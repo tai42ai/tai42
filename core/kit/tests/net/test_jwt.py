@@ -271,6 +271,40 @@ async def test_verify_jwt_aud_list(jwks_cache: JwksCache, issuer_key: RSAKey) ->
     assert claims["aud"] == ["client-1", "other"]
 
 
+async def test_verify_jwt_passes_when_aud_matches_the_second_of_two_audiences(
+    jwks_cache: JwksCache, issuer_key: RSAKey
+) -> None:
+    token = _sign(issuer_key, _valid_claims(aud="https://mcp.example/mcp"), kid="k1")
+    claims = await verify_jwt(
+        token, jwks=jwks_cache, issuer="https://issuer.test", audience=("client-1", "https://mcp.example/mcp")
+    )
+    assert claims["aud"] == "https://mcp.example/mcp"
+
+
+async def test_verify_jwt_fails_when_aud_matches_none_of_the_audiences(
+    jwks_cache: JwksCache, issuer_key: RSAKey
+) -> None:
+    token = _sign(issuer_key, _valid_claims(aud=["someone-else", "another"]), kid="k1")
+    with pytest.raises(JwtVerifyError, match="claims verification failed"):
+        await verify_jwt(token, jwks=jwks_cache, issuer="https://issuer.test", audience=["client-1", "client-2"])
+
+
+async def test_verify_jwt_refuses_an_empty_audience_sequence(jwks_cache: JwksCache, issuer_key: RSAKey) -> None:
+    # An empty set of acceptable audiences would accept every token; it is a caller error.
+    token = _sign(issuer_key, _valid_claims(), kid="k1")
+    with pytest.raises(ValueError, match="audience"):
+        await verify_jwt(token, jwks=jwks_cache, issuer="https://issuer.test", audience=())
+
+
+async def test_verify_jwt_single_string_audience_is_one_value_not_characters(
+    jwks_cache: JwksCache, issuer_key: RSAKey
+) -> None:
+    # A string is itself a sequence of characters: "c" must not match the audience "client-1".
+    token = _sign(issuer_key, _valid_claims(aud="c"), kid="k1")
+    with pytest.raises(JwtVerifyError, match="claims verification failed"):
+        await verify_jwt(token, jwks=jwks_cache, issuer="https://issuer.test", audience="client-1")
+
+
 async def test_verify_jwt_alg_none_rejected(jwks_cache: JwksCache) -> None:
     header = _b64url(json.dumps({"alg": "none", "kid": "k1"}).encode())
     payload = _b64url(json.dumps(_valid_claims()).encode())

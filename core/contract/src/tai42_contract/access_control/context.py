@@ -11,6 +11,10 @@ Alongside the id, the host binds whether the caller is authorized to READ SECRET
 anonymous caller, or code running outside a bound request, is never treated as
 secret-capable. A plugin gates a host-secret-exposing primitive on it so the reach
 of that primitive is by construction identical to the reach of the secret fence.
+
+While the host validates a request's credential it binds the protected resource the
+request addresses, read back through :func:`get_request_resource`, so an identity
+provider can bind a token's audience to the endpoint it was issued for.
 """
 
 from __future__ import annotations
@@ -20,14 +24,18 @@ from contextvars import ContextVar, Token
 __all__ = [
     "caller_may_read_secrets",
     "get_current_user_id",
+    "get_request_resource",
+    "reset_request_resource",
     "reset_request_secret_capability",
     "reset_request_user_id",
+    "set_request_resource",
     "set_request_secret_capability",
     "set_request_user_id",
 ]
 
 _current_user_id: ContextVar[str | None] = ContextVar("tai42_current_user_id", default=None)
 _current_secret_capability: ContextVar[bool] = ContextVar("tai42_current_secret_capability", default=False)
+_current_request_resource: ContextVar[str | None] = ContextVar("tai42_current_request_resource", default=None)
 
 
 def get_current_user_id() -> str | None:
@@ -79,3 +87,27 @@ def reset_request_secret_capability(token: Token[bool]) -> None:
     Pairs with the matching :func:`set_request_secret_capability` call.
     """
     _current_secret_capability.reset(token)
+
+
+def get_request_resource() -> str | None:
+    """Return the public URL of the protected resource the current request addresses, or ``None``.
+
+    Set while the host validates the request's credential, when the request targets an MCP
+    endpoint of a deployment that advertises an authorization server; ``None`` for every
+    other request and outside a request. An identity provider may bind a token's audience
+    to it.
+    """
+    return _current_request_resource.get()
+
+
+def set_request_resource(resource: str | None) -> Token[str | None]:
+    """Bind ``resource`` as the current request's protected resource and return the reset token.
+
+    Pass the returned token to :func:`reset_request_resource` to restore the previous value.
+    """
+    return _current_request_resource.set(resource)
+
+
+def reset_request_resource(token: Token[str | None]) -> None:
+    """Restore the request resource to the value captured in ``token`` by the matching :func:`set_request_resource`."""
+    _current_request_resource.reset(token)

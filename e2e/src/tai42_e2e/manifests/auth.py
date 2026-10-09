@@ -344,3 +344,107 @@ def build_sse_auth_stack(res: StackResources, variants: Variants) -> StackConfig
         auth=True,
         transport="sse",
     )
+
+
+# The MCP door profiles. The fixture provider declares ``MCP_DOOR_AUTHORIZATION_SERVER`` and
+# accepts ``MCP_DOOR_STATIC_TOKEN`` as ``MCP_DOOR_USER_ID``; the deployment-wide public URL
+# is ``MCP_DOOR_PUBLIC_BASE_URL`` on every replica (one deployment, one public URL — the
+# host is never dialled: a test reads the documents over the loopback origin).
+MCP_DOOR_PROVIDER_MODULE = "tai42_e2e_fixtures.door_identity_provider"
+MCP_DOOR_AUTHORIZATION_SERVER = "https://issuer.e2e.local/realm"
+MCP_DOOR_STATIC_TOKEN = "door-static-e2e-token"
+MCP_DOOR_USER_ID = "door-user"
+MCP_DOOR_PUBLIC_BASE_URL = "https://mcp.e2e.local"
+
+
+def _with_door_provider(manifest: dict, env: dict[str, str], variants: Variants, *, public_url: bool) -> None:
+    """Add the declaring fixture provider after the stack's identity provider, and the door's env."""
+    manifest["lifecycle_modules"] = [*manifest["lifecycle_modules"], MCP_DOOR_PROVIDER_MODULE]
+    providers = json.loads(variants.identity.auth_provider_env()["ACCESS_CONTROL_AUTH_PROVIDERS"])
+    env["ACCESS_CONTROL_AUTH_PROVIDERS"] = json.dumps([*providers, "door-static"])
+    env["E2E_DOOR_AUTHORIZATION_SERVER"] = MCP_DOOR_AUTHORIZATION_SERVER
+    env["E2E_DOOR_STATIC_TOKEN"] = MCP_DOOR_STATIC_TOKEN
+    env["E2E_DOOR_USER_ID"] = MCP_DOOR_USER_ID
+    if public_url:
+        env["ACCESS_CONTROL_PUBLIC_BASE_URL"] = MCP_DOOR_PUBLIC_BASE_URL
+
+
+def build_mcp_door_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """REPLICAS with access control ON, the declaring fixture provider beside the stack's
+    identity provider, and the public URL set: the MCP door advertised on every replica.
+
+    The sub-MCP composition router is mounted (in the core router set) over the durable
+    sub-MCP store, so a slug registered through replica A is served on replica B."""
+    manifest = _auth_manifest(variants)
+    env = _auth_env(res, variants)
+    _with_door_provider(manifest, env, variants, public_url=True)
+    return StackConfig(
+        name="mcp-door",
+        topology=Topology.REPLICAS,
+        manifest=manifest,
+        env=env,
+        run_backend=True,
+        run_metrics=True,
+        auth=True,
+    )
+
+
+def build_mcp_door_without_public_url_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The declaring fixture provider with NO public URL: the door advertises nothing and
+    the boot logs one warning naming the setting. One worker, no backend, busless."""
+    manifest = _busless_auth_manifest(variants)
+    env = _busless_auth_env(res, variants)
+    _with_door_provider(manifest, env, variants, public_url=False)
+    return StackConfig(
+        name="mcp-door-no-url",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=env,
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=True,
+    )
+
+
+def build_mcp_door_without_provider_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The public URL set but no provider that declares an authorization server: the door
+    advertises nothing. One worker, no backend, busless."""
+    env = _busless_auth_env(res, variants)
+    env["ACCESS_CONTROL_PUBLIC_BASE_URL"] = MCP_DOOR_PUBLIC_BASE_URL
+    return StackConfig(
+        name="mcp-door-no-provider",
+        topology=Topology.MULTIWORKER,
+        manifest=_busless_auth_manifest(variants),
+        env=env,
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=True,
+    )
+
+
+def build_mcp_door_studio_routes_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The MCP door on a deployment that serves the Studio routes (``default_routers: "all"``,
+    the SPA catch-all last), so a GET under the sub-MCP mount must reach the sub-MCP router,
+    not the catch-all. One worker, no backend, busless."""
+    manifest = {
+        "default_routers": "all",
+        "lifecycle_modules": [variants.identity.lifecycle_module],
+        "extensions_modules": _EXTENSION_MODULES,
+        "tools": [_probe_tools_entry(with_backend_branches=False), *_builtin_entries()],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask", "reload_config"],
+    }
+    env = _busless_auth_env(res, variants)
+    _with_door_provider(manifest, env, variants, public_url=True)
+    return StackConfig(
+        name="mcp-door-studio-routes",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=env,
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=True,
+    )

@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import Response
-from starlette.routing import BaseRoute, Route
+from starlette.routing import BaseRoute, Mount, Route
 from tai42_contract.app import HostedUiPaths
 
 from tai42_skeleton.app.mount_map import MountBinding, MountRegistrationError, current_mount_binding, note_registered
@@ -76,6 +76,15 @@ def _reload_gated(fn: Callable[[Request], Awaitable[Response]]) -> Callable[[Req
         return await fn(request)
 
     return gated
+
+
+def _mount_before_spa_fallback(routes: list[BaseRoute], mount: Mount) -> None:
+    """Place ``mount`` immediately before the SPA catch-all in ``routes``, or last when none is mounted."""
+    spa_index = next((index for index, route in enumerate(routes) if isinstance(route, SpaFallbackRoute)), None)
+    if spa_index is None:
+        routes.append(mount)
+    else:
+        routes.insert(spa_index, mount)
 
 
 class HttpSurface:
@@ -373,6 +382,11 @@ class HttpSurface:
     def finalize(self, app):
         """Mount the sub-MCP router and wrap the registered middleware stack.
 
+        The sub-MCP mount is matched immediately before the Studio SPA catch-all, so a request
+        under the mount prefix that no other route claims reaches the sub-MCP router whatever
+        its method (the GET-only catch-all would otherwise answer a sub-app's GET stream).
+        Every other route keeps its place ahead of the mount.
+
         ``app`` is the FastMCP-built ASGI app whose lifespan drives the
         streamable-http session-manager task group. Middleware wrappers are plain
         ASGI callables that expose neither ``app``'s ``router`` nor its lifespan,
@@ -383,7 +397,7 @@ class HttpSurface:
         """
         lifespan_app = app
         prefix = self._app._mcp_sub_app_router.root_prefix
-        app.mount(prefix, self._app._mcp_sub_app_router)
+        _mount_before_spa_fallback(app.router.routes, Mount(prefix, app=self._app._mcp_sub_app_router))
         record_sub_mcp_mount(prefix)
 
         for mw in self._middlewares.values():

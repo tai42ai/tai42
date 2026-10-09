@@ -77,8 +77,7 @@ def test_create_app_http_lifespan_and_dispatch(patch_app_seam, monkeypatch: pyte
 
     assert response.status_code == 200
     assert response.text == "ok"
-    assert app.http_called is True
-    assert app.sse_called is False
+    assert app.selection == ("http", False)
     assert inner.lifespan_entered is True
 
 
@@ -110,8 +109,7 @@ def test_create_app_sse_transport_selects_sse(patch_app_seam, monkeypatch: pytes
     with TestClient(star) as client:
         client.get("/")
 
-    assert app.sse_called is True
-    assert app.http_called is False
+    assert app.selection == ("sse", False)
 
 
 def test_create_app_inner_without_lifespan_context(patch_app_seam, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,7 +127,7 @@ def test_create_app_inner_without_lifespan_context(patch_app_seam, monkeypatch: 
 def test_create_app_enters_lifespan_via_mcp_lifespan_app_when_wrapped(
     patch_app_seam, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When ``@app.http.middleware`` wraps the served app, ``http_app()`` returns
+    """When ``@app.http.middleware`` wraps the served app, the serving app built is
     a plain-ASGI wrapper with no lifespan of its own. ``finalize`` records the
     lifespan-bearing FastMCP app as ``mcp_lifespan_app``; the worker must enter
     THAT lifespan, then still handle the request through the wrapper — otherwise
@@ -151,7 +149,7 @@ def test_create_app_enters_lifespan_via_mcp_lifespan_app_when_wrapped(
 
     wrapped = _PassThroughMiddleware(inner)
     app = _FakeApp(inner)
-    monkeypatch.setattr(app, "http_app", lambda: wrapped)
+    monkeypatch.setattr(app, "serving_app", lambda transport, *, stateless_http: wrapped)
     patch_app_seam(app)
 
     star = mcp_app.create_app()
@@ -399,7 +397,7 @@ async def test_run_debug_installs_process_scope_redactor(patch_app_seam, monkeyp
 
 
 def test_create_app_stateless_reaches_http_app_factory(patch_app_seam, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With the env flag set, the worker factory builds ``http_app(stateless_http=True)``."""
+    """With the env flag set, the worker factory selects the stateless streamable-HTTP serving app."""
     monkeypatch.setenv("TAI_TRANSPORT", "http")
     monkeypatch.setenv("TAI_STATELESS_HTTP", "1")
     inner = _FakeInnerApp()
@@ -409,8 +407,7 @@ def test_create_app_stateless_reaches_http_app_factory(patch_app_seam, monkeypat
     with TestClient(star) as client:
         client.get("/")
 
-    assert app.http_called is True
-    assert app.http_stateless is True
+    assert app.selection == ("http", True)
 
 
 # --- serve hardening: stale UDS socket cleanup ----------------------------

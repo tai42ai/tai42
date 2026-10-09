@@ -19,6 +19,7 @@ from tai42_skeleton.access_control.backend import (
     IdentityProviderUnavailableError,
     ReloadInProgressError,
 )
+from tai42_skeleton.access_control.challenge import McpChallengeMiddleware
 from tai42_skeleton.access_control.middleware import PolicyVersionScopeMiddleware, ResourceGuardMiddleware
 from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
 from tai42_skeleton.access_control.role_gate import refusal_route
@@ -84,7 +85,11 @@ def handle_auth_error(conn: HTTPConnection, exc: Exception) -> JSONResponse:
 
 
 class AuthAdapter(TokenVerifier):
-    """Token verifier that installs the access-control middleware stack and resolves identity providers."""
+    """Token verifier that installs the access-control middleware stack and resolves identity providers.
+
+    The stack, outermost first: the MCP sign-in pointer (:class:`McpChallengeMiddleware`), the
+    credential backend, the auth-context helper, and the resource guard.
+    """
 
     def __init__(self, settings: AccessControlSettings):
         """Wire the verifier and middleware stack from ``settings``, deferring provider resolution to first use."""
@@ -131,18 +136,22 @@ class AuthAdapter(TokenVerifier):
             return []
 
         return [
-            # 0. One policy-version read for the whole access-control decision below; the
+            # 1. MCP sign-in pointer (outermost, so every 401 beneath it — this stack's and the
+            #    MCP library's inner gate's — passes through it): a 401 from an MCP endpoint
+            #    gains the WWW-Authenticate pointer to its protected-resource metadata.
+            Middleware(McpChallengeMiddleware),
+            # 2. One policy-version read for the whole access-control decision below; the
             #    resource guard closes it as it hands the request to the app.
             Middleware(PolicyVersionScopeMiddleware),
-            # 1. Identity & Policy (Reads cached Redis data)
+            # 3. Identity & Policy (Reads cached Redis data)
             Middleware(
                 AuthenticationMiddleware,
                 backend=AccessControlAuthBackend(self._internal_verifier, self.settings),
                 on_error=handle_auth_error,  # Renders denials as generic 401/403, hiding internal detail
             ),
-            # 2. Context Helper (Populates request.user / request.auth)
+            # 4. Context Helper (Populates request.user / request.auth)
             Middleware(AuthContextMiddleware),
-            # 3. Route Authorization (Resource Guard)
+            # 5. Route Authorization (Resource Guard)
             Middleware(
                 ResourceGuardMiddleware,
                 verifier=self._internal_verifier,

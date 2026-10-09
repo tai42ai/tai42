@@ -2,13 +2,16 @@
 
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from starlette.authentication import AuthCredentials, AuthenticationBackend, AuthenticationError, UnauthenticatedUser
 from tai42_contract.access_control import API_KEY_HEADER
+from tai42_contract.access_control.context import reset_request_resource, set_request_resource
 
-from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
+from tai42_skeleton.access_control.advertised import advertised_authorization_servers, mcp_resource_url
+from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path, sent_path_is_canonical
 from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer, render_condition
 from tai42_skeleton.access_control.role_gate import DenialCause, resolve_route_meta
 from tai42_skeleton.access_control.role_grants import role_level_decision
@@ -22,6 +25,7 @@ from tai42_skeleton.access_control.standing import (
 )
 from tai42_skeleton.access_control.user import TaiUser
 from tai42_skeleton.access_control.verifier import AccessControlVerifier, is_always_public_prefix
+from tai42_skeleton.app.mcp_endpoints import mcp_endpoint_for
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE, reload_gate
 
 logger = logging.getLogger(__name__)
@@ -144,6 +148,23 @@ def _declared_pre_auth(canonical: str, method: str | None) -> bool:
     return meta is not None and meta.public and meta.pre_auth
 
 
+def _request_resource(scope: Mapping[str, Any], canonical_path: str | None) -> str | None:
+    """The public URL of the MCP endpoint the request addresses, for the identity providers to bind a token to.
+
+    Set only when the deployment advertises an authorization server, the canonical path
+    addresses an MCP endpoint, AND the path as sent is that canonical path (one trailing
+    slash apart at most): the router serves the path as sent, so a spelling such as
+    ``/api/…/../../mcp`` — which the gate reads as ``/mcp`` but an ``/api`` handler serves —
+    carries no MCP endpoint's resource. ``None`` otherwise.
+    """
+    if canonical_path is None:
+        return None
+    endpoint = mcp_endpoint_for(canonical_path)
+    if endpoint is None or not sent_path_is_canonical(scope) or not advertised_authorization_servers():
+        return None
+    return mcp_resource_url(endpoint)
+
+
 class AccessControlAuthBackend(AuthenticationBackend):
     """Starlette auth backend: verifies a request's credential and resolves its authorized policy."""
 
@@ -233,8 +254,13 @@ class AccessControlAuthBackend(AuthenticationBackend):
             return AuthCredentials(["unauthenticated"]), UnauthenticatedUser()
 
         # 1. Resolve Identity
-        # This will either return a token, return None (participant), or raise AuthenticationError (bad token)
-        access_token = await self._get_access_token(conn)
+        # This will either return a token, return None (participant), or raise AuthenticationError (bad token).
+        # The provider chain runs with the request resource bound, and only for the chain.
+        resource_token = set_request_resource(_request_resource(conn.scope, canonical_path))
+        try:
+            access_token = await self._get_access_token(conn)
+        finally:
+            reset_request_resource(resource_token)
 
         if not access_token:
             return AuthCredentials(["unauthenticated"]), UnauthenticatedUser()

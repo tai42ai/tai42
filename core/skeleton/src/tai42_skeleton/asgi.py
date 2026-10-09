@@ -48,6 +48,7 @@ from starlette.types import ASGIApp
 
 from tai42_skeleton.app import epoch, instance
 from tai42_skeleton.app.admission import EpochAdmissionApp
+from tai42_skeleton.app.serving_selection import Transport
 from tai42_skeleton.app.stream_shutdown_watch import start_stream_shutdown_watch
 from tai42_skeleton.app.sub_mcp_app import SubAppLifespan
 from tai42_skeleton.config.config_mode import config_mode
@@ -59,7 +60,6 @@ __all__ = ["Transport", "create_app", "lifespan"]
 
 logger = logging.getLogger(__name__)
 
-Transport = Literal["http", "streamable-http", "sse"]
 
 _VALID_TRANSPORTS = get_args(Transport)
 
@@ -126,15 +126,14 @@ def _release_app_token(manifest_path: str | None, saved_manifest_env: str | None
 
 
 def _build_inner_app(app, transport: Transport, stateless_http: bool):
-    """Build the inner serving app for the selected transport."""
+    """Build the inner serving app for the selected transport, recording the selection on the app for every rebuild."""
     if transport == "sse":
         logger.info("Initializing Legacy SSE App")
-        return app.sse_app()
-    if stateless_http:
+    elif stateless_http:
         logger.info("Initializing stateless Streamable HTTP App")
-        return app.http_app(stateless_http=True)
-    logger.info("Initializing Streamable HTTP App")
-    return app.http_app()
+    else:
+        logger.info("Initializing Streamable HTTP App")
+    return app.serving_app(transport, stateless_http=stateless_http)
 
 
 async def _enter_boot_serving_app(

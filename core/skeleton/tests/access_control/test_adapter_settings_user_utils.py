@@ -29,6 +29,7 @@ from tai42_skeleton.access_control.backend import (
     AuthorizationError,
     IdentityProviderUnavailableError,
 )
+from tai42_skeleton.access_control.challenge import McpChallengeMiddleware
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_identity_claims,
     reset_request_is_admin,
@@ -92,9 +93,10 @@ def test_adapter_builds_middleware_stack_without_resolving_provider():
     adapter = AuthAdapter(AccessControlSettings())
     assert adapter._internal_verifier._providers is None
     stack = adapter.get_middleware()
-    # The policy-version scope, authentication, the auth context, the resource guard.
-    assert len(stack) == 4
+    # The MCP challenge, the policy-version scope, authentication, the auth context, the resource guard.
+    assert len(stack) == 5
     assert all(isinstance(m, Middleware) for m in stack)
+    assert stack[0].cls is McpChallengeMiddleware
 
 
 def test_adapter_get_identity_providers_resolves_redis_from_active_providers():

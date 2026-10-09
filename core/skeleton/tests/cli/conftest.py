@@ -138,9 +138,8 @@ class _FakeApp:
         # The CLI seams register the root-logger reload handler through the app's
         # lifecycle; the recorder captures it without a real lifecycle.
         self.lifecycle = _FakeLifecycle(self.config.config_manager)
-        self.http_called = False
-        self.http_stateless: bool | None = None
-        self.sse_called = False
+        # The serving selection the factory asked for: ``(transport, stateless_http)``.
+        self.selection: tuple[str, bool] | None = None
         self.run_async_transport: str | None = None
 
     @asynccontextmanager
@@ -155,13 +154,8 @@ class _FakeApp:
         finally:
             await epoch.clear_epoch()
 
-    def http_app(self, stateless_http: bool | None = None) -> _FakeInnerApp:
-        self.http_called = True
-        self.http_stateless = stateless_http
-        return self.inner
-
-    def sse_app(self) -> _FakeInnerApp:
-        self.sse_called = True
+    def serving_app(self, transport: str, *, stateless_http: bool) -> _FakeInnerApp:
+        self.selection = (transport, stateless_http)
         return self.inner
 
     async def run_async(self, transport: str) -> None:

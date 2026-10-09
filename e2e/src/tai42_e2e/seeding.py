@@ -85,6 +85,30 @@ def seed_owner_and_key(
     return raw
 
 
+def seed_principal_policy(resources: StackResources, *, user_id: str, scopes: Sequence[str]) -> None:
+    """Seed a top-level principal and its condition-free policy — the standing an identity
+    provider's own user needs to be admitted (a non-key identity carries no owner claim)."""
+    with psycopg.connect(
+        host=resources.pg_host,
+        port=resources.pg_port,
+        user=resources.pg_user,
+        password=resources.pg_password,
+        dbname=resources.pg_db,
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO access_control_principals (user_id, kind, display_name, created_by) "
+                "VALUES (%s, 'human', %s, NULL) ON CONFLICT (user_id) DO NOTHING",
+                (user_id, user_id),
+            )
+            cur.execute(
+                "INSERT INTO access_control_policies (user_id, scopes) VALUES (%s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET scopes = EXCLUDED.scopes",
+                (user_id, list(scopes)),
+            )
+        conn.commit()
+
+
 def seed_editor_key(infra: Infra, resources: StackResources, *, owner_id: str, key_id: str) -> str:
     """Seed an owner principal holding the seeded ``editor`` role and its ``*``-scope key.
 

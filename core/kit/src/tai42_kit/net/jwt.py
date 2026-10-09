@@ -27,6 +27,7 @@ import ipaddress
 import json
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import urlsplit
@@ -278,7 +279,7 @@ async def verify_jwt(
     *,
     jwks: JwksCache,
     issuer: str,
-    audience: str,
+    audience: str | Sequence[str],
     allowed_algs: tuple[str, ...] = ("RS256",),
     leeway_seconds: float = 60.0,
     expected_nonce: str | None = None,
@@ -289,10 +290,18 @@ async def verify_jwt(
     header parse; ``alg`` must be in ``allowed_algs`` BEFORE any key lookup (so
     ``alg=none`` and symmetric downgrades are rejected by construction); ``kid``
     required; key fetch via the cache; signature verification; then claims —
-    ``iss`` exact, ``aud`` contains ``audience``, ``exp`` required, ``exp``/``nbf``
-    with leeway. When ``expected_nonce`` is given, the ``nonce`` claim must equal
-    it exactly (the OIDC id_token replay binding).
+    ``iss`` exact, ``aud`` contains ``audience`` (any one of them when a sequence is
+    given), ``exp`` required, ``exp``/``nbf`` with leeway. When ``expected_nonce`` is
+    given, the ``nonce`` claim must equal it exactly (the OIDC id_token replay binding).
+
+    An empty audience sequence raises ``ValueError`` before anything is verified: no
+    acceptable audience is a caller error, never "accept every audience".
     """
+    # A ``str`` is itself a sequence of characters, so it is tested first.
+    audiences = [audience] if isinstance(audience, str) else list(audience)
+    if not audiences:
+        raise ValueError("verify_jwt needs at least one acceptable audience; an empty audience sequence was given")
+
     if not looks_like_jwt(token):
         raise JwtVerifyError("Token is not a structurally valid JWT.")
 
@@ -314,7 +323,7 @@ async def verify_jwt(
     registry = _jwt.JWTClaimsRegistry(
         leeway=int(leeway_seconds),
         iss={"essential": True, "value": issuer},
-        aud={"essential": True, "value": audience},
+        aud={"essential": True, "values": audiences},
         exp={"essential": True},
     )
     try:

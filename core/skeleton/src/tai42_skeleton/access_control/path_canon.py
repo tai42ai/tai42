@@ -101,6 +101,32 @@ def request_canonical_path(scope: Mapping[str, Any]) -> str:
     return canonicalize_path(strip_root_path(target, root_path))
 
 
+def sent_path_is_canonical(scope: Mapping[str, Any]) -> bool:
+    """Whether the request's path, as sent, is already the canonical form every access decision reads.
+
+    Compares the raw target that :func:`request_canonical_path` reads (less any mounted
+    ``root_path``) with that function's result. They may differ by one trailing slash at
+    most; a ``.`` or ``..`` segment, an empty segment, or a segment the canonical form
+    would decode makes the request non-canonical, and so does a target with no canonical
+    form at all. A consumer that serves the path as sent uses this to serve exactly the
+    path the gate decided on.
+    """
+    raw = scope.get("raw_path")
+    if raw is None:
+        target = scope["path"]
+    else:
+        try:
+            target = raw.decode("ascii")
+        except UnicodeDecodeError:
+            return False
+    sent = strip_root_path(target, scope.get("root_path", "")) or "/"
+    try:
+        canonical = canonicalize_path(sent)
+    except MalformedPathError:
+        return False
+    return sent == canonical or (canonical != "/" and sent == f"{canonical}/")
+
+
 def strip_root_path(path: str, root_path: str) -> str:
     """``path`` with a mounted ``root_path`` prefix removed, as Starlette's ``get_route_path`` does.
 

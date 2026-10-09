@@ -88,9 +88,8 @@ class _FakeApp:
         self.config = SimpleNamespace(config_manager=_FakeConfigManager())
         self.lifecycle = _FakeLifecycle()
         self.raise_in_context = raise_in_context
-        self.http_called = False
-        self.http_stateless: bool | None = None
-        self.sse_called = False
+        # The serving selection the factory asked for: ``(transport, stateless_http)``.
+        self.selection: tuple[str, bool] | None = None
         # ``TAI_MANIFEST_PATH`` as seen when the app context is entered — proves the
         # lifespan stamp is live by then.
         self.manifest_env_at_context: list[str | None] = []
@@ -110,13 +109,8 @@ class _FakeApp:
         finally:
             await epoch.clear_epoch()
 
-    def http_app(self, stateless_http: bool | None = None) -> _FakeInnerApp:
-        self.http_called = True
-        self.http_stateless = stateless_http
-        return self.inner
-
-    def sse_app(self) -> _FakeInnerApp:
-        self.sse_called = True
+    def serving_app(self, transport: str, *, stateless_http: bool) -> _FakeInnerApp:
+        self.selection = (transport, stateless_http)
         return self.inner
 
 
@@ -266,29 +260,25 @@ def test_stamp_failure_rolls_back_one_app_claim(patch_factory_seam, monkeypatch:
 # --- transport selection --------------------------------------------------
 
 
-def test_transport_http_reaches_http_app(patch_factory_seam) -> None:
+def test_transport_http_reaches_the_serving_app(patch_factory_seam) -> None:
     app = patch_factory_seam(_FakeApp())
     with TestClient(asgi.create_app(transport="http")) as client:
         client.get("/")
-    assert app.http_called is True
-    assert app.http_stateless is None
-    assert app.sse_called is False
+    assert app.selection == ("http", False)
 
 
-def test_transport_streamable_stateless_reaches_stateless_http_app(patch_factory_seam) -> None:
+def test_transport_streamable_stateless_reaches_the_stateless_serving_app(patch_factory_seam) -> None:
     app = patch_factory_seam(_FakeApp())
     with TestClient(asgi.create_app(transport="streamable-http", stateless_http=True)) as client:
         client.get("/")
-    assert app.http_called is True
-    assert app.http_stateless is True
+    assert app.selection == ("streamable-http", True)
 
 
-def test_transport_sse_reaches_sse_app(patch_factory_seam) -> None:
+def test_transport_sse_reaches_the_sse_serving_app(patch_factory_seam) -> None:
     app = patch_factory_seam(_FakeApp())
     with TestClient(asgi.create_app(transport="sse")) as client:
         client.get("/")
-    assert app.sse_called is True
-    assert app.http_called is False
+    assert app.selection == ("sse", False)
 
 
 # --- one-app-per-process guard --------------------------------------------

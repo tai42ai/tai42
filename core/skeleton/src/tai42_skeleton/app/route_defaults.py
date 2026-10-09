@@ -49,13 +49,15 @@ STUDIO_SPA_ROUTER = "tai42_skeleton.routers.plugins"
 # The always-on core tier: the modules the skeleton mounts on EVERY boot
 # regardless of ``default_routers``/``routers_modules``, for a deployment-invariant
 # answer that must be reachable even where no management surface is mounted. The
-# presence read ``GET /api/storage`` ("is a storage provider installed?") and the
-# OAuth client-identity document ``GET /oauth/client-metadata.json`` live here so
-# they survive a lean ``"none"`` boot. Disjoint from ``DEFAULT_API_ROUTERS``
-# and never contains the SPA catch-all.
+# presence read ``GET /api/storage`` ("is a storage provider installed?"), the
+# OAuth client-identity document ``GET /oauth/client-metadata.json`` and the MCP
+# endpoints' protected-resource metadata documents, which a 401 from any MCP
+# endpoint points at, live here so they survive a lean ``"none"`` boot. Disjoint
+# from ``DEFAULT_API_ROUTERS`` and never contains the SPA catch-all.
 CORE_API_ROUTERS: tuple[str, ...] = (
     "tai42_skeleton.routers.client_identity",
     "tai42_skeleton.routers.storage_presence",
+    "tai42_skeleton.routers.well_known",
 )
 
 # The 37 route-registering API router modules mounted by default under
