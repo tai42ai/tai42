@@ -9,6 +9,7 @@ from tai42_contract.tools import ToolRetryPolicy
 from tai42_skeleton.tools.binding.errors import UnknownToolError
 from tai42_skeleton.tools.binding.state import _ToolBindingBase
 from tai42_skeleton.tools.binding.surface import remove_surface_tool, tool_surface_generation
+from tai42_skeleton.tools.dispatch_scope import declared_schema_listing
 
 if TYPE_CHECKING:
     from tai42_skeleton.authz.identity import CallerIdentity
@@ -69,7 +70,16 @@ class _ResolutionMixin(_ToolBindingBase):
     # -- lookup / invocation ---------------------------------------------------
 
     async def get_tools(self) -> dict[str, Tool]:
-        return {t.name: t for t in await self._fast_mcp.list_tools()}
+        """Every listed tool by name, with its schemas as the server shapes them for a client.
+
+        Read through the server's middleware chain, so a schema reaches every in-process reader
+        exactly as an MCP ``tools/list`` advertises it (``$ref`` inlined), except that a pausing
+        tool keeps its declared output schema: the park markers are advertised on the MCP
+        listing only (:func:`declared_schema_listing`).
+        """
+        with declared_schema_listing():
+            tools = await self._fast_mcp.list_tools()
+        return {t.name: t for t in tools}
 
     async def get_tool(self, key: str) -> Tool:
         """The tool bound to ``key`` on the serving core, from that core's index when it holds it.

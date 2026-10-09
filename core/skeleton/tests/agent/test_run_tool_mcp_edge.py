@@ -156,9 +156,9 @@ def test_mcp_call_of_a_parking_preset_records_parked_not_success(monkeypatch):
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            # No declared output_schema: FastMCP would otherwise flatten the sentinel's
-            # fields into structured_content, dropping the reserved marker key the edge
-            # reads a park by. The edge must recognize the park regardless.
+            # The tool emits the reserved park marker as its structured content whatever its
+            # declared output schema, and the edge advertises the marker beside a declared
+            # schema; this unannotated tool declares none, so nothing validates the marker.
             @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
             async def parker():
                 """Park the caller and return the suspend sentinel."""

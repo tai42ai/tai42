@@ -5,7 +5,12 @@ from typing import Any
 import mcp.types
 from fastmcp.tools.base import ToolResult
 from fastmcp.tools.function_tool import FunctionTool
-from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction, suspended_interaction_marker
+from tai42_contract.interactions import (
+    ResumeBuffered,
+    SuspendedInteraction,
+    resume_buffered_marker,
+    suspended_interaction_marker,
+)
 from tai42_contract.secrets import contains_secrets, mask_secrets, unwrap_secrets
 
 from tai42_skeleton.tools.reveal_gate import inprocess_reveal_gate, note_secret_reveal
@@ -79,7 +84,9 @@ class _SecretRevealingTool(FunctionTool):
             # as the ToolResult's structured content directly (never routed through the
             # tool's output_schema) since the marker is a control signal, not the tool's
             # declared output — it must ride the wire top-level, unwrapped, whatever the
-            # base tool's return schema.
+            # base tool's return schema. ``DispatchScopeMiddleware`` advertises it beside the
+            # declared output schema of every tool that can pause, so an MCP client's schema
+            # validation accepts it.
             marker = suspended_interaction_marker(
                 raw_value.interaction_id,
                 raw_value.expiry_at,
@@ -88,6 +95,12 @@ class _SecretRevealingTool(FunctionTool):
                 caller_interaction_ids=raw_value.caller_interaction_ids,
             )
             return ToolResult(structured_content=marker)
+        if isinstance(raw_value, ResumeBuffered):
+            # Unarmed MCP edge: a resume that left sibling asks open returned this partial.
+            # Flattened to its plain fields it would read as a terminal result, so it rides the
+            # wire as its own reserved marker, emitted and advertised exactly as the
+            # suspended-interaction marker above.
+            return ToolResult(structured_content=resume_buffered_marker(raw_value.remaining_ids))
         if contains_secrets(raw_value):
             # Unarmed MCP edge: this reveal exposes a secret into ``structured_content``.
             # Flag it so the preset output-schema guard redacts any validation failure

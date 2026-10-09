@@ -1,6 +1,7 @@
 """Async-park probe tools: the flow-driver parks, the shared multi-park super-step
-barrier, and the agent async-park leg. Each registers at import via
-``@tai42_app.tools.tool`` and exposes an ``e2e_record`` Redis observable."""
+barrier, the agent async-park leg, and a pausing tool that ends on a resume-buffered partial.
+Each registers at import via ``@tai42_app.tools.tool`` and exposes an ``e2e_record`` Redis
+observable or its return value."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ import os
 from typing import Literal
 
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import ResumeBuffered
 from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
@@ -329,6 +331,20 @@ async def e2e_undeclared_park(question: str, expiry_seconds: float) -> object:
             Awaitable[int], client.rpush(f"e2e:rec:undeclared_park:{question}", json.dumps({"pid": os.getpid()}))
         )
     return suspended
+
+
+@tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
+async def e2e_resume_buffered(key: str, mark: str, buffer: bool, remaining_ids: list[str]) -> object:
+    """End on a ``ResumeBuffered`` partial when ``buffer`` is set, else on a plain result.
+
+    A ``ResumeBuffered`` is what a resume that answered one ask of several returns: the step's
+    other asks (``remaining_ids``) are still open, so the run stays parked. The plain result
+    ``{"key": key, "mark": mark}`` is the control a spec compares the partial against. ``key``
+    and ``mark`` are read by a binding's subject expression and update, never by the tool.
+    """
+    if buffer:
+        return ResumeBuffered(remaining_ids=remaining_ids)
+    return {"key": key, "mark": mark}
 
 
 @tai42_app.tools.tool(tags={"e2e"})

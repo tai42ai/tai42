@@ -163,6 +163,34 @@ def test_a_preset_over_a_parking_kind_records_parked_at_the_mcp_edge(
     assert marker["interaction_id"] == "parked-run"
 
 
+def test_a_preset_declaring_an_output_schema_over_a_parking_kind_parks_over_the_mcp_edge(
+    preset_manager_restored: Any,
+) -> None:
+    # A preset with an ``output_schema`` over an agent forces the agent's structured output and
+    # advertises the authored schema; the edge advertises the park marker beside it, so the kind's
+    # park reaches the MCP caller as the marker instead of a schema refusal.
+    answer_schema = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+
+    async def run() -> Any:
+        async with app.app_context(_manifest()):
+            await app.preset_manager.register(
+                "forced_parking_preset",
+                "parking_kind",
+                {},
+                [],
+                "A forced preset over the kind.",
+                output_schema=answer_schema,
+            )
+            async with Client(app._fast_mcp) as client:
+                return await client.call_tool("forced_parking_preset", {"text": "hi"}, raise_on_error=False)
+
+    result = asyncio.run(run())
+    assert result.is_error is False, result.content
+    marker = read_suspended_interaction_marker(result.structured_content)
+    assert marker is not None
+    assert marker["interaction_id"] == "parked-run"
+
+
 def test_a_registration_meta_naming_the_pause_key_is_refused() -> None:
     manifest = Manifest.model_validate(
         {"agents": [{"title": "bad", "module": "tests.agent._meta_pause_fixtures", "include": ["meta_pause_kind"]}]}

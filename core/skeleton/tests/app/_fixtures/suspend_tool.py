@@ -33,7 +33,14 @@ def echo_payload(payload: dict) -> dict:
     return {"answer": "ok"}
 
 
+@tai42_app.tools.tool
+def relay_payload(payload: dict) -> dict:
+    """Return the routed input-schema payload it is handed, whatever its shape (a tool that cannot pause)."""
+    return payload
+
+
 # An input_schema preset routes the caller's validated object into ``payload_arg``;
 # declare the support so the fixture bases accept one.
 tai42_app.presets.register_input_schema_support("make_suspend_payload", PresetInputSchemaSupport(payload_arg="payload"))
 tai42_app.presets.register_input_schema_support("echo_payload", PresetInputSchemaSupport(payload_arg="payload"))
+tai42_app.presets.register_input_schema_support("relay_payload", PresetInputSchemaSupport(payload_arg="payload"))

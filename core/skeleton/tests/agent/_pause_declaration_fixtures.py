@@ -17,6 +17,8 @@ from tests.agent._memoryless import MemorylessTestAgent
 
 class _Input(BaseModel):
     text: str = ""
+    # Advertised so a preset declaring an ``output_schema`` can bake the forced structured output.
+    response_format: dict[str, Any] | None = None
 
 
 def _park(interaction_id: str) -> SuspendedInteraction:

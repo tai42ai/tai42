@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
 from tai42_contract.monitoring import RunAttribution, get_ambient_trace_context
 
 import tai42_skeleton.runs.chokepoint as chokepoint
@@ -114,6 +114,16 @@ async def test_parked_result_records_parked(wire):
     assert store.terminals[0]["outcome"] == "parked"
 
 
+async def test_resume_buffered_result_records_parked_with_no_interaction_id(wire):
+    # A resume that answered one ask and left its siblings open: the run stays parked, and the
+    # still-open ids are not a park this dispatch raised, so the terminal write carries no id.
+    store = wire(store=_SpyStore())
+    async with record_outermost_preset_run("wx", 1) as run:
+        run.observe(ResumeBuffered(remaining_ids=["r1", "r2"]))
+    assert store.terminals[0]["outcome"] == "parked"
+    assert store.terminals[0]["interaction_id"] is None
+
+
 async def test_exception_records_error_and_propagates(wire):
     store = wire(store=_SpyStore())
     with pytest.raises(ValueError, match="boom"):
@@ -169,6 +179,18 @@ async def test_resume_origin_is_recorded_at_start(wire):
         async with record_outermost_preset_run("wx", 1) as run:
             run.observe("ok")
     assert store.starts[0]["interaction_id"] == "i-origin"
+
+
+async def test_resume_buffered_continuation_keeps_its_resume_origin_at_start(wire):
+    # A continuation fire that buffers one answer records its resume origin at START and writes
+    # ``parked`` with no id of its own at the terminal, so the store keeps the origin.
+    store = wire(store=_SpyStore())
+    with resume_origin("i-origin"):
+        async with record_outermost_preset_run("wx", 1) as run:
+            run.observe(ResumeBuffered(remaining_ids=["r1"]))
+    assert store.starts[0]["interaction_id"] == "i-origin"
+    assert store.terminals[0]["outcome"] == "parked"
+    assert store.terminals[0]["interaction_id"] is None
 
 
 async def test_no_correlation_available_is_null_never_an_error(wire):

@@ -19,7 +19,7 @@ import asyncio
 from typing import Any
 
 import pytest
-from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction, read_resume_buffered_marker
 from tai42_contract.states import (
     ApplyResult,
     StateAttach,
@@ -333,6 +333,98 @@ def test_in_process_park_result_applies_no_updates_but_injects_and_records_parke
             assert terminals == [{"outcome": "parked", "interaction_id": "i-inproc"}]
 
     asyncio.run(run())
+
+
+def _spy_run_terminals(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Open the runs index onto a spy that records each terminal write's outcome and interaction id."""
+    import tai42_skeleton.runs.chokepoint as chokepoint
+
+    terminals: list[dict[str, Any]] = []
+
+    class _SpyRuns:
+        async def insert_start(
+            self, run_id, preset_name, preset_version, *, trace_id, user_id, session_id, interaction_id, started_at
+        ):
+            pass
+
+        async def update_outcome(
+            self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None, resumed_interactions=None
+        ):
+            terminals.append({"outcome": outcome, "interaction_id": interaction_id})
+
+    monkeypatch.setattr(chokepoint, "component_store_configured", lambda _c: True)
+    monkeypatch.setattr(chokepoint, "get_run_index_store", lambda: _SpyRuns())
+    monkeypatch.setattr(chokepoint, "_safe_trace_id", lambda: None)
+    return terminals
+
+
+async def _register_buffering_preset(seen: dict[str, Any]) -> None:
+    """Register a pausing tool returning a ``ResumeBuffered`` and a preset binding an injection and an update."""
+
+    @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
+    async def buffering(x: int, injected: dict | None = None) -> ResumeBuffered:
+        """Probe tool: a resume that answered one ask and left its siblings open."""
+        seen["injected"] = injected
+        return ResumeBuffered(remaining_ids=["r1", "r2"])
+
+    binding = StateBinding(
+        states=[
+            _attach(
+                input_injections=[StateInjection(jq=TemplatedText(content="{n: .n}"), into="injected")],
+                updates=[StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: 1}]'))],
+            )
+        ]
+    )
+    await app.preset_manager.register("bp", "buffering", {}, [], "d", state_binding=binding, version=1)
+
+
+def test_in_process_resume_buffered_result_applies_no_updates_but_injects_and_records_parked(
+    monkeypatch: pytest.MonkeyPatch, preset_manager_restored: Any
+) -> None:
+    # A ``ResumeBuffered`` (a resume that left sibling asks open) is a park signal, not a clean
+    # output: the binding's updates do not apply, its injections stand, and the run row records
+    # ``parked`` with no interaction id of its own.
+    seen: dict[str, Any] = {}
+    fake = _FakeStates(record={"n": 4})
+    terminals = _spy_run_terminals(monkeypatch)
+
+    async def run() -> Any:
+        async with app.app_context(Manifest.model_validate({})):
+            fake.patch_onto(app._states_facet, monkeypatch)
+            await _register_buffering_preset(seen)
+            return await app.tools.run_tool("bp", {"x": 5})
+
+    result = asyncio.run(run())
+    assert result == ResumeBuffered(remaining_ids=["r1", "r2"])
+    assert seen["injected"] == {"n": 4}
+    assert fake.applies == []
+    assert terminals == [{"outcome": "parked", "interaction_id": None}]
+
+
+def test_mcp_edge_resume_buffered_result_applies_no_updates_but_injects_and_records_parked(
+    monkeypatch: pytest.MonkeyPatch, preset_manager_restored: Any
+) -> None:
+    # The MCP twin: the call answers the resume-buffered marker (not an error), no update
+    # applies, and the run row records ``parked`` with no interaction id of its own.
+    from fastmcp import Client
+
+    seen: dict[str, Any] = {}
+    fake = _FakeStates(record={"n": 4})
+    terminals = _spy_run_terminals(monkeypatch)
+
+    async def run() -> Any:
+        async with app.app_context(Manifest.model_validate({})):
+            fake.patch_onto(app._states_facet, monkeypatch)
+            await _register_buffering_preset(seen)
+            async with Client(app._fast_mcp) as client:
+                return await client.call_tool("bp", {"x": 5}, raise_on_error=False)
+
+    result = asyncio.run(run())
+    assert result.is_error is False, result.content
+    assert read_resume_buffered_marker(result.structured_content) == {"remaining_ids": ["r1", "r2"]}
+    assert seen["injected"] == {"n": 4}
+    assert fake.applies == []
+    assert terminals == [{"outcome": "parked", "interaction_id": None}]
 
 
 def test_mcp_edge_injects_into_absent_arguments_reaching_the_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
