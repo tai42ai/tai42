@@ -14,9 +14,12 @@ a declared schema. The events are a transport, not a validation boundary.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from tai42_contract.interactions.models.response import SuspendedInteraction
 
 
 class StreamEvent(BaseModel):
@@ -162,6 +165,21 @@ class SuspendedFinal(StreamEvent):
     caller_interaction_ids: list[str] = Field(default_factory=list)
     expiry_at: str | None = None
     final: bool = True
+
+    def to_suspended_interaction(self) -> SuspendedInteraction:
+        """The park as the shared typed sentinel the platform's ``visit`` recognises by type.
+
+        It carries the whole super-step's two id lists, so ``visit`` normalises it per ask, and the
+        earliest deadline. It carries NO ``resume_owner``: the parked run recorded its own resume
+        state against those interactions and is the only thing the platform resumes for them, so no
+        caller may adopt the park as its own.
+        """
+        return SuspendedInteraction(
+            interaction_id=self.interaction_ids[0],
+            expiry_at=datetime.fromisoformat(self.expiry_at) if self.expiry_at else None,
+            interaction_ids=list(self.interaction_ids),
+            caller_interaction_ids=list(self.caller_interaction_ids),
+        )
 
 
 class AsksFinal(StreamEvent):

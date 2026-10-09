@@ -581,25 +581,24 @@ def test_authored_run_streamable_from_live_registry(pg, emit):
 
 
 @pytest.mark.parametrize(
-    ("config_field", "key"),
+    ("config_field", "key", "named"),
     [
-        ("langgraph_config", "thread_id"),
-        ("langgraph_config", "checkpoint_id"),
-        ("judge_langgraph_config", "thread_id"),
-        ("voter_langgraph_config", "checkpoint_id"),
+        ("engine_options", "thread", "thread_id"),
+        ("engine_options", "checkpoint", "checkpoint_id"),
+        ("role_options", "thread", "thread_id"),
+        ("role_options", "checkpoint", "checkpoint_id"),
     ],
 )
-def test_authored_run_rejects_caller_supplied_bridge_namespace(pg, emit, config_field, key):
+def test_authored_run_rejects_caller_supplied_bridge_namespace(pg, emit, config_field, key, named):
     async def run():
         async with instance.app.app_context(_manifest()):
             # An empty-bake wrapper over a non-spec-runnable agent authors fine; the run
-            # body then steers a config kwarg into the reserved bridge namespace, which
-            # the door refuses as a loud 400 before streaming.
+            # body then steers an option blob into the reserved bridge namespace, which the
+            # agent reports and the door refuses as a loud 400 before streaming.
             await _author("cfg", base_tool="config_agent", fixed_kwargs={})
-            frames = await _run_authored("cfg", {config_field: {"configurable": {key: "bridge:route:addr"}}})
+            frames = await _run_authored("cfg", {config_field: {"scope": {key: "bridge:route:addr"}}})
             assert frames[0]["__status__"] == 400
-            assert key in frames[0]["__error__"]
-            assert "bridge:" in frames[0]["__error__"]
+            assert frames[0]["__error__"] == f"{named} may not use the reserved 'bridge:' namespace"
 
     asyncio.run(run())
 
@@ -608,7 +607,7 @@ def test_authored_run_allows_a_normal_thread_id(pg, emit):
     async def run():
         async with instance.app.app_context(_manifest()):
             await _author("cfg", base_tool="config_agent", fixed_kwargs={})
-            frames = await _run_authored("cfg", {"langgraph_config": {"configurable": {"thread_id": "user-9"}}})
+            frames = await _run_authored("cfg", {"engine_options": {"scope": {"thread": "user-9"}}})
             assert frames[-1] == {"type": "stream.end"}
 
     asyncio.run(run())

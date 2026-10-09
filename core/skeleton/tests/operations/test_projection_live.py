@@ -332,7 +332,7 @@ def test_duplicate_bind_of_builtin_and_projection_fails_boot():
         async with app.app_context(manifest):
             pass
 
-    with pytest.raises(Exception, match="already exists"):
+    with pytest.raises(Exception, match="is already registered"):
         asyncio.run(run())
 
 

@@ -26,6 +26,7 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_THREAD_KEY,
     SUSPENDED_INTERACTION_MARKER_KEY,
     ChainedResume,
+    MalformedParkMarkerError,
     NestedParkOwnershipError,
     assert_park_adoptable,
     attach_chained_park,
@@ -258,9 +259,10 @@ def test_the_refusal_leads_with_the_remedy_and_trails_the_diagnostics():
 
 def test_the_wire_marker_carries_the_park_owner():
     # The marker is the WIRE form a claimer reads off a serialized tool result, so the owner
-    # has to ride it — the sentinel object never reaches that seam. The per-ask id lists ride it
-    # too, defaulting to the single id / empty caller subset when the minter passes none.
-    payload = suspended_interaction_marker("i1", None, "agent_resume")[SUSPENDED_INTERACTION_MARKER_KEY]
+    # has to ride it — the sentinel object never reaches that seam — beside both id lists.
+    payload = suspended_interaction_marker(
+        "i1", None, "agent_resume", interaction_ids=["i1"], caller_interaction_ids=[]
+    )[SUSPENDED_INTERACTION_MARKER_KEY]
     assert payload == {
         "interaction_id": "i1",
         "expiry_at": None,
@@ -270,6 +272,13 @@ def test_the_wire_marker_carries_the_park_owner():
     }
     # And it survives the JSON round trip the tool-output serialization puts it through.
     assert read_suspended_interaction_marker(json.dumps({SUSPENDED_INTERACTION_MARKER_KEY: payload})) == payload
+
+
+def test_the_marker_builder_requires_both_id_lists():
+    with pytest.raises(TypeError, match="interaction_ids"):
+        suspended_interaction_marker("i1", None, "agent_resume")  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="caller_interaction_ids"):
+        suspended_interaction_marker("i1", None, "agent_resume", interaction_ids=["i1"])  # type: ignore[call-arg]
 
 
 def test_the_wire_marker_carries_the_step_id_lists():
@@ -303,20 +312,29 @@ def test_a_malformed_marker_reads_as_no_park(content: object):
     assert read_suspended_interaction_marker(content) is None
 
 
-def test_a_legacy_two_key_marker_still_reads():
-    # A wire form written before the resume_owner field carries only interaction_id + expiry_at;
-    # it is still a well-formed park and reads back (its ownerless payload is refused downstream).
-    legacy = {SUSPENDED_INTERACTION_MARKER_KEY: {"interaction_id": "i1", "expiry_at": None}}
-    marker = read_suspended_interaction_marker(json.dumps(legacy))
-    assert marker == {"interaction_id": "i1", "expiry_at": None}
-    assert marker is not None
-    assert marker.get("resume_owner") is None
+@pytest.mark.parametrize(
+    ("payload", "field"),
+    [
+        ({"interaction_id": "i1", "expiry_at": None}, "interaction_ids"),
+        ({"interaction_id": "i1", "interaction_ids": ["i1"]}, "caller_interaction_ids"),
+        ({"interaction_id": "i1", "interaction_ids": "i1", "caller_interaction_ids": []}, "interaction_ids"),
+        ({"interaction_id": "i1", "interaction_ids": ["i1"], "caller_interaction_ids": [7]}, "caller_interaction_ids"),
+    ],
+    ids=["no-lists", "no-caller-list", "ids-not-a-list", "caller-ids-not-strings"],
+)
+def test_a_marker_lacking_a_valid_id_list_is_refused(payload: dict[str, object], field: str):
+    # A value naming an interaction under the reserved key but missing an id list cannot say which
+    # of its asks address the caller: it is refused loudly, never read as a park of user asks only.
+    content = json.dumps({SUSPENDED_INTERACTION_MARKER_KEY: payload})
+    with pytest.raises(MalformedParkMarkerError, match=f"lacks a valid '{field}' list"):
+        read_suspended_interaction_marker(content)
 
 
 def test_a_marker_built_without_an_owner_is_not_adoptable():
-    # The owner argument defaults to None so an un-updated minter fails CLOSED: whatever it
-    # built names no owner, and no bound driver may claim it.
-    marker = read_suspended_interaction_marker(suspended_interaction_marker("i1", None))
+    # A marker naming no owner names no driver entitled to claim it.
+    marker = read_suspended_interaction_marker(
+        suspended_interaction_marker("i1", None, None, interaction_ids=["i1"], caller_interaction_ids=[])
+    )
     assert marker is not None
     assert marker["resume_owner"] is None
     token = set_resume_continuation_tool("agent_resume")

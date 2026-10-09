@@ -1,19 +1,11 @@
-"""The in-process client-tool runnable's park-ADOPTION rule.
+"""The client-tool handle hands a park back BY TYPE, unadapted, with the owner its producer stamped.
 
-A tool that async-parks returns the ``SuspendedInteraction`` sentinel; this seam turns it
-into the reserved park marker, which is what makes the CALLING run (an agent loop) park on
-that interaction. A park has exactly one resume owner, so the conversion is allowed only
-when the park was raised under the continuation bound here — and the marker it produces
-carries that owner onward, because the driver that finally claims the park reads the
-serialized ToolMessage, not the sentinel.
-
-A park a NESTED run owns — a driver tool that bound its own resume continuation, or an
-agent run parked at its tool face — is resumed on that run's own path and would never
-resume this one, so it is never adopted. What happens instead depends on the caller: a
-CHAINED dispatch parks on the chained KEY (the call), so the nested run keeps its park and
-its terminal re-enters the caller through the chain's delivery tool; an unchained one is
-refused as a model-visible ``ToolException`` instead of suspending the caller behind a
-resume that never comes.
+A tool that async-parks returns the ``SuspendedInteraction`` sentinel; the handle returns it as it
+is — adopting it (this run's own park, a chained park on the call, or a refusal) is the agent
+engine's adapter's decision, made over the owner the sentinel carries. So the producers are pinned
+here: the real ``ask`` stamps the continuation bound around it, an agent run parked at its tool face
+stamps none, and a nested driver's park keeps its own owner. The handle also opens the tool's own
+call frame, so an ask it raises records the tool in ``asked_by``.
 """
 
 from __future__ import annotations
@@ -23,14 +15,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from langchain_core.tools import ToolException
 from tai42_contract.interactions import (
-    ChainedResume,
     SuspendedInteraction,
-    read_suspended_interaction_marker,
-    reset_chained_resume,
     reset_resume_continuation_tool,
-    set_chained_resume,
     set_resume_continuation_tool,
 )
 from tai42_contract.tools import TOOL_META_PAUSES, current_call_chain, tool_call_frame
@@ -51,40 +38,7 @@ def _clean_server():
     asyncio.run(_clear())
 
 
-async def _run_parking_tool(
-    resume_owner: str | None, *, bound: str | None, chained: str | None = None, expiry_at: datetime | None = None
-):
-    """Invoke a client tool that returns a park sentinel owned by ``resume_owner``, with
-    ``bound`` as this run's resume continuation and (optionally) ``chained`` as the chained
-    key its caller bound around the dispatch."""
-    async with app.app_context(Manifest.model_validate({})):
-
-        @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
-        async def parks(q: str) -> SuspendedInteraction:
-            """A tool whose call async-parked its caller."""
-            return SuspendedInteraction(interaction_id="i1", resume_owner=resume_owner, expiry_at=expiry_at)
-
-        tool_obj = await app.tools.get_tool("parks")
-        runnable = app._tool_binding._client_runnable(tool_obj)
-        token = set_resume_continuation_tool(bound)
-        completion = (
-            set_chained_resume(
-                ChainedResume(delivery_tool="deliver_chained_park", chain_key=chained, asked_by=("main",))
-            )
-            if chained is not None
-            else None
-        )
-        try:
-            return await runnable(q="x")
-        finally:
-            if completion is not None:
-                reset_chained_resume(completion)
-            reset_resume_continuation_tool(token)
-
-
-def test_the_in_process_runnable_opens_the_push_frame_of_the_tool():
-    # The in-process agent tool-dispatch door reaches the tool body directly, so it opens the call
-    # frame itself: a PUSH of the tool's own name, so an ask this dispatch raises records it.
+def test_the_handle_opens_the_push_frame_of_the_tool() -> None:
     seen: dict[str, tuple[str, ...]] = {}
 
     async def _run() -> None:
@@ -92,79 +46,40 @@ def test_the_in_process_runnable_opens_the_push_frame_of_the_tool():
 
             @app.tools.tool(force=True)
             async def records_chain(q: str) -> str:
-                """Records the ambient call chain the in-process runnable dispatches under."""
+                """Records the ambient call chain the handle dispatches under."""
                 seen["chain"] = current_call_chain()
                 return "ok"
 
-            tool_obj = await app.tools.get_tool("records_chain")
-            runnable = app._tool_binding._client_runnable(tool_obj)
-            await runnable(q="x")
+            [handle] = await app.tools.get_client_tools(["records_chain"])
+            await handle.invoke({"q": "x"})
 
     asyncio.run(_run())
     assert seen["chain"] == ("records_chain",)
 
 
-def test_a_park_this_run_owns_becomes_the_park_marker():
-    # The ask ran under THIS run's binding, so this run is the park's resume owner: the
-    # sentinel converts to the reserved marker its park middleware interrupts on.
-    result = asyncio.run(_run_parking_tool("agent_resume", bound="agent_resume"))
-    marker = read_suspended_interaction_marker(result)
-    assert marker is not None
-    assert marker["interaction_id"] == "i1"
+def test_a_nested_drivers_park_is_returned_with_its_own_owner() -> None:
+    # Whose park it is decides nothing here: the handle returns the sentinel as the body made it.
+    async def run() -> Any:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
+            async def drives(q: str) -> SuspendedInteraction:
+                """A tool whose nested driver parked under its own continuation."""
+                return SuspendedInteraction(interaction_id="i-nested", resume_owner="nested_driver_resume")
+
+            [handle] = await app.tools.get_client_tools(["drives"])
+            token = set_resume_continuation_tool("agent_resume")
+            try:
+                return await handle.invoke({"q": "x"})
+            finally:
+                reset_resume_continuation_tool(token)
+
+    result = asyncio.run(run())
+    assert isinstance(result, SuspendedInteraction)
+    assert result.resume_owner == "nested_driver_resume"
 
 
-def test_the_marker_carries_the_owner_onward():
-    # The claim point reads the marker off a serialized ToolMessage and never sees the
-    # sentinel, so the owner has to ride the wire form for it to be checkable there too.
-    result = asyncio.run(_run_parking_tool("agent_resume", bound="agent_resume"))
-    marker = read_suspended_interaction_marker(result)
-    assert marker is not None
-    assert marker["resume_owner"] == "agent_resume"
-
-
-def test_a_nested_drivers_park_is_refused_to_the_model():
-    # A nested driver bound its own continuation for the ask, so the platform resumes THAT
-    # driver. Refused as a ToolException — the class the agent loop's error middleware turns
-    # into a model-visible error ToolMessage — never converted to a park marker.
-    with pytest.raises(ToolException) as caught:
-        asyncio.run(_run_parking_tool("nested_driver_resume", bound="agent_resume"))
-    message = str(caught.value)
-    assert "parks" in message
-    assert "different run's resume binding" in message
-    # The refusal names NEITHER owner: echoing the bound continuation would hand a model the
-    # exact string to name for a claim, so it stays store-name-free.
-    assert "'nested_driver_resume'" not in message
-    assert "agent_resume" not in message
-
-
-def test_the_refusal_is_not_double_prefixed_as_a_tool_failure():
-    # A deliberate refusal is already worded for the model and already names the tool: it
-    # carries its own message, never the seam's "Error calling tool" body-failure prefix.
-    with pytest.raises(ToolException) as caught:
-        asyncio.run(_run_parking_tool("nested_driver_resume", bound="agent_resume"))
-    assert str(caught.value).startswith("Tool 'parks' cannot be used inside this run")
-    assert "Error calling tool" not in str(caught.value)
-
-
-def test_a_nested_runs_ownerless_park_is_refused_to_the_model():
-    # A park surfaced with no adoptable owner (an agent run parked at its tool face) is
-    # refused the same way — the nested run drives its own resume.
-    with pytest.raises(ToolException, match="no adoptable owner"):
-        asyncio.run(_run_parking_tool(None, bound="agent_resume"))
-
-
-def test_an_unbound_caller_is_refused_an_ownerless_park_too():
-    # ``None`` is not adoptable by ANY caller: an ask that parks always stamps the
-    # continuation it was raised under, so an ownerless sentinel is one no ask minted here.
-    # An unbound caller has no continuation the platform could fire either way.
-    with pytest.raises(ToolException, match="no adoptable owner"):
-        asyncio.run(_run_parking_tool(None, bound=None))
-
-
-def test_a_real_ask_park_is_adoptable_by_the_binding_that_raised_it():
-    # End to end on the PRODUCER side: the sentinel is minted by the real ``ask`` under a
-    # bound continuation (not hand-built), so this pins that what the helper stamps is exactly
-    # what the adoption seam accepts — the two halves cannot drift apart.
+def test_a_real_ask_park_carries_the_continuation_bound_around_it() -> None:
     async def run() -> Any:
         async with app.app_context(Manifest.model_validate({})):
 
@@ -187,43 +102,41 @@ def test_a_real_ask_park_is_adoptable_by_the_binding_that_raised_it():
                 finally:
                     reset_execution_identity(identity)
 
-            tool_obj = await app.tools.get_tool("asks")
-            runnable = app._tool_binding._client_runnable(tool_obj)
+            [handle] = await app.tools.get_client_tools(["asks"])
             token = set_resume_continuation_tool("agent_resume")
             try:
                 # The outer door frame that mints the run's delivery identity a parkable run
                 # always carries (a real dispatch always opens one before the tool body runs).
                 with tool_call_frame():
-                    return await runnable(q="proceed?")
+                    return await handle.invoke({"q": "proceed?"})
             finally:
                 reset_resume_continuation_tool(token)
 
-    marker = read_suspended_interaction_marker(_with_interactions_store(run))
-    assert marker is not None
-    # The helper stamped the bound continuation, the seam accepted it, and the wire form
-    # carries it on to whatever claims the park.
-    assert marker["resume_owner"] == "agent_resume"
+    result = _with_interactions_store(run)
+    assert isinstance(result, SuspendedInteraction)
+    assert result.resume_owner == "agent_resume"
+    assert result.interaction_ids == [result.interaction_id]
+    assert result.caller_interaction_ids == []
 
 
-def test_a_real_agent_tool_face_park_is_refused_by_an_adopting_run():
-    # End to end on the OTHER producer: an agent run parked as a TOOL of another agent. The
-    # tool face mints the sentinel with no owner (the parked run holds its own resume state),
-    # so the adopting run is refused instead of overwriting that run's claim.
+def test_an_agent_run_parked_at_its_tool_face_carries_no_owner() -> None:
+    # The parked run holds its own resume state, so the sentinel its tool face mints names no
+    # owner: no caller may adopt it.
     async def run() -> Any:
         manifest = Manifest.model_validate(
             {"agents": [{"title": "agents", "module": "tests.agent._fixtures", "include": ["parking"]}]}
         )
         async with app.app_context(manifest):
-            tool_obj = await app.tools.get_tool("parking")
-            runnable = app._tool_binding._client_runnable(tool_obj)
+            [handle] = await app.tools.get_client_tools(["parking"])
             token = set_resume_continuation_tool("agent_resume")
             try:
-                return await runnable(text="hi")
+                return await handle.invoke({"text": "hi"})
             finally:
                 reset_resume_continuation_tool(token)
 
-    with pytest.raises(ToolException, match="no adoptable owner"):
-        asyncio.run(run())
+    result = asyncio.run(run())
+    assert isinstance(result, SuspendedInteraction)
+    assert result.resume_owner is None
 
 
 def _with_interactions_store(run: Any) -> Any:
@@ -251,43 +164,3 @@ def _with_interactions_store(run: Any) -> Any:
     finally:
         helper_module.client_ctx = real_ctx  # type: ignore[assignment]
         helper_module.interactions_settings = real_settings  # type: ignore[assignment]
-
-
-def test_a_chained_dispatch_parks_on_the_call_not_the_nested_interaction():
-    # The caller bound a chained completion around this dispatch, so the nested run's park is
-    # not adopted and not refused: this run parks on the chained KEY, and the nested run's
-    # terminal re-enters it through that binding's delivery tool.
-    deadline = datetime(2030, 1, 1, tzinfo=UTC)
-    result = asyncio.run(
-        _run_parking_tool(
-            "nested_driver_resume", bound="agent_resume", chained="tai42:chained-park:k1", expiry_at=deadline
-        )
-    )
-    marker = read_suspended_interaction_marker(result)
-    assert marker is not None
-    assert marker["interaction_id"] == "tai42:chained-park:k1"
-    # Owned by THIS run's continuation: the chained park is genuinely this run's — it waits on
-    # the CALL — so the claim point downstream reaches the same verdict.
-    assert marker["resume_owner"] == "agent_resume"
-    # The chained park INHERITS the nested ask's horizon: the deadline rides through unchanged.
-    assert marker["expiry_at"] == deadline.isoformat()
-
-
-def test_a_chained_dispatch_still_adopts_this_runs_own_park():
-    # An ask raised under THIS run's binding inside a chained dispatch is still the run's own
-    # park — the chained key names the CALL, and nothing about it is this ask.
-    result = asyncio.run(_run_parking_tool("agent_resume", bound="agent_resume", chained="tai42:chained-park:k1"))
-    marker = read_suspended_interaction_marker(result)
-    assert marker is not None
-    assert marker["interaction_id"] == "i1"
-    assert marker["resume_owner"] == "agent_resume"
-
-
-def test_a_chained_dispatch_chains_an_ownerless_nested_park_too():
-    # A nested RUN parked at its tool face names no adoptable owner; chaining never adopts its
-    # park, it waits on the run's terminal, so the ownerless receipt chains like any other.
-    result = asyncio.run(_run_parking_tool(None, bound="agent_resume", chained="tai42:chained-park:k1"))
-    marker = read_suspended_interaction_marker(result)
-    assert marker is not None
-    assert marker["interaction_id"] == "tai42:chained-park:k1"
-    assert marker["resume_owner"] == "agent_resume"

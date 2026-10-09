@@ -10,10 +10,9 @@ Each case runs in a FRESH interpreter (a subprocess), because module import is c
 process-wide: once one test here imports a park-capable module, a later import in the same
 process re-runs nothing, so isolation is the only faithful way to prove "importing THIS
 module alone registers the tool". The child binds a stub app whose ``tools.tool`` records
-each bound name and RAISES the FastMCP duplicate-bind error on a re-bind — mirroring the
-skeleton's ``on_duplicate="error"`` (a ``ValueError('Component already exists: ...')``) — so
-the idempotent ``register_agent_resume_tool`` catches exactly that on the second caller and
-the count still lands at exactly one binding.
+each bound name and RAISES the contract's ``ToolAlreadyRegisteredError`` on a re-bind — as
+the platform's tool surface does — so the idempotent ``register_agent_resume_tool`` catches
+exactly that on the second caller and the count still lands at exactly one binding.
 """
 
 from __future__ import annotations
@@ -21,14 +20,15 @@ from __future__ import annotations
 import subprocess
 import sys
 
-# Bind a stub app that records tool registrations and refuses duplicates (mirroring the
-# skeleton's ``on_duplicate="error"``), import the modules named on argv, then print how
+# Bind a stub app that records tool registrations and refuses duplicates with the typed
+# error the platform raises, import the modules named on argv, then print how
 # many times the ``agent_resume`` tool registered.
 _CHILD_PROGRAM = """
 import importlib
 import sys
 
 from tai42_contract.app import tai42_app
+from tai42_contract.tools import ToolAlreadyRegisteredError
 
 _REGISTERED = []
 
@@ -49,7 +49,7 @@ class _StubTools:
         def decorator(func):
             name = kwargs.get("name") or getattr(func, "__name__", None)
             if name in _REGISTERED:
-                raise ValueError("Component already exists: " + repr(name))
+                raise ToolAlreadyRegisteredError(name)
             _REGISTERED.append(name)
             return func
 

@@ -152,15 +152,15 @@ def test_client_tool_advertises_agent_tool_input_schema_and_runs():
         async with app.app_context(_manifest()):
             [client_tool] = await app.tools.get_client_tools(["echo_fields"])
 
-            # Surfaced as a client subtool, the agent run tool advertises its real
-            # ToolInput FIELDS via its explicit ``.parameters`` (the concrete
-            # signature carries sentinel defaults langchain cannot round-trip).
-            assert set(client_tool.args) == {"text", "times", "note"}
+            # Surfaced as a client-tool handle, the agent run tool advertises its real
+            # ToolInput FIELDS via its explicit ``.parameters`` (the concrete signature
+            # carries sentinel defaults a JSON schema cannot carry).
+            assert set(client_tool.input_schema["properties"]) == {"text", "times", "note"}
 
-            # And it still executes end-to-end through the client tool: the
-            # permissive runnable forwards set-fields only (``times`` omitted → not
-            # forwarded), so the body reports only ``text``.
-            assert await client_tool.ainvoke({"text": "hi"}) == "text"
+            # And it still executes end-to-end through the handle: the permissive call
+            # forwards the supplied keys only (``times`` omitted → not forwarded), so the
+            # body reports only ``text``.
+            assert await client_tool.invoke({"text": "hi"}) == "text"
 
     asyncio.run(run())
 
@@ -427,18 +427,19 @@ def _config_manifest() -> Manifest:
 
 def test_the_run_tool_refuses_a_reserved_bridge_thread():
     # The HTTP run doors are not the only way to reach an agent: the auto-registered run
-    # tool is a second door onto the same seam, and the reservation holds there too.
+    # tool is a second door onto the same seam, and the reservation holds there too, for every
+    # id the agent reports its run kwargs address.
     async def run() -> None:
         async with app.app_context(_config_manifest()):
             with pytest.raises(ReservedThreadNamespaceError, match="thread_id"):
                 await app.tools.run_tool(
                     "config_fields",
-                    {"text": "hi", "langgraph_config": {"configurable": {"thread_id": "bridge:chat:+15550001111"}}},
+                    {"text": "hi", "engine_options": {"scope": {"thread": "bridge:chat:+15550001111"}}},
                 )
             with pytest.raises(ReservedThreadNamespaceError, match="checkpoint_id"):
                 await app.tools.run_tool(
                     "config_fields",
-                    {"text": "hi", "langgraph_config": {"configurable": {"checkpoint_id": "bridge:chat:x"}}},
+                    {"text": "hi", "engine_options": {"scope": {"checkpoint": "bridge:chat:x"}}},
                 )
 
     asyncio.run(run())
@@ -449,23 +450,22 @@ def test_the_run_tool_allows_an_unreserved_thread():
         async with app.app_context(_config_manifest()):
             answer = await app.tools.run_tool(
                 "config_fields",
-                {"text": "hi", "langgraph_config": {"configurable": {"thread_id": "user-42"}}},
+                {"text": "hi", "engine_options": {"scope": {"thread": "user-42"}}},
             )
             assert answer == "user-42"
 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
-def test_the_run_tool_refuses_a_reserved_top_level_thread_key(key):
-    # The reservation guards the contract's OWN top-level thread kwargs, not only a
-    # config-shaped spelling: an agent whose ToolInput exposes ``thread_id`` or
-    # ``resume_checkpoint_id`` directly must not let a caller steer the run into the
-    # reserved ``bridge:`` namespace through it.
+@pytest.mark.parametrize(("key", "refused"), [("thread_id", "thread_id"), ("resume_checkpoint_id", "checkpoint_id")])
+def test_the_run_tool_refuses_a_reserved_top_level_thread_key(key, refused):
+    # The contract's own ``thread_id`` kwarg is checked by the platform itself; a top-level
+    # ``resume_checkpoint_id`` the agent reports as a checkpoint it continues from is refused
+    # through its own answer — neither steers the run into the reserved ``bridge:`` namespace.
     async def run() -> None:
         async with app.app_context(_thread_recorder_manifest()):
             _thread_recorder_seen().clear()
-            with pytest.raises(ReservedThreadNamespaceError, match=key):
+            with pytest.raises(ReservedThreadNamespaceError, match=f"^{refused} may not"):
                 await app.tools.run_tool("thread_recorder", {"text": "hi", key: "bridge:chat:+15550001111"})
             # The run was refused before reaching the agent — nothing was recorded.
             assert _thread_recorder_seen() == []
@@ -530,19 +530,18 @@ def test_a_caller_pinned_thread_wins_over_the_ambient_deposit():
     asyncio.run(run())
 
 
-def test_a_config_shaped_caller_pin_also_wins_over_the_ambient_deposit():
-    # The caller-pinned check covers the config-shaped spelling too: a
-    # ``configurable.thread_id`` on a config-bearing kwarg means the deposit must NOT
-    # inject a top-level ``thread_id`` (which build_run_config would let override the
-    # caller's config-shaped pin). The recorder sees no top-level thread at all — the
-    # caller's config rides through untouched.
+def test_a_reported_thread_pin_also_wins_over_the_ambient_deposit():
+    # The caller-pinned check covers every thread the agent reports its run kwargs address: a
+    # thread pinned inside the agent's own option blob means the deposit must NOT inject a
+    # top-level ``thread_id``. The recorder sees no top-level thread at all — the caller's blob
+    # rides through untouched.
     async def run() -> None:
         async with app.app_context(_thread_recorder_manifest()):
             _thread_recorder_seen().clear()
             with agent_session_thread("flow:run-1:node-a"):
                 answer = await app.tools.run_tool(
                     "thread_recorder",
-                    {"text": "hi", "langgraph_config": {"configurable": {"thread_id": "cfg-pinned"}}},
+                    {"text": "hi", "engine_options": {"scope": {"thread": "cfg-pinned"}}},
                 )
             assert answer == ""
             assert _thread_recorder_seen() == [None]

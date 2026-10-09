@@ -2,7 +2,7 @@
 execution identity.
 
 Boots the real registries over a faked policy store and dispatches through the real
-``tools/binding.py`` seams (``run_tool`` and the ``get_client_tools`` runnable). An
+``tools/binding.py`` seams (``run_tool`` and the ``get_client_tools`` handle). An
 OPERATION tool takes the full route-edge decision (scope/jq pass AND per-tag LEVEL pass);
 a CAPABILITY tool (non-operation) takes liveness only. With no identity bound the seam is
 a strict no-op. The two operation classes come from ``tests.authz._fixtures.execution_probe``.
@@ -40,7 +40,6 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import api_keys as api_keys_ops
 from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.operations.registry import operation_registry
-from tai42_skeleton.tools.binding import CLIENT_TOOL_NAME_MAX_LEN
 
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 from ..access_control.test_policy_store import _MemStore
@@ -141,7 +140,7 @@ async def _invoke_client_tool_as(key: str, tool: str, arguments: dict | None = N
     """Resolve ``tool`` as a client tool and invoke it AS ``key`` — the agent-facing seam."""
     async with bind_execution_identity(key, bound_fingerprint=f"fp-{key}"):
         [client_tool] = await app.tools.get_client_tools([tool])
-        return await client_tool.ainvoke(arguments or {})
+        return await client_tool.invoke(arguments or {})
 
 
 def test_the_probe_routes_carry_the_action_classes_the_matrix_assumes(ac) -> None:
@@ -279,23 +278,23 @@ def test_a_fenced_operation_is_refused_while_the_operation_surface_rebuilds(ac) 
 
 
 def test_the_client_tool_seam_is_refused_while_the_operation_surface_rebuilds(ac) -> None:
-    # A client runnable captured its target before the tear, so it never takes ``run_tool``'s
+    # A client-tool handle captured its target before the tear, so it never takes ``run_tool``'s
     # resolution wait — the discriminator itself is what refuses on this path.
     async def run() -> None:
         async with app.app_context(_manifest()):
             from ._fixtures import execution_probe
 
-            runnable = app._tool_binding._client_runnable(await app.tools.get_tool(_FENCED_OP))
+            [handle] = await app.tools.get_client_tools([_FENCED_OP])
 
             with _rebuilding_operation_surface():
                 execution_probe.calls.clear()
                 async with bind_execution_identity("k-scoped", bound_fingerprint="fp-k-scoped"):
                     with pytest.raises(OperationSurfaceUnsettledError, match="retry shortly"):
-                        await runnable(target="deploy", mark="m")
+                        await handle.invoke({"target": "deploy", "mark": "m"})
                 assert execution_probe.calls == []
 
             async with bind_execution_identity("k-admin", bound_fingerprint="fp-k-admin"):
-                assert await runnable(target="deploy", mark="m") == "fenced:deploy:m"
+                assert await handle.invoke({"target": "deploy", "mark": "m"}) == "fenced:deploy:m"
 
     asyncio.run(run())
 
@@ -405,7 +404,7 @@ def test_one_dispatch_decides_on_one_policy_snapshot(monkeypatch: pytest.MonkeyP
 
 
 def test_the_client_tool_seam_applies_the_same_decision(ac) -> None:
-    # A tool handed to an agent runs through ``_client_runnable``, not ``run_tool``.
+    # A tool handed to an agent runs through its client-tool handle, not ``run_tool``.
     async def run() -> None:
         async with app.app_context(_manifest()):
             with pytest.raises(PermissionDeniedError, match=f"POST {_FENCED_PATH} is not permitted"):
@@ -416,49 +415,29 @@ def test_the_client_tool_seam_applies_the_same_decision(ac) -> None:
     asyncio.run(run())
 
 
-def test_the_client_tool_seam_authorizes_the_full_name_the_client_label_truncates(ac) -> None:
-    # ``get_client_tools`` truncates the name it hands the LLM, but the seam must resolve the
-    # FULL registered name: a truncated label resolves to nothing and would read as a
-    # CAPABILITY tool. Extension branches carry no length bound, so >64 chars is reachable.
-    long_name = "exec_probe_fenced_branch_" + "b" * 50
+def test_the_client_tool_seam_authorizes_an_extension_branch_by_its_full_name(ac) -> None:
+    # The handle carries the FULL registered name, so the seam resolves the branch to its fenced
+    # base: an extension branch over the fenced probe takes the same LEVEL pass.
+    branch_name = "exec_probe_fenced_branch_" + "b" * 30
 
     async def run() -> None:
         async with app.app_context(_manifest()):
 
-            @app.tools.tool(force=True, name=long_name)
+            @app.tools.tool(force=True, name=branch_name)
             async def _branch(target: str, mark: str) -> str:
                 """An extension branch over the fenced probe."""
                 return f"branch:{target}:{mark}"
 
-            app._tool_binding._tool_registry.register_extend_tool(tool_name=_FENCED_OP, extend_tool_name=long_name)
-            assert len(long_name) > CLIENT_TOOL_NAME_MAX_LEN
+            app._tool_binding._tool_registry.register_extend_tool(tool_name=_FENCED_OP, extend_tool_name=branch_name)
 
             async with bind_execution_identity("k-scoped", bound_fingerprint="fp-k-scoped"):
-                [client_tool] = await app.tools.get_client_tools([long_name])
-                assert client_tool.name == long_name[:CLIENT_TOOL_NAME_MAX_LEN]
+                [client_tool] = await app.tools.get_client_tools([branch_name])
+                assert client_tool.name == branch_name
                 with pytest.raises(PermissionDeniedError, match=f"POST {_FENCED_PATH} is not permitted"):
-                    await client_tool.ainvoke(_FENCED_ARGS)
+                    await client_tool.invoke(_FENCED_ARGS)
 
             # Non-vacuous: the deny above is the LEVEL pass, not a broken registration.
-            assert await _invoke_client_tool_as("k-admin", long_name, _FENCED_ARGS) == "branch:deploy:m"
-
-    asyncio.run(run())
-
-
-def test_the_client_tool_seam_binds_positional_arguments_before_deciding(ac) -> None:
-    # The decision keys arguments by PARAMETER NAME, so a positional path parameter must be
-    # bound through the signature first — positional and keyword spellings must refuse alike.
-    async def run() -> None:
-        async with app.app_context(_manifest()):
-            runnable = app._tool_binding._client_runnable(await app.tools.get_tool(_FENCED_OP))
-            async with bind_execution_identity("k-scoped", bound_fingerprint="fp-k-scoped"):
-                with pytest.raises(
-                    PermissionDeniedError, match=f"POST {_FENCED_PATH_ALT} is not permitted"
-                ) as positional:
-                    await runnable("rollback", "m")
-                with pytest.raises(PermissionDeniedError) as keyword:
-                    await runnable(target="rollback", mark="m")
-            assert str(positional.value) == str(keyword.value)
+            assert await _invoke_client_tool_as("k-admin", branch_name, _FENCED_ARGS) == "branch:deploy:m"
 
     asyncio.run(run())
 
@@ -538,7 +517,7 @@ def test_with_no_execution_identity_the_seam_does_nothing(ac) -> None:
             assert await app.tools.run_tool(_FENCED_OP, _FENCED_ARGS) == "fenced:deploy:m"
 
             [client_tool] = await app.tools.get_client_tools([_FENCED_OP])
-            assert await client_tool.ainvoke(_FENCED_ARGS) == "fenced:deploy:m"
+            assert await client_tool.invoke(_FENCED_ARGS) == "fenced:deploy:m"
 
             nested = {"tool_name": _FENCED_OP, "arguments": _FENCED_ARGS}
             assert await app.tools.run_tool("nested_tools", nested) == "fenced:deploy:m"

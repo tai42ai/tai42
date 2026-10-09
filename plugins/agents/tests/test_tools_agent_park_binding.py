@@ -75,7 +75,11 @@ def test_tools_agent_under_ambient_binding_does_not_answer_with_a_marker_when_no
     # relayed marker naming that ambient continuation is then REFUSED at the claim point rather than
     # adopted, so the run never answers with the marker JSON.
     saver = InMemorySaver()
-    relay = _RawMarkerTool(suspended_interaction_marker("i-relayed", None, AGENT_RESUME_TOOL_NAME))
+    relay = _RawMarkerTool(
+        suspended_interaction_marker(
+            "i-relayed", None, AGENT_RESUME_TOOL_NAME, interaction_ids=["i-relayed"], caller_interaction_ids=[]
+        )
+    )
     model = ScriptedChatModel([_relay_call(), AIMessage(content="cannot host that here")])
     _wire_tools_build(monkeypatch, model, saver)
     app_tools.client_tools["relay"] = relay.tool()
@@ -224,16 +228,39 @@ def test_tools_agent_astream_parks_under_a_run_delivery_context_without_an_addre
     ("marker", "why"),
     [
         # A nested driver's park, relayed as content by a middle agent that could not park.
-        (suspended_interaction_marker("i-relayed", None, "nested_driver_resume"), "different run's resume binding"),
-        # An older wire form / a nested RUN's park: no owner rides it at all.
-        ({SUSPENDED_INTERACTION_MARKER_KEY: {"interaction_id": "i-relayed", "expiry_at": None}}, "no adoptable owner"),
-        # Content a MODEL shaped to look like a park, reserved key and all.
         (
-            {SUSPENDED_INTERACTION_MARKER_KEY: {"interaction_id": "i-relayed", "expiry_at": None, "resume_owner": ""}},
+            suspended_interaction_marker(
+                "i-relayed", None, "nested_driver_resume", interaction_ids=["i-relayed"], caller_interaction_ids=[]
+            ),
+            "different run's resume binding",
+        ),
+        # A nested RUN's park: no owner rides it.
+        (
+            suspended_interaction_marker(
+                "i-relayed", None, None, interaction_ids=["i-relayed"], caller_interaction_ids=[]
+            ),
             "no adoptable owner",
         ),
+        # Content a MODEL shaped to look like a park, reserved key and all.
+        (
+            {
+                SUSPENDED_INTERACTION_MARKER_KEY: {
+                    "interaction_id": "i-relayed",
+                    "expiry_at": None,
+                    "resume_owner": "",
+                    "interaction_ids": ["i-relayed"],
+                    "caller_interaction_ids": [],
+                }
+            },
+            "no adoptable owner",
+        ),
+        # A marker lacking its id lists cannot say which asks address the caller: refused.
+        (
+            {SUSPENDED_INTERACTION_MARKER_KEY: {"interaction_id": "i-relayed", "expiry_at": None}},
+            "lacks a valid 'interaction_ids' list",
+        ),
     ],
-    ids=["foreign", "ownerless", "injected"],
+    ids=["foreign", "ownerless", "injected", "lacking-id-lists"],
 )
 def test_tools_agent_refuses_to_claim_a_marker_it_does_not_own(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any, marker: dict[str, Any], why: str
@@ -281,7 +308,11 @@ def test_tools_agent_run_never_answers_with_a_park_marker(
     # ANSWER — the marker's JSON is a suspend SIGNAL, and reading as text it would be an
     # answer no one wrote.
     saver = InMemorySaver()
-    relay = _RawMarkerTool(suspended_interaction_marker("i-relayed", None, "nested_driver_resume"))
+    relay = _RawMarkerTool(
+        suspended_interaction_marker(
+            "i-relayed", None, "nested_driver_resume", interaction_ids=["i-relayed"], caller_interaction_ids=[]
+        )
+    )
     model = ScriptedChatModel([_relay_call(), AIMessage(content="done without it")])
     _wire_tools_build(monkeypatch, model, saver)
     app_tools.client_tools["relay"] = relay.tool()
@@ -310,7 +341,11 @@ def test_tools_agent_astream_still_reaches_a_terminal_event(
     # A drive that stops on an interrupt nothing classifies yields no terminal event, and a
     # consumer waiting for one waits forever.
     saver = InMemorySaver()
-    relay = _RawMarkerTool(suspended_interaction_marker("i-relayed", None, "nested_driver_resume"))
+    relay = _RawMarkerTool(
+        suspended_interaction_marker(
+            "i-relayed", None, "nested_driver_resume", interaction_ids=["i-relayed"], caller_interaction_ids=[]
+        )
+    )
     model = ScriptedChatModel([_relay_call(), AIMessage(content="done without it")])
     _wire_tools_build(monkeypatch, model, saver)
     app_tools.client_tools["relay"] = relay.tool()

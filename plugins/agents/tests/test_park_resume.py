@@ -21,7 +21,6 @@ from fakeredis import aioredis
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
@@ -32,10 +31,10 @@ from tai42_contract.interactions import (
     RunTerminalFailed,
     SuspendedInteraction,
     get_resume_continuation_tool,
-    suspended_interaction_marker,
 )
 from tai42_contract.template import TemplatedText
 from tai42_kit.interactions.park_index import DriveInProgressError, superstep_id
+from tests._client_tool import FakeClientTool, client_tool
 from tests.conftest import bind_park_index
 
 from tai42_agents._internal.park import agent_resume, finalize_drive
@@ -89,12 +88,16 @@ class _CountingAsk:
         self._interaction_id = interaction_id
         self._expiry_at = expiry_at
 
-    def tool(self) -> StructuredTool:
-        def ask() -> dict[str, Any]:
+    def tool(self) -> FakeClientTool:
+        def ask() -> SuspendedInteraction:
             self.calls += 1
-            return suspended_interaction_marker(self._interaction_id, self._expiry_at, get_resume_continuation_tool())
+            return SuspendedInteraction(
+                interaction_id=self._interaction_id,
+                expiry_at=self._expiry_at,
+                resume_owner=get_resume_continuation_tool(),
+            )
 
-        return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
+        return client_tool("ask", ask, description="Ask the user and park.")
 
 
 def _ask_call(call_id: str = "c1") -> AIMessage:
@@ -209,7 +212,7 @@ def test_finalize_drive_raises_on_a_park_with_no_identity_bound(fake_park_redis:
         async def aget_state(self, config: Any, subgraphs: bool = False) -> Any:
             return self._snapshot
 
-    park_value = {AGENT_PARK_PAYLOAD_KEY: {"interactions": {"i1": None}}}
+    park_value = {AGENT_PARK_PAYLOAD_KEY: {"interactions": {"i1": None}, "caller_interaction_ids": []}}
     agent = _FakeAgent(_Snapshot([_Task([_Interrupt("int1", park_value)])]))
 
     async def go() -> None:
@@ -219,6 +222,19 @@ def test_finalize_drive_raises_on_a_park_with_no_identity_bound(fake_park_redis:
             await finalize_drive(agent, {}, {"approve": True}, None)
 
     asyncio.run(go())
+
+
+def test_a_park_payload_without_its_caller_list_raises() -> None:
+    # A park interrupt that cannot say which of its asks address the caller is refused loudly,
+    # never read as a park of user asks only; a plain HITL interrupt carries no caller asks.
+    from tai42_agents._internal.park.drive import _park_caller_ids
+    from tai42_agents._internal.park.errors import AgentParkMarkerError
+    from tai42_agents._internal.park.middleware import AGENT_PARK_PAYLOAD_KEY
+
+    with pytest.raises(AgentParkMarkerError, match="carries no caller_interaction_ids list"):
+        _park_caller_ids({AGENT_PARK_PAYLOAD_KEY: {"interactions": {"i1": None}}})
+    assert _park_caller_ids({"approve": True}) == []
+    assert _park_caller_ids({AGENT_PARK_PAYLOAD_KEY: {"interactions": {}, "caller_interaction_ids": ["i1"]}}) == ["i1"]
 
 
 def test_agent_resume_on_resolved_tombstone_replays_the_stored_terminal(fake_park_redis: Any) -> None:
@@ -501,11 +517,13 @@ def _two_parallel_subagent_park_setup(
     ask_calls = {"n": 0}
     id_for_who = {"A": "iA", "B": "iB"}
 
-    def ask(who: str) -> dict[str, Any]:
+    def ask(who: str) -> SuspendedInteraction:
         ask_calls["n"] += 1
-        return suspended_interaction_marker(id_for_who[who], _WITHIN_HORIZON, get_resume_continuation_tool())
+        return SuspendedInteraction(
+            interaction_id=id_for_who[who], expiry_at=_WITHIN_HORIZON, resume_owner=get_resume_continuation_tool()
+        )
 
-    app_tools.client_tools["ask"] = StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
+    app_tools.client_tools["ask"] = client_tool("ask", ask, description="Ask the user and park.")
 
     model = _EchoingScriptedModel(
         [

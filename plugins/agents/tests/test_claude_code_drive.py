@@ -169,6 +169,36 @@ def test_proxied_tool_call_runs_under_run_tool(monkeypatch: pytest.MonkeyPatch) 
     assert any(isinstance(e, MessageDelta) and "err=False" in e.text for e in events)
 
 
+def test_the_runner_payload_carries_each_granted_tools_schema_and_description(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runner declares each granted tool to the model with the platform's own description and
+    argument schema (read off its client-tool handle), never a placeholder."""
+    _settings(monkeypatch)
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
+    captured: dict[str, Any] = {}
+    real = workspace_module.build_options_payload
+
+    def _capture(**kwargs: Any) -> Any:
+        captured["proxy_tools"] = kwargs["proxy_tools"]
+        return real(**kwargs)
+
+    monkeypatch.setattr(workspace_module, "build_options_payload", _capture)
+
+    def lookup(city: str, units: str = "metric") -> dict[str, str]:
+        return {"city": city, "units": units}
+
+    app = build_local_app(tool_runners={"lookup": lookup})
+    token = set_request_user_id("user-1")
+    try:
+        _run(app, user_message=TemplatedText(content="hi"), tool_names=["lookup"])
+    finally:
+        reset_request_user_id(token)
+    (spec,) = captured["proxy_tools"]
+    assert spec["name"] == "lookup"
+    assert spec["description"] == "The lookup tool."
+    assert spec["input_schema"]["properties"].keys() == {"city", "units"}
+    assert spec["input_schema"]["required"] == ["city"]
+
+
 def test_tool_call_outside_allowlist_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(TOOL_CALL_UNGRANTED))

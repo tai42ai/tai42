@@ -223,14 +223,13 @@ def test_tools_agent_run_park_without_a_completion_binds_none(
     asyncio.run(go())
 
 
-def test_tools_agent_resume_delivers_a_legacy_ownerless_park_answer_end_to_end(
+def test_a_resume_refuses_a_park_whose_marker_names_no_owner(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
-    # PRODUCTION WIRING (end-to-end): a park written by a release predecessor carries no
-    # resume_owner on its persisted wire marker. Drive the REAL agent_resume over such a park and
-    # prove the operator's answer is SUBSTITUTED into the parked ToolMessage, not refused/dropped.
-    # This pins the driver's ``resuming_park_interaction_ids(frozenset(expected))`` wrap: removing
-    # it leaves the ownerless marker refused and the answer replaced by a tool error (red).
+    # PRODUCTION WIRING (end-to-end): drive the REAL agent_resume over a park whose marker, as the
+    # resume's claim check reads it, names no owner. A resume grants no exemption: the ownerless
+    # park is refused with a model-visible error, the answer is never substituted.
+    from tai42_agents._internal.lc_tools import to_structured_tool
     from tai42_agents._internal.park import middleware as park_mw
 
     saver = InMemorySaver()
@@ -246,33 +245,28 @@ def test_tools_agent_resume_delivers_a_legacy_ownerless_park_answer_end_to_end(
             tool_names=["ask"],
             checkpoint_provider="redis",
             user_message=TemplatedText(content="go"),
-            thread_id="t-legacy-e2e",
+            thread_id="t-ownerless-e2e",
         )
         assert isinstance(receipt, SuspendedInteraction)
 
-        # Downgrade every marker the resume middleware reads to the legacy TWO-KEY wire form (no
-        # resume_owner key), standing in for a park persisted by a released predecessor.
         real_reader = park_mw.read_suspended_interaction_marker
 
-        def legacy_reader(content: Any) -> Any:
+        def ownerless_reader(content: Any) -> Any:
             marker = real_reader(content)
-            return None if marker is None else {k: v for k, v in marker.items() if k != "resume_owner"}
+            return None if marker is None else {**marker, "resume_owner": None}
 
-        monkeypatch.setattr(park_mw, "read_suspended_interaction_marker", legacy_reader)
+        monkeypatch.setattr(park_mw, "read_suspended_interaction_marker", ownerless_reader)
 
-        # The real driver rebuilds the graph and resumes it, naming i1 as the interaction it is
-        # delivering an answer for — so the ownerless in-flight park is claimed, not refused.
         result = await agent_resume("i1", "the answer")
         assert result == "all done"
         assert ask.calls == 1
 
-        # The parked ToolMessage carries the operator's ANSWER, read back off the shared checkpoint
-        # — never a refusal error (which is what a dropped answer would leave).
-        graph, _ = await base_mod._compile_tools_agent([ask.tool()], checkpoint_provider="redis")
-        state = await graph.aget_state({"configurable": {"thread_id": "t-legacy-e2e"}})
+        graph, _ = await base_mod._compile_tools_agent([to_structured_tool(ask.tool())], checkpoint_provider="redis")
+        state = await graph.aget_state({"configurable": {"thread_id": "t-ownerless-e2e"}})
         by_call = {m.tool_call_id: m for m in state.values["messages"] if getattr(m, "tool_call_id", None)}
-        assert by_call["c1"].content == "the answer"
-        assert getattr(by_call["c1"], "status", None) != "error"
+        assert by_call["c1"].status == "error"
+        assert "no adoptable owner" in by_call["c1"].content
+        assert by_call["c1"].content != "the answer"
 
     asyncio.run(go())
 

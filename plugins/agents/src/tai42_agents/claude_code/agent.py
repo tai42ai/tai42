@@ -21,14 +21,14 @@ validation fires at run start (the first ``astream``/``run``), before any sandbo
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Final, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, SecretStr
 from tai42_contract.access_control.context import get_current_user_id
-from tai42_contract.agent import Agent
+from tai42_contract.agent import AddressedMemory, Agent
 from tai42_contract.agent.events import StreamEvent, SuspendedFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
@@ -40,7 +40,6 @@ from tai42_contract.interactions import (
 from tai42_contract.monitoring.models import SpanKind, TokenUsage
 from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
-from tai42_contract.tools import TOOL_META_PAUSES
 from tai42_kit.interactions.park_index import superstep_id as park_superstep_id
 from tai42_kit.llm import resolve_trace_context
 
@@ -55,12 +54,9 @@ from tai42_agents._internal.park import (
     workspace_lease,
 )
 from tai42_agents._internal.park.lease import LEASE_HEADROOM_SECONDS
-from tai42_agents._internal.reject import (
-    reject_blank_memory_keys,
-    reject_unhonored,
-    resolve_response_format,
-)
+from tai42_agents._internal.reject import reject_blank_memory_keys, resolve_response_format
 from tai42_agents._internal.render import render_message
+from tai42_agents._internal.run_kwargs import guard_run_kwargs
 from tai42_agents._internal.sandbox_util import build_policied_spec, workspace_key_for
 from tai42_agents.claude_code.credentials import (
     _BearerMaterial,
@@ -100,26 +96,9 @@ from tai42_agents.claude_code.settings import (
 )
 from tai42_agents.claude_code.skills_sync import validate_name
 from tai42_agents.claude_code.tool_call import run_proxied_tool_call
-from tai42_agents.claude_code.workspace import _RUNNER_PAYLOAD_DIR, build_payload, materialize
+from tai42_agents.claude_code.workspace import _RUNNER_PAYLOAD_DIR, build_payload, materialize, proxy_tool_specs
 
 AGENT_NAME: Final[str] = "claude_code"
-
-# The two ABC ``run``/``astream`` parameters ``claude_code`` cannot honor, mapped to the reason
-# named in the raised error (its keys define the unhonored set).
-_UNHONORED_REASONS: dict[str, str] = {
-    "tools": "live tool closures cannot cross the sandbox process boundary; grant tool_names instead",
-    "presets": "its tool set is composed from tool_names, not presets, and it will not silently ignore one",
-    "strategy": "the SDK applies no composition strategy and will not silently ignore one",
-    "interrupt_on": "permission policy is plugin settings (the SDK auto-approves in-sandbox), not per-run",
-    "recursion_limit": "LangGraph semantics do not apply to the SDK loop; use max_turns",
-    "llm_provider": "claude_code is Anthropic by construction; the key comes from plugin settings only",
-    "llm_kwargs": "the model is configured through plugin settings; a caller key is never accepted",
-    "checkpoint_provider": "the SDK owns session state; there is no LangGraph checkpoint here",
-    "store_provider": "the SDK owns session state; there is no LangGraph store here",
-    "resume_checkpoint_id": "the SDK owns session state; there is no checkpoint to fork",
-    "system_content_kwargs": "the system prompt is passed to the SDK verbatim, never built as a content block",
-}
-_UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset({"tools", "presets"})
 
 
 @contextlib.contextmanager
@@ -160,7 +139,7 @@ _LIVE_SESSIONS: dict[str, SandboxSession] = {}
 @tai42_app.agents.agent(
     AGENT_NAME,
     tags={"agents", "coding", "claude"},
-    meta={"tai42/crash_resume": claude_code_crash_resume(), TOOL_META_PAUSES: True},
+    meta={"tai42/crash_resume": claude_code_crash_resume()},
 )
 class ClaudeCodeAgent(Agent):
     """The ``claude_code`` agent: drives the real ``claude`` binary in a sandbox over the exec protocol."""
@@ -173,11 +152,20 @@ class ClaudeCodeAgent(Agent):
         "structured object and fails loudly if the agent produces none."
     )
     ToolInput: ClassVar[type[BaseModel]] = ClaudeCodeInput
+    parks: ClassVar[bool] = True
 
-    async def run(self, **kwargs: Any) -> Any:
-        """Drive one turn and drain the stream to a value (the contract terminal rule)."""
-        response_format = await resolve_response_format(AGENT_NAME, kwargs.get("response_format"))
-        return await self._drain(self.astream(**kwargs), response_format=response_format)
+    @classmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        """Its workspace is addressed by the contract ``thread_id`` alone, which the platform checks itself."""
+        return AddressedMemory()
+
+    async def run(self, *, response_format: TemplatedText | dict[str, Any] | None = None, **kwargs: Any) -> Any:
+        """Drive one turn and drain the stream to a value (the contract terminal rule).
+
+        ``astream``'s guard refuses an undeclared keyword.
+        """
+        resolved = await resolve_response_format(AGENT_NAME, response_format)
+        return await self._drain(self.astream(response_format=response_format, **kwargs), response_format=resolved)
 
     async def astream(
         self,
@@ -191,7 +179,7 @@ class ClaudeCodeAgent(Agent):
         max_turns: int | None = None,
         subagents: Sequence[dict[str, Any] | SubagentSpecShape] = (),
         thread_id: str | None = None,
-        **kwargs: Any,
+        **unknown: Any,
     ) -> AsyncIterator[StreamEvent]:
         """Drive one turn inside a sandbox session, yielding contract stream events.
 
@@ -200,14 +188,19 @@ class ClaudeCodeAgent(Agent):
         threaded run only — the cross-worker workspace lease, authors the hermetic workspace,
         and drives the runner. A sync ask is answered adapter-side; an async ask parks (or is
         refused loudly on an ephemeral run). The credential scrub runs on a TERMINAL exit only.
+        A keyword this face does not declare raises ``TypeError``.
         """
-        settings = claude_code_settings()
-        reject_unhonored(
+        guard_run_kwargs(
             f"{AGENT_NAME}.astream",
-            kwargs,
-            _UNHONORED_REASONS,
-            collection_params=_UNHONORED_COLLECTION_PARAMS,
+            unknown,
+            {
+                "thread_id": thread_id,
+                "user_message": user_message,
+                "tool_names": tool_names,
+                "response_format": response_format,
+            },
         )
+        settings = claude_code_settings()
         reject_blank_memory_keys(f"{AGENT_NAME}.astream", thread_id=thread_id, resume_checkpoint_id=None)
         response_format = await resolve_response_format(AGENT_NAME, response_format)
 
@@ -400,6 +393,7 @@ class ClaudeCodeAgent(Agent):
                 settings=settings,
                 ws=ws,
                 options_snapshot=options_snapshot,
+                proxy_tools=await proxy_tool_specs(options_snapshot["tool_names"]),
                 static_env_names=static_env_names,
                 model_env_name=model_env_name,
                 resume_id=resume_id,

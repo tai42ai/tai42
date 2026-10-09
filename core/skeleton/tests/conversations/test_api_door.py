@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from tai42_contract.agent import Agent
 from tai42_contract.template import TemplatedText
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import delivery as delivery_module
@@ -126,7 +126,7 @@ async def test_api_slow_wait_returns_202_then_posts_the_callback(env, monkeypatc
     _wire(monkeypatch, FakeManager(_api_route()))
     release = asyncio.Event()
 
-    class _SlowAgent(Agent):
+    class _SlowAgent(MemorylessTestAgent):
         tool_name = "slow"
         ToolInput = _EchoInput
 
@@ -177,7 +177,7 @@ async def test_api_no_callback_slow_wait_202_then_readable_by_poll_and_no_callba
 
     release = asyncio.Event()
 
-    class _SlowAgent(Agent):
+    class _SlowAgent(MemorylessTestAgent):
         tool_name = "slow"
         ToolInput = _EchoInput
 

@@ -27,7 +27,7 @@ from tai42_contract.interactions import (
 )
 
 from tai42_agents._internal.park.capability import ParkIdentity
-from tai42_agents._internal.park.errors import AgentParkNotHostableError
+from tai42_agents._internal.park.errors import AgentParkMarkerError, AgentParkNotHostableError
 from tai42_agents._internal.park.middleware import AGENT_PARK_PAYLOAD_KEY
 from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents._internal.park.persist import persist_park
@@ -197,14 +197,17 @@ def _park_interactions(value: Any) -> dict[str, Any] | None:
 
 
 def _park_caller_ids(value: Any) -> list[str]:
-    """The ``to="caller"`` subset a park interrupt's value carries, or ``[]`` when it carries none.
+    """The ``to="caller"`` subset a park interrupt's value carries; ``[]`` for a plain HITL interrupt.
 
-    Absent on a plain HITL interrupt and on a park payload written before the caller subset rode
-    it — either way an empty caller partition, never a raise.
+    A park payload without its caller list cannot say which of its asks address the caller, so it
+    raises rather than reading as a park of user asks only.
     """
-    if isinstance(value, dict) and AGENT_PARK_PAYLOAD_KEY in value:
-        return value[AGENT_PARK_PAYLOAD_KEY].get("caller_interaction_ids") or []
-    return []
+    if not (isinstance(value, dict) and AGENT_PARK_PAYLOAD_KEY in value):
+        return []
+    caller_ids = value[AGENT_PARK_PAYLOAD_KEY].get("caller_interaction_ids")
+    if not isinstance(caller_ids, list):
+        raise AgentParkMarkerError("park interrupt payload carries no caller_interaction_ids list")
+    return caller_ids
 
 
 async def finalize_drive(

@@ -169,11 +169,21 @@ class ExtensionsFacet(_Facet):
         name: str | None = None,
         requires_body_locality: bool = False,
         pauses: bool = False,
+        declares_output_schema: bool = False,
     ) -> Callable[..., Any]:
         """Register an extension of ``kind`` (or return the decorator when called bare)."""
         return self._app._extension_registry.extension(
-            f, kind=kind, name=name, requires_body_locality=requires_body_locality, pauses=pauses
+            f,
+            kind=kind,
+            name=name,
+            requires_body_locality=requires_body_locality,
+            pauses=pauses,
+            declares_output_schema=declares_output_schema,
         )
+
+    def declares_output_schema(self, element: ExtensionElement) -> bool:
+        """Whether the extension of combo ``element`` declares the wrapped tool's output shape; unknown raises."""
+        return self._app._extension_registry.declares_output_schema(element)
 
     def available_extensions(self) -> list[dict]:
         """Every registered extension as a listing dict."""

@@ -20,7 +20,6 @@ from typing import Any
 from pydantic import BaseModel
 
 from tai42_contract.access_control.models import AccessPolicy, RoleDefinition
-from tai42_contract.agent.base import SubAgentSpec
 from tai42_contract.backend.callback import CallbackSchema
 from tai42_contract.channels import ChannelTemplate
 from tai42_contract.conversations import (
@@ -55,7 +54,6 @@ SERVED_DOCUMENTS: dict[str, type[BaseModel]] = {
     "StateUpdate": StateUpdate,
     "StateAttach": StateAttach,
     "StateBinding": StateBinding,
-    "SubAgentSpec": SubAgentSpec,
     "CallbackSchema": CallbackSchema,
 }
 

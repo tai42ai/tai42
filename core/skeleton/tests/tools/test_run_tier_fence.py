@@ -9,8 +9,8 @@ schedules, channel turns, chain/batch re-dispatch), so driving ``run_tool`` dire
 fenced tool and a stubbed caller proves the fence for all of them. Two doors reach the tool
 BODY without this seam and are covered separately: the MCP edge
 (``test_run_tier_fence_mcp.py``) and the agent tool-dispatch door
-(``_client_runnable``, the langchain client tool an in-process agent invokes — covered by
-``test_client_runnable_*`` below).
+(the client-tool handle an in-process agent invokes — covered by ``test_client_tool_handle_*``
+below).
 """
 
 from __future__ import annotations
@@ -220,13 +220,12 @@ def test_tier_decorator_skips_a_manifest_excluded_tool(monkeypatch: pytest.Monke
     assert registry.get("risky") is None
 
 
-# -- The agent tool-dispatch door (``_client_runnable``) -----------------------------------
+# -- The agent tool-dispatch door (the client-tool handle) ---------------------------------
 #
-# ``get_client_tools`` builds a langchain ``StructuredTool`` whose runnable
-# (:meth:`ToolBinding._client_runnable`) reaches the tool BODY directly, never the
-# ``run_tool`` seam, so it enforces the fence itself. These drive a real app + a fenced tool
-# through that runnable, so the door is proven against the actual dispatch path an in-process
-# agent uses.
+# ``get_client_tools`` builds framework-neutral handles whose ``invoke``
+# (:meth:`ToolBinding._client_call`) reaches the tool BODY directly, never the ``run_tool``
+# seam, so it enforces the fence itself. These drive a real app + a fenced tool through that
+# handle, so the door is proven against the actual dispatch path an in-process agent uses.
 
 
 @pytest.fixture
@@ -242,7 +241,7 @@ def clean_process_server() -> Iterator[None]:
 
 
 @pytest.mark.usefixtures("clean_process_server")
-def test_client_runnable_fences_a_fenced_tool_for_non_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_client_tool_handle_fences_a_fenced_tool_for_non_admin(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _non_admin() -> _Caller:
         return _Caller(is_admin=False)
 
@@ -256,16 +255,15 @@ def test_client_runnable_fences_a_fenced_tool_for_non_admin(monkeypatch: pytest.
                 """A fenced probe body — reached only past the run-time fence."""
                 return q
 
-            tool_obj = await process_app.tools.get_tool("fenced_client_probe")
-            runnable = process_app._tool_binding._client_runnable(tool_obj)
+            [handle] = await process_app.tools.get_client_tools(["fenced_client_probe"])
             with pytest.raises(ForbiddenError):
-                await runnable(q="x")
+                await handle.invoke({"q": "x"})
 
     asyncio.run(run())
 
 
 @pytest.mark.usefixtures("clean_process_server")
-def test_client_runnable_admits_a_fenced_tool_for_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_client_tool_handle_admits_a_fenced_tool_for_admin(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _admin() -> _Caller:
         return _Caller(is_admin=True)
 
@@ -279,8 +277,7 @@ def test_client_runnable_admits_a_fenced_tool_for_admin(monkeypatch: pytest.Monk
                 """A fenced probe body — the admin runs it past the fence."""
                 return q
 
-            tool_obj = await process_app.tools.get_tool("fenced_client_probe_admin")
-            runnable = process_app._tool_binding._client_runnable(tool_obj)
-            assert await runnable(q="ok") == "ok"
+            [handle] = await process_app.tools.get_client_tools(["fenced_client_probe_admin"])
+            assert await handle.invoke({"q": "ok"}) == "ok"
 
     asyncio.run(run())

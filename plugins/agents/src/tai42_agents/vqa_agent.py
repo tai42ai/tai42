@@ -20,13 +20,13 @@ With a ``response_format`` set, the completion emits exactly one
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar, cast
 
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, ConfigDict, Field
-from tai42_contract.agent import Agent
+from tai42_contract.agent import AddressedMemory, Agent
 from tai42_contract.agent.events import MessageDelta, MessageFinal, StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
@@ -37,7 +37,8 @@ from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.llm.structured import plan_structured_output
 
 from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
-from tai42_agents._internal.reject import reject_unhonored, resolve_response_format
+from tai42_agents._internal.reject import resolve_response_format
+from tai42_agents._internal.run_kwargs import guard_run_kwargs
 from tai42_agents._internal.structured import ainvoke_structured
 from tai42_agents._internal.text import text_of
 from tai42_agents._internal.usage import usage_event
@@ -85,42 +86,35 @@ class VqaAgentInput(BaseModel):
     llm_kwargs: dict[str, Any] | None = None
 
 
-# Contract ``Agent.run`` parameters ``vqa_agent`` cannot honor, mapped to the
-# reason named in the raised error (the keys define this agent's unhonored set). A
-# single multimodal completion has no tool loop, graph, or checkpointer; the honored
-# params are ``llm_provider`` / ``llm_kwargs`` (reaching the llm factory) and
-# ``response_format`` (forced via ``with_structured_output``).
+# The contract ``Agent.run`` keys ``vqa_agent`` cannot honor, mapped to the reason named in the raised
+# error. A single multimodal completion has no tool loop, graph, or checkpointer.
 _UNHONORED_REASONS: dict[str, str] = {
-    "tools": "it runs a single multimodal completion and loads no tools",
     "tool_names": "it runs a single multimodal completion and loads no tools",
-    "presets": "it runs a single multimodal completion and exposes no preset tools",
-    "subagents": "it runs a single multimodal completion with no sub-agent machinery",
-    "system_message": "it builds its own prompt from image_url and query and takes no system_message",
     "user_message": "it builds its own prompt from image_url and query and takes no user_message",
-    "strategy": "it applies no composition strategy",
-    "interrupt_on": "it runs no graph and never pauses for external input",
-    "skills": "it loads no skills backend",
-    "inline_skills": "it loads no skills backend",
-    "recursion_limit": "it runs no graph, so there is no step count to bound",
     "thread_id": "it runs no checkpointer, so there is no thread to pin",
-    "resume": "it runs no graph and never interrupts, so there is no paused run to resume",
-    "resume_checkpoint_id": "it runs no checkpointer, so there is no checkpoint to fork from",
-    "checkpoint_provider": "it runs no checkpointer",
-    "store_provider": "it wires no long-term store",
-    "system_content_kwargs": (
-        "it builds its own multimodal prompt and routes no message through the tools-agent input builder, "
-        "so there is no system content block to carry these keys"
-    ),
-    "user_content_kwargs": (
-        "it builds its own multimodal prompt and routes no message through the tools-agent input builder, "
-        "so there is no user content block to carry these keys"
-    ),
 }
-# The unhonored parameters whose unset default is an empty sequence; every other
-# defaults to ``None`` and is set when not ``None``.
-_UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset(
-    {"tools", "tool_names", "presets", "subagents", "skills", "inline_skills"}
-)
+
+
+def _guard(
+    face: str,
+    unknown: Mapping[str, Any],
+    *,
+    thread_id: str | None,
+    user_message: TemplatedText | None,
+    tool_names: Sequence[str],
+    response_format: Any,
+) -> None:
+    guard_run_kwargs(
+        face,
+        unknown,
+        {
+            "thread_id": thread_id,
+            "user_message": user_message,
+            "tool_names": tool_names,
+            "response_format": response_format,
+        },
+        _UNHONORED_REASONS,
+    )
 
 
 @tai42_app.agents.agent("vqa_agent", tags={"agents"})
@@ -131,6 +125,11 @@ class VqaAgent(Agent):
     tool_description: ClassVar[str] = "Analyze an image and answer a query about it using a multimodal LLM."
     ToolInput: ClassVar[type[BaseModel]] = VqaAgentInput
 
+    @classmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        """A single completion addresses no memory."""
+        return AddressedMemory()
+
     async def run(
         self,
         *,
@@ -139,17 +138,28 @@ class VqaAgent(Agent):
         response_format: Any = None,
         llm_provider: str | None = None,
         llm_kwargs: dict[str, Any] | None = None,
-        **kwargs: Any,
+        thread_id: str | None = None,
+        user_message: TemplatedText | None = None,
+        tool_names: Sequence[str] = (),
+        **unknown: Any,
     ) -> Any:
         """Drain :meth:`astream` and return the final value.
 
         The agent honors ``image_url``/``query``, ``response_format``, and
         ``llm_provider``/``llm_kwargs``. A ``response_format`` JSON-Schema dict must
         carry a top-level ``"title"``; when set, the validated structured object is
-        returned and a run producing none raises loudly. Every other contract
-        parameter is rejected loudly, in parity with :meth:`astream`.
+        returned and a run producing none raises loudly. A set ``thread_id`` /
+        ``user_message`` / ``tool_names`` or an undeclared keyword is refused loudly, in
+        parity with :meth:`astream`.
         """
-        reject_unhonored("vqa_agent.run", kwargs, _UNHONORED_REASONS, collection_params=_UNHONORED_COLLECTION_PARAMS)
+        _guard(
+            "vqa_agent.run",
+            unknown,
+            thread_id=thread_id,
+            user_message=user_message,
+            tool_names=tool_names,
+            response_format=response_format,
+        )
         response_format = await resolve_response_format("vqa_agent", response_format)
         return await self._drain(
             self.astream(
@@ -170,7 +180,10 @@ class VqaAgent(Agent):
         response_format: Any = None,
         llm_provider: str | None = None,
         llm_kwargs: dict[str, Any] | None = None,
-        **kwargs: Any,
+        thread_id: str | None = None,
+        user_message: TemplatedText | None = None,
+        tool_names: Sequence[str] = (),
+        **unknown: Any,
     ) -> AsyncIterator[StreamEvent]:
         """Stream one multimodal completion.
 
@@ -183,11 +196,16 @@ class VqaAgent(Agent):
         With a ``response_format`` the completion forces structured output via
         ``with_structured_output`` and emits exactly one :class:`StructuredFinal`.
 
-        Contract parameters this agent cannot honor are rejected loudly here, in
-        parity with :meth:`run`.
+        A set ``thread_id`` / ``user_message`` / ``tool_names`` or an undeclared keyword is
+        refused loudly here, in parity with :meth:`run`.
         """
-        reject_unhonored(
-            "vqa_agent.astream", kwargs, _UNHONORED_REASONS, collection_params=_UNHONORED_COLLECTION_PARAMS
+        _guard(
+            "vqa_agent.astream",
+            unknown,
+            thread_id=thread_id,
+            user_message=user_message,
+            tool_names=tool_names,
+            response_format=response_format,
         )
         response_format = await resolve_response_format("vqa_agent", response_format)
         provider = llm_provider or llm_provider_settings().llm

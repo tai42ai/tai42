@@ -19,7 +19,7 @@ from tai42_contract.agent import (
     ToolCallStep,
     ToolResultStep,
 )
-from tai42_contract.agent.base import PresetSpec, SubAgentSpec
+from tai42_contract.agent.base import PresetSpec
 from tai42_contract.template import TemplatedText
 from tests._tools_agent_support import (
     _STRUCTURED_SCHEMA,
@@ -219,11 +219,10 @@ def test_astream_emits_the_full_event_taxonomy(monkeypatch: pytest.MonkeyPatch) 
     assert call.call_id == result.call_id == "c1"
     assert events[5] == MessageFinal(text="Hello")
 
-    # Live tools passed through — by SURFACE, not by object identity: resolution hands the
-    # graph a delivery-scoped copy of every tool (its body runs with the park-completion
-    # binding cleared), so the model-facing name/description/schema is what carries through.
-    assert [(tool.name, tool.description, tool.args) for tool in captured["tools"]] == [
-        (live_tool.name, live_tool.description, live_tool.args)
+    # The live handle is adapted for the graph: its model-facing name, description and argument
+    # schema are what carry through.
+    assert [(tool.name, tool.description, tool.args_schema) for tool in captured["tools"]] == [
+        (live_tool.name, live_tool.description, live_tool.input_schema)
     ]
     # and the resume checkpoint threaded into config.
     assert captured["user_message"] == ["hi"]
@@ -244,20 +243,6 @@ def test_astream_resolves_baked_tool_names_and_presets(monkeypatch: pytest.Monke
     preset = PresetSpec(name="my_preset", base_tool="example_tool", fixed_kwargs={"example_config": {"nodes": []}})
     _collect(agent, tool_names=["search"], presets=[preset], user_message=TemplatedText(content="hi"))
     assert [tool.name for tool in captured["tools"]] == ["search", "my_preset"]
-
-
-def test_astream_with_subagents_raises_loudly() -> None:
-    """``astream`` never silently drops baked ``subagents`` — parity with ``run``."""
-    agent = _get_agent()
-    with pytest.raises(RuntimeError, match="subagents"):
-        _collect(agent, user_message=TemplatedText(content="hi"), subagents=[SubAgentSpec(name="helper")])
-
-
-def test_astream_with_strategy_raises_loudly() -> None:
-    """``astream`` never silently drops a baked ``strategy`` — parity with ``run``."""
-    agent = _get_agent()
-    with pytest.raises(RuntimeError, match="strategy"):
-        _collect(agent, user_message=TemplatedText(content="hi"), strategy="react")
 
 
 def test_astream_with_response_format_emits_structured_final(monkeypatch: pytest.MonkeyPatch) -> None:

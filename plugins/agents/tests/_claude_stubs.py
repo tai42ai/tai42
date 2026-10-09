@@ -54,7 +54,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 TOOL_CALL = (
     _PREAMBLE
     + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
-emit({"type": "tool_call", "call_id": "c1", "tool_name": options["proxy_tool_names"][0], "arguments": {"x": 1}})
+emit({"type": "tool_call", "call_id": "c1", "tool_name": options["proxy_tools"][0]["name"], "arguments": {"x": 1}})
 res = readline()
 echo = "tool=" + str(res.get("result")) + ",err=" + str(res.get("is_error"))
 emit({"type": "event", "event": {"kind": "text", "text": echo}})
@@ -69,7 +69,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 TOOL_CALL_PARK = (
     _PREAMBLE
     + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
-emit({"type": "tool_call", "call_id": "c1", "tool_name": options["proxy_tool_names"][0], "arguments": {"x": 1}})
+emit({"type": "tool_call", "call_id": "c1", "tool_name": options["proxy_tools"][0]["name"], "arguments": {"x": 1}})
 frame = readline()
 if frame.get("type") == "stop":
     sys.exit(0)

@@ -15,11 +15,11 @@ events and ends with a terminal ``StructuredFinal`` carrying the full
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, field_validator
-from tai42_contract.agent import Agent
+from tai42_contract.agent import AddressedMemory, Agent
 from tai42_contract.agent.events import MessageFinal, RunUsage, StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
@@ -27,10 +27,10 @@ from tai42_kit.llm import resolve_trace_context
 from tai42_kit.llm.settings import llm_provider_settings
 
 from tai42_agents._internal.base_tool_agent import ainvoke_tools_agent
-from tai42_agents._internal.config_util import with_run_trace_lineage
+from tai42_agents._internal.config_util import config_addressed, with_run_trace_lineage
 from tai42_agents._internal.graph_cache import ToolsAgentGraph, ToolsAgentGraphSpec, tools_agent_graph
-from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents._internal.render import render_message
+from tai42_agents._internal.run_kwargs import guard_run_kwargs
 from tai42_agents._internal.stream_events import astream_tools_agent_events
 from tai42_agents.settings import agents_limits_settings
 from tai42_agents.voting_agent.model import VoteInfo, VoterSpec, VotingOutput
@@ -104,67 +104,25 @@ async def _run_voters(
     return user_messages, voters_info
 
 
-# ABC ``Agent.run`` parameters the voting runtime has no seat for, mapped to the
-# reason named in the raised error (the keys define this agent's unhonored set).
-# Voting drives its judge and voters through role-named params (``judge_*``/
-# ``voter_*``) plus ``checkpoint_provider``. ``response_format`` is conditional:
-# ``VotingOutput`` (the type this agent always produces) is accepted and removed
-# before the guard runs, any other type is an offender.
+# The contract ``Agent.run`` keys the voting runtime has no seat for, mapped to the reason named in
+# the raised error. Voting drives its judge and voters through role-named params (``judge_*``/
+# ``voter_*``) plus ``checkpoint_provider``. ``response_format`` is conditional: ``VotingOutput``
+# (the type this agent always produces) is accepted, any other value is refused.
 _UNHONORED_REASONS: dict[str, str] = {
-    "tools": "it drives its judge and voters through role-named judge_tools/voter_tools",
     "tool_names": "it drives its judge and voters through role-named judge_tools/voter_tools",
-    "presets": "it exposes no preset tools; judge and voter tools are role-named",
-    "subagents": "it runs no sub-agent machinery",
-    "system_message": "it renders role-named judge_message/voter_message and takes no system_message",
     "user_message": "it renders role-named judge_message/voter_message and takes no user_message",
-    "strategy": "it applies no composition strategy and will not silently ignore one",
-    "interrupt_on": "its judge and voter graphs never pause for external input",
-    "skills": "it loads no skills backend",
-    "inline_skills": "it loads no skills backend",
-    "recursion_limit": (
-        "recursion_limit is per-role RunnableConfig content set via judge_/voter_ langgraph_config; "
-        "a single global value would mask the per-role setting"
-    ),
     "thread_id": (
         "thread_id is per-role RunnableConfig content set via judge_/voter_ langgraph_config's configurable; "
         "a single global thread_id would collide the two role graphs' checkpoint namespaces"
     ),
-    "resume": "its judge and voter graphs never interrupt, so there is no paused run to resume",
-    "resume_checkpoint_id": (
-        "resume_checkpoint_id is per-role RunnableConfig content set via judge_/voter_ langgraph_config's "
-        "configurable; a single global checkpoint would collide the two role graphs' checkpoint namespaces"
-    ),
-    "llm_provider": "it uses role-named judge_llm_provider and per-voter providers",
-    "store_provider": "it wires no long-term store",
-    "llm_kwargs": "it uses role-named judge_llm_kwargs and per-voter kwargs",
     "response_format": (
         "it always produces a VotingOutput and cannot honor a different structured output type; "
         "pass VotingOutput or omit it"
     ),
-    "system_content_kwargs": (
-        "its judge/voter system messages are internal fixed prompts and take no caller system message; "
-        "use user_content_kwargs to mark the judge's last user turn (the final voter verdict when voters are present)"
-    ),
 }
-# The unhonored parameters whose unset default is an empty sequence; every other
-# defaults to ``None`` and is set when not ``None``.
-_UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset(
-    {"tools", "tool_names", "presets", "subagents", "skills", "inline_skills"}
-)
 
-
-def _reject_unhonored(face: str, response_format: Any, extra_kwargs: dict[str, Any]) -> None:
-    """Reject, in ONE raise, every ABC ``Agent.run`` parameter the voting runtime cannot honor.
-
-    ``response_format`` folds into the same guard: ``VotingOutput`` (or an unset
-    ``None``) is dropped before the guard runs, any other type is an offender named
-    alongside the rest. ``face`` is the ``voting_agent.run`` / ``.astream`` label.
-    """
-    checked = dict(extra_kwargs)
-    checked["response_format"] = response_format
-    if response_format is VotingOutput:
-        del checked["response_format"]
-    reject_unhonored(face, checked, _UNHONORED_REASONS, collection_params=_UNHONORED_COLLECTION_PARAMS)
+# The run kwarg that steers the run's own checkpoint continuity.
+_CONTINUITY_KEYS = frozenset({"checkpoint_provider"})
 
 
 class VotingAgentInput(BaseModel):
@@ -229,14 +187,28 @@ class VotingAgent(Agent):
     )
     ToolInput: ClassVar[type[BaseModel]] = VotingAgentInput
 
+    @classmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        """The checkpoint provider when present, and the ids the judge and voter configs carry."""
+        threads: set[str] = set()
+        checkpoints: set[str] = set()
+        for key in ("judge_langgraph_config", "voter_langgraph_config"):
+            role_threads, role_checkpoints = config_addressed(run_kwargs.get(key))
+            threads |= role_threads
+            checkpoints |= role_checkpoints
+        return AddressedMemory(
+            keys=frozenset(_CONTINUITY_KEYS & set(run_kwargs)),
+            thread_ids=frozenset(threads),
+            checkpoint_ids=frozenset(checkpoints),
+        )
+
     async def run(self, **kwargs: Any) -> VotingOutput:
         """Drain ``astream`` to its terminal ``VotingOutput``.
 
-        A ``response_format`` other than ``VotingOutput``, or any unhonored ABC parameter, is
-        rejected before draining. The drain forces the ``VotingOutput`` structured terminal —
-        a missing one raises rather than falling back to message text.
+        ``astream``'s guard refuses an undeclared keyword and a contract key this agent cannot
+        honor. The drain forces the ``VotingOutput`` structured terminal — a missing one raises
+        rather than falling back to message text.
         """
-        _reject_unhonored("voting_agent.run", kwargs.get("response_format"), kwargs)
         return await self._drain(self.astream(**kwargs), response_format=VotingOutput)
 
     async def astream(
@@ -254,7 +226,10 @@ class VotingAgent(Agent):
         voter_langgraph_config: dict[str, Any] | None = None,
         user_content_kwargs: dict[str, Any] | None = None,
         response_format: Any = None,
-        **kwargs: Any,
+        thread_id: str | None = None,
+        user_message: TemplatedText | None = None,
+        tool_names: Sequence[str] = (),
+        **unknown: Any,
     ) -> AsyncIterator[StreamEvent]:
         """Resolve the judge/voter tool names, run the voters, stream the judge, and yield the terminal.
 
@@ -263,14 +238,20 @@ class VotingAgent(Agent):
         ``user_content_kwargs`` merges content-block keys (e.g. ``cache_control``)
         onto the judge's last user message (the final voter verdict when voters are
         present); a provider-unknown key surfaces as a loud provider error. A ``response_format``
-        other than ``VotingOutput``, or any unhonored ABC parameter (including
-        ``system_content_kwargs`` — the system prompts are internal fixed), is
-        rejected loudly here in parity with :meth:`run`.
+        other than ``VotingOutput``, a set ``thread_id`` / ``user_message`` / ``tool_names``, or a
+        keyword this face does not declare is refused loudly.
         """
-        _reject_unhonored("voting_agent.astream", response_format, kwargs)
-        # The judge's and voters' tools resolve delivery-scoped (``resolve_tools``): a tool a judge
-        # or voter dispatches must not capture the completion binding addressing the agent's OWN
-        # deferred answer (see ``_internal.nested_dispatch``).
+        guard_run_kwargs(
+            "voting_agent.astream",
+            unknown,
+            {
+                "thread_id": thread_id,
+                "user_message": user_message,
+                "tool_names": tool_names,
+                "response_format": None if response_format is VotingOutput else response_format,
+            },
+            _UNHONORED_REASONS,
+        )
         judge_llm_provider = judge_llm_provider or llm_provider_settings().llm
         judge_llm_kwargs = judge_llm_kwargs or {}
         judge_graph = await tools_agent_graph(

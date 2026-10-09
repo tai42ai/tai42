@@ -15,14 +15,14 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar
 
 from langchain_core.embeddings import Embeddings
 from langchain_core.messages import HumanMessage
-from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tai42_contract.agent import (
+    AddressedMemory,
     Agent,
     MessageDelta,
     MessageFinal,
@@ -33,6 +33,7 @@ from tai42_contract.agent import (
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
+from tai42_contract.tools import ClientTool
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.embedding import get_embedding_async
 from tai42_kit.llm.models import get_llm_async
@@ -44,19 +45,17 @@ from tai42_kit.llm.structured import plan_structured_output
 from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
 from tai42_agents._internal.config_util import (
     build_run_config,
+    config_addressed,
     init_langgraph_config,
     mark_minted_thread_finished,
     start_run_thread,
 )
+from tai42_agents._internal.lc_tools import resolve_tools
 from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
-from tai42_agents._internal.reject import (
-    reject_blank_memory_keys,
-    reject_unhonored,
-    resolve_response_format,
-)
+from tai42_agents._internal.reject import reject_blank_memory_keys, resolve_response_format
 from tai42_agents._internal.render import render_message
-from tai42_agents._internal.resolve_tools import resolve_tools
+from tai42_agents._internal.run_kwargs import guard_run_kwargs
 from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import ainvoke_structured
 from tai42_agents.retrieval_tools_agent.graph import RetrievalToolsGraph
@@ -194,10 +193,23 @@ class RetrievalToolsAgent(Agent):
     )
     ToolInput: ClassVar[type[BaseModel]] = RetrievalToolsAgentInput
 
+    @classmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        """The continuity keys present, and the ids ``resume_checkpoint_id`` and ``langgraph_config`` carry."""
+        threads, checkpoints = config_addressed(run_kwargs.get("langgraph_config"))
+        resume_checkpoint_id = run_kwargs.get("resume_checkpoint_id")
+        if resume_checkpoint_id is not None:
+            checkpoints.add(str(resume_checkpoint_id))
+        return AddressedMemory(
+            keys=frozenset({"resume_checkpoint_id", "checkpoint_provider"} & set(run_kwargs)),
+            thread_ids=frozenset(threads),
+            checkpoint_ids=frozenset(checkpoints),
+        )
+
     async def _build(
         self,
         *,
-        tools: Sequence[StructuredTool] = (),
+        tools: Sequence[ClientTool] = (),
         tool_names: Sequence[str] = (),
         presets: Sequence[PresetSpec] = (),
         system_message: TemplatedText | None = None,
@@ -224,7 +236,7 @@ class RetrievalToolsAgent(Agent):
         rendered_system = await render_message(system_message)
         rendered_user = await render_message(user_message, allow_empty=False, field="user_message")
 
-        resolved_tools = await resolve_tools(tai42_app.tools, list(tool_names), list(tools), list(presets))
+        resolved_tools = await resolve_tools(tai42_app.tools, tool_names, tools, presets)
 
         provider_settings = llm_provider_settings()
 
@@ -270,7 +282,30 @@ class RetrievalToolsAgent(Agent):
         await _repair_dangling_tool_calls(agent, run_config)
         return agent, messages, run_config, llm, minted
 
-    async def astream(self, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+    async def astream(
+        self,
+        *,
+        tools: Sequence[ClientTool] = (),
+        tool_names: Sequence[str] = (),
+        presets: Sequence[PresetSpec] = (),
+        system_message: TemplatedText | None = None,
+        user_message: TemplatedText | None = None,
+        response_format: Any = None,
+        embedding_provider: str | None = None,
+        llm_provider: str | None = None,
+        checkpoint_provider: str | None = None,
+        store_provider: str | None = None,
+        overwrite_store: bool = False,
+        tools_limit: int = 10,
+        embedding_kwargs: dict[str, Any] | None = None,
+        llm_kwargs: dict[str, Any] | None = None,
+        user_content_kwargs: dict[str, Any] | None = None,
+        thread_id: str | None = None,
+        resume_checkpoint_id: str | None = None,
+        recursion_limit: int | None = None,
+        langgraph_config: dict[str, Any] | None = None,
+        **unknown: Any,
+    ) -> AsyncIterator[StreamEvent]:
         """Build the retrieval graph and yield its run as normalized events.
 
         The projection's ``MessageDelta``/``MessageFinal`` carry the model's raw
@@ -282,43 +317,48 @@ class RetrievalToolsAgent(Agent):
         the schema by a finalization pass over the resolved ``llm``, ending with one
         ``StructuredFinal`` carrying the validated object.
 
-        ``thread_id`` / ``resume_checkpoint_id`` map into the run config's
-        ``configurable`` and ``recursion_limit`` onto its top level.
-        ``user_content_kwargs`` merges content-block keys (e.g. ``cache_control``)
-        onto the user message's text block; a provider-unknown key surfaces as a loud
-        provider error. The ABC parameters this runtime cannot honor — including
-        ``system_content_kwargs`` (the system prompt is a composed template string,
-        never a content block) — are rejected loudly (see ``_UNHONORED_REASONS``); the
-        same guard runs on ``run``.
+        ``langgraph_config`` is the run config base: ``thread_id`` /
+        ``resume_checkpoint_id`` map into its ``configurable`` and ``recursion_limit``
+        onto its top level. ``user_content_kwargs`` merges content-block keys (e.g.
+        ``cache_control``) onto the user message's text block; a provider-unknown key
+        surfaces as a loud provider error. A keyword this face does not declare raises
+        ``TypeError``; the same guard runs on ``run``.
         """
-        reject_unhonored(
+        guard_run_kwargs(
             "retrieval_tools_agent.astream",
-            kwargs,
-            _UNHONORED_REASONS,
-            collection_params=_UNHONORED_COLLECTION_PARAMS,
+            unknown,
+            {
+                "thread_id": thread_id,
+                "user_message": user_message,
+                "tool_names": tool_names,
+                "response_format": response_format,
+            },
         )
         reject_blank_memory_keys(
-            "retrieval_tools_agent.astream",
-            thread_id=kwargs.get("thread_id"),
-            resume_checkpoint_id=kwargs.get("resume_checkpoint_id"),
+            "retrieval_tools_agent.astream", thread_id=thread_id, resume_checkpoint_id=resume_checkpoint_id
         )
-        resolved_response_format = await resolve_response_format("retrieval_tools_agent", kwargs.get("response_format"))
-
-        build_kwargs = {name: value for name, value in kwargs.items() if name in _BUILD_PARAMS}
-        # The public ``langgraph_config`` overlays this agent's ``_build`` ``config``
-        # argument, so a thread pin / recursion bound is honored over either door.
-        build_kwargs["config"] = build_run_config(
-            kwargs.get("langgraph_config"),
-            kwargs.get("thread_id"),
-            kwargs.get("resume_checkpoint_id"),
-            kwargs.get("recursion_limit"),
+        resolved_response_format = await resolve_response_format("retrieval_tools_agent", response_format)
+        agent, messages, config, llm, minted = await self._build(
+            tools=tools,
+            tool_names=tool_names,
+            presets=presets,
+            system_message=system_message,
+            user_message=user_message,
+            embedding_provider=embedding_provider,
+            llm_provider=llm_provider,
+            checkpoint_provider=checkpoint_provider,
+            store_provider=store_provider,
+            overwrite_store=overwrite_store,
+            tools_limit=tools_limit,
+            embedding_kwargs=embedding_kwargs,
+            llm_kwargs=llm_kwargs,
+            user_content_kwargs=user_content_kwargs,
+            config=build_run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit),
         )
-
-        agent, messages, config, llm, minted = await self._build(**build_kwargs)
-        async for event in self._run_events(agent, messages, config, llm, kwargs, resolved_response_format):
+        async for event in self._run_events(agent, messages, config, llm, llm_provider, resolved_response_format):
             yield event
         # The run reached its terminal: a thread it minted is finished.
-        await mark_minted_thread_finished(minted, provider=kwargs.get("checkpoint_provider"))
+        await mark_minted_thread_finished(minted, provider=checkpoint_provider)
 
     async def _run_events(
         self,
@@ -326,7 +366,7 @@ class RetrievalToolsAgent(Agent):
         messages: dict[str, Any],
         config: dict[str, Any],
         llm: Any,
-        kwargs: dict[str, Any],
+        llm_provider: str | None,
         resolved_response_format: Any,
     ) -> AsyncIterator[StreamEvent]:
         """Drive the built retrieval graph and yield its events up to and including the terminal."""
@@ -352,7 +392,7 @@ class RetrievalToolsAgent(Agent):
             # The finalization pass forces the terminal result into the schema through the
             # capability-negotiated plan (native-first, bounded tool tier second); a
             # never-conforming payload ends on the typed outcome, not a raw raise.
-            provider = kwargs.get("llm_provider") or llm_provider_settings().llm
+            provider = llm_provider or llm_provider_settings().llm
             plan = plan_structured_output(llm, provider, resolved_response_format)
             try:
                 structured = await ainvoke_structured(llm, plan, [HumanMessage(content=result_text)], config=config)
@@ -366,26 +406,15 @@ class RetrievalToolsAgent(Agent):
             return
         yield MessageFinal(text=result_text)
 
-    async def run(self, **kwargs: Any) -> Any:
-        """Reject the ABC parameters this runtime cannot honor, then drain ``astream`` to the final value.
+    async def run(self, *, response_format: Any = None, **kwargs: Any) -> Any:
+        """Drain :meth:`astream` to the final value; ``astream``'s keyword guard refuses an undeclared keyword.
 
         A ``response_format`` is honored: its JSON-Schema dict must carry a top-level
         ``"title"``, and the drain returns the validated structured object, raising
         loudly if the run produced none.
         """
-        reject_unhonored(
-            "retrieval_tools_agent.run",
-            kwargs,
-            _UNHONORED_REASONS,
-            collection_params=_UNHONORED_COLLECTION_PARAMS,
-        )
-        reject_blank_memory_keys(
-            "retrieval_tools_agent.run",
-            thread_id=kwargs.get("thread_id"),
-            resume_checkpoint_id=kwargs.get("resume_checkpoint_id"),
-        )
-        response_format = await resolve_response_format("retrieval_tools_agent", kwargs.get("response_format"))
-        return await self._drain(self.astream(**kwargs), response_format=response_format)
+        resolved = await resolve_response_format("retrieval_tools_agent", response_format)
+        return await self._drain(self.astream(response_format=response_format, **kwargs), response_format=resolved)
 
     async def _compile_for_append(
         self,
@@ -445,52 +474,3 @@ class RetrievalToolsAgent(Agent):
         require_thread_id("retrieval_tools_agent.append_thread_messages", config)
         agent = await self._compile_for_append(llm_provider, checkpoint_provider, store_provider, llm_kwargs)
         await awrite_thread_messages(agent, config, converted)
-
-
-# The ABC ``run``/``astream`` parameters this runtime cannot honor, mapped to the
-# reason named in the raised error. Honored params are absent: ``thread_id`` /
-# ``resume_checkpoint_id`` / ``recursion_limit`` map into the run config, the tool
-# inputs / provider / message params go through ``_BUILD_PARAMS``, and
-# ``response_format`` is consumed by the finalization pass in ``astream``.
-_UNHONORED_REASONS: dict[str, str] = {
-    "subagents": "sub-agent delegation is langchain_deep_agent's domain; this agent never exposes sub-agents",
-    "strategy": "it applies no composition strategy and will not silently ignore one",
-    "skills": "it loads no skills backend",
-    "inline_skills": "it loads no skills backend",
-    "interrupt_on": "its graph never pauses for external input, so there is no interrupt to configure",
-    "resume": "its graph never interrupts, so there is no paused run to resume",
-    "system_content_kwargs": (
-        "its raw graph prepends the system prompt as the first entry of the message list it rolls to "
-        "the newest cache breakpoint, so a system mark there is the earliest and is stripped whenever a "
-        "later turn carries one — it cannot hold a stable system breakpoint the way a create_agent "
-        "face's roll-exempt per-run system message does, so this face is excluded from the system-prompt "
-        "cache default; use user_content_kwargs to mark the user turn instead"
-    ),
-}
-
-# The unhonored parameters whose unset default is an empty collection; every other
-# defaults to ``None`` and is set when not ``None``.
-_UNHONORED_COLLECTION_PARAMS = frozenset({"subagents", "skills", "inline_skills"})
-
-
-# The ``_build`` parameters ``astream`` forwards from a ``run``/``astream`` call.
-# The honored memory params and ``recursion_limit`` are absent (mapped into the run
-# config before building); the unhonored params raise via ``_UNHONORED_REASONS``.
-_BUILD_PARAMS = frozenset(
-    {
-        "tools",
-        "tool_names",
-        "presets",
-        "system_message",
-        "user_message",
-        "embedding_provider",
-        "llm_provider",
-        "checkpoint_provider",
-        "store_provider",
-        "overwrite_store",
-        "tools_limit",
-        "embedding_kwargs",
-        "llm_kwargs",
-        "user_content_kwargs",
-    }
-)

@@ -36,6 +36,7 @@ from pydantic import PrivateAttr
 from tai42_contract.agent import ToolResultStep
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
+from tests._client_tool import FakeClientTool, client_tool
 
 from tai42_agents._internal import recovery as rec
 from tai42_agents._internal.stream_events import aproject_agent_events
@@ -74,6 +75,15 @@ def _raising_tool(exc: Exception, name: str = "failing") -> StructuredTool:
         raise exc
 
     return StructuredTool.from_function(func=None, coroutine=_run, name=name, description="a tool that raises")
+
+
+def _raising_handle(exc: Exception, name: str = "failing") -> FakeClientTool:
+    """A client-tool handle whose body raises ``exc`` (an agent's live or registered tool)."""
+
+    async def _run(**_: Any) -> str:
+        raise exc
+
+    return client_tool(name, _run, description="a tool that raises")
 
 
 def _tool_call(name: str, call_id: str) -> AIMessage:
@@ -173,7 +183,7 @@ class TestDeepAgentRecovery:
         with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
             out = asyncio.run(
                 tai42_app.agents.get_agent("langchain_deep_agent").run(
-                    tools=[_raising_tool(ToolException("tool said no"))],
+                    tools=[_raising_handle(ToolException("tool said no"))],
                     user_message=TemplatedText(content="hi"),
                     thread_id="t-deep-tool",
                 )
@@ -193,7 +203,7 @@ class TestDeepAgentRecovery:
         with pytest.raises(RuntimeError, match="infra down"):
             asyncio.run(
                 tai42_app.agents.get_agent("langchain_deep_agent").run(
-                    tools=[_raising_tool(RuntimeError("infra down"))],
+                    tools=[_raising_handle(RuntimeError("infra down"))],
                     user_message=TemplatedText(content="hi"),
                     thread_id="t-deep-rt",
                 )
@@ -226,7 +236,11 @@ class TestDeepAgentRecovery:
 
         monkeypatch.setattr(fac, "get_llm_async", get_llm)
         spec = ResolvedSubAgentSpec(
-            name="worker", description="w", system_prompt=TemplatedText(content="sp"), tools=[tool], llm_provider="w"
+            name="worker",
+            description="w",
+            system_prompt=TemplatedText(content="sp"),
+            tools=[tool],
+            llm_provider="w",
         )
         return await fac.build_langchain_deep_agent(
             llm=parent, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[], subagents=[spec]
@@ -483,7 +497,7 @@ class TestRefineAgentRecovery:
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, app_tools: Any
     ) -> None:
         saver = InMemorySaver()
-        app_tools.client_tools["failing"] = _raising_tool(ToolException("tool said no"))
+        app_tools.client_tools["failing"] = _raising_handle(ToolException("tool said no"))
         # Evaluator calls the failing tool, sees the error ToolMessage, then drafts.
         eval_model = ScriptedChatModel(
             [_tool_call("failing", "call_1"), AIMessage(content="draft"), AIMessage(content="final answer")]
@@ -502,7 +516,7 @@ class TestRefineAgentRecovery:
 
     def test_runtime_error_aborts(self, monkeypatch: pytest.MonkeyPatch, app_tools: Any) -> None:
         saver = InMemorySaver()
-        app_tools.client_tools["failing"] = _raising_tool(RuntimeError("infra down"))
+        app_tools.client_tools["failing"] = _raising_handle(RuntimeError("infra down"))
         eval_model = ScriptedChatModel([_tool_call("failing", "call_1"), AIMessage(content="unreached")])
         crit_model = ScriptedChatModel([AIMessage(content=f"approved {self._approval()}")])
         self._seams(monkeypatch, {"eval": eval_model, "crit": crit_model}, saver)

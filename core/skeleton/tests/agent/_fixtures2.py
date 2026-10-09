@@ -8,8 +8,8 @@ agent registry must reject loudly.
 from __future__ import annotations
 
 from pydantic import BaseModel
-from tai42_contract.agent import Agent
 from tai42_contract.app import tai42_app
+from tests.agent._memoryless import MemorylessTestAgent
 
 
 class OtherInput(BaseModel):
@@ -17,7 +17,7 @@ class OtherInput(BaseModel):
 
 
 @tai42_app.agents.agent("echo_fields")
-class OtherEchoAgent(Agent):
+class OtherEchoAgent(MemorylessTestAgent):
     tool_name = "echo_fields"
     tool_description = "A second agent claiming the same name."
     ToolInput = OtherInput

@@ -376,14 +376,14 @@ def test_post_consolidation_guard_409_nothing_written(cfg):
 
 def test_two_configs_binding_one_tool_name_collide_at_boot(cfg):
     # Two tools configs each providing a tool named ``shout`` is a genuine name
-    # collision. Under the server's ``on_duplicate="error"`` the SECOND bind fails
+    # collision. The tool surface refuses the SECOND bind
     # loudly at boot — aborting boot through the shared abort seam (a manifest-declared
     # module that cannot load), never a silent last-write-win.
     async def run():
         async with _running(cfg, _dup()):
             pass  # pragma: no cover — start() aborts before the body runs
 
-    with pytest.raises(CorePluginBootError, match="already exists"):
+    with pytest.raises(CorePluginBootError, match="is already registered"):
         asyncio.run(run())
 
 

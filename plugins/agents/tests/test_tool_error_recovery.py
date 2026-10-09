@@ -30,8 +30,8 @@ from tai42_contract.agent.base import PresetSpec
 
 from tai42_agents._internal import base_tool_agent as bta
 from tai42_agents._internal import recovery as rec
-from tai42_agents._internal.resolve_tools import resolve_tools
 
+from ._client_tool import FakeClientTool, client_tool
 from ._graph_support import build_agent_and_input, invoke_tools_agent, stream_tools_agent_events
 from .conftest import fake_run_trace
 
@@ -76,11 +76,11 @@ class ScriptedChatModel(BaseChatModel):
         return self
 
 
-def _raising_tool(exc: Exception, name: str = "failing") -> StructuredTool:
+def _raising_tool(exc: Exception, name: str = "failing") -> FakeClientTool:
     async def _run(**_: Any) -> str:
         raise exc
 
-    return StructuredTool.from_function(func=None, coroutine=_run, name=name, description="a tool that raises")
+    return client_tool(name, _run, description="a tool that raises")
 
 
 def _tool_call(name: str, call_id: str) -> AIMessage:
@@ -219,16 +219,16 @@ class TestToolErrorMiddleware:
         saver = InMemorySaver()
         model = ScriptedChatModel([_tool_call("my_preset", "call_1"), AIMessage(content="recovered")])
         _seams(monkeypatch, model, saver)
-        app_tools.client_tools["base"] = _raising_tool(RuntimeError("unused"), name="base")
+        app_tools.client_tools["base"] = client_tool("base")
 
         def boom(**_kwargs: Any) -> Any:
             raise ValueError("base tool down")
 
         app_tools.tool_runners["base"] = boom
         preset = PresetSpec(name="my_preset", description="run a preset", base_tool="base", fixed_kwargs={})
-        (preset_tool,) = asyncio.run(resolve_tools(app_tools, [], [], [preset]))
-
-        result = asyncio.run(invoke_tools_agent("sys", ["do it"], [preset_tool], config=_config("t-preset-fail")))
+        result = asyncio.run(
+            invoke_tools_agent("sys", ["do it"], [], config=_config("t-preset-fail"), presets=[preset])
+        )
 
         # The loop continued past the base tool's failure and the model produced an answer.
         assert result.output == "recovered"
@@ -254,7 +254,7 @@ class TestToolErrorMiddleware:
         saver = InMemorySaver()
         model = ScriptedChatModel([_tool_call("my_preset", "call_1"), AIMessage(content="recovered")])
         _seams(monkeypatch, model, saver)
-        app_tools.client_tools["base"] = _raising_tool(RuntimeError("unused"), name="base")
+        app_tools.client_tools["base"] = client_tool("base")
 
         outcome = {
             "status": "error",
@@ -266,9 +266,9 @@ class TestToolErrorMiddleware:
 
         app_tools.tool_runners["base"] = boom
         preset = PresetSpec(name="my_preset", description="run a preset", base_tool="base", fixed_kwargs={})
-        (preset_tool,) = asyncio.run(resolve_tools(app_tools, [], [], [preset]))
-
-        result = asyncio.run(invoke_tools_agent("sys", ["do it"], [preset_tool], config=_config("t-preset-terminal")))
+        result = asyncio.run(
+            invoke_tools_agent("sys", ["do it"], [], config=_config("t-preset-terminal"), presets=[preset])
+        )
         assert result.output == "recovered"
         messages = asyncio.run(_state_messages(saver, model, "t-preset-terminal"))
         errors = [m for m in messages if isinstance(m, ToolMessage) and m.status == "error"]
@@ -278,6 +278,68 @@ class TestToolErrorMiddleware:
         assert failed_outcome_text(outcome) in errors[0].content
         assert "DEEP_MARKER_PAST_200" in errors[0].content
         assert json.loads(failed_outcome_text(outcome)) == outcome
+
+    def test_a_handle_client_tool_error_reaches_the_model_and_the_run_continues(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A handle's model-visible failure (``ClientToolError``) is adapted to the ToolException
+        # the recovery middleware turns into an "Error: ..." ToolMessage; the turn finishes.
+        from tai42_contract.tools import ClientToolError
+
+        def fails() -> None:
+            raise ClientToolError("failing", "Error calling tool 'failing': invalid arguments: q missing")
+
+        saver = InMemorySaver()
+        model = ScriptedChatModel([_tool_call("failing", "call_1"), AIMessage(content="recovered")])
+        _seams(monkeypatch, model, saver)
+        result = asyncio.run(
+            invoke_tools_agent("sys", ["do it"], [client_tool("failing", fails)], config=_config("t-handle-fail"))
+        )
+
+        assert result.output == "recovered"
+        messages = asyncio.run(_state_messages(saver, model, "t-handle-fail"))
+        errors = [m for m in messages if isinstance(m, ToolMessage) and m.status == "error"]
+        assert len(errors) == 1
+        assert "Error calling tool 'failing': invalid arguments: q missing" in errors[0].content
+
+    def test_a_preset_called_by_the_graph_hands_its_base_exactly_the_model_arguments(
+        self, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+    ) -> None:
+        # The graph's tool node injects framework values into a tool whose function names them;
+        # the preset's base tool receives the fixed kwargs and the model's arguments, nothing else.
+        saver = InMemorySaver()
+        call = AIMessage(content="", tool_calls=[{"id": "call_1", "name": "my_preset", "args": {"q": "x"}}])
+        model = ScriptedChatModel([call, AIMessage(content="done")])
+        _seams(monkeypatch, model, saver)
+        app_tools.client_tools["base"] = client_tool("base", properties={"q": {"type": "string"}, "k": {}})
+        received: list[dict[str, Any]] = []
+
+        def base(**kwargs: Any) -> str:
+            received.append(kwargs)
+            return "ok"
+
+        app_tools.tool_runners["base"] = base
+        preset = PresetSpec(name="my_preset", description="run a preset", base_tool="base", fixed_kwargs={"k": 1})
+        result = asyncio.run(
+            invoke_tools_agent("sys", ["do it"], [], config=_config("t-preset-args"), presets=[preset])
+        )
+
+        assert result.output == "done"
+        assert received == [{"k": 1, "q": "x"}]
+
+    def test_a_handle_called_by_the_graph_receives_exactly_the_model_arguments(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saver = InMemorySaver()
+        call = AIMessage(content="", tool_calls=[{"id": "call_1", "name": "probe", "args": {"q": "x"}}])
+        model = ScriptedChatModel([call, AIMessage(content="done")])
+        _seams(monkeypatch, model, saver)
+        handle = client_tool("probe", properties={"q": {"type": "string"}})
+
+        result = asyncio.run(invoke_tools_agent("sys", ["do it"], [handle], config=_config("t-handle-args")))
+
+        assert result.output == "done"
+        assert handle.calls == [{"q": "x"}]
 
     def test_runtime_error_propagates_and_aborts_the_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A non-tool-logic failure is NOT masked: it propagates and aborts the run.

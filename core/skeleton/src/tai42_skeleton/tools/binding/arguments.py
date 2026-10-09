@@ -1,4 +1,4 @@
-"""Shape a client call's arguments by parameter name and build the makefun validation wrapper ``run_tool`` uses."""
+"""The makefun validation wrapper ``run_tool`` uses."""
 
 import asyncio
 import inspect
@@ -9,28 +9,7 @@ from typing import Any, cast
 from makefun import create_function
 from tai42_kit.utils.data import makefun_func_name
 
-from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.tools.binding.schema import _resolved_signature
-
-
-def _named_call_arguments(
-    signature: inspect.Signature, args: tuple[Any, ...], kwargs: dict[str, Any]
-) -> dict[str, Any]:
-    """A client-tool call's arguments keyed by PARAMETER NAME.
-
-    The shape the execution-identity decision reads them in. Positionals are
-    bound through ``signature``, a ``**kwargs`` catch-all is flattened
-    back in, ``*args`` is dropped, and the :data:`_UNSET` sentinel is stripped — so the
-    decision sees exactly the set-fields-only argument set ``run_tool`` authorizes.
-    """
-    bound = signature.bind_partial(*args, **kwargs)
-    arguments = dict(bound.arguments)
-    for name, param in signature.parameters.items():
-        if param.kind is inspect.Parameter.VAR_KEYWORD:
-            arguments.update(arguments.pop(name, {}))
-        elif param.kind is inspect.Parameter.VAR_POSITIONAL:
-            arguments.pop(name, None)
-    return {name: value for name, value in arguments.items() if value is not _UNSET}
 
 
 @lru_cache(maxsize=2048)

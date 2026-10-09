@@ -5,7 +5,6 @@ reject-unhonored guards, and the input model.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -13,7 +12,6 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 from tai42_contract.agent import (
-    Agent,
     MessageFinal,
     StructuredFinal,
 )
@@ -26,10 +24,8 @@ from tests._retrieval_tools_agent_support import (
     _ToolFake,
 )
 
-from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents.retrieval_tools_agent import agent as ragent
 from tai42_agents.retrieval_tools_agent.agent import (
-    _UNHONORED_REASONS,
     RetrievalToolsAgent,
     RetrievalToolsAgentInput,
 )
@@ -102,38 +98,16 @@ class TestBuild:
             asyncio.run(agent.run())
 
 
-# Every key in ``_UNHONORED_REASONS`` paired with a representative SET value; the
-# falsy-but-present scalars (strategy="", interrupt_on={}, resume=False) pin that a
-# scalar is set whenever it is not None. Distinct params here must equal the full map.
-_UNHONORED_CASES = [
+# Keywords this agent does not declare: each is refused loudly on both faces, never dropped.
+_UNDECLARED_CASES = [
     ("subagents", [object()]),
-    ("strategy", "parallel"),
     ("strategy", ""),
     ("skills", ["s"]),
     ("inline_skills", [{"name": "n", "content": "c"}]),
-    ("interrupt_on", {"tool": True}),
     ("interrupt_on", {}),
-    ("resume", {"answer": "y"}),
     ("resume", False),
     ("system_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
 ]
-
-
-# The unhonored params whose ABC ``Agent.run`` default is an empty collection (``()`` /
-# ``""``), read from the contract signature — the independent source of truth for which
-# unhonored params are collection-typed. Intersected with this agent's reasons map it is
-# exactly the set ``_UNHONORED_COLLECTION_PARAMS`` must classify as collections. The
-# empty-collection test below parametrizes from HERE, not from the frozenset, so a member
-# dropped from the frozenset (reclassifying it as a scalar) turns a case red rather than
-# silently vanishing.
-_EMPTY_COLLECTION_ABC_DEFAULTS = frozenset(
-    name
-    for name, parameter in inspect.signature(Agent.run).parameters.items()
-    if isinstance(parameter.default, (tuple, list, str)) and not parameter.default
-)
-
-
-_COLLECTION_REJECT_PARAMS = sorted(_UNHONORED_REASONS.keys() & _EMPTY_COLLECTION_ABC_DEFAULTS)
 
 
 class TestAstreamAndRun:
@@ -194,11 +168,10 @@ class TestAstreamAndRun:
 
         assert [type(event) for event in events] == [MessageFinal]
         assert events[0].text == "done"
-        assert captured["build_kwargs"] == {
-            "user_message": TemplatedText(content="hi"),
-            "tools_limit": 3,
-            "config": {"configurable": {"thread_id": "keep-me"}},
-        }
+        build_kwargs = captured["build_kwargs"]
+        assert build_kwargs["user_message"] == TemplatedText(content="hi")
+        assert build_kwargs["tools_limit"] == 3
+        assert build_kwargs["config"] == {"configurable": {"thread_id": "keep-me"}}
         assert captured["project"] == ("graph", "messages", "config")
 
     def test_astream_forwards_user_content_kwargs_to_build(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,51 +215,19 @@ class TestAstreamAndRun:
 
         assert captured["build_kwargs"]["config"]["configurable"] == {"monitoring_trace_id": "x", "thread_id": "th"}
 
-    @pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
-    def test_unsupported_abc_param_raises_naming_the_exact_face(
+    @pytest.mark.parametrize(("param", "value"), _UNDECLARED_CASES)
+    def test_an_undeclared_keyword_is_refused_on_both_faces(
         self, monkeypatch: pytest.MonkeyPatch, param: str, value: Any
     ) -> None:
-        # Every ABC parameter this runtime cannot honor raises a RuntimeError naming
-        # the offending parameter AND the exact face it was called on, never a silent
-        # drop. Falsy-but-present scalars (strategy="", interrupt_on={}, resume=False)
-        # still raise — a scalar parameter is set whenever it is not None, so they
-        # never slip through a truthiness gate. Asserting the exact face token makes
-        # each face's guard load-bearing: dropping the run-face guard (which delegates
-        # to astream) would surface the ``astream`` token and fail the run assertion.
+        # Falsy-but-present values (strategy="", interrupt_on={}, resume=False) are refused too:
+        # an undeclared keyword is refused by presence, never by truthiness.
         self._script(monkeypatch, [self._final("done")])
         agent = RetrievalToolsAgent()
-
-        with pytest.raises(RuntimeError, match=rf"retrieval_tools_agent\.astream does not support .*\b{param}\b"):
+        match = rf"retrieval_tools_agent\.astream got unknown run keyword argument\(s\): {param}"
+        with pytest.raises(TypeError, match=match):
             asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="hi"), **{param: value})))
-        with pytest.raises(RuntimeError, match=rf"retrieval_tools_agent\.run does not support .*\b{param}\b"):
+        with pytest.raises(TypeError, match=match):
             asyncio.run(agent.run(user_message=TemplatedText(content="hi"), **{param: value}))
-
-    def test_unhonored_cases_cover_the_full_reasons_map(self) -> None:
-        # Every key in the guard's reasons map has a parametrized reject case above, so
-        # a key added to the map without a matching test fails here immediately.
-        assert {param for param, _ in _UNHONORED_CASES} == set(_UNHONORED_REASONS)
-
-    def test_collection_params_match_the_abc_collection_defaults(self) -> None:
-        # _UNHONORED_COLLECTION_PARAMS is exactly this agent's unhonored params whose ABC
-        # default is an empty collection: no scalar wrongly listed (which would let a
-        # meaningful falsy value slip through), none dropped (which would over-reject the
-        # not-requested empty default).
-        assert set(ragent._UNHONORED_COLLECTION_PARAMS) == set(_COLLECTION_REJECT_PARAMS)
-
-    @pytest.mark.parametrize("empty", [[], ""])
-    @pytest.mark.parametrize("param", _COLLECTION_REJECT_PARAMS)
-    def test_reject_unhonored_permits_empty_collection_param(self, param: str, empty: object) -> None:
-        # An empty collection is the ABC's "not requested" default for a collection
-        # parameter, so the guard does not raise for it — in either falsy empty form ([] /
-        # ""). Were the parameter dropped from _UNHONORED_COLLECTION_PARAMS it would be
-        # classified as a scalar (set whenever it is not None) and this empty value would
-        # raise.
-        reject_unhonored(
-            "retrieval_tools_agent.run",
-            {param: empty},
-            _UNHONORED_REASONS,
-            collection_params=ragent._UNHONORED_COLLECTION_PARAMS,
-        )
 
     @pytest.mark.parametrize("blank", ["", "   "])
     @pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
@@ -297,16 +238,7 @@ class TestAstreamAndRun:
         self._script(monkeypatch, [self._final("done")])
         agent = RetrievalToolsAgent()
         with pytest.raises(ValueError, match=rf"retrieval_tools_agent\.astream: {key} must be a non-empty string"):
-            asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="hi"), **{key: blank})))
-
-    @pytest.mark.parametrize("blank", ["", "   "])
-    @pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
-    def test_run_rejects_blank_memory_key(self, monkeypatch: pytest.MonkeyPatch, key: str, blank: str) -> None:
-        # Parity with astream: the run face rejects a present-but-blank memory key loudly.
-        self._script(monkeypatch, [self._final("done")])
-        agent = RetrievalToolsAgent()
-        with pytest.raises(ValueError, match=rf"retrieval_tools_agent\.run: {key} must be a non-empty string"):
-            asyncio.run(agent.run(user_message=TemplatedText(content="hi"), **{key: blank}))
+            asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="hi"), **{key: blank})))  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("value", [123, ["x"]])
     @pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
@@ -321,18 +253,6 @@ class TestAstreamAndRun:
             match=rf"retrieval_tools_agent\.astream: {key} must be a string or None; got {type(value).__name__}",
         ):
             asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="hi"), **{key: value})))
-
-    @pytest.mark.parametrize("value", [123, ["x"]])
-    @pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
-    def test_run_rejects_non_string_memory_key(self, monkeypatch: pytest.MonkeyPatch, key: str, value: Any) -> None:
-        # Parity with astream: the run face rejects a non-string memory key with a
-        # TypeError naming the offending param and the received type.
-        self._script(monkeypatch, [self._final("done")])
-        agent = RetrievalToolsAgent()
-        with pytest.raises(
-            TypeError, match=rf"retrieval_tools_agent\.run: {key} must be a string or None; got {type(value).__name__}"
-        ):
-            asyncio.run(agent.run(user_message=TemplatedText(content="hi"), **{key: value}))
 
     def test_astream_honors_recursion_limit_into_build_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # recursion_limit is a standard RunnableConfig key the compiled graph reads,

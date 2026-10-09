@@ -7,10 +7,12 @@ import time
 from typing import cast
 
 import pytest
+from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import MessageFinal, StructuredOutputUnresolvedFinal
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import current_call_chain
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import turn as turn_module
@@ -86,7 +88,7 @@ async def test_agent_structured_array_final_stays_one_serialized_message(env, mo
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
 
-    class _ArrayAgent(Agent):
+    class _ArrayAgent(MemorylessTestAgent):
         tool_name = "arr"
         ToolInput = _EchoInput
 
@@ -114,7 +116,7 @@ async def test_agent_reprompt_cap_outcome_reaches_the_turn_reply(env, monkeypatc
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
 
-    class _OutcomeAgent(Agent):
+    class _OutcomeAgent(MemorylessTestAgent):
         tool_name = "oc"
         ToolInput = _EchoInput
 
@@ -176,7 +178,7 @@ async def test_a_long_answer_is_split_into_ordered_channel_sends(env, monkeypatc
 
 
 def _fixed_answer_agent(answer: str) -> Agent:
-    class _Fixed(Agent):
+    class _Fixed(MemorylessTestAgent):
         tool_name = "fixed"
         ToolInput = _EchoInput
 
@@ -323,3 +325,46 @@ async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(
     assert await manager.render_by_id("welcome", locale=cast(str, seen["ambient_locale"])) == "shalom"
     with pytest.raises(TemplateLocaleNotFoundError):
         await manager.render_by_id("missing", locale=cast(str, seen["ambient_locale"]))
+
+
+class _NoFields(BaseModel):
+    pass
+
+
+async def test_the_conversation_door_reads_the_park_off_the_terminal_with_no_store_read(monkeypatch):
+    # The park value carries the caller subset and the deadline the run's ``SuspendedFinal``
+    # reported; the run's parked list is never read to rebuild it.
+    from datetime import UTC, datetime
+
+    from tai42_contract.agent.events import SuspendedFinal
+    from tai42_contract.interactions import SuspendedInteraction
+    from tests.agent._memoryless import MemorylessTestAgent
+
+    from tai42_skeleton.conversations.turn import agent_turn
+
+    class _Parks(MemorylessTestAgent):
+        tool_name = "parks"
+        ToolInput = _NoFields
+
+        async def run(self, **_kwargs):  # pragma: no cover - astream is overridden
+            raise NotImplementedError
+
+        async def astream(self, **_kwargs):
+            yield SuspendedFinal(
+                interaction_ids=["i1", "i2"],
+                caller_interaction_ids=["i2"],
+                thread_id="t",
+                expiry_at="2030-01-01T00:00:00+00:00",
+            )
+
+    async def _no_store_read():
+        raise AssertionError("the parked list must not be read")
+
+    monkeypatch.setattr(agent_turn, "list_parked", _no_store_read)
+    value = await agent_turn._drive_agent_terminal(_Parks(), {})
+    assert value == SuspendedInteraction(
+        interaction_id="i1",
+        interaction_ids=["i1", "i2"],
+        caller_interaction_ids=["i2"],
+        expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+    )

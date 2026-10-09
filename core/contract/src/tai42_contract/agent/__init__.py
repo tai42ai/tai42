@@ -1,17 +1,19 @@
 """Agent contract: the :class:`Agent` ABC + its neutral streamed-event vocabulary.
 
-Re-exports the ``Agent`` interface (and its ``PresetSpec`` / ``SubAgentSpec``
-inputs and ``AgentInterruptedError`` error) alongside the ``StreamEvent`` types an
-agent's ``astream`` yields and ``run`` drains.
+Re-exports the ``Agent`` interface (its ``PresetSpec`` input, ``AddressedMemory`` answer, the
+``TOOL_NAME_MAX_LEN`` / ``PRESET_NAME_PATTERN`` laws and ``AgentInterruptedError`` error)
+alongside the ``StreamEvent`` types an agent's ``astream`` yields and ``run`` drains.
 """
 
 from __future__ import annotations
 
 from tai42_contract.agent.base import (
+    PRESET_NAME_PATTERN,
+    TOOL_NAME_MAX_LEN,
+    AddressedMemory,
     Agent,
     AgentInterruptedError,
     PresetSpec,
-    SubAgentSpec,
 )
 from tai42_contract.agent.events import (
     AsksFinal,
@@ -41,6 +43,9 @@ from tai42_contract.agent.session_thread import (
 )
 
 __all__ = [
+    "PRESET_NAME_PATTERN",
+    "TOOL_NAME_MAX_LEN",
+    "AddressedMemory",
     "Agent",
     "AgentInterruptedError",
     "AsksFinal",
@@ -54,7 +59,6 @@ __all__ = [
     "StreamEvent",
     "StructuredFinal",
     "StructuredOutputUnresolvedFinal",
-    "SubAgentSpec",
     "SuspendedFinal",
     "ToolCallStep",
     "ToolResultStep",

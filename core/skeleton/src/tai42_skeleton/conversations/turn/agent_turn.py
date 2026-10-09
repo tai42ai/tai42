@@ -19,7 +19,6 @@ from tai42_contract.interactions import (
     LocationElement,
     MediaItem,
     RunTerminalFailed,
-    SuspendedInteraction,
     binds_caller_ask,
     caller_ask_no_landing_outcome,
     declare_caller_ask_landing,
@@ -30,6 +29,7 @@ from tai42_contract.template import TemplatedText
 from tai42_contract.tools import tool_call_frame
 from tai42_kit.interactions.door_contract import DOOR_START_DEFAULT, evaluate_door_contract, parked_entries_for_jq
 
+from tai42_skeleton.agent.thread_reservation import run_kwargs_from_tool_input
 from tai42_skeleton.authz.execution import authorize_execution_agent_run, bind_execution_identity
 from tai42_skeleton.conversations.target_validators import caller_ask_landing_for_route
 from tai42_skeleton.conversations.turn import accessors
@@ -57,28 +57,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
 
-# The astream kwargs the route (never a ``start_expr``) owns: the run's thread and its checkpoint
-# continuity. A ``start_expr`` that emits one of these would fight the route for the run's identity,
-# so it is refused loudly before the drive rather than silently overriding it.
-_ROUTE_OWNED_AGENT_KEYS = frozenset({"thread_id", "resume", "resume_checkpoint_id", "checkpoint_provider"})
 
-
-def _agent_run_kwargs(text: str, start: Any) -> tuple[dict[str, Any], bool]:
+def _agent_run_kwargs(agent: Agent, text: str, start: Any) -> tuple[dict[str, Any], bool]:
     """The ``astream`` kwargs to drive with and whether a start runs at all.
 
     :data:`DOOR_START_DEFAULT` (no ``start_expr``) → the default ``{user_message}`` from the rendered
-    turn text, start runs; ``None`` (``start_expr`` yielded null) → start nothing; a dict → those
-    kwargs, start runs, after refusing any route-owned key. The route supplies ``thread_id``
-    separately, so a ``start_expr`` naming it (or a checkpoint key) is refused.
+    turn text, start runs; ``None`` (``start_expr`` yielded null) → start nothing; a dict → a mapping
+    of run-kwarg names, start runs. The route owns the run's identity — its thread and the keys the
+    agent reports steer the run's own continuity (``Agent.addressed_memory(...).keys``) — so a start
+    naming one is refused on the RAW start, before validation; the start then validates against the
+    agent's ``ToolInput`` and maps through the one reservation seam every door uses. A start that does
+    not validate, or names a reserved thread, raises a ``ValueError``.
     """
     if start is DOOR_START_DEFAULT:
         return {"user_message": TemplatedText(content=text)}, True
     if start is None:
         return {}, False
-    owned = sorted(_ROUTE_OWNED_AGENT_KEYS & set(start))
+    agent_cls = type(agent)
+    owned = sorted(({"thread_id"} & set(start)) | agent_cls.addressed_memory(start).keys)
     if owned:
         raise ValueError(f"start_expr for an agent target must not set the route-owned key(s) {owned}")
-    return dict(start), True
+    return run_kwargs_from_tool_input(agent, agent_cls.ToolInput.model_validate(start)), True
 
 
 def _has_pending_caller_ask(parked: list[dict[str, Any]]) -> bool:
@@ -88,24 +87,6 @@ def _has_pending_caller_ask(parked: list[dict[str, Any]]) -> bool:
     still owed an answer, so the start is refused.
     """
     return any(entry.get("to") == "caller" and entry.get("status") in ("asking", "running") for entry in parked)
-
-
-async def _agent_suspended(final: SuspendedFinal) -> SuspendedInteraction:
-    """The :class:`SuspendedInteraction` a park's :class:`SuspendedFinal` normalises to for ``visit``.
-
-    The caller/user split ``visit`` classifies on is read off the run's own parked list (read FRESH
-    after the park, so the newly-parked asks are seen): the ids parked ``to="caller"`` are the ones
-    the reply maps through ``reply_expr`` (``asks``); the rest are user asks delivered out of band
-    (``parked``).
-    """
-    parked = await list_parked()
-    ids = set(final.interaction_ids)
-    caller_ids = [entry.id for entry in parked if entry.to == "caller" and entry.id in ids]
-    return SuspendedInteraction(
-        interaction_id=final.interaction_ids[0],
-        interaction_ids=list(final.interaction_ids),
-        caller_interaction_ids=caller_ids,
-    )
 
 
 async def _drive_agent_terminal(agent: Agent, run_kwargs: dict[str, Any]) -> Any:
@@ -119,7 +100,7 @@ async def _drive_agent_terminal(agent: Agent, run_kwargs: dict[str, Any]) -> Any
     """
     async for event in drive_live_caller_astream(agent.astream(**run_kwargs)):
         if isinstance(event, SuspendedFinal):
-            return await _agent_suspended(event)
+            return event.to_suspended_interaction()
         if isinstance(event, InterruptFinal):
             raise RuntimeError(f"agent raised an interrupt ({event.interrupt_id}) a background turn cannot answer")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         if isinstance(event, StructuredFinal | MessageFinal | StructuredOutputUnresolvedFinal | RecursionLimitFinal):
@@ -272,7 +253,7 @@ async def _run_agent_turn(
         )
         return _tool_error(f"door contract error ({type(exc).__name__})", route)
     try:
-        run_kwargs, start_requested = _agent_run_kwargs(text, contract.start)
+        run_kwargs, start_requested = _agent_run_kwargs(agent, text, contract.start)
     except ValueError as exc:
         logger.warning(
             "conversations: start_expr for agent route %r produced invalid run kwargs: %s", route.route_name, exc

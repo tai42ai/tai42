@@ -21,6 +21,7 @@ from tai42_contract.conversations import (
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils import render as door_contract_module
 from tai42_kit.utils.data.string_util import hash_api_key
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations import cache as cache_module
@@ -59,7 +60,7 @@ class _EchoInput(BaseModel):
     user_message: str = ""
 
 
-class EchoAgent(Agent):
+class EchoAgent(MemorylessTestAgent):
     tool_name = "echo"
     ToolInput = _EchoInput
 
@@ -788,7 +789,7 @@ async def test_greeting_due_first_contact_with_a_silent_tool_outcome_delivers_th
 async def test_greeting_due_first_contact_with_an_error_outcome_keeps_the_greeting(env, monkeypatch):
     _seed_config(env, greeting_template="Welcome!")
 
-    class _BoomAgent(Agent):
+    class _BoomAgent(MemorylessTestAgent):
         tool_name = "boom"
         ToolInput = _EchoInput
 
@@ -839,7 +840,7 @@ class _YieldingTool:
         return self._reply
 
 
-class _BlockingAssistant(Agent):
+class _BlockingAssistant(MemorylessTestAgent):
     """An agent registered as ``assistant`` that blocks until released — so the overlap watcher can
     cancel its first turn while a newer message is accepted."""
 

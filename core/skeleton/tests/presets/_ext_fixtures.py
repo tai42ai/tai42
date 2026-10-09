@@ -42,3 +42,16 @@ def extb(func, name, desc, config=None):
     variant.__name__ = f"{name}_extb"
     variant.__qualname__ = variant.__name__
     return variant
+
+
+@tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="shaped", declares_output_schema=True)
+def shaped(func, name, desc, config=None):
+    """A wrapper that declares the wrapped tool's output shape (a neutral stand-in for any such extension)."""
+
+    @functools.wraps(func)
+    def variant(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    variant.__name__ = f"{name}_shaped"
+    variant.__qualname__ = variant.__name__
+    return variant

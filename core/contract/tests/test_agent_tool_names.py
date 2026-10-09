@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
-from tai42_contract.agent.base import Agent
+from tai42_contract.agent.base import AddressedMemory, Agent
 
 
 def test_agent_tool_names_defaults_to_none():
@@ -20,6 +20,10 @@ def test_agent_subclass_declares_a_fixed_tool_set():
         tool_name = "fixed"
         ToolInput = BaseModel
         tool_names: ClassVar[Sequence[str] | None] = ["ask"]
+
+        @classmethod
+        def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+            return AddressedMemory()
 
         async def run(self, **kwargs: Any) -> Any:
             return None

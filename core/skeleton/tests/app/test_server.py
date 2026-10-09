@@ -22,10 +22,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastmcp.tools.function_tool import FunctionTool
 from starlette.types import ASGIApp
-from tai42_contract.agent import Agent
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 from tai42_contract.storage import Storage
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.app import server as server_module
 from tai42_skeleton.app.instance import app
@@ -553,7 +553,7 @@ def test_agent_decorator_noop_without_manifest():
     a = _fresh()
 
     @a.agents.agent("x")
-    class _A(Agent):
+    class _A(MemorylessTestAgent):
         async def run(self, **kwargs: Any) -> Any:
             return None
 
@@ -628,29 +628,6 @@ def test_get_client_tools_unknown_name_raises():
         asyncio.run(a.tools.get_client_tools(["missing"]))
 
 
-def _fake_function_tool(name):
-    from tai42_skeleton.tools.binding import FunctionTool
-
-    def fn():
-        """A tool."""
-        return name
-
-    fn.__name__ = "fn"
-    fake = MagicMock(spec=FunctionTool)
-    fake.fn = fn
-    return fake
-
-
-def test_get_client_tools_post_truncation_collision_raises():
-    a = _fresh()
-    long = "x" * 64
-    a._tool_binding.get_tools = AsyncMock(
-        return_value={long + "_a": _fake_function_tool("a"), long + "_b": _fake_function_tool("b")}
-    )
-    with pytest.raises(ValueError, match="collide after 64-char truncation"):
-        asyncio.run(a.tools.get_client_tools())
-
-
 def test_get_client_tools_non_branchable_tool_raises():
     a = _fresh()
     # A tool that is neither a FunctionTool nor a TransformedTool has no callable
@@ -698,7 +675,7 @@ def test_started_app_tool_extension_agent_and_client_tools():
             tool = await app.tools.get_tool("shout")
             assert isinstance(tool, FunctionTool)  # callable body lives on FunctionTool
             assert isinstance(app.tools.tool_title(tool.fn), str)
-            # client tools (LangChain) build for a selected name
+            # client-tool handles build for a selected name
             client_tools = await app.tools.get_client_tools(["shout"])
             assert [t.name for t in client_tools] == ["shout"]
             # live_manifest is available once started
