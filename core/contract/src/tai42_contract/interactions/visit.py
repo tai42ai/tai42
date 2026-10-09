@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions.models import SuspendedInteraction
@@ -98,7 +98,8 @@ class ParkedEntry(BaseModel):
     ``id`` and ``status`` are always present. The question/answer fields are present for a state-backed
     entry (an ``asking`` or ``running`` one); a bare ``running`` membership whose state hash has aged
     out carries only ``id``/``status``, and a ``finished``/``failed`` waiting outcome carries its
-    ``result``/``error`` instead of the question fields. Absent fields default to ``None``.
+    ``result``/``error`` instead of the question fields. Absent fields default to ``None`` and are left out
+    of every dump: an entry serializes with only its set fields, never a null key, whichever door sends it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -122,6 +123,15 @@ class ParkedEntry(BaseModel):
     media: list[dict[str, Any]] | None = None
     result: Any = None
     error: Any = None
+
+    @model_serializer(mode="wrap")
+    def _without_unset_fields(self, handler: SerializerFunctionWrapHandler):
+        """The entry's dump with every ``None`` field left out (a set value keeps its own nested nulls).
+
+        Unannotated on purpose: a return annotation would replace the entry's fields in its published
+        serialization JSON schema.
+        """
+        return {key: value for key, value in handler(self).items() if value is not None}
 
 
 class VisitOutcome(BaseModel):
