@@ -27,10 +27,10 @@ from click.testing import CliRunner
 from tai42_contract.app import tai42_app
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
 from tai42_kit.backend import ManagedBackend
+from tai42_kit.logging import redaction as kit_redaction
 from tai42_kit.signals import signal_chain
 
 import tai42_skeleton.cli.backend as backend
-from tai42_skeleton.connectors import meta_log_redactor
 
 _LOGGING_RELOAD_KEY = "tai42_skeleton.app.instance.apply_logging_settings"
 
@@ -41,12 +41,12 @@ def _restore_log_record_factory():
     scope around every test: ``run_backend`` installs the connector-secret redactor
     at process scope, so this keeps one test's install from leaking onward."""
     saved_factory = logging.getLogRecordFactory()
-    saved_scope = meta_log_redactor._SCOPE
+    saved_scope = kit_redaction._SCOPE
     try:
         yield
     finally:
         logging.setLogRecordFactory(saved_factory)
-        meta_log_redactor._SCOPE = saved_scope
+        kit_redaction._SCOPE = saved_scope
 
 
 class _FakeConfigManager:
@@ -173,7 +173,7 @@ async def test_run_backend_installs_process_scope_redactor(fake_app: _FakeApp, m
     # This CLI-owned backend process widens the connector-secret redactor to the
     # whole process.
     scopes: list[object] = []
-    monkeypatch.setattr(backend, "install_meta_log_redactor", lambda **kwargs: scopes.append(kwargs.get("scope")))
+    monkeypatch.setattr(backend, "install_record_redaction", lambda **kwargs: scopes.append(kwargs.get("scope")))
 
     await backend.run_backend(["beat"])
 

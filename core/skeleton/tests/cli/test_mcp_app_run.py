@@ -15,9 +15,9 @@ import click
 import pytest
 from click.testing import CliRunner
 from starlette.applications import Starlette
+from tai42_kit.logging import redaction as kit_redaction
 
 import tai42_skeleton.cli.mcp_app as mcp_app
-from tai42_skeleton.connectors import meta_log_redactor
 
 from .conftest import (  # noqa: F401
     _HTTP_SCOPE,
@@ -38,12 +38,12 @@ def _restore_log_record_factory():
     scope around every test: the CLI seams install the connector-secret redactor at
     process scope, so this keeps one test's install from leaking onward."""
     saved_factory = logging.getLogRecordFactory()
-    saved_scope = meta_log_redactor._SCOPE
+    saved_scope = kit_redaction._SCOPE
     try:
         yield
     finally:
         logging.setLogRecordFactory(saved_factory)
-        meta_log_redactor._SCOPE = saved_scope
+        kit_redaction._SCOPE = saved_scope
 
 
 @pytest.fixture(autouse=True)

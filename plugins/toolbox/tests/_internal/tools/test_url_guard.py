@@ -322,14 +322,16 @@ def test_validate_proxies_hostless_userinfo_url_does_not_leak_credentials(
     assert "secret" not in str(excinfo.value)
 
 
-def test_redact_userinfo_masks_credentials() -> None:
-    """``_redact_userinfo`` masks ``user:pass@`` credentials, preserving host and path. A URL with
-    no userinfo is unchanged, and an ``@`` inside the credentials still splits at the last ``@``."""
-    from tai42_toolbox._internal.tools.http_client import _redact_userinfo
+def test_out_of_range_proxy_port_error_masks_the_whole_userinfo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The proxy-port refusal echoes the URL with its userinfo masked to ``***@``, host and port
+    kept; an ``@`` inside the credentials still splits at the last ``@``."""
+    from tai42_toolbox._internal.tools.http_client import _validate_proxies
 
-    assert _redact_userinfo("http://u:p@h.example:8080/x") == "http://***@h.example:8080/x"
-    assert _redact_userinfo("http://h.example:8080/x") == "http://h.example:8080/x"
-    assert _redact_userinfo("http://u:p@ss@h.example:8080/x") == "http://***@h.example:8080/x"
+    _enable(monkeypatch)
+    with pytest.raises(UrlGuardError) as excinfo:
+        asyncio.run(_validate_proxies({"proxy": "http://u:p@ss@h.example:99999/x"}))
+    assert "http://***@h.example:99999/x" in str(excinfo.value)
+    assert "p@ss" not in str(excinfo.value)
 
 
 def test_resolve_pin_entry_brackets_ipv6() -> None:

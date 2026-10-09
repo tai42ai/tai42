@@ -4,7 +4,7 @@ Domain/wire models + ABCs live in ``tai42_contract.connectors``; this package ow
 the runtime implementation (oauth/, store/, runtime/, service/, stdio/), reached
 on demand by the app and the mcp adapter. Tokens are resolved at call time via
 ``runtime.resolver.resolve_managed_auth``. The mcp-resident token-injection glue
-(:mod:`tai42_skeleton.connectors.token_injection`) + the ``_meta`` log redactor
+(:mod:`tai42_skeleton.connectors.token_injection`) + the connector-secret log rule
 (:mod:`tai42_skeleton.connectors.meta_log_redactor`) sit alongside the engine.
 """
 

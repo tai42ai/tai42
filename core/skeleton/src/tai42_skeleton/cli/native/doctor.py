@@ -7,7 +7,6 @@ import platform
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import cast
-from urllib.parse import urlsplit, urlunsplit
 
 import typer
 from tai42_cli import app_context
@@ -22,6 +21,7 @@ from tai42_kit.db import (
     component_migrator_settings,
     migration_status,
 )
+from tai42_kit.logging import redact_url_userinfo
 
 from tai42_skeleton.config.config_mode import config_mode
 from tai42_skeleton.db import SKELETON_COMPONENT, discover_all_migration_chains
@@ -47,18 +47,10 @@ def _pg_target(settings: PostgresConnectionSettings) -> str:
 
 
 def _redact_url(url: str | None) -> str:
-    """Mask the password in a connection URL, keeping the rest for diagnosis."""
+    """Mask the userinfo of a connection URL, keeping the rest for diagnosis."""
     if not url:
         return "(unset)"
-    parts = urlsplit(url)
-    if parts.password is None:
-        return url
-    host = parts.hostname or ""
-    if parts.port is not None:
-        host = f"{host}:{parts.port}"
-    user = parts.username or ""
-    netloc = f"{user}:***@{host}" if user else f":***@{host}"
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    return redact_url_userinfo(url)
 
 
 async def _probe_postgres(settings: PostgresConnectionSettings) -> Check:
@@ -175,7 +167,7 @@ def doctor(ctx: typer.Context) -> None:
 
     Probes Python version, config mode, Postgres and Redis connectivity, and
     whether the schema is applied. Purely read-only. Credentials are redacted:
-    connection-URL passwords are masked and no DSN is echoed. Exits non-zero when
+    connection-URL userinfo is masked and no DSN is echoed. Exits non-zero when
     any dependency check fails.
     """
     app_ctx = app_context(ctx)

@@ -57,10 +57,16 @@ There is no auto-discovery — importing the package *is* the registration.
 Settings are read from the environment (or a `.env` file) with the
 `STORAGE_LOCAL_` prefix:
 
-| Variable                    | Default        | Description                                             |
-| --------------------------- | -------------- | ------------------------------------------------------- |
-| `STORAGE_LOCAL_ROOT_PATH`   | `./templates`  | The base directory every stored path is resolved under. |
-| `STORAGE_LOCAL_CREATE_DIRS` | `true`         | Create missing parent directories on write.             |
+| Variable                    | Default  | Description                                                                              |
+| --------------------------- | -------- | ---------------------------------------------------------------------------------------- |
+| `STORAGE_LOCAL_ROOT_PATH`   | required | The base directory every stored path resolves under; every call refuses until it is set. |
+| `STORAGE_LOCAL_CREATE_DIRS` | `true`   | Create missing parent directories on write.                                              |
+
+The root has no default: until `STORAGE_LOCAL_ROOT_PATH` is set, every storage call
+(`list` included) raises `RuntimeError`, so an unmounted or mistyped location never
+reads as an empty store. A relative root resolves against the process working
+directory (`STORAGE_LOCAL_ROOT_PATH=./templates`); a container sets the absolute path
+it mounts.
 
 ## Contract surface
 

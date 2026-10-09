@@ -20,9 +20,9 @@ import pytest
 from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.testclient import TestClient
+from tai42_kit.logging import redaction as kit_redaction
 
 import tai42_skeleton.cli.mcp_app as mcp_app
-from tai42_skeleton.connectors import meta_log_redactor
 
 from .conftest import (  # noqa: F401
     _HTTP_SCOPE,
@@ -43,12 +43,12 @@ def _restore_log_record_factory():
     scope around every test: the CLI seams install the connector-secret redactor at
     process scope, so this keeps one test's install from leaking onward."""
     saved_factory = logging.getLogRecordFactory()
-    saved_scope = meta_log_redactor._SCOPE
+    saved_scope = kit_redaction._SCOPE
     try:
         yield
     finally:
         logging.setLogRecordFactory(saved_factory)
-        meta_log_redactor._SCOPE = saved_scope
+        kit_redaction._SCOPE = saved_scope
 
 
 @pytest.fixture(autouse=True)
@@ -367,7 +367,7 @@ def test_wrapper_installs_process_scope_redactor(
     monkeypatch.delenv("TAI_STATELESS_HTTP", raising=False)
     patch_app_seam(_FakeApp(_FakeInnerApp()))
     scopes: list[object] = []
-    monkeypatch.setattr(mcp_app, "install_meta_log_redactor", lambda **kwargs: scopes.append(kwargs.get("scope")))
+    monkeypatch.setattr(mcp_app, "install_record_redaction", lambda **kwargs: scopes.append(kwargs.get("scope")))
 
     mcp_app.create_app()
 
@@ -377,7 +377,7 @@ def test_wrapper_installs_process_scope_redactor(
 async def test_run_stdio_installs_process_scope_redactor(patch_app_seam, monkeypatch: pytest.MonkeyPatch) -> None:
     patch_app_seam(_FakeApp(_FakeInnerApp()))
     scopes: list[object] = []
-    monkeypatch.setattr(mcp_app, "install_meta_log_redactor", lambda **kwargs: scopes.append(kwargs.get("scope")))
+    monkeypatch.setattr(mcp_app, "install_record_redaction", lambda **kwargs: scopes.append(kwargs.get("scope")))
 
     await mcp_app.run_stdio()
 
@@ -388,7 +388,7 @@ async def test_run_debug_installs_process_scope_redactor(patch_app_seam, monkeyp
     patch_app_seam(_FakeApp(_FakeInnerApp()))
     monkeypatch.setattr(mcp_app, "uvicorn", _FakeUvicorn())
     scopes: list[object] = []
-    monkeypatch.setattr(mcp_app, "install_meta_log_redactor", lambda **kwargs: scopes.append(kwargs.get("scope")))
+    monkeypatch.setattr(mcp_app, "install_record_redaction", lambda **kwargs: scopes.append(kwargs.get("scope")))
 
     await mcp_app.run_debug({"host": "127.0.0.1", "port": 8000})
 

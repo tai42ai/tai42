@@ -46,7 +46,7 @@ def test_record_failed_mcp_records_credential_free_detail():
     # The URL userinfo and query values are redacted — no credential rides the record.
     assert "p4ss" not in row["message"]
     assert "leakval" not in row["message"]
-    assert "<redacted>" in row["message"]
+    assert "https://***@h/sse?apikey=***" in row["message"]
     # The list door surfaces the same record under a ``title`` key, nothing more.
     assert m._list_failed_mcps() == [{"title": "gh", **row}]
 

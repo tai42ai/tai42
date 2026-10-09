@@ -43,8 +43,9 @@ MONITORING
 Each attempt of a policy-armed dispatch is wrapped in a ``tool-attempt:<name>``
 span stamping ``retry.attempt`` / ``retry.max_attempts`` — the ``send_span``
 per-attempt idiom — emitted only when a trace is ambient (never a rootless
-span). A failed attempt's span is ERROR-marked with the typed failure detail;
-the spans carry no input/output (the run's existing seams already record the
+span). A failed attempt's span is ERROR-marked with the typed failure detail,
+its ``retryable`` key this seam's decision (``true`` exactly when another attempt
+follows); the spans carry no input/output (the run's existing seams already record the
 payloads), only the retry mechanics.
 """
 
@@ -57,8 +58,10 @@ from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 from tai42_contract.errors import ErrorKind, error_kind
-from tai42_contract.monitoring import MonitoringLevel, SpanKind
+from tai42_contract.monitoring import MonitoringLevel, Span, SpanKind
 from tai42_contract.tools import DEFAULT_RETRYABLE_KINDS, NEVER_RETRYABLE_KINDS, ToolRetryPolicy
+
+from tai42_skeleton.monitoring.span_metadata import _declared_retry_after, _explicit_retry_verdict, error_span_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -107,26 +110,6 @@ class ToolRetryRegistry:
         self._policies.clear()
 
 
-def _explicit_retry_verdict(exc: BaseException) -> bool | None:
-    """The error's OWN boolean ``retryable`` verdict (the ``ChannelDeliveryError`` shape), or ``None``.
-
-    Only a real bool counts — any other value on the attribute is no verdict, never a truthy accident.
-    """
-    verdict = getattr(exc, "retryable", None)
-    return verdict if isinstance(verdict, bool) else None
-
-
-def _declared_retry_after(exc: BaseException) -> float | None:
-    """The seconds the server asked the caller to wait.
-
-    When the error carries a positive numeric ``retry_after`` — else ``None``.
-    """
-    value = getattr(exc, "retry_after", None)
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
-        return float(value)
-    return None
-
-
 def _kind_allowlist(policy: ToolRetryPolicy) -> frozenset[ErrorKind]:
     """The error kinds ``policy`` admits for kind-based retry.
 
@@ -170,48 +153,43 @@ def _retry_delay(exc: Exception, policy: ToolRetryPolicy, attempt: int) -> float
     return max(delay, min(retry_after, _MAX_RETRY_AFTER_SECONDS))
 
 
-def _attempt_error_metadata(exc: BaseException) -> dict[str, Any]:
-    """The structured failure detail stamped on a failed attempt's span.
+class _AttemptSpan:
+    """The handle of one attempt's span; a no-op outside a trace."""
 
-    The exception type, its resolved ``error.kind``, and — when the error vouches its
-    own verdict — the ``retryable``/``retry_after`` pair (the ``send_span``
-    metadata shape, attribute-generic).
-    """
-    metadata: dict[str, Any] = {"error.type": type(exc).__name__, "error.kind": error_kind(exc).value}
-    verdict = _explicit_retry_verdict(exc)
-    if verdict is not None:
-        metadata["retryable"] = verdict
-        retry_after = _declared_retry_after(exc)
-        if retry_after is not None:
-            metadata["retry_after"] = retry_after
-    return metadata
+    def __init__(self, span: Span | None) -> None:
+        self._span = span
+
+    def fail(self, exc: Exception, *, retryable: bool) -> None:
+        """Mark the attempt ERROR with the failure detail and this seam's ``retryable`` decision."""
+        if self._span is None:
+            return
+        self._span.update(
+            level=MonitoringLevel.ERROR,
+            status_message=str(exc),
+            metadata=error_span_metadata(exc, retryable=retryable),
+        )
 
 
 @contextlib.contextmanager
-def _attempt_span(tool_name: str, attempt: int, max_attempts: int) -> Iterator[None]:
+def _attempt_span(tool_name: str, attempt: int, max_attempts: int) -> Iterator[_AttemptSpan]:
     """Wrap ONE attempt of a policy-armed dispatch in a ``tool-attempt:<name>`` span.
 
-    Runs it unwrapped when no trace is ambient (a rootless attempt span
-    would attach to no run — the ``send_span`` conditional-emit idiom). A raised
-    exception marks the span ERROR with the typed detail and propagates
-    unchanged; the retry decision is never made here.
+    Yields a no-op handle when no trace is ambient (a rootless attempt span would
+    attach to no run — the ``send_span`` conditional-emit idiom). The caller marks a
+    failure through the handle once it has decided whether another attempt follows.
     """
     from tai42_skeleton.monitoring import get_monitoring
 
     writer = get_monitoring().writer
     if writer.current_trace_id() is None:
-        yield
+        yield _AttemptSpan(None)
         return
     with writer.start_span(
         name=f"tool-attempt:{tool_name}",
         kind=SpanKind.TOOL,
         metadata={"retry.attempt": attempt, "retry.max_attempts": max_attempts},
     ) as span:
-        try:
-            yield
-        except Exception as exc:
-            span.update(level=MonitoringLevel.ERROR, status_message=str(exc), metadata=_attempt_error_metadata(exc))
-            raise
+        yield _AttemptSpan(span)
 
 
 async def dispatch_with_retry(
@@ -233,22 +211,23 @@ async def dispatch_with_retry(
     attempt = 0
     while True:
         attempt += 1
-        try:
-            with _attempt_span(tool_name, attempt, policy.max_attempts):
+        with _attempt_span(tool_name, attempt, policy.max_attempts) as attempt_span:
+            try:
                 return await attempt_fn()
-        except Exception as exc:
-            delay = _retry_delay(exc, policy, attempt)
-            if delay is None:
-                raise
-            logger.warning(
-                "tool %r attempt %d/%d failed; retrying in %ss",
-                tool_name,
-                attempt,
-                policy.max_attempts,
-                delay,
-                exc_info=exc,
-            )
-            await _sleep(delay)
+            except Exception as exc:
+                delay = _retry_delay(exc, policy, attempt)
+                attempt_span.fail(exc, retryable=delay is not None)
+                if delay is None:
+                    raise
+                logger.warning(
+                    "tool %r attempt %d/%d failed; retrying in %ss",
+                    tool_name,
+                    attempt,
+                    policy.max_attempts,
+                    delay,
+                    exc_info=exc,
+                )
+        await _sleep(delay)
 
 
 __all__ = ["ToolRetryRegistry", "dispatch_with_retry"]

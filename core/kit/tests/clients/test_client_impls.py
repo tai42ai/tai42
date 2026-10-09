@@ -584,7 +584,7 @@ def _curl_mod():
     return importlib.import_module("tai42_kit.clients.impl.curl")
 
 
-async def test_curl_create_strips_session_key_and_builds_session(monkeypatch):
+async def test_curl_create_builds_the_session_from_session_params_only(monkeypatch):
     curl_mod = _curl_mod()
     captured = {}
 
@@ -597,13 +597,52 @@ async def test_curl_create_strips_session_key_and_builds_session(monkeypatch):
             self.closed = True
 
     monkeypatch.setattr(curl_mod.requests, "AsyncSession", _FakeSession)
-    caller_params = {"session_params": {"timeout": 10, "session_key": "drop-me"}}
+    caller_params = {"session_params": {"timeout": 10}, "share_key": "shared-a"}
     session = await curl_mod.CurlClient()._create(**caller_params)
-    # session_key is stripped; the caller's dict is never mutated.
+    # share_key selects the pool and never reaches the session; the caller's dict is never mutated.
     assert captured == {"timeout": 10}
-    assert caller_params["session_params"] == {"timeout": 10, "session_key": "drop-me"}
+    assert caller_params == {"session_params": {"timeout": 10}, "share_key": "shared-a"}
     await curl_mod.CurlClient()._close(session)
-    assert session.closed is True
+
+
+def test_curl_share_key_is_part_of_the_pool_identity():
+    curl_mod = _curl_mod()
+    client = curl_mod.CurlClient()
+    params = {"timeout": 10}
+    assert client.pool_key(session_params=params, share_key="a") == client.pool_key(
+        session_params=dict(params), share_key="a"
+    )
+    assert client.pool_key(session_params=params, share_key="a") != client.pool_key(
+        session_params=params, share_key="b"
+    )
+    assert client.pool_key(session_params=params, share_key="a") != client.pool_key(session_params=params)
+
+
+async def test_curl_callers_with_different_share_keys_lease_different_sessions(monkeypatch):
+    curl_mod = _curl_mod()
+
+    class _FakeSession:
+        def __init__(self, **kwargs):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(curl_mod.requests, "AsyncSession", _FakeSession)
+    client = curl_mod.CurlClient()
+    async with client.current(session_params={}, share_key="a") as first:
+        async with client.current(session_params={}, share_key="a") as again:
+            assert again is first
+        async with client.current(session_params={}, share_key="b") as other:
+            assert other is not first
+    await client.close(session_params={}, share_key="a")
+    await client.close(session_params={}, share_key="b")
+
+
+async def test_curl_session_params_reach_the_session_verbatim_so_an_unknown_one_fails_loudly():
+    curl_mod = _curl_mod()
+    with pytest.raises(TypeError):
+        await curl_mod.CurlClient()._create(session_params={"not_a_session_option": "x"})
 
 
 async def test_curl_create_rejects_unknown_kwarg():

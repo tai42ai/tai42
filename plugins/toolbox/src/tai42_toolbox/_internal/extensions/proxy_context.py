@@ -15,10 +15,11 @@ host is resolved and validated (see :func:`build_route`).
 from __future__ import annotations
 
 import random
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
+from tai42_kit.logging import redact_url_userinfo
 from tai42_kit.net import url_guard
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
@@ -41,18 +42,6 @@ def proxy_settings() -> ProxySettings:
     return ProxySettings()
 
 
-def _redact_userinfo(proxy_url: str) -> str:
-    """Return ``proxy_url`` with any ``user:pass@`` credentials replaced by ``***@``.
-
-    So an error echoing the URL never leaks a proxy password. Operates on the raw netloc.
-    """
-    parsed = urlparse(proxy_url)
-    if "@" not in parsed.netloc:
-        return proxy_url
-    _userinfo, _, hostport = parsed.netloc.rpartition("@")
-    return urlunparse(parsed._replace(netloc=f"***@{hostport}"))
-
-
 def _select_proxy_url(proxies: list[str] | None, settings: ProxySettings) -> str:
     """Pick one proxy URL to route through, enforcing the pool policy.
 
@@ -68,7 +57,7 @@ def _select_proxy_url(proxies: list[str] | None, settings: ProxySettings) -> str
         for candidate in proxies:
             if candidate not in settings.pool:
                 raise ValueError(
-                    f"Proxy URL {_redact_userinfo(candidate)!r} is not in the operator pool and "
+                    f"Proxy URL {redact_url_userinfo(candidate)!r} is not in the operator pool and "
                     "PROXY_ALLOW_CALLER_URLS is not set; refusing to route through a caller-supplied proxy."
                 )
         candidates = proxies
@@ -94,12 +83,12 @@ async def build_route(proxies: list[str] | None) -> RouteConfig:
     scheme = parsed.scheme.lower()
     host = parsed.hostname
     if not host:
-        raise ValueError(f"Proxy URL has no host: {_redact_userinfo(proxy_url)!r}")
+        raise ValueError(f"Proxy URL has no host: {redact_url_userinfo(proxy_url)!r}")
     # ``.port`` raises a bare "Port out of range"; surface a domain-specific error instead.
     try:
         explicit_port = parsed.port
     except ValueError as exc:
-        raise ValueError(f"Proxy URL has an out-of-range port: {_redact_userinfo(proxy_url)!r}") from exc
+        raise ValueError(f"Proxy URL has an out-of-range port: {redact_url_userinfo(proxy_url)!r}") from exc
 
     if scheme.startswith("socks"):
         socks = load_socks()

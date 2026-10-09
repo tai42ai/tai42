@@ -1,7 +1,7 @@
 """``tai doctor`` — read-only diagnostics.
 
 Covers the exit-code contract (non-zero when any dependency check fails) and the
-credential-redaction rule (connection-URL passwords are masked, never echoed).
+credential-redaction rule (connection-URL userinfo is masked, never echoed).
 """
 
 from __future__ import annotations
@@ -24,10 +24,10 @@ from tai42_skeleton.cli.native.doctor import Check
 from tai42_skeleton.db import MigrationChainDiscovery, SkippedChain
 
 
-def test_redact_url_masks_password() -> None:
-    assert doctor._redact_url("redis://user:secret@host:6379/0") == "redis://user:***@host:6379/0"
-    assert doctor._redact_url("redis://:secret@host:6379/0") == "redis://:***@host:6379/0"
-    # No password -> unchanged; unset -> a clear marker, never a blank.
+def test_redact_url_masks_userinfo() -> None:
+    assert doctor._redact_url("redis://user:secret@host:6379/0") == "redis://***@host:6379/0"
+    assert doctor._redact_url("redis://:secret@host:6379/0") == "redis://***@host:6379/0"
+    # No userinfo -> unchanged; unset -> a clear marker, never a blank.
     assert doctor._redact_url("redis://host:6379/0") == "redis://host:6379/0"
     assert doctor._redact_url(None) == "(unset)"
 

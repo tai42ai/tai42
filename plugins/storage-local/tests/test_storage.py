@@ -145,3 +145,47 @@ async def test_delete_then_upload_at_freed_id(storage, storage_root):
     # "a/b" and "a" are pruned once empty, so the id "a/b" is free to hold a file.
     await storage.upload("a/b", "now a file")
     assert await storage.load("a/b") == "now a file"
+
+
+# --- unconfigured root -------------------------------------------------------
+
+_UNSET_ROOT_MESSAGE = "local storage is not configured: set STORAGE_LOCAL_ROOT_PATH to the storage root directory."
+
+
+@pytest.fixture
+def unconfigured(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """No root configured: the env var is absent, or set empty (the settings layer reads empty as absent)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("STORAGE_LOCAL_ROOT_PATH", raising=False)
+    storage_settings.cache_clear()  # type: ignore[attr-defined]
+    yield LocalStorage()
+    storage_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("method", "args"),
+    [
+        ("load", ("a.txt",)),
+        ("list", ()),
+        ("upload", ("a.txt", "text")),
+        ("delete", ("a.txt",)),
+        ("delete_dir", ("dir",)),
+        ("load_bytes", ("a.txt",)),
+        ("upload_bytes", ("a.bin", b"\x00")),
+        ("stat", ("a.png",)),
+    ],
+)
+async def test_every_call_refuses_until_the_root_is_set(unconfigured, tmp_path, method, args):
+    with pytest.raises(RuntimeError) as exc:
+        await getattr(unconfigured, method)(*args)
+    assert str(exc.value) == _UNSET_ROOT_MESSAGE
+    # Nothing is created anywhere: the refusal precedes every filesystem touch.
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_an_empty_root_reads_as_unset(unconfigured, monkeypatch):
+    monkeypatch.setenv("STORAGE_LOCAL_ROOT_PATH", "")
+    storage_settings.cache_clear()  # type: ignore[attr-defined]
+    assert storage_settings().root_path is None
+    with pytest.raises(RuntimeError, match="STORAGE_LOCAL_ROOT_PATH"):
+        await unconfigured.list()

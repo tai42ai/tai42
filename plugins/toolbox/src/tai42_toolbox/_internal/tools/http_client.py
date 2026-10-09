@@ -26,6 +26,7 @@ except ImportError as exc:
     ) from exc
 
 from tai42_contract.app import tai42_app
+from tai42_kit.logging import redact_url_userinfo
 from tai42_kit.net import url_guard
 
 # Body fields (``content``/``text``) are set explicitly so the streaming path can supply an already-read body.
@@ -126,7 +127,7 @@ async def _validate_proxies(session_params: dict[str, Any]) -> list[str]:
         proxy_host = parsed.hostname
         if not proxy_host:
             raise url_guard.UrlGuardError(
-                f"SSRF guard: proxy URL has no host to check: {_redact_userinfo(proxy_url)!r}"
+                f"SSRF guard: proxy URL has no host to check: {redact_url_userinfo(proxy_url)!r}"
             )
         scheme = parsed.scheme.lower()
         if scheme.startswith("socks"):
@@ -140,27 +141,12 @@ async def _validate_proxies(session_params: dict[str, Any]) -> list[str]:
             explicit_port = parsed.port
         except ValueError as exc:
             raise url_guard.UrlGuardError(
-                f"SSRF guard: proxy URL has an out-of-range port: {_redact_userinfo(proxy_url)!r}"
+                f"SSRF guard: proxy URL has an out-of-range port: {redact_url_userinfo(proxy_url)!r}"
             ) from exc
         proxy_port = explicit_port or default_port
         validated_ip = await url_guard.resolve_and_validate(proxy_host)
         pins.append(_resolve_pin_entry(proxy_host, proxy_port, validated_ip))
     return pins
-
-
-def _redact_userinfo(url: str) -> str:
-    """Return ``url`` with any ``user:pass@`` credentials replaced by ``***@``.
-
-    So a URL echoed in an error never leaks the caller's credentials. Host and everything after it are preserved.
-    """
-    scheme, sep, rest = url.partition("://")
-    if not sep:
-        return url
-    netloc, slash, tail = rest.partition("/")
-    _creds, at, hostport = netloc.rpartition("@")
-    if not at:
-        return url
-    return f"{scheme}://***@{hostport}{slash}{tail}"
 
 
 def _resolve_pin_entry(host: str, port: int, validated_ip: str) -> str:
@@ -272,8 +258,7 @@ async def perform_request(
         proxy_pins = await _validate_proxies(session_params)
 
     if session_key is not None:
-        session_params["session_key"] = session_key
-        session_ctx = tai42_app.clients.client_ctx(CurlClient, session_params=session_params)
+        session_ctx = tai42_app.clients.client_ctx(CurlClient, session_params=session_params, share_key=session_key)
     else:
         session_ctx = tai42_app.clients.client_ctx(CurlClient, session_params=session_params, fresh=True)
 

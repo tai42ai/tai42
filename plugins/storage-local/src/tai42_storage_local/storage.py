@@ -1,7 +1,8 @@
 """Local-filesystem :class:`~tai42_contract.storage.Storage` backend.
 
 Builds a stateless :class:`~tai42_storage_local.driver.AsyncLocalDriver` per call
-from cached settings, so a live-reloaded root path takes effect on the next call.
+from cached settings, so a live-reloaded root path takes effect on the next call;
+every call refuses until ``STORAGE_LOCAL_ROOT_PATH`` is set.
 """
 
 from __future__ import annotations
@@ -9,12 +10,22 @@ from __future__ import annotations
 import logging
 
 from tai42_contract.app import tai42_app
-from tai42_contract.storage import Storage, assert_not_root
+from tai42_contract.storage import ObjectStat, Storage, assert_not_root
 
 from tai42_storage_local.driver import AsyncLocalDriver
 from tai42_storage_local.settings import storage_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _root_path() -> str:
+    """The configured storage root; raises a clear config error when unset."""
+    root_path = storage_settings().root_path
+    if root_path is None:
+        raise RuntimeError(
+            "local storage is not configured: set STORAGE_LOCAL_ROOT_PATH to the storage root directory."
+        )
+    return root_path
 
 
 # Importing this module registers LocalStorage in the storage provider registry.
@@ -24,7 +35,7 @@ class LocalStorage(Storage):
 
     def _driver(self) -> AsyncLocalDriver:
         settings = storage_settings()
-        return AsyncLocalDriver(root_path=settings.root_path, create_dirs=settings.create_dirs)
+        return AsyncLocalDriver(root_path=_root_path(), create_dirs=settings.create_dirs)
 
     async def load(self, path: str) -> str:
         """Read the text object at ``path``, raising ``FileNotFoundError`` on a miss."""
@@ -70,3 +81,8 @@ class LocalStorage(Storage):
         # contract parity but not stored.
         await self._driver().write_bytes(path, data)
         logger.info("Wrote bytes to local storage: %s", path)
+
+    async def stat(self, path: str) -> ObjectStat:
+        """The path-inferred metadata of the contract default, refused like every call until the root is set."""
+        _root_path()
+        return await super().stat(path)

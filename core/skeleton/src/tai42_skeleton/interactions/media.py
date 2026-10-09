@@ -21,16 +21,16 @@ from redis.asyncio import Redis
 from tai42_contract.interactions import MEDIA_ROUTE_PREFIX, MediaItem, MediaKind, check_media_list
 
 from tai42_skeleton.interactions.store import InteractionStore, as_str
+from tai42_skeleton.settings.media_ingest import media_ingest_settings
 
 _DATA_IMAGE_PREFIX = "data:image/"
-_ALLOWED_MIME = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 
 
 def _parse_data_image(data_url: str) -> tuple[str, bytes]:
     """Split a ``data:image/<subtype>;base64,<payload>`` URI into (mime, decoded bytes).
 
-    A non-image mime, a missing ``;base64`` marker, an unlisted subtype, empty or
-    non-strict-base64 payload raises ValueError — never a silent skip.
+    A missing ``;base64`` marker, a mime outside ``MEDIA_INGEST_IMAGE_MIME_ALLOWLIST``, an
+    empty or non-strict-base64 payload raises ValueError — never a silent skip.
     """
     if not data_url.startswith("data:"):
         raise ValueError("media data url must start with 'data:'")
@@ -40,7 +40,7 @@ def _parse_data_image(data_url: str) -> tuple[str, bytes]:
     if not header.endswith(";base64"):
         raise ValueError("media data url must be base64-encoded (a ';base64' marker)")
     mime = header[: -len(";base64")]
-    if mime not in _ALLOWED_MIME:
+    if mime not in media_ingest_settings().image_mime_allowlist:
         raise ValueError(f"media data url mime {mime!r} is not an accepted image type")
     try:
         raw = base64.b64decode(payload, validate=True)

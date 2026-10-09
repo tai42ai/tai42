@@ -79,15 +79,12 @@ Settings are read from the `STORAGE_S3_` environment group (see
 
 ## Content-type behavior
 
-- `upload` (text) stores `ContentType: application/jinja2` — a template reads
-  back as its authoring format, not an inferred `text/*`.
+- `upload` (text) stores `ContentType: text/plain; charset=utf-8`.
 - `upload_bytes` stores the parametrized `content_type` as the object's
   `ContentType` (omitted when `None`).
 - `stat` returns the object's stored `ContentType` via `head_object`, mapping a
   missing object (404) to `FileNotFoundError` — no raw `ClientError` or metadata
-  leaks. Because text uploads store `application/jinja2`, `stat` on a text
-  template reports that type; it reads as non-media, which is the only thing the
-  content-type gates.
+  leaks. `stat` on a text object reports `text/plain; charset=utf-8`.
 
 ## Development
 

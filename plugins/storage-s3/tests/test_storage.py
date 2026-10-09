@@ -148,14 +148,14 @@ async def test_list_empty_bucket_returns_empty(s3_client: Any) -> None:
 # --- upload / upload_bytes ---------------------------------------------------
 
 
-async def test_upload_stores_jinja2_content_type(s3_client: Any) -> None:
+async def test_upload_stores_utf8_text_content_type(s3_client: Any) -> None:
     # Every upload lists its ``id + "/"`` prefix first to refuse a file/dir collision.
     s3_client.get_paginator.return_value = FakePaginator([{}])
 
     await S3Storage().upload("t.j2", "{{ name }}")
 
     s3_client.put_object.assert_awaited_once_with(
-        Bucket="b", Key="t.j2", Body=b"{{ name }}", ContentType="application/jinja2"
+        Bucket="b", Key="t.j2", Body=b"{{ name }}", ContentType="text/plain; charset=utf-8"
     )
 
 
