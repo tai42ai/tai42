@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -20,10 +20,12 @@ import pydantic
 import pytest
 
 from tai42_contract.agent.base import (
+    PRESET_NAME_PATTERN,
+    TOOL_NAME_MAX_LEN,
+    AddressedMemory,
     Agent,
     AgentInterruptedError,
     PresetSpec,
-    SubAgentSpec,
 )
 from tai42_contract.agent.events import (
     InterruptFinal,
@@ -42,7 +44,6 @@ from tai42_contract.extensions.kinds import ExtensionFactory
 from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.manifest import Manifest, MCPConfig, TaiMCPConfig
 from tai42_contract.storage import assert_not_root
-from tai42_contract.template import TemplatedText
 
 UUID = "12345678-1234-1234-1234-123456789abc"
 
@@ -59,6 +60,10 @@ class _DummyAgent(Agent):
 
     def __init__(self, return_value: Any = "ran") -> None:
         self._return_value = return_value
+
+    @classmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        return AddressedMemory()
 
     async def run(self, **kwargs: Any) -> Any:
         return self._return_value
@@ -96,36 +101,62 @@ def test_from_tool_input_maps_only_set_fields():
 
 
 def test_from_tool_input_keeps_nested_models_as_instances():
+    class _Composite(pydantic.BaseModel):
+        name: str
+        presets: list[PresetSpec] = []
+        description: str = ""
+
     preset = PresetSpec(name="p", base_tool="example_tool")
-    spec = SubAgentSpec(name="agent", presets=[preset])
-    out = Agent.from_tool_input(spec)
+    out = Agent.from_tool_input(_Composite(name="agent", presets=[preset]))
     assert set(out) == {"name", "presets"}
     assert out["presets"] == [preset]
     assert isinstance(out["presets"][0], PresetSpec)
 
 
-def test_sub_agent_spec_response_format_accepts_a_json_schema_dict():
-    # ``response_format`` accepts a JSON-Schema dict on the neutral spec (not only a
-    # pydantic class), the dict shape the deep sub-agent path already authors.
-    schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
-    spec = SubAgentSpec(name="agent", response_format=schema)
-    assert spec.response_format == schema
+# -- the preset-name law and the tool-name bound -------------------------------
 
 
-def test_sub_agent_spec_response_format_accepts_a_pydantic_class():
-    class Answer(pydantic.BaseModel):
-        value: int
-
-    spec = SubAgentSpec(name="agent", response_format=Answer)
-    assert spec.response_format is Answer
+@pytest.mark.parametrize("name", ["a/b", "", "a b", "x" * (TOOL_NAME_MAX_LEN + 1)])
+def test_preset_spec_refuses_a_name_outside_the_preset_name_law(name: str):
+    with pytest.raises(pydantic.ValidationError, match="name"):
+        PresetSpec(name=name, base_tool="example_tool")
 
 
-def test_sub_agent_spec_system_prompt_is_a_templated_text():
-    # The system prompt is a templated text (inline content or a stored id, plus render
-    # kwargs); omitted it defaults to None.
-    assert SubAgentSpec(name="agent").system_prompt is None
-    spec = SubAgentSpec(name="agent", system_prompt=TemplatedText(id="sp", kwargs={"tone": "brief"}))
-    assert spec.system_prompt == TemplatedText(id="sp", kwargs={"tone": "brief"})
+def test_preset_spec_accepts_a_name_at_the_tool_name_bound():
+    assert PresetSpec(name="x" * TOOL_NAME_MAX_LEN, base_tool="example_tool").name == "x" * TOOL_NAME_MAX_LEN
+
+
+def test_the_preset_name_pattern_bound_is_the_tool_name_bound():
+    assert TOOL_NAME_MAX_LEN == 64
+    assert PRESET_NAME_PATTERN.endswith(f"{{1,{TOOL_NAME_MAX_LEN}}}$")
+
+
+# -- AddressedMemory / parks -----------------------------------------------------
+
+
+def test_addressed_memory_defaults_to_no_memory():
+    memory = AddressedMemory()
+    assert memory.keys == frozenset()
+    assert memory.thread_ids == frozenset()
+    assert memory.checkpoint_ids == frozenset()
+    with pytest.raises(pydantic.ValidationError):
+        memory.keys = frozenset({"x"})  # type: ignore[misc]
+
+
+def test_parks_defaults_false_on_base_agent():
+    assert Agent.parks is False
+
+
+def test_an_agent_without_addressed_memory_cannot_be_instantiated():
+    class _NoMemoryAnswer(Agent):
+        tool_name = "no_memory_answer"
+        ToolInput = PresetSpec
+
+        async def run(self, **kwargs: Any) -> Any:
+            return ""
+
+    with pytest.raises(TypeError, match="addressed_memory"):
+        _NoMemoryAnswer()  # type: ignore[abstract]
 
 
 # -- spec_runnable capability marker (ClassVar, not an instance field) --------
@@ -293,6 +324,25 @@ def test_drain_suspended_returns_typed_sentinel_without_raising():
     assert result.expiry_at == datetime(2030, 1, 1, tzinfo=UTC)
     # It carries no resume owner: a caller may not adopt a park the run owns and resumes itself.
     assert result.resume_owner is None
+
+
+def test_suspended_final_converts_to_the_typed_sentinel():
+    final = SuspendedFinal(
+        interaction_ids=["i1", "i2"],
+        caller_interaction_ids=["i2"],
+        thread_id="t",
+        expiry_at="2030-01-01T00:00:00+00:00",
+    )
+    sentinel = final.to_suspended_interaction()
+    assert sentinel == SuspendedInteraction(
+        interaction_id="i1",
+        interaction_ids=["i1", "i2"],
+        caller_interaction_ids=["i2"],
+        expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    assert sentinel.resume_owner is None
+    # No deadline on the park: none on the sentinel.
+    assert SuspendedFinal(interaction_ids=["i1"], thread_id="t").to_suspended_interaction().expiry_at is None
 
 
 def test_drain_suspended_takes_precedence_over_interrupt():

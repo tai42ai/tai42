@@ -22,6 +22,7 @@ from tai42_skeleton.operations._authority import require_admin
 from tai42_skeleton.operations.definition_door import definition_door
 from tai42_skeleton.operations.presets.references import _spec_reference_error
 from tai42_skeleton.presets.definition import PresetDefinitionError, check_preset_body, output_schema_body_error
+from tai42_skeleton.presets.manager import output_schema_extension_clash
 from tai42_skeleton.tools.state_binding import is_binding_refusal
 
 # This submodule's own package generation, captured at import time (a reload builds a
@@ -104,15 +105,19 @@ async def _output_schema_error(
     reaches the bind kernel.
 
     The body rules first (:func:`~tai42_skeleton.presets.definition.output_schema_body_error`:
-    the schema resolves to a JSON object, passes the draft-2020-12 meta-schema, has an object
-    root, and does not clash with an ``output_schema`` extension entry), then the live-registry
-    rule: an agent base whose run tool does not advertise ``response_format`` (voting_agent)
-    cannot force structured output, so it is rejected at authoring rather than let the bake
-    target a missing parameter at bind time.
+    the schema resolves to a JSON object, passes the draft-2020-12 meta-schema and has an object
+    root), then the live-registry rules: an extension entry that declares the wrapped tool's output
+    shape (registered with ``declares_output_schema=True``) clashes with the field, and an agent base
+    whose run tool does not advertise ``response_format`` cannot force structured output, so it is
+    rejected at authoring rather than let the bake target a missing parameter at bind time. Runs
+    after the combo check, so every extension entry names a registered extension.
     """
-    body_error = await output_schema_body_error(output_schema, extensions)
+    body_error = await output_schema_body_error(output_schema)
     if body_error is not None or output_schema is None:
         return body_error
+    clash = output_schema_extension_clash(extensions, instance.app.extensions.declares_output_schema)
+    if clash is not None:
+        return clash
     agent = instance.app.agents.all_agents().get(base_tool)
     if agent is not None and "response_format" not in agent.ToolInput.model_fields:
         return f"agent base {base_tool!r} does not support forced structured output (its input has no response_format)"

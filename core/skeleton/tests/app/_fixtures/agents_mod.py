@@ -4,8 +4,8 @@ synthesized run tool; the excluded one (same module, not in ``include``) is
 left unregistered."""
 
 from pydantic import BaseModel
-from tai42_contract.agent import Agent
 from tai42_contract.app import tai42_app
+from tests.agent._memoryless import MemorylessTestAgent
 
 
 class _In(BaseModel):
@@ -13,7 +13,7 @@ class _In(BaseModel):
 
 
 @tai42_app.agents.agent("kept_agent")
-class KeptAgent(Agent):
+class KeptAgent(MemorylessTestAgent):
     tool_name = "kept_agent"
     tool_description = "Kept agent."
     ToolInput = _In
@@ -23,7 +23,7 @@ class KeptAgent(Agent):
 
 
 @tai42_app.agents.agent("dropped_agent")
-class DroppedAgent(Agent):
+class DroppedAgent(MemorylessTestAgent):
     tool_name = "dropped_agent"
     tool_description = "Dropped agent."
     ToolInput = _In

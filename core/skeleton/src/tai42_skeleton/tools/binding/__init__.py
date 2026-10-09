@@ -8,7 +8,6 @@ is read through the owning app so a reload is always visible here.
 
 from fastmcp.tools.function_tool import FunctionTool
 
-from tai42_skeleton.tools.binding.client_tools import CLIENT_TOOL_NAME_MAX_LEN
 from tai42_skeleton.tools.binding.errors import UnknownToolError
 from tai42_skeleton.tools.binding.facet import ToolBinding
 from tai42_skeleton.tools.binding.result import ToolResultEncodingError, UnencodableLeafError, find_lone_surrogate
@@ -17,7 +16,6 @@ from tai42_skeleton.tools.binding.result import ToolResultEncodingError, Unencod
 # resolve against; it is re-exported so ``app.tools``'s public module surface
 # names the type its callers check bound tools against.
 __all__ = [
-    "CLIENT_TOOL_NAME_MAX_LEN",
     "FunctionTool",
     "ToolBinding",
     "ToolResultEncodingError",

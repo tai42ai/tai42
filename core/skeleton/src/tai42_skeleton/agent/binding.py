@@ -22,12 +22,13 @@ from tai42_contract.interactions import (
     caller_ask_no_landing_outcome,
     current_caller_ask_landing,
 )
+from tai42_contract.tools import TOOL_META_PAUSES
 from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.agent.session_thread import get_agent_session_thread
 from tai42_skeleton.agent.thread_reservation import (
+    BRIDGE_THREAD_PREFIX,
     ReservedThreadNamespaceError,
-    reserved_thread_namespace_error,
     run_kwargs_from_tool_input,
 )
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
@@ -125,7 +126,9 @@ class AgentBinding:
         exactly as ``tags`` threads) — an agent registers as a prebuilt ``FunctionTool``
         and the bind path takes that object as-is (kwargs are NOT forwarded for a prebuilt
         tool), so both must ride on the constructed object, set here at the only effective
-        site (the run-tool ``FunctionTool`` constructor).
+        site (the run-tool ``FunctionTool`` constructor). The run tool's pause declaration
+        comes from the class attribute ``parks`` alone: a ``meta`` carrying
+        ``TOOL_META_PAUSES`` is refused.
 
         Enforces the ``preset_bakeable_fields`` invariant at registration: every
         declared name must be a real ``ToolInput`` field. A stray name could never
@@ -157,6 +160,12 @@ class AgentBinding:
             if stray:
                 raise RuntimeError(
                     f"Agent '{name}' declares preset_bakeable_fields not on its ToolInput: {sorted(stray)}."
+                )
+
+            if meta is not None and TOOL_META_PAUSES in meta:
+                raise ValueError(
+                    f"agent {name!r}: declare that the agent can pause with the class attribute 'parks', "
+                    f"not with meta[{TOOL_META_PAUSES!r}]"
                 )
 
             instance: Agent = agent_cls()
@@ -214,6 +223,7 @@ class AgentBinding:
         """
         agent = self._agents[name]
         tool_input = agent.ToolInput
+        run_meta = {**(meta or {}), TOOL_META_PAUSES: True} if agent.parks else meta
 
         signature = _run_tool_signature(tool_input)
 
@@ -255,31 +265,21 @@ class AgentBinding:
             # and the caller pinned no thread of its own — so an out-of-band in-process
             # driver can carry an agent's memory across successive runs without the run
             # tool advertising a thread parameter. The deposit is a caller-external
-            # steering vector like any thread id, so it passes the SAME reserved-namespace
-            # guard: a ``bridge:`` deposit stays refused however it arrives. Absent a
-            # deposit this is a no-op and the run mints its own fresh thread (config_util).
+            # steering vector like any thread id, so a ``bridge:`` deposit is refused.
+            # Absent a deposit this is a no-op and the run addresses its own memory.
             #
-            # "Caller pinned" covers EVERY spelling a thread can arrive in: the top-level
-            # ``thread_id`` kwarg AND a ``configurable.thread_id`` on ANY config-shaped
-            # kwarg (``langgraph_config``, a voting agent's variants — the same breadth
-            # the reservation guard scans). An injected top-level value would override a
-            # config-shaped pin in ``build_run_config``, so the deposit yields to all forms.
+            # "Caller pinned" covers EVERY spelling a thread can arrive in: the contract's
+            # ``thread_id`` kwarg AND every thread id the agent reports its run kwargs address
+            # (``addressed_memory``). A checkpoint-only pin is not a thread pin.
             session_thread = get_agent_session_thread()
-            caller_pinned_thread = "thread_id" in run_kwargs or any(
-                isinstance(value, dict)
-                and isinstance(value.get("configurable"), dict)
-                and "thread_id" in value["configurable"]
-                for value in run_kwargs.values()
+            caller_pinned_thread = "thread_id" in run_kwargs or bool(
+                type(agent).addressed_memory(run_kwargs).thread_ids
             )
             if session_thread is not None and not caller_pinned_thread:
-                # Reuse the shared reservation guard as the single source of truth for the
-                # refused ``bridge:`` prefix — it scans config-shaped run-kwarg values, so
-                # wrap the deposit in the same ``{"configurable": {"thread_id": ...}}`` shape
-                # a config-bearing kwarg carries.
-                deposited_config = {"session_thread": {"configurable": {"thread_id": session_thread}}}
-                message = reserved_thread_namespace_error(deposited_config)
-                if message is not None:
-                    raise ReservedThreadNamespaceError(message)
+                if session_thread.startswith(BRIDGE_THREAD_PREFIX):
+                    raise ReservedThreadNamespaceError(
+                        f"thread_id may not use the reserved {BRIDGE_THREAD_PREFIX!r} namespace"
+                    )
                 run_kwargs["thread_id"] = session_thread
             # A parked run leaves ``Agent.run`` as a ``SuspendedInteraction`` typed value, and a
             # terminal leaves it as its plain answer. The run tool-face passes BOTH through
@@ -317,8 +317,10 @@ class AgentBinding:
             # constructor is the ONLY effective place tags can be set.
             tags=tags or set(),
             # Generic registration metadata threaded the same way as ``tags``; a
-            # registrant attaches any generic meta key here (e.g. a crash-resume flag).
-            meta=meta,
+            # registrant attaches any generic meta key here (e.g. a crash-resume flag). An
+            # agent that ``parks`` declares its run tool pausing here, so the pause registry
+            # covers the run tool, its branches and any preset over it.
+            meta=run_meta,
         )
         # Bind through the shared extension-capable path: the base registers as this
         # prebuilt ``FunctionTool`` (advertised schema exact by construction) and one

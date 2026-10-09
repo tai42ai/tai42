@@ -567,6 +567,22 @@ def test_extension_registration_carries_requires_body_locality():
     assert param.default is False
 
 
+def test_extension_registration_carries_declares_output_schema():
+    # An extension that declares the wrapped tool's output shape says so at registration:
+    # keyword-only, defaulting to False.
+    from tai42_contract.app import AppExtensions
+
+    param = inspect.signature(AppExtensions.extension).parameters["declares_output_schema"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is False
+
+
+def test_get_client_tools_returns_framework_neutral_handles():
+    from tai42_contract.tools import AppTools
+
+    assert inspect.signature(AppTools.get_client_tools).return_annotation == "list[ClientTool]"
+
+
 def test_app_conversations_is_runtime_checkable_and_shaped():
     from tai42_contract.app import AppConversations
 

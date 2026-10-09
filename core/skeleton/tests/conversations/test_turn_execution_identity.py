@@ -14,10 +14,10 @@ import time
 import pytest
 from pydantic import BaseModel
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
-from tai42_contract.agent import Agent
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import ConversationRoute
 from tai42_contract.template import TemplatedText
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import policy as policy_module
@@ -73,7 +73,7 @@ class _ToolInput(BaseModel):
     user_message: str = ""
 
 
-class ToolCallingAgent(Agent):
+class ToolCallingAgent(MemorylessTestAgent):
     """Resolves ONE tool by name mid-turn from the process-global facet and invokes it,
     answering with its result — the agent-facing seam an agent (or a subagent) crosses for
     a tool it resolves itself."""
@@ -87,7 +87,7 @@ class ToolCallingAgent(Agent):
 
     async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
         [tool] = await tai42_app.tools.get_client_tools([self._tool])
-        return str(await tool.ainvoke(self._arguments))
+        return str(await tool.invoke(self._arguments))
 
 
 class FakeChannel:
@@ -220,7 +220,7 @@ async def test_a_capability_tool_runs_within_a_turn(ac, store, monkeypatch):
     assert answer == "hi there"
 
 
-class _IdentityProbeAgent(Agent):
+class _IdentityProbeAgent(MemorylessTestAgent):
     """Reads the bound execution identity from inside the running turn and answers with
     the principal it is running as."""
 

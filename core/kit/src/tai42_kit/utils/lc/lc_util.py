@@ -5,6 +5,7 @@ from fastmcp.client import Client
 from langchain_core.tools import StructuredTool
 
 from tai42_kit.clients.settings import mcp_client_settings
+from tai42_kit.llm.models import check_tool_name
 
 
 async def mcp_tools_to_lc_tools(client: Client, tools_names: list[str] | None = None) -> list[StructuredTool]:
@@ -31,14 +32,8 @@ async def mcp_tools_to_lc_tools(client: Client, tools_names: list[str] | None = 
 
 
 def mcp_tool_to_lc_tool(client: Client, mcp_tool: mcp.types.Tool) -> StructuredTool:
-    """Adapt one MCP tool into a LangChain ``StructuredTool``; a name over 64 characters raises ``ValueError``."""
-    # Names map 1:1 to the filter key and the LLM tool-name limit; raise on an
-    # over-length name rather than silently truncating it (which would desync the
-    # registered name from the filter key).
-    if len(mcp_tool.name) > 64:
-        raise ValueError(
-            f"MCP tool name exceeds the 64-character limit: {mcp_tool.name!r} ({len(mcp_tool.name)} chars)"
-        )
+    """Adapt one MCP tool into a LangChain ``StructuredTool``; an over-long name raises ``ToolNameTooLongError``."""
+    check_tool_name(mcp_tool.name)
 
     def coroutine_impl(tool):
         async def call_tool(**kwargs):

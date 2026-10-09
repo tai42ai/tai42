@@ -157,6 +157,7 @@ class AppExtensions(Protocol):
         name: str | None = None,
         requires_body_locality: bool = False,
         pauses: bool = False,
+        declares_output_schema: bool = False,
     ) -> Callable[..., Any]:
         """Register a tool-extension factory under ``name`` (default: the function's own name).
 
@@ -173,6 +174,9 @@ class AppExtensions(Protocol):
         ``pauses`` marks an extension every branch of which can pause, whatever its base
         declares (an extension that re-dispatches other tools and passes their park
         through); see ``AppTools.pauses``.
+
+        ``declares_output_schema``: this extension declares the wrapped tool's output shape (its
+        JSON Schema), so a preset over a tool carrying it may not also set ``output_schema``.
         """
         ...
 

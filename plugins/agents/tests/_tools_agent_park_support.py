@@ -13,7 +13,6 @@ import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
@@ -21,8 +20,8 @@ from tai42_contract.interactions import (
     SuspendedInteraction,
     get_chained_resume,
     get_resume_continuation_tool,
-    suspended_interaction_marker,
 )
+from tests._client_tool import FakeClientTool, client_tool
 from tests.conftest import fake_run_trace
 
 from tai42_agents import tools_agent as tools_mod
@@ -67,8 +66,8 @@ def _within_retention() -> datetime:
 
 
 class _AskStandIn:
-    """A faithful ``ask(mode="async")`` stand-in: it parks (returns the reserved
-    marker) ONLY when a resume continuation is bound, and otherwise RAISES exactly as the
+    """A faithful ``ask(mode="async")`` stand-in: it parks (returns the park sentinel,
+    owned by the bound continuation) ONLY when a resume continuation is bound, and otherwise RAISES exactly as the
     platform helper does with no driver bound — so a face that binds no resume path refuses
     loudly. Counts calls so a resume that re-ran the tool (a double-park) is caught."""
 
@@ -82,19 +81,20 @@ class _AskStandIn:
         # ``ask`` does this off ``to``); a user ask leaves it empty.
         self._caller = caller
 
-    def tool(self) -> StructuredTool:
-        def ask() -> dict[str, Any]:
+    def tool(self) -> FakeClientTool:
+        def ask() -> SuspendedInteraction:
             self.calls += 1
             if get_resume_continuation_tool() is None:
                 raise RuntimeError("async ask requires a resuming driver (no resume_continuation_tool is bound)")
-            return suspended_interaction_marker(
-                self._interaction_id,
-                self._expiry_at,
-                get_resume_continuation_tool(),
+            return SuspendedInteraction(
+                interaction_id=self._interaction_id,
+                expiry_at=self._expiry_at,
+                resume_owner=get_resume_continuation_tool(),
+                interaction_ids=[self._interaction_id],
                 caller_interaction_ids=[self._interaction_id] if self._caller else [],
             )
 
-        return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
+        return client_tool("ask", ask, description="Ask the user and park.")
 
 
 def _ask_call(call_id: str = "c1") -> AIMessage:
@@ -128,12 +128,12 @@ class _NestedDriverStandIn:
             interaction_id=self._interaction_id, resume_owner=self._resume_owner, expiry_at=self._expiry_at
         )
 
-    def base_tool(self) -> StructuredTool:
+    def base_tool(self) -> FakeClientTool:
         def nested_driver(marker: str = "") -> str:
             """Run the nested driver."""
             return marker
 
-        return StructuredTool.from_function(nested_driver, name="nested_driver", description="Run the nested driver.")
+        return client_tool("nested_driver", nested_driver, description="Run the nested driver.")
 
 
 class _Registry:
@@ -202,12 +202,12 @@ class _RawMarkerTool:
         self.calls = 0
         self._marker = marker
 
-    def tool(self) -> StructuredTool:
+    def tool(self) -> FakeClientTool:
         def relay() -> dict[str, Any]:
             self.calls += 1
             return self._marker
 
-        return StructuredTool.from_function(relay, name="relay", description="Relay a nested result.")
+        return client_tool("relay", relay, description="Relay a nested result.")
 
 
 def _relay_call(call_id: str = "c1") -> AIMessage:

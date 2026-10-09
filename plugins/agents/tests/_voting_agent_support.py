@@ -8,7 +8,6 @@ import asyncio
 from typing import Any
 
 import pytest
-from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
 from tai42_contract.agent.events import (
     MessageDelta,
@@ -19,6 +18,7 @@ from tai42_contract.agent.events import (
     ToolCallStep,
     ToolResultStep,
 )
+from tests._client_tool import FakeClientTool, client_tool
 from tests._tools_agent_support import ScriptedGraph, flatten
 
 from tai42_agents._internal.graph_cache import ToolsAgentGraphSpec
@@ -28,27 +28,18 @@ from tai42_agents.voting_agent import agent as agent_module
 AGENT_NAME = "voting_agent"
 
 
-def _make_tool(name: str) -> StructuredTool:
-    async def call(**kwargs: Any) -> dict[str, Any]:
-        return kwargs
-
-    return StructuredTool.from_function(
-        func=None,
-        coroutine=call,
-        name=name,
-        description="t",
-        args_schema={"type": "object", "properties": {}, "required": []},
-    )
+def _make_tool(name: str) -> FakeClientTool:
+    return client_tool(name, description="t")
 
 
 def script_voting_graphs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace the voting agent's graph build with one that resolves the named tools and compiles nothing."""
     from tai42_contract.app import tai42_app
 
-    from tai42_agents._internal.resolve_tools import resolve_tools
+    from tai42_agents._internal.lc_tools import resolve_tools
 
     async def fake_graph(spec: ToolsAgentGraphSpec) -> ScriptedGraph:
-        tools = await resolve_tools(tai42_app.tools, list(spec.tool_names), list(spec.live_tools), list(spec.presets))
+        tools = await resolve_tools(tai42_app.tools, spec.tool_names, spec.live_tools, spec.presets)
         graph = ScriptedGraph(
             agent=None,
             strategy=None,

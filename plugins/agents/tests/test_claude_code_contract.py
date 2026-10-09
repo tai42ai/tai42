@@ -52,14 +52,14 @@ def test_registered_name_matches_tool_name() -> None:
 
 
 @pytest.mark.usefixtures("_settings")
-def test_unhonored_param_raises_loudly() -> None:
-    with pytest.raises(RuntimeError, match="recursion_limit"):
+def test_an_undeclared_keyword_raises_loudly() -> None:
+    with pytest.raises(TypeError, match=r"claude_code\.astream got unknown run keyword argument\(s\): recursion_limit"):
         asyncio.run(_drain(ClaudeCodeAgent(), user_message=TemplatedText(content="hi"), recursion_limit=5))
 
 
 @pytest.mark.usefixtures("_settings")
-def test_live_tools_unhonored() -> None:
-    with pytest.raises(RuntimeError, match="tools"):
+def test_live_tools_are_an_undeclared_keyword() -> None:
+    with pytest.raises(TypeError, match=r"unknown run keyword argument\(s\): tools"):
         asyncio.run(_drain(ClaudeCodeAgent(), user_message=TemplatedText(content="hi"), tools=[object()]))
 
 

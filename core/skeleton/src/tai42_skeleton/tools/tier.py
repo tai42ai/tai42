@@ -14,8 +14,9 @@ its BASE tool, so a preset authored over a fenced tool inherits the fence at run
 The fence is built through ONE shared function (:func:`enforce_run_tier`) called at each
 seam a dispatch can reach the tool BODY through, so no door carries its own copy: the
 in-process :meth:`~tai42_skeleton.tools.binding.ToolBinding.run_tool` seam, the agent
-tool-dispatch door (:meth:`~tai42_skeleton.tools.binding.ToolBinding._client_runnable`,
-the langchain client tool an in-process agent invokes, which reaches the body directly),
+tool-dispatch door (:meth:`~tai42_skeleton.tools.binding.ToolBinding._client_call`,
+the call behind the client-tool handle an in-process agent invokes, which reaches the body
+directly),
 and the MCP tool-call edge (which reaches ``Tool.run`` directly through the FastMCP
 middleware chain).
 """

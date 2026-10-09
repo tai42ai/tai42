@@ -28,7 +28,6 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult, LLMResult
-from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from opentelemetry.sdk.trace import ReadableSpan
 from pydantic import PrivateAttr
@@ -53,6 +52,7 @@ from tai42_agents.voting_agent.agent import VotingAgent
 from tai42_agents.voting_agent.model import VoterSpec
 from tai42_agents.vqa_agent import VqaAgent
 
+from ._client_tool import client_tool
 from ._graph_support import invoke_tools_agent
 from .conftest import RecordingMonitoringWriter
 
@@ -432,7 +432,7 @@ def test_tools_agent_records_each_message_once_and_every_chain_record_resolves(
     def echo(n: int) -> str:
         return _marker("RESULT", n)
 
-    tool = StructuredTool.from_function(echo, name="echo", description="Return the n-th result marker.")
+    tool = client_tool("echo", echo, description="Return the n-th result marker.")
     asyncio.run(invoke_tools_agent(system_message="sys", user_message=["start"], tools=[tool]))
 
     spans = _writer().spans()

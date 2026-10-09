@@ -31,6 +31,7 @@ from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents._internal.usage import AgentInvokeResult
 
+from ._client_tool import FakeClientTool, client_tool
 from ._graph_support import invoke_tools_agent
 from .conftest import fake_run_trace
 
@@ -85,6 +86,13 @@ def _loop_tool() -> StructuredTool:
         return "again"
 
     return StructuredTool.from_function(func=None, coroutine=loop, name="loop", description="loops")
+
+
+def _loop_handle() -> FakeClientTool:
+    async def loop() -> str:
+        return "again"
+
+    return client_tool("loop", loop, description="loops")
 
 
 def _compile(model: BaseChatModel, tools: list[StructuredTool], schema: Any) -> tuple[Any, Any]:
@@ -222,7 +230,7 @@ def test_invoke_face_returns_recursion_outcome(monkeypatch: pytest.MonkeyPatch) 
     _patch_invoke_seams(monkeypatch, model, recursion_limit=4)
 
     result = asyncio.run(
-        invoke_tools_agent(system_message="", user_message=["go"], tools=[_loop_tool()], response_format=_SCHEMA)
+        invoke_tools_agent(system_message="", user_message=["go"], tools=[_loop_handle()], response_format=_SCHEMA)
     )
 
     assert isinstance(result.outcome, RecursionLimitFinal)

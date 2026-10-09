@@ -13,11 +13,12 @@ sequence. The tests assert registration end-to-end and the exact event stream.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 from pydantic import BaseModel
 from tai42_contract.agent import (
+    AddressedMemory,
     Agent,
     MessageDelta,
     MessageFinal,
@@ -42,6 +43,10 @@ class FakeStreamingAgent(Agent):
     tool_name = AGENT_NAME
     tool_description = "Test-only agent that streams a scripted event sequence."
     ToolInput = FakeStreamInput
+
+    @classmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        return AddressedMemory()
 
     async def run(self, **kwargs: Any) -> Any:
         return await self._drain(self.astream(**kwargs))

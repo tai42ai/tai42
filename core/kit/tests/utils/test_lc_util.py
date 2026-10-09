@@ -9,7 +9,9 @@ pytest.importorskip("langchain_core")
 
 from fastmcp.client import Client
 from langchain_core.tools import StructuredTool
+from tai42_contract.agent import TOOL_NAME_MAX_LEN
 
+from tai42_kit.llm import ToolNameTooLongError
 from tai42_kit.utils.lc.lc_util import mcp_tool_to_lc_tool, mcp_tools_to_lc_tools
 
 
@@ -72,8 +74,8 @@ async def test_tool_call_passes_configured_call_timeout():
 
 
 def test_overlong_name_raises():
-    with pytest.raises(ValueError, match="64-character limit"):
-        mcp_tool_to_lc_tool(_as_client(_FakeClient()), _mcp_tool("n" * 65))
+    with pytest.raises(ToolNameTooLongError, match=f"at most {TOOL_NAME_MAX_LEN}"):
+        mcp_tool_to_lc_tool(_as_client(_FakeClient()), _mcp_tool("n" * (TOOL_NAME_MAX_LEN + 1)))
 
 
 async def test_tools_to_lc_tools_returns_all_when_no_filter():

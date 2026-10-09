@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
-from tai42_contract.agent import Agent
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import policy as policy_module
@@ -60,7 +60,7 @@ class _RelayInput(BaseModel):
     user_message: str = ""
 
 
-class _RelayAgent(Agent):
+class _RelayAgent(MemorylessTestAgent):
     """A plain, non-asking agent — the bind gate reads its ``tool_names`` (none), so it binds freely."""
 
     tool_name = "relay"

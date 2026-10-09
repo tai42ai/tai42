@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute
 from tai42_contract.template import TemplatedText
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations import caps as caps_module
@@ -38,7 +39,7 @@ class _EchoInput(BaseModel):
     user_message: str = ""
 
 
-class RecordingAgent(Agent):
+class RecordingAgent(MemorylessTestAgent):
     tool_name = "echo"
     ToolInput = _EchoInput
 
@@ -58,7 +59,7 @@ class RecordingAgent(Agent):
         self.appended.append((thread_id, messages))
 
 
-class MemorylessAgent(Agent):
+class MemorylessAgent(MemorylessTestAgent):
     """An agent that leaves ``append_thread_messages`` the ABC default (raises
     ``NotImplementedError`` if ever called), so it holds no thread memory to feed."""
 

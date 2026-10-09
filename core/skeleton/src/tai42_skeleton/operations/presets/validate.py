@@ -8,6 +8,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+from tai42_contract.agent import PRESET_NAME_PATTERN
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.presets import PresetBody
 from tai42_contract.presets.errors import PresetNotFoundError
@@ -67,7 +68,7 @@ async def _validate_create(
     the real create's edge.
     """
     if not is_valid_preset_name(name):
-        return _verdict(f"invalid preset name {name!r}: must match ^[A-Za-z0-9_-]{{1,64}}$")
+        return _verdict(f"invalid preset name {name!r}: must match {PRESET_NAME_PATTERN}")
     if description is not None and not description.strip():
         return _verdict("a preset description must not be empty")
     mgr = instance.app.preset_manager

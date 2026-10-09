@@ -6,6 +6,7 @@ import logging
 import sys
 from typing import Any
 
+from tai42_contract.agent import PRESET_NAME_PATTERN
 from tai42_contract.presets.errors import (
     PresetExistsError,
     PresetNameConflictError,
@@ -136,7 +137,7 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     # current preset's state (a missing or quarantined or fenced preset still yields
     # 400, never 404/409/403).
     if not is_valid_preset_name(new_name):
-        raise BadRequestError(f"invalid preset name {new_name!r}: must match ^[A-Za-z0-9_-]{{1,64}}$")
+        raise BadRequestError(f"invalid preset name {new_name!r}: must match {PRESET_NAME_PATTERN}")
     # A no-op rename is a caller error, surfaced loudly — never a silent 200.
     if new_name == name:
         raise BadRequestError("new name must differ from the current name")

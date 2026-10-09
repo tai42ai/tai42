@@ -428,9 +428,10 @@ SUSPENDED_INTERACTION_MARKER_KEY: Final[str] = "tai42:suspended_interaction"
 def suspended_interaction_marker(
     interaction_id: str,
     expiry_at: datetime | None,
-    resume_owner: str | None = None,
-    interaction_ids: list[str] | None = None,
-    caller_interaction_ids: list[str] | None = None,
+    resume_owner: str | None,
+    *,
+    interaction_ids: list[str],
+    caller_interaction_ids: list[str],
 ) -> dict[str, Any]:
     """Build the reserved marker dict a platform-produced async park returns in place of an answer.
 
@@ -439,14 +440,14 @@ def suspended_interaction_marker(
 
     ``resume_owner`` is the park's :attr:`SuspendedInteraction.resume_owner`, carried on the
     WIRE FORM so a driver that claims the park off a serialized tool result — never having
-    seen the sentinel object — can still check it owns it (:func:`assert_park_adoptable`). It
-    defaults to ``None``, which no bound driver may adopt: a marker built without an owner is
-    treated as a nested/foreign park rather than silently claimed.
+    seen the sentinel object — can still check it owns it (:func:`assert_park_adoptable`).
+    ``None`` names no owner, and no bound driver may adopt it: such a marker is treated as a
+    nested/foreign park rather than silently claimed.
 
-    ``interaction_ids`` are every ask this park represents (defaulting to the single
-    ``interaction_id``) and ``caller_interaction_ids`` the subset addressed to the caller
-    (``to="caller"``); both ride the wire so a driver reading the marker off a serialized
-    tool result can MERGE them when it surfaces a whole super-step at one tool face.
+    ``interaction_ids`` are every ask this park represents and ``caller_interaction_ids`` the
+    subset addressed to the caller (``to="caller"``); both ride the wire so a driver reading
+    the marker off a serialized tool result can MERGE them when it surfaces a whole super-step
+    at one tool face.
 
     Disclosure: the ``resume_owner`` field rides the MCP wire wherever a park sentinel is
     serialized, so it exposes an internal resume-tool NAME to the caller. That caller already
@@ -458,10 +459,17 @@ def suspended_interaction_marker(
             "interaction_id": interaction_id,
             "expiry_at": expiry_at.isoformat() if expiry_at is not None else None,
             "resume_owner": resume_owner,
-            "interaction_ids": list(interaction_ids) if interaction_ids else [interaction_id],
-            "caller_interaction_ids": list(caller_interaction_ids) if caller_interaction_ids else [],
+            "interaction_ids": list(interaction_ids),
+            "caller_interaction_ids": list(caller_interaction_ids),
         }
     }
+
+
+class MalformedParkMarkerError(ValueError):
+    """A park marker names an interaction but lacks a valid ``interaction_ids`` / ``caller_interaction_ids`` list.
+
+    Such a marker cannot say which of its asks address the caller, so it is never read as a park.
+    """
 
 
 def read_suspended_interaction_marker(content: Any) -> dict[str, Any] | None:
@@ -471,21 +479,14 @@ def read_suspended_interaction_marker(content: Any) -> dict[str, Any] | None:
     resuming driver may see the marker as either the live dict or its JSON string;
     both are recognized. A ``str`` that is not JSON, or a JSON value without the
     reserved key, is a normal (non-park) result and yields ``None``. Returns the
-    payload — which always carries an ``interaction_id`` and MAY include ``expiry_at``
-    and ``resume_owner`` — when a well-formed marker is present.
+    payload — ``interaction_id``, ``interaction_ids``, ``caller_interaction_ids``,
+    ``expiry_at`` and ``resume_owner`` — when a well-formed marker is present.
 
-    The payload is UNTRUSTED: it arrives as tool-result content, which a model can also
-    author. The reserved key alone is not enough — the value under it is SHAPE-CHECKED here,
-    so a payload that is not a dict, or one carrying no string ``interaction_id`` (``{}``, a
-    bare string, an owner-only object a model shaped), yields ``None`` rather than a malformed
-    dict a caller would ``KeyError`` on and abort the run over. A park with no valid interaction
-    id names nothing to resume, so it is not a park. The returned payload MAY also carry
-    ``interaction_ids`` / ``caller_interaction_ids`` (present on a platform-built marker); a
-    consumer reading them defaults to the single ``interaction_id`` when they are absent.
-    ``resume_owner`` is what makes an otherwise
-    well-formed marker checkable — a claimer passes it to :func:`assert_park_adoptable`, and a
-    marker carrying no owner (e.g. one a model shaped) names no driver entitled
-    to claim it, so it is refused there.
+    The payload is UNTRUSTED (tool-result content a model can also author), so it is
+    SHAPE-CHECKED: one that is not a dict or carries no string ``interaction_id`` names nothing to
+    resume and yields ``None``; one whose id lists are missing or not lists of strings raises
+    :class:`MalformedParkMarkerError`. A claimer passes ``resume_owner`` to
+    :func:`assert_park_adoptable`, which refuses a marker naming no owner.
     """
     value: Any = content
     if isinstance(value, str):
@@ -493,17 +494,22 @@ def read_suspended_interaction_marker(content: Any) -> dict[str, Any] | None:
             value = json.loads(value)
         except (ValueError, TypeError):
             return None
-    if isinstance(value, dict) and SUSPENDED_INTERACTION_MARKER_KEY in value:
-        # The payload is UNTRUSTED, so guard its real shape here — a non-dict payload, or one with
-        # no string ``interaction_id``, is not a park (it would abort a caller on ``KeyError`` at
-        # the reserved key).
-        marker = cast("object", value[SUSPENDED_INTERACTION_MARKER_KEY])
-        if not isinstance(marker, dict):
-            return None
-        if "interaction_id" not in marker or not isinstance(marker["interaction_id"], str):
-            return None
-        return cast("dict[str, Any]", marker)
-    return None
+    if not (isinstance(value, dict) and SUSPENDED_INTERACTION_MARKER_KEY in value):
+        return None
+    marker = cast("object", value[SUSPENDED_INTERACTION_MARKER_KEY])
+    if not isinstance(marker, dict):
+        return None
+    payload = cast("dict[str, Any]", marker)
+    interaction_id = payload.get("interaction_id")
+    if not isinstance(interaction_id, str):
+        return None
+    for field in ("interaction_ids", "caller_interaction_ids"):
+        ids = payload.get(field)
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in cast("list[object]", ids)):
+            raise MalformedParkMarkerError(
+                f"park marker for interaction {interaction_id!r} lacks a valid {field!r} list"
+            )
+    return payload
 
 
 class NestedParkOwnershipError(RuntimeError):

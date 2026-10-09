@@ -9,17 +9,15 @@ preset whose base the live registry cannot bind is quarantined by the preset reh
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any
 
-from tai42_contract.manifest import ExtensionElement
+from tai42_contract.agent import PRESET_NAME_PATTERN
 from tai42_contract.presets import PresetBody
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.json_schema_util import InvalidJsonSchemaError, check_json_schema
 from tai42_kit.utils.render import SchemaBodyError, resolve_schema_body
 
-from tai42_skeleton.extensions.registry import extension_name
 from tai42_skeleton.presets.manager import is_valid_preset_name
 from tai42_skeleton.versioning.restore_checks import register_restore_check
 
@@ -31,17 +29,13 @@ class PresetDefinitionError(ValueError):
     """A preset body the document rules refuse; the message is the refusal a door answers with."""
 
 
-async def output_schema_body_error(
-    output_schema: TemplatedText | dict[str, Any] | None,
-    extensions: Sequence[Sequence[ExtensionElement]],
-) -> str | None:
+async def output_schema_body_error(output_schema: TemplatedText | dict[str, Any] | None) -> str | None:
     """The first violation of an ``output_schema`` judged on the body alone, or ``None`` when unset or valid.
 
     Rejects, in order: a by-id schema whose stored resource cannot be rendered or does not render
     to a JSON object (the ``TemplatedText | dict`` union is resolved the same way the bake
     resolves it); a schema that fails the draft-2020-12 meta-schema; a non-object schema (both
-    dispatch paths require an object root); a clash with an explicit ``output_schema`` extension
-    entry (the shape declared in two places).
+    dispatch paths require an object root).
     """
     if output_schema is None:
         return None
@@ -57,13 +51,6 @@ async def output_schema_body_error(
         return f"output_schema is not a valid JSON Schema: {exc}"
     if resolved.get("type") != "object":
         return 'output_schema must be an object schema ("type": "object")'
-    for combo in extensions:
-        for element in combo:
-            if extension_name(element) == "output_schema":
-                return (
-                    "output_schema field conflicts with an explicit 'output_schema' extension entry; "
-                    "declare the output shape in exactly one place"
-                )
     return None
 
 
@@ -77,8 +64,8 @@ async def check_preset_body(body: PresetBody, *, name: str, attach: bool) -> Non
     raises them, for the caller to classify by type.
     """
     if not is_valid_preset_name(name):
-        raise PresetDefinitionError(f"invalid preset name {name!r}: must match ^[A-Za-z0-9_-]{{1,64}}$")
-    schema_error = await output_schema_body_error(body.output_schema, body.extensions)
+        raise PresetDefinitionError(f"invalid preset name {name!r}: must match {PRESET_NAME_PATTERN}")
+    schema_error = await output_schema_body_error(body.output_schema)
     if schema_error is not None:
         raise PresetDefinitionError(schema_error)
     try:

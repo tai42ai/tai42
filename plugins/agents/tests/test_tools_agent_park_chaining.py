@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 from fakeredis import aioredis
 from langchain_core.messages import AIMessage
-from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.interactions import (
@@ -34,6 +33,7 @@ from tai42_contract.template import TemplatedText
 from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome
 from tai42_kit.interactions.park_index import DriveInProgressError, ResolutionRecord, superstep_id
 from tai42_kit.settings import reset_all_settings
+from tests._client_tool import client_tool
 from tests._tools_agent_park_support import (
     ScriptedChatModel,
     _agent,
@@ -624,12 +624,12 @@ class _RoutingRecordingAsk(_AskStandIn):
     def tool(self) -> Any:
         inner = super().tool()
 
-        def ask() -> dict[str, Any]:
+        def ask() -> Any:
             routing = get_chained_resume()
             self.seen_chain_keys.append(None if routing is None else routing.chain_key)
-            return inner.func()  # type: ignore[misc]
+            return inner.body()
 
-        return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
+        return client_tool("ask", ask, description="Ask the user and park.")
 
 
 class _ProbeChainDeliver:

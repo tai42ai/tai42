@@ -44,7 +44,7 @@ from tai42_contract.template import TemplatedText
 
 from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, collect_pending_interrupts
 from tai42_agents._internal.park.drive import _park_interactions
-from tai42_agents._internal.park.middleware import AsyncParkMiddleware, resuming_park_interaction_ids
+from tai42_agents._internal.park.middleware import AsyncParkMiddleware
 from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
 
 
@@ -97,7 +97,13 @@ class _CountingAsk:
     def tool(self) -> StructuredTool:
         def ask() -> dict[str, Any]:
             self.calls += 1
-            return suspended_interaction_marker(self._interaction_id, self._expiry_at, get_resume_continuation_tool())
+            return suspended_interaction_marker(
+                self._interaction_id,
+                self._expiry_at,
+                get_resume_continuation_tool(),
+                interaction_ids=[self._interaction_id],
+                caller_interaction_ids=[],
+            )
 
         return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
 
@@ -150,9 +156,8 @@ def test_park_then_answer_runs_ask_exactly_once() -> None:
     assert tool_messages[-1].content == "the answer"
 
 
-def _legacy_park(interaction_id: str = "i1") -> dict[str, Any]:
-    """A scanned park for a legacy TWO-KEY wire marker (no resume_owner), as ``_scan_parks``
-    surfaces it — standing in for a park minted by a released predecessor."""
+def _ownerless_park(interaction_id: str = "i1") -> dict[str, Any]:
+    """A scanned park whose wire marker names no resume owner, as ``_scan_parks`` surfaces it."""
     return {
         "message_id": "m1",
         "tool_call_id": "c1",
@@ -160,51 +165,45 @@ def _legacy_park(interaction_id: str = "i1") -> dict[str, Any]:
         "interaction_id": interaction_id,
         "expiry_at": None,
         "resume_owner": None,
+        "caller_interaction_ids": [],
     }
 
 
-def test_a_legacy_ownerless_park_is_claimable_only_while_the_driver_resumes_it() -> None:
-    # A park written by a RELEASED predecessor carries no ``resume_owner`` on its wire
-    # marker. Replayed through the new middleware it would be refused — its answer dropped and the
-    # operator's ``Command(resume=...)`` discarded. The resuming driver names the interactions it
-    # is delivering answers for (``resuming_park_interaction_ids``, bound by
-    # ``_drive_completed_barrier``), so the claim check adopts the ownerless in-flight park.
+def test_an_ownerless_park_is_refused_at_the_claim_point() -> None:
+    # A marker naming no owner names no driver entitled to claim it: it is refused with a
+    # model-visible error ToolMessage, never claimed.
     from tai42_agents._internal.park.middleware import _partition_claimable
 
-    # Not resuming (a fresh pass): the ownerless legacy marker is refused, so its answer would drop.
-    claimable, refusals = _partition_claimable([_legacy_park()])
+    claimable, refusals = _partition_claimable([_ownerless_park()])
     assert claimable == []
     assert len(refusals) == 1
     assert refusals[0].status == "error"
 
-    # Resuming THIS interaction: the driver names it, so the same ownerless marker is claimable and
-    # rides the resume to have its answer substituted.
-    with resuming_park_interaction_ids(frozenset({"i1"})):
-        claimable, refusals = _partition_claimable([_legacy_park()])
-    assert refusals == []
-    assert [p["interaction_id"] for p in claimable] == ["i1"]
 
+def test_a_marker_lacking_its_id_lists_is_refused_never_parked(caplog: pytest.LogCaptureFixture) -> None:
+    # Tool-result content naming an interaction under the reserved key but missing an id list
+    # cannot say which of its asks address the caller. The hook answers it with a model-visible
+    # error ToolMessage and logs it at ERROR: never a park, never the raw marker as the answer.
+    import logging
 
-def test_nested_dispatch_does_not_inherit_the_parents_resuming_set() -> None:
-    # A nested tool dispatch must NOT inherit the PARENT run's resuming-park ids. Those ids are the
-    # parent's claim-point binding; a nested run that saw them would adopt an OWNERLESS marker that
-    # merely carries one of the parent's resuming ids (a forged/relayed park), claiming a park it
-    # does not own. ``nested_tool_dispatch`` clears the resuming set at the dispatch seam, symmetric
-    # with the completion-address clearing already there.
-    from tai42_agents._internal.nested_dispatch import nested_tool_dispatch
-    from tai42_agents._internal.park.middleware import _partition_claimable
+    from langchain_core.messages import ToolMessage
 
-    with resuming_park_interaction_ids(frozenset({"i-parent"})):
-        # In the parent's resume scope the parent's own in-flight (ownerless) park is claimable.
-        claimable, _ = _partition_claimable([_legacy_park("i-parent")])
-        assert [p["interaction_id"] for p in claimable] == ["i-parent"]
-        # Inside a nested dispatch the parent's resuming set is gone, so the SAME ownerless marker
-        # bearing the parent's id is refused rather than claimed.
-        with nested_tool_dispatch():
-            claimable, refusals = _partition_claimable([_legacy_park("i-parent")])
-        assert claimable == []
-        assert len(refusals) == 1
-        assert refusals[0].status == "error"
+    from tai42_agents._internal.park.middleware import _park_or_resume
+
+    content = json.dumps({SUSPENDED_INTERACTION_MARKER_KEY: {"interaction_id": "i1", "resume_owner": "agent_resume"}})
+    messages = [
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "ask", "args": {}}]),
+        ToolMessage(content=content, tool_call_id="c1", name="ask", id="m1"),
+    ]
+    with caplog.at_level(logging.ERROR, logger="tai42_agents._internal.park.middleware"):
+        update = _park_or_resume(messages)
+    assert update is not None
+    (refusal,) = update["messages"]
+    assert refusal.id == "m1"
+    assert refusal.status == "error"
+    assert "lacks a valid 'interaction_ids' list" in refusal.content
+    assert SUSPENDED_INTERACTION_MARKER_KEY not in refusal.content
+    assert any("refusing a malformed park marker on tool call c1" in r.getMessage() for r in caplog.records)
 
 
 def test_park_then_expiry_feeds_the_expiry_marker() -> None:
@@ -230,10 +229,14 @@ def test_two_siblings_park_in_one_superstep_and_resume_together() -> None:
 
     def ask_a() -> dict[str, Any]:
         ask1.calls += 1
-        return suspended_interaction_marker("iA", None, get_resume_continuation_tool())
+        return suspended_interaction_marker(
+            "iA", None, get_resume_continuation_tool(), interaction_ids=["iA"], caller_interaction_ids=[]
+        )
 
     def ask_b() -> dict[str, Any]:
-        return suspended_interaction_marker("iB", None, get_resume_continuation_tool())
+        return suspended_interaction_marker(
+            "iB", None, get_resume_continuation_tool(), interaction_ids=["iB"], caller_interaction_ids=[]
+        )
 
     tools = [
         StructuredTool.from_function(ask_a, name="ask_a", description="a"),
@@ -279,11 +282,15 @@ def test_mixed_superstep_parks_the_owned_and_refuses_the_foreign_in_one_step() -
     # ownership, not its neighbour's), and every rewrite/refusal is keyed by its own message id
     # through the messages replace-by-id reducer — so a foreign-first batch resolves identically.
     def ask_owned() -> dict[str, Any]:
-        return suspended_interaction_marker("i-owned", None, get_resume_continuation_tool())
+        return suspended_interaction_marker(
+            "i-owned", None, get_resume_continuation_tool(), interaction_ids=["i-owned"], caller_interaction_ids=[]
+        )
 
     def ask_foreign() -> dict[str, Any]:
         # A park raised under a DIFFERENT run's resume binding (a nested driver), relayed here.
-        return suspended_interaction_marker("i-foreign", None, "other_driver")
+        return suspended_interaction_marker(
+            "i-foreign", None, "other_driver", interaction_ids=["i-foreign"], caller_interaction_ids=[]
+        )
 
     tools = [
         StructuredTool.from_function(ask_owned, name="ask_owned", description="owned"),
@@ -419,7 +426,13 @@ def test_two_parallel_subagent_parks_surface_and_resume_by_id() -> None:
     def ask_seq() -> dict[str, Any]:
         interaction_id = seq[calls["n"]]
         calls["n"] += 1
-        return suspended_interaction_marker(interaction_id, None, get_resume_continuation_tool())
+        return suspended_interaction_marker(
+            interaction_id,
+            None,
+            get_resume_continuation_tool(),
+            interaction_ids=[interaction_id],
+            caller_interaction_ids=[],
+        )
 
     subagent = ResolvedSubAgentSpec(
         name="asker",
@@ -483,7 +496,9 @@ def test_marker_round_trips_through_msg_content_output() -> None:
     from tai42_contract.interactions import read_suspended_interaction_marker
 
     for expiry in (None, datetime(2030, 1, 1, tzinfo=UTC)):
-        marker = suspended_interaction_marker("i1", expiry, "agent_resume")
+        marker = suspended_interaction_marker(
+            "i1", expiry, "agent_resume", interaction_ids=["i1"], caller_interaction_ids=[]
+        )
         serialized = msg_content_output(marker)
         # The dict marker serializes to a JSON string content, and parses back intact.
         assert isinstance(serialized, str)
@@ -512,7 +527,11 @@ def test_a_failed_awaited_outcome_substitutes_a_model_visible_tool_error() -> No
     messages = [
         AIMessage(content="", tool_calls=[{"id": "c1", "name": "flow", "args": {}}]),
         ToolMessage(
-            content=json.dumps(suspended_interaction_marker(key, None, AGENT_RESUME_TOOL_NAME)),
+            content=json.dumps(
+                suspended_interaction_marker(
+                    key, None, AGENT_RESUME_TOOL_NAME, interaction_ids=[key], caller_interaction_ids=[]
+                )
+            ),
             tool_call_id="c1",
             name="flow",
             id="m1",
@@ -542,7 +561,11 @@ def test_an_ordinary_answer_still_substitutes_as_a_success_result() -> None:
     messages = [
         AIMessage(content="", tool_calls=[{"id": "c1", "name": "ask", "args": {}}]),
         ToolMessage(
-            content=json.dumps(suspended_interaction_marker("i1", None, AGENT_RESUME_TOOL_NAME)),
+            content=json.dumps(
+                suspended_interaction_marker(
+                    "i1", None, AGENT_RESUME_TOOL_NAME, interaction_ids=["i1"], caller_interaction_ids=[]
+                )
+            ),
             tool_call_id="c1",
             name="ask",
             id="m1",
@@ -587,7 +610,11 @@ def test_the_claim_point_claims_a_chained_park_like_any_other() -> None:
     messages = [
         AIMessage(content="", tool_calls=[{"id": "c1", "name": "flow", "args": {}}]),
         ToolMessage(
-            content=json.dumps(suspended_interaction_marker(key, None, AGENT_RESUME_TOOL_NAME)),
+            content=json.dumps(
+                suspended_interaction_marker(
+                    key, None, AGENT_RESUME_TOOL_NAME, interaction_ids=[key], caller_interaction_ids=[]
+                )
+            ),
             tool_call_id="c1",
             name="flow",
             id="m1",
@@ -613,7 +640,11 @@ def test_the_claim_point_still_refuses_a_park_owned_elsewhere() -> None:
     messages = [
         AIMessage(content="", tool_calls=[{"id": "c1", "name": "flow", "args": {}}]),
         ToolMessage(
-            content=json.dumps(suspended_interaction_marker("i-nested", None, "nested_driver_resume")),
+            content=json.dumps(
+                suspended_interaction_marker(
+                    "i-nested", None, "nested_driver_resume", interaction_ids=["i-nested"], caller_interaction_ids=[]
+                )
+            ),
             tool_call_id="c1",
             name="flow",
             id="m1",

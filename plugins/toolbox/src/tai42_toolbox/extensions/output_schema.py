@@ -40,7 +40,7 @@ def _configured_schema(config: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
-@tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="output_schema")
+@tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="output_schema", declares_output_schema=True)
 def output_schema(func, orig_name, orig_desc, config):
     """Branch ``func`` into an ``<orig_name>_output_schema`` variant gated on a JSON Schema.
 

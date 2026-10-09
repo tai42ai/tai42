@@ -44,7 +44,6 @@ from typing import Any
 from unittest import mock
 
 import pytest
-from langchain_core.tools import StructuredTool
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from tai42_contract.agent import Agent
@@ -53,6 +52,7 @@ from tai42_contract.connectors import ResolvedConnectionAuth
 from tai42_contract.monitoring import TraceContext
 from tai42_contract.sandbox import Sandbox, SandboxPolicy, SandboxUnavailableError
 from tai42_contract.template import TemplatedText
+from tai42_contract.tools import ClientTool
 from tai42_kit.llm import RunTrace
 from tai42_kit.monitoring.otel import OtelWriter
 from tai42_kit.monitoring.testing import InMemoryOtelReader
@@ -143,7 +143,7 @@ class RecordingMonitoringFacet:
         return self._backend
 
 
-class _SurfaceMap(dict[str, StructuredTool]):
+class _SurfaceMap(dict[str, ClientTool]):
     """A name-to-tool map that counts its own mutations, so the double's surface generation moves on each."""
 
     mutations = 0
@@ -151,7 +151,7 @@ class _SurfaceMap(dict[str, StructuredTool]):
     def _moved(self) -> None:
         self.mutations += 1
 
-    def __setitem__(self, key: str, value: StructuredTool) -> None:
+    def __setitem__(self, key: str, value: ClientTool) -> None:
         super().__setitem__(key, value)
         self._moved()
 
@@ -176,16 +176,16 @@ class _SurfaceMap(dict[str, StructuredTool]):
 class RecordingTools:
     """An ``AppTools`` impl backed by mutable maps a test populates.
 
-    ``client_tools`` maps a name to a live ``StructuredTool`` returned by
-    ``get_client_tools``; ``tool_runners`` maps a base-tool name to a callable
-    invoked by ``run_tool`` (used by preset binding). An unknown name raises a
-    ``RuntimeError`` carrying the tool name: the ``AppTools`` contract declares no
-    exception type for these calls, so this is the fake's own unknown-tool signal
+    ``client_tools`` maps a name to the :class:`~tai42_contract.tools.ClientTool` handle
+    ``get_client_tools`` returns (``tests._client_tool.client_tool`` builds one);
+    ``tool_runners`` maps a base-tool name to a callable invoked by ``run_tool`` (used by
+    preset binding). An unknown name raises a ``RuntimeError`` carrying the tool name: the
+    ``AppTools`` contract declares no exception type for these calls, so this is the fake's own unknown-tool signal
     and tests assert against it, not against any app-side exception hierarchy.
     """
 
     def __init__(self) -> None:
-        self.client_tools: dict[str, StructuredTool] = _SurfaceMap()
+        self.client_tools: dict[str, ClientTool] = _SurfaceMap()
         self._registrations = 0
         self.tool_runners: dict[str, Callable[..., Any]] = {}
         self.registered_tools: dict[str, Callable[..., Any]] = {}
@@ -220,7 +220,7 @@ class RecordingTools:
         mutations = client_tools.mutations if isinstance(client_tools, _SurfaceMap) else 0
         return self._registrations + mutations
 
-    async def get_client_tools(self, names: list[str] | None = None) -> list[StructuredTool]:
+    async def get_client_tools(self, names: list[str] | None = None) -> list[ClientTool]:
         if names is None:
             return list(self.client_tools.values())
         missing = [name for name in names if name not in self.client_tools]
