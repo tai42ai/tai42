@@ -99,6 +99,8 @@ async def test_version_probes_and_scalars(pg: FakeStatesPg, store: PostgresState
     assert await store.declaration_version("absent") is None
     assert await store.declaration_scalars("alerts") == (_version(pg), ["thread"], "thread")
     assert await store.declaration_scalars("absent") is None
+    assert await store.declaration_versions(["absent", "alerts"]) == {"alerts": _version(pg)}
+    assert await store.declaration_versions([]) == {}
 
 
 @pytest.fixture

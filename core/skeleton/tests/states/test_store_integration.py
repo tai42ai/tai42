@@ -574,6 +574,25 @@ async def test_a_deleted_and_recreated_row_never_repeats_its_version(
     assert template_again > template_first
 
 
+async def test_every_named_declarations_version_reads_in_one_statement(
+    real_store: tuple[PostgresStatesStore, str],
+) -> None:
+    store, state = real_store
+    other = state + "_other"
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+    await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
+    await store.upsert_declaration(other, "", schema, ["thread"], "thread", None, effective_schema=schema)
+    try:
+        versions = await store.declaration_versions([state, other, state + "_absent"])
+        assert versions == {
+            state: await store.declaration_version(state),
+            other: await store.declaration_version(other),
+        }
+        assert await store.declaration_versions([]) == {}
+    finally:
+        assert await store.delete_declaration(other)
+
+
 async def test_a_projected_write_lands_only_on_an_unmoved_base(real_store: tuple[PostgresStatesStore, str]) -> None:
     from tai42_skeleton.states.store.writes import ProjectedWrite
 

@@ -84,6 +84,9 @@ class FakeStatesStore:
         row = self.declarations.get(name)
         return None if row is None else row.get("version", 1)
 
+    async def declaration_versions(self, names):
+        return {name: self.declarations[name].get("version", 1) for name in names if name in self.declarations}
+
     async def declaration_scalars(self, name, *, conn=None):
         row = self.declarations.get(name)
         if row is None:

@@ -99,6 +99,7 @@ from tai42_contract.states.rendered import (
     RenderedTemplateDeclarations,
     RenderedTemplateJq,
     ResolvedTemplateJq,
+    TemplateJqReference,
 )
 
 __all__ = [
@@ -172,6 +173,7 @@ __all__ = [
     "TemplateExistsError",
     "TemplateInUseError",
     "TemplateJqApplyResult",
+    "TemplateJqReference",
     "TemplateJqResult",
     "TemplateValidationError",
     "UnitCommitResult",

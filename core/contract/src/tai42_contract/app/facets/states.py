@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from tai42_contract.states.errors import StateNotFoundError, ValueValidationError
 from tai42_contract.states.models import (
     ApplyResult,
     AttachBody,
@@ -26,7 +27,12 @@ from tai42_contract.states.models import (
     WritesPage,
 )
 from tai42_contract.states.pending import HeldPendingSave, PruneResult, StateDeclarationSaved
-from tai42_contract.states.rendered import RenderedAttachment, RenderedStateTemplate, ResolvedTemplateJq
+from tai42_contract.states.rendered import (
+    RenderedAttachment,
+    RenderedStateTemplate,
+    ResolvedTemplateJq,
+    TemplateJqReference,
+)
 
 
 @runtime_checkable
@@ -153,6 +159,20 @@ class AppStates(Protocol):
         program whose purpose is not ``purpose``, raises
         :class:`~tai42_contract.states.ValueValidationError`. The rule every ``template_jq`` door
         evaluates and applies by, so a reference accepted here resolves the same way at run time.
+        """
+        ...
+
+    async def resolve_template_jq_batch(
+        self, refs: Sequence[TemplateJqReference]
+    ) -> list[ResolvedTemplateJq | StateNotFoundError | ValueValidationError]:
+        """Resolve every reference in ``refs`` in one call, each by :meth:`resolve_template_jq`'s rules.
+
+        Returns one item per reference, in order: its resolution, or the
+        :class:`~tai42_contract.states.StateNotFoundError` /
+        :class:`~tai42_contract.states.ValueValidationError` :meth:`resolve_template_jq` raises for
+        it, with the same message, so one refused reference never hides the others' verdicts. Every
+        reference on one state resolves against one read of that state's catalog. Any other failure
+        raises for the whole call.
         """
         ...
 

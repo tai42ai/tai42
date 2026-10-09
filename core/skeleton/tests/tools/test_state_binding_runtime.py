@@ -4,7 +4,7 @@ update-after, and the save-time validate-and-attach seam — driven against a li
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any, Literal
 
@@ -24,6 +24,7 @@ from tai42_contract.states import (
     StateUpdate,
     SubjectCandidates,
     TemplateJqApplyResult,
+    TemplateJqReference,
     TemplateJqResult,
     UnitCommitResult,
     WriteOrigin,
@@ -65,8 +66,8 @@ class FakeStates(_SubjectMixin):
     """The subset of the ``states`` facet the binding runtime calls.
 
     ``resolve_subject`` is the platform's own resolver over the fake's declaration and ambient
-    context; ``resolve_template_jq`` picks through the platform's selection rule over the fake's
-    attached and declared templates.
+    context; ``resolve_template_jq_batch`` answers each reference through the platform's selection
+    rule over the fake's attached and declared templates.
     """
 
     def __init__(
@@ -87,7 +88,7 @@ class FakeStates(_SubjectMixin):
         self.enqueue_batch_calls: list[list[StateBatchWrite]] = []
         self.read_calls: list[tuple[str, StateSubject]] = []
         self.attached_now: list[tuple[str, str, list[str]]] = []
-        self.resolve_tjq_calls: list[tuple[str, str, str, list[str]]] = []
+        self.resolve_tjq_batches: list[list[tuple[str, str, str, list[str]]]] = []
         self._store = _ScalarStore()  # type: ignore[assignment]
 
     @staticmethod
@@ -97,15 +98,21 @@ class FakeStates(_SubjectMixin):
     def context(self) -> StateContext | None:
         return self._ctx
 
-    async def resolve_template_jq(
-        self,
-        state: str,
-        name: str,
-        *,
-        purpose: Literal["input", "update"],
-        declared: Collection[str] = (),
+    async def resolve_template_jq_batch(
+        self, refs: Sequence[TemplateJqReference]
+    ) -> list[ResolvedTemplateJq | StateNotFoundError | ValueValidationError]:
+        self.resolve_tjq_batches.append([(ref.state, ref.name, ref.purpose, list(ref.declared)) for ref in refs])
+        results: list[ResolvedTemplateJq | StateNotFoundError | ValueValidationError] = []
+        for ref in refs:
+            try:
+                results.append(self._resolve(ref.state, ref.name, ref.purpose, ref.declared))
+            except (StateNotFoundError, ValueValidationError) as exc:
+                results.append(exc)
+        return results
+
+    def _resolve(
+        self, state: str, name: str, purpose: Literal["input", "update"], declared: Collection[str]
     ) -> ResolvedTemplateJq:
-        self.resolve_tjq_calls.append((state, name, purpose, list(declared)))
         attached = self._attached.get(state, [])
         names = [*attached, *(t for t in dict.fromkeys(declared) if t not in attached)]
         programs: list[tuple[str, Mapping[str, Any]]] = []
@@ -696,7 +703,7 @@ async def test_validate_binding_resolves_a_declared_template_without_attaching()
     assert states.attached_now == []  # dry run attaches nothing
 
 
-async def test_save_resolves_each_named_program_with_its_purpose_and_the_bindings_templates() -> None:
+async def test_save_resolves_every_named_program_in_one_call_with_its_purpose_and_the_bindings_templates() -> None:
     tpl = StateTemplateDocument.model_validate(
         {
             "name": "planner",
@@ -720,9 +727,8 @@ async def test_save_resolves_each_named_program_with_its_purpose_and_the_binding
         ]
     )
     await validate_binding(_app(states), b)
-    assert states.resolve_tjq_calls == [
-        ("status", "v", "input", ["planner"]),
-        ("status", "planner.put", "update", ["planner"]),
+    assert states.resolve_tjq_batches == [
+        [("status", "v", "input", ["planner"]), ("status", "planner.put", "update", ["planner"])]
     ]
 
 
@@ -873,6 +879,74 @@ async def test_named_injection_referencing_unknown_program_is_refused_at_save() 
     )
     with pytest.raises(StateNotFoundError):
         await validate_and_attach_binding(_app(states), b)
+
+
+async def test_save_resolves_one_batch_per_attached_state_and_none_for_a_state_without_named_programs() -> None:
+    tpl = StateTemplateDocument.model_validate(
+        {
+            "name": "planner",
+            "schema": {"type": "object"},
+            "template_jq": {
+                "v": {"purpose": "input", "jq": {"content": "."}},
+                "put": {"purpose": "update", "params": [], "writes": [], "jq": {"content": "[]"}},
+            },
+        }
+    )
+    states = FakeStates(attached={"status": ["planner"], "events": ["planner"]}, templates={"planner": tpl})
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content=".id"),
+                input_injections=[StateInjection(template_jq="v", into="x")],
+                updates=[StateUpdate(template_jq="put")],
+            ),
+            StateAttach(
+                state="relay",
+                subject_expr=TemplatedText(content=".id"),
+                input_injections=[StateInjection(jq=TemplatedText(content="."), into="y")],
+            ),
+            StateAttach(
+                state="events",
+                subject_expr=TemplatedText(content=".id"),
+                updates=[StateUpdate(template_jq="planner.put")],
+            ),
+        ]
+    )
+    await validate_and_attach_binding(_app(states), b)
+    assert states.resolve_tjq_batches == [
+        [("status", "v", "input", []), ("status", "put", "update", [])],
+        [("events", "planner.put", "update", [])],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("injections", "expected"),
+    [
+        # The refused named reference comes first: its refusal is the save's.
+        (
+            [StateInjection(template_jq="ghost", into="x"), StateInjection(jq=TemplatedText(content="(("), into="y")],
+            StateNotFoundError,
+        ),
+        # A bad custom jq comes first: its compile error is the save's, not the later slot's refusal.
+        (
+            [StateInjection(jq=TemplatedText(content="(("), into="y"), StateInjection(template_jq="ghost", into="x")],
+            ValueError,
+        ),
+    ],
+)
+async def test_save_refuses_at_the_first_failing_slot_in_slot_order(
+    injections: list[StateInjection], expected: type[Exception]
+) -> None:
+    tpl = StateTemplateDocument.model_validate({"name": "planner", "schema": {"type": "object"}, "template_jq": {}})
+    states = FakeStates(attached={"status": ["planner"]}, templates={"planner": tpl})
+    b = StateBinding(
+        states=[StateAttach(state="status", subject_expr=TemplatedText(content=".id"), input_injections=injections)]
+    )
+    with pytest.raises(expected) as excinfo:
+        await validate_and_attach_binding(_app(states), b)
+    assert type(excinfo.value) is expected
+    assert len(states.resolve_tjq_batches) == 1
 
 
 # -- by-id slots: render-then-compile at save --------------------------------

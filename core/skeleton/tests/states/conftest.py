@@ -356,6 +356,12 @@ def _decl_version(cur, pg, norm, params):
     cur._one = None if row is None else {"version": row["version"]}
 
 
+@_on(r"SELECT name, version FROM state_declarations WHERE name = ANY\(%s\)$")
+def _decl_versions(cur, pg, norm, params):
+    (names,) = params
+    cur._all = [{"name": n, "version": pg.declarations[n]["version"]} for n in names if n in pg.declarations]
+
+
 @_on(r"SELECT version, subject_kinds, default_subject_kind FROM state_declarations WHERE name = %s$")
 def _decl_scalars(cur, pg, norm, params):
     (name,) = params
