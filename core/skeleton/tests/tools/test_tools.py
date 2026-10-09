@@ -9,6 +9,7 @@ import mcp.types
 import pytest
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ValidationError
+from pydantic.experimental.missing_sentinel import MISSING
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 from tai42_kit.utils.data.json_schema_util import json_schema_to_pydantic_model
 
@@ -48,7 +49,7 @@ def test_registry_unregister_drops_tool():
 
 class _SampleInstance(Protocol):
     name: str
-    count: int | None
+    count: int
 
 
 def test_json_schema_to_pydantic_via_kit_util():
@@ -65,9 +66,15 @@ def test_json_schema_to_pydantic_via_kit_util():
     assert issubclass(model, BaseModel)
     # The model is built dynamically from the schema, so its fields aren't
     # statically known; narrow to the shape the schema declares.
-    instance = cast(_SampleInstance, model(name="x"))
+    built = model(name="x")
+    instance = cast(_SampleInstance, built)
     assert instance.name == "x"
-    assert instance.count is None
+    # ``count`` is optional and its type admits no null, so an omitted value is the
+    # MISSING sentinel (excluded from dumps), and an explicit null is refused.
+    assert instance.count is MISSING
+    assert built.model_dump() == {"name": "x"}
+    with pytest.raises(ValidationError):
+        model(name="x", count=None)
     with pytest.raises(ValidationError):
         model()  # ``name`` is required
 

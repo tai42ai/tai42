@@ -183,15 +183,36 @@ def test_build_signature_carries_field_default():
     assert sig.parameters["n"].default == 7
 
 
-def test_build_input_value_applies_alias_and_drops_unset():
-    class _M(BaseModel):
-        q: str = Field(alias="query")
-        n: int | None = None
+def _model_from_props(props: dict, required: list[str] | None = None):
+    # Build the input model through the production converter, so the test exercises
+    # the shape ``_build_input_value`` actually receives at runtime.
+    class _T:
+        name = "t"
+        description = "d"
+        inputSchema: ClassVar[dict] = {"type": "object", "properties": props, "required": required or []}
+        outputSchema: ClassVar[dict] = {}
 
-    # A usable alias is the exposed signature name, so callers pass by it; the
-    # dump emits the alias and drops the unset Optional ``n``.
-    out = _build_input_value(_M, query="hi")
+    return _build_input_model(_T(), schema_max_depth=6)
+
+
+def test_build_input_value_applies_alias_and_drops_unset():
+    model = _model_from_props(
+        {"query": {"type": "string"}, "n": {"type": "integer"}},
+        required=["query"],
+    )
+    # The dump emits each property by its JSON key and drops the unset optional ``n``
+    # (its value is the MISSING sentinel), so the forwarded call carries only ``query``.
+    out = _build_input_value(model, query="hi")
     assert out == {"query": "hi"}
+
+
+def test_build_input_value_forwards_explicit_null_for_a_nullable_arg():
+    # A child arg whose authored type admits null: an explicitly-passed ``None`` must
+    # reach the wire, not be silently dropped as ``exclude_none`` would.
+    model = _model_from_props({"n": {"type": ["string", "null"]}})
+    assert _build_input_value(model, n=None) == {"n": None}
+    # An omitted optional arg is absent (MISSING), so the child applies its own default.
+    assert _build_input_value(model) == {}
 
 
 def _tool_with_arg(arg_name: str):

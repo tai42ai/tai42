@@ -155,7 +155,11 @@ def _build_input_value(input_model: type[BaseModel], **kwargs):
         if exposed in kwargs:
             data[field.alias or field_name] = kwargs[exposed]
     input_instance = input_model.model_validate(data)
-    return input_instance.model_dump(exclude_none=True, by_alias=True)
+    # Dump by alias, keeping an explicitly-passed value — including a ``None`` for an
+    # arg whose type admits null — while an omitted optional (the MISSING sentinel) is
+    # excluded by pydantic. NOT ``exclude_none``, which would drop an explicit null and
+    # silently rewrite the call.
+    return input_instance.model_dump(by_alias=True)
 
 
 # -- Transport dispatch -------------------------------------------------------

@@ -196,6 +196,45 @@ def test_graph_pydantic_class_yields_an_instance_with_omitted_default(monkeypatc
     assert response.note == "default"
 
 
+# --- the shown contract equals the enforced contract --------------------------
+
+
+def _shown_properties(model: _ToolCallModel, schema: dict[str, Any]) -> dict[str, Any]:
+    strategy, _rail = structured_output_stack(cast(BaseChatModel, model), "openai", schema)
+    tool = convert_to_openai_tool(strategy.schema)
+    return tool["function"]["parameters"]["properties"]
+
+
+def test_shown_optional_property_has_no_null_member_or_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    _cap(monkeypatch, 3)
+    # The schema the model is SHOWN for an optional, non-nullable property must carry the
+    # bare type — no ``null`` member, no ``default`` inviting a null — so it matches the
+    # authored schema the rail enforces.
+    shown = _shown_properties(_ToolCallModel([{}]), _OPTIONAL_SCHEMA)
+    assert "anyOf" not in shown["s"]
+    assert "default" not in shown["s"]
+    assert shown["s"]["type"] == "string"
+
+
+@pytest.mark.parametrize(
+    ("payload", "accepted"),
+    [({"s": "hi"}, True), ({}, True), ({"s": None}, False), ({"s": 7}, False)],
+)
+def test_shown_contract_matches_the_rail_verdict(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any], accepted: bool
+) -> None:
+    # For each payload, acceptance under the SHOWN tool schema equals the rail's verdict:
+    # a null the rendering would invite is exactly a null the authored schema refuses.
+    import jsonschema
+
+    _cap(monkeypatch, 3)
+    strategy, _rail = structured_output_stack(cast(BaseChatModel, _ToolCallModel([{}])), "openai", _OPTIONAL_SCHEMA)
+    shown_schema = convert_to_openai_tool(strategy.schema)["function"]["parameters"]
+    shown_ok = next(iter(jsonschema.Draft202012Validator(shown_schema).iter_errors(payload)), None) is None
+    authored_ok = next(iter(jsonschema.Draft202012Validator(_OPTIONAL_SCHEMA).iter_errors(payload)), None) is None
+    assert shown_ok == authored_ok == accepted
+
+
 # --- the rail normalizes a pydantic structured_response to a dict --------------
 
 

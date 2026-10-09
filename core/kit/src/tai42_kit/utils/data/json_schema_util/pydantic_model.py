@@ -17,6 +17,7 @@ import re
 from typing import Annotated, Any, ForwardRef, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
+from pydantic.experimental.missing_sentinel import MISSING
 
 from tai42_kit.utils.data.json_schema_util.constraints import _map_json_type, _value_constraint_metadata
 
@@ -182,24 +183,32 @@ def _build_property_field(
 ) -> tuple[Any, Any]:
     """Build one property's ``(annotation, Field)`` pair.
 
-    The recursed model with its value constraints carried, the optional ``| None`` wrap, the default,
-    and the alias that keeps the original JSON key when the field name was sanitized.
+    The recursed model carries its value constraints and, for a property the author
+    typed as nullable, its ``| None``. A property absent from ``required`` may be
+    OMITTED, which JSON Schema expresses as neither required nor (on its own) nullable:
+    it is rendered as ``T | MISSING = MISSING`` so the schema the model is shown keeps
+    the bare type (no null member, no default) while an omitted value is the ``MISSING``
+    sentinel — excluded from every dump and never confused with a null the author's type
+    does not admit. An authored ``default`` keeps the property optional with that exact
+    default. The alias keeps the original JSON key when the field name was sanitized.
     """
     prop_model: Any = json_schema_to_pydantic_model(
         prop_schema, f"{model_name}_{prop_name}", parent_models, max_depth=max_depth, _depth=depth + 1
     )
 
-    # Carry the schema's value constraints as Annotated metadata on the
-    # property annotation BEFORE any ``| None`` wrap, so they survive the
-    # optional-property union into the re-derived schema and the coercion
-    # validator.
+    # Carry the schema's value constraints as Annotated metadata on the property
+    # annotation BEFORE the optional ``| MISSING`` union, so they survive into the
+    # re-derived schema and the coercion validator.
     metadata = _value_constraint_metadata(prop_schema)
     if metadata:
         prop_model = Annotated[prop_model, *metadata]
 
-    is_required = prop_name in required
-    default = ... if is_required else prop_schema.get("default")
-    annotation = prop_model if is_required else prop_model | None
+    if prop_name in required:
+        annotation, default = prop_model, ...
+    elif "default" in prop_schema:
+        annotation, default = prop_model, prop_schema["default"]
+    else:
+        annotation, default = prop_model | MISSING, MISSING
 
     sanitized_name = _sanitize_field_name(prop_name)
     alias = prop_name if sanitized_name != prop_name else None
