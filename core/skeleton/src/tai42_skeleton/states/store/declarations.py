@@ -66,6 +66,12 @@ class _DeclarationStore(_StoreBase):
             row = await cur.fetchone()
             return None if row is None else int(row["version"])
 
+    async def declaration_versions(self, names: Sequence[str]) -> dict[str, int]:
+        """Each declared name's row ``version`` in one statement; an undeclared name is absent from the result."""
+        async with self._read_cursor(None) as cur:
+            await cur.execute("SELECT name, version FROM state_declarations WHERE name = ANY(%s)", (list(names),))
+            return {row["name"]: int(row["version"]) for row in await cur.fetchall()}
+
     async def declaration_scalars(
         self, name: str, *, conn: AsyncConnection[Any] | None = None
     ) -> tuple[int, list[str], str] | None:

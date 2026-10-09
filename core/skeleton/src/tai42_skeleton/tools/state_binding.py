@@ -14,7 +14,7 @@ fails, a subject that cannot be resolved — each raises and the run's outcome c
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -22,10 +22,12 @@ from typing import TYPE_CHECKING, Any, Final
 
 from tai42_contract.states import (
     AttachBody,
+    ResolvedTemplateJq,
     StateAttach,
     StateBatchWrite,
     StateBinding,
     StateSubject,
+    TemplateJqReference,
     WriteOrigin,
 )
 from tai42_contract.states.errors import (
@@ -64,6 +66,10 @@ BINDING_REFUSALS: Final[frozenset[type[StatesError]]] = frozenset(
         AttachConflictError,
     }
 )
+
+
+# One named ``template_jq`` reference's answer from the batch resolver: its resolution or its refusal.
+type _Resolution = ResolvedTemplateJq | StateNotFoundError | ValueValidationError
 
 
 def is_binding_refusal(exc: BaseException) -> bool:
@@ -413,8 +419,37 @@ async def _validate_templates(app: TaiMCP, attach: StateAttach, *, do_attach: bo
             raise StateNotFoundError(f"template {template!r} to attach on state {attach.state!r} does not exist")
 
 
-async def _validate_injections(app: TaiMCP, attach: StateAttach) -> None:
-    """Compile each injection's custom jq, or resolve each named ``template_jq`` to an ``"input"`` program."""
+async def _resolve_named_references(app: TaiMCP, attach: StateAttach) -> Iterator[_Resolution]:
+    """Resolve every named ``template_jq`` of ``attach`` in ONE batch call, in slot order (injections, then updates).
+
+    Each reference carries its purpose (``"input"`` for an injection, ``"update"`` for an update) and
+    the attach's templates as ``declared``. The answer is one item per reference in the same order —
+    its resolution or its refusal — consumed by :func:`_next_resolution` as each slot is validated.
+    An attach with no named reference makes no call.
+    """
+    refs = [
+        TemplateJqReference(state=attach.state, name=injection.template_jq, purpose="input", declared=attach.templates)
+        for injection in attach.input_injections
+        if injection.template_jq is not None
+    ] + [
+        TemplateJqReference(state=attach.state, name=update.template_jq, purpose="update", declared=attach.templates)
+        for update in attach.updates
+        if update.template_jq is not None
+    ]
+    results: Sequence[_Resolution] = await app.states.resolve_template_jq_batch(refs) if refs else []
+    return iter(results)
+
+
+def _next_resolution(resolutions: Iterator[_Resolution]) -> ResolvedTemplateJq:
+    """The next named slot's resolution, raising its refusal at that slot so the save refuses in slot order."""
+    result = next(resolutions)
+    if isinstance(result, ResolvedTemplateJq):
+        return result
+    raise result
+
+
+async def _validate_injections(app: TaiMCP, attach: StateAttach, resolutions: Iterator[_Resolution]) -> None:
+    """Compile each injection's custom jq, or take each named ``template_jq``'s ``"input"`` resolution."""
     for injection in attach.input_injections:
         if injection.jq is not None:
             compile_check(
@@ -424,13 +459,11 @@ async def _validate_injections(app: TaiMCP, attach: StateAttach) -> None:
         else:
             if injection.template_jq is None:
                 raise AssertionError
-            await app.states.resolve_template_jq(
-                attach.state, injection.template_jq, purpose="input", declared=attach.templates
-            )
+            _next_resolution(resolutions)
 
 
-async def _validate_updates(app: TaiMCP, attach: StateAttach) -> None:
-    """Compile op_id/custom-jq, resolve each named update ``template_jq``, and enforce the adapter-params rule."""
+async def _validate_updates(app: TaiMCP, attach: StateAttach, resolutions: Iterator[_Resolution]) -> None:
+    """Compile op_id/custom-jq, take each named update's resolution, and enforce the adapter-params rule."""
     for update in attach.updates:
         if update.op_id is not None:
             compile_check(
@@ -445,9 +478,7 @@ async def _validate_updates(app: TaiMCP, attach: StateAttach) -> None:
         else:
             if update.template_jq is None:
                 raise AssertionError
-            program = await app.states.resolve_template_jq(
-                attach.state, update.template_jq, purpose="update", declared=attach.templates
-            )
+            program = _next_resolution(resolutions)
             if update.adapter is not None:
                 compile_check(
                     await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter),
@@ -465,12 +496,14 @@ async def _validate_binding(app: TaiMCP, binding: StateBinding, *, do_attach: bo
 
     With ``do_attach`` the named templates are attached idempotently (the SAVE seam); without
     it they are only verified to exist (the dry-run seam) — the one difference between the two
-    doors, so neither drifts from the other's verdict.
+    doors, so neither drifts from the other's verdict. Each attach's named ``template_jq``
+    references resolve in one batch call once its templates are attached (or verified).
     """
     for attach in binding.states:
         await _validate_templates(app, attach, do_attach=do_attach)
         compile_check(await _render_slot(app, f"subject_expr for state {attach.state!r}", attach.subject_expr))
         if attach.scope_expr is not None:
             compile_check(await _render_slot(app, f"scope_expr for state {attach.state!r}", attach.scope_expr))
-        await _validate_injections(app, attach)
-        await _validate_updates(app, attach)
+        resolutions = await _resolve_named_references(app, attach)
+        await _validate_injections(app, attach, resolutions)
+        await _validate_updates(app, attach, resolutions)

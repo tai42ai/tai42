@@ -12,6 +12,7 @@ from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal
 
 from psycopg import AsyncConnection
+from tai42_contract.states import TemplateJqReference
 from tai42_contract.states.errors import StateNotFoundError, ValueValidationError
 from tai42_contract.states.models import (
     CompletedOrigin,
@@ -86,13 +87,43 @@ class _TemplateJqMixin(_StatesServiceBase):
     ) -> ResolvedProgram:
         """Resolve the ``template_jq`` reference ``name`` on ``state`` at its current declaration version.
 
-        The rules are :meth:`_resolve_template_jq`'s; an undeclared state is a :class:`StateNotFoundError`.
+        :meth:`resolve_template_jq_batch` for the one reference, raising its refusal.
+        """
+        ref = TemplateJqReference(state=state, name=name, purpose=purpose, declared=list(declared))
+        (result,) = await self.resolve_template_jq_batch([ref])
+        if isinstance(result, (StateNotFoundError, ValueValidationError)):
+            raise result
+        return result
+
+    async def resolve_template_jq_batch(
+        self, refs: Sequence[TemplateJqReference]
+    ) -> list[ResolvedProgram | StateNotFoundError | ValueValidationError]:
+        """Resolve every reference in ``refs``, each at its state's current declaration version.
+
+        One statement reads every named state's version; each reference then resolves by
+        :meth:`_resolve_template_jq`'s rules on that version's catalog snapshot. Returns one item per
+        reference, in order: the resolved program, or the :class:`StateNotFoundError` /
+        :class:`ValueValidationError` refusing it (an undeclared state is a :class:`StateNotFoundError`).
         """
         self._ensure_available()
-        version = await self._store.declaration_version(state)
-        if version is None:
-            raise StateNotFoundError(f"no state declared as {state!r}")
-        return await self._resolve_template_jq(state, version, name, purpose=purpose, declared=declared)
+        if not refs:
+            return []
+        versions = await self._store.declaration_versions(sorted({ref.state for ref in refs}))
+        results: list[ResolvedProgram | StateNotFoundError | ValueValidationError] = []
+        for ref in refs:
+            version = versions.get(ref.state)
+            if version is None:
+                results.append(StateNotFoundError(f"no state declared as {ref.state!r}"))
+                continue
+            try:
+                results.append(
+                    await self._resolve_template_jq(
+                        ref.state, version, ref.name, purpose=ref.purpose, declared=ref.declared
+                    )
+                )
+            except (StateNotFoundError, ValueValidationError) as exc:
+                results.append(exc)
+        return results
 
     async def _resolve_template_jq(
         self,

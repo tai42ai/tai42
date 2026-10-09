@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from tai42_contract.states import ResolvedTemplateJq
+from tai42_contract.states.errors import StateNotFoundError, ValueValidationError
 
 from .base import _Facet
 
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
         StateTemplateDocument,
         StateUnit,
         TemplateJqApplyResult,
+        TemplateJqReference,
         TemplateJqResult,
         UnitCommitResult,
         WriteOrigin,
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
 
     from tai42_skeleton.states.outbox.models import OutboxRow
     from tai42_skeleton.states.service.pending_saves import RetryOutcome
+    from tai42_skeleton.states.service.template_jq import ResolvedProgram
 
 
 class StatesFacet(_Facet):
@@ -137,21 +140,20 @@ class StatesFacet(_Facet):
 
         ``declared`` templates not attached yet take part as if attached at ``[<template>]``.
         """
-        (
-            template,
-            _version,
-            path,
-            _parameters,
-            _declarations,
-            program,
-        ) = await self._app._states_service.resolve_template_jq(state, name, purpose=purpose, declared=declared)
-        return ResolvedTemplateJq(
-            template=template.name,
-            program=program,
-            purpose=purpose,
-            params=list(template.template_jq[program].params),
-            path=path,
-        )
+        program = await self._app._states_service.resolve_template_jq(state, name, purpose=purpose, declared=declared)
+        return _served_resolution(program, purpose)
+
+    async def resolve_template_jq_batch(
+        self, refs: Sequence[TemplateJqReference]
+    ) -> list[ResolvedTemplateJq | StateNotFoundError | ValueValidationError]:
+        """Resolve every reference in ``refs`` in one call: each item its resolution or the refusal for it."""
+        results = await self._app._states_service.resolve_template_jq_batch(refs)
+        return [
+            result
+            if isinstance(result, (StateNotFoundError, ValueValidationError))
+            else _served_resolution(result, ref.purpose)
+            for ref, result in zip(refs, results, strict=True)
+        ]
 
     async def resolve_subject(self, state: str, ref: str | Mapping[str, Any] | None) -> StateSubject:
         """Resolve the subject reference ``ref`` for ``state``: a full mapping, ``{kind, key}``, a key or ``None``."""
@@ -378,3 +380,11 @@ class StatesFacet(_Facet):
     def register_attach_reconciler(self, reconciler: AttachReconciler) -> None:
         """Register ``reconciler`` to run when an attachment changes."""
         return self._app._states_service.register_attach_reconciler(reconciler)
+
+
+def _served_resolution(program: ResolvedProgram, purpose: Literal["input", "update"]) -> ResolvedTemplateJq:
+    """The served model of a resolved ``template_jq`` program."""
+    template, _version, path, _parameters, _declarations, name = program
+    return ResolvedTemplateJq(
+        template=template.name, program=name, purpose=purpose, params=list(template.template_jq[name].params), path=path
+    )

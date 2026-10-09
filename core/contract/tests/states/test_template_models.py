@@ -24,6 +24,7 @@ from tai42_contract.states import (
     StateTemplateParameter,
     StateTemplateTrace,
     StateUnitClosedError,
+    TemplateJqReference,
     path_overlaps,
 )
 
@@ -223,6 +224,29 @@ def test_resolved_template_jq_round_trips_and_is_frozen() -> None:
 def test_resolved_template_jq_refuses(raw: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         ResolvedTemplateJq.model_validate(raw)
+
+
+def test_template_jq_reference_round_trips_and_is_frozen() -> None:
+    ref = TemplateJqReference(state="probe-state", name="alpha.count", purpose="input", declared=["alpha"])
+    assert TemplateJqReference.model_validate(ref.model_dump()) == ref
+    assert TemplateJqReference(state="probe-state", name="count", purpose="update").declared == []
+    with pytest.raises(ValidationError):
+        ref.name = "other"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"state": "probe-state", "name": "count", "purpose": "read"},
+        {"state": "probe-state", "name": "count", "purpose": "input", "extra": 1},
+        {"state": "probe-state", "purpose": "input"},
+        {"name": "count", "purpose": "input"},
+        {"state": "probe-state", "name": "count", "purpose": "input", "declared": "alpha"},
+    ],
+)
+def test_template_jq_reference_refuses(raw: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        TemplateJqReference.model_validate(raw)
 
 
 @pytest.mark.parametrize(

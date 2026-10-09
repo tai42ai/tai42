@@ -92,3 +92,17 @@ class ResolvedTemplateJq(BaseModel):
     purpose: Literal["input", "update"]
     params: list[str]
     path: list[PathSegment]
+
+
+class TemplateJqReference(BaseModel):
+    """A ``template_jq`` reference to resolve on ``state``: the reference ``name``, the ``purpose`` it is used for.
+
+    ``declared`` names templates the caller is about to attach (see ``AppStates.resolve_template_jq``).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state: str
+    name: str
+    purpose: Literal["input", "update"]
+    declared: list[str] = Field(default_factory=list)
