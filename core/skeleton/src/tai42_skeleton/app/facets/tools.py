@@ -83,6 +83,10 @@ class ToolsFacet(_Facet):
         """The door ``extras`` keys tool ``name`` declares reading (a preset inherits its base tool's)."""
         return await self._app._tool_binding.declared_extras(name)
 
+    async def pauses(self, key: str) -> bool:
+        """Whether a dispatch of ``key`` can return a park signal (a declared tool, its presets and branches)."""
+        return await self._app._tool_binding.pauses(key)
+
     def remove_tool(self, name: str) -> None:
         """Unregister the tool named ``name``."""
         return self._app._tool_binding.remove_tool(name)

@@ -38,7 +38,7 @@ _JQ_EXPRESSION_PARAM = Annotated[
 ]
 
 
-@tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="chain")
+@tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="chain", pauses=True)
 def chain(func, orig_name, orig_desc):
     """Branch ``func`` into a chained ``<orig_name>_chain`` variant."""
     sig = inspect.signature(func)

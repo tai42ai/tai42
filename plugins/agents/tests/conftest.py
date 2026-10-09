@@ -189,6 +189,8 @@ class RecordingTools:
         self._registrations = 0
         self.tool_runners: dict[str, Callable[..., Any]] = {}
         self.registered_tools: dict[str, Callable[..., Any]] = {}
+        # Each registered tool's declared ``meta``, by its bound name.
+        self.registered_meta: dict[str, dict[str, Any]] = {}
         # Every ``run_tool`` dispatch, so a test can assert a cross-driver chain fire and the
         # ancestor chain it continued.
         self.run_tool_calls: list[dict[str, Any]] = []
@@ -205,6 +207,7 @@ class RecordingTools:
             name = kwargs.get("name") or getattr(func, "__name__", repr(func))
             self.registered_tools[name] = func
             self._registrations += 1
+            self.registered_meta[name] = dict(kwargs.get("meta") or {})
             return func
 
         if args and callable(args[0]):

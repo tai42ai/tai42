@@ -19,7 +19,7 @@ from tai42_kit.utils.data import makefun_func_name, snake_to_pascal
 from tai42_toolbox._internal.extensions.batch_executor import execute_batch
 
 
-@tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="batch")
+@tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="batch", pauses=True)
 def batch(func, orig_name, orig_desc):
     """Branch ``func`` into a batched ``<orig_name>_batch`` variant."""
     type_hints = inspect.get_annotations(func, eval_str=True)

@@ -8,6 +8,7 @@ import json
 import os
 
 from tai42_contract.app import tai42_app
+from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
@@ -33,7 +34,7 @@ _TOOL_TARGET_PARK_EXPIRY_SECONDS = 3600.0
 _TOOL_TARGET_ABORT_ANSWER = "__abort__"
 
 
-@tai42_app.tools.tool(tags={"e2e"})
+@tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def e2e_tool_target_park(marker: str) -> object:
     """A conversation tool-target that async-parks on ``ask`` and later delivers its
     resumed reply back through the door's generic park-completion binding.

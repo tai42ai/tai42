@@ -64,7 +64,7 @@ def _manager(items: dict[str, bytes] | None = None) -> ResourceManager:
     registry = StorageRegistry()
     store = _BinStorage(items)
     registry.register_storage(lambda: store)  # type: ignore[arg-type]
-    return ResourceManager(registry.provider)
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
 
 
 # --- load: scheme disambiguation --------------------------------------------

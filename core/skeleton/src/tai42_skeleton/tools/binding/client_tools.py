@@ -12,6 +12,7 @@ from fastmcp.tools.function_tool import FunctionTool
 from langchain_core.tools import StructuredTool, ToolException, tool
 from tai42_contract.interactions import (
     NestedParkOwnershipError,
+    ResumeBuffered,
     RunTerminalFailed,
     SuspendedInteraction,
     failed_outcome_text,
@@ -19,7 +20,7 @@ from tai42_contract.interactions import (
     suspended_interaction_marker,
 )
 from tai42_contract.secrets import mask_secrets
-from tai42_contract.tools import tool_call_frame
+from tai42_contract.tools import UndeclaredPauseError, tool_call_frame
 
 from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.tools.binding.arguments import _named_call_arguments
@@ -69,12 +70,15 @@ async def _invoke_tool_body(
     the generic arm would collapse it to. Any other body failure becomes the generic named tool
     error. Only the body's own failure is caught here; ``CancelledError``/``BaseException`` pass
     through untouched, and a caller's surrounding machinery (identity gate, park adoption, masking)
-    is never mislabeled as a tool that failed.
+    is never mislabeled as a tool that failed. An undeclared park refused by a dispatch inside the
+    body propagates raw, never as a tool error.
     """
     try:
         result = target(*args, **kwargs)
         if inspect.isawaitable(result):
             result = await result
+    except UndeclaredPauseError:
+        raise
     except RunTerminalFailed as exc:
         raise ToolException(failed_outcome_text(exc.outcome)) from exc
     except Exception as exc:
@@ -236,6 +240,11 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
                 # ``_invoke_tool_body`` ALONE — a bug in the adoption check, marker build, or secret
                 # masking is not mislabeled as a tool that failed.
                 result = await _invoke_tool_body(target, args, kwargs, tool_obj.name)
+                # Only a tool that declares it can pause may return a park signal. Refused RAW,
+                # never a ToolException: an undeclared park is a registration fault the model
+                # must not retry around (a retry would fire the body a second time).
+                if isinstance(result, (SuspendedInteraction, ResumeBuffered)) and not await self.pauses(tool_obj.name):
+                    raise UndeclaredPauseError(tool_obj.name)
                 if isinstance(result, SuspendedInteraction):
                     # An async ask parked the caller and returned this sentinel. Inside a
                     # graph the tool task must COMPLETE (so ask runs exactly once, never

@@ -47,7 +47,7 @@ def _manager(items: dict[str, str]) -> ResourceManager:
         def __init__(self) -> None:
             super().__init__(items)
 
-    return ResourceManager(registry.provider)
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
 
 
 async def test_locale_variant_chain_prefers_specific_then_language_then_default() -> None:
@@ -138,7 +138,7 @@ def _counting_manager(items: dict[str, str]) -> tuple[ResourceManager, _Counting
         def __new__(cls) -> _CountingStorage:  # type: ignore[misc]
             return storage
 
-    return ResourceManager(registry.provider), storage
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None), storage
 
 
 async def test_a_locale_render_reads_the_absent_variants_once_then_never() -> None:

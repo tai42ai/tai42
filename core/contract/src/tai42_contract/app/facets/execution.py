@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from typing import Any, Protocol, TypeVar, overload, runtime_checkable
 
 from tai42_contract.agent import Agent
@@ -10,6 +11,7 @@ from tai42_contract.backend import Backend
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.sandbox import Sandbox, SandboxPolicy
 from tai42_contract.storage import Storage
+from tai42_contract.template.eviction import TemplateEviction
 
 _AgentT = TypeVar("_AgentT", bound=Agent)
 _StorageT = TypeVar("_StorageT", bound=Storage)
@@ -125,6 +127,23 @@ class AppStorage(Protocol):
         """The active resource manager (impl type; loads/renders content over storage)."""
         ...
 
+    def on_template_evicted(self, func: Callable[[TemplateEviction], Any]) -> Callable[[TemplateEviction], Any]:
+        """Register a handler called, synchronously and in this process, after the template store drops cached content.
+
+        Called on the process that wrote or deleted a template, on every bus member applying
+        the fleet's template eviction, and on a whole-cache clear. A handler that raises
+        propagates to the dropping call. A decorator: returns ``func``.
+        """
+        ...
+
+    def template_reads(self) -> AbstractContextManager[set[str]]:
+        """Record, into the yielded set, the id of every stored template a render inside the block resolves or probes.
+
+        A by-id render's whole locale fallback chain and every ``{% include %}`` /
+        ``{% extends %}`` / ``{% import %}`` target, at any depth. Blocks nest; each records.
+        """
+        ...
+
 
 @runtime_checkable
 class AppExtensions(Protocol):
@@ -137,6 +156,7 @@ class AppExtensions(Protocol):
         kind: ExtensionKind,
         name: str | None = None,
         requires_body_locality: bool = False,
+        pauses: bool = False,
     ) -> Callable[..., Any]:
         """Register a tool-extension factory under ``name`` (default: the function's own name).
 
@@ -149,6 +169,10 @@ class AppExtensions(Protocol):
         (``ExtensionKind.relocates_execution``), so its wrapper travels with the
         body to the worker. Bound outside a relocating layer, the wrapper stays
         behind in the submitting process and silently does not apply.
+
+        ``pauses`` marks an extension every branch of which can pause, whatever its base
+        declares (an extension that re-dispatches other tools and passes their park
+        through); see ``AppTools.pauses``.
         """
         ...
 

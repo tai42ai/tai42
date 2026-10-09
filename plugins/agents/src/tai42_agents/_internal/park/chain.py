@@ -44,6 +44,7 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_REPARKED,
     PARK_COMPLETION_SUCCEEDED,
 )
+from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_agents._internal.park.middleware import park_error_answer
 from tai42_agents._internal.park.park_binding import agents_park_index
@@ -198,7 +199,7 @@ def register_chained_park_tool() -> None:
         tai42_app.tools.tool(
             name=CHAINED_PARK_DELIVERY_TOOL_NAME,
             tags={"agents"},
-            meta={"tai42/hidden": True},
+            meta={"tai42/hidden": True, TOOL_META_PAUSES: True},
             force=True,
         )(deliver_chained_park)
     except ValueError as exc:

@@ -4,9 +4,10 @@ preservation of a ``SuspendedInteraction`` through a preset (``TransformedTool``
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction, get_resume_continuation_tool
 from tai42_contract.presets import PresetInputSchemaSupport
+from tai42_contract.tools import TOOL_META_PAUSES
 
 
-@tai42_app.tools.tool
+@tai42_app.tools.tool(meta={TOOL_META_PAUSES: True})
 def make_suspend() -> SuspendedInteraction:
     """Return an async-park sentinel."""
     # Stamp the resume owner the real platform ask does (the bound resume continuation), so the
@@ -14,13 +15,13 @@ def make_suspend() -> SuspendedInteraction:
     return SuspendedInteraction(interaction_id="i-preset", resume_owner=get_resume_continuation_tool())
 
 
-@tai42_app.tools.tool
+@tai42_app.tools.tool(meta={TOOL_META_PAUSES: True})
 def make_buffered() -> ResumeBuffered:
     """Return a ``ResumeBuffered`` partial — the non-terminal a resume of one sibling produces."""
     return ResumeBuffered(remaining_ids=["r1", "r2"])
 
 
-@tai42_app.tools.tool
+@tai42_app.tools.tool(meta={TOOL_META_PAUSES: True})
 def make_suspend_payload(payload: dict) -> SuspendedInteraction:
     """Accept a routed input-schema payload, then return an async-park sentinel."""
     return SuspendedInteraction(interaction_id="i-preset", resume_owner=get_resume_continuation_tool())

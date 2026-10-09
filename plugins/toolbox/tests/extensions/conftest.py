@@ -37,6 +37,7 @@ class _NullExtensions:
         kind: Any = None,
         name: str | None = None,
         requires_body_locality: bool = False,
+        pauses: bool = False,
     ) -> Any:
         if callable(f):
             return f
@@ -58,6 +59,8 @@ class CapturingExtensions:
 
     def __init__(self) -> None:
         self.registered: list[tuple[str, ExtensionKind, bool]] = []
+        # Each registered extension's ``pauses`` flag, by name.
+        self.pauses: dict[str, bool] = {}
 
     def extension(
         self,
@@ -66,9 +69,11 @@ class CapturingExtensions:
         kind: ExtensionKind,
         name: str | None = None,
         requires_body_locality: bool = False,
+        pauses: bool = False,
     ) -> Any:
         def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
             self.registered.append((name or fn.__name__, kind, requires_body_locality))
+            self.pauses[name or fn.__name__] = pauses
             return fn
 
         if callable(f):
@@ -163,9 +168,14 @@ def capture_registration() -> Callable[[ModuleType], list[tuple[str, ExtensionKi
     registered, as ``[(name, kind, requires_body_locality)]``."""
 
     def _capture(module: ModuleType) -> list[tuple[str, ExtensionKind, bool]]:
-        app = CapturingApp()
-        tai42_app.bind(app)
-        importlib.reload(module)
-        return app.extensions.registered
+        return capture_extensions(module).registered
 
     return _capture
+
+
+def capture_extensions(module: ModuleType) -> CapturingExtensions:
+    """Re-run a module's import body under a capturing app and return its capturing extensions facet."""
+    app = CapturingApp()
+    tai42_app.bind(app)
+    importlib.reload(module)
+    return app.extensions

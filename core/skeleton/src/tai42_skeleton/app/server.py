@@ -541,7 +541,9 @@ class TaiMCP(TaiMCPLifecycleMixin):
     @property
     def _resource_manager(self) -> ResourceManager:
         if not self._resource_manager_cache:
-            self._resource_manager_cache = ResourceManager(self._storage_registry.provider)
+            self._resource_manager_cache = ResourceManager(
+                self._storage_registry.provider, on_evicted=self._fire_template_evicted
+            )
         return self._resource_manager_cache
 
     def _register_storage(self, cls: type[Storage] | None = None):

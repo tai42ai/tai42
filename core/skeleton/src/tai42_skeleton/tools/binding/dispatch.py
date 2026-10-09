@@ -9,6 +9,7 @@ from fastmcp.tools.function_tool import FunctionTool
 from fastmcp.tools.tool_transform import TransformedTool
 from fastmcp.utilities.types import get_cached_typeadapter
 from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
+from tai42_contract.tools import UndeclaredPauseError
 
 from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.tools.binding.arguments import _validation_wrapper
@@ -105,6 +106,11 @@ class _DispatchMixin(_ResolutionMixin):
                 result = await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
             except UnencodableLeafError as exc:
                 raise ToolResultEncodingError(key, exc.path) from exc
+            # Only a tool that declares it can pause may return a park signal: an undeclared
+            # one is refused here, inside the scope, so its row records ``error`` and no
+            # binding update applies — never a park a caller would resume into a second run.
+            if isinstance(result, (SuspendedInteraction, ResumeBuffered)) and not await self.pauses(key):
+                raise UndeclaredPauseError(key)
             if not isinstance(result, (SuspendedInteraction, ResumeBuffered)):
                 offending_path = find_lone_surrogate(result)
                 if offending_path is not None:

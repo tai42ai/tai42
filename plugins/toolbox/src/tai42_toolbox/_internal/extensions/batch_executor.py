@@ -12,6 +12,7 @@ from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.tools import UndeclaredPauseError
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
@@ -67,13 +68,16 @@ async def _run_one_body(
     """Run one body of the batch.
 
     Under ``fail_fast`` a failure re-raises; otherwise the exception's string takes the
-    result slot so order and length are preserved.
+    result slot so order and length are preserved. An undeclared park is a registration
+    fault, never a slot: it re-raises under either mode.
     """
     try:
         if sem:
             async with sem:
                 return await tai42_app.tools.run_tool(tool_name, param)
         return await tai42_app.tools.run_tool(tool_name, param)
+    except UndeclaredPauseError:
+        raise
     except Exception as exc:
         if fail_fast:
             raise

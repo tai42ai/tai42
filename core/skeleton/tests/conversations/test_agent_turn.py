@@ -318,7 +318,7 @@ async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(
 
     registry = StorageRegistry()
     registry.register_storage(_InMemory)
-    manager = ResourceManager(registry.provider)
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
 
     assert await manager.render_by_id("welcome", locale=cast(str, seen["ambient_locale"])) == "shalom"
     with pytest.raises(TemplateLocaleNotFoundError):

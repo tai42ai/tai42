@@ -19,6 +19,7 @@ import os
 from typing import Literal
 
 from tai42_contract.app import tai42_app
+from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
@@ -55,7 +56,7 @@ def _expiry_policy(value: str) -> Literal["kill", "resume"]:
     raise ValueError(f"on_expiry must be 'kill' or 'resume', got {value!r}")
 
 
-@tai42_app.tools.tool(tags={"e2e"})
+@tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def held_route_park(marker: str) -> object:
     """A conversation tool-target that asks its CALLER and parks — the route-driven caller ask.
 
@@ -94,7 +95,7 @@ async def held_route_park(marker: str) -> object:
     return suspended
 
 
-@tai42_app.tools.tool(tags={"e2e"})
+@tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def held_ask(
     marker: str, expiry_seconds: float, reask: bool = False, deeper: bool = False, on_expiry: str = "kill"
 ) -> object:
@@ -131,7 +132,7 @@ async def held_ask(
         )
 
 
-@tai42_app.tools.tool(tags={"e2e"})
+@tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def held_run(
     marker: str, reask: bool = False, deeper: bool = False, expiry_seconds: float = 3600, on_expiry: str = "kill"
 ) -> object:
@@ -154,7 +155,7 @@ async def held_run(
     )
 
 
-@tai42_app.tools.tool(tags={"e2e"})
+@tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def held_deeper(marker: str, expiry_seconds: float) -> object:
     """Ask the CALLER (through ``held_ask`` one frame down) from a deeper frame, so this tool's
     name is pushed onto the re-park's ``asked_by`` (depth two). Never re-parks again."""
@@ -163,7 +164,7 @@ async def held_deeper(marker: str, expiry_seconds: float) -> object:
     )
 
 
-@tai42_app.tools.tool(tags={"e2e"})
+@tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def held_run_resume(interaction_id: str, answer: object) -> object:
     """Re-drive a resumed ``held_run`` with the answer, under the restored call chain.
 

@@ -16,6 +16,7 @@ from mcp.types import TextContent
 from tai42_contract.access_control import reset_request_user_id, set_request_user_id
 from tai42_contract.interactions import SuspendedInteraction, read_suspended_interaction_marker
 from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
+from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
@@ -156,7 +157,7 @@ def test_mcp_call_of_a_parking_preset_records_parked_not_success(monkeypatch):
             # No declared output_schema: FastMCP would otherwise flatten the sentinel's
             # fields into structured_content, dropping the reserved marker key the edge
             # reads a park by. The edge must recognize the park regardless.
-            @app.tools.tool(force=True)
+            @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
             async def parker():
                 """Park the caller and return the suspend sentinel."""
                 return SuspendedInteraction(interaction_id="park-42", expiry_at=expiry, resume_owner="resume_tool")

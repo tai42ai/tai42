@@ -28,14 +28,14 @@ def protocol_members(proto: type) -> set[str]:
     return {m for m in members if m not in _PROTOCOL_SCAFFOLDING and not m.startswith("__")}
 
 
-# The frozen facade surface: the 148 (sub-protocol, member) pairs over 144
+# The frozen facade surface: the 151 (sub-protocol, member) pairs over 147
 # distinct flat names. This is the
 # contract's own source of truth — no external lookup needed. Two leaf names
 # are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
 # (webhook_verifiers + channels), so the distinct-name union is four
 # fewer than the pair count.
 EXPECTED_FACADE = {
-    # tools (20)
+    # tools (21)
     "tool",
     "surface_generation",
     "toolkit",
@@ -56,6 +56,7 @@ EXPECTED_FACADE = {
     "tier",
     "extras",
     "declared_extras",
+    "pauses",
     # agents (3)
     "agent",
     "get_agent",
@@ -68,9 +69,11 @@ EXPECTED_FACADE = {
     "sandbox",
     "require_sandbox",
     "sandbox_policy",
-    # storage (2)
+    # storage (4)
     "register_storage",
     "resource_manager",
+    "on_template_evicted",
+    "template_reads",
     # connectors (3)
     "register_connector",
     "token_store",
@@ -311,11 +314,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 148 (sub-protocol, member) pairs over 144 distinct names — ``store`` is exposed
+    # 151 (sub-protocol, member) pairs over 147 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 144, f"union={len(union)}"
-    assert total == 148 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 147, f"union={len(union)}"
+    assert total == 151 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_five_namespaces():

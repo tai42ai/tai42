@@ -201,7 +201,7 @@ async def test_callback_jq_eval_is_timeout_bounded(bound_app, monkeypatch) -> No
     # The callback path evaluates jq through ``run_jq_first``, so a slow program
     # is aborted by JQ_TIMEOUT_SECONDS and the named TimeoutError is raised.
     class _SlowProgram:
-        def input(self, payload):
+        def input_text(self, text):
             return self
 
         def first(self):

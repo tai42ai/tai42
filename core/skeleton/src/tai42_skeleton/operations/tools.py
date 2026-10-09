@@ -55,12 +55,14 @@ from tai42_contract.app.responses import OpaqueJson
 from tai42_contract.interactions import RunTerminalFailed
 from tai42_contract.secrets import unwrap_secrets
 from tai42_contract.states import StateSubject
+from tai42_contract.tools import UndeclaredPauseError
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
 from tai42_skeleton.operations import (
     BadRequestError,
     NotFoundError,
+    NotSupportedError,
     OperationError,
     OperationFailedError,
     PermissionDeniedError,
@@ -334,6 +336,11 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
                     extra={"tool": tool_name, "path": offending_path},
                 ) from exc
             raise OperationFailedError("tool run failed", extra={"outcome": exc.outcome}) from exc
+        except UndeclaredPauseError as exc:
+            # The tool ran and parked without declaring that it can pause: the deployment's
+            # registration lacks the capability declaration this call needs, not an execution
+            # failure. The dispatch scope already recorded the run's ``error``.
+            raise NotSupportedError(str(exc), extra={"tool": exc.tool}) from exc
         except OperationError:
             # A typed operation error is the tool's own answer (e.g. a PermissionDeniedError 403);
             # flattening it into ``OperationFailedError`` would report a refusal as a crash.

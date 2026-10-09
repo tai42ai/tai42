@@ -12,12 +12,13 @@ import json
 import os
 
 from tai42_contract.app import tai42_app
+from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
 
 
-@tai42_app.tools.tool(tags={"e2e"})
+@tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def e2e_caller_ask(question: str, expiry_seconds: float) -> object:
     """Async-ask the run's CALLER, parking the run on a ``to="caller"`` interaction.
 
@@ -63,7 +64,7 @@ async def e2e_caller_ask(question: str, expiry_seconds: float) -> object:
     return suspended
 
 
-@tai42_app.tools.tool(tags={"e2e"})
+@tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def e2e_schedule_park(question: str, expiry_seconds: float, record_key: str) -> object:
     """Async-ask (parking the run), recording the execution identity this dispatch is bound under.
 
@@ -108,7 +109,7 @@ async def e2e_schedule_park_deliver(interaction_id: str, answer: object) -> dict
     return {"answer": answer}
 
 
-@tai42_app.tools.tool(tags={"e2e"})
+@tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def e2e_caller_hold(question: str, expiry_seconds: float) -> object:
     """Async-ask the run's CALLER, parking a ``to="caller"`` interaction that waits standalone.
 

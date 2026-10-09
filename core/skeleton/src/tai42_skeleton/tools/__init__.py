@@ -18,6 +18,7 @@ from tai42_skeleton.tools.adapters import (
     mcp_tool_to_func,
 )
 from tai42_skeleton.tools.extras import ToolExtrasRegistry
+from tai42_skeleton.tools.pause_registry import ToolPauseRegistry
 from tai42_skeleton.tools.registry import ToolRegistry
 from tai42_skeleton.tools.retry import ToolRetryRegistry
 from tai42_skeleton.tools.tier import ToolTierRegistry
@@ -25,6 +26,7 @@ from tai42_skeleton.tools.tool_refs import ToolRefsRegistry
 
 __all__ = [
     "ToolExtrasRegistry",
+    "ToolPauseRegistry",
     "ToolRefsRegistry",
     "ToolRegistry",
     "ToolRetryRegistry",

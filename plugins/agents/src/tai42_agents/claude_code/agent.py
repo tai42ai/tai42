@@ -40,6 +40,7 @@ from tai42_contract.interactions import (
 from tai42_contract.monitoring.models import SpanKind, TokenUsage
 from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
+from tai42_contract.tools import TOOL_META_PAUSES
 from tai42_kit.interactions.park_index import superstep_id as park_superstep_id
 from tai42_kit.llm import resolve_trace_context
 
@@ -159,7 +160,7 @@ _LIVE_SESSIONS: dict[str, SandboxSession] = {}
 @tai42_app.agents.agent(
     AGENT_NAME,
     tags={"agents", "coding", "claude"},
-    meta={"tai42/crash_resume": claude_code_crash_resume()},
+    meta={"tai42/crash_resume": claude_code_crash_resume(), TOOL_META_PAUSES: True},
 )
 class ClaudeCodeAgent(Agent):
     """The ``claude_code`` agent: drives the real ``claude`` binary in a sandbox over the exec protocol."""

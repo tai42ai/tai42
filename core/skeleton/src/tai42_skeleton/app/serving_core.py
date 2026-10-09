@@ -34,6 +34,7 @@ from tai42_skeleton.states.service import (
 )
 from tai42_skeleton.tools import (
     ToolExtrasRegistry,
+    ToolPauseRegistry,
     ToolRefsRegistry,
     ToolRegistry,
     ToolRetryRegistry,
@@ -232,6 +233,10 @@ class ServingCore:
         # Per-tool declared door-extras registry (@app.tools.tool(extras_keys=...)),
         # reset each start() for the same reload reason.
         self._tool_extras_registry = ToolExtrasRegistry()
+
+        # The bound tool names that can pause (a ``TOOL_META_PAUSES`` declaration or a
+        # ``pauses=True`` extension in a branch's stack), reset each start() likewise.
+        self._tool_pause_registry = ToolPauseRegistry()
 
         # Tool-rename referee registry + declared-preset-seed registry, reset each
         # start() alongside the registries above so a reload re-imports the plugin

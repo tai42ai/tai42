@@ -30,6 +30,7 @@ from tai42_contract.tools.invocation import (
     reset_current_tool_invocation,
     set_current_tool_invocation,
 )
+from tai42_contract.tools.meta import TOOL_META_PAUSES, UndeclaredPauseError
 from tai42_contract.tools.retry import (
     DEFAULT_RETRYABLE_KINDS,
     MAX_ATTEMPTS_CEILING,
@@ -111,7 +112,8 @@ class AppTools(Protocol):
     # only when the manifest includes the tool. ``extras_keys`` declares the door
     # ``extras`` keys this tool reads through :meth:`extras`; a key a target does not
     # declare is refused before the run, and a preset inherits its base tool's keys
-    # (likewise registered only when the manifest includes the tool).
+    # (likewise registered only when the manifest includes the tool). A tool that can
+    # pause declares ``meta={TOOL_META_PAUSES: True}`` (see :meth:`pauses`).
     @overload
     def tool(self, func: F, /) -> F: ...
     @overload
@@ -189,6 +191,18 @@ class AppTools(Protocol):
 
         A preset inherits its base tool's declared keys. The visit checks a door's ``extras`` against
         this set before starting the target and refuses an undeclared key.
+        """
+        ...
+
+    async def pauses(self, key: str) -> bool:
+        """Whether a dispatch of ``key`` can return a park signal.
+
+        The tool registered under ``key`` declares ``TOOL_META_PAUSES``, or it is an extension
+        branch whose base declares it or whose extension stack holds an extension registered
+        with ``pauses=True``, or it is a preset (transformed tool) whose ``parent_tool`` chain
+        reaches such a tool. An unknown name answers ``False`` (its own dispatch surfaces the
+        not-found). A dispatch of a tool that answers ``False`` and returns a park signal is
+        refused with :class:`UndeclaredPauseError`.
         """
         ...
 
@@ -291,6 +305,7 @@ __all__ = [
     "DEFAULT_RETRYABLE_KINDS",
     "MAX_ATTEMPTS_CEILING",
     "NEVER_RETRYABLE_KINDS",
+    "TOOL_META_PAUSES",
     "AppTools",
     "NestedDoorFrameError",
     "RunDelivery",
@@ -302,6 +317,7 @@ __all__ = [
     "ToolRenameReferee",
     "ToolRetryBackoff",
     "ToolRetryPolicy",
+    "UndeclaredPauseError",
     "current_call_chain",
     "current_extras",
     "current_tool_invocation",

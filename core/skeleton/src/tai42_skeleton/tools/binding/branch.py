@@ -8,6 +8,7 @@ from typing import Any
 from fastmcp.tools.base import Tool
 from fastmcp.tools.function_tool import FunctionTool
 from fastmcp.tools.tool_transform import TransformedTool
+from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.registry import extension_config, extension_name, factory_accepts_config
@@ -17,6 +18,24 @@ from tai42_skeleton.tools.binding.schema import _declares_own_output_schema, _de
 from tai42_skeleton.tools.binding.secret_tool import _SecretRevealingTool
 from tai42_skeleton.tools.binding.state import _ToolBindingBase
 from tai42_skeleton.tools.binding.surface import add_surface_tool
+
+
+@dataclass(frozen=True)
+class _Branch:
+    """One branch tool an expansion binds: its callable (or prebuilt tool), description and stack facts.
+
+    ``preserves_output`` — every extension in its stack preserves the base's output shape;
+    ``stack_pauses`` — an extension in its stack is registered ``pauses=True``.
+    """
+
+    func: Callable[..., Any] | Tool
+    description: str | None
+    preserves_output: bool
+    stack_pauses: bool
+
+
+def _declares_pauses(meta: dict[str, Any] | None) -> bool:
+    return (meta or {}).get(TOOL_META_PAUSES) is True
 
 
 @dataclass(frozen=True)
@@ -90,43 +109,40 @@ class _BranchBindingMixin(_ToolBindingBase):
             base_output_schema=base_output_schema,
         )
 
-    def _expanded_tools(self, prepared: _BranchBase) -> dict[str, tuple[Callable[..., Any] | Tool, str | None, bool]]:
+    def _expanded_tools(self, prepared: _BranchBase) -> dict[str, _Branch]:
         """The full branch set for ``prepared``'s base, keyed by branch name.
 
         Each combo is expanded one layer at a time (:meth:`_apply_combo`), and EVERY
         intermediate layer is registered as its own branch tool. The bare base is
         appended when no combo produced it, so the base tool always binds.
         """
-        # curr_name -> (func/tool, description, stack_preserves_output_shape).
         # A branch preserves the base's output shape only when EVERY extension
         # in its stack does (one TRANSFORMER anywhere reshapes the result).
-        extend_tools: dict[str, tuple[Callable[..., Any] | Tool, str | None, bool]] = {}
+        extend_tools: dict[str, _Branch] = {}
         for extensions in self._tool_registry.tool_extensions_iterator(prepared.orig_name):
             self._extension_registry.validate(extensions)
-            for curr_name, curr_func, curr_desc, stack_preserves_output in self._apply_combo(prepared, extensions):
-                extend_tools[curr_name] = (curr_func, curr_desc, stack_preserves_output)
+            extend_tools.update(self._apply_combo(prepared, extensions))
 
         if prepared.orig_name not in extend_tools:
             # The base tool auto-derives its own output schema on
             # registration, so it never needs propagation (preserves=False).
-            extend_tools[prepared.orig_name] = (prepared.func, prepared.orig_desc, False)
+            extend_tools[prepared.orig_name] = _Branch(prepared.func, prepared.orig_desc, False, False)
         return extend_tools
 
-    def _apply_combo(
-        self, prepared: _BranchBase, extensions: Any
-    ) -> list[tuple[str, Callable[..., Any], str | None, bool]]:
+    def _apply_combo(self, prepared: _BranchBase, extensions: Any) -> list[tuple[str, _Branch]]:
         """Apply one combo's extension chain left-to-right.
 
-        Returns the branch tuple ``(name, func, description, stack_preserves_output)`` produced at EACH layer.
+        Returns the ``(name, branch)`` produced at EACH layer.
 
         Per extension: resolve name/config/factory, enforce the locality-vs-relocation
         ordering, apply the factory, reject a same-name return, enforce the schema rule,
         track whether the stack still preserves the output shape, and carry the running
         description forward.
         """
-        branches: list[tuple[str, Callable[..., Any], str | None, bool]] = []
+        branches: list[tuple[str, _Branch]] = []
         curr_func, curr_name, curr_desc = prepared.branch_base, prepared.orig_name, prepared.orig_desc
         stack_preserves_output = True
+        stack_pauses = False
         # The relocating extension already applied in this stack, if any:
         # extensions apply left-to-right, so a later element wraps (sits
         # OUTSIDE) everything applied before it, and a relocating layer
@@ -183,6 +199,7 @@ class _BranchBindingMixin(_ToolBindingBase):
             _enforce_extension_schema(ext_name, kind, extension_func, prev_func, curr_func, prepared.orig_name)
 
             stack_preserves_output = stack_preserves_output and kind.preserves_output_shape
+            stack_pauses = stack_pauses or self._extension_registry.pauses(extension)
             curr_name = curr_func.__name__
             # Carry the running description forward so each stacked
             # extension composes on the previous one's output, not the
@@ -193,22 +210,34 @@ class _BranchBindingMixin(_ToolBindingBase):
             # than dropping it.
             if curr_func.__doc__ is not None and curr_func.__doc__ != prepared.base_doc:
                 curr_desc = curr_func.__doc__
-            branches.append((curr_name, curr_func, curr_desc, stack_preserves_output))
+            branches.append((curr_name, _Branch(curr_func, curr_desc, stack_preserves_output, stack_pauses)))
         return branches
 
     def _register_expanded(
         self,
         prepared: _BranchBase,
-        extend_tools: dict[str, tuple[Callable[..., Any] | Tool, str | None, bool]],
+        extend_tools: dict[str, _Branch],
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         owner: str | None,
     ) -> None:
         """Bind every branch (and the bare base) onto the server with shape-aware output-schema propagation.
 
-        Tracks each name under ``owner`` when given.
+        Tracks each name under ``owner`` when given, and records every bound name that can pause:
+        the base declares ``TOOL_META_PAUSES`` (a decorated tool through its ``meta``, a prebuilt
+        tool through its own or its parent chain's), or the branch's stack holds a ``pauses=True``
+        extension. A prebuilt tool's ``meta`` never rides onto its branches, so the registry, not a
+        branch's own meta, is the answer.
         """
-        for curr_name, (tool_func, tool_desc, preserves_output) in extend_tools.items():
+        base_pauses = (
+            self._prebuilt_pauses(prepared.func)
+            if isinstance(prepared.func, Tool)
+            else _declares_pauses(kwargs.get("meta"))
+        )
+        for curr_name, branch in extend_tools.items():
+            tool_func, tool_desc, preserves_output = branch.func, branch.description, branch.preserves_output
+            if base_pauses or branch.stack_pauses:
+                self._tool_pause_registry.register(curr_name)
             bind_kwargs = dict(kwargs)
             # Shape-aware output-schema propagation: carry the base's
             # output schema onto a branch ONLY when the branch preserves the
@@ -227,6 +256,15 @@ class _BranchBindingMixin(_ToolBindingBase):
             self.bind_tool(tool_func, curr_name, prepared.orig_name, *args, description=tool_desc, **bind_kwargs)
             if owner is not None:
                 self._mcp_bound_tools.setdefault(owner, set()).add(curr_name)
+
+    def _prebuilt_pauses(self, tool_obj: Tool) -> bool:
+        """Whether a prebuilt tool can pause: it or a tool in its ``parent_tool`` chain declares or is recorded."""
+        current: Tool | None = tool_obj
+        while current is not None:
+            if _declares_pauses(current.meta) or current.name in self._tool_pause_registry:
+                return True
+            current = current.parent_tool if isinstance(current, TransformedTool) else None
+        return False
 
     def bind_tool(self, func, curr_name, orig_name, *args, description: str | None = None, **kwargs):
         self._tool_registry.register_extend_tool(orig_name, curr_name)
