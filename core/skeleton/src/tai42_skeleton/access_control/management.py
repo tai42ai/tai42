@@ -48,7 +48,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.policy_version_scope import remember_policy_version
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
-from tai42_skeleton.access_control.store import access_control_store
+from tai42_skeleton.access_control.store import access_control_store, refuse_disabled_claim_at_mint
 from tai42_skeleton.utils.redis_typing import awaited
 
 logger = logging.getLogger(__name__)
@@ -286,7 +286,10 @@ async def api_key_state(user_id: str) -> Literal["absent", "live", "orphaned", "
 
 
 async def add_url_to_scope(scope_id: str, url: str, pattern: str | None = None) -> None:
-    """Map ``url`` to ``scope_id`` (optionally with a dynamic ``pattern``); the policy cache is invalidated."""
+    """Map ``url`` to ``scope_id`` (optionally with a dynamic ``pattern``); the policy cache is invalidated.
+
+    Mapping a url to the universal grant ``"*"`` raises ``ValueError`` with nothing written.
+    """
     await access_control_store().add_url_to_scope(scope_id, url, pattern)
     await record_policy_change()
 
@@ -307,7 +310,8 @@ async def remove_scope(scope_id: str) -> tuple[int, list[tuple[str, dict[str, An
     """Delete a scope, stripping it from every token policy and deleting its routes.
 
     Returns ``(deleted_count, [(user_id, committed_body), …])``; the policy cache is invalidated
-    when anything was deleted. Removing the public marker raises ``ValueError``.
+    when anything was deleted. Removing the public marker or the universal grant ``"*"``
+    raises ``ValueError`` with nothing written.
     """
     deleted, affected = await access_control_store().remove_scope(scope_id)
     if deleted > 0:
@@ -361,13 +365,48 @@ async def any_principal_exists() -> bool:
     return await access_control_store().any_principal_exists()
 
 
+async def create_principal_row(user_id: str, kind: str, display_name: str, created_by: str | None) -> None:
+    """Insert a principal row (the backup restore's create); the policy cache is invalidated.
+
+    The store refuses a duplicate ``user_id`` with a loud ``ValueError``.
+    """
+    await access_control_store().create_principal(user_id, kind, display_name, created_by)
+    await record_policy_change()
+
+
+async def create_principal_policy(
+    user_id: str, scopes: list[str], policy_data: dict[str, Any] | None, condition: dict[str, Any] | None
+) -> None:
+    """Insert a principal's own policy row (the backup restore's create); the policy cache is invalidated."""
+    await access_control_store().create_policy(user_id, scopes, policy_data, condition)
+    await record_policy_change()
+
+
+async def set_principal_disabled_row(user_id: str, disabled: bool) -> None:
+    """Flip a principal's ``disabled`` marker on both homes with no last-admin count; the policy cache is invalidated.
+
+    The raw flip the backup restore applies to a recreated principal. The guarded flip every
+    administrative door uses is :func:`~tai42_skeleton.access_control.roles.set_principal_disabled`.
+    Raises ``KeyError`` when the principal or its policy row is absent.
+    """
+    await access_control_store().set_principal_disabled(user_id, disabled)
+    await record_policy_change()
+
+
 async def restore_policy_body(user_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
     """Write a prior policy ``body`` back as the enforced policy — the store side of a version rollback.
 
     Returns the restored body, or ``None`` if ``user_id`` is not provisioned (a falsy sentinel the
-    route's 404 guard tests). A restored body invalidates the policy cache.
+    route's 404 guard tests). A restored body invalidates the policy cache. A principal's own row
+    is written under the last-admin guard: a body that demotes the last enabled admin principal
+    raises :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written.
     """
-    restored = await access_control_store().restore_policy_body(user_id, body)
+    store = access_control_store()
+    if await store.get_principal(user_id) is not None:
+        async with store.principal_guard_txn() as guard:
+            restored = await guard.restore_policy_body(user_id, body)
+    else:
+        restored = await store.restore_policy_body(user_id, body)
     if restored is not None:
         await record_policy_change()
     return restored
@@ -405,9 +444,14 @@ async def add_user_api_key(
     asserted equal to the stored one wherever a credential is verified. Both homes are
     written only by this mint path.
 
+    ``policy_data`` may not carry the ``disabled`` claim: that is the enforcement projection
+    of a principal's ``disabled`` state, written only by the principal's disabled writer, and
+    a key is switched off by revoking it.
+
     ORCHESTRATES the backends in a FAIL-CLOSED order. Raises ``ValueError`` if the
-    user id is already provisioned, if the owner is not an enabled principal, or if any
-    requested scope does not exist (has no url mapping) — all checked BEFORE any write, so
+    user id is already provisioned, if the owner is not an enabled principal, if
+    ``policy_data`` carries the ``disabled`` claim, or if any requested scope does not
+    exist (has no url mapping) — all checked BEFORE any write, so
     a user error never leaves a half-provisioned key. Then:
 
     1. the provider's ``provision`` writes the identity/key record FIRST — the key
@@ -451,6 +495,10 @@ async def add_user_api_key(
             f"user id {user_id!r} is already in use; to replace its key, revoke the key for "
             "that user id, then re-import"
         )
+    # The ``disabled`` claim is server-owned like the fingerprint and the owner claim below,
+    # but a supplied value is refused rather than stamped over: a key starts enabled and is
+    # switched off by revoking it.
+    refuse_disabled_claim_at_mint(policy_data or {})
     if scopes:
         # A scope-typo guard. The universal "*" names no routed scope, so it is always
         # valid to mint; every other scope must exist in the route table.
@@ -508,7 +556,9 @@ async def edit_user_payload(
 
     Returns the committed policy body on success, or ``None`` if ``user_id`` is not
     provisioned (a falsy sentinel the route's 404 guard tests). Raises ``ValueError``
-    if any supplied scope does not exist.
+    if any supplied scope does not exist. A principal's own row is written under the
+    last-admin guard: an edit that demotes the last enabled admin principal raises
+    :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written.
     """
     provider = _identity_provider()
     store = access_control_store()
@@ -522,7 +572,11 @@ async def edit_user_payload(
     if not isinstance(condition, _Unset):
         updates["condition"] = condition.model_dump() if condition is not None else None
 
-    policy = await store.update_policy_fields(user_id, updates)
+    if await store.get_principal(user_id) is not None:
+        async with store.principal_guard_txn() as guard:
+            policy = await guard.update_policy_fields(user_id, updates)
+    else:
+        policy = await store.update_policy_fields(user_id, updates)
     # No policy row → not provisioned. The description edit below is never attempted
     # for a user with no policy (its single existence signal this surface can read).
     if policy is None:

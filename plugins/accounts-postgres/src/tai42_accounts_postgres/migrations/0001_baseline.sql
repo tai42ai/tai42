@@ -15,14 +15,13 @@
 -- `user_id` is the opaque, stable identity (`usr-<token_urlsafe>`) that keys
 -- policies, key-ownership claims, and sessions — never the email, which is a
 -- mutable contact attribute stored normalized (trim + lower). `password_hash`
--- is NULL until an invite is accepted. `role` is the role-template name applied
--- to the user's enforced policy.
+-- is NULL until an invite is accepted. The person's role lives in their platform
+-- access-control policy, never here.
 CREATE TABLE IF NOT EXISTS accounts_users (
     id            BIGSERIAL PRIMARY KEY,
     user_id       TEXT NOT NULL,
     email         TEXT NOT NULL,            -- stored normalized (trim + lower)
     password_hash TEXT,                     -- NULL until an invite is accepted
-    role          TEXT NOT NULL,            -- role-template name
     disabled      BOOLEAN NOT NULL DEFAULT FALSE,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT accounts_users_user_id_unique UNIQUE (user_id),

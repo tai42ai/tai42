@@ -8,7 +8,7 @@ from tai42_contract.access_control.context import set_request_user_id
 from tai42_accounts_postgres import routes_users, service
 from tai42_accounts_postgres.hashing import hash_password
 
-from .conftest import build_request, future
+from .conftest import build_request, future, gate_verified
 
 
 @pytest.fixture
@@ -22,12 +22,11 @@ def as_user():
     set_request_user_id(None)
 
 
-def _add_user(wire, user_id, *, email=None, role="viewer", disabled=False, password_hash=None):
+def _add_user(wire, user_id, *, email=None, disabled=False, password_hash=None):
     wire.users.rows[user_id] = {
         "user_id": user_id,
         "email": email or f"{user_id}@x.y",
         "password_hash": password_hash,
-        "role": role,
         "disabled": disabled,
         "created_at": future(0),
     }
@@ -39,7 +38,7 @@ def _add_user(wire, user_id, *, email=None, role="viewer", disabled=False, passw
 async def test_change_own_password_keeps_presented_session(wire, as_user):
     raw = service.new_session_token()
     presented_hash = service.token_hash(raw)
-    _add_user(wire, "usr-1", role="admin", password_hash=hash_password("old-password-1"))
+    _add_user(wire, "usr-1", password_hash=hash_password("old-password-1"))
     wire.sessions.rows[presented_hash] = {
         "user_id": "usr-1",
         "last_seen_at": future(0),
@@ -47,6 +46,7 @@ async def test_change_own_password_keeps_presented_session(wire, as_user):
     }
     wire.sessions.rows["other"] = {"user_id": "usr-1", "last_seen_at": future(0), "absolute_expires_at": future()}
     as_user("usr-1")
+    gate_verified(raw)
 
     resp = await routes_users.change_own_password(
         build_request(
@@ -61,8 +61,49 @@ async def test_change_own_password_keeps_presented_session(wire, as_user):
     assert wire.users.rows["usr-1"]["password_hash"] != hash_password("old-password-1")
 
 
+async def test_change_own_password_spares_the_session_the_gate_verified(wire, as_user):
+    # A stale session in Authorization and the live one in X-Api-Key: the gate verified the
+    # live one, so it is the session spared; the stale one is revoked with the rest.
+    stale, live = service.new_session_token(), service.new_session_token()
+    stale_hash, live_hash = service.token_hash(stale), service.token_hash(live)
+    _add_user(wire, "usr-1", password_hash=hash_password("old-password-1"))
+    for token_hash in (stale_hash, live_hash):
+        wire.sessions.rows[token_hash] = {
+            "user_id": "usr-1",
+            "last_seen_at": future(0),
+            "absolute_expires_at": future(),
+        }
+    as_user("usr-1")
+    gate_verified(live)
+
+    resp = await routes_users.change_own_password(
+        build_request(
+            {"current_password": "old-password-1", "new_password": "brand-new-password"},
+            method="PUT",
+            headers={"Authorization": f"Bearer {stale}", "X-Api-Key": live},
+        )
+    )
+    assert resp.status_code == 200
+    assert live_hash in wire.sessions.rows
+    assert stale_hash not in wire.sessions.rows
+
+
+async def test_change_own_password_with_a_key_revokes_every_session(wire, as_user):
+    # Verified by an api key (not a session): no session is spared.
+    _add_user(wire, "usr-1", password_hash=hash_password("old-password-1"))
+    wire.sessions.rows["one"] = {"user_id": "usr-1", "last_seen_at": future(0), "absolute_expires_at": future()}
+    as_user("usr-1")
+    gate_verified("sk-not-a-session")
+
+    resp = await routes_users.change_own_password(
+        build_request({"current_password": "old-password-1", "new_password": "brand-new-password"}, method="PUT")
+    )
+    assert resp.status_code == 200
+    assert "one" not in wire.sessions.rows
+
+
 async def test_change_own_password_wrong_current_403(wire, as_user):
-    _add_user(wire, "usr-1", role="admin", password_hash=hash_password("old-password-1"))
+    _add_user(wire, "usr-1", password_hash=hash_password("old-password-1"))
     as_user("usr-1")
     resp = await routes_users.change_own_password(
         build_request({"current_password": "wrong", "new_password": "brand-new-password"}, method="PUT")
@@ -71,7 +112,7 @@ async def test_change_own_password_wrong_current_403(wire, as_user):
 
 
 async def test_change_own_password_too_short_422(wire, as_user):
-    _add_user(wire, "usr-1", role="admin", password_hash=hash_password("old-password-1"))
+    _add_user(wire, "usr-1", password_hash=hash_password("old-password-1"))
     as_user("usr-1")
     resp = await routes_users.change_own_password(
         build_request({"current_password": "old-password-1", "new_password": "short"}, method="PUT")
@@ -80,7 +121,7 @@ async def test_change_own_password_too_short_422(wire, as_user):
 
 
 async def test_change_own_password_invalid_body_422(wire, as_user):
-    _add_user(wire, "usr-1", role="admin", password_hash=hash_password("old-password-1"))
+    _add_user(wire, "usr-1", password_hash=hash_password("old-password-1"))
     as_user("usr-1")
     resp = await routes_users.change_own_password(build_request({"current_password": "old-password-1"}, method="PUT"))
     assert resp.status_code == 422
@@ -94,7 +135,7 @@ async def test_change_own_password_unauthenticated_401(wire):
 
 
 async def test_change_own_password_no_password_set_400(wire, as_user):
-    _add_user(wire, "usr-1", role="admin", password_hash=None)
+    _add_user(wire, "usr-1", password_hash=None)
     as_user("usr-1")
     resp = await routes_users.change_own_password(
         build_request({"current_password": "x", "new_password": "brand-new-password"}, method="PUT")

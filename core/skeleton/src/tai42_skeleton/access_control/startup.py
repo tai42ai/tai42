@@ -41,8 +41,8 @@ async def probe_identity_provider() -> None:
     routes both resolve against. Resolves each name in ``auth_providers`` through the
     STAGED identity registry (the generation THIS build assembled), instantiates the
     provider once against the access-control settings (whose ``admin`` services the
-    freshly-built AuthAdapter has already installed), records it in the epoch core's
-    ``active_auth_providers`` so a later request never re-instantiates it nor reads a
+    freshly-built AuthAdapter has already installed), records it through
+    ``app.record_auth_provider`` so a later request never re-instantiates it nor reads a
     plugin module holder, then awaits
     its ``healthcheck()``. A provider whose storage needs no boot probe inherits the
     contract's default no-op; a key-minting provider probes its own record store. ANY
@@ -60,10 +60,9 @@ async def probe_identity_provider() -> None:
             "resolved auth-provider chain is empty, so no credential could ever authenticate. "
             "Register an identity provider in the manifest, or set ACCESS_CONTROL_AUTH_PROVIDERS"
         )
-    core = app._serving_core
     for name in chain:
         provider = get_identity_provider_factory_staged(name)(settings)
-        core.active_auth_providers[name] = provider
+        app.record_auth_provider(name, provider)
         await provider.healthcheck()
 
 

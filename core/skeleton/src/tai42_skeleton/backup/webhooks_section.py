@@ -18,8 +18,7 @@ from tai42_contract.states.errors import StatesError
 
 from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError, ExecutionKeyScan
 from tai42_skeleton.authz.token_free import TokenFreeConditionError
-from tai42_skeleton.backup.registry import current_import_mode
-from tai42_skeleton.backup.sections import _empty_report
+from tai42_skeleton.backup.registry import _empty_report, current_import_mode
 from tai42_skeleton.hooks import cache as hooks_cache
 from tai42_skeleton.hooks.trigger_links import (
     TriggerLinkError,

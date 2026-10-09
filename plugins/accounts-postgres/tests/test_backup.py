@@ -11,7 +11,12 @@ import pytest
 from tai42_kit.clients import PostgresConnectionSettings
 
 from tai42_accounts_postgres import backup
-from tai42_accounts_postgres.backup import _BackupUserStore, export_accounts, import_accounts
+from tai42_accounts_postgres.backup import (
+    AccountsArchiveVersionError,
+    _BackupUserStore,
+    export_accounts,
+    import_accounts,
+)
 
 from .conftest import FakeUniqueViolation, ScriptedPg, make_pg_ctx
 
@@ -29,7 +34,6 @@ def _row(user_id: str, email: str) -> dict:
         "user_id": user_id,
         "email": email,
         "password_hash": "argon2$hash",
-        "role": "member",
         "disabled": False,
         "created_at": datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
     }
@@ -42,13 +46,14 @@ async def test_export_users_shape(monkeypatch):
     assert [u["user_id"] for u in users] == ["usr-a", "usr-b"]
     assert users[0]["password_hash"] == "argon2$hash"  # the verifier round-trips as stored
     assert users[0]["created_at"] == "2026-01-02T03:04:05+00:00"  # JSON-safe iso string
+    assert set(users[0]) == {"user_id", "email", "password_hash", "disabled", "created_at"}
     # settings tier only — sessions/invites are never queried
     assert all("accounts_users" in sql and "accounts_sessions" not in sql for sql, _ in pg.executed)
 
 
 async def test_export_accounts_empty_when_unconfigured(monkeypatch):
     monkeypatch.setattr(backup, "accounts_store_configured", lambda: False)
-    assert await export_accounts() == {"version": 1, "users": []}
+    assert await export_accounts() == {"version": 2, "users": []}
 
 
 async def test_export_accounts_wraps_version(monkeypatch):
@@ -56,7 +61,7 @@ async def test_export_accounts_wraps_version(monkeypatch):
     monkeypatch.setattr(backup, "component_store_settings", lambda _c: _settings())
     _pg(monkeypatch, ScriptedPg(fetches=[[_row("usr-a", "a@x.io")]]))
     out = await export_accounts()
-    assert out["version"] == 1
+    assert out["version"] == 2
     assert len(out["users"]) == 1
 
 
@@ -79,19 +84,35 @@ async def test_restore_email_collision_is_a_per_user_error(monkeypatch):
 
 
 async def test_import_refuses_a_newer_version():
-    with pytest.raises(ValueError, match="newer than this plugin supports"):
+    with pytest.raises(AccountsArchiveVersionError, match="newer than this plugin supports"):
         await import_accounts({"version": 99, "users": []})
-    # A missing version is its own honest refusal — not the misleading
-    # "None is newer than" wording the old guard produced.
-    with pytest.raises(ValueError, match="no valid version"):
+    # A missing version is its own refusal.
+    with pytest.raises(AccountsArchiveVersionError, match="no valid version"):
         await import_accounts({"users": []})
+
+
+async def test_import_refuses_a_version_1_archive_before_any_write(monkeypatch):
+    # A version-1 archive carries a per-user role the current format does not: refused
+    # loudly, naming the version, before the store is even reached.
+    pg = ScriptedPg()
+    _pg(monkeypatch, pg)
+    monkeypatch.setattr(backup, "accounts_store_configured", lambda: True)
+    monkeypatch.setattr(backup, "component_store_settings", lambda _c: _settings())
+    with pytest.raises(AccountsArchiveVersionError, match="version 1 predates") as raised:
+        await import_accounts({"version": 1, "users": [_row("usr-a", "a@x.io") | {"role": "admin"}]})
+    assert "recreate the archive from a deployment on the current baseline" in str(raised.value)
+    assert pg.executed == []
+
+
+def test_the_version_error_is_a_value_error():
+    assert issubclass(AccountsArchiveVersionError, ValueError)
 
 
 async def test_import_refused_when_unconfigured(monkeypatch):
     # A valid-version payload still refuses loudly when the store is not configured.
     monkeypatch.setattr(backup, "accounts_store_configured", lambda: False)
     with pytest.raises(RuntimeError, match="not configured"):
-        await import_accounts({"version": 1, "users": [_row("usr-a", "a@x.io")]})
+        await import_accounts({"version": 2, "users": [_row("usr-a", "a@x.io")]})
 
 
 def test_registration_is_idempotent_and_secret(monkeypatch):
@@ -142,7 +163,7 @@ async def test_restore_defaults_a_missing_created_at_to_now(monkeypatch):
 async def test_import_refuses_bool_and_non_positive_versions():
     # bool is an int subclass — True must not pass as version 1.
     for version in (True, False, 0, -1):
-        with pytest.raises(ValueError, match="no valid version"):
+        with pytest.raises(AccountsArchiveVersionError, match="no valid version"):
             await import_accounts({"version": version, "users": []})
 
 
@@ -158,7 +179,7 @@ async def test_restore_contains_psycopg_adaptation_errors_per_user(monkeypatch):
 
     pg = ScriptedPg(errors=[FakeAdaptError("cannot adapt type 'dict'")], fetches=[{"user_id": "usr-b"}])
     _pg(monkeypatch, pg)
-    bad = _row("usr-a", "a@x.io") | {"role": {"x": 1}}
+    bad = _row("usr-a", "a@x.io") | {"email": {"x": 1}}
     report = await _BackupUserStore(_settings()).restore_users([bad, _row("usr-b", "b@x.io")])
     assert report.created == 1
     assert len(report.errors) == 1

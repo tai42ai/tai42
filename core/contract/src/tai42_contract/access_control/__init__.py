@@ -11,6 +11,7 @@ from tai42_contract.access_control.context import (
     set_request_user_id,
 )
 from tai42_contract.access_control.identity import (
+    DISABLED_CLAIM,
     KEY_FINGERPRINT_CLAIM,
     OWNER_USER_ID_CLAIM,
     ApiKeyIdentityProvider,
@@ -29,6 +30,7 @@ from tai42_contract.access_control.models import (
 from tai42_contract.access_control.verifier import Verifier
 
 __all__ = [
+    "DISABLED_CLAIM",
     "KEY_FINGERPRINT_CLAIM",
     "OWNER_USER_ID_CLAIM",
     "UNIVERSAL_SCOPE",

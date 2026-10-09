@@ -21,6 +21,7 @@ from typing import LiteralString
 import pytest
 from psycopg.errors import UniqueViolation
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
+from tai42_contract.accounts.errors import LastAdminError
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.postgres import PostgresClient
@@ -340,40 +341,29 @@ async def _add_principal_with_policy(s: PostgresAccessControlStore, uid: str, *,
         await s.set_principal_disabled(uid, True)
 
 
-async def _guarded_last_admin_delete(s: PostgresAccessControlStore, user_id: str) -> str:
-    """Mirror the principals door's guarded delete: refuse the last enabled admin, else delete.
+async def _guarded(change: str, s: PostgresAccessControlStore, user_id: str) -> str:
+    """Run one guarded change the way every door composes it: the last-admin rule, then the write.
 
-    Returns ``"deleted"``, ``"refused"`` (last enabled admin), or ``"gone"`` (row vanished
-    under the race). The re-read, the last-admin count, and the delete all run on the guard's
-    advisory-locked cursor — the exact atomic sequence the door composes."""
+    ``change`` is ``"delete"``, ``"disable"`` or ``"demote"`` (a condition put on the
+    principal's own ``['*']`` policy, so it is no longer admin-shaped). Returns the change's
+    name, ``"refused"`` (the last enabled admin) or ``"gone"`` (the row vanished under the
+    race). The re-read, the count and the write all run on the guard's advisory-locked cursor.
+    """
     async with s.principal_guard_txn() as guard:
-        locked = await guard.read(user_id)
-        if locked is None:
+        if await guard.read(user_id) is None:
             return "gone"
-        if (
-            not locked["disabled"]
-            and await guard.target_is_enabled_admin(user_id)
-            and await guard.count_other_enabled_admins(user_id) == 0
-        ):
+        try:
+            if change == "delete":
+                await guard.refuse_if_last_admin(user_id)
+                await guard.delete(user_id)
+            elif change == "disable":
+                await guard.refuse_if_last_admin(user_id)
+                await guard.set_disabled(user_id, True)
+            else:
+                await guard.update_policy_fields(user_id, {"condition": {"content": "true"}})
+        except LastAdminError:
             return "refused"
-        await guard.delete(user_id)
-        return "deleted"
-
-
-async def _guarded_last_admin_disable(s: PostgresAccessControlStore, user_id: str) -> str:
-    """Mirror the principals door's guarded disable: refuse the last enabled admin, else disable."""
-    async with s.principal_guard_txn() as guard:
-        locked = await guard.read(user_id)
-        if locked is None:
-            return "gone"
-        if (
-            not locked["disabled"]
-            and await guard.target_is_enabled_admin(user_id)
-            and await guard.count_other_enabled_admins(user_id) == 0
-        ):
-            return "refused"
-        await guard.set_disabled(user_id, True)
-        return "disabled"
+        return change
 
 
 async def test_guard_counts_only_enabled_admins(store: tuple[PostgresAccessControlStore, str]) -> None:
@@ -418,8 +408,8 @@ async def test_concurrent_guarded_delete_of_two_last_admins_one_refused(
     a1, a2 = f"{token}-a1", f"{token}-a2"
     await _add_principal_with_policy(s, a1, admin=True, disabled=False)
     await _add_principal_with_policy(s, a2, admin=True, disabled=False)
-    r1, r2 = await asyncio.gather(_guarded_last_admin_delete(s, a1), _guarded_last_admin_delete(s, a2))
-    assert {r1, r2} == {"deleted", "refused"}
+    r1, r2 = await asyncio.gather(_guarded("delete", s, a1), _guarded("delete", s, a2))
+    assert {r1, r2} == {"delete", "refused"}
     survivors = [p for p in await s.list_principals() if p["user_id"] in (a1, a2)]
     assert len(survivors) == 1
     survivor = survivors[0]
@@ -439,8 +429,8 @@ async def test_concurrent_guarded_disable_of_two_last_admins_one_refused(
     a1, a2 = f"{token}-a1", f"{token}-a2"
     await _add_principal_with_policy(s, a1, admin=True, disabled=False)
     await _add_principal_with_policy(s, a2, admin=True, disabled=False)
-    r1, r2 = await asyncio.gather(_guarded_last_admin_disable(s, a1), _guarded_last_admin_disable(s, a2))
-    assert {r1, r2} == {"disabled", "refused"}
+    r1, r2 = await asyncio.gather(_guarded("disable", s, a1), _guarded("disable", s, a2))
+    assert {r1, r2} == {"disable", "refused"}
     enabled_admins = []
     for uid in (a1, a2):
         principal = await s.get_principal(uid)
@@ -448,3 +438,133 @@ async def test_concurrent_guarded_disable_of_two_last_admins_one_refused(
         if not principal["disabled"]:
             enabled_admins.append(uid)
     assert len(enabled_admins) == 1
+
+
+async def test_concurrent_demote_and_disable_of_the_last_two_admins_one_refused(
+    store: tuple[PostgresAccessControlStore, str],
+) -> None:
+    """A demotion of one and a disable of the other of the last two enabled admins serialize on
+    the one advisory lock: exactly one change commits and the other is refused, so one enabled
+    admin always remains."""
+    s, token = store
+    a1, a2 = f"{token}-a1", f"{token}-a2"
+    await _add_principal_with_policy(s, a1, admin=True, disabled=False)
+    await _add_principal_with_policy(s, a2, admin=True, disabled=False)
+    r1, r2 = await asyncio.gather(_guarded("demote", s, a1), _guarded("disable", s, a2))
+    assert sorted([r1, r2]).count("refused") == 1
+    async with s.principal_guard_txn() as guard:
+        standing = [
+            uid
+            for uid in (a1, a2)
+            if not (await guard.read(uid) or {}).get("disabled") and await guard.target_is_enabled_admin(uid)
+        ]
+    assert len(standing) == 1
+
+
+async def test_a_refused_demotion_writes_nothing(store: tuple[PostgresAccessControlStore, str]) -> None:
+    s, token = store
+    a1 = f"{token}-a1"
+    await _add_principal_with_policy(s, a1, admin=True, disabled=False)
+    with pytest.raises(LastAdminError):
+        async with s.principal_guard_txn() as guard:
+            await guard.restore_policy_body(a1, {"scopes": [], "policy_data": {}, "condition": None})
+    assert await s.get_policy_body(a1) == {"scopes": ["*"], "policy_data": {}, "condition": None}
+
+
+async def test_a_policy_edit_never_changes_a_principals_disabled_state(
+    store: tuple[PostgresAccessControlStore, str],
+) -> None:
+    """The ``disabled`` marker is carried from the stored row on a guarded edit: clearing
+    ``policy_data`` keeps a disabled principal disabled, and writing a marker that differs from
+    the stored state is refused with nothing written, whatever the admin count."""
+    s, token = store
+    a1, a2 = f"{token}-a1", f"{token}-a2"
+    await _add_principal_with_policy(s, a1, admin=True, disabled=False)
+    with pytest.raises(ValueError, match="'disabled' is not policy content"):
+        async with s.principal_guard_txn() as guard:
+            await guard.update_policy_fields(a1, {"policy_data": {"disabled": True}})
+    assert await s.get_policy_body(a1) == {"scopes": ["*"], "policy_data": {}, "condition": None}
+
+    await _add_principal_with_policy(s, a2, admin=True, disabled=False)
+    with pytest.raises(ValueError, match="'disabled' is not policy content"):
+        async with s.principal_guard_txn() as guard:
+            await guard.update_policy_fields(a2, {"policy_data": {"disabled": True}})
+    assert await s.get_policy_body(a2) == {"scopes": ["*"], "policy_data": {}, "condition": None}
+
+    await s.set_principal_disabled(a2, True)
+    async with s.principal_guard_txn() as guard:
+        committed = await guard.update_policy_fields(a2, {"policy_data": {}})
+    assert committed == {"scopes": ["*"], "policy_data": {"disabled": True}, "condition": None}
+    assert await s.get_policy_body(a2) == committed
+    principal = await s.get_principal(a2)
+    assert principal is not None
+    assert principal["disabled"] is True
+
+
+async def test_a_rollback_never_changes_a_principals_disabled_state(
+    store: tuple[PostgresAccessControlStore, str],
+) -> None:
+    """A rollback restores policy content with the live marker forced on: a historical marker on
+    an enabled principal is dropped (no last-admin refusal, the principal stays enabled), and a
+    disabled principal keeps its marker."""
+    s, token = store
+    a1, a2 = f"{token}-a1", f"{token}-a2"
+    await _add_principal_with_policy(s, a1, admin=True, disabled=False)
+    async with s.principal_guard_txn() as guard:
+        restored = await guard.restore_policy_body(
+            a1, {"scopes": ["*"], "policy_data": {"disabled": True, "note": "v1"}, "condition": None}
+        )
+    assert restored == {"scopes": ["*"], "policy_data": {"note": "v1"}, "condition": None}
+    assert await s.get_policy_body(a1) == restored
+
+    await _add_principal_with_policy(s, a2, admin=True, disabled=True)
+    async with s.principal_guard_txn() as guard:
+        restored = await guard.restore_policy_body(a2, {"scopes": ["*"], "policy_data": {}, "condition": None})
+    assert restored == {"scopes": ["*"], "policy_data": {"disabled": True}, "condition": None}
+    assert await s.get_policy_body(a2) == restored
+    for uid, disabled in ((a1, False), (a2, True)):
+        principal = await s.get_principal(uid)
+        assert principal is not None
+        assert principal["disabled"] is disabled
+
+
+async def test_a_key_row_policy_edit_refuses_the_disabled_marker(store: tuple[PostgresAccessControlStore, str]) -> None:
+    """The plain store path holds the same rule on a key row: the marker is refused on edit and
+    dropped on rollback."""
+    s, token = store
+    key = f"{token}-key"
+    await s.create_policy(key, [], {KEY_FINGERPRINT_CLAIM: "fp-1"})
+    with pytest.raises(ValueError, match="'disabled' is not policy content"):
+        await s.update_policy_fields(key, {"policy_data": {"disabled": True}})
+    restored = await s.restore_policy_body(key, {"scopes": [], "policy_data": {"disabled": True}, "condition": None})
+    assert restored == {"scopes": [], "policy_data": {KEY_FINGERPRINT_CLAIM: "fp-1"}, "condition": None}
+    assert await s.get_policy_body(key) == restored
+
+
+async def test_guard_write_policy_creates_the_row_when_absent(store: tuple[PostgresAccessControlStore, str]) -> None:
+    s, token = store
+    uid = f"{token}-fresh"
+    await s.create_principal(uid, "human", uid, None)
+    body = {"scopes": ["*"], "policy_data": {ROLE_POINTER_KEY: "editor"}, "condition": {"content": "true"}}
+    async with s.principal_guard_txn() as guard:
+        await guard.write_policy(uid, body)
+    assert await s.get_policy_body(uid) == body
+    body["policy_data"] = {ROLE_POINTER_KEY: "viewer"}
+    async with s.principal_guard_txn() as guard:
+        await guard.write_policy(uid, body)
+    assert (await s.get_policy_body(uid) or {})["policy_data"] == {ROLE_POINTER_KEY: "viewer"}
+
+
+async def test_principal_policies_reads_every_principal_in_one_query(
+    store: tuple[PostgresAccessControlStore, str],
+) -> None:
+    s, token = store
+    admin, editor, bare = f"{token}-admin", f"{token}-editor", f"{token}-bare"
+    await _add_principal_with_policy(s, admin, admin=True, disabled=False)
+    await _add_principal_with_policy(s, editor, admin=False, disabled=False)
+    await s.create_principal(bare, "service", bare, None)
+    policies = await s.principal_policies([admin, editor, bare, f"{token}-ghost"])
+    assert set(policies) == {admin, editor, bare}
+    assert policies[admin] == {"scopes": ["*"], "policy_data": {}, "condition": None}
+    assert policies[editor]["condition"] == {"content": "true"}
+    assert policies[bare] == {"scopes": [], "policy_data": {}, "condition": None}

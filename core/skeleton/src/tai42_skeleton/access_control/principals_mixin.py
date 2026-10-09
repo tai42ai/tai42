@@ -4,8 +4,8 @@ Split out of :mod:`tai42_skeleton.access_control.store` so each module stays wit
 source-size budget. :class:`PrincipalsStoreMixin` is mixed into
 :class:`~tai42_skeleton.access_control.store.PostgresAccessControlStore`, so
 ``access_control_store()`` exposes the policy and principal surfaces as ONE store over the
-same component pool — the ``disabled`` writer touches both tables in one transaction, and
-``self._write_policy_body`` (the policy half) is reachable here.
+same component pool — the ``disabled`` writer touches both tables in one transaction
+through the policy half's cursor-level writers.
 
 The Postgres transport seam is resolved through the ``store`` module
 (``_store.client_ctx``) at call time, so a test that patches the policy store's transport
@@ -14,20 +14,41 @@ covers the principal surface too — there is one patch point for the whole stor
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
 from psycopg.errors import UniqueViolation
-from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
+from tai42_contract.access_control import DISABLED_CLAIM
+from tai42_contract.access_control.models import AccessPolicy
+from tai42_contract.accounts.errors import LastAdminError
+from tai42_kit.clients.impl.postgres import Json, PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.access_control import store as _store
+from tai42_skeleton.access_control.user import is_admin_policy
 from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.db.lock_keys import FIRST_PRINCIPAL_LOCK_KEY
 
+# The refusal every guarded door raises when a change would leave no enabled admin principal.
+LAST_ADMIN_MESSAGE = "the last enabled admin principal cannot be demoted, disabled or deleted"
+
 # The principal row shape every principal read/insert returns, in one place.
 _PRINCIPAL_COLUMNS = "user_id, kind, display_name, created_by, disabled, created_at"
+
+
+def _holds_admin_standing(body: dict[str, Any]) -> bool:
+    """Whether a principal's OWN policy ``body`` lets it act as an admin.
+
+    Admin-shaped (:func:`~tai42_skeleton.access_control.user.is_admin_policy` on the own row,
+    no owner, so ``owner_policy`` is ``None``) AND not carrying the ``disabled`` marker that
+    enforcement denies on (:func:`~tai42_skeleton.access_control.standing.resolve_standing`).
+    The marker is the principal row's ``disabled`` column projected by
+    :func:`_apply_disabled_on_cursor`, so the two always agree.
+    """
+    if body["policy_data"].get(DISABLED_CLAIM) is True:
+        return False
+    return is_admin_policy(AccessPolicy(**body), None)
 
 
 def _principal_row(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -46,15 +67,11 @@ def _principal_row(row: tuple[Any, ...]) -> dict[str, Any]:
 async def _count_other_enabled_admins_on_cursor(cur: Any, user_id: str) -> int:
     """Enabled admin principals OTHER than ``user_id``, counted on ``cur``.
 
-    "Admin" is the shared :func:`~tai42_skeleton.access_control.user.is_admin_policy`
-    predicate applied to each enabled principal's OWN policy row (a principal's own row has
-    no owner, so ``owner_policy`` is ``None``): ``"*"`` scopes and no condition. Reusing the
-    predicate keeps this count from drifting from the admin fence enforcement uses.
+    Counted: a principal whose row is not ``disabled`` and whose OWN policy row holds admin
+    standing (:func:`_holds_admin_standing`: ``"*"`` scopes, no condition, no ``disabled``
+    marker). Reusing the shared admin predicate and the marker enforcement reads keeps this
+    count from drifting from the principals enforcement lets act as admin.
     """
-    from tai42_contract.access_control.models import AccessPolicy
-
-    from tai42_skeleton.access_control.user import is_admin_policy
-
     await cur.execute(
         "SELECT p.scopes, p.policy_data, p.condition "
         "FROM access_control_principals pr "
@@ -63,21 +80,17 @@ async def _count_other_enabled_admins_on_cursor(cur: Any, user_id: str) -> int:
         (user_id,),
     )
     rows = await cur.fetchall()
-    return sum(1 for row in rows if is_admin_policy(AccessPolicy(**_store._policy_body(row)), None))
+    return sum(1 for row in rows if _holds_admin_standing(_store.policy_body_from_row(row)))
 
 
 async def _target_is_enabled_admin_on_cursor(cur: Any, user_id: str) -> bool:
-    """Whether ``user_id``'s OWN policy row is admin-shaped, read on ``cur``.
+    """Whether ``user_id``'s OWN policy row holds admin standing, read on ``cur``.
 
-    The same :func:`~tai42_skeleton.access_control.user.is_admin_policy` predicate the count
-    applies, on the target's own row (no owner, so ``owner_policy`` is ``None``). ``False``
-    when the target has no policy row. The caller pairs this with the target's ``disabled``
-    state to decide whether removing it could strand the deployment with no enabled admin.
+    The same :func:`_holds_admin_standing` predicate the count applies, on the target's own
+    row. ``False`` when the target has no policy row. The caller pairs this with the
+    target's ``disabled`` column to decide whether changing it could strand the deployment
+    with no enabled admin.
     """
-    from tai42_contract.access_control.models import AccessPolicy
-
-    from tai42_skeleton.access_control.user import is_admin_policy
-
     await cur.execute(
         "SELECT scopes, policy_data, condition FROM access_control_policies WHERE user_id = %s",
         (user_id,),
@@ -85,17 +98,19 @@ async def _target_is_enabled_admin_on_cursor(cur: Any, user_id: str) -> bool:
     row = await cur.fetchone()
     if row is None:
         return False
-    return is_admin_policy(AccessPolicy(**_store._policy_body(row)), None)
+    return _holds_admin_standing(_store.policy_body_from_row(row))
 
 
-async def _apply_disabled_on_cursor(store: Any, cur: Any, user_id: str, disabled: bool) -> dict[str, Any]:
+async def _apply_disabled_on_cursor(cur: Any, user_id: str, disabled: bool) -> dict[str, Any]:
     """Write the ``disabled`` marker to BOTH homes on ``cur`` and return the committed body.
 
     The single spelling of the ``disabled`` flip: it updates the AUTHORITATIVE
     ``access_control_principals.disabled`` column AND the enforcement projection
     ``access_control_policies.policy_data->'disabled'`` on the principal's own policy row, so
-    the two can never drift. Runs on the caller's cursor, so the plain single-writer path and
-    the advisory-locked guard share ONE implementation. Raises ``KeyError`` when the principal
+    the two can never drift: every other policy write carries the stored marker forward
+    (``store._carry_server_owned_claims``) and the key mint refuses a supplied one
+    (``store.refuse_disabled_claim_at_mint``). Runs on the caller's cursor, so the plain
+    single-writer path and the advisory-locked guard share ONE implementation. Raises ``KeyError`` when the principal
     row or its policy row is absent (an invariant breach, never a silent no-op).
     """
     await cur.execute(
@@ -111,19 +126,26 @@ async def _apply_disabled_on_cursor(store: Any, cur: Any, user_id: str, disabled
     row = await cur.fetchone()
     if row is None:
         raise KeyError(f"principal {user_id!r} has no policy row to project 'disabled' onto")
-    body = _store._policy_body(row)
+    body = _store.policy_body_from_row(row)
     policy_data = dict(body["policy_data"])
     if disabled:
-        policy_data["disabled"] = True
+        policy_data[DISABLED_CLAIM] = True
     else:
-        policy_data.pop("disabled", None)
+        policy_data.pop(DISABLED_CLAIM, None)
     body["policy_data"] = policy_data
-    await store._write_policy_body(cur, user_id, body)
+    await _store.write_policy_body(cur, user_id, body)
     return body
 
 
 class _PrincipalGuard:
-    """The last-admin re-read, count, and mutation, bound to one advisory-locked cursor.
+    """The last-admin rule and the mutations it gates, bound to one advisory-locked cursor.
+
+    "Admin" is every principal with an enabled row whose own policy holds admin standing
+    (:func:`_holds_admin_standing`: admin-shaped and free of the ``disabled`` marker
+    enforcement denies on). The rule is
+    :meth:`refuse_if_last_admin`; every door that can strand the admins — a disable, a
+    delete, a role assignment, and a key/policy-door write to a principal's own row — runs it
+    here, before its write.
 
     Runs as a single serialized transaction under :data:`FIRST_PRINCIPAL_LOCK_KEY`.
     Every method runs on the guard's own cursor, so the last-admin count and the mutation it
@@ -150,16 +172,84 @@ class _PrincipalGuard:
         return _principal_row(row) if row is not None else None
 
     async def target_is_enabled_admin(self, user_id: str) -> bool:
-        """Whether the target's own policy row is admin-shaped, read under the lock."""
+        """Whether the target's own policy row holds admin standing, read under the lock."""
         return await _target_is_enabled_admin_on_cursor(self._cur, user_id)
 
     async def count_other_enabled_admins(self, user_id: str) -> int:
         """Enabled admin principals OTHER than the target, counted under the lock."""
         return await _count_other_enabled_admins_on_cursor(self._cur, user_id)
 
+    async def refuse_if_last_admin(self, user_id: str, resulting_body: dict[str, Any] | None = None) -> None:
+        """Raise :class:`~tai42_contract.accounts.errors.LastAdminError` when the change leaves no enabled admin.
+
+        ``resulting_body`` is the target's own policy after the change, or ``None`` when the
+        change removes the target from the count (a disable or a delete). The change is judged
+        by the standing it leaves, not only the shape: the resulting body carries the target's
+        stored ``disabled`` marker, so a disabled target never holds standing. Call it
+        BEFORE the write: the target's current standing is read on this cursor. Nothing to
+        refuse when the result still holds admin standing, when the target has no principal
+        row or its row is disabled, or when its current policy does not hold admin standing;
+        otherwise the OTHER enabled admins are counted, and zero refuses.
+        """
+        if resulting_body is not None and _holds_admin_standing(resulting_body):
+            return
+        principal = await self.read(user_id)
+        if principal is None or principal["disabled"]:
+            return
+        if await self.target_is_enabled_admin(user_id) and await self.count_other_enabled_admins(user_id) == 0:
+            raise LastAdminError(LAST_ADMIN_MESSAGE)
+
+    async def policy_body(self, user_id: str) -> dict[str, Any] | None:
+        """The target's policy body locked ``FOR UPDATE`` under the guard, or ``None`` when it has none."""
+        await self._cur.execute(
+            "SELECT scopes, policy_data, condition FROM access_control_policies WHERE user_id = %s FOR UPDATE",
+            (user_id,),
+        )
+        row = await self._cur.fetchone()
+        return _store.policy_body_from_row(row) if row is not None else None
+
+    async def write_policy(self, user_id: str, body: dict[str, Any]) -> None:
+        """Write ``body`` as the target's policy under the guard, creating the row when absent.
+
+        Concrete scopes are validated against live routes with their route rows locked
+        ``FOR SHARE`` (a ``ValueError`` names an unbacked scope).
+        """
+        if body["scopes"]:
+            await self._store._lock_and_validate_scopes(self._cur, body["scopes"])
+        await _store.write_policy_body(self._cur, user_id, body)
+        if self._cur.rowcount == 0:
+            await self._cur.execute(
+                "INSERT INTO access_control_policies (user_id, scopes, policy_data, condition) VALUES (%s, %s, %s, %s)",
+                (user_id, body["scopes"], Json(body["policy_data"]), Json(body["condition"])),
+            )
+
+    async def update_policy_fields(self, user_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+        """A partial policy edit under the guard, refused when it demotes the last enabled admin.
+
+        Returns the committed body, or ``None`` when the target has no policy row.
+        """
+        body = await _store.resolve_policy_update(self._store, self._cur, user_id, updates)
+        if body is None:
+            return None
+        await self.refuse_if_last_admin(user_id, body)
+        await _store.write_policy_body(self._cur, user_id, body)
+        return body
+
+    async def restore_policy_body(self, user_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
+        """A rollback write under the guard, refused when it demotes the last enabled admin.
+
+        Returns the restored body, or ``None`` when the target has no policy row.
+        """
+        resolved = await _store.resolve_policy_restore(self._cur, user_id, body)
+        if resolved is None:
+            return None
+        await self.refuse_if_last_admin(user_id, resolved)
+        await _store.write_policy_body(self._cur, user_id, resolved)
+        return resolved
+
     async def set_disabled(self, user_id: str, disabled: bool) -> dict[str, Any]:
         """Flip the target's ``disabled`` marker on both homes under the lock; return the committed body."""
-        return await _apply_disabled_on_cursor(self._store, self._cur, user_id, disabled)
+        return await _apply_disabled_on_cursor(self._cur, user_id, disabled)
 
     async def delete(self, user_id: str) -> tuple[bool, bool]:
         """Delete the target's policy row and principal row under the lock.
@@ -235,9 +325,10 @@ class PrincipalsStoreMixin:
     async def principal_guard_txn(self) -> AsyncIterator[_PrincipalGuard]:
         """One transaction under :data:`FIRST_PRINCIPAL_LOCK_KEY` for a last-admin-guarded mutation.
 
-        The mutation is a disable or a delete. A concurrent guarded removal blocks at the lock
-        and re-evaluates the admin count against committed state, so two removals of the last
-        two enabled admins can never both pass. On the yielded guard the caller re-reads,
+        The mutation is a disable, a delete, a role assignment or a policy write to a
+        principal's own row. A concurrent guarded change blocks at the lock and re-evaluates
+        the admin count against committed state, so two changes that each remove one of the
+        last two enabled admins can never both pass. On the yielded guard the caller re-reads,
         counts, and mutates on this one cursor; the re-read, the last-admin refusal, and the
         write all commit or roll back together on block exit — a refusal leaves nothing
         written.
@@ -250,6 +341,27 @@ class PrincipalsStoreMixin:
         ):
             await cur.execute("SELECT pg_advisory_xact_lock(%s)", (FIRST_PRINCIPAL_LOCK_KEY,))
             yield _PrincipalGuard(cur, self)
+
+    async def principal_policies(self, user_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Each existing principal's own policy body, by principal id, in one query.
+
+        A principal with no policy row maps to the empty body; an id with no principal row
+        is absent.
+        """
+        if not user_ids:
+            return {}
+        async with (
+            _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            read_connection(pool) as conn,
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                "SELECT pr.user_id, p.scopes, p.policy_data, p.condition FROM access_control_principals pr "
+                "LEFT JOIN access_control_policies p ON p.user_id = pr.user_id WHERE pr.user_id = ANY(%s)",
+                (list(user_ids),),
+            )
+            rows = await cur.fetchall()
+        return {row[0]: _store.policy_body_from_row(row[1:]) for row in rows}
 
     async def get_principal(self, user_id: str) -> dict[str, Any] | None:
         """The principal row for ``user_id``, or ``None`` when none exists."""
@@ -321,7 +433,7 @@ class PrincipalsStoreMixin:
             conn.transaction(),
             conn.cursor() as cur,
         ):
-            return await _apply_disabled_on_cursor(self, cur, user_id, disabled)
+            return await _apply_disabled_on_cursor(cur, user_id, disabled)
 
     async def delete_principal(self, user_id: str) -> bool:
         """Delete a principal row. Returns whether a row existed.

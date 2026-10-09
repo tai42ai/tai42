@@ -21,13 +21,13 @@ pytestmark = pytest.mark.integration
 
 async def test_export_import_roundtrip_and_skip_only(accounts_db: PostgresConnectionSettings) -> None:
     users = UsersStore(accounts_db)
-    await users.create_login("usr-alice", "alice@a-42.example", "admin", password_hash="argon2$alice")
-    await users.create_login("usr-bob", "bob@a-42.example", "member")  # a pending invite: null hash
+    await users.create_login("usr-alice", "alice@a-42.example", password_hash="argon2$alice")
+    await users.create_login("usr-bob", "bob@a-42.example")  # a pending invite: null hash
     original = await users.get_by_user_id("usr-alice")
     assert original is not None
 
     payload = await export_accounts()
-    assert payload["version"] == 1
+    assert payload["version"] == 2
     assert {u["user_id"] for u in payload["users"]} == {"usr-alice", "usr-bob"}
 
     # Wipe the roster (a fresh restore target) and import it back.
@@ -43,7 +43,6 @@ async def test_export_import_roundtrip_and_skip_only(accounts_db: PostgresConnec
     restored = await users.get_by_user_id("usr-alice")
     assert restored is not None
     assert restored["password_hash"] == "argon2$alice"  # the verifier round-trips as stored
-    assert restored["role"] == "admin"
     assert restored["created_at"] == original["created_at"]  # timestamp preserved through iso round-trip
 
     pending = await users.get_by_user_id("usr-bob")
@@ -60,15 +59,14 @@ async def test_export_import_roundtrip_and_skip_only(accounts_db: PostgresConnec
 async def test_import_email_collision_is_contained_per_user(accounts_db: PostgresConnectionSettings) -> None:
     users = UsersStore(accounts_db)
     # An existing user already holds the email a payload row (with a different user_id) claims.
-    await users.create_login("usr-existing", "shared@a-42.example", "admin", password_hash="argon2$existing")
+    await users.create_login("usr-existing", "shared@a-42.example", password_hash="argon2$existing")
     payload = {
-        "version": 1,
+        "version": 2,
         "users": [
             {
                 "user_id": "usr-clash",
                 "email": "shared@a-42.example",
                 "password_hash": "argon2$clash",
-                "role": "member",
                 "disabled": False,
                 "created_at": "2026-01-02T03:04:05+00:00",
             },
@@ -76,7 +74,6 @@ async def test_import_email_collision_is_contained_per_user(accounts_db: Postgre
                 "user_id": "usr-ok",
                 "email": "ok@a-42.example",
                 "password_hash": "argon2$ok",
-                "role": "member",
                 "disabled": False,
                 "created_at": "2026-01-02T03:04:05+00:00",
             },

@@ -112,8 +112,19 @@ a user (or sending a new link) returns a one-time invite token and a `/login?inv
 path relative to your origin, shown once on the action's result; the invitee sets a
 password through `POST /api/login/invite/accept`, which consumes the token and mints a
 session in one step. `role` names an existing access-control role template; an unknown
-name is rejected and no user is created. The last enabled admin cannot be demoted,
-disabled, or deleted.
+name is rejected and no user is created. A member's role is read from the platform —
+the role their principal holds, or **No role** when their access was not set from a
+role. The platform refuses a change that would leave no enabled admin principal, and
+every admin principal counts, not only accounts; see
+[the last enabled admin stays](/concepts/permissions#the-last-enabled-admin-stays).
+
+### Login throttles behind a proxy
+
+The per-IP login counters key on the client the platform resolves for every public
+door: the direct peer unless you declare your proxies with
+`TAI_RATE_LIMIT_TRUSTED_PROXIES` or `TAI_RATE_LIMIT_TRUSTED_HOPS`, in which case the
+forwarded client. An IPv6 client is counted by its `/64`. See
+[which client a request is from](/concepts/access-control#which-client-a-request-is-from).
 
 ## See also
 

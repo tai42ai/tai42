@@ -8,6 +8,7 @@ subclass ``AccountsProvider``; the application renders the declared
 from __future__ import annotations
 
 from tai42_contract.accounts.errors import (
+    LastAdminError,
     LoginAttachError,
     LoginConflictError,
     MemberActionBadRequestError,
@@ -57,6 +58,7 @@ __all__ = [
     "InviteRow",
     "InvokeMemberActionRequest",
     "InvokeMemberActionResult",
+    "LastAdminError",
     "LoginAttachError",
     "LoginAttachingProvider",
     "LoginAttachment",

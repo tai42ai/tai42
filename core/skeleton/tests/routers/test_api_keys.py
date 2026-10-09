@@ -215,6 +215,15 @@ async def test_create_forwards_policy_data_and_condition_into_stored_policy(stor
     }
 
 
+async def test_create_with_a_disabled_claim_is_400(store: _Fakes) -> None:
+    resp = await api_keys.create_api_key(
+        _req(body={"user_id": "u1", "description": "d", "scopes": [], "policy_data": {"disabled": True}})
+    )
+    assert resp.status_code == 400
+    assert "'disabled' is not policy content" in _body(resp)["error"]
+    assert store.pg.policy("u1") is None
+
+
 async def test_create_unknown_scope_is_400(store: _Fakes) -> None:
     resp = await api_keys.create_api_key(_req(body={"user_id": "u1", "description": "desc", "scopes": ["ghost"]}))
     assert resp.status_code == 400
@@ -1099,6 +1108,12 @@ async def test_delete_public_marker_scope_is_400(store: _Fakes) -> None:
     assert "public marker" in _body(resp)["error"]
 
 
+async def test_delete_universal_scope_is_400(store: _Fakes) -> None:
+    resp = await api_keys.delete_scope(_req(path_params={"scope_id": "*"}))
+    assert resp.status_code == 400
+    assert "universal grant" in _body(resp)["error"]
+
+
 async def test_validate_condition_malformed_body_400(bound_app: Any) -> None:
     resp = await api_keys.validate_condition(_req(body={"condition": 123}))
     assert resp.status_code == 400
@@ -1265,6 +1280,13 @@ async def test_add_scope_url_rejects_public_marker(store: _Fakes) -> None:
     assert resp.status_code == 400
     assert "public marker" in _body(resp)["error"]
     # Nothing written to the scope machinery.
+    assert store.pg.routes == []
+
+
+async def test_add_scope_url_rejects_the_universal_scope(store: _Fakes) -> None:
+    resp = await api_keys.add_scope_url(_req(body={"scope_id": "*", "url": "/x"}))
+    assert resp.status_code == 400
+    assert "universal grant" in _body(resp)["error"]
     assert store.pg.routes == []
 
 

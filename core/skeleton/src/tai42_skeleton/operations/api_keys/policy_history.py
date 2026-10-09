@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from tai42_contract.accounts.errors import LastAdminError
 from tai42_contract.versioning.errors import DocumentNotFoundError, DocumentVersionNotFoundError
 
 import tai42_skeleton.operations.api_keys as _pkg
 from tai42_skeleton.access_control import management
-from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotFoundError, NotSupportedError, operation
+from tai42_skeleton.operations import (
+    BadRequestError,
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    NotSupportedError,
+    operation,
+)
 from tai42_skeleton.operations._authority import require_admin
 from tai42_skeleton.operations.response_models_group_a import DocumentVersionList, PolicyRollbackResult
 
@@ -54,7 +62,7 @@ async def list_policy_versions(user_id: str) -> list[dict[str, Any]]:
     summary="Roll a policy back to a version",
     tags=["access-control"],
     destructive=True,
-    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
+    errors=[BadRequestError, ConflictError, ForbiddenError, NotFoundError, NotSupportedError],
     request_model=PolicyRollback,
     response_model=PolicyRollbackResult,
 )
@@ -96,6 +104,8 @@ async def rollback_policy(user_id: str, version: int) -> dict[str, Any]:
         restored = await management.restore_policy_body(user_id, target.body)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
+    except LastAdminError as exc:
+        raise ConflictError(str(exc)) from exc
     if not restored:
         raise NotFoundError(f"user not found: {user_id!r}")
     await store.rollback(user_id, version)

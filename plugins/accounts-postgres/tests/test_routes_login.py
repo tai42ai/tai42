@@ -38,7 +38,6 @@ def _seed_user(wire, password: str, *, disabled=False, password_hash=_FROM_PASSW
         "user_id": "usr-1",
         "email": "a@b.c",
         "password_hash": hash_password(password) if password_hash is _FROM_PASSWORD else password_hash,
-        "role": "admin",
         "disabled": disabled,
         "created_at": future(0),
     }
@@ -168,7 +167,6 @@ def _seed_invite(wire, raw_token: str, *, user_id="usr-1", expires=None):
         "user_id": user_id,
         "email": "a@b.c",
         "password_hash": None,
-        "role": "viewer",
         "disabled": False,
         "created_at": future(0),
     }
@@ -275,3 +273,70 @@ def test_boot_guard_raises_when_unpopulated():
 
 def test_boot_guard_passes_when_populated(wire):
     routes_login._assert_accounts_provider_instantiated()
+
+
+# -- the per-IP throttle keys on the kit's client bucket ---------------------------
+
+
+@pytest.fixture
+def trusted_proxy(monkeypatch):
+    """Declare the test peer ``198.51.100.7`` a trusted proxy for the client resolver."""
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("TAI_RATE_LIMIT_TRUSTED_PROXIES", '["198.51.100.7"]')
+    reset_all_settings()
+    yield
+    monkeypatch.delenv("TAI_RATE_LIMIT_TRUSTED_PROXIES")
+    reset_all_settings()
+
+
+async def _wrong_login(*, client=("198.51.100.7", 40000), headers=None):
+    return await routes_login.login_password(
+        build_request({"email": "a@b.c", "password": "wrong"}, client=client, headers=headers)
+    )
+
+
+async def test_two_ipv6_peers_in_one_slash64_share_a_counter(wire, redis_fake):
+    _seed_user(wire, "correct-password")
+    await _wrong_login(client=("2001:db8:1:2::10", 40000))
+    await _wrong_login(client=("2001:db8:1:2:ffff::20", 40001))
+    assert await redis_fake.get(_ip_key("2001:db8:1:2::")) == "2"
+
+
+async def test_an_ipv4_mapped_peer_keys_on_its_ipv4(wire, redis_fake):
+    _seed_user(wire, "correct-password")
+    await _wrong_login(client=("::ffff:203.0.113.9", 40000))
+    assert await redis_fake.get(_ip_key("203.0.113.9")) == "1"
+
+
+async def test_no_peer_keys_on_unknown(wire, redis_fake):
+    _seed_user(wire, "correct-password")
+    await _wrong_login(client=None)
+    assert await redis_fake.get(_ip_key("unknown")) == "1"
+
+
+async def test_forwarded_for_is_ignored_without_declared_trust(wire, redis_fake):
+    _seed_user(wire, "correct-password")
+    await _wrong_login(headers={"X-Forwarded-For": "203.0.113.5"})
+    await _wrong_login(headers={"X-Forwarded-For": "203.0.113.6"})
+    assert await redis_fake.get(_ip_key()) == "2"
+    assert await redis_fake.get(_ip_key("203.0.113.5")) is None
+
+
+async def test_trusted_proxy_gives_two_forwarded_clients_two_counters(wire, redis_fake, trusted_proxy):
+    _seed_user(wire, "correct-password")
+    await _wrong_login(headers={"X-Forwarded-For": "203.0.113.5"})
+    await _wrong_login(headers={"X-Forwarded-For": "203.0.113.6"})
+    assert await redis_fake.get(_ip_key("203.0.113.5")) == "1"
+    assert await redis_fake.get(_ip_key("203.0.113.6")) == "1"
+    assert await redis_fake.get(_ip_key()) is None
+
+
+async def test_invite_miss_throttle_keys_on_the_client_bucket(wire, redis_fake):
+    await routes_login.login_invite_accept(
+        build_request(
+            {"invite_token": "tai-inv-x", "password": "brand-new-pass", "password_confirm": "brand-new-pass"},
+            client=("2001:db8:9:9::1", 40000),
+        )
+    )
+    assert await redis_fake.get(_ip_key("2001:db8:9:9::")) == "1"

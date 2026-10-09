@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping, Sequence
 
 import pytest
 from pydantic import BaseModel
@@ -287,6 +288,9 @@ class _StandInAdmin:
     async def set_user_disabled(self, user_id: str, disabled: bool) -> None:
         return None
 
+    async def principal_roles(self, user_ids: Sequence[str]) -> Mapping[str, str | None]:
+        return dict.fromkeys(user_ids)
+
 
 class _StandInSettings:
     def __init__(self) -> None:
@@ -296,6 +300,32 @@ class _StandInSettings:
 def test_admin_services_protocol_is_runtime_checkable():
     assert isinstance(_StandInAdmin(), AccountsAdminServices)
     assert not isinstance(object(), AccountsAdminServices)
+
+
+def test_admin_services_protocol_requires_principal_roles():
+    class _NoRoles:
+        async def create_principal(self, user_id: str, **_kwargs: object) -> None:
+            return None
+
+        async def apply_role(self, user_id: str, role: str) -> None:
+            return None
+
+        async def remove_policy(self, user_id: str) -> None:
+            return None
+
+        async def set_user_disabled(self, user_id: str, disabled: bool) -> None:
+            return None
+
+    assert not isinstance(_NoRoles(), AccountsAdminServices)
+
+
+def test_last_admin_error_is_its_own_conflict_family():
+    from tai42_contract.accounts import LastAdminError
+    from tai42_contract.accounts.errors import MemberActionError
+    from tai42_contract.errors import ErrorKind
+
+    assert LastAdminError.__tai_error_kind__ is ErrorKind.CONFLICT
+    assert not issubclass(LastAdminError, MemberActionError)
 
 
 def test_settings_protocol_is_runtime_checkable():

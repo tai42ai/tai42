@@ -10,8 +10,6 @@ failure propagates with the enclosing operation.
 from __future__ import annotations
 
 import secrets
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 import psycopg
@@ -22,10 +20,6 @@ from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
 
 if TYPE_CHECKING:
     from tai42_kit.clients import PostgresConnectionSettings
-
-# Fixed advisory-lock key serializing the count-then-mutate last-admin guard so two
-# guarded removals cannot both pass. ASCII "ACCOUS".
-_ACCOUNTS_ADVISORY_LOCK = 0x414343_4F5553
 
 _EMAIL_UNIQUE = "accounts_users_email_unique"
 _USER_ID_UNIQUE = "accounts_users_user_id_unique"
@@ -71,15 +65,13 @@ class UsersStore:
         """Bind the store to the Postgres connection ``settings``."""
         self._settings = settings
 
-    async def create_login(self, user_id: str, email: str, role: str, password_hash: str | None = None) -> None:
+    async def create_login(self, user_id: str, email: str, password_hash: str | None = None) -> None:
         """Insert the login row for the EXISTING principal ``user_id``.
 
         A ``user_id``-unique violation raises :class:`LoginExistsError` (a login
         already exists for that principal); an email-unique violation raises
         :class:`EmailTakenError`. The principal owns ``user_id``, so a collision is
-        an invariant breach surfaced loudly, never silently regenerated. ``role`` is
-        the plugin's own copy of the principal's role, keyed on by the last-admin
-        guard and echoed in the session claims.
+        an invariant breach surfaced loudly, never silently regenerated.
         """
         try:
             async with (
@@ -88,8 +80,8 @@ class UsersStore:
                 conn.cursor() as cur,
             ):
                 await cur.execute(
-                    "INSERT INTO accounts_users (user_id, email, password_hash, role) VALUES (%s, %s, %s, %s)",
-                    (user_id, email, password_hash, role),
+                    "INSERT INTO accounts_users (user_id, email, password_hash) VALUES (%s, %s, %s)",
+                    (user_id, email, password_hash),
                 )
         except psycopg.errors.UniqueViolation as exc:
             constraint = exc.diag.constraint_name
@@ -107,7 +99,7 @@ class UsersStore:
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
-                "SELECT user_id, email, password_hash, role, disabled, created_at FROM accounts_users WHERE email = %s",
+                "SELECT user_id, email, password_hash, disabled, created_at FROM accounts_users WHERE email = %s",
                 (email,),
             )
             return await cur.fetchone()
@@ -120,8 +112,7 @@ class UsersStore:
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
-                "SELECT user_id, email, password_hash, role, disabled, created_at "
-                "FROM accounts_users WHERE user_id = %s",
+                "SELECT user_id, email, password_hash, disabled, created_at FROM accounts_users WHERE user_id = %s",
                 (user_id,),
             )
             return await cur.fetchone()
@@ -134,7 +125,7 @@ class UsersStore:
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
-                "SELECT user_id, email, role, disabled, created_at, (password_hash IS NULL) AS pending_invite "
+                "SELECT user_id, email, disabled, created_at, (password_hash IS NULL) AS pending_invite "
                 "FROM accounts_users ORDER BY created_at"
             )
             return list(await cur.fetchall())
@@ -150,15 +141,6 @@ class UsersStore:
                 "UPDATE accounts_users SET password_hash = %s WHERE user_id = %s",
                 (password_hash, user_id),
             )
-
-    async def set_role(self, user_id: str, role: str) -> None:
-        """Set ``user_id``'s role."""
-        async with (
-            client_ctx(PostgresClient, self._settings) as pool,
-            pool.connection() as conn,
-            conn.cursor() as cur,
-        ):
-            await cur.execute("UPDATE accounts_users SET role = %s WHERE user_id = %s", (role, user_id))
 
     async def set_disabled(self, user_id: str, disabled: bool) -> None:
         """Enable or disable ``user_id``."""
@@ -177,94 +159,6 @@ class UsersStore:
             conn.cursor() as cur,
         ):
             await cur.execute("DELETE FROM accounts_users WHERE user_id = %s", (user_id,))
-
-    async def count_other_enabled_admins(self, user_id: str) -> int:
-        """Enabled admins OTHER than ``user_id`` — the last-admin guard's input.
-
-        Zero here for a currently-enabled admin means acting on that user would
-        leave the deployment with no enabled admin (caller 409s). Keys on the
-        reserved literal ``'admin'``.
-        """
-        async with (
-            client_ctx(PostgresClient, self._settings) as pool,
-            read_connection(pool) as conn,
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
-            await cur.execute(
-                "SELECT count(*) AS n FROM accounts_users WHERE role = 'admin' AND disabled = FALSE AND user_id <> %s",
-                (user_id,),
-            )
-            row = await cur.fetchone()
-            return 0 if row is None else int(row["n"])
-
-    @asynccontextmanager
-    async def admin_guard_txn(self) -> AsyncIterator[_AdminGuard]:
-        """One transaction under the fixed advisory lock for a last-admin-guarded mutation.
-
-        The mutation is a disable, demote, or delete. A concurrent guarded removal blocks at
-        the lock and re-evaluates the admin
-        count against committed state, so two removals of the last two admins can
-        never both pass. On the yielded guard the caller re-reads, counts, and
-        mutates on this one cursor; all commit or roll back together on block exit.
-        """
-        async with (
-            client_ctx(PostgresClient, self._settings) as pool,
-            pool.connection() as conn,
-            conn.transaction(),
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
-            await cur.execute("SELECT pg_advisory_xact_lock(%s)", (_ACCOUNTS_ADVISORY_LOCK,))
-            yield _AdminGuard(cur)
-
-
-class _AdminGuard:
-    """The last-admin re-read, count, and mutation, bound to one advisory-locked cursor.
-
-    Runs as a single serialized transaction. Every method runs on the guard's own cursor,
-    so the credential cleanup a guarded
-    disable/delete performs runs in this transaction — never a second pool checkout
-    under the lock.
-    """
-
-    def __init__(self, cur: psycopg.AsyncCursor[dict[str, Any]]) -> None:
-        self._cur = cur
-
-    async def read_target(self, user_id: str) -> dict[str, Any] | None:
-        """The target's committed ``role``/``disabled`` under the lock.
-
-        The authoritative state the orphan check decides on, never the pre-lock snapshot.
-        """
-        await self._cur.execute(
-            "SELECT role, disabled FROM accounts_users WHERE user_id = %s",
-            (user_id,),
-        )
-        return await self._cur.fetchone()
-
-    async def count_other_enabled_admins(self, user_id: str) -> int:
-        # Same ``'admin'`` basis as the plain read, on the guard's locked cursor.
-        await self._cur.execute(
-            "SELECT count(*) AS n FROM accounts_users WHERE role = 'admin' AND disabled = FALSE AND user_id <> %s",
-            (user_id,),
-        )
-        row = await self._cur.fetchone()
-        return 0 if row is None else int(row["n"])
-
-    async def set_disabled(self, user_id: str, disabled: bool) -> None:
-        await self._cur.execute("UPDATE accounts_users SET disabled = %s WHERE user_id = %s", (disabled, user_id))
-
-    async def set_role(self, user_id: str, role: str) -> None:
-        await self._cur.execute("UPDATE accounts_users SET role = %s WHERE user_id = %s", (role, user_id))
-
-    async def delete(self, user_id: str) -> None:
-        await self._cur.execute("DELETE FROM accounts_users WHERE user_id = %s", (user_id,))
-
-    async def delete_sessions_for_user(self, user_id: str) -> None:
-        """Revoke the user's sessions on the guard's connection (same transaction)."""
-        await self._cur.execute("DELETE FROM accounts_sessions WHERE user_id = %s", (user_id,))
-
-    async def delete_invites_for_user(self, user_id: str) -> None:
-        """Drop the user's invites on the guard's connection (same transaction)."""
-        await self._cur.execute("DELETE FROM accounts_invites WHERE user_id = %s", (user_id,))
 
 
 class SessionsStore:
@@ -297,7 +191,7 @@ class SessionsStore:
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
-                "SELECT s.user_id, u.email, u.role, u.disabled, s.last_seen_at, s.absolute_expires_at "
+                "SELECT s.user_id, u.email, u.disabled, s.last_seen_at, s.absolute_expires_at "
                 "FROM accounts_sessions s JOIN accounts_users u ON u.user_id = s.user_id "
                 "WHERE s.token_hash = %s",
                 (token_hash,),
@@ -400,7 +294,7 @@ class InvitesStore:
         """Every open (unconsumed) invitation with its invited person, oldest first.
 
         Joins the invitation to its ``accounts_users`` row so each carries the invited
-        ``email``/``role`` and the user's ``created_at``, plus the invitation's own
+        ``email`` and the user's ``created_at``, plus the invitation's own
         ``expires_at``. An invitation past ``expires_at`` is still listed (so an admin
         can see it and regenerate); a consumed one is excluded — its person has a
         password and is a member, not a pending invite.
@@ -411,7 +305,7 @@ class InvitesStore:
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
-                "SELECT u.user_id, u.email, u.role, u.created_at, i.expires_at "
+                "SELECT u.user_id, u.email, u.created_at, i.expires_at "
                 "FROM accounts_invites i JOIN accounts_users u ON u.user_id = i.user_id "
                 "WHERE i.consumed_at IS NULL ORDER BY u.created_at"
             )
