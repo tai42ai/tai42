@@ -77,7 +77,7 @@ def _identity(raw_key: str, key_id: str, owner_id: str) -> tuple[str, dict[str, 
 
 @dataclass
 class AccessControl:
-    """The in-memory stores behind the real verifier, and the provisioned keys."""
+    """The in-memory identity and policy stores behind the real verifier."""
 
     redis: FakeRedis
     pg: FakeAccessControlPg

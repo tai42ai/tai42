@@ -11,6 +11,7 @@ import asyncio
 
 import pytest
 from starlette.applications import Starlette
+from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -23,7 +24,7 @@ from tai42_skeleton.access_control import management as management_module
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
-from tai42_skeleton.access_control.middleware import PolicyVersionScopeMiddleware
+from tai42_skeleton.access_control.middleware import PolicyVersionScopeMiddleware, ResourceGuardMiddleware
 from tai42_skeleton.access_control.policy import policy_enforcer
 from tai42_skeleton.access_control.policy_version_scope import close_policy_version_scope, policy_version_scope
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
@@ -135,9 +136,11 @@ def test_each_request_reads_its_own_version(monkeypatch: pytest.MonkeyPatch, fak
 
 
 def test_the_auth_stack_opens_the_scope_before_authentication() -> None:
-    stack = AuthAdapter(AccessControlSettings()).get_middleware()
+    stack: list[object] = [middleware.cls for middleware in AuthAdapter(AccessControlSettings()).get_middleware()]
 
-    assert stack[0].cls is PolicyVersionScopeMiddleware
+    scope_at = stack.index(PolicyVersionScopeMiddleware)
+    assert scope_at < stack.index(AuthenticationMiddleware)
+    assert scope_at < stack.index(ResourceGuardMiddleware)
 
 
 async def test_reads_inside_an_open_scope_share_one_get(fake: _CountingRedis) -> None:

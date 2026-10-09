@@ -285,13 +285,19 @@ async def test_a_websocket_scope_passes_through_untouched() -> None:
     assert len(seen) == 1
 
 
-def test_the_challenge_is_the_outermost_member_of_the_four_member_stack() -> None:
+def test_the_challenge_is_the_outermost_member_of_the_stack() -> None:
     from mcp.server.auth.middleware.auth_context import AuthContextMiddleware
     from starlette.middleware.authentication import AuthenticationMiddleware
 
     from tai42_skeleton.access_control.adapter import AuthAdapter
-    from tai42_skeleton.access_control.middleware import ResourceGuardMiddleware
+    from tai42_skeleton.access_control.middleware import PolicyVersionScopeMiddleware, ResourceGuardMiddleware
     from tai42_skeleton.access_control.settings import AccessControlSettings
 
     stack = [middleware.cls for middleware in AuthAdapter(AccessControlSettings(enable=True)).get_middleware()]
-    assert stack == [McpChallengeMiddleware, AuthenticationMiddleware, AuthContextMiddleware, ResourceGuardMiddleware]
+    assert stack == [
+        McpChallengeMiddleware,
+        PolicyVersionScopeMiddleware,
+        AuthenticationMiddleware,
+        AuthContextMiddleware,
+        ResourceGuardMiddleware,
+    ]

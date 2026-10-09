@@ -50,8 +50,8 @@ _DISABLE_HINT = "set ACCESS_CONTROL_ENABLE=false to disable access control for l
 class PolicyVersionScopeMiddleware:
     """Open the request-scoped policy-version memo for every http/websocket request.
 
-    Installed first in the access-control stack, so the auth backend and the resource guard
-    decide on one version read; the resource guard closes the memo as it hands the request
+    Installed in the access-control stack outside the auth backend and the resource guard, so
+    both decide on one version read; the resource guard closes the memo as it hands the request
     to the app (see :mod:`~tai42_skeleton.access_control.policy_version_scope`).
     """
 

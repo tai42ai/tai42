@@ -88,7 +88,8 @@ class AuthAdapter(TokenVerifier):
     """Token verifier that installs the access-control middleware stack and resolves identity providers.
 
     The stack, outermost first: the MCP sign-in pointer (:class:`McpChallengeMiddleware`), the
-    credential backend, the auth-context helper, and the resource guard.
+    request's policy-version scope, the credential backend, the auth-context helper, and the
+    resource guard.
     """
 
     def __init__(self, settings: AccessControlSettings):
