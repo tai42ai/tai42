@@ -10,7 +10,11 @@ SUT builds its checkpoint store (recording the store-format generation in the em
 the harness then opens the SAME store through the kit's own resource builder on the conn string
 the SUT is pinned to, seeds threads — one with its newest checkpoint backdated past the waiting
 horizon, one marked finished past the finished horizon, one fresh — and sweeps again. Ageing is
-by backdating the checkpoint ``ts`` and the finished mark — no wall-clock sleeps.
+by backdating the checkpoint ``ts`` and the finished mark's due time — no wall-clock sleeps.
+
+A thread's owner may declare a shorter retention for it: the harness writes such a thread through
+the kit's saver view (``redis``: its keys carry the declared waiting as their TTL) or records the
+declared waiting at its start (``postgres`` / ``sqlite``: the sweep's per-thread waiting horizon).
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ from ._checkpoint_support import (  # pyright: ignore[reportMissingImports]
 
 @contextlib.asynccontextmanager
 async def _harness_store(provider: str, conn_string: str, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
-    """The stack's checkpoint store opened through the kit, as the SUT opens it: ``(saver, ledger, client)``.
+    """The stack's checkpoint store opened through the kit, as the SUT opens it: ``(saver, ledger, client, resource)``.
 
     The harness process carries the stack's retention settings, so a thread it writes on the
     ``redis`` provider carries the same waiting TTL the SUT's writes do.
@@ -48,7 +52,7 @@ async def _harness_store(provider: str, conn_string: str, monkeypatch: pytest.Mo
     reset_all_settings()
     resource, close = await create_checkpoint_resource(provider, conn_string)
     try:
-        yield get_saver_from_resource(provider, resource), resource.ledger, resource.redis_client
+        yield get_saver_from_resource(provider, resource), resource.ledger, resource.redis_client, resource
     finally:
         await close()
         reset_all_settings()
@@ -85,7 +89,7 @@ async def test_sweep_deletes_threads_past_each_horizon(
     # unambiguous for the aged threads and the fresh one is inside both.
     aged = now - timedelta(hours=3)
 
-    async with _harness_store(provider, conn_string, monkeypatch) as (saver, ledger, _client):
+    async with _harness_store(provider, conn_string, monkeypatch) as (saver, ledger, _client, _resource):
         await _write_thread(saver, stale_id, aged)
         await _write_thread(saver, finished_id, now)
         await _write_thread(saver, fresh_id, now)
@@ -121,7 +125,7 @@ async def test_redis_sweep_deletes_finished_threads_and_leaves_waiting_ones_to_t
     waiting_id = uniq("waiting-thread")
     now = datetime.now(UTC)
 
-    async with _harness_store("redis", conn_string, monkeypatch) as (saver, ledger, client):
+    async with _harness_store("redis", conn_string, monkeypatch) as (saver, ledger, client, _resource):
         await _write_thread(saver, finished_id, now)
         await _write_thread(saver, waiting_id, now - timedelta(hours=3))
         await ledger.mark([finished_id], now - timedelta(hours=3))
@@ -141,3 +145,75 @@ async def test_redis_sweep_deletes_finished_threads_and_leaves_waiting_ones_to_t
         # The sweep left the waiting thread to its TTL: still set, never extended.
         ttls_after = [await client.ttl(key) for key in waiting_keys]
         assert all(0 < after <= before for before, after in zip(ttls_before, ttls_after, strict=True))
+
+
+@pytest.mark.needs("store:postgres", "files", "setting:LLM_PROVIDER_CHECKPOINT")
+async def test_sweep_applies_a_thread_declared_retention(
+    checkpoint_stack: tuple[TaiStack, str], uniq: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tai42_kit.llm.checkpoint import ThreadRetention
+
+    stack, provider = checkpoint_stack
+    conn_string = checkpoint_conn_string(provider, stack.resources)
+    await _sweep(stack)
+
+    declared_id = uniq("declared-thread")
+    undeclared_id = uniq("undeclared-thread")
+    finished_id = uniq("declared-finished-thread")
+    now = datetime.now(UTC)
+    # Five minutes back: past the declared 2-minute waiting, inside the stack's 60-minute one.
+    recent = now - timedelta(minutes=5)
+    short = ThreadRetention(waiting_minutes=2, finished_minutes=1)
+
+    async with _harness_store(provider, conn_string, monkeypatch) as (saver, ledger, _client, _resource):
+        await ledger.start([declared_id, finished_id], short)
+        await _write_thread(saver, declared_id, recent)
+        await _write_thread(saver, undeclared_id, recent)
+        await _write_thread(saver, finished_id, now)
+        await ledger.mark([finished_id], now - timedelta(seconds=1))
+
+        result = await _sweep(stack)
+        assert declared_id in result["waiting_swept"], result
+        assert finished_id in result["finished_swept"], result
+        assert undeclared_id not in result["waiting_swept"] + result["finished_swept"], result
+        assert result["waiting_minutes"] == WAITING_MINUTES, result
+        assert result["finished_minutes"] == FINISHED_MINUTES, result
+
+        assert await saver.aget_tuple(_thread_config(declared_id)) is None, "declared thread survived the sweep"
+        assert await saver.aget_tuple(_thread_config(finished_id)) is None, "finished thread survived the sweep"
+        assert await saver.aget_tuple(_thread_config(undeclared_id)) is not None, "undeclared thread was swept"
+        assert await ledger.declared_waiting([declared_id, finished_id]) == {}
+
+
+@pytest.mark.needs("store:redis", "setting:LLM_PROVIDER_CHECKPOINT", "setting:checkpoint:redis")
+async def test_redis_a_declared_waiting_is_every_key_ttl_and_a_due_mark_is_swept(
+    redis_checkpoint_stack: TaiStack, uniq: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tai42_kit.llm.checkpoint.checkpoint import create_redis_saver_view
+
+    stack = redis_checkpoint_stack
+    conn_string = checkpoint_conn_string("redis", stack.resources)
+    await _sweep(stack)
+
+    declared_id = uniq("declared-thread")
+    undeclared_id = uniq("undeclared-thread")
+    now = datetime.now(UTC)
+
+    async with _harness_store("redis", conn_string, monkeypatch) as (saver, ledger, client, resource):
+        view = await create_redis_saver_view(resource, 2)
+        await _write_thread(view, declared_id, now)
+        await _write_thread(saver, undeclared_id, now)
+        declared_keys = [key async for key in client.scan_iter(match=f"*{declared_id}*")]
+        assert declared_keys
+        declared_ttls = [await client.ttl(key) for key in declared_keys]
+        assert all(0 < ttl <= 120 for ttl in declared_ttls), declared_ttls
+        undeclared_keys = [key async for key in client.scan_iter(match=f"*{undeclared_id}*")]
+        assert undeclared_keys
+        undeclared_ttls = [await client.ttl(key) for key in undeclared_keys]
+        assert all(WAITING_MINUTES * 60 - 60 <= ttl <= WAITING_MINUTES * 60 for ttl in undeclared_ttls), undeclared_ttls
+
+        await ledger.mark([declared_id], now - timedelta(seconds=1))
+        result = await _sweep(stack)
+        assert declared_id in result["finished_swept"], result
+        assert await saver.aget_tuple(_thread_config(declared_id)) is None, "declared thread survived the sweep"
+        await saver.adelete_thread(undeclared_id)

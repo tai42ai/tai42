@@ -435,14 +435,14 @@ class LedgerBook:
         return self.ledgers[key]
 
     def finished(self, provider: str, conn_string: str | None = None) -> list[str]:
-        """The thread ids marked finished in ``provider``'s ledger (oldest first)."""
+        """The thread ids marked finished in ``provider``'s ledger, whatever their due time (earliest first)."""
         import asyncio
         from datetime import UTC, datetime
 
         ledger = self.ledgers.get((provider, conn_string))
         if ledger is None:
             return []
-        return asyncio.run(ledger.finished_before(datetime.now(UTC), limit=1000))
+        return asyncio.run(ledger.finished_before(datetime.max.replace(tzinfo=UTC), limit=1000))
 
 
 @pytest.fixture(autouse=True)

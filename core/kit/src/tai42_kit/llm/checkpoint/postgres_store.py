@@ -1,13 +1,13 @@
 """The kit's SQL against a Postgres checkpoint store, behind one module.
 
 The stale-thread query reads the Postgres saver's own ``checkpoints`` table (``checkpoint JSONB``
-carrying the checkpoint's ``ts``); the finished-thread ledger and the store-format marker are kit
-tables beside it.
+carrying the checkpoint's ``ts``) joined with the declared waiting retentions; the finished-thread
+ledger, the declared retentions and the store-format marker are kit tables beside it.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -16,18 +16,25 @@ if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
 
 FINISHED_TABLE: Final = "tai42_checkpoint_finished"
+RETENTION_TABLE: Final = "tai42_checkpoint_retention"
 FORMAT_TABLE: Final = "tai42_checkpoint_format"
 
 _STALE_THREADS_SQL: Final = (
-    "SELECT thread_id FROM checkpoints GROUP BY thread_id "
-    "HAVING max((checkpoint->>'ts')::timestamptz) < %(cutoff)s ORDER BY thread_id"
+    f"SELECT c.thread_id FROM checkpoints c LEFT JOIN {RETENTION_TABLE} r USING (thread_id) "  # noqa: S608 -- constant table name
+    "GROUP BY c.thread_id, r.waiting_minutes "
+    "HAVING max((c.checkpoint->>'ts')::timestamptz) < "
+    "%(now)s - make_interval(mins => COALESCE(r.waiting_minutes, %(default_minutes)s)) "
+    "ORDER BY c.thread_id"
 )
 
 
-async def stale_threads(pool: AsyncConnectionPool, *, cutoff: datetime) -> list[str]:
-    """The threads whose newest checkpoint is older than ``cutoff``."""
+async def stale_threads(pool: AsyncConnectionPool, *, now: datetime, default_minutes: int) -> list[str]:
+    """The threads whose newest checkpoint is older than their waiting retention before ``now``.
+
+    A thread's waiting retention is the one its owner declared at run start, else ``default_minutes``.
+    """
     async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(_STALE_THREADS_SQL, {"cutoff": cutoff})
+        await cur.execute(_STALE_THREADS_SQL, {"now": now, "default_minutes": default_minutes})
         rows = await cur.fetchall()
     return [_first(row) for row in rows]
 
@@ -39,45 +46,73 @@ async def holds_checkpoints(pool: AsyncConnectionPool) -> bool:
         return await cur.fetchone() is not None
 
 
-async def create_finished_table(pool: AsyncConnectionPool) -> None:
-    """Create the finished-thread ledger table and its time index."""
+async def create_ledger_tables(pool: AsyncConnectionPool) -> None:
+    """Create the finished-thread ledger table with its due-time index, and the declared-retention table."""
     async with pool.connection() as conn:
         await conn.execute(
-            f"CREATE TABLE IF NOT EXISTS {FINISHED_TABLE} "
-            "(thread_id TEXT PRIMARY KEY, finished_at TIMESTAMPTZ NOT NULL)"
+            f"CREATE TABLE IF NOT EXISTS {FINISHED_TABLE} (thread_id TEXT PRIMARY KEY, due_at TIMESTAMPTZ NOT NULL)"
         )
-        await conn.execute(f"CREATE INDEX IF NOT EXISTS {FINISHED_TABLE}_at ON {FINISHED_TABLE} (finished_at)")
+        await conn.execute(f"CREATE INDEX IF NOT EXISTS {FINISHED_TABLE}_due ON {FINISHED_TABLE} (due_at)")
+        await conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {RETENTION_TABLE} "
+            "(thread_id TEXT PRIMARY KEY, waiting_minutes INTEGER NOT NULL)"
+        )
 
 
-async def mark_finished(pool: AsyncConnectionPool, thread_ids: Sequence[str], at: datetime) -> None:
-    """Record ``thread_ids`` as finished at ``at``."""
+async def start_threads(pool: AsyncConnectionPool, thread_ids: Sequence[str], waiting_minutes: int | None) -> None:
+    """Remove the finished marks of ``thread_ids`` and record their declared waiting (``None`` removes it), at once."""
+    ids = list(thread_ids)
+    async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+        await cur.execute(f"DELETE FROM {FINISHED_TABLE} WHERE thread_id = ANY(%s)", (ids,))  # noqa: S608 -- constant table name
+        if waiting_minutes is None:
+            await cur.execute(f"DELETE FROM {RETENTION_TABLE} WHERE thread_id = ANY(%s)", (ids,))  # noqa: S608 -- constant table name
+        else:
+            await cur.executemany(
+                f"INSERT INTO {RETENTION_TABLE} (thread_id, waiting_minutes) VALUES (%s, %s) "  # noqa: S608 -- constant table name
+                "ON CONFLICT (thread_id) DO UPDATE SET waiting_minutes = EXCLUDED.waiting_minutes",
+                [(thread_id, waiting_minutes) for thread_id in ids],
+            )
+
+
+async def mark_finished(pool: AsyncConnectionPool, thread_ids: Sequence[str], due_at: datetime) -> None:
+    """Record ``thread_ids`` as finished, due at ``due_at``."""
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.executemany(
-            f"INSERT INTO {FINISHED_TABLE} (thread_id, finished_at) VALUES (%s, %s) "  # noqa: S608 -- constant table name
-            "ON CONFLICT (thread_id) DO UPDATE SET finished_at = EXCLUDED.finished_at",
-            [(thread_id, at) for thread_id in thread_ids],
+            f"INSERT INTO {FINISHED_TABLE} (thread_id, due_at) VALUES (%s, %s) "  # noqa: S608 -- constant table name
+            "ON CONFLICT (thread_id) DO UPDATE SET due_at = EXCLUDED.due_at",
+            [(thread_id, due_at) for thread_id in thread_ids],
         )
 
 
 async def finished_before(pool: AsyncConnectionPool, cutoff: datetime, limit: int) -> list[str]:
-    """Up to ``limit`` thread ids marked at or before ``cutoff``, oldest first."""
+    """Up to ``limit`` thread ids due at or before ``cutoff``, earliest first."""
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
-            f"SELECT thread_id FROM {FINISHED_TABLE} WHERE finished_at <= %s "  # noqa: S608 -- constant table name
-            "ORDER BY finished_at, thread_id LIMIT %s",
+            f"SELECT thread_id FROM {FINISHED_TABLE} WHERE due_at <= %s "  # noqa: S608 -- constant table name
+            "ORDER BY due_at, thread_id LIMIT %s",
             (cutoff, limit),
         )
         rows = await cur.fetchall()
     return [_first(row) for row in rows]
 
 
-async def forget_finished(pool: AsyncConnectionPool, thread_ids: Sequence[str]) -> None:
-    """Remove ``thread_ids`` from the ledger."""
+async def forget_threads(pool: AsyncConnectionPool, thread_ids: Sequence[str]) -> None:
+    """Remove ``thread_ids`` from the ledger: their finished marks and their declared waiting."""
+    ids = list(thread_ids)
+    async with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+        await cur.execute(f"DELETE FROM {FINISHED_TABLE} WHERE thread_id = ANY(%s)", (ids,))  # noqa: S608 -- constant table name
+        await cur.execute(f"DELETE FROM {RETENTION_TABLE} WHERE thread_id = ANY(%s)", (ids,))  # noqa: S608 -- constant table name
+
+
+async def declared_waiting(pool: AsyncConnectionPool, thread_ids: Sequence[str]) -> dict[str, int]:
+    """The recorded declared waiting minutes of those of ``thread_ids`` that have one."""
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
-            f"DELETE FROM {FINISHED_TABLE} WHERE thread_id = ANY(%s)",  # noqa: S608 -- constant table name
+            f"SELECT thread_id, waiting_minutes FROM {RETENTION_TABLE} WHERE thread_id = ANY(%s)",  # noqa: S608 -- constant table name
             (list(thread_ids),),
         )
+        rows = await cur.fetchall()
+    return {_first(row): int(_second(row)) for row in rows}
 
 
 async def read_format_generation(pool: AsyncConnectionPool) -> int | None:
@@ -100,6 +135,12 @@ async def write_format_generation(pool: AsyncConnectionPool, generation: int) ->
             f"INSERT INTO {FORMAT_TABLE} (id, generation) VALUES (1, %s) ON CONFLICT (id) DO NOTHING",  # noqa: S608 -- constant table name
             (generation,),
         )
+
+
+def _second(row: object) -> Any:
+    if isinstance(row, dict):
+        return list(row.values())[1]
+    return row[1]  # type: ignore[index]
 
 
 def _first(row: object) -> str:

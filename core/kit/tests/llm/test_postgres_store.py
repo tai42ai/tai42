@@ -39,6 +39,7 @@ async def saver_and_pool() -> AsyncIterator[tuple[Any, Any]]:
     try:
         saver = AsyncPostgresSaver(cast("Any", pool))
         await saver.setup()
+        await postgres_store.create_ledger_tables(pool)
         await _clear(pool)
         yield saver, pool
         await _clear(pool)
@@ -52,6 +53,7 @@ async def _clear(pool: Any) -> None:
         await conn.execute("DELETE FROM checkpoint_writes")
         await conn.execute("DELETE FROM checkpoint_blobs")
         await conn.execute("DELETE FROM checkpoints")
+        await conn.execute(f"DELETE FROM {postgres_store.RETENTION_TABLE}")  # noqa: S608 -- constant table name
 
 
 async def _put(saver: Any, thread_id: str, ts: datetime) -> None:
@@ -72,7 +74,32 @@ async def test_stale_threads_are_those_whose_newest_checkpoint_is_older_than_the
     await _put(saver, fresh, now - timedelta(minutes=5))
     await _put(saver, revived, now - timedelta(hours=6))
     await _put(saver, revived, now - timedelta(minutes=1))
-    assert await postgres_store.stale_threads(pool, cutoff=now - timedelta(hours=1)) == [stale]
+    assert await postgres_store.stale_threads(pool, now=now, default_minutes=60) == [stale]
+
+
+async def _declare(pool: Any, thread_id: str, waiting_minutes: int) -> None:
+    from tai42_kit.llm.checkpoint import ThreadRetention
+    from tai42_kit.llm.checkpoint.ledger import PostgresFinishedThreadLedger
+
+    await PostgresFinishedThreadLedger(pool).start([thread_id], ThreadRetention(waiting_minutes, 1))
+
+
+async def test_a_declared_waiting_is_each_thread_own_stale_horizon(saver_and_pool):
+    saver, pool = saver_and_pool
+    now = datetime.now(UTC)
+    declared_short = f"short-{uuid.uuid4().hex}"
+    undeclared = f"undeclared-{uuid.uuid4().hex}"
+    declared_long = f"long-{uuid.uuid4().hex}"
+    await _put(saver, declared_short, now - timedelta(minutes=3))
+    await _put(saver, undeclared, now - timedelta(minutes=3))
+    await _put(saver, declared_long, now - timedelta(minutes=45))
+    await _declare(pool, declared_short, 2)
+    await _declare(pool, declared_long, 60)
+    assert await postgres_store.stale_threads(pool, now=now, default_minutes=60) == [declared_short]
+    assert await postgres_store.stale_threads(pool, now=now, default_minutes=30) == [declared_short]
+    assert sorted(await postgres_store.stale_threads(pool, now=now, default_minutes=1)) == sorted(
+        [declared_short, undeclared]
+    )
 
 
 async def test_holds_checkpoints(saver_and_pool):
@@ -97,3 +124,8 @@ async def test_format_generation_is_written_once_and_read_back(saver_and_pool):
 def test_first_column_reads_dict_and_tuple_rows():
     assert postgres_store._first({"thread_id": "a"}) == "a"
     assert postgres_store._first(("b",)) == "b"
+
+
+def test_second_column_reads_dict_and_tuple_rows():
+    assert postgres_store._second({"thread_id": "a", "waiting_minutes": 5}) == 5
+    assert postgres_store._second(("b", 7)) == 7

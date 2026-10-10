@@ -206,3 +206,97 @@ async def test_checkpoint_registry_settings_reset_raises_on_live_resource(monkey
     await reg.close_all()
     reset_all_settings()
     assert reg_mod.checkpoint_registry() is not reg
+
+
+# --------------------------------------------------------------------------- #
+# A declared retention: a saver view per waiting value on a native-TTL store
+# --------------------------------------------------------------------------- #
+class _FakeResource:
+    def __init__(self, provider: str) -> None:
+        self.provider = provider
+        self.handle = object()
+
+
+@pytest.fixture
+def views(monkeypatch):
+    from tai42_kit.llm.checkpoint import checkpoint_registry as reg_mod
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES", "600")
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_FINISHED_MINUTES", "120")
+    reset_all_settings()
+    built: list[tuple[object, int]] = []
+
+    async def _fake_create(provider, conn_string):
+        return (_FakeResource(provider), None)
+
+    async def _fake_view(resource, waiting_minutes):
+        built.append((resource, waiting_minutes))
+        return ("view", resource, waiting_minutes)
+
+    monkeypatch.setattr(reg_mod, "create_checkpoint_resource", _fake_create)
+    monkeypatch.setattr(reg_mod, "create_redis_saver_view", _fake_view)
+    monkeypatch.setattr(reg_mod, "get_saver_from_resource", lambda provider, resource: ("handle", resource))
+    yield built
+    reset_all_settings()
+
+
+async def test_a_declared_waiting_on_redis_gets_a_view_with_that_waiting(views):
+    from tai42_kit.llm.checkpoint import ThreadRetention
+
+    reg = CheckpointRegistry()
+    view = await reg.get_checkpointer("redis", "c", ThreadRetention(2, 1))
+    resource = await reg.resource("redis", "c")
+    assert view == ("view", resource, 2)
+
+
+async def test_the_same_waiting_twice_is_the_same_view_built_once(views):
+    from tai42_kit.llm.checkpoint import ThreadRetention
+
+    reg = CheckpointRegistry()
+    a = await reg.get_checkpointer("redis", "c", ThreadRetention(2, 1))
+    b = await reg.get_checkpointer("redis", "c", ThreadRetention(2, 2))
+    c = await reg.get_checkpointer("redis", "c", ThreadRetention(5, 1))
+    assert a is b
+    assert c is not a
+    assert [waiting for _resource, waiting in views] == [2, 5]
+
+
+async def test_no_retention_and_the_platform_waiting_are_the_resource_handle(views):
+    from tai42_kit.llm.checkpoint import ThreadRetention
+
+    reg = CheckpointRegistry()
+    resource = await reg.resource("redis", "c")
+    assert await reg.get_checkpointer("redis", "c") == ("handle", resource)
+    assert await reg.get_checkpointer("redis", "c", None) == ("handle", resource)
+    assert await reg.get_checkpointer("redis", "c", ThreadRetention(600, 30)) == ("handle", resource)
+    assert views == []
+
+
+@pytest.mark.parametrize("provider", ["postgres", "sqlite", "memory"])
+async def test_a_store_without_native_ttl_returns_the_same_saver_for_any_retention(views, provider):
+    from tai42_kit.llm.checkpoint import ThreadRetention
+
+    reg = CheckpointRegistry()
+    resource = await reg.resource(provider, "c")
+    assert await reg.get_checkpointer(provider, "c", ThreadRetention(2, 1)) == ("handle", resource)
+    assert views == []
+
+
+async def test_the_views_go_with_close_all(views):
+    from tai42_kit.llm.checkpoint import ThreadRetention
+
+    reg = CheckpointRegistry()
+    await reg.get_checkpointer("redis", "c", ThreadRetention(2, 1))
+    assert reg.has_live_resources is True
+    await reg.close_all()
+    assert reg.has_live_resources is False
+
+
+async def test_a_saver_view_needs_a_redis_resource():
+    from tai42_kit.llm.checkpoint.checkpoint import CheckpointResource, create_redis_saver_view
+    from tai42_kit.llm.checkpoint.ledger import MemoryFinishedThreadLedger
+
+    resource = CheckpointResource("memory", object(), MemoryFinishedThreadLedger())
+    with pytest.raises(ValueError, match="a Redis saver view needs a redis checkpoint resource, got 'memory'"):
+        await create_redis_saver_view(resource, 2)

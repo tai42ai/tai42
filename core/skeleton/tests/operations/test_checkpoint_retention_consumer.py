@@ -6,6 +6,10 @@ past the finished horizon the platform sweep deletes it and leaves an unmarked t
 filter the consumer registers under ``probe`` spares a marked thread it claims (reported in
 ``spared``), and a thread the consumer marks active again is not swept. Runs on the in-process
 and sqlite stores, and on real Redis / Postgres when they are configured.
+
+The consumer also declares a shorter retention for some of its threads: their writes go through
+the saver the registry hands for that retention, their finished mark is due the declared finished
+life after the terminal, and on a swept store their declared waiting is their own stale horizon.
 """
 
 from __future__ import annotations
@@ -20,10 +24,13 @@ import pytest
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from tai42_kit.llm.checkpoint import (
+    ThreadRetention,
+    ThreadRetentionError,
     liveness,
     mark_threads_active,
     mark_threads_finished,
     register_live_thread_filter,
+    resolve_retention,
 )
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.settings import reset_all_settings
@@ -209,3 +216,124 @@ async def test_the_sweep_leaves_no_document_of_a_finished_thread_with_more_write
     assert thread_id in result["finished_swept"]
     remaining = [key async for key in saver._redis.scan_iter(match=f"*{thread_id}*", count=5000)]
     assert remaining == []
+
+
+# --------------------------------------------------------------------------- #
+# A retention the consumer declares for its own threads
+# --------------------------------------------------------------------------- #
+def _clock_ahead(delta: timedelta) -> type[datetime]:
+    class _Ahead(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> Any:  # type: ignore[override]
+            return datetime.now(tz) + delta
+
+    return _Ahead
+
+
+async def test_a_declared_finished_life_is_swept_at_its_due_and_the_platform_one_is_not(
+    deployment_store: tuple[str, str | None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, conn_string = deployment_store
+    short = ThreadRetention(waiting_minutes=2, finished_minutes=1)
+    registry = checkpoint_registry()
+    declared_saver = await registry.get_checkpointer(provider, conn_string, short)
+    default_saver = await registry.get_checkpointer(provider, conn_string)
+    run = uuid.uuid4().hex[:10]
+    declared, undeclared = f"probe-short-{run}", f"probe-default-{run}"
+    await mark_threads_active([declared], retention=short)
+    await _run_to_finish(declared_saver, declared)
+    await mark_threads_active([undeclared])
+    await _run_to_finish(default_saver, undeclared)
+    await mark_threads_finished([declared], retention=short)
+    await mark_threads_finished([undeclared])
+    monkeypatch.setattr(checkpoints_ops, "datetime", _clock_ahead(timedelta(seconds=90)))
+    try:
+        result = await checkpoints_ops.sweep_checkpoints()
+
+        assert declared in result["finished_swept"]
+        assert undeclared not in result["finished_swept"]
+        assert undeclared not in result["waiting_swept"]
+        assert not await _thread_exists(default_saver, declared)
+        assert await _thread_exists(default_saver, undeclared)
+        assert result["waiting_minutes"] == 7 * 24 * 60
+        assert result["finished_minutes"] == 24 * 60
+    finally:
+        await default_saver.adelete_thread(undeclared)
+        await (await registry.ledger(provider, conn_string)).forget([undeclared])
+
+
+@pytest.mark.parametrize(
+    "deployment_store", ["sqlite", pytest.param("postgres", marks=pytest.mark.integration)], indirect=True
+)
+async def test_a_declared_waiting_is_the_thread_own_swept_horizon(
+    deployment_store: tuple[str, str | None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, conn_string = deployment_store
+    short = ThreadRetention(waiting_minutes=2, finished_minutes=1)
+    registry = checkpoint_registry()
+    saver = await registry.get_checkpointer(provider, conn_string, short)
+    run = uuid.uuid4().hex[:10]
+    declared, undeclared = f"probe-wait-short-{run}", f"probe-wait-default-{run}"
+    await mark_threads_active([declared], retention=short)
+    await mark_threads_active([undeclared])
+    await _run_to_finish(saver, declared)
+    await _run_to_finish(saver, undeclared)
+    monkeypatch.setattr(checkpoints_ops, "datetime", _clock_ahead(timedelta(minutes=3)))
+    try:
+        result = await checkpoints_ops.sweep_checkpoints()
+
+        assert declared in result["waiting_swept"]
+        assert undeclared not in result["waiting_swept"]
+        assert not await _thread_exists(saver, declared)
+        assert await _thread_exists(saver, undeclared)
+        # The swept thread's declaration leaves the store with it.
+        assert await (await registry.ledger(provider, conn_string)).declared_waiting([declared]) == {}
+    finally:
+        await saver.adelete_thread(undeclared)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("deployment_store", ["redis"], indirect=True)
+async def test_a_declared_waiting_is_the_key_ttl_of_every_key_on_redis(
+    deployment_store: tuple[str, str | None],
+) -> None:
+    provider, conn_string = deployment_store
+    registry = checkpoint_registry()
+    saver: Any = await registry.get_checkpointer(provider, conn_string, ThreadRetention(2, 1))
+    default: Any = await registry.get_checkpointer(provider, conn_string)
+    run = uuid.uuid4().hex[:10]
+    declared, undeclared = f"probe-ttl-short-{run}", f"probe-ttl-default-{run}"
+    await _run_to_finish(saver, declared)
+    await _run_to_finish(default, undeclared)
+    try:
+        declared_keys = [key async for key in saver._redis.scan_iter(match=f"*{declared}*")]
+        assert declared_keys
+        for key in declared_keys:
+            assert 60 < await saver._redis.ttl(key) <= 120, key
+        for key in [key async for key in saver._redis.scan_iter(match=f"*{undeclared}*")]:
+            assert await saver._redis.ttl(key) > 120, key
+    finally:
+        await default.adelete_thread(declared)
+        await default.adelete_thread(undeclared)
+
+
+async def test_a_declaration_above_the_platform_never_reaches_a_store(
+    deployment_store: tuple[str, str | None],
+) -> None:
+    with pytest.raises(ThreadRetentionError, match="exceeds the platform's 10080 min"):
+        resolve_retention(waiting_minutes=7 * 24 * 60 + 1)
+
+
+async def test_a_retention_value_above_the_platform_is_refused_before_the_consumer_records_it(
+    deployment_store: tuple[str, str | None],
+) -> None:
+    provider, conn_string = deployment_store
+    thread_id = f"probe-over-{uuid.uuid4().hex[:10]}"
+    with pytest.raises(ThreadRetentionError) as excinfo:
+        await mark_threads_active([thread_id], retention=ThreadRetention(waiting_minutes=20000, finished_minutes=60))
+    assert str(excinfo.value) == (
+        "checkpoint retention waiting_minutes (20000 min) exceeds the platform's 10080 min "
+        "(LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES)"
+    )
+    ledger = await checkpoint_registry().ledger(provider, conn_string)
+    assert await ledger.declared_waiting([thread_id]) == {}
