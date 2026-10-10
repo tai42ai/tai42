@@ -278,7 +278,7 @@ class _TemplateMixin(_StatesServiceBase):
         fails loudly, naming the template). The stored body is the canonical document carrying the
         ORIGINAL union fragment, so a read serves a by-id reference back unchanged.
         """
-        body = doc.model_dump(by_alias=True, exclude_none=True)
+        body = doc.model_dump(by_alias=True)
         resolved_body, _by_id = await self._resolve_template_body(doc.name, body)
         template = validate_template(resolved_body)
         await self._compile_by_id_declarations_check(template)

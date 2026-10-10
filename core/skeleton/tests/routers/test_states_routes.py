@@ -599,3 +599,18 @@ def test_put_state_template_by_id_body_that_cannot_be_fetched_fails_loudly(monke
     assert excinfo.value.status == 422
     assert "absent-id" in str(excinfo.value)
     assert "could not be fetched" in str(excinfo.value)
+
+
+def test_put_state_template_keeps_an_explicit_null_parameter_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The upload door saves a parameter whose default is an explicit ``null`` and serves it back
+    # with ``"default": null``, distinct from a parameter that has no default (no ``default`` key).
+    app = _real_states_door(monkeypatch)
+    parameters = {
+        "p": {"schema": {"type": ["object", "null"]}, "default": None},
+        "cap": {"schema": {"type": "object"}},
+    }
+    schema = {"type": "object", "properties": {"count": {"$parameter": "cap"}}}
+    with tai42_app.bound(app):
+        saved = asyncio.run(ops.put_state_template("nullable", {"parameters": parameters, "schema": schema}))
+        assert saved["parameters"] == parameters
+        assert asyncio.run(ops.get_state_template("nullable"))["parameters"] == parameters

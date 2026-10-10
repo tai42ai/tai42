@@ -41,7 +41,7 @@ class _ReconcileMixin(_StatesServiceBase):
         if context.previous_declarations is None:
             return
         resolved_body, _by_id = await self._resolve_template_body(
-            context.template.name, context.template.model_dump(by_alias=True, exclude_none=True)
+            context.template.name, context.template.model_dump(by_alias=True)
         )
         template = validate_template(resolved_body)
         if template.reconcile is None:

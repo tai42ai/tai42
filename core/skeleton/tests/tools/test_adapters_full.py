@@ -242,6 +242,37 @@ def test_keyword_arg_exposes_sanitized_name_but_wire_keeps_original():
     assert client.captured_args[0][1] == {"class": "x"}
 
 
+class _NullableArgsTool:
+    name = "t"
+    description = "d"
+    inputSchema: ClassVar[dict] = {
+        "type": "object",
+        "properties": {
+            "required_nullable": {"type": ["string", "null"]},
+            "defaulted": {"type": ["integer", "null"], "default": 5},
+            "optional": {"type": "string"},
+            "nested": {
+                "type": "object",
+                "properties": {"inner": {"type": ["integer", "null"]}},
+                "required": ["inner"],
+            },
+        },
+        "required": ["required_nullable", "nested"],
+    }
+    outputSchema: ClassVar[dict] = {}
+
+
+def test_explicit_null_arguments_reach_the_wire():
+    # An explicitly-passed ``None`` is forwarded as ``null`` — for a required nullable argument, a
+    # nested required nullable field, and an argument whose default differs from ``None`` — while
+    # an argument the caller did not pass stays off the wire for the child to fill.
+    client = _FakeMcpClient(_ok_result())
+    func = mcp_tool_to_func(_http_config(), cast(mcp.types.Tool, _NullableArgsTool()), name="t", module="mod")
+    with patch(_CLIENT, return_value=client):
+        asyncio.run(func(required_nullable=None, defaulted=None, nested={"inner": None}))
+    assert client.captured_args[0][1] == {"required_nullable": None, "defaulted": None, "nested": {"inner": None}}
+
+
 # -- transport detection ------------------------------------------------------
 
 
