@@ -11,13 +11,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncGenerator
 from typing import Any
 
+import httpx
 import pytest
 from pydantic import BaseModel
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
+from starlette.routing import Route
+from starlette.testclient import TestClient
 from tai42_contract.agent.events import (
     AsksFinal,
     InterruptFinal,
@@ -38,6 +44,7 @@ from tai42_skeleton.agent import (
     ToolCallStep,
     ToolResultStep,
 )
+from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.operations import agents as agent_ops
 from tai42_skeleton.routers import agents as router
 from tai42_skeleton.routers import interactions as interactions_router
@@ -397,6 +404,55 @@ async def test_run_disconnect_cancels_underlying_run(one_agent):
     # The disconnect monitor fired; the producer was cancelled, propagating
     # cancellation into astream — the abandoned run stopped.
     assert agent.cancelled is True
+
+
+def _post_through_httpx(app: Starlette, path: str, body: bytes) -> str:
+    async def post() -> str:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(path, content=body, headers={"content-type": "application/json"})
+        assert resp.status_code == 200, resp.text
+        return resp.text
+
+    return asyncio.run(post())
+
+
+def _post_through_starlette_testclient(app: Starlette, path: str, body: bytes) -> str:
+    with TestClient(app) as client:
+        resp = client.post(path, content=body, headers={"content-type": "application/json"})
+    assert resp.status_code == 200, resp.text
+    return resp.text
+
+
+@pytest.mark.parametrize("post", [_post_through_httpx, _post_through_starlette_testclient])
+def test_run_streams_to_its_end_through_a_real_asgi_client(one_agent, post):
+    # The run door served as an ASGI app behind the stack's one ``receive``-wrapping
+    # middleware: the client's own ``receive`` feeds the body read, the response's
+    # disconnect listener and the run's disconnect monitor, and the finished run ends
+    # the response without waiting for the client to drop. The client runs on a daemon
+    # thread so a response that never ends fails the test at the deadline.
+    one_agent(_FakeAgent([MessageFinal(text="done")]))
+    app = Starlette(
+        routes=[Route("/api/agents/{name}/runs", router.run_agent, methods=["POST"])],
+        middleware=[Middleware(BodyLimitMiddleware)],
+    )
+    outcome: dict[str, Any] = {}
+
+    def client() -> None:
+        try:
+            outcome["text"] = post(app, "/api/agents/faker/runs", b'{"prompt":"hi"}')
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=client, daemon=True)
+    thread.start()
+    thread.join(_MONITOR_STOP_TIMEOUT)
+    assert not thread.is_alive(), "the response did not end after the run finished"
+    if "error" in outcome:
+        raise outcome["error"]
+    text = outcome["text"]
+    frames = _data_frames([f"{block}\n\n" for block in text.split("\n\n") if block])
+    assert [f["type"] for f in frames] == ["message_final", "stream.end"]
+    assert frames[0]["text"] == "done"
 
 
 # -- run route: input / lookup errors ----------------------------------------
