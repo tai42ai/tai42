@@ -27,7 +27,7 @@ from tai42_kit.db import component_store_settings
 from tai42_skeleton.states.db import STATES_COMPONENT
 from tai42_skeleton.states.outbox.keys import record_key
 
-from .conftest import OutboxBed, execute
+from .conftest import OutboxBed, execute, set_states_env
 
 pytestmark = pytest.mark.integration
 
@@ -67,8 +67,7 @@ async def test_a_read_on_a_failed_save_raises_naming_it(bed: OutboxBed) -> None:
 async def test_a_lock_held_past_the_drain_timeout_raises_the_timeout(
     bed: OutboxBed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS", "0.5")
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_POLL_SECONDS", "0.05")
+    set_states_env(monkeypatch, STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS="0.5", STATES_OUTBOX_DRAIN_POLL_SECONDS="0.05")
     row = await bed.enqueue(bed.write(bed.subject(), [_set("n", 4)]))
     key = record_key(bed.state, bed.subject())
     async with (
@@ -86,8 +85,7 @@ async def test_a_lock_held_past_the_drain_timeout_raises_the_timeout(
 async def test_a_read_on_a_subject_held_behind_a_failed_save_raises_at_once(
     bed: OutboxBed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS", "0.3")
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_POLL_SECONDS", "0.05")
+    set_states_env(monkeypatch, STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS="0.3", STATES_OUTBOX_DRAIN_POLL_SECONDS="0.05")
     failed, held = await _held_pair(bed)
     with pytest.raises(StatePendingSaveFailedError) as raised:
         await bed.svc.read(bed.state, bed.subject("B"))
@@ -374,8 +372,7 @@ async def test_the_target_drain_waits_for_running_calls_then_names_them_past_the
 
     from tai42_skeleton.states.context import state_context
 
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS", "0.4")
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_POLL_SECONDS", "0.05")
+    set_states_env(monkeypatch, STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS="0.4", STATES_OUTBOX_DRAIN_POLL_SECONDS="0.05")
     name = f"T{bed.state}"
     ctx = StateContext(
         door="api", candidates=SubjectCandidates(target_kind="tool", target_name=name, by_kind={"thread": "t-1"})

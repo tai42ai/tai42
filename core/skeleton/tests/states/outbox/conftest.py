@@ -152,6 +152,13 @@ def probe(monkeypatch: pytest.MonkeyPatch) -> ProbeKind:
     return kind
 
 
+def set_states_env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
+    """Set ``STATES_*`` env values and reset the settings, as a config reload does, so the state store reads them."""
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    reset_all_settings()
+
+
 @pytest.fixture(autouse=True)
 def _bound_app() -> Iterator[None]:
     with tai42_app.bound(_FakeApp()):

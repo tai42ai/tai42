@@ -21,7 +21,7 @@ from tai42_skeleton.states.context import state_context
 from tai42_skeleton.states.outbox.drain import run_entry_drain
 from tai42_skeleton.states.outbox.keys import subject_key
 
-from .conftest import OutboxBed, execute
+from .conftest import OutboxBed, execute, set_states_env
 
 pytestmark = pytest.mark.integration
 
@@ -125,8 +125,7 @@ async def test_a_door_with_nothing_forwarded_drains_nothing(bed: OutboxBed, quer
 async def test_the_entry_on_a_subject_held_behind_a_failed_save_raises_at_once(
     bed: OutboxBed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS", "0.3")
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_POLL_SECONDS", "0.05")
+    set_states_env(monkeypatch, STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS="0.3", STATES_OUTBOX_DRAIN_POLL_SECONDS="0.05")
     failed, _held = await bed.enqueue_together(
         [bed.write(bed.subject("A"), [_set("n", 1)])],
         [bed.write(bed.subject("A"), [_set("n", 2)]), bed.write(bed.subject("B"), [_set("n", 3)])],
@@ -142,8 +141,7 @@ async def test_the_entry_on_a_subject_held_behind_a_failed_save_raises_at_once(
 async def test_the_entry_on_a_calls_row_behind_a_failed_row_raises_at_once(
     bed: OutboxBed, monkeypatch: pytest.MonkeyPatch, probe: Any
 ) -> None:
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS", "0.3")
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_POLL_SECONDS", "0.05")
+    set_states_env(monkeypatch, STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS="0.3", STATES_OUTBOX_DRAIN_POLL_SECONDS="0.05")
     # A failed save on subject A; then a calls row whose subjects are B and A.
     failed = await bed.enqueue(bed.write(bed.subject("A"), [_set("n", 1)]))
     await bed.fail(failed)
@@ -166,7 +164,7 @@ async def test_the_entry_on_a_calls_row_behind_a_failed_row_raises_at_once(
 async def test_the_entry_waits_for_a_running_call_and_proceeds_when_it_is_deleted(
     bed: OutboxBed, monkeypatch: pytest.MonkeyPatch, probe: Any
 ) -> None:
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_POLL_SECONDS", "0.02")
+    set_states_env(monkeypatch, STATES_OUTBOX_DRAIN_POLL_SECONDS="0.02")
     with _door("A"):
         row = await bed.enqueue(calls=(("echo", {}),))
     await execute("UPDATE state_outbox SET status = 'running', claimed_by = 'other' WHERE id = %s", (row,))
@@ -188,8 +186,7 @@ async def test_the_entry_waits_for_a_running_call_and_proceeds_when_it_is_delete
 async def test_a_running_call_past_the_deadline_times_out_naming_it(
     bed: OutboxBed, monkeypatch: pytest.MonkeyPatch, probe: Any
 ) -> None:
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS", "0.3")
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_POLL_SECONDS", "0.05")
+    set_states_env(monkeypatch, STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS="0.3", STATES_OUTBOX_DRAIN_POLL_SECONDS="0.05")
     with _door("A"):
         row = await bed.enqueue(calls=(("echo", {}),))
     await execute("UPDATE state_outbox SET status = 'running', claimed_by = 'other' WHERE id = %s", (row,))

@@ -169,15 +169,14 @@ async def _attempt_failed(
 ) -> RowApply:
     """Record one failed attempt: back off when transient and attempts remain, else fail the row loudly."""
     transient = is_transient(exc)
-    settings = states_settings()
     outcome = await store.outbox_record_failure(
         row_id,
         phase=phase,
         error=_error_text(exc),
         transient=transient,
-        max_attempts=settings.outbox_max_attempts,
-        retry_base_seconds=settings.outbox_retry_base_seconds,
-        retry_cap_seconds=settings.outbox_retry_cap_seconds,
+        max_attempts=states_settings().outbox_max_attempts,
+        retry_base_seconds=states_settings().outbox_retry_base_seconds,
+        retry_cap_seconds=states_settings().outbox_retry_cap_seconds,
         claim=claim,
     )
     metrics = outbox_metrics()
@@ -221,9 +220,8 @@ async def run_calls(service: _StatesServiceBase, row_id: int) -> None:
     resumable; otherwise the row fails.
     """
     store = service._store
-    settings = states_settings()
     me = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex}"
-    lease = settings.outbox_claim_lease_seconds
+    lease = states_settings().outbox_claim_lease_seconds
     claimed = await store.outbox_claim_calls(row_id, me, lease)
     if claimed is None:
         return

@@ -1,6 +1,6 @@
 """The retention sweep — op-ledger and expired-record pruning.
 
-Plus the fresh reads of the op-ledger and default record retention windows.
+Plus the reads of the op-ledger and default record retention windows from the state-store settings.
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ class _RetentionStore:
 
 
 def store_settings_retention() -> int:
-    """The op-ledger retention window in days, read fresh and validated LOUDLY.
+    """The op-ledger retention window in days from the current state-store settings, validated LOUDLY.
 
     A ``0``/negative value would turn the retention sweep's op-ledger prune into a full
     ledger wipe, so a misconfigured value refuses the sweep instead.
@@ -83,7 +83,7 @@ def store_settings_retention() -> int:
 
 
 def store_settings_default_retention() -> int | None:
-    """The global default RECORD retention window in days, read fresh.
+    """The global default RECORD retention window in days from the current state-store settings.
 
     ``None`` keeps records forever unless a state sets its own ``retention_days``.
     """

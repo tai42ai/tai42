@@ -16,7 +16,7 @@ from tai42_skeleton.states.outbox import loud as loud_mod
 from tai42_skeleton.states.outbox.apply import apply_row, in_flight_tasks, is_transient
 from tai42_skeleton.states.outbox.metrics import outbox_metrics
 
-from .conftest import OutboxBed, execute
+from .conftest import OutboxBed, execute, set_states_env
 
 pytestmark = pytest.mark.integration
 
@@ -106,8 +106,7 @@ def test_transient_failures_are_the_timeouts_the_unavailable_and_lost_connection
 async def test_a_transient_failure_backs_off_and_the_last_attempt_fails_the_row(
     bed: OutboxBed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("STATES_OUTBOX_MAX_ATTEMPTS", "2")
-    monkeypatch.setenv("STATES_OUTBOX_RETRY_BASE_SECONDS", "10")
+    set_states_env(monkeypatch, STATES_OUTBOX_MAX_ATTEMPTS="2", STATES_OUTBOX_RETRY_BASE_SECONDS="10")
     row = await bed.enqueue(bed.write(bed.subject(), [_set("n", 1)]))
 
     async def _lost(*args: Any, **kwargs: Any) -> Any:
