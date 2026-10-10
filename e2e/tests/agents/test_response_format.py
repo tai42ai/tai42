@@ -240,6 +240,13 @@ async def test_tool_tier_structured_run_handles_an_optional_field(agents_stack: 
     # The tool tier forces the function call: the request binds a forced ``tool_choice``
     # (a concrete tool selection), never the native plan's absent / "auto" / "none".
     assert llm_stub.requests[-1].get("tool_choice") not in (None, "auto", "none"), llm_stub.requests[-1]
+    # The optional ``note`` the tool tier SHOWS the model carries the bare type — no null
+    # member, no default inviting a null — so the shown contract equals the authored schema
+    # the rail enforces. (Without this the model is shown ``anyOf:[string, null], default: null``
+    # and a model-written null is then refused by the authored schema.)
+    shown_note = llm_stub.requests[-1]["tools"][0]["function"]["parameters"]["properties"]["note"]
+    assert "anyOf" not in shown_note, shown_note
+    assert "default" not in shown_note, shown_note
 
 
 async def test_tool_tier_structured_run_round_trips_a_keyword_property_name(

@@ -98,13 +98,15 @@ def test_nullable_type_list_carries_constraint_and_accepts_none():
         model(s="abcd")  # maxLength enforced on the string branch
 
 
-def test_optional_constrained_property_accepts_none_and_enforces_bound():
+def test_optional_constrained_property_is_absent_when_omitted_and_enforces_bound():
     model = build(
         {"type": "object", "properties": {"n": {"type": "integer", "minimum": 5}}},
         "OptNum",
     )
-    assert model().n is None  # optional -> default None accepted
+    assert model().model_dump() == {}  # optional non-nullable -> absent, not a null default
     model(n=5)
+    with pytest.raises(ValidationError):
+        model(n=None)  # the authored type admits no null
     with pytest.raises(ValidationError):
         model(n=1)  # below minimum
 

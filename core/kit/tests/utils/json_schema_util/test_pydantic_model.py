@@ -8,6 +8,7 @@ model and checking it validates as the schema describes.
 
 import pytest
 from pydantic import BaseModel, ValidationError
+from pydantic.experimental.missing_sentinel import MISSING
 
 from tai42_kit.utils.data.json_schema_util import json_schema_to_pydantic_model as build
 
@@ -42,9 +43,65 @@ def test_object_required_and_optional_fields():
     # attributes are not statically known.
     inst: Any = model(name="ada")
     assert inst.name == "ada"
-    assert inst.age is None
+    # 'age' is optional (absent from required) and its type admits no null, so an
+    # omitted 'age' is the MISSING sentinel and is excluded from every dump.
+    assert inst.age is MISSING
+    assert inst.model_dump() == {"name": "ada"}
+    assert inst.model_dump(exclude_unset=True) == {"name": "ada"}
     with pytest.raises(ValidationError):
         model()  # missing required 'name'
+
+
+def test_optional_non_nullable_property_refuses_explicit_null():
+    # The property's authored type admits no null, so an explicit null is refused —
+    # the contract the model is shown (bare type, no null member) is the one enforced.
+    model = build(
+        {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}}}},
+        "Optional",
+    )
+    prop = model.model_json_schema()["properties"]["tags"]
+    assert prop == {"type": "array", "items": {"type": "string"}, "title": "Tags"}
+    assert "tags" not in model.model_json_schema().get("required", [])
+    with pytest.raises(ValidationError):
+        model(tags=None)
+
+
+def test_optional_nullable_property_keeps_its_null_member():
+    # A property whose authored type DOES admit null stays nullable and accepts null.
+    model = build(
+        {"type": "object", "properties": {"note": {"type": ["string", "null"]}}},
+        "Nullable",
+    )
+    prop = model.model_json_schema()["properties"]["note"]
+    assert {"type": "null"} in prop["anyOf"]
+    assert "default" not in prop
+    assert model(note=None).note is None
+    assert model().model_dump() == {}
+
+
+def test_optional_property_constraint_survives_without_a_null_member():
+    model = build(
+        {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}, "minItems": 2}}},
+        "Constrained",
+    )
+    prop = model.model_json_schema()["properties"]["tags"]
+    assert prop["minItems"] == 2
+    assert "anyOf" not in prop
+    with pytest.raises(ValidationError):
+        model(tags=["only-one"])
+
+
+def test_optional_ref_property_resolves_and_refuses_null():
+    model = build(
+        {
+            "type": "object",
+            "properties": {"inner": {"type": "object", "properties": {"a": {"type": "integer"}}}},
+        },
+        "Ref",
+    )
+    assert model(inner={"a": 1}).inner.a == 1
+    with pytest.raises(ValidationError):
+        model(inner=None)
 
 
 def test_object_default_value_used_for_optional():
@@ -53,6 +110,7 @@ def test_object_default_value_used_for_optional():
         "WithDefault",
     )
     assert model().n == 7
+    assert model.model_json_schema()["properties"]["n"]["default"] == 7
 
 
 def test_array_of_objects():
