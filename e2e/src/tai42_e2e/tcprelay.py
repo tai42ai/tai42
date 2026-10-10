@@ -1,5 +1,6 @@
 """An in-process TCP forwarder the harness puts in front of Redis / Postgres so a
-test can sever and restore a stack's connection to shared infra mid-run.
+test can sever and restore a stack's connection to shared infra mid-run, or read
+what the stack sends to it.
 
 The compose infra is shared across concurrently-alive stacks, so an outage cannot
 be injected by stopping the container (it would take down every other stack).
@@ -20,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import socket
 import threading
+from collections.abc import Callable
 
 from tai42_e2e import ports
 from tai42_e2e.waiting import wait_for
@@ -32,15 +34,26 @@ class TcpRelay:
     bidirectionally to the upstream on two daemon threads. ``sever`` models an
     outage (listener closed, live connections dropped); ``restore`` re-binds the
     same port; ``stop`` is the final teardown and releases the port. Not reusable
-    after ``stop``.
+    after ``stop``. ``observe_client`` lets a test read what the stack sends (e.g.
+    :class:`~tai42_e2e.pgwire.PgStatementTap`): each connection's client-to-server
+    chunks pass through its observer before they are forwarded.
 
     A relay thread that dies of anything other than the deliberate close records
     the exception; :meth:`raise_if_failed` (called by :func:`wait_relay_ready` and
     by ``stop``) re-raises it on the owning thread, so a broken relay surfaces as
     itself instead of as an outage no test injected."""
 
-    def __init__(self, upstream_host: str, upstream_port: int) -> None:
+    def __init__(
+        self,
+        upstream_host: str,
+        upstream_port: int,
+        *,
+        observe_client: Callable[[], Callable[[bytes], None]] | None = None,
+    ) -> None:
         self._upstream = (upstream_host, upstream_port)
+        # Called once per forwarded connection; the callable it returns sees every chunk
+        # the client sends, before the chunk is forwarded upstream.
+        self._observe_client = observe_client
         # Loopback only: the port comes from ``tai42_e2e.ports``, which proves a port
         # free on 127.0.0.1, and the relay fronts host-local infra.
         self._listen_host = "127.0.0.1"
@@ -215,12 +228,13 @@ class TcpRelay:
                 upstream.close()
                 return
             self._live_conns.extend((client, upstream))
-        for src, dst in ((client, upstream), (upstream, client)):
-            thread = threading.Thread(target=self._pump, args=(src, dst), daemon=True)
+        observe = self._observe_client() if self._observe_client is not None else None
+        for src, dst, seen in ((client, upstream, observe), (upstream, client, None)):
+            thread = threading.Thread(target=self._pump, args=(src, dst, seen), daemon=True)
             self._pump_threads.append(thread)
             thread.start()
 
-    def _pump(self, src: socket.socket, dst: socket.socket) -> None:
+    def _pump(self, src: socket.socket, dst: socket.socket, observe: Callable[[bytes], None] | None) -> None:
         try:
             while True:
                 try:
@@ -231,6 +245,14 @@ class TcpRelay:
                     break
                 if not data:
                     break
+                if observe is not None:
+                    try:
+                        observe(data)
+                    except Exception as exc:
+                        # An observer that cannot read the stream fails the relay loudly
+                        # (``raise_if_failed``) rather than forwarding what it could not see.
+                        self._record_failure(exc)
+                        break
                 try:
                     dst.sendall(data)
                 except OSError:

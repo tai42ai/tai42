@@ -10,7 +10,10 @@ content search finds the subject, a fold aliases one subject onto another, and a
 additive migration re-validates every record. A second leg pins the OFF contract:
 with no states database bound (``off_stack``), every door — a read and a write
 alike — refuses ``501`` with the stable ``states-not-configured`` code rather than
-serving an empty or forged answer.
+serving an empty or forged answer. A binding door leg saves hooks whose state binding
+names template programs: the save resolves a state's named references in one batch
+(read off the stack's Postgres wire through a relay tap), and a reference to a template
+neither attached nor declared is refused with the platform's own text, storing nothing.
 """
 
 from __future__ import annotations
@@ -22,8 +25,12 @@ from urllib.parse import quote
 import httpx
 import pytest
 
+from tai42_e2e import Infra
 from tai42_e2e.httpapi import ApiClient
+from tai42_e2e.manifests import build_replicas_stack
+from tai42_e2e.pgwire import PgStatementTap
 from tai42_e2e.stack import TaiStack
+from tai42_e2e.tcprelay import TcpRelay, wait_relay_ready
 
 # The OFF door's machine-readable refusal code (``operations.states._NOT_CONFIGURED_CODE``).
 _NOT_CONFIGURED_CODE = "states-not-configured"
@@ -478,6 +485,113 @@ async def test_auth_stack_slashed_key_record_door_is_gated_for_a_non_admin_key(
     anon = ApiClient(auth_stack.origin(auth_stack.port_a))
     denied = await anon.request_raw("GET", record)
     assert denied.status_code in (401, 403), f"slashed-key record door served unauthenticated: {denied.status_code}"
+
+
+@pytest.mark.needs("kind:states", "topology:replicas", "process", "store:postgres", "probe-tools")
+async def test_a_door_binding_save_resolves_its_named_template_references_in_one_batch(
+    infra: Infra, fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
+) -> None:
+    """The hook register door saves a state binding whose injections name template programs.
+    The stack reaches Postgres through a relay whose tap records every statement it sends, and
+    every save goes to replica A (one process), so after a first save its catalog caches are
+    warm: a save naming two programs then sends exactly as many statements carrying the state's
+    name as a save naming one — the two references resolve in one batch, not one read each. A
+    reference to a template neither attached nor declared by the binding is refused with the
+    platform's own text, and the refused save stores no hook and attaches nothing."""
+    tap = PgStatementTap()
+    pg_relay = TcpRelay(infra.settings.pg_host, infra.settings.pg_port, observe_client=tap.observer)
+    try:
+        pg_relay.start()
+        wait_relay_ready(pg_relay)
+    except BaseException:
+        pg_relay.stop()
+        raise
+    stack = fresh_stack(
+        build_replicas_stack,
+        resource_kwargs={"pg_host": pg_relay.listen_host, "pg_port": pg_relay.port},
+        relays=[pg_relay],
+    )
+    api = stack.api(port=stack.port_a)
+    state = uniq("status")
+    template = uniq("counts-tmpl").replace("_", "-")
+    absent = uniq("absent-tmpl").replace("_", "-")
+
+    await api.put(
+        f"/api/states/{state}",
+        json={
+            "description": "e2e door binding",
+            "schema": {"type": "object", "properties": {"note": {"type": "string"}}},
+            "subject_kinds": ["thread"],
+            "default_subject_kind": "thread",
+        },
+    )
+    await api.put(
+        f"/api/state-templates/{template}",
+        json={
+            "kind": "state-template",
+            "name": template,
+            "schema": {"type": "object", "properties": {"items": {"type": "array"}}},
+            "template_jq": {
+                "ids": {"purpose": "input", "jq": {"content": "[(.items // [])[] | .id]"}},
+                "size": {"purpose": "input", "jq": {"content": "(.items // []) | length"}},
+            },
+        },
+    )
+
+    def hook(name: str, references: list[str]) -> dict:
+        binding = {
+            "states": [
+                {
+                    "state": state,
+                    "templates": [template],
+                    "subject_expr": {"content": ".key"},
+                    "input_injections": [
+                        {"template_jq": reference, "into": f"in_{i}"} for i, reference in enumerate(references)
+                    ],
+                }
+            ]
+        }
+        return {
+            "name": name,
+            "topic": uniq("door-topic").replace("_", "-"),
+            "tool": "e2e_echo",
+            "execution_key": uniq("door-exec"),
+            "state_binding": binding,
+        }
+
+    async def save_counting(name: str, references: list[str]) -> int:
+        mark = tap.mark()
+        await api.post("/api/hooks", json=hook(name, references))
+        return sum(1 for statement in tap.since(mark) if statement.carries(state))
+
+    # The first save attaches the template on use and warms replica A's catalog caches.
+    first = uniq("door-hook").replace("_", "-")
+    await save_counting(first, ["ids", "size"])
+    served = await api.get(f"/api/states/{state}")
+    assert [m["template"] for m in served["attachments"]] == [template]
+
+    one_reference = await save_counting(uniq("door-hook").replace("_", "-"), ["ids"])
+    two_references = await save_counting(uniq("door-hook").replace("_", "-"), [f"{template}.ids", "size"])
+    assert one_reference > 0, "the tap recorded no statement carrying the state's name"
+    assert two_references == one_reference, (
+        f"a save naming two programs sent {two_references} statements carrying the state's name, "
+        f"one naming a single program {one_reference}"
+    )
+    hooks_before = {item["name"] for item in (await api.get("/api/hooks"))["items"]}
+    assert first in hooks_before
+
+    # A reference to a template the binding neither attaches nor declares is refused, after the
+    # valid reference before it, with the platform's text; nothing is stored or attached.
+    refused_name = uniq("door-hook").replace("_", "-")
+    refused = await api.request_raw("POST", "/api/hooks", json=hook(refused_name, ["ids", f"{absent}.size"]))
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["error"] == (
+        f"invalid hook params: template {absent!r} is not attached on state {state!r}"
+    ), refused.text
+    hooks_after = {item["name"] for item in (await api.get("/api/hooks"))["items"]}
+    assert hooks_after == hooks_before
+    served = await api.get(f"/api/states/{state}")
+    assert [m["template"] for m in served["attachments"]] == [template]
 
 
 async def _assert_states_off(off_stack: TaiStack, method: str, path: str, *, json=None) -> None:

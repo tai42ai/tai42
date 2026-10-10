@@ -170,9 +170,11 @@ class AppStates(Protocol):
         Returns one item per reference, in order: its resolution, or the
         :class:`~tai42_contract.states.StateNotFoundError` /
         :class:`~tai42_contract.states.ValueValidationError` :meth:`resolve_template_jq` raises for
-        it, with the same message, so one refused reference never hides the others' verdicts. Every
-        reference on one state resolves against one read of that state's catalog. Any other failure
-        raises for the whole call.
+        it, with the same message, so one refused reference never hides the others' verdicts. One
+        statement reads every named state's declaration version, and each reference resolves against
+        its state's catalog at that version; a write that lands on a state during the call can make
+        any reference on that state read the catalog's current rows and resolve against the newer
+        version. Any other failure raises for the whole call.
         """
         ...
 
