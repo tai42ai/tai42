@@ -226,6 +226,15 @@ _DISCOVERED_ENV_CLIENT_SECRET = "e2e-discovered-env-secret"
 # The ``https`` origin the client-identity document scenario presents; the stack serves plain http,
 # so the fixture fetches this origin's document from a replica with this ``Host``.
 DOCUMENT_ORIGIN = "https://app.e2e.test"
+# The failed-MCP re-probe cadence the profile declares: both ``TAI_MCP_MCP_REPROBE_INITIAL_SECONDS`` and
+# ``TAI_MCP_MCP_REPROBE_MAX_SECONDS``. A scenario proves that a credential landing after a build binds at
+# the loop's next pass. The loop keeps one interval for every failed title and backs it off while any probed
+# server stays down; the profile's scenarios leave entries whose fixture servers are gone, so the shipped
+# back-off would stretch "the next pass" to the remainder of a sleep of up to the shipped maximum. Pinning
+# both settings at the shipped initial value keeps the next pass at most one interval away on any host. The
+# value stays the shipped initial rather than a smaller one, so a loop pass does not coincide by chance with
+# a reconnect's immediate re-bind, whose proof is the reconnect's own re-probe.
+DISCOVERED_REPROBE_INTERVAL_SECONDS = 30
 
 
 def discovered_env_client_descriptor(fixture_base: str) -> dict[str, object]:
@@ -256,7 +265,8 @@ def build_discovered_connectors_stack(res: StackResources, variants: Variants) -
     The connectors router over a live store, the probe tools, the core routers (a manifest write and
     a hand-written ``mcp`` entry among them), and the hand-written discovered descriptor
     with an env client pinned to the fixture at ``res.oauth_mcp_base_url``. The redirect allow-list
-    carries both replicas' origins and :data:`DOCUMENT_ORIGIN`.
+    carries both replicas' origins and :data:`DOCUMENT_ORIGIN`; the failed-MCP re-probe runs at the
+    fixed cadence :data:`DISCOVERED_REPROBE_INTERVAL_SECONDS`.
     """
     if res.oauth_mcp_base_url is None:
         raise RuntimeError("the discovered-servers profile needs the OAuth MCP fixture's base URL")
@@ -285,6 +295,8 @@ def build_discovered_connectors_stack(res: StackResources, variants: Variants) -
         env["CONNECTORS_STATE_HMAC_KEY"] = res.connectors_state_hmac_key
     env["E2E_DISCOVERED_CLIENT_ID"] = DISCOVERED_ENV_CLIENT_ID
     env["E2E_DISCOVERED_CLIENT_SECRET"] = _DISCOVERED_ENV_CLIENT_SECRET
+    env["TAI_MCP_MCP_REPROBE_INITIAL_SECONDS"] = str(DISCOVERED_REPROBE_INTERVAL_SECONDS)
+    env["TAI_MCP_MCP_REPROBE_MAX_SECONDS"] = str(DISCOVERED_REPROBE_INTERVAL_SECONDS)
     return StackConfig(
         name="discovered-connectors",
         topology=Topology.REPLICAS,

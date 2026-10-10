@@ -185,8 +185,9 @@ class BusSubscriptionMixin(LifecycleState):
         The sibling-worker counterpart of a route-received admin call: it maps each op
         to the local admin primitive. The heavy sync ops run on a worker thread through
         the reload gate, identically to the HTTP path; the tool reload/remove ops
-        dispatch through the async per-kind reloader; ``list_failed_mcps`` is a plain
-        in-process read. An unrecognized op raises loudly.
+        dispatch through the async per-kind reloader; ``reprobe_failed_mcps`` runs the
+        set-scoped re-probe on the serving loop, taking the reload gate only to snapshot and
+        bind; ``list_failed_mcps`` is a plain in-process read. An unrecognized op raises loudly.
 
         After the op applies, ``on_fleet_op_applied`` handlers fire with the op name and
         the seconds left before ``deadline`` (a ``time.monotonic()`` instant) — the op
@@ -219,6 +220,10 @@ class BusSubscriptionMixin(LifecycleState):
             # payload in one FleetResult is uniform (a consumer never special-cases
             # self vs remote for this op).
             return await reload_gate.run(tai42_app.admin.reload_failed_mcps, reimports=False)
+        if op_name == "reprobe_failed_mcps":
+            # Runs on the serving loop: the pass takes the reload gate only to snapshot and to bind, never
+            # across its probe. Bare per-title list, matching the self-apply shape.
+            return await tai42_app.admin.reprobe_failed_mcps(_op_field(op, "titles"))
         if op_name == "list_failed_mcps":
             # Bare list, matching the self-apply shape — see reload_failed_mcps above.
             return tai42_app.admin.list_failed_mcps()

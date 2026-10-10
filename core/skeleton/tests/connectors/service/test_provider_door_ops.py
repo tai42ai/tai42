@@ -496,6 +496,58 @@ async def test_a_failed_client_deletion_after_the_removal_is_raised(
     assert manifest.doc["connectors"] == []
 
 
+async def test_a_rerun_of_a_remove_whose_client_deletion_failed_deletes_the_rows_and_frees_the_id(
+    door, client_store_fake: FakeClientStore, monkeypatch
+) -> None:
+    _, manifest, providers, _ = door
+    _register(providers, manifest, make_discovered_descriptor())
+    client_store_fake.add_row(provider_id="remote", issuer="https://a.example", client_id="m", source="manual")
+    real = client_store_fake.delete_for_provider
+
+    async def failing(provider_id: str) -> int:
+        raise ConnectionError("the client store is unreachable")
+
+    monkeypatch.setattr(client_store_fake, "delete_for_provider", failing)
+    with pytest.raises(ConnectionError, match="unreachable"):
+        await ops.remove_connector_provider(provider_id="remote")
+    # The manifest change went through; its reload drops the provider from the registry.
+    providers.pop("remote")
+    monkeypatch.setattr(client_store_fake, "delete_for_provider", real)
+
+    rerun = await ops.remove_connector_provider(provider_id="remote")
+
+    assert rerun == {"provider_id": "remote", "removed_clients": 1, "fanout": None}
+    assert not await client_store_fake.has_rows("remote")
+    assert await provider_service.id_taken_reason("remote") is None
+
+
+async def test_removing_an_unknown_id_with_no_client_rows_is_not_found(
+    door, client_store_fake: FakeClientStore
+) -> None:
+    with pytest.raises(NotFoundError, match="provider 'remote' not found"):
+        await ops.remove_connector_provider(provider_id="remote")
+
+
+@pytest.mark.parametrize("holder", ["manifest", "plugin", "connection"])
+async def test_client_rows_under_an_id_still_held_are_not_deleted_by_a_remove_of_an_unregistered_id(
+    door, client_store_fake: FakeClientStore, plugins, stored_rows, holder: str
+) -> None:
+    """Rows are deleted by the re-run only when nothing holds the id any more: not the persisted manifest, not
+    an installed plugin, not a connection record."""
+    _, manifest, _providers, _ = door
+    client_store_fake.add_row(provider_id="remote", issuer="https://a.example", client_id="m", source="manual")
+    if holder == "manifest":
+        manifest.doc["connectors"].append(make_discovered_descriptor().model_dump(mode="json", exclude_none=True))
+    elif holder == "plugin":
+        plugins["remote"] = "acme-plugin@1.0.0"
+    else:
+        stored_rows.append(_connection(CID, "remote", lapsed=True))
+
+    with pytest.raises(NotFoundError, match="provider 'remote' not found"):
+        await ops.remove_connector_provider(provider_id="remote")
+    assert await client_store_fake.has_rows("remote")
+
+
 # -- set client ----------------------------------------------------------------------------------
 
 

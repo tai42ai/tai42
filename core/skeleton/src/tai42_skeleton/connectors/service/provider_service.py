@@ -316,6 +316,21 @@ async def connections_of(provider_id: str) -> tuple[list[str], list[str]]:
     return live, lapsed
 
 
+async def clients_left_without_provider(provider_id: str) -> bool:
+    """Whether client rows are stored under ``provider_id`` while nothing else holds the id.
+
+    Nothing else: no provider in the persisted manifest, no installed plugin that provides it, no
+    connection record (live or lapsed). These are the rows a removal leaves when its deletion of
+    them fails after the provider left the manifest.
+    """
+    if provider_id in _manifest_ids() or provider_id in await plugin_connector_owners():
+        return False
+    live, lapsed = await connections_of(provider_id)
+    if live or lapsed:
+        return False
+    return await client_store.active_client_store().has_rows(provider_id)
+
+
 async def taken_provider_ids() -> set[str]:
     """Every id that is not free: in the manifest, or with a connection record, or with a client row."""
     taken = set(_manifest_ids())

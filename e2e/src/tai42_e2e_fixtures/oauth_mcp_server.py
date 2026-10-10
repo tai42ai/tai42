@@ -44,6 +44,8 @@ _AS_METADATA_PATH = "/.well-known/oauth-authorization-server"
 _ISSUER_PATH = "/tenant"
 _DEFAULT_SCOPE = "mcp"
 _WRONG_ISSUER = "https://wrong-issuer.e2e.test"
+# The platform's refresh deadline: the longest it waits for an answer to a refresh grant.
+_REFRESH_HOLD_DEADLINE = 20.0
 
 
 @dataclass
@@ -66,9 +68,8 @@ class Controls:
     issuer_with_path: bool = False
     # A token endpoint the metadata names instead of the fixture's own (a private address).
     token_endpoint: str | None = None
-    # Seconds the answer to every refresh grant is held after the request arrived, at most; a
-    # :meth:`OAuthMcpServer.release_refreshes` answers every held one at once.
-    refresh_delay: float = 0.0
+    # Hold the answer to every refresh grant until :meth:`OAuthMcpServer.release_refreshes`.
+    hold_refreshes: bool = False
     # Leave ``code_challenge_methods_supported`` out of the metadata.
     omit_pkce_methods: bool = False
     # Send a wrong ``iss`` on the authorization redirect.
@@ -230,7 +231,7 @@ class OAuthMcpServer:
                 token.expires_at = 0.0
 
     def release_refreshes(self) -> None:
-        """Answer every refresh grant the ``refresh_delay`` control is holding now."""
+        """Answer every refresh grant the ``hold_refreshes`` control is holding now."""
         with self._lock:
             self._releases += 1
 
@@ -498,15 +499,20 @@ class OAuthMcpServer:
                 return JSONResponse({"error": "invalid_target"}, status_code=400)
             return JSONResponse(self._issue(client.client_id, code.scopes, code.resource))
         if grant == "refresh_token":
-            delay = self._controls.refresh_delay
-            if delay:
-                answer_at = time.monotonic() + delay
+            if self._controls.hold_refreshes:
                 released = self._releases
 
                 async def due() -> bool:
-                    return time.monotonic() >= answer_at or self._releases != released
+                    return self._releases != released
 
-                await wait_for_async(due, deadline=delay + 5.0, message="a delayed refresh was never answered")
+                # The platform abandons a refresh after its refresh deadline (20 s); a hold released
+                # later would rotate a refresh token the platform never stored, so a hold the test
+                # does not release inside that deadline fails here.
+                await wait_for_async(
+                    due,
+                    deadline=_REFRESH_HOLD_DEADLINE,
+                    message="a held refresh was never released inside the platform's refresh deadline",
+                )
             with self._lock:
                 held = self._refresh.pop(form.get("refresh_token", ""), None)
                 self._counters.refreshes.append(

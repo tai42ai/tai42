@@ -158,7 +158,7 @@ def harness(monkeypatch, oauth_client_env):
     }
     store = _FakeStore(records)
     flows: dict[str, OAuthFlowState] = {}
-    events = {"added": [], "removed": [], "revoked": [], "state_put": []}
+    events = {"added": [], "removed": [], "revoked": [], "state_put": [], "broadcasts": []}
 
     monkeypatch.setattr(cs, "token_store", lambda: store)
     monkeypatch.setattr(cs, "get_provider", lambda pid: providers[pid])
@@ -194,6 +194,17 @@ def harness(monkeypatch, oauth_client_env):
             return manifest_service
 
     monkeypatch.setattr(cs, "ConfigService", _FakeConfigServiceFactory)
+
+    # The fleet ops the lifecycle publishes outside the manifest pipeline (a reconnect's re-probe of
+    # the connection's failed entries) are recorded, not run; the publish itself is exercised with the
+    # real ``broadcast`` in the completion tests.
+    async def fake_broadcast(op, targets, apply, *, publish_on_local_failure=False, pre_mutation_errors=()):
+        events["broadcasts"].append(
+            {"op": op, "targets": targets, "publish_on_local_failure": publish_on_local_failure}
+        )
+        return {"op": op["op"], "results": []}
+
+    monkeypatch.setattr(cs, "broadcast", fake_broadcast)
 
     # OAuth state store: in-memory.
     async def fake_state_put(flow_state):

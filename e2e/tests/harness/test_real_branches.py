@@ -18,6 +18,7 @@ from tai42_e2e.manifests import (
     _STRIPE_TEST_SECRET_KEY,
     ATLASSIAN_CLIENT_ID,
     DISCOVERED_ENV_PROVIDER_ID,
+    DISCOVERED_REPROBE_INTERVAL_SECONDS,
     DOCUMENT_ORIGIN,
     GOOGLE_CLIENT_ID,
     _llm_env,
@@ -325,6 +326,8 @@ def test_the_discovered_servers_profile_pins_its_env_client_to_the_fixture() -> 
     assert descriptor["issuer"] == "http://127.0.0.1:9"
     assert descriptor["sub_services"]["default"]["mcp_server"]["url"] == "http://127.0.0.1:9/mcp"
     assert cfg.env["ACCESS_CONTROL_ENABLE"] == "true"
+    assert cfg.env["TAI_MCP_MCP_REPROBE_INITIAL_SECONDS"] == str(DISCOVERED_REPROBE_INTERVAL_SECONDS)
+    assert cfg.env["TAI_MCP_MCP_REPROBE_MAX_SECONDS"] == str(DISCOVERED_REPROBE_INTERVAL_SECONDS)
     assert cfg.topology is Topology.REPLICAS
     assert cfg.extra_allowlist_origins == [DOCUMENT_ORIGIN]
     with pytest.raises(RuntimeError, match="OAuth MCP fixture"):

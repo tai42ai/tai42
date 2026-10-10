@@ -143,7 +143,11 @@ async def test_a_remove_reads_its_provider_from_the_path(monkeypatch: pytest.Mon
     def unknown(provider_id: str) -> Any:
         raise KeyError(provider_id)
 
+    async def no_rows_left(provider_id: str) -> bool:
+        return False
+
     monkeypatch.setattr(ops.connection_service, "get_provider", unknown)
+    monkeypatch.setattr(ops.provider_service, "clients_left_without_provider", no_rows_left)
     resp = await router.remove_provider(_req(provider_id="ghost"))
     assert resp.status_code == 404
     assert "ghost" in _body(resp)["error"]
