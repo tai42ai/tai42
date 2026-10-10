@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ChannelConversationRoute, ConversationRoute
 from tai42_contract.template import TemplatedText
 from tests.agent._memoryless import MemorylessTestAgent
 
@@ -104,7 +104,7 @@ class _FakeApp:
 
 
 def _channel_route(target_kind: str = "agent") -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name="line",
         door="channel",
         target_kind=target_kind,  # pyright: ignore[reportArgumentType]

@@ -39,12 +39,12 @@ from typing import Any
 
 from pydantic import BaseModel
 from pydantic.json_schema import JsonSchemaMode, models_json_schema
+from tai42_contract.access_control import API_KEY_HEADER
 
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE
 from tai42_skeleton.app.route_registry import RouteMetadata, load_api_routes, method_to_action
 
 _SECURITY_SCHEME = "ApiKeyAuth"
-_API_KEY_HEADER = "x-api-key"
 
 # The literal prefix of every component ``$ref`` target the document carries.
 _REF_PREFIX = "#/components/schemas/"
@@ -569,6 +569,6 @@ def build_openapi_spec() -> dict[str, Any]:
         "paths": paths,
         "components": {
             "schemas": published,
-            "securitySchemes": {_SECURITY_SCHEME: {"type": "apiKey", "in": "header", "name": _API_KEY_HEADER}},
+            "securitySchemes": {_SECURITY_SCHEME: {"type": "apiKey", "in": "header", "name": API_KEY_HEADER}},
         },
     }

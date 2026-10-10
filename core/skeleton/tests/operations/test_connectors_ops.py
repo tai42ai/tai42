@@ -16,6 +16,7 @@ from typing import get_args
 import pytest
 from tai42_contract.connectors.errors import OperatorMisconfiguredError
 from tai42_contract.connectors.models import AuthHealthState
+from tai42_contract.connectors.service import StartConnectResult
 from tai42_contract.manifest import ApiToolsConfig
 
 from tai42_skeleton.connectors.oauth.crypto import ConnectorEncryptionConfigError
@@ -103,6 +104,39 @@ async def test_reconnect_returns_authorize_url(monkeypatch: pytest.MonkeyPatch) 
         origin="https://app",
     )
     assert result == {"flow_id": "f1", "authorize_url": "https://gh/auth"}
+
+
+async def test_the_operation_doors_pass_an_omitted_return_url_to_the_connection_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    async def _load(cid):
+        return _record(cid)
+
+    async def _start(**kw):
+        seen.append(kw["return_url"])
+        return StartConnectResult(flow_id="f1", authorize_url="https://gh/auth")
+
+    monkeypatch.setattr(conn_ops, "load_record_or_none", _load)
+    monkeypatch.setattr(conn_ops, "component_store_configured", lambda _component: True)
+    monkeypatch.setattr(conn_ops.connection_service, "start_reconnect", _start)
+    monkeypatch.setattr(conn_ops.connection_service, "start_connect", _start)
+    await conn_ops.reconnect(
+        connection_id="c1",
+        enabled_sub_services=["repo"],
+        redirect_uri="https://app/oauth-bridge.html",
+        origin="https://app",
+    )
+    await conn_ops.start_connect(
+        provider_id="github",
+        alias="work",
+        enabled_sub_services=["repo"],
+        config_values={},
+        redirect_uri="https://app/oauth-bridge.html",
+        origin="https://app",
+    )
+    assert seen == [None, None]
 
 
 async def test_patch_sub_services_returns_result_view(monkeypatch: pytest.MonkeyPatch) -> None:

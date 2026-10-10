@@ -12,14 +12,19 @@ from starlette.requests import Request
 
 from tai42_skeleton.connectors.oauth.client import RedirectUriNotAllowedError
 from tai42_skeleton.connectors.settings import connector_engine_config
+from tai42_skeleton.plugins.settings import hosted_ui_settings
 
 logger = logging.getLogger(__name__)
 
-# Static chromeless callback page registered with the OAuth provider. The
-# provider redirects the popup back to this path — on the originating deployment
-# (single-deployment default) or on the central bridge origin when one is
-# configured. The page reads the signed ``state`` and hands the code onward.
-CALLBACK_PATH = "/oauth-bridge.html"
+
+def callback_uri(base: str) -> str:
+    """The OAuth callback address on origin ``base``: the declared hosted-UI callback page.
+
+    The provider redirects the popup back to this page — on the originating deployment
+    (single-deployment default) or on the central bridge origin when one is configured. The
+    page reads the signed ``state`` and hands the code onward.
+    """
+    return f"{base}{hosted_ui_settings().oauth_callback_path}"
 
 
 def _resolve_origin(request: Request) -> str:
@@ -69,4 +74,4 @@ def compute_redirect_uri(request: Request) -> str:
     """
     bridge = connector_engine_config().oauth_bridge_url
     base = bridge.strip().rstrip("/") if bridge else _resolve_origin(request)
-    return f"{base}{CALLBACK_PATH}"
+    return callback_uri(base)

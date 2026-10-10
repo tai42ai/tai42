@@ -11,7 +11,7 @@ from typing import ClassVar
 
 import pytest
 from pydantic import BaseModel
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ApiConversationRoute, ChannelConversationRoute, ConversationRoute
 from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError
@@ -89,7 +89,7 @@ def wired(monkeypatch):
 
 
 def _api_route(name: str, secret: str, execution_key: str = "svc") -> ConversationRoute:
-    return ConversationRoute(
+    return ApiConversationRoute(
         route_name=name,
         door="api",
         target_kind="agent",
@@ -102,7 +102,7 @@ def _api_route(name: str, secret: str, execution_key: str = "svc") -> Conversati
 
 
 def _channel_route(name: str) -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name=name,
         door="channel",
         target_kind="agent",
@@ -396,7 +396,7 @@ async def test_import_rejects_a_row_whose_target_fails_the_bind_check(wired, mon
 
     monkeypatch.setattr(instance, "app", _BindCheckApp(), raising=False)
 
-    row = ConversationRoute(
+    row = ApiConversationRoute(
         route_name="chat",
         door="api",
         target_kind="agent",

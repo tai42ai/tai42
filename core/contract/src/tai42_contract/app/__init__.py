@@ -42,6 +42,7 @@ from .facets import (
     AppVersioning,
     AppWebhookVerifiers,
     DeclaredRouteMetadata,
+    HostedUiPaths,
     PendingMessage,
     RouteAction,
 )
@@ -221,6 +222,7 @@ __all__ = [
     "AppVersioning",
     "AppWebhookVerifiers",
     "DeclaredRouteMetadata",
+    "HostedUiPaths",
     "PendingMessage",
     "RouteAction",
     "TaiApp",

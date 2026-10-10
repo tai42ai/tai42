@@ -18,17 +18,13 @@ here — this module names only the seam.
 
 from __future__ import annotations
 
-import re
 from enum import StrEnum
 from typing import ClassVar
 
 from pydantic import field_validator
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.config.manager import CONFIG_MODE_ENV, CONFIG_MODE_PATTERN, FILE_CONFIG_MODE
 from tai42_kit.settings import ReloadClass, TaiBaseSettings, settings_cache
-
-# A mode maps to the module ``tai42_config_<mode>.manager``, so it must be a valid
-# module-name segment; the pattern also fixes the canonical (lowercase) spelling.
-_MODE_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
 
 
 class ConfigMode(StrEnum):
@@ -39,7 +35,7 @@ class ConfigMode(StrEnum):
     provider plugin, so it is deliberately not enumerated here.
     """
 
-    file = "file"
+    file = FILE_CONFIG_MODE
 
 
 class ConfigModeSettings(TaiBaseSettings):
@@ -65,10 +61,10 @@ class ConfigModeSettings(TaiBaseSettings):
     @classmethod
     def validate_config_mode(cls, v: object) -> str:
         """Validate ``config_mode`` is ``file`` or a well-formed provider mode name, returning it."""
-        if not isinstance(v, str) or _MODE_PATTERN.fullmatch(v) is None:
+        if not isinstance(v, str) or CONFIG_MODE_PATTERN.fullmatch(v) is None:
             raise ValueError(
-                f"Invalid TAI_CONFIG_MODE={v!r}: expected 'file' (built-in) or a config-provider "
-                "mode name matching [a-z][a-z0-9_]*, resolved to the tai42-config-<mode> plugin."
+                f"Invalid {CONFIG_MODE_ENV}={v!r}: expected {FILE_CONFIG_MODE!r} (built-in) or a config-provider "
+                f"mode name matching {CONFIG_MODE_PATTERN.pattern}, resolved to the tai42-config-<mode> plugin."
             )
         return v
 

@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import Request
 from pydantic import ValidationError
-from tai42_contract.conversations import ConversationRouteCreate, TargetConversationConfig
+from tai42_contract.conversations import ConversationRouteCreateBody, TargetConversationConfig
 
 from tai42_skeleton.operations import BadRequestError
 
@@ -58,7 +58,7 @@ async def _extract_route_create(request: Request) -> dict:
         raise BadRequestError("route_name in the body must match the route_name in the path") from None
     body = {**body, "route_name": path_route_name}
     try:
-        create = ConversationRouteCreate.model_validate(body)
+        create = ConversationRouteCreateBody.model_validate(body).root
     except ValidationError as exc:
         raise BadRequestError(f"invalid conversation route: {exc}") from exc
     return create.model_dump()

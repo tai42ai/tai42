@@ -23,13 +23,13 @@ client), :class:`~tai42_cli.client.ApiClient`, and the
 """
 
 import os
-import re
 from importlib.metadata import entry_points
 from typing import Any, cast
 
 import click
 import typer
 from dotenv import load_dotenv
+from tai42_contract.config.manager import CONFIG_MODE_ENV, CONFIG_MODE_PATTERN, FILE_CONFIG_MODE
 from typer.core import TyperGroup, TyperOption
 from typer.main import get_command
 
@@ -226,14 +226,14 @@ def main(
     # normalization) to stay in step with the server's provider-naming convention.
     # Only the built-in ``file`` mode reads a local ``.env``; any external provider
     # injects env directly and a local ``.env`` must not shadow it, so the load is skipped.
-    config_mode = os.environ.get("TAI_CONFIG_MODE", "file")
-    if re.fullmatch(r"[a-z][a-z0-9_]*", config_mode) is None:
+    config_mode = os.environ.get(CONFIG_MODE_ENV, FILE_CONFIG_MODE)
+    if CONFIG_MODE_PATTERN.fullmatch(config_mode) is None:
         raise typer.BadParameter(
-            f"Invalid TAI_CONFIG_MODE={config_mode!r}: expected 'file' (built-in) or a "
-            "config-provider mode name matching [a-z][a-z0-9_]*.",
-            param_hint="TAI_CONFIG_MODE",
+            f"Invalid {CONFIG_MODE_ENV}={config_mode!r}: expected {FILE_CONFIG_MODE!r} (built-in) or a "
+            f"config-provider mode name matching {CONFIG_MODE_PATTERN.pattern}.",
+            param_hint=CONFIG_MODE_ENV,
         )
-    if config_mode == "file":
+    if config_mode == FILE_CONFIG_MODE:
         load_dotenv()
     ctx.obj = AppContext(
         json_output=json_output,

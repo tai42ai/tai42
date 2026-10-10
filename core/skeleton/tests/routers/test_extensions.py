@@ -38,7 +38,10 @@ def install(monkeypatch):
 
 
 async def test_list_extensions(install):
-    items = [{"name": "cache", "kind": "wrapper"}, {"name": "run_sync", "kind": "backend"}]
+    items = [
+        {"name": "cache", "kind": "wrapper", "multiple": True},
+        {"name": "run_sync", "kind": "backend", "multiple": False},
+    ]
     install(items)
     resp = await router.list_extensions(_req())
     assert resp.status_code == 200

@@ -31,7 +31,7 @@ from __future__ import annotations
 import warnings
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from tai42_contract.channels import (
     ChannelDeliveryError,
     ChannelInputError,
@@ -77,6 +77,8 @@ with warnings.catch_warnings():
         an optional per-call ``recipient`` delivery address, and an optional ``audience`` identity whose in-app
         inbox shows it (honored even with a channel set; distinct from ``recipient``).
         """
+
+        model_config = ConfigDict(extra="forbid")
 
         message: str
         channel: str | None = None

@@ -13,7 +13,7 @@ import time
 
 import httpx
 import pytest
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ApiConversationRoute, ConversationRoute
 
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import delivery_api as delivery_api_module
@@ -80,7 +80,7 @@ _CALLBACK_SECRET = "sec-1"
 
 
 def _api_route() -> ConversationRoute:
-    return ConversationRoute(
+    return ApiConversationRoute(
         route_name="chat",
         door="api",
         target_kind="agent",
@@ -288,7 +288,7 @@ async def test_the_api_retry_stops_when_it_loses_the_lease_during_backoff(monkey
 
 
 def _no_callback_api_route() -> ConversationRoute:
-    return ConversationRoute(
+    return ApiConversationRoute(
         route_name="chat",
         door="api",
         target_kind="agent",

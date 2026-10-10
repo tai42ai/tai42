@@ -46,12 +46,21 @@ from tai42_contract.conversations.overlap import OverlapPolicy, TurnSupersededEr
 from tai42_contract.conversations.persons import Person, PersonAddress
 from tai42_contract.conversations.receipts import DeliveryReceipt
 from tai42_contract.conversations.routes import (
+    CHANNEL_NAME_PATTERN,
     CONVERSATION_MODES,
+    HTTPS_CALLBACK_PATTERN,
+    NON_BLANK_PATTERN,
     ROUTE_NAME_RE,
+    ApiConversationRoute,
+    ApiConversationRouteCreate,
+    ChannelConversationRoute,
+    ChannelConversationRouteCreate,
     ConversationDoor,
     ConversationMode,
     ConversationRoute,
+    ConversationRouteBody,
     ConversationRouteCreate,
+    ConversationRouteCreateBody,
     TargetBindValidator,
 )
 from tai42_contract.conversations.targets import (
@@ -77,6 +86,7 @@ from tai42_contract.entry_params import (
 )
 
 __all__ = [
+    "CHANNEL_NAME_PATTERN",
     "CONVERSATION_MODES",
     "ENTRY_PARAMS_MAX_COUNT",
     "ENTRY_PARAMS_MAX_TOTAL_BYTES",
@@ -85,6 +95,7 @@ __all__ = [
     "EVENT_ID_MAX_CHARS",
     "EVENT_KIND_RE",
     "GREETING_PLACEHOLDER",
+    "HTTPS_CALLBACK_PATTERN",
     "INBOUND_FORM_MAX_BYTES",
     "INBOUND_FORM_MAX_DEPTH",
     "MEDIA_FILENAME_PARAM",
@@ -94,11 +105,16 @@ __all__ = [
     "MEDIA_SHA256_PARAM",
     "MEDIA_SIZE_PARAM",
     "MEDIA_VOICE_PARAM",
+    "NON_BLANK_PATTERN",
     "ROUTE_NAME_RE",
     "STICKER_ANIMATED_PARAM",
     "AnswerPart",
     "AnswerStatus",
+    "ApiConversationRoute",
+    "ApiConversationRouteCreate",
     "BlankInboundTextError",
+    "ChannelConversationRoute",
+    "ChannelConversationRouteCreate",
     "ConversationAnswer",
     "ConversationDoor",
     "ConversationEvent",
@@ -106,7 +122,9 @@ __all__ = [
     "ConversationMessage",
     "ConversationMode",
     "ConversationRoute",
+    "ConversationRouteBody",
     "ConversationRouteCreate",
+    "ConversationRouteCreateBody",
     "ConversationTargetKind",
     "ConversationTurnRef",
     "CrossTargetMergeError",

@@ -1,12 +1,25 @@
-"""Tests for the conversation routing row: ``ConversationRouteCreate`` and the stored
-``ConversationRoute`` — door-conditional fields, tool exprs, overrides, locale, slug."""
+"""Tests for the conversation routing row: the door-discriminated create union and the stored
+row — door-exclusive fields, the published patterns, tool exprs, overrides, locale, slug."""
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
+
+from tai42_contract.conversations import (
+    HTTPS_CALLBACK_PATTERN,
+    ApiConversationRoute,
+    ApiConversationRouteCreate,
+    ChannelConversationRoute,
+    ChannelConversationRouteCreate,
+    ConversationRouteBody,
+    ConversationRouteCreateBody,
+)
+from tai42_contract.conversations.routes import _require_https_url  # pyright: ignore[reportPrivateUsage]
 
 
 def _route_kwargs(**overrides: Any) -> dict[str, Any]:
@@ -23,10 +36,29 @@ def _route_kwargs(**overrides: Any) -> dict[str, Any]:
     return base
 
 
-def test_channel_route_round_trips_and_is_frozen():
-    from tai42_contract.conversations import ConversationRouteCreate
+def _api_kwargs(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "route_name": "api-desk",
+        "door": "api",
+        "target_kind": "agent",
+        "target_name": "assistant",
+        "execution_key": "svc-bridge",
+    }
+    base.update(overrides)
+    return base
 
-    route = ConversationRouteCreate(**_route_kwargs())
+
+def _create(body: dict[str, Any]) -> ApiConversationRouteCreate | ChannelConversationRouteCreate:
+    return ConversationRouteCreateBody.model_validate(body).root
+
+
+def _errors(caught: pytest.ExceptionInfo[ValidationError]) -> list[tuple[str, tuple[Any, ...]]]:
+    return [(error["type"], error["loc"]) for error in caught.value.errors()]
+
+
+def test_channel_route_round_trips_and_is_frozen():
+    route = _create(_route_kwargs())
+    assert isinstance(route, ChannelConversationRouteCreate)
     assert route.door == "channel"
     assert route.callback_url is None
     with pytest.raises(ValidationError):
@@ -34,100 +66,60 @@ def test_channel_route_round_trips_and_is_frozen():
 
 
 def test_api_route_callback_is_optional_https_when_set_and_forbids_channel_fields():
-    from tai42_contract.conversations import ConversationRouteCreate
-
     # A callback is OPTIONAL: a caller reading its answer back from the poll door declares
     # none, and the route is valid.
-    no_callback = ConversationRouteCreate(
-        route_name="api-desk",
-        door="api",
-        target_kind="agent",
-        target_name="assistant",
-        execution_key="svc-bridge",
-    )
+    no_callback = _create(_api_kwargs())
+    assert isinstance(no_callback, ApiConversationRouteCreate)
     assert no_callback.callback_url is None
-    ok = ConversationRouteCreate(
-        route_name="api-desk",
-        door="api",
-        target_kind="agent",
-        target_name="assistant",
-        execution_key="svc-bridge",
-        callback_url="https://host.example/hook",
-    )
+    assert no_callback.channel is None
+    assert no_callback.our_identity is None
+    ok = _create(_api_kwargs(callback_url="https://host.example/hook"))
     assert ok.callback_url == "https://host.example/hook"
-    # a declared callback must be https
-    with pytest.raises(ValidationError, match="https"):
-        ConversationRouteCreate(
-            route_name="api-desk",
-            door="api",
-            target_kind="agent",
-            target_name="assistant",
-            execution_key="svc-bridge",
-            callback_url="http://host.example/hook",
-        )
-    # a credential-form authority is not an acceptable https url
-    with pytest.raises(ValidationError, match="https"):
-        ConversationRouteCreate(
-            route_name="api-desk",
-            door="api",
-            target_kind="agent",
-            target_name="assistant",
-            execution_key="svc-bridge",
-            callback_url="https://user@evil.example/hook",
-        )
-    # a malformed authority (unterminated IPv6 literal) makes urlsplit raise → not https
-    with pytest.raises(ValidationError, match="https"):
-        ConversationRouteCreate(
-            route_name="api-desk",
-            door="api",
-            target_kind="agent",
-            target_name="assistant",
-            execution_key="svc-bridge",
-            callback_url="https://[::1/hook",
-        )
+    # a declared callback must be https, with no credential-form authority
+    for bad in ("http://host.example/hook", "https://user@evil.example/hook"):
+        with pytest.raises(ValidationError) as caught:
+            _create(_api_kwargs(callback_url=bad))
+        assert _errors(caught) == [("string_pattern_mismatch", ("api", "callback_url"))]
+    # an authority the pattern admits but urlsplit refuses (an unterminated IPv6 literal, an
+    # empty hostname) is refused by the server-side check
+    for residual in ("https://[::1/hook", "https://:443"):
+        with pytest.raises(ValidationError, match="callback_url must be an absolute https URL with no userinfo"):
+            _create(_api_kwargs(callback_url=residual))
     # api rows carry no channel/our_identity
-    with pytest.raises(ValidationError, match="no channel"):
-        ConversationRouteCreate(
-            route_name="api-desk",
-            door="api",
-            target_kind="agent",
-            target_name="assistant",
-            execution_key="svc-bridge",
-            callback_url="https://host.example/hook",
-            channel="twilio",
-        )
-    with pytest.raises(ValidationError, match="no our_identity"):
-        ConversationRouteCreate(
-            route_name="api-desk",
-            door="api",
-            target_kind="agent",
-            target_name="assistant",
-            execution_key="svc-bridge",
-            callback_url="https://host.example/hook",
-            our_identity="+15550001111",
-        )
+    for field, value in (("channel", "twilio"), ("our_identity", "+15550001111")):
+        with pytest.raises(ValidationError) as caught:
+            _create(_api_kwargs(**{field: value}))
+        assert _errors(caught) == [("none_required", ("api", field))]
 
 
 def test_channel_route_requires_channel_and_identity_forbids_callback():
-    from tai42_contract.conversations import ConversationRouteCreate
+    for field in ("channel", "our_identity"):
+        with pytest.raises(ValidationError) as caught:
+            _create(_route_kwargs(**{field: None}))
+        assert _errors(caught) == [("string_type", ("channel", field))]
+    for field, blank in (("channel", "  "), ("our_identity", " \t")):
+        with pytest.raises(ValidationError) as caught:
+            _create(_route_kwargs(**{field: blank}))
+        assert _errors(caught) == [("string_pattern_mismatch", ("channel", field))]
+    with pytest.raises(ValidationError) as caught:
+        _create(_route_kwargs(callback_url="https://host.example/hook"))
+    assert _errors(caught) == [("none_required", ("channel", "callback_url"))]
 
-    with pytest.raises(ValidationError, match="non-blank channel"):
-        ConversationRouteCreate(**_route_kwargs(channel=None))
-    with pytest.raises(ValidationError, match="non-blank our_identity"):
-        ConversationRouteCreate(**_route_kwargs(our_identity=None))
-    with pytest.raises(ValidationError, match="no callback_url"):
-        ConversationRouteCreate(**_route_kwargs(callback_url="https://host.example/hook"))
+
+def test_an_unknown_door_is_refused_by_the_discriminator():
+    with pytest.raises(ValidationError) as caught:
+        _create(_route_kwargs(door="email"))
+    assert _errors(caught) == [("union_tag_invalid", ())]
 
 
 _DOOR_EXPR_FIELDS = ("start_expr", "cancel_expr", "resume_expr", "extras_expr", "reply_expr")
 
 
 def test_tool_target_carries_optional_exprs():
-    from tai42_contract.conversations import ConversationRouteCreate
     from tai42_contract.template import TemplatedText
 
-    route = ConversationRouteCreate(
-        **_route_kwargs(
+    route = _create(
+        _route_kwargs(
             target_kind="tool",
             target_name="echo",
             start_expr={"content": "{message: .message}"},
@@ -145,11 +137,10 @@ def test_tool_target_carries_optional_exprs():
 
 
 def test_tool_target_carries_exprs_by_id():
-    from tai42_contract.conversations import ConversationRouteCreate
     from tai42_contract.template import TemplatedText
 
-    route = ConversationRouteCreate(
-        **_route_kwargs(
+    route = _create(
+        _route_kwargs(
             target_kind="tool",
             target_name="echo",
             start_expr={"id": "route-start", "kwargs": {"k": "v"}},
@@ -164,11 +155,10 @@ def test_agent_target_carries_the_door_exprs():
     # An agent target may carry the parkable-door jqs and a reply_expr: the run's start kwargs, its
     # cancel/resume over parked interactions, its extras, and the reply mapping are all valid on an
     # agent route (the turn engine evaluates them the same way it does for a tool target).
-    from tai42_contract.conversations import ConversationRouteCreate
     from tai42_contract.template import TemplatedText
 
-    route = ConversationRouteCreate(
-        **_route_kwargs(
+    route = _create(
+        _route_kwargs(
             target_kind="agent",
             target_name="assistant",
             start_expr={"content": "{user_message: {content: .message}}"},
@@ -184,10 +174,9 @@ def test_route_exprs_carry_the_jq_expression_annotation(field: str):
     # Each door jq (and the reply_expr) is a jq-typed templated text, so each declares itself in the
     # generated JSON schema under the shared ``x-tai42-expression`` vendor key (language jq) for a
     # schema-driven UI to auto-render the jq editor.
-    from tai42_contract.conversations import ConversationRouteCreate
     from tai42_contract.template import EXPRESSION_ANNOTATION_KEY
 
-    prop = ConversationRouteCreate.model_json_schema()["properties"][field]
+    prop = ChannelConversationRouteCreate.model_json_schema()["properties"][field]
     annotation = prop[EXPRESSION_ANNOTATION_KEY]
     assert annotation["language"] == "jq"
     assert annotation["label"]
@@ -198,14 +187,13 @@ def test_route_expr_annotation_keeps_the_none_default_additive():
     # stays the ``None`` literal — a ``Field(default=None, ...)`` redeclaration is flagged as a
     # breaking change by the griffe api-gate. The field stays optional-defaulting-None and the
     # annotation adds ONLY the vendor key to a plain declaration.
-    from tai42_contract.conversations import ConversationRouteCreate
     from tai42_contract.template import EXPRESSION_ANNOTATION_KEY
 
-    route = ConversationRouteCreate(**_route_kwargs(target_kind="tool", target_name="echo"))
+    route = _create(_route_kwargs(target_kind="tool", target_name="echo"))
     assert route.start_expr is None
     assert route.reply_expr is None
 
-    schema = ConversationRouteCreate.model_json_schema()
+    schema = ChannelConversationRouteCreate.model_json_schema()
     for field in _DOOR_EXPR_FIELDS:
         prop = dict(schema["properties"][field])
         prop.pop(EXPRESSION_ANNOTATION_KEY)
@@ -217,88 +205,221 @@ def test_route_expr_annotation_keeps_the_none_default_additive():
 
 
 def test_turns_per_hour_override_defaults_to_none_and_must_be_positive():
-    from tai42_contract.conversations import ConversationRouteCreate
 
     # Absent by default: the route runs at the global per-address cap.
-    assert ConversationRouteCreate(**_route_kwargs()).turns_per_hour_override is None
+    assert _create(_route_kwargs()).turns_per_hour_override is None
     # A positive per-hour override is accepted and preserved.
-    assert ConversationRouteCreate(**_route_kwargs(turns_per_hour_override=250)).turns_per_hour_override == 250
+    assert _create(_route_kwargs(turns_per_hour_override=250)).turns_per_hour_override == 250
     # Non-positive rates are refused.
     for bad in (0, -5):
         with pytest.raises(ValidationError):
-            ConversationRouteCreate(**_route_kwargs(turns_per_hour_override=bad))
+            _create(_route_kwargs(turns_per_hour_override=bad))
 
 
 def test_error_reply_text_defaults_to_none_and_must_be_non_blank_and_bounded():
-    from tai42_contract.conversations import ConversationRouteCreate
 
     # Absent by default: a failed turn falls back to the built-in default reply.
-    assert ConversationRouteCreate(**_route_kwargs()).error_reply_text is None
+    assert _create(_route_kwargs()).error_reply_text is None
     # A non-blank custom reply is accepted and preserved verbatim.
     text = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
-    assert ConversationRouteCreate(**_route_kwargs(error_reply_text=text)).error_reply_text == text
+    assert _create(_route_kwargs(error_reply_text=text)).error_reply_text == text
     # An empty reply is refused by the min-length bound.
     with pytest.raises(ValidationError):
-        ConversationRouteCreate(**_route_kwargs(error_reply_text=""))
+        _create(_route_kwargs(error_reply_text=""))
     # A whitespace-only reply is refused as blank by the non-blank validator.
-    with pytest.raises(ValidationError, match="non-blank"):
-        ConversationRouteCreate(**_route_kwargs(error_reply_text="   "))
+    with pytest.raises(ValidationError) as caught:
+        _create(_route_kwargs(error_reply_text="   "))
+    assert _errors(caught) == [("string_pattern_mismatch", ("channel", "error_reply_text"))]
     # The reply is length-bounded so a single participant-facing message cannot be unbounded.
     # Exactly at the 2000-char bound is accepted; one past it is refused.
-    assert ConversationRouteCreate(**_route_kwargs(error_reply_text="x" * 2000)).error_reply_text == "x" * 2000
+    assert _create(_route_kwargs(error_reply_text="x" * 2000)).error_reply_text == "x" * 2000
     with pytest.raises(ValidationError):
-        ConversationRouteCreate(**_route_kwargs(error_reply_text="x" * 2001))
+        _create(_route_kwargs(error_reply_text="x" * 2001))
 
 
 def test_route_locale_defaults_to_none_round_trips_and_canonicalizes():
-    from tai42_contract.conversations import ConversationRoute, ConversationRouteCreate
 
     # Absent by default: the route declares no default language.
-    assert ConversationRouteCreate(**_route_kwargs()).locale is None
+    assert _create(_route_kwargs()).locale is None
     # A supplied tag is stored through the one locale seam, canonicalized like every carrier.
-    assert ConversationRouteCreate(**_route_kwargs(locale="he-il")).locale == "he-IL"
+    assert _create(_route_kwargs(locale="he-il")).locale == "he-IL"
     # It round-trips onto the stored row and survives a JSON persist cycle unchanged.
-    stored = ConversationRoute(**_route_kwargs(locale="fr"), execution_key_fingerprint="fp")
+    stored = ConversationRouteBody.model_validate(
+        {**_route_kwargs(locale="fr"), "execution_key_fingerprint": "fp"}
+    ).root
     assert stored.locale == "fr"
-    assert ConversationRoute.model_validate_json(stored.model_dump_json()).locale == "fr"
+    assert ConversationRouteBody.model_validate_json(stored.model_dump_json()).root.locale == "fr"
 
 
 def test_route_locale_rejects_a_malformed_tag_loudly():
-    from tai42_contract.conversations import ConversationRouteCreate
 
     # A malformed tag is rejected at the boundary — never silently dropped or guessed.
     with pytest.raises(ValidationError):
-        ConversationRouteCreate(**_route_kwargs(locale="not a locale"))
+        _create(_route_kwargs(locale="not a locale"))
 
 
 def test_channel_route_rejects_a_colon_in_the_channel_name():
-    from tai42_contract.conversations import ConversationRouteCreate
 
     # The channel name prefixes the dedupe/outbound-index keys; a ``:`` in it would let
     # one (channel, provider id) pair read another's entry.
-    with pytest.raises(ValidationError, match="free of ':'"):
-        ConversationRouteCreate(**_route_kwargs(channel="twi:lio"))
+    with pytest.raises(ValidationError) as caught:
+        _create(_route_kwargs(channel="twi:lio"))
+    assert _errors(caught) == [("string_pattern_mismatch", ("channel", "channel"))]
 
 
-@pytest.mark.parametrize("bad", ["Support", "support sms", "support:sms", "support/sms", "", "café"])
+@pytest.mark.parametrize("bad", ["Relay", "relay sms", "relay:sms", "relay/sms", "", "café"])
 def test_route_name_rejects_non_slug(bad: str):
-    from tai42_contract.conversations import ConversationRouteCreate
 
-    with pytest.raises(ValidationError, match="route_name"):
-        ConversationRouteCreate(**_route_kwargs(route_name=bad))
+    with pytest.raises(ValidationError) as caught:
+        _create(_route_kwargs(route_name=bad))
+    assert _errors(caught) == [("string_pattern_mismatch", ("channel", "route_name"))]
 
 
 def test_stored_route_adds_the_two_server_derived_fields():
-    from tai42_contract.conversations import ConversationRoute, ConversationRouteCreate
-
-    stored = ConversationRoute(**_route_kwargs(), execution_key_fingerprint="fp-abc")
+    stored = ConversationRouteBody.model_validate({**_route_kwargs(), "execution_key_fingerprint": "fp-abc"}).root
+    assert isinstance(stored, ChannelConversationRoute)
     assert stored.execution_key_fingerprint == "fp-abc"
     assert stored.callback_secret is None
-    # the stored row is the create shape plus exactly the two derived fields
-    assert set(ConversationRoute.model_fields) - set(ConversationRouteCreate.model_fields) == {
-        "callback_secret",
-        "execution_key_fingerprint",
-    }
+    # each stored variant is its create variant plus exactly the two derived fields
+    for stored_cls, create_cls in (
+        (ApiConversationRoute, ApiConversationRouteCreate),
+        (ChannelConversationRoute, ChannelConversationRouteCreate),
+    ):
+        assert set(stored_cls.model_fields) - set(create_cls.model_fields) == {
+            "callback_secret",
+            "execution_key_fingerprint",
+        }
     # the fingerprint is required on the stored row
     with pytest.raises(ValidationError):
-        ConversationRoute(**_route_kwargs())
+        ConversationRouteBody.model_validate(_route_kwargs())
+    # a channel row never carries a callback secret
+    with pytest.raises(ValidationError):
+        ConversationRouteBody.model_validate(
+            {**_route_kwargs(), "execution_key_fingerprint": "fp", "callback_secret": "s3cret"}
+        )
+
+
+# The stored JSON of one row per door, as the manager persists and backup exports it.
+_STORED_API_ROW = (
+    '{"cancel_expr":null,"resume_expr":null,"start_expr":null,"extras_expr":null,"route_name":"relay-api",'
+    '"door":"api","target_kind":"tool","target_name":"echo","reply_expr":null,"initial_mode":"agent",'
+    '"execution_key":"svc","channel":null,"our_identity":null,"callback_url":"https://host.example/hook",'
+    '"turns_per_hour_override":5,"error_reply_text":null,"locale":"fr","overlap":{"running":"continue",'
+    '"deliver":"one","settle_seconds":0},"callback_secret":"s3cret","execution_key_fingerprint":"fp-1"}'
+)
+_STORED_CHANNEL_ROW = (
+    '{"cancel_expr":null,"resume_expr":null,"start_expr":{"content":".message"},"extras_expr":null,'
+    '"route_name":"relay-sms","door":"channel","target_kind":"agent","target_name":"assistant",'
+    '"reply_expr":null,"initial_mode":"agent","execution_key":"svc","channel":"twilio",'
+    '"our_identity":"+15550001111","callback_url":null,"turns_per_hour_override":null,'
+    '"error_reply_text":"sorry","locale":null,"overlap":{"running":"continue","deliver":"one",'
+    '"settle_seconds":0},"callback_secret":null,"execution_key_fingerprint":"fp-2"}'
+)
+
+
+@pytest.mark.parametrize(
+    ("stored", "variant"),
+    [(_STORED_API_ROW, ApiConversationRoute), (_STORED_CHANNEL_ROW, ChannelConversationRoute)],
+)
+def test_a_stored_row_of_either_door_round_trips_unchanged(stored: str, variant: type) -> None:
+    # The same fields with the same values: an existing row reads into its door's variant and
+    # writes back as the same JSON object.
+    row = ConversationRouteBody.model_validate_json(stored).root
+    assert isinstance(row, variant)
+    assert json.loads(row.model_dump_json()) == json.loads(stored)
+
+
+# -- the exported schema -------------------------------------------------------
+
+
+def _create_document() -> dict[str, Any]:
+    return ConversationRouteCreateBody.model_json_schema(ref_template="#/$defs/{model}")
+
+
+def test_the_create_document_is_a_door_discriminated_union():
+    document = _create_document()
+    assert document["oneOf"] == [
+        {"$ref": "#/$defs/ApiConversationRouteCreate"},
+        {"$ref": "#/$defs/ChannelConversationRouteCreate"},
+    ]
+    assert document["discriminator"] == {
+        "propertyName": "door",
+        "mapping": {
+            "api": "#/$defs/ApiConversationRouteCreate",
+            "channel": "#/$defs/ChannelConversationRouteCreate",
+        },
+    }
+
+
+def test_each_variant_publishes_its_door_rules():
+    defs = _create_document()["$defs"]
+    api, channel = defs["ApiConversationRouteCreate"], defs["ChannelConversationRouteCreate"]
+    for variant in (api, channel):
+        assert variant["properties"]["route_name"]["pattern"] == "^[a-z0-9-]+$"
+        error_text = variant["properties"]["error_reply_text"]["anyOf"][0]
+        assert error_text == {"maxLength": 2000, "minLength": 1, "pattern": "\\S", "type": "string"}
+    assert api["properties"]["door"]["const"] == "api"
+    assert channel["properties"]["door"]["const"] == "channel"
+    assert api["properties"]["channel"]["type"] == "null"
+    assert api["properties"]["our_identity"]["type"] == "null"
+    assert api["properties"]["callback_url"]["anyOf"][0] == {"pattern": HTTPS_CALLBACK_PATTERN, "type": "string"}
+    assert channel["properties"]["callback_url"]["type"] == "null"
+    assert channel["properties"]["channel"]["pattern"] == "^[^:]*[^:\\s][^:]*$"
+    assert channel["properties"]["our_identity"]["pattern"] == "\\S"
+    assert {"door", "channel", "our_identity"} <= set(channel["required"])
+    assert "door" in api["required"]
+    assert not {"channel", "our_identity", "callback_url"} & set(api["required"])
+
+
+def test_the_stored_document_is_a_door_discriminated_union():
+    document = ConversationRouteBody.model_json_schema(ref_template="#/$defs/{model}")
+    assert document["discriminator"]["propertyName"] == "door"
+    assert document["oneOf"] == [
+        {"$ref": "#/$defs/ApiConversationRoute"},
+        {"$ref": "#/$defs/ChannelConversationRoute"},
+    ]
+
+
+def _server_accepts(value: str) -> bool:
+    try:
+        _require_https_url(value)
+    except ValueError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://h",
+        "https://user@h",
+        "https://h/p@x",
+        "https://",
+        "https://:443",
+        "https://h:99999",
+        "https://[::1",
+        "HTTPS://h",
+        "https://h?x",
+        "https://u:p@h/x",
+        "https://h#f",
+        "https://h x",
+        "https://h:8443/cb?x=1",
+        "http://h",
+        "ftp://h",
+        "/relative",
+        " https://h",
+        "\x01https://h",
+        "ht\ttps://h",
+        "https:/\t/h",
+        "https://h/\npath",
+    ],
+)
+def test_the_published_callback_pattern_never_refuses_what_the_server_accepts(value: str):
+    if _server_accepts(value):
+        assert re.search(HTTPS_CALLBACK_PATTERN, value), value
+
+
+@pytest.mark.parametrize("value", [" https://h", "\x01https://h", "ht\ttps://h", "https:/\t/h", "https://h/\npath"])
+def test_the_server_refuses_a_callback_url_that_urlsplit_would_silently_clean(value: str):
+    with pytest.raises(ValueError, match="callback_url must be an absolute https URL with no userinfo"):
+        _require_https_url(value)

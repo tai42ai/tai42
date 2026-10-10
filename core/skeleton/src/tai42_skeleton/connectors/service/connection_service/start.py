@@ -34,7 +34,7 @@ async def start_connect(
     alias: str,
     enabled_sub_services: list[str],
     config_values: dict[str, str] | None = None,
-    return_url: str,
+    return_url: str | None,
     redirect_uri: str,
     origin: str,
 ) -> StartConnectResult | NoAuthConnectResult:
@@ -59,7 +59,7 @@ async def start_connect(
     check_alias(alias)
 
     _validate_sub_services(descriptor, enabled_sub_services)
-    _validate_return_url(return_url)
+    landing = _validate_return_url(return_url)
 
     # Alias uniqueness is enforced durably by the store's UNIQUE (provider_id,
     # alias) constraint at persist time (create-only insert → AliasInUseError); a
@@ -80,7 +80,7 @@ async def start_connect(
         alias=alias,
         enabled_sub_services=enabled_sub_services,
         requested_scopes=_scopes_for(descriptor, enabled_sub_services),
-        return_url=return_url,
+        return_url=landing,
         redirect_uri=redirect_uri,
         origin=origin,
         operation=state.FlowOperation.CONNECT,
@@ -146,7 +146,7 @@ async def start_reconnect(
     *,
     connection_id: str,
     enabled_sub_services: list[str],
-    return_url: str,
+    return_url: str | None,
     redirect_uri: str,
     origin: str,
 ) -> StartConnectResult:
@@ -170,14 +170,14 @@ async def start_reconnect(
         raise ValueError(f"unknown provider: {record.provider_id!r}") from exc
 
     _validate_sub_services(descriptor, enabled_sub_services)
-    _validate_return_url(return_url)
+    landing = _validate_return_url(return_url)
 
     return await _start_flow(
         descriptor=descriptor,
         alias=record.alias,
         enabled_sub_services=enabled_sub_services,
         requested_scopes=_scopes_for(descriptor, enabled_sub_services),
-        return_url=return_url,
+        return_url=landing,
         redirect_uri=redirect_uri,
         origin=origin,
         operation=state.FlowOperation.RECONNECT,

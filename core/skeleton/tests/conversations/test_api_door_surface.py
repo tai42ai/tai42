@@ -8,6 +8,8 @@ an HTTP response is what is under test — the auth stack is exercised in
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -25,6 +27,8 @@ from tai42_skeleton.conversations.turn import (
 )
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations.errors import NotSupportedError
+
+from .conftest import DOOR_RULE_REFUSALS
 
 _PATH = "/api/conversations/chat/messages"
 
@@ -475,3 +479,12 @@ def test_a_malformed_locale_is_a_400(monkeypatch):
     resp = _post(client, body={"external_user_id": "u-7", "text": "hi", "locale": "not a locale!"})
     assert resp.status_code == 400
     assert engine.calls == []
+
+
+@pytest.mark.parametrize(("overrides", "location"), DOOR_RULE_REFUSALS)
+async def test_extract_route_create_refuses_each_door_rule(overrides: dict, location: str):
+    router = _router()
+    body = {"target_kind": "agent", "target_name": "relay", "execution_key": "svc", **overrides}
+    with pytest.raises(BadRequestError, match="invalid conversation route") as caught:
+        await router._extract_route_create(_create_request(json.dumps(body).encode()))
+    assert location in str(caught.value) or (location == "door" and "union_tag_invalid" in str(caught.value))

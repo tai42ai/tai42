@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import inspect
 import json
+from typing import get_args
 
 import httpx
 import pytest
+from tai42_contract.access_control import PrincipalKind
+
+from tai42_cli.commands.principals import create_principal
 
 from .remote_harness import data_response, run_cli
 
@@ -128,3 +133,8 @@ def test_principals_delete_hits_delete(monkeypatch: pytest.MonkeyPatch) -> None:
 
     result = run_cli(monkeypatch, handler, ["principals", "delete", "svc-1"])
     assert result.exit_code == 0, result.output
+
+
+def test_principals_create_kind_choices_are_the_contract_principal_kinds() -> None:
+    kind = inspect.signature(create_principal, eval_str=True).parameters["kind"].annotation
+    assert get_args(kind)[0] is PrincipalKind

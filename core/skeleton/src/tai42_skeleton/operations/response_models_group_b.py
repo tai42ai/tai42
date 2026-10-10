@@ -22,6 +22,7 @@ from tai42_contract.tool_meta import FolderRecord, ToolMetaRecord
 from tai42_contract.versioning import DocumentVersion
 
 from tai42_skeleton.hooks.trigger_auth import TriggerAuth
+from tai42_skeleton.operations.response_models_group_c import ExtensionView
 
 # -- config ------------------------------------------------------------------
 
@@ -372,11 +373,11 @@ class FolderDeleted(BaseModel):
 class ToolExtensionsView(BaseModel):
     """A tool's applied extension combos plus the catalog of available extensions.
 
-    Each ``available`` entry is a ``{name, kind}`` string map.
+    Each ``available`` entry is one registered extension's catalog row.
     """
 
     combos: list[list[ExtensionElement]]
-    available: list[dict[str, str]]
+    available: list[ExtensionView]
 
 
 # -- tool_runs ---------------------------------------------------------------

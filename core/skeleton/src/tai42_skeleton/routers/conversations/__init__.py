@@ -7,7 +7,7 @@ The authed CRUD doors the operator and Studio drive over the routing table.
 - ``GET /api/conversations/{route_name}`` (AUTHED) — read one route by name; an unknown
   name is a loud 404.
 - ``POST /api/conversations/{route_name}`` (AUTHED, ``authority_changing``) — create or
-  replace a route from a ``ConversationRouteCreate`` body. An ``api`` row's minted
+  replace a route from a door-discriminated route create body. An ``api`` row's minted
   ``callback_secret`` (present only when the row declares a ``callback_url``) is returned
   ONCE here and never again. Binding the route's
   ``execution_key`` is a pass-role decision the operation takes before any write.

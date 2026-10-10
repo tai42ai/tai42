@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 
 import pytest
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ApiConversationRoute, ChannelConversationRoute, ConversationRoute
 
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
@@ -26,7 +26,7 @@ from tai42_skeleton.operations.errors import BadRequestError, ForbiddenError, No
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 #: The one route the fake routing table holds, so a read on any other name is a 404.
-_ROUTE = ConversationRoute(
+_ROUTE = ChannelConversationRoute(
     route_name="chat",
     door="channel",
     target_kind="agent",
@@ -39,7 +39,7 @@ _ROUTE = ConversationRoute(
 
 
 #: The same route name as an ``api`` row, for reads exercised over an api-door thread.
-_API_ROUTE = ConversationRoute(
+_API_ROUTE = ApiConversationRoute(
     route_name="chat",
     door="api",
     target_kind="agent",

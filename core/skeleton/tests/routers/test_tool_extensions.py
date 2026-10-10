@@ -21,11 +21,13 @@ from typing import Any
 
 import pytest
 from starlette.requests import Request
+from tai42_contract.manifest import normalize_extension_element
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace.compat import CorePluginBootError
+from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.routers import tool_extensions as router
 
 from .._fakes.bus import FakeBus
@@ -893,3 +895,12 @@ def test_post_rejects_unregistered_dict_element_name(cfg):
             assert "not_registered" in _err(resp)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("element", ["", 5, {"config": {}}, {"name": "x"}, {"name": "x", "config": {}, "bogus": 1}])
+def test_combo_element_refuses_with_the_contract_normalizer_message(element: object) -> None:
+    with pytest.raises(ValueError, match="extension") as contract:
+        normalize_extension_element(element)
+    with pytest.raises(BadRequestError) as caught:
+        router._read_combo_members([[element]])
+    assert str(caught.value) == str(contract.value)

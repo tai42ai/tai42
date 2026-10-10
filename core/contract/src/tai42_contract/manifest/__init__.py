@@ -139,29 +139,40 @@ class MCPConfig(BaseModel):
         return self
 
 
-def _normalize_extension_element(key: str, member: object) -> ExtensionElement:
-    """Validate one combo member and return it in canonical form.
+_EXTENSION_ELEMENT_SHAPE = "an extension element is a non-empty extension name or a {'name', 'config'} mapping"
 
-    A ``str`` is an extension name with no bound config and passes through. A
-    ``dict`` binds author config and must carry a non-empty string ``name`` (an
-    extension-name shape — registration is checked later) and a ``config``
-    mapping, with no other keys; any deviation raises loudly.
+
+def normalize_extension_element(member: object) -> ExtensionElement:
+    """Validate one combo member and return it in canonical form, raising ``ValueError`` when malformed.
+
+    A non-empty ``str`` is an extension name with no bound config. A ``dict`` binds author config
+    and must carry a non-empty string ``name`` (registration is checked later) and a ``config``
+    mapping, with no other keys.
     """
     if isinstance(member, str):
+        if not member:
+            raise ValueError(_EXTENSION_ELEMENT_SHAPE)
         return member
     if isinstance(member, dict):
         entry = cast("dict[str, object]", member)
         name = entry.get("name")
         if not isinstance(name, str) or not name:
-            raise ValueError(f"extensions[{key!r}] element must have a non-empty string 'name'")
+            raise ValueError("an extension element must have a non-empty string 'name'")
         config = entry.get("config")
         if not isinstance(config, dict):
-            raise ValueError(f"extensions[{key!r}] element {name!r} must carry a 'config' mapping")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
+            raise ValueError(f"extension element {name!r} must carry a 'config' mapping")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
         extra = set(entry) - {"name", "config"}
         if extra:
-            raise ValueError(f"extensions[{key!r}] element {name!r} has unexpected keys: {sorted(extra)!r}")
+            raise ValueError(f"extension element {name!r} has unexpected keys: {sorted(extra)!r}")
         return {"name": name, "config": dict(cast("dict[str, object]", config))}
-    raise ValueError(f"extensions[{key!r}] combo members must be an extension name or a {{'name', 'config'}} mapping")
+    raise ValueError(_EXTENSION_ELEMENT_SHAPE)
+
+
+def _normalize_combo_member(key: str, member: object) -> ExtensionElement:
+    try:
+        return normalize_extension_element(member)
+    except ValueError as exc:
+        raise ValueError(f"extensions[{key!r}]: {exc}") from exc
 
 
 class ExtensionsConfigMixin(BaseModel):
@@ -215,7 +226,7 @@ class ExtensionsConfigMixin(BaseModel):
             all_element = all(isinstance(member, (str, dict)) for member in entries)
             all_list = all(isinstance(member, list) for member in entries)
             if all_element:
-                result[key] = [[_normalize_extension_element(key, member) for member in entries]]
+                result[key] = [[_normalize_combo_member(key, member) for member in entries]]
             elif all_list:
                 normalized: list[list[ExtensionElement]] = []
                 for combo in cast("list[list[object]]", entries):
@@ -223,7 +234,7 @@ class ExtensionsConfigMixin(BaseModel):
                         raise ValueError(
                             f"extensions[{key!r}] combo must not be empty; a combo names at least one extension"
                         )
-                    normalized.append([_normalize_extension_element(key, member) for member in combo])
+                    normalized.append([_normalize_combo_member(key, member) for member in combo])
                 result[key] = normalized
             else:
                 raise ValueError(
@@ -453,4 +464,5 @@ __all__ = [
     "Manifest",
     "TaiMCPConfig",
     "ToolsConfig",
+    "normalize_extension_element",
 ]

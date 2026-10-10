@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import typing
 from typing import TYPE_CHECKING, Any
@@ -28,7 +29,7 @@ def protocol_members(proto: type) -> set[str]:
     return {m for m in members if m not in _PROTOCOL_SCAFFOLDING and not m.startswith("__")}
 
 
-# The frozen facade surface: the 152 (sub-protocol, member) pairs over 148
+# The frozen facade surface: the 153 (sub-protocol, member) pairs over 149
 # distinct flat names. This is the
 # contract's own source of truth — no external lookup needed. Two leaf names
 # are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
@@ -125,11 +126,12 @@ EXPECTED_FACADE = {
     # extensions (2)
     "extension",
     "available_extensions",
-    # http (4)
+    # http (5)
     "middleware",
     "custom_route",
     "mount_base",
     "use_raw_path_key",
+    "hosted_ui",
     # clients (2)
     "client_ctx",
     "shutdown_clients",
@@ -315,11 +317,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 152 (sub-protocol, member) pairs over 148 distinct names — ``store`` is exposed
+    # 153 (sub-protocol, member) pairs over 149 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 148, f"union={len(union)}"
-    assert total == 152 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 149, f"union={len(union)}"
+    assert total == 153 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_five_namespaces():
@@ -557,6 +559,21 @@ def test_mount_base_is_a_zero_arg_str_query():
     sig = inspect.signature(AppHttp.mount_base)
     assert list(sig.parameters) == ["self"]
     assert sig.return_annotation == "str"
+
+
+def test_hosted_ui_is_a_zero_arg_query_of_the_declared_paths():
+    from tai42_contract.app import AppHttp, HostedUiPaths
+
+    sig = inspect.signature(AppHttp.hosted_ui)
+    assert list(sig.parameters) == ["self"]
+    assert sig.return_annotation == "HostedUiPaths"
+    assert [field.name for field in dataclasses.fields(HostedUiPaths)] == [
+        "login_path",
+        "claim_fragment_key",
+        "invite_query_key",
+        "oauth_callback_path",
+        "connectors_path",
+    ]
 
 
 def test_extension_registration_carries_requires_body_locality():

@@ -35,6 +35,11 @@ def test_token_prefixes_and_paths():
     assert service.invite_login_path("tok") == "/login?invite=tok"
 
 
+def test_invite_login_path_follows_the_declared_hosted_ui(hosted_ui):
+    hosted_ui(login_path="/signin", invite_query_key="join")
+    assert service.invite_login_path("tok") == "/signin?join=tok"
+
+
 def test_too_many_attempts_message_pluralizes():
     assert service.too_many_attempts_message(30) == "Too many attempts — try again in 1 minute"
     assert service.too_many_attempts_message(120) == "Too many attempts — try again in 2 minutes"

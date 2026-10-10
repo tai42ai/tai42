@@ -16,6 +16,8 @@ def test_connectors_connect_body(monkeypatch: pytest.MonkeyPatch) -> None:
         body = json.loads(request.content)
         assert body["provider_id"] == "google"
         assert body["enabled_sub_services"] == ["gmail"]
+        # No --return-url: the server lands the flow on the deployment's declared page.
+        assert "return_url" not in body
         return data_response({"flow_id": "f1", "authorize_url": "https://x"})
 
     result = run_cli(
@@ -84,7 +86,7 @@ def test_connectors_reconnect_body(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == "/api/connectors/connections/c1/reconnect"
-        assert json.loads(request.content) == {"enabled_sub_services": ["gmail"], "return_url": "/connectors"}
+        assert json.loads(request.content) == {"enabled_sub_services": ["gmail"]}
         return data_response({"authorize_url": "https://x"})
 
     result = run_cli(monkeypatch, handler, ["connectors", "reconnect", "c1", "--sub-service", "gmail"])
@@ -95,10 +97,7 @@ def test_connectors_sub_services_patches(monkeypatch: pytest.MonkeyPatch) -> Non
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "PATCH"
         assert request.url.path == "/api/connectors/connections/c1/sub-services"
-        assert json.loads(request.content) == {
-            "enabled_sub_services": ["gmail", "calendar"],
-            "return_url": "/connectors",
-        }
+        assert json.loads(request.content) == {"enabled_sub_services": ["gmail", "calendar"]}
         return data_response({"enabled_sub_services": ["gmail", "calendar"]})
 
     result = run_cli(
@@ -165,3 +164,23 @@ def test_connect_rejects_both_config_and_file(monkeypatch: pytest.MonkeyPatch, t
     )
     assert result.exit_code != 0
     assert "--config-file" in result.output
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["connectors", "connect", "google", "--alias", "work", "--sub-service", "gmail"],
+        ["connectors", "reconnect", "c1", "--sub-service", "gmail"],
+        ["connectors", "sub-services", "c1", "--sub-service", "gmail"],
+    ],
+)
+def test_connectors_send_a_given_return_url(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return data_response({"flow_id": "f1", "authorize_url": "https://x"})
+
+    result = run_cli(monkeypatch, handler, [*argv, "--return-url", "/back"])
+    assert result.exit_code == 0, result.output
+    assert seen["return_url"] == "/back"

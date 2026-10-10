@@ -16,14 +16,16 @@ from types import SimpleNamespace
 import pytest
 from starlette.authentication import AuthenticationError
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
-from tai42_contract.access_control.models import JqAuthContext
+from tai42_contract.access_control.models import PATH_COVERAGE_VECTORS, PATTERN_OPEN_PREFIX_VECTORS, JqAuthContext
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.access_control import management as management_module
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import projection
+from tai42_skeleton.access_control.path_canon import under_prefix
 from tai42_skeleton.access_control.policy import PolicyEnforcer, RenderedCondition
 from tai42_skeleton.access_control.projection import build_projection, synthetic_full_projection
+from tai42_skeleton.access_control.projection_pattern_sampling import pattern_open_prefix
 from tai42_skeleton.access_control.roles import editor_jq, viewer_jq
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
@@ -331,6 +333,30 @@ async def test_route_patterns_scope_and_jq_filtered_no_topology_leak(env: _Env):
     # The covered pattern projects; the uncovered one is NOT leaked (topology-leak pin).
     assert {p.pattern for p in result.route_patterns} == {r"^/api/dyn/\d+$"}
     assert result.route_patterns[0].scope_id == "pub-dyn"
+
+
+async def test_route_patterns_serve_the_open_prefix_parsed_from_the_stored_regex(env: _Env):
+    env.pg.add_policy("u1", scopes=["dyn"])
+    env.pg.add_route("/api/x/{rest}", "dyn", pattern=r"^/api/x/.*$")
+    env.pg.add_route("/api/alt/{rest}", "dyn", pattern=r"^/api/(a|b)/.*$")
+    result = await build_projection("u1", ["dyn"], {})
+    served = {p.pattern: p.open_prefix for p in result.route_patterns}
+    assert served == {r"^/api/x/.*$": "/api/x/", r"^/api/(a|b)/.*$": None}
+
+
+@pytest.mark.parametrize("row", PATTERN_OPEN_PREFIX_VECTORS, ids=lambda row: str(row["pattern"]))
+def test_pattern_open_prefix_agrees_with_every_published_vector(row: dict[str, str | None]):
+    pattern = row["pattern"]
+    assert pattern is not None
+    assert pattern_open_prefix(pattern) == row["open_prefix"]
+
+
+@pytest.mark.parametrize("row", PATH_COVERAGE_VECTORS, ids=lambda row: f"{row['prefix']}|{row['path']}")
+def test_under_prefix_agrees_with_every_published_path_coverage_vector(row: dict[str, str | bool]):
+    prefix, path = row["prefix"], row["path"]
+    assert isinstance(prefix, str)
+    assert isinstance(path, str)
+    assert under_prefix(path, prefix) is row["covered"]
 
 
 async def test_templated_route_projects_as_pattern_not_concrete(env: _Env):

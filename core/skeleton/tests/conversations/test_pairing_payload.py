@@ -12,7 +12,12 @@ import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import InterruptFinal, StructuredFinal, SuspendedFinal
-from tai42_contract.conversations import ConversationRoute, ConversationTargetKind, TargetConversationConfig
+from tai42_contract.conversations import (
+    ApiConversationRoute,
+    ChannelConversationRoute,
+    ConversationTargetKind,
+    TargetConversationConfig,
+)
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils import render as door_contract_module
 from tests.agent._memoryless import MemorylessTestAgent
@@ -105,7 +110,7 @@ class _FakeTemplateApp:
 
 
 def _channel_route(route_name: str = "line-a", channel: str = "twilio", our_identity: str = "+15550001111"):
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="agent",
@@ -118,7 +123,7 @@ def _channel_route(route_name: str = "line-a", channel: str = "twilio", our_iden
 
 
 def _api_route(route_name: str = "chat"):
-    return ConversationRoute(
+    return ApiConversationRoute(
         route_name=route_name,
         door="api",
         target_kind="agent",
@@ -193,7 +198,7 @@ def _tool_route(
     *,
     start_expr: str | None = None,
 ):
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="tool",
@@ -366,7 +371,7 @@ async def test_tool_payload_on_the_api_door_carries_the_person_and_composed_addr
     # The api door reaches the tool payload with door="api", channel/our_identity None, and a
     # composed client_address (percent-encoded principal / end-user id) as the sender.
     _seed_config(env, target_kind="tool", target_name="pinger")
-    api_tool_route = ConversationRoute(
+    api_tool_route = ApiConversationRoute(
         route_name="tool-api",
         door="api",
         target_kind="tool",

@@ -6,7 +6,7 @@ import logging
 
 import pytest
 from tai42_contract.conversations import (
-    ConversationRoute,
+    ChannelConversationRoute,
 )
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils import render as door_contract_module
@@ -87,7 +87,7 @@ async def test_tool_payload_builder_always_carries_the_thread_id(env, monkeypatc
 async def test_tool_start_expr_by_id_renders_then_maps(env, monkeypatch):
     # A by-id start_expr is rendered through the bound resource manager to its jq program
     # IMMEDIATELY before the map runs, so the tool receives the mapped kwargs.
-    route = ConversationRoute(
+    route = ChannelConversationRoute(
         route_name="tool-line",
         door="channel",
         target_kind="tool",

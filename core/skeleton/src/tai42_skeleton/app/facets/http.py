@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
     from starlette.requests import Request
     from starlette.responses import Response
-    from tai42_contract.app import DeclaredRouteMetadata
+    from tai42_contract.app import DeclaredRouteMetadata, HostedUiPaths
 
     from tai42_skeleton.app.route_registry import RouteAction
 
@@ -28,6 +28,10 @@ class HttpFacet(_Facet):
     def mount_base(self) -> str:
         """Return the URL prefix custom routes and mounts are served under."""
         return self._app._http_surface.mount_base()
+
+    def hosted_ui(self) -> HostedUiPaths:
+        """Return the page addresses of the hosted UI, as the deployment declares them."""
+        return self._app._http_surface.hosted_ui()
 
     def custom_route(
         self,

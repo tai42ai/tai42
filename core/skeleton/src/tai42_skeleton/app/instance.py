@@ -33,6 +33,7 @@ from tai42_skeleton.conversations.lifecycle import (
 from tai42_skeleton.db import SKELETON_COMPONENT, assert_skeleton_schema_applied
 from tai42_skeleton.marketplace.advisories import start_advisories_poll, stop_advisories_poll
 from tai42_skeleton.plugins.registry import rebuild_studio_plugin_registry
+from tai42_skeleton.plugins.settings import check_hosted_ui_settings
 from tai42_skeleton.states.db import assert_states_schema_applied
 from tai42_skeleton.sub_mcp import service as sub_mcp_service
 
@@ -302,6 +303,10 @@ def build_app() -> TaiMCP:
         # changes ``studio_plugins`` reflects without a process restart.
         app.lifecycle.on_startup(rebuild_studio_plugin_registry)
         app.lifecycle.on_reload(rebuild_studio_plugin_registry)
+        # The hosted-UI page addresses are read at boot and on every reload, so a malformed
+        # ``HOSTED_UI_*`` value refuses there instead of failing the login page or a Connect.
+        app.lifecycle.on_startup(check_hosted_ui_settings)
+        app.lifecycle.on_reload(check_hosted_ui_settings)
         # Versioned presets load at boot AND re-load on every in-place reload
         # (``reload_config()`` wipes the runtime tool registry), so a persisted
         # preset survives a restart and a reload. Gated + ``raise_on_error`` like
