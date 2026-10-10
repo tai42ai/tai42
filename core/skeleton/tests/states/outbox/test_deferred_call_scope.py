@@ -20,7 +20,7 @@ from tai42_skeleton.states.context import state_context
 from tai42_skeleton.states.outbox.drain import current_applying_save, outbox_apply_scope, run_entry_drain
 from tai42_skeleton.states.outbox.keys import subject_key
 
-from .conftest import OutboxBed, execute
+from .conftest import OutboxBed, execute, set_states_env
 
 pytestmark = pytest.mark.integration
 
@@ -58,8 +58,7 @@ async def _running_save(bed: OutboxBed, subject: str, claim: str = "me") -> int:
 async def test_a_child_of_a_deferred_call_skips_its_own_save_and_the_saves_waiting_on_it(
     bed: OutboxBed, monkeypatch: pytest.MonkeyPatch, probe: Any
 ) -> None:
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS", "0.3")
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_POLL_SECONDS", "0.05")
+    set_states_env(monkeypatch, STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS="0.3", STATES_OUTBOX_DRAIN_POLL_SECONDS="0.05")
     saving = await _running_save(bed, "A")
     with _door("A"):
         newer = await bed.enqueue(calls=(("echo", {}),))  # held behind ``saving`` by the claim
@@ -141,8 +140,7 @@ async def test_a_child_of_a_deferred_call_raises_on_a_newer_failed_save(bed: Out
 async def test_a_child_of_a_deferred_call_skips_a_save_whose_chain_ends_at_it(
     bed: OutboxBed, monkeypatch: pytest.MonkeyPatch, probe: Any
 ) -> None:
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS", "0.3")
-    monkeypatch.setenv("STATES_OUTBOX_DRAIN_POLL_SECONDS", "0.05")
+    set_states_env(monkeypatch, STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS="0.3", STATES_OUTBOX_DRAIN_POLL_SECONDS="0.05")
     saving = await _running_save(bed, "A")
     multi = StateContext(
         door="api",

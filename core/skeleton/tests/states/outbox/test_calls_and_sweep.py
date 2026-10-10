@@ -16,7 +16,7 @@ from tai42_skeleton.states.outbox import sweep as sweep_mod
 from tai42_skeleton.states.outbox.apply import in_flight_tasks, run_calls, spawn_tracked
 from tai42_skeleton.states.outbox.drain import current_applying_save
 
-from .conftest import OutboxBed, ProbeKind, execute
+from .conftest import OutboxBed, ProbeKind, execute, set_states_env
 
 pytestmark = pytest.mark.integration
 
@@ -115,7 +115,7 @@ async def test_a_call_a_lapsed_claim_interrupted_is_re_run_only_when_resumable(
 async def test_the_heartbeat_extends_the_lease_while_the_call_runs(
     bed: OutboxBed, probe: ProbeKind, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("STATES_OUTBOX_CLAIM_LEASE_SECONDS", "0.6")
+    set_states_env(monkeypatch, STATES_OUTBOX_CLAIM_LEASE_SECONDS="0.6")
     probe.gate = asyncio.Event()
     row = await _calls_row(bed, ("echo", {}))
     runner = asyncio.create_task(run_calls(bed.svc, row))
@@ -133,7 +133,7 @@ async def test_the_heartbeat_extends_the_lease_while_the_call_runs(
 async def test_a_claim_taken_over_cancels_the_running_call(
     bed: OutboxBed, probe: ProbeKind, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv("STATES_OUTBOX_CLAIM_LEASE_SECONDS", "0.3")
+    set_states_env(monkeypatch, STATES_OUTBOX_CLAIM_LEASE_SECONDS="0.3")
     probe.gate = asyncio.Event()
     row = await _calls_row(bed, ("echo", {}))
     runner = asyncio.create_task(run_calls(bed.svc, row))
@@ -167,7 +167,7 @@ async def test_the_sweep_recovers_a_pending_save_and_a_lapsed_claim(bed: OutboxB
 async def test_shutdown_awaits_the_in_flight_applies_up_to_the_grace_then_names_the_cancelled(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv("STATES_OUTBOX_SHUTDOWN_GRACE_SECONDS", "0.2")
+    set_states_env(monkeypatch, STATES_OUTBOX_SHUTDOWN_GRACE_SECONDS="0.2")
     done = asyncio.Event()
 
     async def _quick() -> None:

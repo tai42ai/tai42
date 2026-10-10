@@ -26,7 +26,7 @@ from tai42_kit.db import (
     component_store_configured,
     component_store_settings,
 )
-from tai42_kit.settings import TaiBaseSettings
+from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +84,9 @@ class StatesSettings(TaiBaseSettings):
         return self
 
 
+@settings_cache
 def states_settings() -> StatesSettings:
-    """Load the state-store settings FRESH (never cached) so a config reload re-evaluates."""
+    """The cached :class:`StatesSettings` for this process, re-read on every settings reset."""
     return StatesSettings()
 
 
