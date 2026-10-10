@@ -48,6 +48,7 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "trustme", specifier = ">=1.1" },
+    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.22" },
 ]
 
 [[package]]
@@ -5162,7 +5163,7 @@ dependencies = [
     { name = "pydantic-core" },
     { name = "pydantic-settings" },
     { name = "tai42-contract" },
-    { name = "tai42-kit", extra = ["jq"] },
+    { name = "tai42-kit", extra = ["jq", "redis"] },
 ]
 
 [package.dev-dependencies]
@@ -5187,7 +5188,7 @@ requires-dist = [
     { name = "pydantic-core", specifier = ">=2" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "tai42-contract", editable = "core/contract" },
-    { name = "tai42-kit", extras = ["jq"], editable = "core/kit" },
+    { name = "tai42-kit", extras = ["jq", "redis"], editable = "core/kit" },
 ]
 
 [package.metadata.requires-dev]
@@ -5806,6 +5807,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "redis" },
     { name = "ruff" },
+    { name = "uvloop", marker = "sys_platform != 'win32'" },
 ]
 google = [
     { name = "langchain" },
@@ -5998,6 +6000,7 @@ requires-dist = [
     { name = "tai42-kit", extras = ["llm"], marker = "extra == 'typesafe'" },
     { name = "tai42-kit", extras = ["llm"], marker = "extra == 'xai'" },
     { name = "uvicorn", marker = "extra == 'uvicorn'", specifier = ">=0.52.4" },
+    { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'dev'", specifier = ">=0.22" },
 ]
 provides-extras = ["llm", "jq", "uvicorn", "anthropic", "mistral", "google", "xai", "ollama", "huggingface", "typesafe", "langgraph-checkpoint-postgres", "langgraph-checkpoint-sqlite", "monitoring", "redis", "curl", "postgres", "jwt", "dev"]
 
@@ -6175,6 +6178,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "redis" },
     { name = "ruamel-yaml" },
+    { name = "sse-starlette" },
     { name = "starlette" },
     { name = "tai42-cli" },
     { name = "tai42-contract" },
@@ -6277,6 +6281,7 @@ requires-dist = [
     { name = "redis", specifier = ">=5" },
     { name = "ruamel-yaml", specifier = ">=0.18" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "sse-starlette", specifier = ">=3.4.6,<4" },
     { name = "starlette", specifier = ">=0.40" },
     { name = "striprtf", marker = "extra == 'files'", specifier = ">=0.0.33" },
     { name = "tabulate", marker = "extra == 'files'", specifier = ">=0.9" },
@@ -6382,6 +6387,7 @@ version = "1.2.11"
 source = { editable = "plugins/storage-s3" }
 dependencies = [
     { name = "aioboto3" },
+    { name = "aiobotocore" },
     { name = "botocore" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -6402,6 +6408,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aioboto3", specifier = ">=15,<16" },
+    { name = "aiobotocore", specifier = ">=2.25.1,<3" },
     { name = "botocore", specifier = ">=1.40,<1.41" },
     { name = "pydantic", specifier = ">=2.12" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },

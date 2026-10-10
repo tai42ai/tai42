@@ -13,6 +13,7 @@ from tai42_kit.clients.base import advance_client_epoch, current_client_epoch
 from tai42_kit.settings import cache_registry
 from tai42_kit.settings.cache_registry import (
     _EPOCH_STAMP_ATTR,
+    keyed_settings_cache,
     register_settings_reset,
     reset_all_settings,
     restamp_settings_born_after,
@@ -506,37 +507,77 @@ class _AccessorSettings(BaseSettings):
     value: int = 1
 
 
-def _register_accessor():
+def _register_accessor(value: int = 1):
     """Register a zero-arg accessor under one fixed qualified name, as each import of its module does."""
 
     @settings_cache
     def accessor_settings() -> _AccessorSettings:
-        return _AccessorSettings()
+        return _AccessorSettings(value=value)
 
     return accessor_settings
 
 
-def test_an_instance_a_superseded_accessor_builds_after_the_mark_keeps_its_epoch():
-    superseded = _register_accessor()
+def test_a_re_registered_accessor_is_the_one_accessor_rebound_to_the_new_function():
+    first = _register_accessor(value=1)
+    first_instance = first()
+    again = _register_accessor(value=2)  # the re-import defines the accessor again under the same name
+
+    assert again is first
+    # The re-bind dropped the cache: the next read constructs through the new function.
+    assert first() is not first_instance
+    assert first().value == 2
+
+
+def test_every_holder_of_a_re_registered_accessor_reads_the_current_configuration_after_a_reset(monkeypatch):
+    class _EnvSettings(BaseSettings):
+        level: int = 0
+
+    def _register():
+        @settings_cache
+        def env_accessor_settings() -> _EnvSettings:
+            return _EnvSettings()
+
+        return env_accessor_settings
+
+    monkeypatch.setenv("LEVEL", "1")
+    boot_name = _register()  # what an object built at boot keeps resolving
+    assert boot_name().level == 1
+    reloaded_name = _register()  # the reload re-imports the module
+    monkeypatch.setenv("LEVEL", "2")
+    reset_all_settings()
+
+    assert boot_name().level == 2
+    assert boot_name() is reloaded_name()
+
+
+def test_an_instance_read_through_an_earlier_name_during_a_build_belongs_to_the_new_generation():
+    earlier = _register_accessor()
+    earlier()
     reset_all_settings()
     mark = settings_birth_mark()
-    current = _register_accessor()  # the re-import registers a new accessor under the same name
-    current_instance = current()
-    superseded_instance = superseded()  # the code that still calls the superseded accessor
+    current = _register_accessor()  # the build re-imports the module
+    instance = earlier()  # code of the replaced generation reads through the name it holds
     retired = advance_client_epoch()
 
     restamp_settings_born_after(mark)
 
-    # The registered accessor's instance belongs to the new epoch; the superseded one's keeps
-    # the epoch of the code that called it, and is reported when that epoch is swept.
-    assert getattr(current_instance, _EPOCH_STAMP_ATTR) == current_client_epoch()
-    assert getattr(superseded_instance, _EPOCH_STAMP_ATTR) == retired
-    del current_instance, superseded_instance
-    found = _of_type(sweep_stale_settings(retired), _AccessorSettings)
-    assert [h.holders for h in found] == [("functools._lru_cache_wrapper",)]
-    # The next retire resets the registered accessor; the superseded instance is never
-    # reported as the newer generation's.
-    newer = advance_client_epoch()
-    reset_all_settings()
-    assert _of_type(sweep_stale_settings(newer), _AccessorSettings) == []
-    assert superseded is not current
+    # One accessor per name: the instance is the one shared instance of the new generation.
+    assert instance is current()
+    assert getattr(instance, _EPOCH_STAMP_ATTR) == current_client_epoch()
+    del instance
+    assert _of_type(sweep_stale_settings(retired), _AccessorSettings) == []
+
+
+def test_a_name_re_registered_with_the_other_call_shape_is_refused():
+    def zero_arg() -> _AccessorSettings:
+        return _AccessorSettings()
+
+    def one_arg(key: str) -> _AccessorSettings:
+        return _AccessorSettings()
+
+    # Both definitions carry one qualified name, as a module re-import that changed the
+    # accessor's call shape would.
+    zero_arg.__qualname__ = one_arg.__qualname__ = "shape_settings"
+    settings_cache(zero_arg)
+    with pytest.raises(TypeError, match="zero-argument accessor; it cannot become a one-argument one"):
+        keyed_settings_cache(one_arg)

@@ -34,7 +34,7 @@ from tai42_skeleton.authz.execution_identity import (
     set_execution_identity,
 )
 from tai42_skeleton.interactions.origin import reset_interaction_origin, set_interaction_origin
-from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings, tool_runs_store_configured
+from tai42_skeleton.routers.tool_runs_settings import tool_runs_store_configured
 from tai42_skeleton.runs.chokepoint import collect_resumed_interactions
 from tai42_skeleton.states.context import current_state_context
 from tai42_skeleton.tools.attribution import get_run_attribution, reset_run_attribution, set_run_attribution
@@ -216,7 +216,7 @@ def _on_supervisor_done(task: asyncio.Task[None], run_id: str, tool_name: str) -
         logger.error("tool-run %s (%s) supervisor task failed", run_id, tool_name, exc_info=exc)
 
 
-async def _refresh_liveness_loop(r: Any, store: ToolRunStore, run_id: str, settings: ToolRunsSettings) -> None:
+async def _refresh_liveness_loop(r: Any, store: ToolRunStore, run_id: str, liveness_ttl_seconds: int) -> None:
     """Re-set the run's liveness key every ``liveness_ttl_seconds / 3`` — a constant cadence.
 
     So a live run (including a slow sync tool offloaded to a thread, which leaves the loop free to run this task)
@@ -226,10 +226,10 @@ async def _refresh_liveness_loop(r: Any, store: ToolRunStore, run_id: str, setti
     failed ``SET`` must never stop the refresher, or a still-``running`` run would
     lose liveness while alive and be wrongly reconciled to ``lost``.
     """
-    cadence = settings.liveness_ttl_seconds / 3
+    cadence = liveness_ttl_seconds / 3
     while True:
         try:
-            await store.refresh_liveness(r, run_id, settings.liveness_ttl_seconds)
+            await store.refresh_liveness(r, run_id, liveness_ttl_seconds)
         except Exception:
             # Loud, not silent: log and keep refreshing on the next cadence rather
             # than letting one failed SET permanently kill the refresher.
@@ -268,8 +268,10 @@ async def _supervise(
     """
     from tai42_skeleton.states.api_context import api_state_context
 
-    settings = _pkg.tool_runs_settings()
-    store = ToolRunStore(settings.key_prefix)
+    # The run reads its settings through the cached accessor at each use and keeps only what it
+    # derives from them: it is a root task that can outlive the generation that admitted it, so a
+    # settings instance bound here would hold that generation's configuration for the whole run.
+    store = ToolRunStore(_pkg.tool_runs_settings().key_prefix)
     # The run's accountable principal is the acting ``(user_id, restricted)`` the spawning caller
     # resolved; ``actor`` is the ``actor`` on the subject context a park records.
     actor, _restricted = acting_context.acting
@@ -278,8 +280,10 @@ async def _supervise(
     # run: a background submit's task inherited none of them (fresh root), an inline fire re-binds
     # the same values it already carries. The capability follows the identity the run acts as.
     with acting_context.bind():
-        async with _pkg.client_ctx(RedisClient, settings.redis) as r:
-            refresher = asyncio.create_task(_refresh_liveness_loop(r, store, run_id, settings))
+        async with _pkg.client_ctx(RedisClient, _pkg.tool_runs_settings().redis) as r:
+            refresher = asyncio.create_task(
+                _refresh_liveness_loop(r, store, run_id, _pkg.tool_runs_settings().liveness_ttl_seconds)
+            )
             # Bind this run's id as the interaction origin for the tool body, so a
             # question the tool raises through ``ask`` is attributed to the run.
             origin_token = set_interaction_origin(run_id)
@@ -339,7 +343,9 @@ async def _supervise(
                             "error": reason,
                             "resumed_interactions": json.dumps(resumed),
                         }
-                        persisted = await store.mark_terminal_if_running(r, run_id, fields, settings.result_ttl_seconds)
+                        persisted = await store.mark_terminal_if_running(
+                            r, run_id, fields, _pkg.tool_runs_settings().result_ttl_seconds
+                        )
                         if not persisted:
                             logger.warning(
                                 "tool-run %s (%s) was cancelled at shutdown but the record was already "
@@ -384,7 +390,9 @@ async def _supervise(
                             }
                     # Gate the terminal write on the record still being ``running`` so it
                     # can never overwrite a ``lost`` a reader already wrote (one-way lost).
-                    persisted = await store.mark_terminal_if_running(r, run_id, fields, settings.result_ttl_seconds)
+                    persisted = await store.mark_terminal_if_running(
+                        r, run_id, fields, _pkg.tool_runs_settings().result_ttl_seconds
+                    )
                     if not persisted:
                         logger.warning(
                             "tool-run %s (%s) finished as %s but the record was already reconciled to lost; "
@@ -446,8 +454,7 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any], *, extras: Map
             reset_detached_run(detached_token)
         return
 
-    settings = _pkg.tool_runs_settings()
-    store = ToolRunStore(settings.key_prefix)
+    store = ToolRunStore(_pkg.tool_runs_settings().key_prefix)
     # The owning identity is the fire's own bound key — request_identity reads it from the
     # bound execution identity — so the record is attributed and per-identity indexed
     # exactly as a restricted submit's is.
@@ -457,12 +464,11 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any], *, extras: Map
     # re-drive inputs (arguments, door extras, and — for a crash-resume run — the fire's ambient
     # subject context) with no second copy of the field list. The fire's ambient context is the
     # subject the re-drive replays under; the store writes it only on a crash-resume record.
-    async with _pkg.client_ctx(RedisClient, settings.redis) as r:
+    async with _pkg.client_ctx(RedisClient, _pkg.tool_runs_settings().redis) as r:
         run_id = await reconcile.create_recorded_run(
             r,
             store,
             tool_name,
-            settings,
             user_id=user_id,
             arguments=arguments,
             extras=extras,

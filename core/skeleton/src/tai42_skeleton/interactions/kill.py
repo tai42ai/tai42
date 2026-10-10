@@ -228,7 +228,6 @@ async def kill_parks_for_subject(kind: str, key: str, *, reason: str) -> list[st
     """
     if not interactions_store_configured():
         return []
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
-    async with client_ctx(RedisClient, settings.redis) as r:
+    store = InteractionStore(interactions_settings().key_prefix)
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         return await kill_members(r, store, await store.subject_members(r, kind, key), reason=reason)

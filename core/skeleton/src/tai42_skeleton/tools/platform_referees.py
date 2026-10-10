@@ -136,9 +136,8 @@ async def _parked_interaction_referee(old_name: str) -> list[str]:
 
     if not interactions_store_configured():
         return []
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
-    async with client_ctx(RedisClient, settings.redis) as r:
+    store = InteractionStore(interactions_settings().key_prefix)
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         # BOTH live holder indices, each walked in FULL (never the capped list_pending):
         # an OPEN park still in pending:expiry, AND an answered/expired park whose durable
         # continuation-due record the reaper still re-fires as run_tool(<tool>). A park

@@ -58,8 +58,10 @@ The host discovers this backend by **importing its package** — importing
 `tai42_backend_arq` registers everything through the global `tai42_app` handle as
 a side-effect (there is no entry-point): the `ArqBackend`
 (`@tai42_app.backends.register_backend`), the `backend_*` tool surface, the
-`sync_task` / `schedule_task` / `async_task` BACKEND-kind tool extensions, and
-a shutdown hook closing the shared ArqRedis pool. Name the package in your
+`sync_task` / `schedule_task` / `async_task` BACKEND-kind tool extensions. The
+enqueue side (enqueues, job status and results, schedule hashes) runs over the
+platform's pooled Redis client, so its connections are pooled per configuration
+generation and closed when that generation retires. Name the package in your
 manifest's `backend_module` field:
 
 ```yaml

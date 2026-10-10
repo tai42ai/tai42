@@ -1,17 +1,20 @@
-"""Reloads with access control ON, end to end: every retired serving generation whose
-holds are bounded is released, and every released generation leaves no settings held.
+"""Reloads with access control ON, end to end: every retired serving generation is
+released once nothing of its requests is left running, and every released generation
+leaves no settings held.
 
 The deployment is the default serve shape — access control on, the identity provider,
 the inbox stream a client keeps open across the reloads. A retired generation stays
 reachable while a task, timer, transport or stream of the runtime still carries the
 context of one of its requests, and a reachable generation is not judged (the probe lists
-it in ``retired_generations_alive``). Two positions may stay reachable after the stream
-closes: the generation that served the worker's first streaming response (a task started
-inside that response carries its request for the process's life) and the last retired one
-(a connection one of its requests opened may stay pooled until the next retire). Every
-generation between them holds only bounded things — the access-control and template
-cache timers, the server's keep-alive timer, connections its requests opened in the next
-epoch's pool, drained at that epoch's retire — and must be released. Every released
+it in ``retired_generations_alive``). While the stream is open the generation serving it
+is held. Once it closes, every hold left is bounded — the access-control and template
+cache timers, the server's keep-alive timer — and every retired generation must be
+released: the worker starts its event-stream shutdown watch and connects its pooled Redis
+connections from no request's context, so neither keeps the generation that served the
+first streaming response or a request that opened a connection. The stack's requests open
+no outbound HTTP during the reloads: on uvloop a keep-alive connection an httpx-backed client
+opens holds the request that opened it until its client epoch's pool is drained at that
+epoch's retire, a hold this suite does not exercise. Every released
 generation is judged: no settings instance of it is still held, except the worker bus's
 boot-epoch bus settings, which the process-lifetime bus keeps by design. The stack sets
 both cache TTLs low so the wait for release stays short.
@@ -47,9 +50,9 @@ pytestmark = pytest.mark.needs(
 # The access-control and template cache TTLs: a served request's cache entries (and the
 # timers that expire them) last this long.
 _CACHE_TTL_SECONDS = 2
-# How long the generations with only bounded holds may take to be released once the stream
-# closes: above the cache TTL and the server's keep-alive, with room for a loaded host.
-_BOUNDED_HOLD_RELEASE_DEADLINE_SECONDS = 60.0
+# How long the retired generations may take to be released once the stream closes: above
+# the cache TTL and the server's keep-alive, with room for a loaded host.
+_RELEASE_DEADLINE_SECONDS = 60.0
 # The process-lifetime worker bus keeps its boot-epoch bus settings by design.
 _WORKER_BUS_HOLD = ["tai42_skeleton.app.bus.WorkerBus"]
 
@@ -80,12 +83,12 @@ def _leaked(stale_holders: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 @pytest.mark.timeout(300)
-async def test_reloads_with_access_control_on_release_the_bounded_hold_generations_and_leak_no_settings(
+async def test_reloads_with_access_control_on_release_every_retired_generation_and_leak_no_settings(
     short_ttl_auth_stack: TaiStack,
 ) -> None:
     stack = short_ttl_auth_stack
     api = stack.api(port=stack.port_a)
-    # This call is the worker's first streaming response; its generation also serves the stream.
+    # This call's generation also serves the stream.
     before = await _snapshot(stack)
     stream_epoch = before["settings_epoch"]
 
@@ -105,24 +108,20 @@ async def test_reloads_with_access_control_on_release_the_bounded_hold_generatio
         assert not _leaked(during["stale_holders"]), f"a released generation left a settings instance held: {during}"
         assert during["stale_pool_epochs"] == [], f"a retired client-pool epoch is still present: {during}"
 
-    last_retired = during["settings_epoch"] - 1
-    bounded_hold_generations = set(range(stream_epoch + 1, last_retired))
     latest: dict[str, Any] = during
 
-    async def bounded_hold_generations_released() -> dict[str, Any] | None:
+    async def every_retired_generation_released() -> dict[str, Any] | None:
         nonlocal latest
         latest = await _snapshot(stack)
-        return latest if bounded_hold_generations.isdisjoint(latest["retired_generations_alive"]) else None
+        return latest if not latest["retired_generations_alive"] else None
 
     try:
         after = await wait_for_async(
-            bounded_hold_generations_released, deadline=_BOUNDED_HOLD_RELEASE_DEADLINE_SECONDS, interval=1.0
+            every_retired_generation_released, deadline=_RELEASE_DEADLINE_SECONDS, interval=1.0
         )
     except WaitTimeoutError as exc:
         raise AssertionError(
-            "a retired generation with only bounded holds was not released: "
-            f"{sorted(bounded_hold_generations & set(latest['retired_generations_alive']))}"
+            f"a retired generation was not released once the stream closed: {latest['retired_generations_alive']}"
         ) from exc
-    assert set(after["retired_generations_alive"]) <= {stream_epoch, last_retired}, after["retired_generations_alive"]
     assert not _leaked(after["stale_holders"]), f"a released generation left a settings instance held: {after}"
     assert after["stale_pool_epochs"] == [], f"a retired client-pool epoch is still present: {after}"

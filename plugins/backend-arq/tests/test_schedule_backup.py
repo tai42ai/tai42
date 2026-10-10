@@ -5,14 +5,16 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Literal
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import orjson
 import pytest
 from arq.jobs import JobStatus
 from pydantic import ValidationError
 
-from tai42_backend_arq import scheduler, tools
+from tai42_backend_arq import pool, scheduler, tools
+
+from .conftest import lease_of
 
 
 class _FakeJob:
@@ -57,8 +59,7 @@ def _seed_schedule(redis: Any, *, name: str, schedule: dict[str, Any], kwargs: d
 @asynccontextmanager
 async def _redis_bound(redis: Any, job_cls: type = _FakeJob) -> AsyncIterator[None]:
     with (
-        patch.object(tools.RedisPoolManager, "get", AsyncMock(return_value=redis)),
-        patch.object(scheduler.RedisPoolManager, "get", AsyncMock(return_value=redis)),
+        patch.object(pool, "arq_connection", lease_of(redis)),
         patch.object(scheduler, "Job", job_cls),
     ):
         yield

@@ -4,7 +4,12 @@ A retired generation stays reachable while a task, timer, transport or stream of
 runtime still carries the context of one of its requests: a cache's expiry timer or a
 keep-alive timer for seconds, a drain-exempt stream until its client disconnects, a task
 or a pooled connection one of its requests started for that task's or connection's life,
-which can be the process's. All of that reaches the generation through its serving
+which can be the process's. Two such holds have no seam on the platform's side: on uvloop
+an outbound keep-alive connection an httpx-backed client opens holds the request that opened
+it until its client epoch's pool is drained at that epoch's retire, and on the asyncio
+selector loop a Redis reply larger than the stream reader's pause threshold holds the request
+reading it until the next such reply on that connection or the connection's close. All of
+that reaches the generation through its serving
 surface (the object every request's ``scope["app"]`` points at). A retire therefore arms
 a finalizer on that surface; when the surface is collected (the generation is released)
 its epoch is swept for stale-config leaks on the serving loop, so every retired-epoch

@@ -9,14 +9,28 @@ design rather than being forced to share one. ``env_prefix`` is a message-only
 passenger — it names the owning component's env var when the URL is unset and never
 splits a pool (the base pool keeps it out of the identity). A Redis client carries no
 build options, so the pool's build-option conflict guard never fires for it.
+
+Every async client the kit builds comes from :func:`async_redis_from_url`, whose
+connections connect from an empty context, never from the caller whose command opened them.
+On the asyncio selector loop (not uvloop), a reply larger than the stream reader's pause
+threshold re-registers the connection's reader in the context of the request reading it,
+which then stays held until the next such reply on that connection or the connection's close.
 """
 
 import asyncio
+import contextvars
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from typing import Any, cast
 
 from redis import Redis as SyncRedis
 from redis.asyncio import Redis as AsyncRedis
+from redis.asyncio.connection import (
+    AbstractConnection,
+    Connection,
+    ConnectionPool,
+    SSLConnection,
+    UnixDomainSocketConnection,
+)
 
 from tai42_kit.clients.base import PooledClient, reject_unknown_connection_kwargs
 from tai42_kit.settings import not_configured_message
@@ -60,6 +74,63 @@ def _validate_url(kwargs: dict[str, Any]) -> None:
         raise TypeError("Redis client 'url' must be a string (e.g., 'redis://localhost:6379/0')")
 
 
+class _ConnectsFromAnEmptyContext(AbstractConnection):
+    """A connection whose connect runs in a task started from an empty context.
+
+    The transport a connect opens keeps the context it was opened in for the
+    connection's life, and a pooled connection outlives the caller whose command
+    opened it. Every connect of the connection — a pool handing it out, a command
+    or a pub/sub reconnecting it — goes through :meth:`connect`, so none of them
+    carries a caller's state (its request) into the transport.
+    """
+
+    async def connect(self) -> None:
+        await asyncio.create_task(super().connect(), context=contextvars.Context())
+
+
+class _TcpConnection(_ConnectsFromAnEmptyContext, Connection):
+    pass
+
+
+class _SslConnection(_ConnectsFromAnEmptyContext, SSLConnection):
+    pass
+
+
+class _UnixConnection(_ConnectsFromAnEmptyContext, UnixDomainSocketConnection):
+    pass
+
+
+# The connection class a Redis URL selects (``redis://``, ``rediss://``, ``unix://``) and
+# the one that connects from an empty context in its place.
+_EMPTY_CONTEXT_CONNECTIONS: dict[type[AbstractConnection], type[AbstractConnection]] = {
+    Connection: _TcpConnection,
+    SSLConnection: _SslConnection,
+    UnixDomainSocketConnection: _UnixConnection,
+}
+
+
+class _EmptyContextConnectionPool(ConnectionPool):
+    """A connection pool whose connections connect from an empty context, never their caller's."""
+
+    def __init__(self, connection_class: type[AbstractConnection] = Connection, **connection_kwargs: Any) -> None:
+        empty_context_class = _EMPTY_CONTEXT_CONNECTIONS.get(connection_class)
+        if empty_context_class is None:
+            raise TypeError(
+                f"no empty-context connect is defined for the Redis connection class {connection_class.__qualname__}; "
+                f"supported: {sorted(cls.__qualname__ for cls in _EMPTY_CONTEXT_CONNECTIONS)}"
+            )
+        super().__init__(connection_class=empty_context_class, **connection_kwargs)
+
+
+def async_redis_from_url(url: str, **kwargs: Any) -> AsyncRedis:
+    """An async Redis client for ``url`` whose pooled connections connect from an empty context.
+
+    The same client ``Redis.from_url(url, **kwargs)`` builds, owning its pool, over a
+    :class:`_EmptyContextConnectionPool`.
+    """
+    return AsyncRedis.from_pool(_EmptyContextConnectionPool.from_url(url, **kwargs))
+
+
 class RedisClient(PooledClient[AsyncRedis]):
     """A pooled async Redis client keyed on its full connection configuration.
 
@@ -70,7 +141,7 @@ class RedisClient(PooledClient[AsyncRedis]):
 
     async def _create(self, **kwargs) -> AsyncRedis:
         _validate_kwargs(kwargs)
-        return await AsyncRedis.from_url(**_with_retry(kwargs)).initialize()
+        return await async_redis_from_url(**_with_retry(kwargs)).initialize()
 
     async def _close(self, client: AsyncRedis):
         await client.aclose()

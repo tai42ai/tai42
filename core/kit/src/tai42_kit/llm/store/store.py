@@ -95,7 +95,8 @@ async def _create_redis_store(conn_string: str | None, store_kwargs: dict[str, A
         raise ValueError(not_configured_message("the Redis store", "REDIS_URL", "TAI_DEFAULT_REDIS_URL"))
 
     from langgraph.store.redis import AsyncRedisStore
-    from redis.asyncio import Redis as AsyncRedis
+
+    from tai42_kit.clients.impl.redis import async_redis_from_url
 
     # The client is injected, never left to the store: the kit resolved the
     # URL, so the kit owns the connection. The checkpoint saver needs that
@@ -106,7 +107,7 @@ async def _create_redis_store(conn_string: str | None, store_kwargs: dict[str, A
     # langgraph-redis backends (and insurance against an open-ended version
     # floor), not a live defect. ``connection_args`` is deliberately not
     # passed: the store consults it only while building a client of its own.
-    client = AsyncRedis.from_url(conn_string)
+    client = async_redis_from_url(conn_string)
     store = AsyncRedisStore(redis_client=client, **store_kwargs)
 
     async def close_redis():

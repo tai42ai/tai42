@@ -55,7 +55,9 @@ async def test_create_run_persists_arguments_and_flag_when_crash_resume(wired) -
         "alpha",
         "2026-01-01T00:00:00",
         1.0,
-        settings,
+        result_ttl_seconds=settings.result_ttl_seconds,
+        liveness_ttl_seconds=settings.liveness_ttl_seconds,
+        recent_runs_limit=settings.recent_runs_limit,
         user_id="u1",
         arguments={"x": 1},
         extras={"warm": "y"},
@@ -80,7 +82,9 @@ async def test_create_run_omits_state_context_when_the_fire_had_no_subject(wired
         "alpha",
         "2026-01-01T00:00:00",
         1.0,
-        settings,
+        result_ttl_seconds=settings.result_ttl_seconds,
+        liveness_ttl_seconds=settings.liveness_ttl_seconds,
+        recent_runs_limit=settings.recent_runs_limit,
         user_id="u1",
         arguments={"x": 1},
         state_context=None,
@@ -197,7 +201,16 @@ async def test_create_run_stores_neither_for_an_unflagged_run(wired) -> None:
     # An un-flagged run stores none of the re-drive inputs even when a subject was passed: the
     # state context lands only on crash-resume records.
     await store.create_run(
-        fake, "r2", "alpha", "2026-01-01T00:00:00", 1.0, settings, user_id="u1", state_context=_STATE_CONTEXT
+        fake,
+        "r2",
+        "alpha",
+        "2026-01-01T00:00:00",
+        1.0,
+        result_ttl_seconds=settings.result_ttl_seconds,
+        liveness_ttl_seconds=settings.liveness_ttl_seconds,
+        recent_runs_limit=settings.recent_runs_limit,
+        user_id="u1",
+        state_context=_STATE_CONTEXT,
     )
     record = await store.get_run(fake, "r2")
     assert record is not None
@@ -211,7 +224,17 @@ async def test_reconcile_redispatches_a_flagged_lost_run(wired, monkeypatch) -> 
     spawned: list[tuple[str, dict]] = []
     monkeypatch.setattr(ops, "_spawn_crash_resume", lambda run_id, record: spawned.append((run_id, record)))
     await store.create_run(
-        fake, "r3", "alpha", "2026-01-01T00:00:00", 1.0, settings, user_id="u1", arguments={"x": 1}, crash_resume=True
+        fake,
+        "r3",
+        "alpha",
+        "2026-01-01T00:00:00",
+        1.0,
+        result_ttl_seconds=settings.result_ttl_seconds,
+        liveness_ttl_seconds=settings.liveness_ttl_seconds,
+        recent_runs_limit=settings.recent_runs_limit,
+        user_id="u1",
+        arguments={"x": 1},
+        crash_resume=True,
     )
     record = await store.get_run(fake, "r3")
     assert record is not None
@@ -226,7 +249,17 @@ async def test_reconcile_does_not_redispatch_an_unflagged_lost_run(wired, monkey
     store, fake, settings = wired
     spawned: list = []
     monkeypatch.setattr(ops, "_spawn_crash_resume", lambda run_id, record: spawned.append(run_id))
-    await store.create_run(fake, "r4", "alpha", "2026-01-01T00:00:00", 1.0, settings, user_id="u1")
+    await store.create_run(
+        fake,
+        "r4",
+        "alpha",
+        "2026-01-01T00:00:00",
+        1.0,
+        result_ttl_seconds=settings.result_ttl_seconds,
+        liveness_ttl_seconds=settings.liveness_ttl_seconds,
+        recent_runs_limit=settings.recent_runs_limit,
+        user_id="u1",
+    )
     record = await store.get_run(fake, "r4")
     assert record is not None
     result = await _reconcile_lost_with_liveness(fake, store, "r4", record, liveness_present=False, ttl=60)
@@ -260,7 +293,17 @@ async def test_reconcile_leaves_a_live_run_untouched(wired, monkeypatch) -> None
     spawned: list = []
     monkeypatch.setattr(ops, "_spawn_crash_resume", lambda run_id, record: spawned.append(run_id))
     await store.create_run(
-        fake, "r5", "alpha", "2026-01-01T00:00:00", 1.0, settings, user_id="u1", arguments={}, crash_resume=True
+        fake,
+        "r5",
+        "alpha",
+        "2026-01-01T00:00:00",
+        1.0,
+        result_ttl_seconds=settings.result_ttl_seconds,
+        liveness_ttl_seconds=settings.liveness_ttl_seconds,
+        recent_runs_limit=settings.recent_runs_limit,
+        user_id="u1",
+        arguments={},
+        crash_resume=True,
     )
     record = await store.get_run(fake, "r5")
     assert record is not None

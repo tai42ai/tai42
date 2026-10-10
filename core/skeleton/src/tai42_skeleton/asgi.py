@@ -47,6 +47,7 @@ from starlette.routing import Mount
 
 from tai42_skeleton.app import epoch, instance
 from tai42_skeleton.app.epoch import EpochAdmissionApp
+from tai42_skeleton.app.stream_shutdown_watch import start_stream_shutdown_watch
 from tai42_skeleton.app.sub_mcp_app import SubAppLifespan
 from tai42_skeleton.config.config_mode import config_mode
 
@@ -166,7 +167,8 @@ async def _worker_lifespan(
     """Run the worker lifespan.
 
     Claim the one-app token, build the app singleton, enter ``app_context`` and the
-    inner FastMCP lifespan, and release the token on exit.
+    inner FastMCP lifespan, start the loop's event-stream shutdown watch, and release
+    the token on exit.
     """
     saved_manifest_env = _claim_app_token(manifest_path)
     try:
@@ -181,6 +183,9 @@ async def _worker_lifespan(
             # suspended for the whole process, so it keeps no reference to a generation a
             # reload later retires.
             await _enter_boot_serving_app(_build_inner_app(app, transport, stateless_http), app_state)
+            # Before the worker admits a request, so no request's context reaches the
+            # loop-lifetime watch every streaming response relies on.
+            await start_stream_shutdown_watch()
             yield
     except Exception:
         logger.exception("Worker application lifespan failed")

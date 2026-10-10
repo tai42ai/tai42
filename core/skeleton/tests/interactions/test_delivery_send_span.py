@@ -152,11 +152,13 @@ def _window(seconds: float) -> DeadlineWindow:
     )
 
 
-async def _deliver(channel_obj: Any, settings: InteractionsSettings, window: DeadlineWindow) -> None:
+async def _deliver(
+    monkeypatch: pytest.MonkeyPatch, channel_obj: Any, settings: InteractionsSettings, window: DeadlineWindow
+) -> None:
+    monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
     await delivery_module.deliver_with_retry(
         channel_obj,
         cast(ChannelDelivery, object()),
-        settings,
         cast(Any, object()),
         window,
         channel="synthetic",
@@ -173,7 +175,7 @@ def terminal_failures(monkeypatch) -> list[BaseException]:
     """Record the terminal failure instead of pruning a real store; the failure re-raises."""
     seen: list[BaseException] = []
 
-    async def _report(settings, store, exc, **kwargs) -> bool:
+    async def _report(store, exc, **kwargs) -> bool:
         seen.append(exc)
         return True
 
@@ -185,26 +187,26 @@ def _retryable_flags(backend: RecordingMonitoring) -> list[object]:
     return [s["span"].updates[0]["metadata"]["retryable"] for s in backend.writer.spans]
 
 
-async def test_the_last_delivery_attempt_says_not_retryable(backend, terminal_failures):
+async def test_the_last_delivery_attempt_says_not_retryable(monkeypatch, backend, terminal_failures):
     backend.writer.active_trace_id = "trace-1"
     settings = InteractionsSettings(delivery_max_attempts=2, delivery_retry_backoff_seconds=0.01)
     channel_obj = _AlwaysRetryableFailure()
 
     with pytest.raises(ChannelDeliveryError):
-        await _deliver(channel_obj, settings, _window(30))
+        await _deliver(monkeypatch, channel_obj, settings, _window(30))
 
     assert channel_obj.attempts == 2
     assert _retryable_flags(backend) == [True, False]
     assert len(terminal_failures) == 1
 
 
-async def test_a_window_too_short_for_the_backoff_says_not_retryable_and_stops(backend, terminal_failures):
+async def test_a_window_too_short_for_the_backoff_says_not_retryable_and_stops(monkeypatch, backend, terminal_failures):
     backend.writer.active_trace_id = "trace-1"
     settings = InteractionsSettings(delivery_max_attempts=3, delivery_retry_backoff_seconds=60)
     channel_obj = _AlwaysRetryableFailure()
 
     with pytest.raises(ChannelDeliveryError):
-        await _deliver(channel_obj, settings, _window(5))
+        await _deliver(monkeypatch, channel_obj, settings, _window(5))
 
     assert channel_obj.attempts == 1
     assert _retryable_flags(backend) == [False]
@@ -233,7 +235,7 @@ async def test_the_retry_decision_is_made_once_per_failed_attempt_and_drives_the
     monkeypatch.setattr(delivery_module.asyncio, "sleep", recording_sleep)
 
     with pytest.raises(ChannelDeliveryError):
-        await _deliver(_AlwaysRetryableFailure(), settings, _window(30))
+        await _deliver(monkeypatch, _AlwaysRetryableFailure(), settings, _window(30))
 
     assert calls == [1, 2, 3]
     assert sleeps == [0.01, 0.02]

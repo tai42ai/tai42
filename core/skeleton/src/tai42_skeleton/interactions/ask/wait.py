@@ -12,7 +12,6 @@ from typing import Any
 from tai42_contract.secrets import SecretValue
 from tai42_kit.clients.impl.redis import RedisClient
 
-from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.tools.turn_budget import mark_parked_question
 
@@ -23,7 +22,6 @@ from .timing import DeadlineWindow
 
 async def await_answer(
     store: InteractionStore,
-    settings: InteractionsSettings,
     window: DeadlineWindow,
     *,
     interaction_id: str,
@@ -56,21 +54,23 @@ async def await_answer(
             # concurrent ask calls once the pool is drained.
             from tai42_skeleton.interactions import helper
 
-            reply_redis = settings.redis.model_copy(update={"socket_timeout": None})
+            reply_redis = helper.interactions_settings().redis.model_copy(update={"socket_timeout": None})
             async with helper.client_ctx(RedisClient, reply_redis, fresh=True) as reply_conn:
-                response = await store.wait_for_reply(reply_conn, reply_to, remaining, settings.blocking_grace_seconds)
+                response = await store.wait_for_reply(
+                    reply_conn, reply_to, remaining, helper.interactions_settings().blocking_grace_seconds
+                )
         except asyncio.CancelledError as exc:
             # Prune on cancel so an abandoned question does not inflate the group count /
             # open index. The status gate makes the cancelled-after-answer race a no-op.
             # A cleanup failure propagates (chained on the CancelledError context).
             mark_parked_question(exc, interaction_id, question, sensitive)
-            await prune(settings, store, interaction_id, group)
+            await prune(store, interaction_id, group)
             raise
     if response is None:
         # Timeout: prune first, else the abandoned question inflates the group count
         # until the idle TTL and stays claimable by a late callback. The prune result
         # names which of the three end states the question reached.
-        result = await prune(settings, store, interaction_id, group)
+        result = await prune(store, interaction_id, group)
         if result == "pruned":
             raise InteractionTimeoutError(
                 f"ask timed out after {window.budget}s with no answer (interaction {interaction_id})"

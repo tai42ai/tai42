@@ -33,18 +33,22 @@ logger = logging.getLogger(__name__)
 
 @dataclass(eq=False, frozen=True)
 class _Accessor:
-    """One registration of a cached settings accessor: its qualified name and its cache clear.
+    """The one registration of a cached settings accessor under its qualified name.
 
-    Compared by identity: registering again under the same name (a module re-import)
-    replaces the registration, and the replaced one is superseded.
+    ``wrapper`` is the cached accessor every holder of the name calls, ``clear`` drops its
+    cache, ``rebind`` points it at a new constructor (and drops its cache), and ``keyed``
+    tells a one-argument accessor from a zero-argument one.
     """
 
     key: str
+    wrapper: Callable
     clear: Callable[[], None]
+    rebind: Callable[[Callable], None]
+    keyed: bool
 
 
-# Keyed by qualified name so a module re-import replaces its registration
-# instead of growing the registry or double-running a hook.
+# Keyed by qualified name: an accessor's identity is its name, so a module re-import
+# re-binds the one registration instead of growing the registry.
 _CACHE_CLEARS: dict[str, _Accessor] = {}
 _RESET_HOOKS: dict[str, Callable[[], None]] = {}
 
@@ -60,9 +64,6 @@ _EPOCH_STAMP_ATTR = "__tai_settings_epoch__"
 # Birth number written beside the epoch stamp: a process-wide count of stamped
 # instances, so a caller can tell the instances constructed after a mark apart.
 _BIRTH_ATTR = "__tai_settings_birth__"
-# The accessor registration that constructed the instance, written beside the epoch
-# stamp, so a re-stamp can tell an instance a superseded accessor built apart.
-_ACCESSOR_ATTR = "__tai_settings_accessor__"
 _last_birth = 0
 _stamp_roster: "list[weakref.ref[BaseSettings]]" = []
 # An RLock, not a plain Lock: the ``_prune_roster`` weakref callback can fire
@@ -89,11 +90,8 @@ def _prune_roster(dead: "weakref.ref") -> None:
         _stamp_roster.remove(dead)
 
 
-def _stamp_settings(value: object, accessor: _Accessor | None = None) -> None:
+def _stamp_settings(value: object) -> None:
     """Stamp a constructed settings instance with the current epoch and roster it.
-
-    ``accessor`` is the registration that constructed it (``None`` for an instance
-    stamped outside a cached accessor).
 
     Only ``BaseSettings`` instances are stamped. The non-model accessors return
     primitives (``str``/``float``/``None`` — e.g. skeleton ``config_mode() ->
@@ -106,7 +104,6 @@ def _stamp_settings(value: object, accessor: _Accessor | None = None) -> None:
     if not isinstance(value, BaseSettings):
         return
     object.__setattr__(value, _EPOCH_STAMP_ATTR, _current_epoch())
-    object.__setattr__(value, _ACCESSOR_ATTR, accessor)
     with _roster_lock:
         _last_birth += 1
         object.__setattr__(value, _BIRTH_ATTR, _last_birth)
@@ -124,11 +121,6 @@ def settings_birth_mark() -> int:
         return _last_birth
 
 
-def _built_by_a_superseded_accessor(instance: object) -> bool:
-    accessor = getattr(instance, _ACCESSOR_ATTR, None)
-    return accessor is not None and _CACHE_CLEARS.get(accessor.key) is not accessor
-
-
 def restamp_settings_born_after(mark: int) -> None:
     """Stamp every live settings instance constructed after ``mark`` with the current epoch.
 
@@ -138,22 +130,35 @@ def restamp_settings_born_after(mark: int) -> None:
     since the mark it took when the build began: a sweep of the replaced epoch then
     judges only the instances read before the build, and the new generation's own
     instances are judged when its epoch retires.
-
-    An instance constructed by a superseded accessor (one whose name a module
-    re-import has registered again) is not re-stamped: only the code of the replaced
-    generation still calls that accessor, so the instance keeps that generation's epoch.
     """
     epoch = _current_epoch()
     with _roster_lock:
         roster = list(_stamp_roster)
     for ref in roster:
         instance = ref()
-        if (
-            instance is not None
-            and getattr(instance, _BIRTH_ATTR, 0) > mark
-            and not _built_by_a_superseded_accessor(instance)
-        ):
+        if instance is not None and getattr(instance, _BIRTH_ATTR, 0) > mark:
             object.__setattr__(instance, _EPOCH_STAMP_ATTR, epoch)
+
+
+def _registered(key: str, fn: Callable, *, keyed: bool) -> _Accessor | None:
+    """Re-bind the registration already held under ``key`` to ``fn``; ``None`` when the key is new.
+
+    A module re-import defines the accessor again under the same qualified name. Every holder
+    of the name — the re-imported module and any object the earlier import built, which still
+    resolves the name it was built with — calls the one registered wrapper, so after the next
+    reset they all read the current configuration. A name re-registered with the other call
+    shape (zero-argument vs one-argument) cannot share the wrapper and is refused.
+    """
+    existing = _CACHE_CLEARS.get(key)
+    if existing is None:
+        return None
+    if existing.keyed is not keyed:
+        kinds = ("a one-argument", "a zero-argument") if existing.keyed else ("a zero-argument", "a one-argument")
+        raise TypeError(
+            f"settings accessor {key!r} is registered as {kinds[0]} accessor; it cannot become {kinds[1]} one"
+        )
+    existing.rebind(fn)
+    return existing
 
 
 def settings_cache[F: Callable](fn: F) -> F:
@@ -163,16 +168,29 @@ def settings_cache[F: Callable](fn: F) -> F:
     the epoch the instance was born under; a cached hit returns the same stamped
     instance, and a reset clears the cache so the next call rebuilds and re-stamps
     under the then-current epoch.
+
+    One accessor exists per qualified name: decorating a function whose name is already
+    registered (a module re-import) re-binds that accessor to the new function, clears its
+    cache and returns the same wrapper.
     """
+    key = _key(fn)
+    existing = _registered(key, fn, keyed=False)
+    if existing is not None:
+        return cast(F, existing.wrapper)
+    constructor: list[Callable] = [fn]
 
     def _construct():
-        value = fn()
-        _stamp_settings(value, accessor)
+        value = constructor[0]()
+        _stamp_settings(value)
         return value
 
     cached = lru_cache(maxsize=1)(_construct)
-    accessor = _Accessor(key=_key(fn), clear=cached.cache_clear)
-    _CACHE_CLEARS[accessor.key] = accessor
+
+    def _rebind(new_fn: Callable) -> None:
+        constructor[0] = new_fn
+        cached.cache_clear()
+
+    _CACHE_CLEARS[key] = _Accessor(key=key, wrapper=cached, clear=cached.cache_clear, rebind=_rebind, keyed=False)
     return cast(F, cached)
 
 
@@ -187,8 +205,14 @@ def keyed_settings_cache[K: Hashable, V](fn: Callable[[K], V]) -> Callable[[K], 
     An entry is served while the env file keeps the identity it had when the entry
     was built; ``reset_all_settings()`` drops every entry. A settings instance is
     epoch-stamped on construction like :func:`settings_cache`'s. A build that raises
-    stores nothing, so the next call builds again.
+    stores nothing, so the next call builds again. One accessor exists per qualified name,
+    re-bound by a re-import exactly as :func:`settings_cache`'s.
     """
+    registry_key = _key(fn)
+    existing = _registered(registry_key, fn, keyed=True)
+    if existing is not None:
+        return existing.wrapper
+    constructor: list[Callable[[K], V]] = [fn]
     entries: dict[K, tuple[EnvFileIdentity | None, V]] = {}
 
     @functools.wraps(fn)
@@ -197,13 +221,19 @@ def keyed_settings_cache[K: Hashable, V](fn: Callable[[K], V]) -> Callable[[K], 
         entry = entries.get(key)
         if entry is not None and entry[0] == token:
             return entry[1]
-        value = fn(key)
-        _stamp_settings(value, accessor)
+        value = constructor[0](key)
+        _stamp_settings(value)
         entries[key] = (token, value)
         return value
 
-    accessor = _Accessor(key=_key(fn), clear=entries.clear)
-    _CACHE_CLEARS[accessor.key] = accessor
+    def _rebind(new_fn: Callable) -> None:
+        constructor[0] = new_fn
+        functools.update_wrapper(cached, new_fn)
+        entries.clear()
+
+    _CACHE_CLEARS[registry_key] = _Accessor(
+        key=registry_key, wrapper=cached, clear=entries.clear, rebind=_rebind, keyed=True
+    )
     return cached
 
 

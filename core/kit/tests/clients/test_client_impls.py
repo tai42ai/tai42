@@ -143,7 +143,7 @@ def test_redis_with_retry_builds_retry_sync():
     assert isinstance(out["retry"], Retry)
 
 
-async def test_redis_async_create_uses_from_url(monkeypatch):
+async def test_redis_async_create_builds_through_the_kit_client_builder(monkeypatch):
     redis_mod = _redis_mod()
     captured = {}
 
@@ -155,7 +155,7 @@ async def test_redis_async_create_uses_from_url(monkeypatch):
         captured.update(kwargs)
         return _FakeAsyncRedis()
 
-    monkeypatch.setattr(redis_mod.AsyncRedis, "from_url", staticmethod(_from_url))
+    monkeypatch.setattr(redis_mod, "async_redis_from_url", _from_url)
     client = await redis_mod.RedisClient()._create(url="redis://localhost:6379/0", retry_attempts=0)
     assert isinstance(client, _FakeAsyncRedis)
     assert captured["url"] == "redis://localhost:6379/0"
@@ -163,7 +163,7 @@ async def test_redis_async_create_uses_from_url(monkeypatch):
 
 async def test_redis_create_accepts_socket_connect_timeout(monkeypatch):
     # The kwarg is in _ALLOWED_KWARGS, so it is not rejected and flows through to
-    # redis.from_url (which forwards it to the connection natively).
+    # the client builder (which forwards it to the connection natively).
     redis_mod = _redis_mod()
     assert "socket_connect_timeout" in redis_mod._ALLOWED_KWARGS
     captured = {}
@@ -176,7 +176,7 @@ async def test_redis_create_accepts_socket_connect_timeout(monkeypatch):
         captured.update(kwargs)
         return _FakeAsyncRedis()
 
-    monkeypatch.setattr(redis_mod.AsyncRedis, "from_url", staticmethod(_from_url))
+    monkeypatch.setattr(redis_mod, "async_redis_from_url", _from_url)
     await redis_mod.RedisClient()._create(url="redis://localhost:6379/0", socket_connect_timeout=2.5)
     assert captured["socket_connect_timeout"] == 2.5
 
@@ -310,7 +310,7 @@ async def test_redis_async_distinct_configurations_get_distinct_pooled_clients(m
         async def aclose(self):
             pass
 
-    monkeypatch.setattr(redis_mod.AsyncRedis, "from_url", staticmethod(lambda **kw: _FakeAsyncRedis(kw)))
+    monkeypatch.setattr(redis_mod, "async_redis_from_url", lambda **kw: _FakeAsyncRedis(kw))
     url = "redis://h:6379/0"
     client = redis_mod.RedisClient()
     try:
@@ -591,6 +591,7 @@ async def test_curl_create_builds_the_session_from_session_params_only(monkeypat
     class _FakeSession:
         def __init__(self, **kwargs):
             captured.update(kwargs)
+            self.acurl = kwargs["async_curl"]
             self.closed = False
 
         async def close(self):
@@ -600,9 +601,19 @@ async def test_curl_create_builds_the_session_from_session_params_only(monkeypat
     caller_params = {"session_params": {"timeout": 10}, "share_key": "shared-a"}
     session = await curl_mod.CurlClient()._create(**caller_params)
     # share_key selects the pool and never reaches the session; the caller's dict is never mutated.
+    # The session drives its transfers through the client's own empty-context AsyncCurl.
+    assert isinstance(captured.pop("async_curl"), curl_mod._EmptyContextAsyncCurl)
     assert captured == {"timeout": 10}
     assert caller_params == {"session_params": {"timeout": 10}, "share_key": "shared-a"}
     await curl_mod.CurlClient()._close(session)
+    assert session.closed is True
+    assert session.acurl._curlm is None  # the client closed the AsyncCurl it supplied
+
+
+async def test_curl_create_refuses_a_caller_supplied_async_curl():
+    curl_mod = _curl_mod()
+    with pytest.raises(TypeError, match="async_curl"):
+        await curl_mod.CurlClient()._create(session_params={"async_curl": object()})
 
 
 def test_curl_share_key_is_part_of_the_pool_identity():
@@ -623,6 +634,7 @@ async def test_curl_callers_with_different_share_keys_lease_different_sessions(m
 
     class _FakeSession:
         def __init__(self, **kwargs):
+            self.acurl = kwargs["async_curl"]
             self.closed = False
 
         async def close(self):

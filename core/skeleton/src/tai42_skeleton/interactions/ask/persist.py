@@ -14,7 +14,6 @@ from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.interactions.media import substitute_media
 from tai42_skeleton.interactions.origin import get_interaction_origin
-from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore
 
 from .errors import InteractionLimitError
@@ -113,7 +112,6 @@ def build_request(
 
 async def persist_question(
     store: InteractionStore,
-    settings: InteractionsSettings,
     window: DeadlineWindow,
     callback: CallbackTicket | None,
     park_binding: AsyncParkBinding,
@@ -142,11 +140,12 @@ async def persist_question(
 
     Reserves the concurrency slot under ``max_concurrent`` (raising
     ``InteractionLimitError`` at the cap). Returns the stored media list (the same items the
-    durable record and any channel delivery carry).
+    durable record and any channel delivery carry). Reads the interactions settings at each use,
+    never keeping an instance across an await.
     """
     from tai42_skeleton.interactions import helper
 
-    async with helper.client_ctx(RedisClient, settings.redis) as r:
+    async with helper.client_ctx(RedisClient, helper.interactions_settings().redis) as r:
         # A data:image is decoded once and stored BY REFERENCE before the request is
         # built, so the durable record carries a served reference the inbox renders,
         # never the inline bytes. The media keys start at ``idle_ttl`` and ``add``
@@ -160,8 +159,8 @@ async def persist_question(
                 store,
                 r,
                 media,
-                settings.idle_ttl_seconds,
-                base_url=settings.public_base_url if channel is not None else None,
+                helper.interactions_settings().idle_ttl_seconds,
+                base_url=helper.interactions_settings().public_base_url if channel is not None else None,
             )
             if media is not None
             else None
@@ -200,7 +199,11 @@ async def persist_question(
         # ``add`` must skip re-adding it (``open_member_reserved=True``). ``to`` also drives
         # ``add``'s ``to`` denormalization onto the state hash, which the read/answer
         # surfaces gate on.
-        cap = settings.max_concurrent_caller if to == "caller" else settings.max_concurrent
+        cap = (
+            helper.interactions_settings().max_concurrent_caller
+            if to == "caller"
+            else helper.interactions_settings().max_concurrent
+        )
         # The RUN's captured out-of-band address, denormalized onto the state hash as
         # ``{tool, context}`` alongside the run's ``run_delivery_id``, so the answer path copies
         # both onto the continuation-due record and the reaper's detached redelivery binds the
@@ -219,7 +222,7 @@ async def persist_question(
             await store.add(
                 r,
                 request,
-                settings.idle_ttl_seconds,
+                helper.interactions_settings().idle_ttl_seconds,
                 ticket=ticket,
                 ticket_ttl=ticket_ttl,
                 open_member_reserved=True,
@@ -234,7 +237,7 @@ async def persist_question(
             await store.add(
                 r,
                 request,
-                settings.idle_ttl_seconds,
+                helper.interactions_settings().idle_ttl_seconds,
                 ticket=ticket,
                 ticket_ttl=ticket_ttl,
                 continuation_fingerprint=park_binding.continuation_fingerprint,

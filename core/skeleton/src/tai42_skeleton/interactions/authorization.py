@@ -73,9 +73,8 @@ async def _stored_run_delivery_id(interaction_id: str) -> str | None:
     """The interaction's stored ``run_delivery_id``, or ``None`` when the store is off or its state is gone."""
     if not interactions_store_configured():
         return None
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
-    async with client_ctx(RedisClient, settings.redis) as r:
+    store = InteractionStore(interactions_settings().key_prefix)
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         state = await store.get_state(r, interaction_id)
     return state.request.run_delivery_id if state is not None else None
 

@@ -671,7 +671,16 @@ async def test_get_run_unknown_raises_not_found(wired):
 
 
 async def test_get_run_returns_running_view(wired):
-    await wired.store.create_run(wired.fake, "r1", "alpha", "2026-01-01T00:00:00", 1.0, wired.settings)
+    await wired.store.create_run(
+        wired.fake,
+        "r1",
+        "alpha",
+        "2026-01-01T00:00:00",
+        1.0,
+        result_ttl_seconds=wired.settings.result_ttl_seconds,
+        liveness_ttl_seconds=wired.settings.liveness_ttl_seconds,
+        recent_runs_limit=wired.settings.recent_runs_limit,
+    )
     view = await ops.get_run("r1")
     assert view == {"run_id": "r1", "tool_name": "alpha", "status": "running", "started_at": "2026-01-01T00:00:00"}
 
@@ -681,7 +690,16 @@ async def test_list_tool_runs_empty_for_unknown_tool(wired):
 
 
 async def test_list_tool_runs_returns_present_records(wired):
-    await wired.store.create_run(wired.fake, "r1", "alpha", "2026-01-01T00:00:00", 1.0, wired.settings)
+    await wired.store.create_run(
+        wired.fake,
+        "r1",
+        "alpha",
+        "2026-01-01T00:00:00",
+        1.0,
+        result_ttl_seconds=wired.settings.result_ttl_seconds,
+        liveness_ttl_seconds=wired.settings.liveness_ttl_seconds,
+        recent_runs_limit=wired.settings.recent_runs_limit,
+    )
     entries = await ops.list_tool_runs("alpha")
     assert [e["run_id"] for e in entries] == ["r1"]
     assert "result" not in entries[0]
@@ -691,7 +709,16 @@ async def test_list_tool_runs_returns_present_records(wired):
 async def test_full_view_carries_the_parsed_resumed_interactions(wired):
     # The terminal record's ``resumed_interactions`` field (a JSON-encoded id list) is
     # parsed back into the full GET view.
-    await wired.store.create_run(wired.fake, "r1", "alpha", "2026-01-01T00:00:00", 1.0, wired.settings)
+    await wired.store.create_run(
+        wired.fake,
+        "r1",
+        "alpha",
+        "2026-01-01T00:00:00",
+        1.0,
+        result_ttl_seconds=wired.settings.result_ttl_seconds,
+        liveness_ttl_seconds=wired.settings.liveness_ttl_seconds,
+        recent_runs_limit=wired.settings.recent_runs_limit,
+    )
     await wired.store.mark_terminal_if_running(
         wired.fake,
         "r1",
@@ -709,7 +736,16 @@ async def test_full_view_carries_the_parsed_resumed_interactions(wired):
 
 async def test_list_view_omits_resumed_interactions(wired):
     # The trimmed list view stays id/tool/status/timestamps only — never the resumed list.
-    await wired.store.create_run(wired.fake, "r1", "alpha", "2026-01-01T00:00:00", 1.0, wired.settings)
+    await wired.store.create_run(
+        wired.fake,
+        "r1",
+        "alpha",
+        "2026-01-01T00:00:00",
+        1.0,
+        result_ttl_seconds=wired.settings.result_ttl_seconds,
+        liveness_ttl_seconds=wired.settings.liveness_ttl_seconds,
+        recent_runs_limit=wired.settings.recent_runs_limit,
+    )
     await wired.store.mark_terminal_if_running(
         wired.fake,
         "r1",

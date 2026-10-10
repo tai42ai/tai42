@@ -310,9 +310,8 @@ async def react(interaction_id: str, event: Any, partial_values: Any) -> dict[st
         # With no store configured no interaction can exist — the same closed signal a
         # missing interaction gives, so the door is no configured oracle.
         raise FormReactionClosedError("interaction is not open")
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
-    async with client_ctx(RedisClient, settings.redis) as r:
+    store = InteractionStore(interactions_settings().key_prefix)
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         state = await store.get_state(r, interaction_id)
         if state is None or state.status != "pending":
             raise FormReactionClosedError("interaction is not open")
@@ -348,6 +347,6 @@ async def react(interaction_id: str, event: Any, partial_values: Any) -> dict[st
         interaction_id=interaction_id,
         event=normalized_event,
         values=partial_values,
-        deadline=settings.reaction_deadline_seconds,
+        deadline=interactions_settings().reaction_deadline_seconds,
     )
     return _validate_update(update, schema, payload)

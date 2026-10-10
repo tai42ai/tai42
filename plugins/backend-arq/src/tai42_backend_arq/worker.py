@@ -26,7 +26,6 @@ import click
 from arq import Worker, func
 from tai42_contract.backend.runtime import CONSUMING_RUNTIME, BackendRuntime, ExecutionMode
 
-from tai42_backend_arq.pool import RedisPoolManager
 from tai42_backend_arq.scheduler import recover_stalled_schedules, task_scheduler
 from tai42_backend_arq.settings import arq_settings, job_deserializer, job_serializer
 from tai42_backend_arq.tasks import callback_job, tool_execution
@@ -152,10 +151,7 @@ class ArqWorkerRuntime(BackendRuntime):
     # -- teardown ------------------------------------------------------------
 
     async def aclose(self) -> None:
-        """Close the worker and the shared Redis pool on every exit path."""
-        # Runs on every exit path, including one where ``build`` itself failed —
-        # the shared pool may exist even when the worker never did.
-        await RedisPoolManager.close()
+        """Close the worker on every exit path, including one where ``build`` itself failed."""
         if self._worker is not None:
             await self._worker.close()
 

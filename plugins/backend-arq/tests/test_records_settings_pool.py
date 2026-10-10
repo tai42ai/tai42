@@ -1,21 +1,26 @@
-"""Schedule records/shape helpers, settings, serializers, and the pool manager."""
+"""Schedule records/shape helpers, settings, serializers, and the enqueue connection."""
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
 
 import orjson
 import pytest
+from arq import ArqRedis
+from arq.connections import RedisSettings
 from arq.jobs import DeserializationError, SerializationError, deserialize_result, serialize_job, serialize_result
 from pydantic import BaseModel, ValidationError
+from redis.asyncio import ConnectionPool
 from tai42_kit.backend import BackendDispatchSettings
+from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import registered_settings
 
-from tai42_backend_arq import records
-from tai42_backend_arq.pool import RedisPoolManager
+from tai42_backend_arq import pool, records
 from tai42_backend_arq.records import ScheduleRecord
 from tai42_backend_arq.settings import (
     UNSERIALIZABLE_KEY,
@@ -291,49 +296,56 @@ def test_malformed_failure_tag_raises_on_deserialize() -> None:
 # -- pool ---------------------------------------------------------------------------
 
 
-async def test_pool_created_once_and_closed(monkeypatch) -> None:
-    created: list[Any] = []
-
-    async def fake_create_pool(*args: Any, **kwargs: Any) -> Any:
-        pool = AsyncMock()
-        created.append(pool)
-        return pool
-
-    monkeypatch.setattr("tai42_backend_arq.pool.create_pool", fake_create_pool)
-    monkeypatch.setattr(RedisPoolManager, "_pool", None)
-
-    import asyncio
-
-    first, second = await asyncio.gather(RedisPoolManager.get(), RedisPoolManager.get())
-    assert first is second
-    assert len(created) == 1
-
-    await RedisPoolManager.close()
-    created[0].aclose.assert_awaited_once()
-    assert RedisPoolManager._pool is None
-
-    # Closing again is a no-op.
-    await RedisPoolManager.close()
-
-
-async def test_pool_binds_the_settings_queue_name(monkeypatch) -> None:
-    """The enqueue pool's default queue is the ``queue_name`` setting, so the
-    enqueue side and the worker's consume side name the SAME per-stack queue."""
-    captured: dict[str, Any] = {}
-
-    async def fake_create_pool(*args: Any, **kwargs: Any) -> Any:
-        captured.update(kwargs)
-        return AsyncMock()
-
-    monkeypatch.setattr("tai42_backend_arq.pool.create_pool", fake_create_pool)
+def test_the_enqueue_client_kwargs_map_the_connection_settings(monkeypatch) -> None:
+    """The kit client is keyed on the backend's URL (host, database, credentials, TLS) and
+    connection cap, reads bytes as arq does, and keeps arq's connect timeout."""
     monkeypatch.setattr(
-        "tai42_backend_arq.pool.arq_settings", lambda: ArqSettings(queue_name="tai42_e2e_abc123:arq:queue")
+        pool,
+        "arq_settings",
+        lambda: ArqSettings(redis_url="rediss://user:secret@cache.internal:6380/2", redis_max_connections=7),
     )
-    monkeypatch.setattr(RedisPoolManager, "_pool", None)
 
-    try:
-        await RedisPoolManager.get()
-    finally:
-        monkeypatch.setattr(RedisPoolManager, "_pool", None)
+    assert pool.enqueue_client_kwargs() == {
+        "url": "rediss://user:secret@cache.internal:6380/2",
+        "max_connections": 7,
+        "decode_responses": False,
+        "socket_connect_timeout": RedisSettings().conn_timeout,
+        "env_prefix": "ARQ_",
+    }
 
-    assert captured["default_queue_name"] == "tai42_e2e_abc123:arq:queue"
+
+async def test_the_lease_drives_arq_over_the_kit_clients_connection_pool(monkeypatch) -> None:
+    """The enqueue connection is an ``ArqRedis`` over the leased kit client's pool, bound to the
+    backend's queue name and JSON (de)serializers, so the enqueue side and the worker's
+    consume side name the SAME per-stack queue."""
+    kit_pool = ConnectionPool()
+    leased: list[tuple[Any, dict[str, Any]]] = []
+
+    @asynccontextmanager
+    async def fake_client_ctx(client_cls: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        leased.append((client_cls, kwargs))
+        yield SimpleNamespace(connection_pool=kit_pool)
+
+    monkeypatch.setattr(pool, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(pool, "arq_settings", lambda: ArqSettings(queue_name="tai42_e2e_abc123:arq:queue"))
+
+    async with pool.arq_connection() as arq_redis:
+        assert isinstance(arq_redis, ArqRedis)
+        assert arq_redis.connection_pool is kit_pool
+        assert arq_redis.default_queue_name == "tai42_e2e_abc123:arq:queue"
+        assert arq_redis.job_serializer is job_serializer
+        assert arq_redis.job_deserializer is job_deserializer
+
+    assert leased == [(RedisClient, pool.enqueue_client_kwargs())]
+
+
+async def test_a_lease_over_a_pool_that_is_not_an_asyncio_pool_is_refused(monkeypatch) -> None:
+    @asynccontextmanager
+    async def fake_client_ctx(client_cls: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        yield SimpleNamespace(connection_pool=object())
+
+    monkeypatch.setattr(pool, "client_ctx", fake_client_ctx)
+
+    with pytest.raises(TypeError, match="not an asyncio pool"):
+        async with pool.arq_connection():
+            pass

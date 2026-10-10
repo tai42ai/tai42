@@ -73,12 +73,12 @@ async def index_send(channel: str, provider_message_ids: list[str], *, trace_id:
     """
     if not provider_message_ids or not interactions_store_configured():
         return
-    settings = interactions_settings()
+    key_prefix = interactions_settings().key_prefix
     ttl = channels_settings().send_receipt_index_ttl_seconds
     payload = json.dumps({"trace_id": trace_id, "span_id": span_id})
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         for provider_message_id in provider_message_ids:
-            await awaited(r.set(_index_key(settings.key_prefix, channel, provider_message_id), payload, ex=ttl))
+            await awaited(r.set(_index_key(key_prefix, channel, provider_message_id), payload, ex=ttl))
 
 
 async def record_send_receipt(
@@ -103,10 +103,9 @@ async def record_send_receipt(
     """
     if not interactions_store_configured():
         return False
-    settings = interactions_settings()
     try:
-        async with client_ctx(RedisClient, settings.redis) as r:
-            raw = await awaited(r.get(_index_key(settings.key_prefix, channel, provider_message_id)))
+        async with client_ctx(RedisClient, interactions_settings().redis) as r:
+            raw = await awaited(r.get(_index_key(interactions_settings().key_prefix, channel, provider_message_id)))
     except Exception:
         # A monitoring-store (interactions Redis) outage must never break receipt ingestion:
         # this resolves in the webhook's ``except LookupError`` fallback, so a raised error

@@ -44,6 +44,9 @@ dependencies = [
     "typer>=0.27.2",
     "fastmcp>=3.4.7,<4",
     "mcp>=1",
+    # The event-stream response every MCP stream is served with; the worker lifespan
+    # serves one itself to start the loop's shutdown watch outside any request.
+    "sse-starlette>=3.4.6,<4",
     "httpx>=0.28",
     "PyYAML>=6.0",
     "pyaml-env>=1.2",

@@ -464,12 +464,22 @@ def hub() -> FakePubSubRedis:
     return FakePubSubRedis()
 
 
+def lease_of(fake: Any) -> Callable[[], Any]:
+    """A stand-in for ``pool.arq_connection`` whose lease yields ``fake``."""
+
+    @asynccontextmanager
+    async def _lease() -> AsyncIterator[Any]:
+        yield fake
+
+    return _lease
+
+
 @pytest.fixture
 def bind_pool(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], None]:
-    """Route ``RedisPoolManager.get`` (everywhere it is imported) to a fake."""
-    from tai42_backend_arq.pool import RedisPoolManager
+    """Route the arq enqueue connection lease (``pool.arq_connection``) to a fake."""
+    from tai42_backend_arq import pool
 
     def bind(fake: Any) -> None:
-        monkeypatch.setattr(RedisPoolManager, "get", AsyncMock(return_value=fake))
+        monkeypatch.setattr(pool, "arq_connection", lease_of(fake))
 
     return bind

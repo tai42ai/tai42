@@ -38,9 +38,7 @@ def retry_delay(exc: BaseException, attempt: int, remaining: float, settings: In
     return delay if delay < remaining else None
 
 
-async def prune(
-    settings: InteractionsSettings, store: InteractionStore, interaction_id: str, group_id: str
-) -> PruneResult:
+async def prune(store: InteractionStore, interaction_id: str, group_id: str) -> PruneResult:
     """Prune an abandoned question on its OWN connection, never the cancelled BLPOP connection.
 
     The cancelled BLPOP connection is not safely reusable for a WATCH/MULTI. Returns
@@ -51,7 +49,7 @@ async def prune(
 
     from tai42_skeleton.interactions import helper
 
-    async with helper.client_ctx(RedisClient, settings.redis) as conn:
+    async with helper.client_ctx(RedisClient, helper.interactions_settings().redis) as conn:
         return await store.prune_pending(conn, interaction_id, group_id)
 
 
@@ -154,7 +152,6 @@ def build_delivery_frame(
 async def deliver_with_retry(
     channel_obj: Channel,
     delivery_frame: ChannelDelivery,
-    settings: InteractionsSettings,
     store: InteractionStore,
     window: DeadlineWindow,
     *,
@@ -177,7 +174,12 @@ async def deliver_with_retry(
     call that does not return within the remaining budget is itself a typed, retryable
     delivery failure — an unbounded await would block the caller forever with the
     question persisted.
+
+    The retry policy is read from the interactions settings at each decision, never kept across
+    an await.
     """
+    from tai42_skeleton.interactions import helper
+
     loop = asyncio.get_running_loop()
     attempt = 0
     retry_in: float | None = None
@@ -187,7 +189,7 @@ async def deliver_with_retry(
 
     def decide(exc: BaseException) -> bool:
         nonlocal retry_in, decided
-        retry_in = retry_delay(exc, attempt, window.deadline - loop.time(), settings)
+        retry_in = retry_delay(exc, attempt, window.deadline - loop.time(), helper.interactions_settings())
         decided = exc
         return retry_in is not None
 
@@ -215,7 +217,7 @@ async def deliver_with_retry(
         except BaseException as exc:
             if decided is not exc:
                 # Raised outside the send span (the backoff sleep): decided here.
-                retry_in = retry_delay(exc, attempt, window.deadline - loop.time(), settings)
+                retry_in = retry_delay(exc, attempt, window.deadline - loop.time(), helper.interactions_settings())
             if retry_in is not None:
                 # Intermediate failure: the question stays open for the next attempt —
                 # never pruned here, never silent.
@@ -223,14 +225,13 @@ async def deliver_with_retry(
                     "channel %r delivery attempt %d/%d failed for interaction %s; retrying in %ss",
                     channel,
                     attempt,
-                    settings.delivery_max_attempts,
+                    helper.interactions_settings().delivery_max_attempts,
                     interaction_id,
                     retry_in,
                     exc_info=exc,
                 )
                 continue
             if await _prune_and_report_failure(
-                settings,
                 store,
                 exc,
                 interaction_id=interaction_id,
@@ -245,7 +246,6 @@ async def deliver_with_retry(
 
 
 async def _prune_and_report_failure(
-    settings: InteractionsSettings,
     store: InteractionStore,
     exc: BaseException,
     *,
@@ -264,7 +264,7 @@ async def _prune_and_report_failure(
     through to the answer wait). On a pruned cancellation the parked-question turn
     budget is marked; on a pruned genuine failure the abandonment event is stated.
     """
-    result = await prune(settings, store, interaction_id, group)
+    result = await prune(store, interaction_id, group)
     if result == "pruned" or not isinstance(exc, Exception):
         # Pruned → nothing was answered; propagate the failure loudly. A non-Exception
         # (asyncio.CancelledError mid-send or mid-backoff, SystemExit) ALWAYS

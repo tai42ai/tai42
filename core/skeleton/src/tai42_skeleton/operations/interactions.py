@@ -206,11 +206,10 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
     # byte-identical to the genuine miss below, so the door is no oracle.
     if not interactions_store_configured():
         raise NotFoundError("Interaction not found")
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
+    store = InteractionStore(interactions_settings().key_prefix)
     user_id, restricted = request_identity()
 
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         state = await _load_answerable_state(store, r, interaction_id)
         _authorize_answerer(state, restricted)
         try:
@@ -250,7 +249,7 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
         # An async park enqueues its durable continuation-due record atomically with
         # the claim; a sync question passes no timing and enqueues nothing.
         due_ttl, due_first_attempt_at_ms = (
-            continuation_due_timing(settings) if state.request.mode == "async" else (None, None)
+            continuation_due_timing(interactions_settings()) if state.request.mode == "async" else (None, None)
         )
         claimed = await _claim_or_serialization_error(
             store,
@@ -298,11 +297,10 @@ async def react_interaction(interaction_id: str, event: dict, values: dict) -> d
     # the genuine miss, mirroring the answer door.
     if not interactions_store_configured():
         raise NotFoundError("Interaction not found")
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
+    store = InteractionStore(interactions_settings().key_prefix)
     _user_id, restricted = request_identity()
 
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         # The answer door's exact correlation — existence/format/status + the audience gate —
         # applied before the reaction runs, inheriting it, adding nothing.
         state = await _load_answerable_state(store, r, interaction_id)
@@ -359,11 +357,10 @@ async def cancel_interaction(interaction_id: str) -> dict:
     # to the genuine miss below, so the door is no oracle (mirrors the answer door).
     if not interactions_store_configured():
         raise NotFoundError("Interaction not found")
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
+    store = InteractionStore(interactions_settings().key_prefix)
     _user_id, restricted = request_identity()
 
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         state = await store.get_state(r, interaction_id)
         if state is None:
             raise NotFoundError("Interaction not found")
@@ -518,10 +515,9 @@ async def list_interactions(page: int = 1, page_size: int = 50) -> dict:
     # (the malformed-window 400 above still applies, so the door is no configured oracle).
     if not interactions_store_configured():
         return {"items": [], "total": 0, "page": page, "page_size": limit, "next_page": None, "truncated": False}
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
+    store = InteractionStore(interactions_settings().key_prefix)
     _user_id, restricted = request_identity()
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         pending = await store.pending(r)
     if restricted is not None:
         # A restricted caller sees only its own addressed questions; filter BEFORE
@@ -595,9 +591,8 @@ async def list_pending_interactions(limit: int = DEFAULT_PENDING_INTERACTIONS_LI
     # OFF gate: with no store configured no park can exist — the honest empty audit.
     if not interactions_store_configured():
         return {"items": [], "count": 0}
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
-    async with client_ctx(RedisClient, settings.redis) as r:
+    store = InteractionStore(interactions_settings().key_prefix)
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         items = await store.list_pending(r, now=datetime.now(UTC), limit=limit)
     if restricted is not None:
         # A restricted caller sees only its own addressed parks — the inbox's audience

@@ -21,7 +21,7 @@ from arq.utils import timestamp_ms
 from tai42_contract.app import tai42_app
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 
-from tai42_backend_arq.pool import RedisPoolManager
+from tai42_backend_arq import pool
 from tai42_backend_arq.records import (
     ScheduleRecord,
     derive_cron_or_interval,
@@ -60,10 +60,10 @@ def _failure_detail(result: Any) -> str:
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_task_status(task_id: str) -> str:
     """Return the current status of a given task ID."""
-    arq_redis: Any = await RedisPoolManager.get()
-    job = Job(task_id, arq_redis, _deserializer=job_deserializer)
-    status = await job.status()
-    return status.value if status else "unknown"
+    async with pool.arq_connection() as arq_redis:
+        job = Job(task_id, arq_redis, _deserializer=job_deserializer)
+        status = await job.status()
+        return status.value if status else "unknown"
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -84,20 +84,20 @@ async def backend_task_result(task_id: str, timeout: float | None = None) -> Any
     SUCCESSFUL result that could not be JSON-serialized is returned as its
     stored tagged description (type name and ``repr``) instead of the value.
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    job = Job(task_id, arq_redis, _deserializer=job_deserializer)
-    status = await job.status()
-    if status == JobStatus.not_found:
-        return f"Task {task_id} not found"
-    if timeout is None and status != JobStatus.complete:
-        return f"Task {task_id} is not ready (status: {status})"
-    try:
-        return await wait_job_result(job, timeout=timeout)
-    except TimeoutError:
+    async with pool.arq_connection() as arq_redis:
+        job = Job(task_id, arq_redis, _deserializer=job_deserializer)
         status = await job.status()
-        return f"Task {task_id} is not ready (status: {status})"
-    except ResultNotFound:
-        return f"No result found for task {task_id}"
+        if status == JobStatus.not_found:
+            return f"Task {task_id} not found"
+        if timeout is None and status != JobStatus.complete:
+            return f"Task {task_id} is not ready (status: {status})"
+        try:
+            return await wait_job_result(job, timeout=timeout)
+        except TimeoutError:
+            status = await job.status()
+            return f"Task {task_id} is not ready (status: {status})"
+        except ResultNotFound:
+            return f"No result found for task {task_id}"
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -118,45 +118,45 @@ async def backend_cancel_task(task_id: str) -> str:
     when even the tagged description could not serialize) stays reported as
     aborted-or-failed, with the raw stored value appended.
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    job = Job(task_id, arq_redis, _deserializer=job_deserializer)
-    status = await job.status()
-    if status in (JobStatus.not_found, JobStatus.complete):
-        return f"Task {task_id} cannot be canceled (status: {status})"
-    try:
-        aborted = await abort_job(job, timeout=arq_settings().task_timeout)
-    except TimeoutError:
-        return f"Task {task_id} abort requested but not confirmed"
-    except Exception:
+    async with pool.arq_connection() as arq_redis:
+        job = Job(task_id, arq_redis, _deserializer=job_deserializer)
         status = await job.status()
-        if status == JobStatus.complete:
-            # Replayed stored outcome of a task that finished during the wait —
-            # not an abort failure. A revived TaskFailedError is the task's own
-            # failure; a failure with no revivable detail leaves abort and
-            # own-failure indistinguishable.
-            info = await job.result_info()
-            if info is not None and not info.success:
-                detail = _failure_detail(info.result)
-                if isinstance(info.result, TaskFailedError):
-                    return f"Task {task_id} failed on its own before the abort could take effect: {detail}"
-                return (
-                    f"Task {task_id} finished in failure after the abort request "
-                    f"(aborted or failed on its own): {detail}"
-                )
+        if status in (JobStatus.not_found, JobStatus.complete):
             return f"Task {task_id} cannot be canceled (status: {status})"
-        if status == JobStatus.not_found:
-            # Vanished between replay and re-check; gone, guaranteed not to run.
+        try:
+            aborted = await abort_job(job, timeout=arq_settings().task_timeout)
+        except TimeoutError:
+            return f"Task {task_id} abort requested but not confirmed"
+        except Exception:
+            status = await job.status()
+            if status == JobStatus.complete:
+                # Replayed stored outcome of a task that finished during the wait —
+                # not an abort failure. A revived TaskFailedError is the task's own
+                # failure; a failure with no revivable detail leaves abort and
+                # own-failure indistinguishable.
+                info = await job.result_info()
+                if info is not None and not info.success:
+                    detail = _failure_detail(info.result)
+                    if isinstance(info.result, TaskFailedError):
+                        return f"Task {task_id} failed on its own before the abort could take effect: {detail}"
+                    return (
+                        f"Task {task_id} finished in failure after the abort request "
+                        f"(aborted or failed on its own): {detail}"
+                    )
+                return f"Task {task_id} cannot be canceled (status: {status})"
+            if status == JobStatus.not_found:
+                # Vanished between replay and re-check; gone, guaranteed not to run.
+                return f"Task {task_id} cannot be canceled (status: {status})"
+            raise
+        if aborted:
+            # ``Job.abort``'s confirmed-abort verdict (a replayed CancelledError).
+            return f"Task {task_id} aborted"
+        status = await job.status()
+        if status in (JobStatus.not_found, JobStatus.complete):
+            # abort returned False on a replayed success / no retained result:
+            # the task finished during the wait, nothing left to cancel.
             return f"Task {task_id} cannot be canceled (status: {status})"
-        raise
-    if aborted:
-        # ``Job.abort``'s confirmed-abort verdict (a replayed CancelledError).
-        return f"Task {task_id} aborted"
-    status = await job.status()
-    if status in (JobStatus.not_found, JobStatus.complete):
-        # abort returned False on a replayed success / no retained result:
-        # the task finished during the wait, nothing left to cancel.
-        return f"Task {task_id} cannot be canceled (status: {status})"
-    return f"Task {task_id} abort requested but not confirmed"
+        return f"Task {task_id} abort requested but not confirmed"
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -167,20 +167,20 @@ async def backend_active_tasks() -> dict[str, Any]:
     no per-worker attribution for a running job, so the map is keyed by job id,
     not by worker.
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    # arq marks a running job with an in-progress key; the job's status API is
-    # the authority (a lingering key after completion reads complete).
-    pattern = f"{in_progress_key_prefix}*".encode()
-    job_ids: list[str] = []
-    async for key in arq_redis.scan_iter(match=pattern):
-        raw = key.decode() if isinstance(key, bytes) else key
-        job_ids.append(raw[len(in_progress_key_prefix) :])
-    tasks: dict[str, Any] = {}
-    for job_id in job_ids:
-        status = await Job(job_id, arq_redis, _deserializer=job_deserializer).status()
-        if status == JobStatus.in_progress:
-            tasks[job_id] = {"status": status.value}
-    return tasks
+    async with pool.arq_connection() as arq_redis:
+        # arq marks a running job with an in-progress key; the job's status API is
+        # the authority (a lingering key after completion reads complete).
+        pattern = f"{in_progress_key_prefix}*".encode()
+        job_ids: list[str] = []
+        async for key in arq_redis.scan_iter(match=pattern):
+            raw = key.decode() if isinstance(key, bytes) else key
+            job_ids.append(raw[len(in_progress_key_prefix) :])
+        tasks: dict[str, Any] = {}
+        for job_id in job_ids:
+            status = await Job(job_id, arq_redis, _deserializer=job_deserializer).status()
+            if status == JobStatus.in_progress:
+                tasks[job_id] = {"status": status.value}
+        return tasks
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -190,13 +190,13 @@ async def backend_reserved_tasks() -> list[str]:
     Returns a flat list of job ids — arq has one queue and no per-worker
     reservation, so there is no worker or queue keying to report.
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    now_ms = timestamp_ms()
-    return [
-        job.job_id
-        for job in await arq_redis.queued_jobs()
-        if job.job_id is not None and job.score is not None and job.score <= now_ms
-    ]
+    async with pool.arq_connection() as arq_redis:
+        now_ms = timestamp_ms()
+        return [
+            job.job_id
+            for job in await arq_redis.queued_jobs()
+            if job.job_id is not None and job.score is not None and job.score <= now_ms
+        ]
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -206,13 +206,13 @@ async def backend_scheduled_tasks() -> dict[str, float]:
     Returns a flat mapping of job id to its due time in milliseconds since the
     epoch (the queue zset score).
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    now_ms = timestamp_ms()
-    return {
-        job.job_id: float(job.score)
-        for job in await arq_redis.queued_jobs()
-        if job.job_id is not None and job.score is not None and job.score > now_ms
-    }
+    async with pool.arq_connection() as arq_redis:
+        now_ms = timestamp_ms()
+        return {
+            job.job_id: float(job.score)
+            for job in await arq_redis.queued_jobs()
+            if job.job_id is not None and job.score is not None and job.score > now_ms
+        }
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -224,12 +224,12 @@ async def backend_list_failed_tasks() -> list[dict[str, Any]]:
     keeps job outcomes only for the configured keep-result window, so this lists failures within
     that window.
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    return [
-        {"task_id": result.job_id, "error": _failure_detail(result.result)}
-        for result in await arq_redis.all_job_results()
-        if not result.success and result.job_id is not None
-    ]
+    async with pool.arq_connection() as arq_redis:
+        return [
+            {"task_id": result.job_id, "error": _failure_detail(result.result)}
+            for result in await arq_redis.all_job_results()
+            if not result.success and result.job_id is not None
+        ]
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -244,34 +244,36 @@ async def backend_list_schedules() -> list[dict[str, Any]]:
     ``recovery_failed_at`` name the terminal error state a schedule the startup
     watchdog cannot recover carries (both null on a healthy schedule).
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    settings = arq_settings()
-    schedule_keys = [key async for key in arq_redis.scan_iter(match=settings.arq_schedule_pattern.encode())]
-    schedules = []
-    for key in schedule_keys:
-        raw = key.decode() if isinstance(key, bytes) else key
-        name = raw.split(":")[-1]
-        data = await arq_redis.hgetall(raw)
-        if not data:
-            # Empty hash: the schedule was deleted between the scan and this read.
-            continue
-        next_run_raw = data.get(b"last_scheduled_ts")
-        next_run_ts = float(next_run_raw) if next_run_raw else None
-        schedules.append(
-            {
-                "name": name,
-                "enabled": data.get(b"enabled", b"true").decode() == "true",
-                "next_run_at_ts": next_run_ts,
-                "next_run_at_iso": (datetime.fromtimestamp(next_run_ts, tz=UTC).isoformat() if next_run_ts else None),
-                "schedule": orjson.loads(data.get(b"schedule", b"{}")),
-                "target": data.get(b"target", b"").decode(),
-                "args": orjson.loads(data.get(b"args", b"[]")),
-                "kwargs": orjson.loads(data.get(b"kwargs", b"{}")),
-                "recovery_error": _decode_optional(data.get(b"recovery_error")),
-                "recovery_failed_at": _decode_optional(data.get(b"recovery_failed_at")),
-            }
-        )
-    return schedules
+    async with pool.arq_connection() as arq_redis:
+        settings = arq_settings()
+        schedule_keys = [key async for key in arq_redis.scan_iter(match=settings.arq_schedule_pattern.encode())]
+        schedules = []
+        for key in schedule_keys:
+            raw = key.decode() if isinstance(key, bytes) else key
+            name = raw.split(":")[-1]
+            data = await arq_redis.hgetall(raw)
+            if not data:
+                # Empty hash: the schedule was deleted between the scan and this read.
+                continue
+            next_run_raw = data.get(b"last_scheduled_ts")
+            next_run_ts = float(next_run_raw) if next_run_raw else None
+            schedules.append(
+                {
+                    "name": name,
+                    "enabled": data.get(b"enabled", b"true").decode() == "true",
+                    "next_run_at_ts": next_run_ts,
+                    "next_run_at_iso": (
+                        datetime.fromtimestamp(next_run_ts, tz=UTC).isoformat() if next_run_ts else None
+                    ),
+                    "schedule": orjson.loads(data.get(b"schedule", b"{}")),
+                    "target": data.get(b"target", b"").decode(),
+                    "args": orjson.loads(data.get(b"args", b"[]")),
+                    "kwargs": orjson.loads(data.get(b"kwargs", b"{}")),
+                    "recovery_error": _decode_optional(data.get(b"recovery_error")),
+                    "recovery_failed_at": _decode_optional(data.get(b"recovery_failed_at")),
+                }
+            )
+        return schedules
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -287,29 +289,29 @@ async def backend_export_schedules() -> list[dict[str, Any]]:
     hash with a missing or malformed stored schedule dict raises loudly — an
     export must never emit a record that cannot recreate its schedule.
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    settings = arq_settings()
-    schedule_keys = [key async for key in arq_redis.scan_iter(match=settings.arq_schedule_pattern.encode())]
-    records = []
-    for key in schedule_keys:
-        raw = key.decode() if isinstance(key, bytes) else key
-        name = raw.split(":")[-1]
-        data = await arq_redis.hgetall(raw)
-        if not data:
-            # Empty hash: the schedule was deleted between the scan and this read.
-            continue
-        raw_schedule = data.get(b"schedule")
-        if raw_schedule is None:
-            raise ValueError(f"schedule '{name}' has no stored schedule definition; cannot export it")
-        record = ScheduleRecord(
-            name=name,
-            args=orjson.loads(data.get(b"args", b"[]")),
-            kwargs=orjson.loads(data.get(b"kwargs", b"{}")),
-            schedule=orjson.loads(raw_schedule),
-            enabled=data.get(b"enabled", b"true").decode() == "true",
-        )
-        records.append(record)
-    return [record.model_dump() for record in records]
+    async with pool.arq_connection() as arq_redis:
+        settings = arq_settings()
+        schedule_keys = [key async for key in arq_redis.scan_iter(match=settings.arq_schedule_pattern.encode())]
+        records = []
+        for key in schedule_keys:
+            raw = key.decode() if isinstance(key, bytes) else key
+            name = raw.split(":")[-1]
+            data = await arq_redis.hgetall(raw)
+            if not data:
+                # Empty hash: the schedule was deleted between the scan and this read.
+                continue
+            raw_schedule = data.get(b"schedule")
+            if raw_schedule is None:
+                raise ValueError(f"schedule '{name}' has no stored schedule definition; cannot export it")
+            record = ScheduleRecord(
+                name=name,
+                args=orjson.loads(data.get(b"args", b"[]")),
+                kwargs=orjson.loads(data.get(b"kwargs", b"{}")),
+                schedule=orjson.loads(raw_schedule),
+                enabled=data.get(b"enabled", b"true").decode() == "true",
+            )
+            records.append(record)
+        return [record.model_dump() for record in records]
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -338,85 +340,85 @@ async def backend_import_schedules(
     always 0 -- this backend has no per-row skip case (every valid record can be
     stored, enabled or disabled).
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    settings = arq_settings()
+    async with pool.arq_connection() as arq_redis:
+        settings = arq_settings()
 
-    created = 0
-    updated = 0
-    skipped = 0
-    skipped_existing = 0
-    errors: list[dict[str, Any]] = []
+        created = 0
+        updated = 0
+        skipped = 0
+        skipped_existing = 0
+        errors: list[dict[str, Any]] = []
 
-    for index, entry in enumerate(schedules):
-        try:
-            record = ScheduleRecord.model_validate(entry)
+        for index, entry in enumerate(schedules):
+            try:
+                record = ScheduleRecord.model_validate(entry)
 
-            key = settings.arq_schedule_key(record.name)
-            exists = bool(await arq_redis.exists(key))
+                key = settings.arq_schedule_key(record.name)
+                exists = bool(await arq_redis.exists(key))
 
-            if exists and mode == "skip":
-                # An existing schedule (keyed by name) is left in place.
-                skipped_existing += 1
-                continue
+                if exists and mode == "skip":
+                    # An existing schedule (keyed by name) is left in place.
+                    skipped_existing += 1
+                    continue
 
-            norm = normalize_schedule(record.schedule)
-            cron_or_interval = derive_cron_or_interval(norm)
-            defer_by, last_scheduled_ts = next_run_after(cron_or_interval, datetime.now(UTC))
+                norm = normalize_schedule(record.schedule)
+                cron_or_interval = derive_cron_or_interval(norm)
+                defer_by, last_scheduled_ts = next_run_after(cron_or_interval, datetime.now(UTC))
 
-            mapping_updates = {
-                "target": "tool_execution",
-                "args": orjson.dumps(record.args),
-                "kwargs": orjson.dumps(record.kwargs),
-                "schedule": orjson.dumps(norm),
-                "cron_or_interval": str(cron_or_interval),
-                "enabled": "true" if record.enabled else "false",
-            }
+                mapping_updates = {
+                    "target": "tool_execution",
+                    "args": orjson.dumps(record.args),
+                    "kwargs": orjson.dumps(record.kwargs),
+                    "schedule": orjson.dumps(norm),
+                    "cron_or_interval": str(cron_or_interval),
+                    "enabled": "true" if record.enabled else "false",
+                }
 
-            await safe_schedule_transition(
-                arq_redis,
-                record.name,
-                defer_by=defer_by,
-                last_scheduled_ts=last_scheduled_ts,
-                mapping_updates=mapping_updates,
-                enforce_job_id=None,
-            )
+                await safe_schedule_transition(
+                    arq_redis,
+                    record.name,
+                    defer_by=defer_by,
+                    last_scheduled_ts=last_scheduled_ts,
+                    mapping_updates=mapping_updates,
+                    enforce_job_id=None,
+                )
 
-            if exists:
-                updated += 1
-            else:
-                created += 1
-        except Exception as exc:
-            name = entry.get("name") if isinstance(entry, dict) else None
-            errors.append({"index": index, "name": name, "error": repr(exc)})
+                if exists:
+                    updated += 1
+                else:
+                    created += 1
+            except Exception as exc:
+                name = entry.get("name") if isinstance(entry, dict) else None
+                errors.append({"index": index, "name": name, "error": repr(exc)})
 
-    return {
-        "created": created,
-        "updated": updated,
-        "skipped": skipped,
-        "skipped_existing": skipped_existing,
-        "errors": errors,
-    }
+        return {
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+            "skipped_existing": skipped_existing,
+            "errors": errors,
+        }
 
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_get_schedule(name: str) -> dict[str, Any]:
     """Get details of a custom schedule."""
-    arq_redis: Any = await RedisPoolManager.get()
-    settings = arq_settings()
-    key = settings.arq_schedule_key(name)
-    data = await arq_redis.hgetall(key)
-    if not data:
-        # Empty hash means no schedule.
-        return {"status": "not_found"}
-    return {
-        "enabled": data.get(b"enabled", b"true").decode() == "true",
-        "schedule": orjson.loads(data.get(b"schedule", b"{}")),
-        "target": data.get(b"target", b"").decode(),
-        "args": orjson.loads(data.get(b"args", b"[]")),
-        "kwargs": orjson.loads(data.get(b"kwargs", b"{}")),
-        "recovery_error": _decode_optional(data.get(b"recovery_error")),
-        "recovery_failed_at": _decode_optional(data.get(b"recovery_failed_at")),
-    }
+    async with pool.arq_connection() as arq_redis:
+        settings = arq_settings()
+        key = settings.arq_schedule_key(name)
+        data = await arq_redis.hgetall(key)
+        if not data:
+            # Empty hash means no schedule.
+            return {"status": "not_found"}
+        return {
+            "enabled": data.get(b"enabled", b"true").decode() == "true",
+            "schedule": orjson.loads(data.get(b"schedule", b"{}")),
+            "target": data.get(b"target", b"").decode(),
+            "args": orjson.loads(data.get(b"args", b"[]")),
+            "kwargs": orjson.loads(data.get(b"kwargs", b"{}")),
+            "recovery_error": _decode_optional(data.get(b"recovery_error")),
+            "recovery_failed_at": _decode_optional(data.get(b"recovery_failed_at")),
+        }
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -427,17 +429,17 @@ async def backend_delete_schedule(name: str) -> dict[str, Any]:
     transitions and flag writes — a transition mid-flight can never re-write
     the hash after this delete removed it.
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    settings = arq_settings()
-    key = settings.arq_schedule_key(name)
-    async with schedule_lock(arq_redis, name):
-        if not await arq_redis.exists(key):
-            return {"status": "not_found", "name": name}
+    async with pool.arq_connection() as arq_redis:
+        settings = arq_settings()
+        key = settings.arq_schedule_key(name)
+        async with schedule_lock(arq_redis, name):
+            if not await arq_redis.exists(key):
+                return {"status": "not_found", "name": name}
 
-        await abort_schedule_task(key)
-        await arq_redis.delete(key)
+            await abort_schedule_task(key)
+            await arq_redis.delete(key)
 
-    return {"status": "deleted", "name": name}
+        return {"status": "deleted", "name": name}
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -448,14 +450,14 @@ async def backend_enable_schedule(name: str) -> dict[str, Any]:
     that stays true for the write — writing the flag into a hash a concurrent
     delete just removed would resurrect the schedule as a partial hash.
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    settings = arq_settings()
-    key = settings.arq_schedule_key(name)
-    async with schedule_lock(arq_redis, name):
-        if not await arq_redis.exists(key):
-            return {"status": "not_found"}
-        await arq_redis.hset(key, "enabled", "true")
-    return {"status": "enabled"}
+    async with pool.arq_connection() as arq_redis:
+        settings = arq_settings()
+        key = settings.arq_schedule_key(name)
+        async with schedule_lock(arq_redis, name):
+            if not await arq_redis.exists(key):
+                return {"status": "not_found"}
+            await arq_redis.hset(key, "enabled", "true")
+        return {"status": "enabled"}
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -466,43 +468,43 @@ async def backend_disable_schedule(name: str) -> dict[str, Any]:
     that stays true for the write — writing the flag into a hash a concurrent
     delete just removed would resurrect the schedule as a partial hash.
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    settings = arq_settings()
-    key = settings.arq_schedule_key(name)
-    async with schedule_lock(arq_redis, name):
-        if not await arq_redis.exists(key):
-            return {"status": "not_found"}
-        await arq_redis.hset(key, "enabled", "false")
-    return {"status": "disabled"}
+    async with pool.arq_connection() as arq_redis:
+        settings = arq_settings()
+        key = settings.arq_schedule_key(name)
+        async with schedule_lock(arq_redis, name):
+            if not await arq_redis.exists(key):
+                return {"status": "not_found"}
+            await arq_redis.hset(key, "enabled", "false")
+        return {"status": "disabled"}
 
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_run_schedule_now(name: str) -> dict[str, Any]:
     """Force a schedule to run ASAP."""
-    arq_redis: Any = await RedisPoolManager.get()
-    settings = arq_settings()
-    key = settings.arq_schedule_key(name)
-    data = await arq_redis.hgetall(key)
-    if not data:
-        # Empty hash means no schedule.
-        return {"status": "not_found"}
+    async with pool.arq_connection() as arq_redis:
+        settings = arq_settings()
+        key = settings.arq_schedule_key(name)
+        data = await arq_redis.hgetall(key)
+        if not data:
+            # Empty hash means no schedule.
+            return {"status": "not_found"}
 
-    target = data.get(b"target", b"").decode()
+        target = data.get(b"target", b"").decode()
 
-    args = orjson.loads(data.get(b"args", b"[]"))
-    kwargs = orjson.loads(data.get(b"kwargs", b"{}"))
+        args = orjson.loads(data.get(b"args", b"[]"))
+        kwargs = orjson.loads(data.get(b"kwargs", b"{}"))
 
-    await arq_redis.enqueue_job(target, *args, **kwargs)
-    return {"status": "queued"}
+        await arq_redis.enqueue_job(target, *args, **kwargs)
+        return {"status": "queued"}
 
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_schedule_exists(name: str) -> bool:
     """Return True if a custom schedule entry exists."""
-    arq_redis: Any = await RedisPoolManager.get()
-    settings = arq_settings()
-    key = settings.arq_schedule_key(name)
-    return bool(await arq_redis.exists(key))
+    async with pool.arq_connection() as arq_redis:
+        settings = arq_settings()
+        key = settings.arq_schedule_key(name)
+        return bool(await arq_redis.exists(key))
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -522,83 +524,83 @@ async def backend_update_schedule(
 
     Returns: dict with status, previous_schedule, new_schedule, next_run_at_ts/iso, redis_key.
     """
-    arq_redis: Any = await RedisPoolManager.get()
-    settings = arq_settings()
-    key = settings.arq_schedule_key(name)
-    if not await arq_redis.exists(key):
-        return {
-            "status": "not_found",
-            "name": name,
-            "message": "Schedule entry does not exist; nothing updated.",
-            "redis_key": key,
-        }
-
-    data = await arq_redis.hgetall(key)
-    prev_schedule = orjson.loads(data.get(b"schedule", b"{}"))
-    prev_cron_or_interval = parse_cron_or_interval(data.get(b"cron_or_interval", b"").decode("utf-8"))
-
-    updated = False
-    cron_or_interval = prev_cron_or_interval
-    mapping_updates: dict[str, Any] = {}
-
-    if new_schedule is not None:
-        norm = normalize_schedule(new_schedule)
-        cron_or_interval = derive_cron_or_interval(norm)
-        mapping_updates["schedule"] = orjson.dumps(norm)
-        mapping_updates["cron_or_interval"] = str(cron_or_interval)
-        updated = True
-
-    if next_run_in_ms is not None:
-        next_run_at_ts = datetime.now(tz=UTC).timestamp() + next_run_in_ms / 1000.0
-
-    if next_run_at_ts is not None or new_schedule is not None:
-        now = datetime.now(UTC)
-        if next_run_at_ts is not None:
-            defer_by = next_run_at_ts - now.timestamp()
-            last_scheduled_ts = next_run_at_ts
-        else:
-            defer_by, last_scheduled_ts = next_run_after(cron_or_interval, now)
-            next_run_at_ts = last_scheduled_ts
-
-        next_job = await safe_schedule_transition(
-            arq_redis,
-            name,
-            defer_by=defer_by,
-            last_scheduled_ts=last_scheduled_ts,
-            mapping_updates=mapping_updates,
-            enforce_job_id=None,
-        )
-        if next_job is None:
-            # Hash gone: a concurrent delete removed the schedule after the
-            # exists-check, and the update mapping must not recreate it.
+    async with pool.arq_connection() as arq_redis:
+        settings = arq_settings()
+        key = settings.arq_schedule_key(name)
+        if not await arq_redis.exists(key):
             return {
                 "status": "not_found",
                 "name": name,
-                "message": "Schedule was deleted concurrently; nothing updated.",
+                "message": "Schedule entry does not exist; nothing updated.",
                 "redis_key": key,
             }
-        updated = True
 
-    if not updated:
+        data = await arq_redis.hgetall(key)
+        prev_schedule = orjson.loads(data.get(b"schedule", b"{}"))
+        prev_cron_or_interval = parse_cron_or_interval(data.get(b"cron_or_interval", b"").decode("utf-8"))
+
+        updated = False
+        cron_or_interval = prev_cron_or_interval
+        mapping_updates: dict[str, Any] = {}
+
+        if new_schedule is not None:
+            norm = normalize_schedule(new_schedule)
+            cron_or_interval = derive_cron_or_interval(norm)
+            mapping_updates["schedule"] = orjson.dumps(norm)
+            mapping_updates["cron_or_interval"] = str(cron_or_interval)
+            updated = True
+
+        if next_run_in_ms is not None:
+            next_run_at_ts = datetime.now(tz=UTC).timestamp() + next_run_in_ms / 1000.0
+
+        if next_run_at_ts is not None or new_schedule is not None:
+            now = datetime.now(UTC)
+            if next_run_at_ts is not None:
+                defer_by = next_run_at_ts - now.timestamp()
+                last_scheduled_ts = next_run_at_ts
+            else:
+                defer_by, last_scheduled_ts = next_run_after(cron_or_interval, now)
+                next_run_at_ts = last_scheduled_ts
+
+            next_job = await safe_schedule_transition(
+                arq_redis,
+                name,
+                defer_by=defer_by,
+                last_scheduled_ts=last_scheduled_ts,
+                mapping_updates=mapping_updates,
+                enforce_job_id=None,
+            )
+            if next_job is None:
+                # Hash gone: a concurrent delete removed the schedule after the
+                # exists-check, and the update mapping must not recreate it.
+                return {
+                    "status": "not_found",
+                    "name": name,
+                    "message": "Schedule was deleted concurrently; nothing updated.",
+                    "redis_key": key,
+                }
+            updated = True
+
+        if not updated:
+            return {
+                "status": "skipped",
+                "name": name,
+                "message": "No changes provided; nothing updated.",
+                "redis_key": key,
+            }
+
+        new_data = await arq_redis.hgetall(key)
+        stored_schedule = orjson.loads(new_data.get(b"schedule", b"{}"))
+
         return {
-            "status": "skipped",
+            "status": "updated",
             "name": name,
-            "message": "No changes provided; nothing updated.",
+            "previous_schedule": prev_schedule,
+            "new_schedule": stored_schedule,
+            "next_run_at_ts": next_run_at_ts,
+            "next_run_at_iso": datetime.fromtimestamp(next_run_at_ts, tz=UTC).isoformat() if next_run_at_ts else None,
             "redis_key": key,
         }
-
-    new_data = await arq_redis.hgetall(key)
-    stored_schedule = orjson.loads(new_data.get(b"schedule", b"{}"))
-
-    return {
-        "status": "updated",
-        "name": name,
-        "previous_schedule": prev_schedule,
-        "new_schedule": stored_schedule,
-        "next_run_at_ts": next_run_at_ts,
-        "next_run_at_iso": datetime.fromtimestamp(next_run_at_ts, tz=UTC).isoformat() if next_run_at_ts else None,
-        "redis_key": key,
-    }
 
 
 @tai42_app.tools.tool(tags={"backend"})

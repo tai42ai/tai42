@@ -244,8 +244,7 @@ async def _create_redis_checkpoint(conn_string: str | None) -> tuple[CheckpointR
     if conn_string is None:
         raise ValueError(REDIS_CHECKPOINT_NOT_CONFIGURED_MESSAGE)
 
-    from redis.asyncio import Redis as AsyncRedis
-
+    from tai42_kit.clients.impl.redis import async_redis_from_url
     from tai42_kit.llm.checkpoint.codec import GuardedAsyncRedisSaver
 
     # Every key a write stamps carries the waiting retention, and a read never re-arms it: a
@@ -263,7 +262,7 @@ async def _create_redis_checkpoint(conn_string: str | None) -> tuple[CheckpointR
     # the client keeps the saver a non-owner, so that env fallback is
     # unreachable. ``connection_args`` is deliberately not passed: the saver
     # consults it only while building a client of its own.
-    client = AsyncRedis.from_url(conn_string)
+    client = async_redis_from_url(conn_string)
     saver = GuardedAsyncRedisSaver(redis_client=client, ttl=ttl_config)
     _guard_saver_serialization(saver, checkpoint_provider_facts("redis"))
 
