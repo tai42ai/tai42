@@ -13,11 +13,10 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-import pytest
 from langchain.agents.structured_output import AutoStrategy, ProviderStrategy, ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter
 from tai42_kit.llm.models import native_structured_output_kwargs
 from tai42_kit.utils.data.json_schema_util import to_portable_schema
 
@@ -79,21 +78,13 @@ def test_native_strategy_carries_the_kit_kwargs_and_a_rail() -> None:
     assert isinstance(rail, StructuredOutputRailMiddleware)
 
 
-def test_tool_strategy_over_bounded_pydantic_model_with_handle_errors_false() -> None:
+def test_tool_strategy_over_the_authored_dict_with_handle_errors_false() -> None:
     strategy, rail = structured_output_stack(_llm({}), "openai", _SCHEMA)
     assert isinstance(strategy, ToolStrategy)
     assert strategy.handle_errors is False
     assert isinstance(rail, StructuredOutputRailMiddleware)
-    # The tool tier binds a pydantic model (not a TypedDict), so langchain's tool-calling
-    # path handles it natively; a value parses to an instance and the injected int64 bound
-    # rejects an oversized integer.
-    assert isinstance(strategy.schema, type)
-    assert issubclass(strategy.schema, BaseModel)
-    parsed = TypeAdapter(strategy.schema).validate_python({"value": 7})
-    assert isinstance(parsed, BaseModel)
-    assert parsed.model_dump()["value"] == 7
-    with pytest.raises(ValidationError):
-        TypeAdapter(strategy.schema).validate_python({"value": INT64_MAX + 1})
+    # The tool tier binds the authored dict; the rail is the single judge of the value.
+    assert strategy.schema == _SCHEMA
 
 
 def test_auto_strategy_is_unwrapped_and_planned() -> None:
@@ -111,17 +102,12 @@ def test_pydantic_class_tool_tier_is_bound_under_the_class_name() -> None:
     assert parsed.model_dump()["value"] == 7
 
 
-def test_recursive_pydantic_class_tool_tier_binds_a_generated_recursive_model() -> None:
-    # A recursive pydantic class carries a ``$ref`` cycle; the converter expresses it as a
-    # generated model (forward reference + rebuild), so the tool tier binds that bounded
-    # model — named for the class — rather than the original class. It converts to an OpenAI
-    # tool without raising, which is what langchain's tool-calling path needs.
+def test_recursive_pydantic_class_tool_tier_binds_the_authored_class() -> None:
+    # A recursive pydantic class carries a ``$ref`` cycle; the tool tier binds the class itself,
+    # which langchain's tool-calling path converts to an OpenAI tool without raising.
     strategy, _rail = structured_output_stack(_llm({}), "openai", _Node)
     assert isinstance(strategy, ToolStrategy)
-    assert isinstance(strategy.schema, type)
-    assert issubclass(strategy.schema, BaseModel)
-    assert strategy.schema is not _Node
-    assert getattr(strategy.schema, "__name__", None) == "_Node"
+    assert strategy.schema is _Node
     convert_to_openai_tool(strategy.schema)
 
 

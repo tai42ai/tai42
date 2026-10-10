@@ -113,7 +113,7 @@ async def test_load_accepts_clean_id() -> None:
     assert data == b"hello"
 
 
-async def test_normalize_media_rejects_traversal_id() -> None:
+async def test_resolve_image_rejects_traversal_id() -> None:
     from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
 
     registry = StorageRegistry()
@@ -121,7 +121,7 @@ async def test_normalize_media_rejects_traversal_id() -> None:
     manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
 
     with pytest.raises(UnsafeTemplatePathError):
-        await manager.normalize_media("../x")
+        await manager.resolve_image("../x")
 
 
 # --- render/fetch/schema by-id containment guard (_load_by_id seam) ----------

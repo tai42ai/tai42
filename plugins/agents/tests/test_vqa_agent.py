@@ -22,7 +22,6 @@ from tai42_contract.agent.events import MessageDelta, MessageFinal, RunUsage, St
 from tai42_contract.app import tai42_app
 
 import tai42_agents.vqa_agent as vqa
-from tai42_agents._internal.text import text_of
 from tai42_agents.vqa_agent import VqaAgent, VqaAgentInput
 
 
@@ -166,19 +165,19 @@ def test_astream_whitespace_only_answer_yields_no_final(monkeypatch: pytest.Monk
     assert all(not isinstance(event, MessageFinal) for event in events)
 
 
-def test_vqa_message_normalizes_a_url_through_the_handle(resource_manager: Any) -> None:
-    """A public URL is normalized via the ``resource_manager`` handle (awaited) and
-    passes through as the image content part, alongside the text query."""
+def test_vqa_message_resolves_a_url_through_the_storage_facet(storage: Any) -> None:
+    """A public URL is resolved via the storage facet (awaited) and the agent builds
+    its own image content part from it, alongside the text query."""
     message = asyncio.run(vqa._vqa_message("http://img/cat.png", "describe"))
     assert message.content == [
         {"type": "text", "text": "describe"},
         {"type": "image_url", "image_url": {"url": "http://img/cat.png"}},
     ]
-    assert resource_manager.media_calls == ["http://img/cat.png"]
+    assert storage.media_calls == ["http://img/cat.png"]
 
 
-def test_vqa_message_normalizes_a_storage_id_through_the_handle(resource_manager: Any) -> None:
-    """A storage id is resolved via the same handle to a base64 data-URI image
+def test_vqa_message_resolves_a_storage_id_through_the_storage_facet(storage: Any) -> None:
+    """A storage id is resolved via the same facet to a base64 data-URI image
     content part — proving VqaAgent works with stored images, not just URLs."""
     message = asyncio.run(vqa._vqa_message("skills/cat.png", "describe"))
     content = message.content
@@ -188,17 +187,17 @@ def test_vqa_message_normalizes_a_storage_id_through_the_handle(resource_manager
     assert isinstance(image_part, dict)
     assert image_part["type"] == "image_url"
     assert image_part["image_url"]["url"].startswith("data:image/")
-    assert resource_manager.media_calls == ["skills/cat.png"]
+    assert storage.media_calls == ["skills/cat.png"]
 
 
-def test_run_rejects_non_image_media_through_the_handle(fake_llm: None, resource_manager: Any) -> None:
-    """A resolvable non-image source (a ``.pdf``) is rejected by the resource
-    manager handle's image-only guard, and the vqa media path propagates that
+def test_run_rejects_non_image_media_through_the_storage_facet(fake_llm: None, storage: Any) -> None:
+    """A resolvable non-image source (a ``.pdf``) is rejected by the storage
+    facet's image-only guard, and the vqa media path propagates that
     ``ValueError`` rather than sending a non-image to the model. Draining ``run``
     exercises the same ``astream`` media path."""
     with pytest.raises(ValueError, match="image"):
         asyncio.run(VqaAgent().run(image_url="notes.pdf", query="describe"))
-    assert resource_manager.media_calls == ["notes.pdf"]
+    assert storage.media_calls == ["notes.pdf"]
 
 
 _VQA_SCHEMA = {"title": "Answer", "type": "object", "properties": {"answer": {"type": "string"}}}
@@ -481,28 +480,3 @@ def test_tool_input_requires_image_url_and_query() -> None:
         VqaAgentInput(image_url="http://img")  # type: ignore[call-arg]
     with pytest.raises(ValidationError):
         VqaAgentInput(query="describe")  # type: ignore[call-arg]
-
-
-class TestTextOf:
-    """The shared ``text_of`` helper (``tai42_agents._internal.text``) that both the
-    vqa stream and the tools-agent projection use to decode message text."""
-
-    def test_string_content_returned_verbatim(self) -> None:
-        assert text_of(SimpleNamespace(content="hi")) == "hi"
-
-    def test_list_content_joins_text_blocks_and_skips_non_text(self) -> None:
-        message = SimpleNamespace(
-            content=[
-                "a",  # a bare string block
-                {"type": "text", "text": "b"},  # an explicit text block
-                {"text": "c"},  # type omitted -> treated as text
-                {"type": "image_url", "image_url": {"url": "http://img"}},  # skipped
-            ]
-        )
-        assert text_of(message) == "abc"
-
-    def test_missing_content_is_empty(self) -> None:
-        assert text_of(object()) == ""
-
-    def test_non_str_non_list_content_is_empty(self) -> None:
-        assert text_of(SimpleNamespace(content=123)) == ""

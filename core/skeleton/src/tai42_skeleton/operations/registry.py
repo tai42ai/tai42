@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from tai42_kit.registry import StagedGeneration
 
 if TYPE_CHECKING:
-    from tai42_skeleton.operations.errors import OperationError
+    from tai42_contract.errors import OperationError
 
 
 @dataclass

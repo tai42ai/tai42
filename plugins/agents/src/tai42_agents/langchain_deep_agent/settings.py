@@ -77,7 +77,7 @@ class LangchainDeepAgentSettings(TaiBaseSettings):
     memory_mb: int | None = Field(default=None, gt=0)
 
     # PARITY with the coding agent: the per-agent re-dispatch declaration, DECLARED
-    # to the skeleton at registration as ``meta={"tai42/crash_resume": <setting>}``. RECYCLE-class
+    # to the skeleton at registration as ``meta={TOOL_META_CRASH_RESUME: <setting>}``. RECYCLE-class
     # so a hot change re-registers and re-declares the meta (it is captured once at registration,
     # so a hot change would otherwise leave the registered meta stale — the same staleness argument
     # as the sandbox knobs).

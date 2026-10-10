@@ -2,9 +2,10 @@
 
 ``SandboxLocalSettings`` reads the ``SANDBOX_LOCAL_`` env group and mixes in
 :class:`~tai42_kit.sandbox.SandboxDispatchSettings`, the lifecycle surface the
-kit sandbox base reads (``default_ttl_seconds`` / ``reap_interval_seconds`` /
-``exec_default_timeout_seconds``): the names, defaults and reload classes are
-declared once there, under this group's own prefix.
+provider dispatches (``reap_interval_seconds`` / ``exec_default_timeout_seconds``,
+read through :meth:`LocalSandbox.dispatch_settings`): the names, defaults and reload
+classes are declared once there, under this group's own prefix. The group claims its
+prefix (``env_prefix_owned``): an unknown ``SANDBOX_LOCAL_*`` name is refused at boot.
 
 Two provider-specific fields:
 
@@ -23,6 +24,8 @@ provider, never silently run uncapped/unisolated.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.sandbox import SandboxDispatchSettings
@@ -33,6 +36,7 @@ class SandboxLocalSettings(SandboxDispatchSettings):
     """The ``SANDBOX_LOCAL_`` env group backing the direct/host sandbox provider."""
 
     model_config = SettingsConfigDict(env_prefix="SANDBOX_LOCAL_")
+    env_prefix_owned: ClassVar[bool] = True
 
     # The host workspace root every provisioned workspace lives under. RECYCLE-class:
     # it binds the on-disk location of durable workspaces, so a change strands them

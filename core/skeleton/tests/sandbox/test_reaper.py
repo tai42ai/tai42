@@ -18,8 +18,10 @@ class _ReapStub:
     """A stub provider whose ``reap`` is scripted: it fires ``fired`` after each call and
     either returns ids or raises, so the loop's log + survival behavior is observable."""
 
-    def __init__(self, *, raise_error: bool) -> None:
+    def __init__(self, *, raise_error: bool, reap_interval_seconds: float = 0.01) -> None:
         self._raise = raise_error
+        # A fast tick so the loop reaps promptly under test.
+        self.reap_interval_seconds = reap_interval_seconds
         self.calls = 0
         self.fired = asyncio.Event()
 
@@ -36,8 +38,6 @@ def bound_app(monkeypatch: pytest.MonkeyPatch):
     app = build_app()
     tai42_app.bind(app)
     monkeypatch.setattr(app, "_manifest", Manifest.model_validate({}), raising=False)
-    # A fast tick so the loop reaps promptly under test.
-    monkeypatch.setattr(reaper_mod, "_reap_interval_seconds", lambda: 0.01)
     return app
 
 
@@ -75,3 +75,20 @@ async def test_reaper_logs_exception_loudly_and_continues(bound_app, monkeypatch
             await task
     assert any(rec.levelno == logging.ERROR and "reap cycle failed" in rec.message for rec in caplog.records)
     assert stub.calls >= 2  # it kept ticking after the first failure
+
+
+async def test_reaper_ticks_at_the_bound_providers_reap_interval(bound_app, monkeypatch) -> None:
+    stub = _ReapStub(raise_error=False, reap_interval_seconds=7)
+    monkeypatch.setattr(bound_app._sandbox_holder, "_sandbox", stub)
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        if len(slept) > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(reaper_mod.asyncio, "sleep", fake_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await run_sandbox_reap_loop()
+    assert slept == [7, 7]
+    assert stub.calls == 1

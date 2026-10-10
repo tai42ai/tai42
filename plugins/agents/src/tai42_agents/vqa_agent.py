@@ -3,9 +3,9 @@
 The simplest agent: a single multimodal LLM completion. It takes an image
 reference (public URL or storage id) and a text query, builds one ``HumanMessage``
 carrying both, and streams the model's answer — no tools, checkpointer, or graph.
-The image is normalized into a model-ready content part via
-``tai42_app.storage.resource_manager.normalize_media`` (a stored id resolves to a
-base64 data-URI, a public URL passes through) before the model call.
+The image is resolved through ``tai42_app.storage.resolve_image`` (a stored id
+resolves to a base64 data-URI, a public URL passes through) and the agent builds
+its model's image content part from it before the model call.
 
 * :meth:`astream` — projects the model's own ``astream`` into the contract
   vocabulary: :class:`MessageDelta` per token, a :class:`RunUsage` when the provider
@@ -40,18 +40,17 @@ from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_
 from tai42_agents._internal.reject import resolve_response_format
 from tai42_agents._internal.run_kwargs import guard_run_kwargs
 from tai42_agents._internal.structured import ainvoke_structured
-from tai42_agents._internal.text import text_of
 from tai42_agents._internal.usage import usage_event
 
 
 async def _vqa_message(image_url: str, query: str) -> HumanMessage:
     """One multimodal ``HumanMessage`` carrying the text query and the image.
 
-    ``image_url`` is normalized into a model-ready image content part via
-    ``resource_manager.normalize_media``: a public URL passes through, a storage id
-    resolves to a base64 data-URI.
+    ``image_url`` is resolved through the storage facet (a public URL passes through, a
+    storage id resolves to a base64 data-URI) and carried as LangChain's ``image_url`` part.
     """
-    image_part = await tai42_app.storage.resource_manager.normalize_media(image_url)
+    ref = await tai42_app.storage.resolve_image(image_url)
+    image_part = {"type": "image_url", "image_url": {"url": ref.url}}
     return HumanMessage(content=[{"type": "text", "text": query}, image_part])
 
 
@@ -59,7 +58,7 @@ class VqaAgentInput(BaseModel):
     """JSON tool-face parameters for ``vqa_agent``.
 
     ``image_url`` accepts either a public image URL or a storage id — both are a
-    plain ``str``, resolved by ``ResourceManager.normalize_media``.
+    plain ``str``, resolved by the storage facet's ``resolve_image``.
 
     ``response_format`` is a JSON-Schema dict with a required top-level ``"title"``
     (used as the structured-output name); when set, the completion forces the model
@@ -239,7 +238,7 @@ class VqaAgent(Agent):
         accumulated: Any = None
         async for chunk in llm.astream([message], config=cast(RunnableConfig, trace.config)):
             accumulated = chunk if accumulated is None else accumulated + chunk
-            text = text_of(chunk)
+            text = chunk.text
             if text:
                 parts.append(text)
                 yield MessageDelta(text=text)

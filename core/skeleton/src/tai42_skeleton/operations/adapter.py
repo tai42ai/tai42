@@ -21,10 +21,10 @@ from pydantic import BaseModel, ValidationError
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from tai42_contract.errors import OperationError
 
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata, RouteAction
-from tai42_skeleton.operations.errors import OperationError
 
 if TYPE_CHECKING:
     from tai42_skeleton.operations.registry import OperationMetadata

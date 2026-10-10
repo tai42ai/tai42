@@ -32,7 +32,6 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.default_memory_mb is None
     assert settings.pull_policy == "missing"
     # Inherited lifecycle knobs from the kit dispatch mixin.
-    assert settings.default_ttl_seconds == 3600
     assert settings.reap_interval_seconds == 300
     assert settings.exec_default_timeout_seconds == 300
 

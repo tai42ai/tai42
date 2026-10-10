@@ -33,6 +33,7 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
+from tai42_kit.llm import middleware as middleware_pkg
 from tai42_kit.llm.middleware.leading_user import _CONVERSATION_START_MARKER
 
 # Importing each agent class registers its module through the recording app
@@ -42,6 +43,7 @@ from tai42_agents._internal import append as append_mod
 from tai42_agents._internal import recovery as rec
 from tai42_agents.langchain_deep_agent.agent import DeepAgent
 from tai42_agents.refine_agent.agent import RefineAgent
+from tai42_agents.retrieval_tools_agent import graph as retrieval_graph
 from tai42_agents.retrieval_tools_agent.agent import RetrievalToolsAgent
 from tai42_agents.tools_agent import ToolsAgent
 from tai42_agents.voting_agent.agent import VotingAgent
@@ -126,6 +128,12 @@ def _assert_run_saw_prior(model: ScriptedChatModel) -> None:
 _OPERATOR_OPENER = [{"role": "assistant", "content": "operator opener"}]
 
 
+def _strict_ordering_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the run's provider one that requires a leading user turn, whatever the recorded table says."""
+    monkeypatch.setattr(middleware_pkg, "requires_leading_user_turn", lambda provider: True)
+    monkeypatch.setattr(retrieval_graph, "requires_leading_user_turn", lambda provider: True)
+
+
 def _assert_leads_user_first(model: ScriptedChatModel) -> None:
     """The first history the model was asked to generate from leads user-first: the
     leading-user marker sits ahead of the operator's assistant message, so a
@@ -137,6 +145,12 @@ def _assert_leads_user_first(model: ScriptedChatModel) -> None:
     assert operator is not None
     assert non_system[operator].content == "operator opener"
     assert operator > 0
+
+
+def _assert_thread_holds_no_marker(stored: list[BaseMessage]) -> None:
+    """The leading user turn is request-scoped: the checkpointed thread never stores it."""
+    assert stored
+    assert all(m.content != _CONVERSATION_START_MARKER for m in stored)
 
 
 # --------------------------------------------------------------------------
@@ -151,7 +165,7 @@ class TestToolsAgentAppend:
         monkeypatch.setattr(
             bta,
             "llm_provider_settings",
-            lambda: SimpleNamespace(llm="p", checkpoint="c", checkpoint_conn_string=None),
+            lambda: SimpleNamespace(llm="anthropic", checkpoint="c", checkpoint_conn_string=None),
         )
         monkeypatch.setattr(bta, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
         monkeypatch.setattr(bta, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: False))
@@ -189,14 +203,18 @@ class TestToolsAgentAppend:
         assert out == "reply"
         _assert_run_saw_prior(model)
 
-    def test_operator_opened_thread_leads_user_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_operator_opened_thread_leads_user_first_on_a_strict_ordering_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         saver = InMemorySaver()
         model = ScriptedChatModel([AIMessage(content="reply")])
         self._seams(monkeypatch, model, saver)
+        _strict_ordering_provider(monkeypatch)
         agent = tai42_app.agents.get_agent("tools_agent")
         asyncio.run(agent.append_thread_messages(thread_id="t-tools-op", messages=_OPERATOR_OPENER))
         asyncio.run(agent.run(user_message=TemplatedText(content="client turn"), thread_id="t-tools-op"))
         _assert_leads_user_first(model)
+        _assert_thread_holds_no_marker(self._read(saver, model, "t-tools-op"))
 
     def test_append_heals_dangling_tool_call_before_write(self, monkeypatch: pytest.MonkeyPatch) -> None:
         saver = InMemorySaver()
@@ -293,7 +311,7 @@ class TestDeepAgentAppend:
             dagent,
             "llm_provider_settings",
             lambda: SimpleNamespace(
-                llm="p", checkpoint="c", store="s", checkpoint_conn_string=None, store_conn_string=None
+                llm="anthropic", checkpoint="c", store="s", checkpoint_conn_string=None, store_conn_string=None
             ),
         )
         monkeypatch.setattr(dagent, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
@@ -338,14 +356,18 @@ class TestDeepAgentAppend:
         assert out == "reply"
         _assert_run_saw_prior(model)
 
-    def test_operator_opened_thread_leads_user_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_operator_opened_thread_leads_user_first_on_a_strict_ordering_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         saver, store = InMemorySaver(), InMemoryStore()
         model = ScriptedChatModel([AIMessage(content="reply")])
         self._seams(monkeypatch, model, saver, store)
+        _strict_ordering_provider(monkeypatch)
         agent = tai42_app.agents.get_agent("langchain_deep_agent")
         asyncio.run(agent.append_thread_messages(thread_id="t-deep-op", messages=_OPERATOR_OPENER))
         asyncio.run(agent.run(tools=[], user_message=TemplatedText(content="client turn"), thread_id="t-deep-op"))
         _assert_leads_user_first(model)
+        _assert_thread_holds_no_marker(self._read(saver, store, model, "t-deep-op"))
 
     def test_invalid_role_raises(self) -> None:
         agent = tai42_app.agents.get_agent("langchain_deep_agent")
@@ -382,7 +404,12 @@ class TestRetrievalAgentAppend:
             ragent,
             "llm_provider_settings",
             lambda: SimpleNamespace(
-                llm="p", embedding="e", checkpoint="c", store="s", checkpoint_conn_string=None, store_conn_string=None
+                llm="anthropic",
+                embedding="e",
+                checkpoint="c",
+                store="s",
+                checkpoint_conn_string=None,
+                store_conn_string=None,
             ),
         )
         monkeypatch.setattr(ragent, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
@@ -410,7 +437,11 @@ class TestRetrievalAgentAppend:
     def _read(self, saver: InMemorySaver, model: BaseChatModel, thread_id: str) -> list[BaseMessage]:
         from tai42_agents.retrieval_tools_agent.graph import RetrievalToolsGraph
 
-        graph = asyncio.run(RetrievalToolsGraph(tools=[], llm=model, store=InMemoryStore(), checkpoint=saver).abuild())
+        graph = asyncio.run(
+            RetrievalToolsGraph(
+                provider="anthropic", tools=[], llm=model, store=InMemoryStore(), checkpoint=saver
+            ).abuild()
+        )
         snapshot = asyncio.run(graph.aget_state(_thread(thread_id)))
         return list(snapshot.values.get("messages", []))
 
@@ -432,14 +463,18 @@ class TestRetrievalAgentAppend:
         assert out == "done"
         _assert_run_saw_prior(model)
 
-    def test_operator_opened_thread_leads_user_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_operator_opened_thread_leads_user_first_on_a_strict_ordering_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         saver = InMemorySaver()
         model = ScriptedChatModel([_status("done")])
         self._seams(monkeypatch, model, saver)
+        _strict_ordering_provider(monkeypatch)
         agent = tai42_app.agents.get_agent("retrieval_tools_agent")
         asyncio.run(agent.append_thread_messages(thread_id="t-retr-op", messages=_OPERATOR_OPENER))
         asyncio.run(agent.run(user_message=TemplatedText(content="client turn"), thread_id="t-retr-op"))
         _assert_leads_user_first(model)
+        _assert_thread_holds_no_marker(self._read(saver, model, "t-retr-op"))
 
     def test_invalid_role_raises(self) -> None:
         agent = tai42_app.agents.get_agent("retrieval_tools_agent")

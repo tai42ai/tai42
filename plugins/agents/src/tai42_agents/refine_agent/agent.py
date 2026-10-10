@@ -35,8 +35,8 @@ from tai42_contract.template import TemplatedText
 from tai42_kit.llm import resolve_trace_context
 from tai42_kit.llm.checkpoint import mark_threads_finished
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
+from tai42_kit.llm.middleware import history_middlewares
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
-from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_system_message, build_user_output
@@ -109,7 +109,8 @@ async def _build_role_agent(
     Each role runs the same middleware stack: system purge first (so a stored system
     message never reaches the model), the context-overflow strategies fed this role's
     own system prompt (so the trimming budget covers the full outgoing request),
-    rolling cache-mark, and tool-error visibility. Each role's system message is its
+    ``provider``'s history middlewares (leading user turn, rolling cache mark), and
+    tool-error visibility. Each role's system message is its
     graph's per-run ``system_prompt``, applied at the model-call boundary and never
     written into the checkpointed thread. Under the server-wide cache default it is
     marked with ``provider``'s system-prompt cache breakpoint, which the rolling
@@ -121,7 +122,7 @@ async def _build_role_agent(
     middleware: list[Any] = [
         SystemPurgeMiddleware(),
         *await context_overflow_middlewares(system_prompt=system_prompt),
-        RollingCacheMarkMiddleware(),
+        *history_middlewares(provider),
         _tool_error_middleware,
     ]
     if structured_rail is not None:
@@ -319,7 +320,7 @@ class RefineAgentInput(BaseModel):
             "Content-block keys merged into the evaluator's first user message's text block (e.g. "
             "cache_control for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors. "
             "On a checkpointed thread the model call keeps only the newest mark (older marks are "
-            "stripped), so per-turn marking stays within the provider's breakpoint cap (Anthropic: 4)."
+            "stripped), so per-turn marking stays within the provider's per-request breakpoint cap."
         ),
     )
     evaluator_llm_provider: str | None = None

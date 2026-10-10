@@ -29,6 +29,7 @@ from tai42_contract.channels import (
     OptionSection,
     ReplyOption,
 )
+from tai42_contract.errors import UnavailableError
 from tai42_contract.interactions.models import (
     FormData,
     FormOption,
@@ -50,7 +51,6 @@ from tai42_skeleton.operations import (
     ForbiddenError,
     NotSupportedError,
     OperationRegistry,
-    UnavailableError,
     UpstreamError,
     operation_metadata_of,
 )

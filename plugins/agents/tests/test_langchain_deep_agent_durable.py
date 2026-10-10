@@ -247,6 +247,31 @@ def test_static_and_env_creds_ride_the_session_env(monkeypatch: pytest.MonkeyPat
     assert asyncio.run(go()) == "static-val:svc"
 
 
+def test_an_env_delivery_connection_cred_puts_the_raw_token_under_its_env_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one session-cred rule: under ``delivery="env"`` the resolved token rides the session env
+    RAW under the cred's own ``env_name``, and the env channel rides under its own names."""
+    _connectors().resolved["conn-key"] = ResolvedConnectionAuth(
+        access_token=SecretStr("TOK"), env={"SVC_REGION": SecretStr("eu")}
+    )
+    _settings_with_creds(
+        monkeypatch,
+        ConnectionCred(env_name="CONN_KEY", connection_id="conn-key", provider_id="p", sub_service="s", delivery="env"),
+    )
+    captured: dict[str, Any] = {}
+    real_build = session_mod.build_policied_spec
+
+    def capture(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return real_build(**kwargs)
+
+    monkeypatch.setattr(session_mod, "build_policied_spec", capture)
+    asyncio.run(DeepAgentSession.acquire(thread_id="conv-env-token"))
+
+    env = {name: value.get_secret_value() for name, value in captured["env"].items()}
+    assert env == {"CONN_KEY": "TOK", "SVC_REGION": "eu"}
+    assert "Authorization" not in env
+
+
 def test_required_bearer_cred_resolving_to_nothing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ``required`` connection cred whose resolution yields nothing usable raises loudly (never a
     silent drop) — the identity-less fail-close is the accessor's own raise, tested elsewhere."""

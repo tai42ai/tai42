@@ -1,54 +1,56 @@
-"""Middleware ensuring an outgoing history opens with a user message for strict-ordering providers."""
+"""Middleware ensuring an outgoing request opens with a user message for a provider that needs it."""
 
-import uuid
-from typing import Any, cast
+from collections.abc import Awaitable, Callable
+from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware, AgentState
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
-from langgraph.runtime import Runtime
+from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 
-#: Inert first user turn prepended when the outgoing history's first non-system
-#: message is an assistant message. Strict-ordering providers (the Anthropic
-#: Messages API) require the first non-system message to have role ``user`` and
-#: reject a leading assistant message; an operator-initiated thread can
-#: legitimately open with one. The text carries no instruction, so it cannot steer
-#: the model.
+#: Inert first user turn added to the outgoing request when its first non-system message is
+#: an assistant message (an operator-initiated thread can legitimately open with one). The
+#: text carries no instruction, so it cannot steer the model.
 _CONVERSATION_START_MARKER = "[conversation start]"
 
 
-class LeadingUserMiddleware(AgentMiddleware):
-    """Ensure the outgoing history's first non-system message is a user message.
+def lead_with_user(messages: list[AnyMessage]) -> list[AnyMessage] | None:
+    """The messages with a marker user turn ahead of a leading assistant message, or ``None``.
 
-    A no-op on the common user-first history. When the first non-system message is
-    an ``AIMessage``, a single :data:`_CONVERSATION_START_MARKER` user message is
-    inserted ahead of it (after any leading system messages), so strict-ordering
-    providers accept the turn. Idempotent: the inserted marker leads on the next
-    turn and the check short-circuits.
+    The marker sits after any leading system messages. ``None`` means the first non-system
+    message is not an assistant message (or there is none): send the input unchanged. Never
+    mutates the input messages.
+    """
+    first = next((i for i, m in enumerate(messages) if not isinstance(m, SystemMessage)), None)
+    if first is None or not isinstance(messages[first], AIMessage):
+        return None
+    return [*messages[:first], HumanMessage(content=_CONVERSATION_START_MARKER), *messages[first:]]
+
+
+class LeadingUserMiddleware(AgentMiddleware):
+    """Ensure the outgoing request's first non-system message is a user message.
+
+    Request-scoped: the marker is added to the outgoing request only and never written to the
+    thread. It runs at the model call, so a trim that dropped the first user turn is covered.
     """
 
-    def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        """Insert the marker turn when the first non-system message is an assistant message; else no-op."""
-        messages = state["messages"]
-        first = next((i for i, m in enumerate(messages) if not isinstance(m, SystemMessage)), None)
-        if first is None or not isinstance(messages[first], AIMessage):
-            return None
+    def wrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], ModelResponse[Any]],
+    ) -> ModelCallResult[Any]:
+        """Lead ``request.messages`` with a user turn before the synchronous model call."""
+        led = lead_with_user(request.messages)
+        if led is not None:
+            request = request.override(messages=led)
+        return handler(request)
 
-        for msg in messages:
-            if msg.id is None:
-                msg.id = str(uuid.uuid4())
-
-        marker = HumanMessage(content=_CONVERSATION_START_MARKER, id=str(uuid.uuid4()))
-        return {
-            "messages": [
-                RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                *messages[:first],
-                marker,
-                *messages[first:],
-            ]
-        }
-
-    async def abefore_model(self, state: AgentState, runtime: Runtime | None = None) -> dict[str, Any] | None:
-        """Async entry point; delegates to the synchronous list rewrite."""
-        # Pure list rewrite (no I/O); reuse the sync implementation.
-        return self.before_model(state, cast(Runtime, runtime))
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelCallResult[Any]:
+        """Lead ``request.messages`` with a user turn before the async model call."""
+        led = lead_with_user(request.messages)
+        if led is not None:
+            request = request.override(messages=led)
+        return await handler(request)

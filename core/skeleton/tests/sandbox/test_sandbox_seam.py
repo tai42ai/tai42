@@ -17,7 +17,7 @@ from tai42_contract.sandbox import (
     SandboxSessionSpec,
     SandboxUnavailableError,
 )
-from tai42_kit.sandbox import ManagedSandbox, ManagedSandboxSession
+from tai42_kit.sandbox import ManagedSandbox, ManagedSandboxSession, SandboxDispatchSettings
 
 from tai42_skeleton.app.instance import build_app
 from tai42_skeleton.manifest import Manifest
@@ -39,6 +39,9 @@ class _FakeSandbox(ManagedSandbox):
 
     async def _list_orphan_resources(self) -> list[str]:
         return []
+
+    def dispatch_settings(self) -> SandboxDispatchSettings:
+        return SandboxDispatchSettings()
 
 
 # -- holder -------------------------------------------------------------------

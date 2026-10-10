@@ -27,7 +27,7 @@ from tai42_contract.sandbox import (
     SandboxStreamExit,
 )
 
-from tai42_kit.sandbox import ManagedSandbox, ManagedSandboxSession
+from tai42_kit.sandbox import ManagedSandbox, ManagedSandboxSession, SandboxDispatchSettings
 
 
 class FakeExecHandle(SandboxExecHandle):
@@ -166,6 +166,10 @@ class FakeSandbox(ManagedSandbox):
 
     def _now(self) -> datetime:
         return self.clock
+
+    def dispatch_settings(self) -> SandboxDispatchSettings:
+        """The kit-declared dispatch defaults."""
+        return SandboxDispatchSettings()
 
     async def _create_session_resources(self, spec: SandboxSessionSpec) -> ManagedSandboxSession:
         if self.reject_caps and (spec.cpu is not None or spec.memory_mb is not None):

@@ -266,6 +266,43 @@ def native_representability_reason_for_provider(provider: str, schema: dict[str,
     raise ValueError(f"Unsupported chat model provider: '{provider}'")
 
 
+def requires_leading_user_turn(provider: str) -> bool:
+    """Whether ``provider`` needs an outgoing history whose first non-system message is a user turn.
+
+    No installed provider package inserts a user turn or refuses an assistant-first history
+    before sending, so a hosted provider's answer is its server's: each hosted entry is the
+    value the real-LLM leg ``e2e/tests/agents/test_leading_user_turn_real_leg.py`` confirms
+    (a bare assistant-first call accepted or refused). ``ollama`` and ``huggingface`` serve
+    the model's own chat template, which decides per model, so they answer ``True``. The
+    ``match`` mirrors :func:`_build_llm`'s and an unknown provider is refused loudly.
+    """
+    match provider:
+        case "anthropic":
+            return False
+        case "openai" | "google" | "xai" | "mistral":
+            return True
+        case "ollama" | "huggingface":
+            return True
+    raise ValueError(f"Unsupported chat model provider: '{provider}'")
+
+
+def cache_mark_key(provider: str) -> str | None:
+    """The content-block key that marks a prompt-caching breakpoint for ``provider``, or ``None``.
+
+    ``anthropic`` hoists a block's ``cache_control``; ``openai`` takes a block's
+    ``prompt_cache_breakpoint``. Every other provider takes no per-block mark. The ``match``
+    mirrors :func:`_build_llm`'s and an unknown provider is refused loudly.
+    """
+    match provider:
+        case "anthropic":
+            return "cache_control"
+        case "openai":
+            return "prompt_cache_breakpoint"
+        case "mistral" | "google" | "xai" | "ollama" | "huggingface":
+            return None
+    raise ValueError(f"Unsupported chat model provider: '{provider}'")
+
+
 def system_prompt_cache_mark(provider: str) -> dict[str, Any] | None:
     """The content-block kwargs that mark ``provider``'s system prompt for caching, or ``None``.
 
@@ -277,7 +314,10 @@ def system_prompt_cache_mark(provider: str) -> dict[str, Any] | None:
     """
     match provider:
         case "anthropic":
-            return {"cache_control": {"type": "ephemeral"}}
+            key = cache_mark_key(provider)
+            if key is None:
+                raise AssertionError
+            return {key: {"type": "ephemeral"}}
 
         case "mistral" | "openai" | "google" | "xai" | "ollama" | "huggingface":
             return None

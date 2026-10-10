@@ -306,3 +306,30 @@ def test_scratch_survives_across_turns_on_persistent_workspace(sandbox: FakeSand
     durable, ephemeral_error = asyncio.run(run())
     assert "survives the turn" in durable
     assert ephemeral_error == "file_not_found"
+
+
+def test_a_derived_exec_without_a_timeout_uses_the_bound_providers_exec_default(
+    sandbox: FakeSandbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tai42_kit.sandbox import SandboxDispatchSettings
+
+    from .conftest import APP
+
+    sandbox.dispatch = SandboxDispatchSettings(exec_default_timeout_seconds=60)
+    monkeypatch.setattr(APP.sandboxes, "provider", sandbox)
+
+    async def run() -> list[float]:
+        session = await _session(sandbox, "ws-timeout")
+        seen: list[float] = []
+        real_exec = session.exec
+
+        async def recording_exec(argv: list[str], **kwargs: object) -> object:
+            seen.append(kwargs["timeout_seconds"])  # type: ignore[arg-type]
+            return await real_exec(argv, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(session, "exec", recording_exec)
+        backend = SandboxSessionBackend(session)
+        await backend.aexecute("echo bounded")
+        return seen
+
+    assert asyncio.run(run()) == [60, 60]

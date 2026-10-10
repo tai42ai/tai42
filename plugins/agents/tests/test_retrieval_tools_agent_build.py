@@ -58,7 +58,7 @@ class TestBuild:
         assert "be brief" in captured["graph_kwargs"]["system_prompt"]
 
         # Providers fell back to the settings defaults and were threaded through.
-        assert captured["llm_provider"] == "def_llm"
+        assert captured["llm_provider"] == "mistral"
         assert captured["embedding_provider"] == "def_embedding"
         assert captured["store"][0] == "def_store"
         assert captured["store"][1] == "store-conn"
@@ -76,14 +76,14 @@ class TestBuild:
         asyncio.run(
             agent._build(
                 user_message=TemplatedText(content="hi"),
-                llm_provider="my_llm",
+                llm_provider="xai",
                 embedding_provider="my_embedding",
                 checkpoint_provider="my_checkpoint",
                 store_provider="my_store",
             )
         )
 
-        assert captured["llm_provider"] == "my_llm"
+        assert captured["llm_provider"] == "xai"
         assert captured["embedding_provider"] == "my_embedding"
         assert captured["store"][0] == "my_store"
         assert captured["checkpoint"][0] == "my_checkpoint"

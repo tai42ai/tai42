@@ -16,12 +16,12 @@ grammar cannot carry falls to the tool tier on the same provider:
 * With a stub that refuses a forced ``tool_choice``, the structured run still succeeds —
   proof the native plan sends no forced choice.
 * A map-object schema (schema-valued ``additionalProperties``) is not natively representable,
-  so it takes the tool tier: the kit binds a pydantic model and forces function-calling, an
+  so it takes the tool tier: the kit binds the authored schema and forces function-calling, an
   optional property the model omits stays absent in the one terminal ``structured_final``, and
   the request carries a forced ``tool_choice``.
 * A tool-tier schema whose property name is a python keyword (``from``) or shadows a builtin
-  (``id``) round-trips to its authored key — the sanitized bound-model field reduces back under
-  the authored name in the terminal ``structured_final``.
+  (``id``) round-trips to its authored key in the terminal ``structured_final``.
+* A key the authored schema allows but does not name survives the tool tier.
 """
 
 from __future__ import annotations
@@ -205,7 +205,7 @@ async def test_native_structured_run_sends_no_forced_tool_choice(agents_stack: T
 
 async def test_tool_tier_structured_run_handles_an_optional_field(agents_stack: TaiStack, llm_stub: LlmStub) -> None:
     """A schema the native grammar cannot carry — a map object (schema-valued
-    ``additionalProperties``) — routes to the tool tier, which binds a pydantic model and
+    ``additionalProperties``) — routes to the tool tier, which binds the authored schema and
     forces function-calling. With an optional property the model omits, the run produces one
     terminal ``structured_final`` whose data carries only the fields the model set (the
     omitted optional stays absent, not an explicit ``null``), and the request bound a forced
@@ -246,10 +246,8 @@ async def test_tool_tier_structured_run_round_trips_a_keyword_property_name(
     agents_stack: TaiStack, llm_stub: LlmStub
 ) -> None:
     """A tool-tier schema whose property name is a python keyword (``from``) or shadows a
-    builtin (``id``) round-trips to its AUTHORED key. The tool tier binds a pydantic model
-    whose fields are sanitized to legal identifiers (``from`` -> ``from_``), the authored key
-    kept as each field's alias; the terminal ``structured_final`` must carry the authored
-    property names, never the sanitized field names, so the run does not fail validation."""
+    builtin (``id``) round-trips to its AUTHORED key: the terminal ``structured_final`` carries
+    the authored property names, so the run does not fail validation."""
     # ``labels`` is a map object (forces the tool tier); ``from``/``id`` are the sanitized names.
     schema = {
         "title": "T",
@@ -277,3 +275,27 @@ async def test_tool_tier_structured_run_round_trips_a_keyword_property_name(
     assert len(finals) == 1, f"expected exactly one structured_final: {frames}"
     assert finals[0]["data"] == {"labels": {"k": "v"}, "from": "A", "id": "X"}, finals
     assert types[-1] == "stream.end", f"the stream did not terminate cleanly: {frames}"
+
+
+async def test_tool_tier_structured_run_keeps_a_key_the_schema_allows(
+    agents_stack: TaiStack, llm_stub: LlmStub
+) -> None:
+    """The tool tier binds the authored schema, so a key the schema allows (no
+    ``additionalProperties: false``) but does not name reaches the terminal ``structured_final``."""
+    schema = {
+        "title": "T",
+        "type": "object",
+        "properties": {"labels": {"type": "object", "additionalProperties": {"type": "string"}}},
+        "required": ["labels"],
+    }
+    llm_stub.reset()
+    llm_stub.script([{"tool_call": {"name": "T", "arguments": {"labels": {"k": "v"}, "extra": "kept"}}}])
+
+    frames = await _run_sse(
+        agents_stack,
+        "/api/agents/tools_agent/runs",
+        {"user_message": {"content": "answer with labels"}, "response_format": schema},
+    )
+    finals = [frame for frame in frames if frame.get("type") == "structured_final"]
+    assert len(finals) == 1, f"expected exactly one structured_final: {frames}"
+    assert finals[0]["data"] == {"labels": {"k": "v"}, "extra": "kept"}, finals

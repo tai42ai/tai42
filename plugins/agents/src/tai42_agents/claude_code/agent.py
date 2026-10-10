@@ -9,7 +9,7 @@ events. Park/resume ride the shared ``_internal/park`` machinery; the SDK's mode
 emitted into the active trace (its model calls bypass the platform LLM seam).
 
 The ``crash_resume`` setting is DECLARED to the skeleton at registration as
-``meta={"tai42/crash_resume": <setting>}`` on the run tool, threaded through the generic
+``meta={TOOL_META_CRASH_RESUME: <setting>}`` on the run tool, threaded through the generic
 ``agents.agent(name, tags=..., meta=...)`` passthrough; the skeleton's run-dispatch seam reads
 that key to decide whether to re-invoke a recycled detached run. The meta is captured ONCE at
 registration (the setting is recycle-class, so a hot change re-registers and re-declares it) and
@@ -39,6 +39,7 @@ from tai42_contract.interactions import (
 from tai42_contract.monitoring.models import SpanKind, TokenUsage
 from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
+from tai42_contract.tools import TOOL_META_CRASH_RESUME
 from tai42_kit.interactions.park_index import superstep_id as park_superstep_id
 from tai42_kit.llm import resolve_trace_context
 
@@ -57,9 +58,8 @@ from tai42_agents._internal.reject import reject_blank_memory_keys, resolve_resp
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.run_kwargs import guard_run_kwargs
 from tai42_agents._internal.sandbox_util import build_policied_spec, workspace_key_for
+from tai42_agents._internal.session_cred import SessionCredMaterial
 from tai42_agents.claude_code.credentials import (
-    _BearerMaterial,
-    _secret_values,
     redact_transcript,
     resolve_creds,
     scrub_credentials,
@@ -138,7 +138,7 @@ _LIVE_SESSIONS: dict[str, SandboxSession] = {}
 @tai42_app.agents.agent(
     AGENT_NAME,
     tags={"agents", "coding", "claude"},
-    meta={"tai42/crash_resume": claude_code_crash_resume()},
+    meta={TOOL_META_CRASH_RESUME: claude_code_crash_resume()},
 )
 class ClaudeCodeAgent(Agent):
     """The ``claude_code`` agent: drives the real ``claude`` binary in a sandbox over the exec protocol."""
@@ -311,7 +311,7 @@ class ClaudeCodeAgent(Agent):
         threaded = thread_id is not None
         workspace_key = workspace_key_for(AGENT_NAME, thread_id) if threaded else str(uuid4())
 
-        spec_env, static_env_names, bearer = await resolve_creds(settings)
+        material = await resolve_creds(settings)
         model_env_name, _ = settings.model_credential()
 
         # The per-workspace Redis lease serializes threaded turns across workers (the volume is
@@ -325,10 +325,8 @@ class ClaudeCodeAgent(Agent):
                 settings=settings,
                 thread_id=thread_id,
                 workspace_key=workspace_key,
-                spec_env=spec_env,
-                static_env_names=static_env_names,
+                material=material,
                 model_env_name=model_env_name,
-                bearer=bearer,
                 prompt=prompt,
                 options_snapshot=options_snapshot,
                 terminal_key=terminal_key,
@@ -341,10 +339,8 @@ class ClaudeCodeAgent(Agent):
         settings: ClaudeCodeSettings,
         thread_id: str | None,
         workspace_key: str,
-        spec_env: dict[str, SecretStr],
-        static_env_names: list[str],
+        material: SessionCredMaterial,
         model_env_name: str,
-        bearer: list[_BearerMaterial],
         prompt: dict[str, Any],
         options_snapshot: dict[str, Any],
         terminal_key: str | None = None,
@@ -356,7 +352,7 @@ class ClaudeCodeAgent(Agent):
             image=settings.session_image,
             workspace_key=workspace_key,
             durability=durability,
-            env=spec_env,
+            env=material.env,
             ttl_seconds=settings.session_ttl_seconds,
             labels={"tai42.agent": AGENT_NAME, "tai42.thread": thread_id or ""},
             network_setting=settings.network,
@@ -385,7 +381,9 @@ class ClaudeCodeAgent(Agent):
                     yield event_from_terminal_record(record)
                     return
 
-            await materialize(session, ws=ws, settings=settings, bearer=bearer, options_snapshot=options_snapshot)
+            await materialize(
+                session, ws=ws, settings=settings, bearer=material.bearer, options_snapshot=options_snapshot
+            )
 
             resume_id = await read_session_id(session) if threaded else None
             payload = build_payload(
@@ -393,7 +391,7 @@ class ClaudeCodeAgent(Agent):
                 ws=ws,
                 options_snapshot=options_snapshot,
                 proxy_tools=await proxy_tool_specs(options_snapshot["tool_names"]),
-                static_env_names=static_env_names,
+                static_env_names=material.env_names,
                 model_env_name=model_env_name,
                 resume_id=resume_id,
             )
@@ -447,7 +445,7 @@ class ClaudeCodeAgent(Agent):
             # park-suspend keeps the bearer file for the door-less expiry resume to reuse.
             if not park_suspended:
                 await scrub_credentials(session, ws=ws)
-                await redact_transcript(session, ws=ws, policy=policy, secrets=_secret_values(spec_env, bearer))
+                await redact_transcript(session, ws=ws, policy=policy, secrets=material.secret_values())
                 if not threaded:
                     # An ephemeral session is not cached; destroy it so its volume is reaped now.
                     await session.destroy()

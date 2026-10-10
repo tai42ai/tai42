@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import pytest
+from tai42_contract.errors import OperationError, UnavailableError
 
 from tai42_skeleton.operations.errors import (
     BadRequestError,
     ConflictError,
     NotFoundError,
-    OperationError,
     OperationFailedError,
     PermissionDeniedError,
-    UnavailableError,
     ValidationRejectedError,
 )
 

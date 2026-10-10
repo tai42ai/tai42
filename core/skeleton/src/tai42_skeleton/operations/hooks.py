@@ -43,6 +43,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import OperationError
 from tai42_contract.hooks import HookParams, HookRegister, HookSubject
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
@@ -54,7 +55,7 @@ from tai42_skeleton.hooks.trigger_links import TriggerLinkError
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._authority import assert_execution_key_bindable, resolve_caller
 from tai42_skeleton.operations.definition_door import definition_door
-from tai42_skeleton.operations.errors import ConflictError, ForbiddenError, NotSupportedError, OperationError
+from tai42_skeleton.operations.errors import ConflictError, ForbiddenError, NotSupportedError
 from tai42_skeleton.operations.response_models_group_b import (
     HookListView,
     HookRegisterResult,

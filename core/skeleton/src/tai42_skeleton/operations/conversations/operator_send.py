@@ -12,12 +12,13 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
 from tai42_contract.conversations import AnswerPart, ConversationRoute
+from tai42_contract.errors import UnavailableError
 from tai42_contract.interactions import LocationElement, MediaItem
 
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
-from tai42_skeleton.operations.errors import NotSupportedError, OperationFailedError, UnavailableError
+from tai42_skeleton.operations.errors import NotSupportedError, OperationFailedError
 from tai42_skeleton.operations.response_models_group_a import ThreadMessageAck
 
 from .backend import _person_routes, _require_backend, _require_route, _thread_not_found
