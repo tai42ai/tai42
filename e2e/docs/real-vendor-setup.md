@@ -31,8 +31,8 @@ the dedicated e2e creds host, not in CI. The seams that step aside:
   negatives, which assert `sends_matching(...) == []`, do NOT step aside — a real
   send simply never lands. Only `test_callback_origin.py` is a real-aware origin
   unit test; it is not a stub-delivery leg.
-- `connector-google`, `connector-atlassian` — the launch-URL-shape legs that pin
-  the fixture `client_id`.
+- `connector-google`, `connector-atlassian`, `connector-slack`, `connector-github`
+  — the launch-URL-shape legs that pin the fixture `client_id`.
 - `marketplace-pypi` — steps the **entire** marketplace suite aside (opt-in behind
   `TAI_E2E_MARKETPLACE=1`): the shared `marketplace_service` fixture seeds a forged
   fixture catalog through the real seed+ingest pipeline, which can't resolve those
@@ -142,6 +142,60 @@ from `E2E_PUBLIC_BASE_URL` at wiring time; register that origin at the vendor.
 - Template vars: `CONNECTORS_ATLASSIAN_CLIENT_ID`,
   `CONNECTORS_ATLASSIAN_CLIENT_SECRET`, `CONNECTORS_ATLASSIAN_SITE_URL`,
   `CONNECTORS_ATLASSIAN_TEST_ACCOUNT_EMAIL`.
+
+### connector-slack — `TAI_E2E_REAL=connector-slack`
+
+- Dashboard: https://api.slack.com/apps → your app → **OAuth & Permissions**
+  → user token scopes of the descriptor's `slack` sub-service, Redirect URL =
+  the derived redirect URI.
+- Template vars: `CONNECTORS_SLACK_CLIENT_ID`, `CONNECTORS_SLACK_CLIENT_SECRET`,
+  `CONNECTORS_SLACK_TEST_ACCOUNT_EMAIL`.
+
+### connector-github — `TAI_E2E_REAL=connector-github`
+
+- Dashboard: https://github.com/settings/apps → a GitHub App with user-to-server
+  token expiration on (it issues refresh tokens), or an OAuth App; callback URL =
+  the derived redirect URI.
+- Template vars: `CONNECTORS_GITHUB_CLIENT_ID`, `CONNECTORS_GITHUB_CLIENT_SECRET`,
+  `CONNECTORS_GITHUB_TEST_ACCOUNT_EMAIL`.
+
+### The vendor-connector leg — `tests/connectors/test_vendor_connectors_real.py`
+
+With `connector-atlassian`, `connector-slack` or `connector-github` selected, this
+leg moves that vendor from its shipped descriptor to its discovered form on one
+stack: an account connected under the shipped descriptor, the discovered
+descriptor loaded into the manifest, a second account connected under it, the
+vendor's named read tool called (Atlassian `getAccessibleAtlassianResources`,
+whose site list must name `CONNECTORS_ATLASSIAN_SITE_URL`; GitHub `list_gists`;
+each looked up under the name the platform serves it as: lower-cased behind the
+connection's `<vendor>_<sub-service>_<alias>_` prefix),
+a refresh of each account forced by moving its stored expiry into the past, and
+both disconnected.
+
+- Each sign-in is a person's browser consent with the test account. The leg
+  prints the authorize address (run pytest with `-s` to see it; it is also
+  written to `<basetemp>/consent/<alias>.url`) and waits for the connection,
+  up to `TAI_E2E_CONSENT_TIMEOUT` seconds (default 900).
+- The leg carries its own pytest bound, derived from that wait and the boot bound
+  (`TAI_E2E_BOOT_TIMEOUT` + 2 × `TAI_E2E_CONSENT_TIMEOUT` + the binding waits and
+  a margin for its other steps), so no `--timeout` flag is needed; past it the
+  leg fails with pytest's own timeout error.
+- Before the call, the leg records every tool the connection serves (name,
+  title, annotations, required arguments) and checks that the named read tool
+  is among them and requires no argument. A vendor with no read tool named yet
+  (Slack) stops at that check after its first sign-in, with the listing in the
+  evidence file and the entry to fill (`_READ_TOOL` in the leg) named in the
+  failure.
+- The vendor redirects the browser to `{E2E_PUBLIC_BASE_URL}/oauth-bridge.html`,
+  which must forward to the stack under test; the prompt names the stack's own
+  origin. A loopback `E2E_PUBLIC_BASE_URL` works when the vendor app's redirect
+  is registered on `localhost` and the browser runs on, or tunnels to, the e2e
+  host.
+- Each step's outcome is written to `<basetemp>/vendor-proof/<vendor>.json`:
+  statuses, granted scopes, the served tool listing, the tool called, the revoke
+  outcome and wall times, never a token.
+- Run one vendor per pytest process: each vendor app registers its own redirect
+  origin.
 
 ## marketplace-github — `TAI_E2E_REAL=marketplace-github`
 

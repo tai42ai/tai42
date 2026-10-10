@@ -69,6 +69,21 @@ def test_init_connector_oauth_tree_parses_and_docs_validate(tmp_path: Path) -> N
     assert (dest / "version.txt").read_text().strip() == spec.version
 
 
+def test_the_oauth_scaffold_without_oauth_and_with_an_issuer_is_a_discovered_provider(tmp_path: Path) -> None:
+    # The scaffold's comment: leave out ``oauth`` and, with the env client, set ``issuer``.
+    dest = tmp_path / "connector-acme"
+    result = _run(["plugins", "init", "connector-acme", "--kind", "connector", "--auth", "oauth", "--dir", str(dest)])
+    assert result.exit_code == 0, result.output
+    raw = yaml.safe_load((dest / "tai-plugin.yml").read_text())
+    provider = raw["provides"][0]["provider"]
+    del provider["oauth"]
+    provider["issuer"] = "https://example.invalid"
+    discovered = PluginSpec.model_validate(raw).provides[0].provider
+    assert discovered is not None
+    assert discovered.is_discovered
+    assert discovered.issuer == "https://example.invalid"
+
+
 def test_init_connector_none_carries_config_fields_not_oauth(tmp_path: Path) -> None:
     dest = tmp_path / "connector-kappa"
     result = _run(["plugins", "init", "connector-kappa", "--kind", "connector", "--auth", "none", "--dir", str(dest)])

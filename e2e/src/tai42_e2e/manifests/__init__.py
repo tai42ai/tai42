@@ -70,10 +70,12 @@ from tai42_e2e.manifests.connectors import (
     GITHUB_CLIENT_ID,
     GOOGLE_CLIENT_ID,
     MANAGED_SERVER_RELOAD_PROBE_ENV,
+    SHIPPED_CONNECTOR_ISSUERS,
     SLACK_CLIENT_ID,
     build_connectors_stack,
     build_discovered_connectors_stack,
     build_shipped_connectors_stack,
+    discovered_candidate_descriptor,
 )
 from tai42_e2e.manifests.core import (
     build_async_park_stack,
@@ -169,6 +171,7 @@ __all__ = [
     "POSTGRES_MCP_TITLE",
     "PROBE_TOOLS_TITLE",
     "RESILIENCE_MCP_TITLE",
+    "SHIPPED_CONNECTOR_ISSUERS",
     "SLACK_ALLOWED_RECIPIENTS",
     "SLACK_BOT_USER_ID",
     "SLACK_CLIENT_ID",
@@ -263,6 +266,7 @@ __all__ = [
     "build_web_media_stack",
     "build_working_signal_capped_stack",
     "build_working_signal_stack",
+    "discovered_candidate_descriptor",
     "misbehaving_mcp_tool_name",
     "postgres_mcp_tool_name",
     "resilience_mcp_tool_name",

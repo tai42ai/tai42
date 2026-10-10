@@ -23,6 +23,9 @@ class _GoodTool:
         self.description = "ok"
         self.inputSchema = {"type": "object", "properties": {"q": {"type": "string"}}}
         self.outputSchema: dict = {}
+        self.title = None
+        self.annotations = None
+        self.icons = None
 
 
 class _EmptyAnyOfTool:
@@ -32,6 +35,9 @@ class _EmptyAnyOfTool:
     # malformed-schema case the per-tool skip must contain.
     inputSchema: ClassVar[dict] = {"anyOf": []}
     outputSchema: ClassVar[dict] = {}
+    title = None
+    annotations = None
+    icons = None
 
 
 def _cfg(title: str = "svc") -> TaiMCPConfig:

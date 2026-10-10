@@ -26,6 +26,7 @@ import pytest
 
 from tai42_e2e.oauth_idp import OAuthIdp
 from tai42_e2e.stack import TaiStack
+from tai42_e2e_fixtures.managed_mcp_server import PING_ANNOTATIONS, PING_TITLE
 
 from ._fleet import (
     assert_fleet_fanout,
@@ -106,6 +107,10 @@ async def test_noauth_connect_disconnect_converges(
     await wait_present(
         lambda: _serves(stack, tool), deadline=30.0, message=f"managed tool {tool} never served fleet-wide"
     )
+    # The bound tool is re-served with the display title and hints its server advertises.
+    async with stack.mcp() as mcp:
+        served = next(listed for listed in await mcp.list_tools() if listed.name == tool)
+    assert (served.title, served.annotations) == (PING_TITLE, PING_ANNOTATIONS), served
 
     # Disconnect → the manifest entry and its tools are gone on every worker.
     disconnect = await api.delete(f"/api/connectors/connections/{connection_id}", retry_on_reloading=True)

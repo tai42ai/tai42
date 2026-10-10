@@ -13,6 +13,7 @@ from tai42_contract.tools import ToolRetryPolicy
 from tai42_skeleton.tools.adapters.lc_tool_to_func import lc_tool_to_func
 from tai42_skeleton.tools.binding.branch import _BranchBindingMixin
 from tai42_skeleton.tools.binding.resolution import MCP_VIRTUAL_MODULE_PREFIX
+from tai42_skeleton.tools.naming import normalized_name
 
 if TYPE_CHECKING:
     from tai42_contract.app import RouteAction
@@ -174,7 +175,12 @@ class _RegistrationMixin(_BranchBindingMixin):
                 # names it (``skipped_tools``); additive to the log, not a replacement.
                 self._app._mcp_unusable_tools[config.title].add(name)
                 continue
-            self.bind_tool_func(owner=config.title)(adapted_tool)
+            # The server's display and behaviour-hint fields ride onto the bound tool (and
+            # every branch of it) verbatim; its ``_meta`` and ``execution`` do not (see
+            # ``mcp_tool_to_func``).
+            self.bind_tool_func(owner=config.title, title=t.title, annotations=t.annotations, icons=t.icons)(
+                adapted_tool
+            )
 
     def register_tool_info(self, name: str, combos: Sequence[Sequence[ExtensionElement]] | None = None) -> None:
         self._tool_registry.register_tool(name, combos)
@@ -203,11 +209,4 @@ class _RegistrationMixin(_BranchBindingMixin):
 
     @staticmethod
     def normalized_name(prefix: str, name: str) -> str:
-        name = name.lower().replace("-", "_")
-        prefix = prefix.lower().replace("-", "_")
-        # Prefix unless already prefixed. The check must respect the ``_``
-        # separator: ``slacker`` under prefix ``slack`` is NOT already prefixed
-        # (a bare ``startswith(prefix)`` would wrongly treat it as such), so it
-        # becomes ``slack_slacker``.
-        already_prefixed = name == prefix or name.startswith(prefix + "_")
-        return name if not prefix or already_prefixed else f"{prefix}_{name}"
+        return normalized_name(prefix, name)

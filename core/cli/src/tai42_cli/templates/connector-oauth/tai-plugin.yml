@@ -28,6 +28,9 @@ provides:
       display_name: Acme
       description: Connect your Acme account.
       icon_url: https://example.invalid/icon.png
+      # Leave out ``oauth`` to have the engine read the endpoints from the MCP
+      # server's own metadata at connect time; with the env client below, also
+      # set ``issuer`` to the authorization server your OAuth app is registered with.
       oauth:
         authorize: https://example.invalid/oauth/authorize
         token: https://example.invalid/oauth/token

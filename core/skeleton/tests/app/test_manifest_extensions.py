@@ -157,6 +157,9 @@ def test_mcp_tool_binds_with_extension_branch(monkeypatch):
             "description": "ping",
             "inputSchema": {"type": "object", "properties": {}},
             "outputSchema": {},
+            "title": None,
+            "annotations": None,
+            "icons": None,
         },
     )()
     monkeypatch.setattr(app, "_probe_mcp", AsyncMock(return_value=[fake_tool]))

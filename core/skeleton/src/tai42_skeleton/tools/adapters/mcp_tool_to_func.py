@@ -301,7 +301,12 @@ def mcp_tool_to_func(
 ) -> Callable:
     """Build a callable wrapping ``tool`` that dispatches to the MCP server.
 
-    The callable's signature matches ``tool``'s input schema.
+    The callable's signature matches ``tool``'s input schema and its docstring is the tool's
+    description. The binding pass re-serves the server's ``title``, ``annotations`` and
+    ``icons`` verbatim on the bound tool; the server's ``_meta`` and ``execution`` describe the
+    server's own edge, never this one's, and are not re-served: a server key under this
+    platform's ``_meta`` namespace would otherwise steer the platform's own tool facets, and this
+    edge runs the bound tool as a plain call whatever task support the server declares.
     """
     # Resolve the schema-depth bound once. The binding pass passes it in — resolved
     # OUTSIDE its per-tool skip guard, so a malformed TAI_MCP_SCHEMA_MAX_DEPTH fails

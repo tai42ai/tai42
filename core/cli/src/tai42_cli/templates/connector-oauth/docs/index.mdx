@@ -18,7 +18,13 @@ tai plugins install acme/your-plugin-name \
 ```
 
 The operator registers their own OAuth client with the provider and points
-`client_id_env` / `client_secret_env` at those values. The engine also needs its
+`client_id_env` / `client_secret_env` at those values.
+
+The descriptor lists the provider's `oauth` endpoints. A provider whose MCP
+server publishes its own authorization metadata can leave `oauth` out: the
+engine then reads the authorize, token and revocation endpoints from that
+metadata at connect time, and `issuer` names the authorization server the
+OAuth client is registered with. The engine also needs its
 connector prerequisites set: the connector KEK, the OAuth state HMAC key, and the
 redirect-URI allowlist.
 

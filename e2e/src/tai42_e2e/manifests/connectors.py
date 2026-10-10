@@ -351,19 +351,50 @@ GITHUB_CLIENT_ID = "e2e-github-client-id"
 _GITHUB_CLIENT_SECRET = "e2e-github-client-secret"
 
 
+# The authorization server each vendor's MCP server names in its protected-resource document: the
+# issuer a discovered descriptor of that vendor pins its env client to.
+SHIPPED_CONNECTOR_ISSUERS: dict[str, str] = {
+    "atlassian": "https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3",
+    "slack": "https://mcp.slack.com",
+    "github": "https://github.com/login/oauth",
+}
+
+
+def _shipped_provider(name: str) -> ProviderDescriptor:
+    spec = load_plugin_spec(_PLUGINS_DIR / f"connector-{name}" / "tai-plugin.yml")
+    provider = spec.provides[0].provider
+    if provider is None:
+        raise RuntimeError(f"shipped connector plugin connector-{name} has no provider descriptor")
+    return provider
+
+
+def discovered_candidate_descriptor(name: str) -> dict[str, object]:
+    """The shipped descriptor of ``connector-<name>`` in discovered mode, serialized for the manifest.
+
+    Its ``oauth`` endpoints are left out and its env client is pinned to
+    :data:`SHIPPED_CONNECTOR_ISSUERS`; everything else is the shipped descriptor unchanged.
+    Validated as a :class:`ProviderDescriptor`, so a candidate the contract refuses raises here.
+    """
+    shipped = _shipped_provider(name).model_dump(mode="json", exclude_none=True, exclude={"oauth"})
+    candidate = ProviderDescriptor.model_validate({**shipped, "issuer": SHIPPED_CONNECTOR_ISSUERS[name]})
+    return candidate.model_dump(mode="json", exclude_none=True)
+
+
+# The fixture client of each shipped descriptor, used while its ``connector-<name>`` seam is mock.
+_SHIPPED_FIXTURE_CLIENTS: dict[str, tuple[str, str]] = {
+    "google": (GOOGLE_CLIENT_ID, _GOOGLE_CLIENT_SECRET),
+    "atlassian": (ATLASSIAN_CLIENT_ID, _ATLASSIAN_CLIENT_SECRET),
+    "slack": (SLACK_CLIENT_ID, _SLACK_CLIENT_SECRET),
+    "github": (GITHUB_CLIENT_ID, _GITHUB_CLIENT_SECRET),
+}
+
+
 def _shipped_connector_descriptors() -> list[dict[str, object]]:
     """The four shipped connector provider descriptors serialized for the manifest
     ``connectors`` field. Each is read from its plugin's ``tai-plugin.yml`` via
     ``load_plugin_spec`` and taken from ``provides[0].provider`` — the single source of
     truth for the shipped descriptor (the yml the release publishes)."""
-    descriptors: list[dict[str, object]] = []
-    for name in _SHIPPED_CONNECTOR_NAMES:
-        spec = load_plugin_spec(_PLUGINS_DIR / f"connector-{name}" / "tai-plugin.yml")
-        provider = spec.provides[0].provider
-        if provider is None:
-            raise RuntimeError(f"shipped connector plugin connector-{name} has no provider descriptor")
-        descriptors.append(provider.model_dump(mode="json", exclude_none=True))
-    return descriptors
+    return [_shipped_provider(name).model_dump(mode="json", exclude_none=True) for name in _SHIPPED_CONNECTOR_NAMES]
 
 
 def build_shipped_connectors_stack(res: StackResources, variants: Variants) -> StackConfig:
@@ -411,26 +442,15 @@ def build_shipped_connectors_stack(res: StackResources, variants: Variants) -> S
     # origin (``origin_allowlist_env_keys``); a real connector routes it to the PUBLIC origin
     # instead via ``public_allowlist_env_keys`` (mirrors ``public_base_url_env_keys``).
     switch = _switch()
-    connectors_real = switch.is_real("connector-google") or switch.is_real("connector-atlassian")
-    if switch.is_real("connector-google"):
-        env["CONNECTORS_GOOGLE_CLIENT_ID"] = os.environ["CONNECTORS_GOOGLE_CLIENT_ID"]
-        env["CONNECTORS_GOOGLE_CLIENT_SECRET"] = os.environ["CONNECTORS_GOOGLE_CLIENT_SECRET"]
-    else:
-        env["CONNECTORS_GOOGLE_CLIENT_ID"] = GOOGLE_CLIENT_ID
-        env["CONNECTORS_GOOGLE_CLIENT_SECRET"] = _GOOGLE_CLIENT_SECRET
-    if switch.is_real("connector-atlassian"):
-        env["CONNECTORS_ATLASSIAN_CLIENT_ID"] = os.environ["CONNECTORS_ATLASSIAN_CLIENT_ID"]
-        env["CONNECTORS_ATLASSIAN_CLIENT_SECRET"] = os.environ["CONNECTORS_ATLASSIAN_CLIENT_SECRET"]
-    else:
-        env["CONNECTORS_ATLASSIAN_CLIENT_ID"] = ATLASSIAN_CLIENT_ID
-        env["CONNECTORS_ATLASSIAN_CLIENT_SECRET"] = _ATLASSIAN_CLIENT_SECRET
-    # Slack and github have no real leg in this suite (no ``TAI_E2E_REAL`` seam), so their
-    # client credentials are always the fixed fixture values — the client_id is stamped
-    # into the locally-built authorize URL, the secret present-but-unused on this leg.
-    env["CONNECTORS_SLACK_CLIENT_ID"] = SLACK_CLIENT_ID
-    env["CONNECTORS_SLACK_CLIENT_SECRET"] = _SLACK_CLIENT_SECRET
-    env["CONNECTORS_GITHUB_CLIENT_ID"] = GITHUB_CLIENT_ID
-    env["CONNECTORS_GITHUB_CLIENT_SECRET"] = _GITHUB_CLIENT_SECRET
+    connectors_real = False
+    for name in _SHIPPED_CONNECTOR_NAMES:
+        prefix = f"CONNECTORS_{name.upper()}_"
+        if switch.is_real(f"connector-{name}"):
+            connectors_real = True
+            env[prefix + "CLIENT_ID"] = os.environ[prefix + "CLIENT_ID"]
+            env[prefix + "CLIENT_SECRET"] = os.environ[prefix + "CLIENT_SECRET"]
+        else:
+            env[prefix + "CLIENT_ID"], env[prefix + "CLIENT_SECRET"] = _SHIPPED_FIXTURE_CLIENTS[name]
     return StackConfig(
         name="shipped-connectors",
         topology=Topology.MULTIWORKER,

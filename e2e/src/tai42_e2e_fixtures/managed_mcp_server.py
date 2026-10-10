@@ -13,7 +13,8 @@ mid-test to drive the real disconnect/reconnect shapes the dispatch seam must su
 A REAL FastMCP server, never a mock. It carries no connector auth glue: the injected OAuth
 token (via ``_meta``) and no-auth ``config_values`` (via env) are handled engine-side of the
 wire contract. ``reflect_env`` exposes the injected ``config_values`` so a scenario can read
-one back."""
+one back. ``ping`` advertises a display title and a read-only hint, so a scenario can read
+them back from the fleet's own MCP listing of the bound tool."""
 
 from __future__ import annotations
 
@@ -21,8 +22,12 @@ import argparse
 import os
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 mcp = FastMCP("e2e-managed-mcp")
+
+PING_TITLE = "Ping"
+PING_ANNOTATIONS = ToolAnnotations(readOnlyHint=True)
 
 
 # Every tool returns an object (never a bare scalar): FastMCP wraps a scalar under
@@ -31,7 +36,7 @@ mcp = FastMCP("e2e-managed-mcp")
 # it specially).
 
 
-@mcp.tool
+@mcp.tool(title=PING_TITLE, annotations=PING_ANNOTATIONS)
 def ping() -> dict:
     """Return the known object ``{"ok": "pong"}`` — the trivially-callable liveness
     tool a scenario calls to prove the managed server launched and serves."""
