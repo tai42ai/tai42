@@ -67,6 +67,7 @@ def test_registry_mutating_ops_exclude_query_and_recycle():
             "reload_tool",
             "remove_tool",
             "reload_failed_mcps",
+            "reprobe_failed_mcps",
         }
     )
     assert expected == REGISTRY_MUTATING_FLEET_OPS

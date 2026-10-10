@@ -135,6 +135,10 @@ class AppAdmin(Protocol):
         """Retry every MCP that failed to bind and return their statuses."""
         ...
 
+    async def reprobe_failed_mcps(self, titles: list[str]) -> list[dict[str, Any]]:
+        """Re-probe those of ``titles`` that failed to bind, bind the recovered ones, and return their statuses."""
+        ...
+
     def list_failed_mcps(self) -> list[dict[str, Any]]:
         """List the MCPs that failed to bind."""
         ...

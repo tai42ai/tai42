@@ -298,10 +298,19 @@ async def remove_connector_provider(provider_id: str) -> dict[str, Any]:
     A provider that is not removable here is a 409 naming where it is managed; a provider with a
     LIVE connection is a 409 naming the count. A connection whose session has lapsed is purged first,
     through the disconnect routine. The manifest change comes before the client rows are deleted, so a
-    failed change leaves them; a failed deletion after it is raised.
+    failed change leaves them; a failed deletion after it is raised, and running the remove again
+    deletes the rows left under the id (nothing else holds it any more; no manifest change, so no
+    fan-out).
     """
     _require_store()
-    descriptor = _provider(provider_id)
+    try:
+        descriptor = connection_service.get_provider(provider_id)
+    except KeyError as exc:
+        if not await provider_service.clients_left_without_provider(provider_id):
+            raise NotFoundError(f"provider {provider_id!r} not found") from exc
+        removed = await client_store.active_client_store().delete_for_provider(provider_id)
+        logger.info("connectors: %d stored client(s) left under the removed provider %s deleted", removed, provider_id)
+        return RemoveProviderResponse(provider_id=provider_id, removed_clients=removed).model_dump(mode="json")
     refusal = await provider_service.removal_refusal(descriptor)
     if refusal is not None:
         raise ConflictError(refusal)

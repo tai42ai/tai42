@@ -59,7 +59,17 @@ class SealedStore:
             raise AssertionError("no record stored")
         return ConnectionRecord.model_validate_json(crypto.decrypt(self.blob, aad=CONNECTION_ID))
 
-    async def put(self, connection_id, blob, *, create_only=False, expected_blob=None, session_expires_at=None):
+    async def put(
+        self,
+        connection_id,
+        blob,
+        *,
+        create_only=False,
+        expected_blob=None,
+        session_expires_at=None,
+        provider_id=None,
+        alias=None,
+    ):
         if self.unreachable:
             raise ConnectionError("store unreachable")
         if expected_blob is not None and expected_blob != self.blob:

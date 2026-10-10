@@ -3,16 +3,24 @@ replacement, the post-exchange failure revoke policy, and the write-under-lock g
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any
+
 import pytest
+from tai42_contract.app import tai42_app
 from tai42_contract.connectors.service import AliasInUseError, CompleteConnectResult, FlowOperation
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.service.connection_service import (
     ConcurrentConnectionUpdateError,
     complete_connect,
     start_connect,
 )
+from tai42_skeleton.operations import _broadcast
+from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
+from ..._fakes.bus import FakeBus
 from ..conftest import CID, make_oauth_record
 from .conftest import _FANOUT, ORIGIN, REDIRECT, _depth_lock, _flow, _token_response
 
@@ -375,3 +383,144 @@ async def test_no_auth_connect_persist_and_manifest_locked(harness, monkeypatch)
     )
     assert put_held == [True]
     assert add_held == [True]
+
+
+# -- a reconnect asks the fleet to re-probe the connection's failed entries ----------------------
+
+
+class _ReprobeAdmin:
+    """The admin facet's set-scoped re-probe, recording the titles it was asked for (or failing)."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.asked: list[list[str]] = []
+        self.error = error
+
+    async def reprobe_failed_mcps(self, titles: list[str]) -> list[dict[str, Any]]:
+        self.asked.append(list(titles))
+        if self.error is not None:
+            raise self.error
+        return [{"title": t, "status": "ok"} for t in titles]
+
+
+def _real_broadcast(monkeypatch, cs_mod, admin: _ReprobeAdmin) -> FakeBus:
+    bus = FakeBus(remotes=["serve-sibling"])
+    monkeypatch.setattr(instance.app, "_bus", bus)
+    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(admin=admin))
+    monkeypatch.setattr(cs_mod, "broadcast", _broadcast.broadcast)
+    return bus
+
+
+def _reconnect_flow(flows, enabled: list[str]):
+    flow = _flow(operation=FlowOperation.RECONNECT, reconnect_cid=CID)
+    flow.enabled_sub_services = enabled
+    flows[flow.flow_id] = flow
+    return flow
+
+
+async def _new_tokens(**kwargs):
+    return _token_response(access_token="new-at")
+
+
+async def test_a_reconnect_with_unchanged_entries_asks_the_fleet_to_reprobe_them(harness, monkeypatch):
+    cs_mod, records, _store, flows, _events, providers = harness
+    records[CID] = make_oauth_record(connection_id=CID, alias="work", enabled_sub_services=["mail", "cal"])
+    cs_mod.ConfigService.from_app().seed(
+        descriptor=providers["acme"], enabled_sub_services=["mail", "cal"], alias="work", connection_id=CID
+    )
+    admin = _ReprobeAdmin()
+    bus = _real_broadcast(monkeypatch, cs_mod, admin)
+    flow = _reconnect_flow(flows, ["mail", "cal"])
+    monkeypatch.setattr(oauth_client, "exchange_code", _new_tokens)
+
+    result = await complete_connect(flow_id=flow.flow_id, code="auth")
+
+    titles = ["acme_cal_work", "acme_mail_work"]
+    # No manifest change: no pipeline run and no manifest fan-out to report.
+    assert cs_mod.ConfigService.from_app().applies == 0
+    assert result.fanout is None
+    # This worker re-probed the titles, and the same op went to the fleet.
+    assert admin.asked == [titles]
+    ((op, targets, local),) = bus.publish_calls
+    assert op == {"op": "reprobe_failed_mcps", "titles": titles}
+    assert targets is None
+    assert local is not None
+    assert local.outcome.value == "applied"
+
+
+async def test_a_reconnect_that_changes_entries_runs_the_pipeline_then_asks_for_the_reprobe(harness, monkeypatch):
+    cs_mod, records, _store, flows, events, providers = harness
+    records[CID] = make_oauth_record(connection_id=CID, alias="work", enabled_sub_services=["mail"])
+    cs_mod.ConfigService.from_app().seed(
+        descriptor=providers["acme"], enabled_sub_services=["mail"], alias="work", connection_id=CID
+    )
+    order: list[str] = []
+    service = cs_mod.ConfigService.from_app()
+    original_apply = service.apply_change
+
+    async def apply_change(mutator):
+        order.append("pipeline")
+        return await original_apply(mutator)
+
+    monkeypatch.setattr(service, "apply_change", apply_change)
+
+    async def recording_broadcast(op, targets, apply, *, publish_on_local_failure=False, pre_mutation_errors=()):
+        order.append("reprobe")
+        events["broadcasts"].append({"op": op, "publish_on_local_failure": publish_on_local_failure})
+        return {}
+
+    monkeypatch.setattr(cs_mod, "broadcast", recording_broadcast)
+    flow = _reconnect_flow(flows, ["mail", "cal"])
+    monkeypatch.setattr(oauth_client, "exchange_code", _new_tokens)
+
+    result = await complete_connect(flow_id=flow.flow_id, code="auth")
+
+    assert order == ["pipeline", "reprobe"]
+    assert result.fanout == _FANOUT
+    assert events["broadcasts"] == [
+        {
+            "op": {"op": "reprobe_failed_mcps", "titles": ["acme_cal_work", "acme_mail_work"]},
+            "publish_on_local_failure": True,
+        }
+    ]
+
+
+async def test_a_toggle_on_completion_asks_for_the_reprobe_too(harness, monkeypatch):
+    cs_mod, records, _store, flows, events, providers = harness
+    records[CID] = make_oauth_record(connection_id=CID, alias="work", enabled_sub_services=["mail"])
+    cs_mod.ConfigService.from_app().seed(
+        descriptor=providers["acme"], enabled_sub_services=["mail"], alias="work", connection_id=CID
+    )
+    flow = _flow(operation=FlowOperation.TOGGLE_SUBSERVICE_ON, reconnect_cid=CID)
+    flow.enabled_sub_services = ["mail", "cal"]
+    flows[flow.flow_id] = flow
+    monkeypatch.setattr(oauth_client, "exchange_code", _new_tokens)
+
+    await complete_connect(flow_id=flow.flow_id, code="auth")
+
+    assert [b["op"] for b in events["broadcasts"]] == [
+        {"op": "reprobe_failed_mcps", "titles": ["acme_cal_work", "acme_mail_work"]}
+    ]
+    assert events["broadcasts"][0]["publish_on_local_failure"] is True
+
+
+async def test_a_failing_local_reprobe_still_reaches_the_fleet_and_raises(harness, monkeypatch):
+    """The reconnect is already persisted, so the siblings are asked even when this worker's pass fails;
+    the failure then surfaces loudly."""
+    cs_mod, records, _store, flows, _events, providers = harness
+    records[CID] = make_oauth_record(connection_id=CID, alias="work", enabled_sub_services=["mail"])
+    cs_mod.ConfigService.from_app().seed(
+        descriptor=providers["acme"], enabled_sub_services=["mail"], alias="work", connection_id=CID
+    )
+    admin = _ReprobeAdmin(error=RuntimeError("probe pass broke"))
+    bus = _real_broadcast(monkeypatch, cs_mod, admin)
+    flow = _reconnect_flow(flows, ["mail"])
+    monkeypatch.setattr(oauth_client, "exchange_code", _new_tokens)
+
+    with pytest.raises(FleetBroadcastError):
+        await complete_connect(flow_id=flow.flow_id, code="auth")
+
+    ((op, _targets, local),) = bus.publish_calls
+    assert op == {"op": "reprobe_failed_mcps", "titles": ["acme_mail_work"]}
+    assert local is not None
+    assert local.outcome.value == "failed"
+    assert records[CID].auth_health_state.value == "healthy"

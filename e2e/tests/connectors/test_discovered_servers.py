@@ -10,8 +10,8 @@ own fixture server (a fresh address, so no replica holds its metadata from an ea
 
 from __future__ import annotations
 
+import asyncio
 import json
-import time
 from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -27,6 +27,7 @@ from tai42_e2e.manifests import (
     DISCOVERED_ENV_CLIENT_ID,
     DISCOVERED_ENV_CLIENT_SECRET,
     DISCOVERED_ENV_PROVIDER_ID,
+    DISCOVERED_REPROBE_INTERVAL_SECONDS,
     DOCUMENT_ORIGIN,
 )
 from tai42_e2e.seeding import seed_editor_key
@@ -45,12 +46,23 @@ pytestmark = pytest.mark.needs(
     "files",
     "process",
     "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origins+https-test-origin",
+    "setting:TAI_MCP_MCP_REPROBE_INITIAL_SECONDS=30",
+    "setting:TAI_MCP_MCP_REPROBE_MAX_SECONDS=30",
 )
 
 _DOCUMENT_HOST = urlparse(DOCUMENT_ORIGIN).netloc
+# Bounds a bind the write's own reload performs: the poll absorbs the write's return and the session round
+# trip. It never bounds a re-probe cadence (see :data:`_REBIND_DEADLINE`).
 _BIND_DEADLINE = 90.0
-# Past the reload probe budget (3 s), inside the platform's refresh deadline (20 s).
-_REFRESH_DELAY = 19.0
+# The cold-boot probe budget (``mcp_probe_timeout``), the largest bound any probe site uses.
+_PROBE_BUDGET_SECONDS = 15.0
+# Bounds a bind the failed-MCP re-probe loop performs at the cadence the stack declares. A pass already
+# running when the entry failed snapshotted the failed set before it and ends within one probe budget (its
+# probes run concurrently, each under the budget); the next pass starts one interval after that and binds
+# within one probe budget. The wait starts later than the failure, so the bound is conservative. Both the
+# loop's sleep and the probe's bound are wall-clock: a bind later than this is the loop not keeping its
+# declared cadence.
+_REBIND_DEADLINE = DISCOVERED_REPROBE_INTERVAL_SECONDS + 2 * _PROBE_BUDGET_SECONDS
 
 
 # -- fixtures --------------------------------------------------------------------------------------
@@ -177,15 +189,17 @@ def _connector_error(result: CallToolResult) -> dict[str, Any]:
     return json.loads(text[text.index("{") :])
 
 
-async def _served(stack: TaiStack, tool: str, *, ports: tuple[int, ...] | None = None) -> None:
-    """Wait until ``tool`` is served on every replica in ``ports`` (both by default)."""
+async def _served(
+    stack: TaiStack, tool: str, *, ports: tuple[int, ...] | None = None, deadline: float = _BIND_DEADLINE
+) -> None:
+    """Wait until ``tool`` is served on every replica in ``ports`` (both by default), each inside ``deadline``."""
     for port in ports or (stack.port_a, stack.port_b):
 
         async def present(port: int = port) -> bool:
             async with stack.mcp(port=port, auth=stack.auth_token) as mcp:
                 return tool in await mcp.tool_names()
 
-        await wait_for_async(present, deadline=_BIND_DEADLINE, message=f"{tool} never served on port {port}")
+        await wait_for_async(present, deadline=deadline, message=f"{tool} never served on port {port}")
 
 
 async def _catalog(api: ApiClient) -> dict[str, dict[str, Any]]:
@@ -377,6 +391,9 @@ async def test_a_server_that_answers_initialize_without_a_token_is_still_discove
 # -- 6. remove -------------------------------------------------------------------------------------
 
 
+# Every manifest write reloads both replicas in turn; this test makes two adds, two first connects, a disconnect and the
+# removal, more than the package's per-test 120 s holds on a loaded host, so the test carries its own bound.
+@pytest.mark.timeout(300)
 async def test_remove_waits_for_disconnect_then_frees_the_id_and_purges_a_lapsed_connection(
     stack: TaiStack, server: OAuthMcpServer, admin_a: ApiClient, admin_b: ApiClient, uniq: Callable[[str], str]
 ) -> None:
@@ -446,6 +463,9 @@ async def test_a_hand_written_discovered_descriptor_with_an_env_client(
 # -- 8. a refused client ---------------------------------------------------------------------------
 
 
+# Every manifest write reloads both replicas in turn; this test makes an add, two first connects and a disconnect, more
+# than the package's per-test 120 s holds on a loaded host, so the test carries its own bound.
+@pytest.mark.timeout(240)
 async def test_a_client_the_server_forgot_asks_for_a_reconnect_that_registers_again(
     stack: TaiStack, server: OAuthMcpServer, admin_a: ApiClient, uniq: Callable[[str], str]
 ) -> None:
@@ -467,10 +487,12 @@ async def test_a_client_the_server_forgot_asks_for_a_reconnect_that_registers_ag
 
     await _reconnect(admin_a, admin_a, first)
     assert len(server.counters().registrations) == 2
-    # The entry that failed to list while its credential was refused is bound again by the
-    # background re-probe.
-    await _served(stack, tool, ports=(stack.port_a,))
-    assert _ok(await _call(stack, tool)) == {"ok": "pong"}
+    # The entry that failed to list while its credential was refused is served again on every replica
+    # as soon as the reconnect answered.
+    for port in (stack.port_a, stack.port_b):
+        assert _ok(await _call(stack, tool, port=port)) == {"ok": "pong"}
+        async with stack.mcp(port=port, auth=stack.auth_token) as mcp:
+            assert tool in await mcp.tool_names(), f"{tool} not served on port {port} after the reconnect"
 
     status, _refused = await _status(admin_a, "DELETE", f"/api/connectors/providers/{provider_id}")
     assert status == 409
@@ -495,13 +517,26 @@ async def test_the_guard_refuses_a_private_address_and_a_private_token_endpoint(
     await _add(admin_a, server.mcp_url, provider_id)
     started = await _start(admin_a, provider_id, uniq("a"))
     status, completed = await _complete(admin_a, await _authorize(started["authorize_url"]))
-    assert (status, completed["kind"]) == (400, "failed"), completed
+    assert (status, completed["kind"], completed["reason"]) == (400, "failed", "CodeExchangeFailedError"), completed
     assert [r for r in server.counters().token_requests if r["grant_type"] == "authorization_code"] == []
+    # The exchange failed at the guard, before any request: the guard's own refusal is in the log of the
+    # replica that completed it (a connection failure to the address logs a transport error instead).
+    serve_log = stack.process("serve-a").log_path
+    refusal = f"token exchange refused by the URL guard ({provider_id})"
+
+    async def refused_by_the_guard() -> bool:
+        return refusal in serve_log.read_text(encoding="utf-8", errors="replace")
+
+    await wait_for_async(refused_by_the_guard, deadline=10.0, message=f"no {refusal!r} in the serve log")
 
 
 # -- 10. a reload refreshes what it needs; a slow sign-in service holds nothing ---------------------
 
 
+# Every manifest write reloads both replicas in turn; this test makes an add, a first connect and two manifest replaces
+# at two replicas each, plus one re-bind bound of ``_REBIND_DEADLINE`` (60 s), more than the package's per-test 120 s
+# holds on a loaded host, so the test carries its own bound.
+@pytest.mark.timeout(360)
 async def test_a_reload_refreshes_a_stale_credential_and_never_waits_on_a_slow_one(
     stack: TaiStack, server: OAuthMcpServer, admin_a: ApiClient, uniq: Callable[[str], str]
 ) -> None:
@@ -514,38 +549,63 @@ async def test_a_reload_refreshes_a_stale_credential_and_never_waits_on_a_slow_o
     # (a) The stored expiry is set back; the manifest write's reload refreshes before its build.
     _ok(await _call(stack, "e2e_age_connection_token", {"connection_id": connection_id}))
     before = len(server.counters().refreshes)
-    started = time.monotonic()
     await _replace_manifest(admin_a, _manifest_document(stack))
-    took_fast = time.monotonic() - started
     assert _ok(await _call(stack, tool)) == {"ok": "pong"}
     assert len(server.counters().refreshes) == before + 1
 
-    # (b) A sign-in service that holds the refresh past the reload probe budget (3 s) — released by
-    # the test once the write returned, and at most inside the refresh deadline (20 s) — holds
-    # neither the write nor costs a rotation.
-    server.set(refresh_delay=_REFRESH_DELAY)
-    _ok(await _call(stack, "e2e_age_connection_token", {"connection_id": connection_id}))
-    refreshes = len(server.counters().refreshes)
-    started = time.monotonic()
-    await _replace_manifest(admin_a, _manifest_document(stack))
-    took = time.monotonic() - started
-    assert any(r["grant_type"] == "refresh_token" for r in server.counters().token_requests[-1:]), (
-        "no refresh reached the fixture during the write"
-    )
-    assert len(server.counters().refreshes) == refreshes, (
-        f"the write waited for the delayed refresh ({took:.1f}s; with a prompt sign-in service {took_fast:.1f}s)"
-    )
-    assert took < _REFRESH_DELAY
-    server.release_refreshes()
+    # (b) The sign-in service holds the refresh. The reload's credential step leaves at its bound:
+    # the entry's listing request without a credential reaches the fixture while the refresh it
+    # asked for is still unanswered. Only then does the test answer the refresh.
+    server.set(hold_refreshes=True)
+    try:
+        _ok(await _call(stack, "e2e_age_connection_token", {"connection_id": connection_id}))
+        seen = server.counters()
+        refreshes, token_requests, mcp_requests = (
+            len(seen.refreshes),
+            len(seen.token_requests),
+            len(seen.mcp_requests),
+        )
+        write = asyncio.create_task(_replace_manifest(admin_a, _manifest_document(stack)))
+        listed_from: list[int] = []
+
+        async def step_left_without_the_answer() -> bool:
+            now = server.counters()
+            if write.done():
+                write.result()
+                raise AssertionError(f"the write returned before its credential step left: {now.token_requests}")
+            if not listed_from:
+                if not any(r.get("grant_type") == "refresh_token" for r in now.token_requests[token_requests:]):
+                    return False
+                listed_from.append(len(now.mcp_requests))
+            anonymous = [
+                r for r in now.mcp_requests[max(listed_from[0], mcp_requests) :] if "authorization" not in r["headers"]
+            ]
+            return bool(anonymous) and len(now.refreshes) == refreshes
+
+        await wait_for_async(
+            step_left_without_the_answer,
+            deadline=_BIND_DEADLINE,
+            message="the reload's listing never went ahead while the refresh was held",
+        )
+    finally:
+        server.set(hold_refreshes=False)
+        server.release_refreshes()
+
+    written = await write
+    assert written["fanout"]["mode"] == "fleet", written
 
     async def answered() -> bool:
-        return len(server.counters().refreshes) == refreshes + 1
+        return len(server.counters().refreshes) > refreshes
 
-    await wait_for_async(answered, deadline=_BIND_DEADLINE, message="the delayed refresh never completed")
-    server.set(refresh_delay=0.0)
+    await wait_for_async(answered, deadline=_BIND_DEADLINE, message="the released refresh never completed")
+    assert len(server.counters().refreshes) == refreshes + 1
+    assert server.counters().refreshes[-1]["accepted"] is True
     view = await admin_a.get(f"/api/connectors/connections/{connection_id}")
     assert view["auth_health_state"] == "healthy"
-    await _served(stack, tool, ports=(stack.port_a,))
+    # The build left the entry unavailable (its listing waited out the budget on the held refresh); the
+    # failed-MCP re-probe loop's next pass binds it with the credential that landed after the swap. No
+    # second refresh happens on the way: the ``refreshes + 2`` below would read ``+ 3``.
+    await _served(stack, tool, ports=(stack.port_a,), deadline=_REBIND_DEADLINE)
     assert _ok(await _call(stack, tool)) == {"ok": "pong"}
     # The connection holds the rotated refresh token: the next refresh is accepted.
     server.expire_access_tokens()
@@ -557,6 +617,9 @@ async def test_a_reload_refreshes_a_stale_credential_and_never_waits_on_a_slow_o
 # -- 11. a credential goes only to its provider's server -------------------------------------------
 
 
+# Every manifest write reloads both replicas in turn; this test makes an add, a first connect, an entry write and a
+# manifest replace, more than the package's per-test 120 s holds on a loaded host, so the test carries its own bound.
+@pytest.mark.timeout(240)
 async def test_a_connections_credential_goes_only_to_its_providers_server(
     stack: TaiStack,
     server: OAuthMcpServer,
@@ -608,6 +671,9 @@ async def test_a_connections_credential_goes_only_to_its_providers_server(
 # -- 12. the issuer check --------------------------------------------------------------------------
 
 
+# Every manifest write reloads both replicas in turn; this test makes two adds and two first connects, more than the
+# package's per-test 120 s holds on a loaded host, so the test carries its own bound.
+@pytest.mark.timeout(360)
 async def test_the_redirects_issuer_is_checked_before_any_token_request(
     stack: TaiStack,
     server: OAuthMcpServer,
@@ -709,6 +775,9 @@ async def test_a_server_without_pkce_is_refused_before_any_login(
 # -- 14. the client-identity document --------------------------------------------------------------
 
 
+# Every manifest write reloads both replicas in turn; this test makes an add and a first connect around two restarts of
+# both replicas, more than the package's per-test 120 s holds on a loaded host, so the test carries its own bound.
+@pytest.mark.timeout(480)
 async def test_a_login_from_an_https_origin_uses_the_client_identity_document(
     stack: TaiStack, server: OAuthMcpServer, admin_a: ApiClient, uniq: Callable[[str], str]
 ) -> None:

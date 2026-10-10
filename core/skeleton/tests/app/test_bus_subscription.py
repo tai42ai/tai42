@@ -417,6 +417,32 @@ async def test_dispatch_clear_template_cache_drops_everything(monkeypatch: pytes
     assert manager.get_cache_info().currsize == 0
 
 
+async def test_dispatch_reprobe_failed_mcps_reaches_the_admin_with_the_titles(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    async def reprobe(titles: list[str]) -> list[dict[str, Any]]:
+        seen.append(list(titles))
+        return [{"title": t, "status": "ok"} for t in titles]
+
+    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(admin=SimpleNamespace(reprobe_failed_mcps=reprobe)))
+
+    result = await _Mixin()._dispatch_bus_op({"op": "reprobe_failed_mcps", "titles": ["a", "b"]})
+
+    # The bare per-title list, the shape the publisher's own apply rides on its self entry.
+    assert result == [{"title": "a", "status": "ok"}, {"title": "b", "status": "ok"}]
+    assert seen == [["a", "b"]]
+
+
+async def test_dispatch_reprobe_failed_mcps_without_titles_raises_loudly() -> None:
+    with pytest.raises(ValueError, match="reprobe_failed_mcps fleet op missing 'titles'"):
+        await _Mixin()._dispatch_bus_op({"op": "reprobe_failed_mcps"})
+
+
+async def test_dispatch_an_unknown_op_raises_loudly() -> None:
+    with pytest.raises(ValueError, match="unknown fleet op 'no_such_op'"):
+        await _Mixin()._dispatch_bus_op({"op": "no_such_op"})
+
+
 # -- drift guard: the contract's mutating-op set vs this dispatch --------------
 
 
