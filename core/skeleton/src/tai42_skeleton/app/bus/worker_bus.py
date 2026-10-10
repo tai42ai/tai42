@@ -12,7 +12,7 @@ from typing import Any
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.app.bus.models import (
-    _TRANSPORT_ERRORS,
+    TRANSPORT_ERRORS,
     WorkerIdentity,
     WorkerKind,
     WorkerRow,
@@ -194,7 +194,7 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
                 presence.state = WorkerState.recycling
                 presence.beat_at = _utcnow_iso()
                 await self._set_presence(r, self._settings.presence_key(name), presence)
-        except _TRANSPORT_ERRORS:
+        except TRANSPORT_ERRORS:
             logger.warning(
                 "worker bus: recycling-state write for %s failed — census may briefly read it as quiet; "
                 "proceeding with recycle",

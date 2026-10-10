@@ -33,7 +33,7 @@ def test_concurrent_stacks_get_isolated_vhosts_that_die_with_them(
             "so there is no per-stack broker vhost to isolate"
         )
 
-    admin = RabbitAdmin(infra.settings.rabbitmq_management_url)
+    admin = RabbitAdmin(infra.settings.rabbitmq_management_url, timeout=infra.settings.boot_timeout)
 
     stack_a = fresh_stack(build_core_stack)
     stack_b = fresh_stack(build_core_stack)

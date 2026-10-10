@@ -253,6 +253,156 @@ async def test_the_ceiling_stops_a_loop_whose_status_never_leaves_in_flight(monk
     assert len(_clears(channel)) == 1
 
 
+class _MillisecondClock(_Clock):
+    """An event loop whose timers fire on a whole-millisecond grid (uvloop rounds every delay to the
+    nearest millisecond), so ``asyncio.sleep(d)`` can end up to half a millisecond before ``d`` has
+    passed on the monotonic clock the loop's deadline reads."""
+
+    async def sleep(self, delay: float) -> None:
+        self.t += max(round(delay * 1000) / 1000, 0.0)
+        await _REAL_SLEEP(0)
+
+
+class _SlowCountingChannel(_CountingChannel):
+    """A counting channel whose every frame takes ``latency`` seconds of the fake clock and notes the
+    instant each frame began."""
+
+    def __init__(self, clock: _Clock, *, latency: float) -> None:
+        super().__init__()
+        self._clock = clock
+        self._latency = latency
+        self.started_at: list[float] = []
+
+    async def signal_working(self, *, recipient, sender_identity=None, provider_message_id=None, active=True) -> None:
+        self.started_at.append(self._clock.t)
+        await super().signal_working(
+            recipient=recipient, sender_identity=sender_identity, provider_message_id=provider_message_id, active=active
+        )
+        self._clock.t += self._latency
+
+
+async def test_a_millisecond_timer_grid_adds_no_refresh_at_the_ceiling(monkeypatch):
+    clock = _MillisecondClock()
+    monkeypatch.setattr(working_signal, "_now", clock.now)
+    monkeypatch.setattr(asyncio, "sleep", clock.sleep)
+    # Each frame takes 33.4 ms, so the remainder left before the ceiling after the second frame
+    # (1.2 - 2 * 0.0334 - 1.0 = 0.1332 s) rounds DOWN onto the millisecond grid and the remainder
+    # sleep ends 0.2 ms short of the ceiling.
+    channel = _SlowCountingChannel(clock, latency=0.0334)
+
+    async def _get_record(message_id: str) -> ConversationRecord:
+        return _record(message_id, status=DeliveryStatus.PENDING_DELIVERY)
+
+    _install_store(monkeypatch, _get_record)
+    settings = ConversationsSettings(working_signal_max_seconds=1.2, working_signal_refresh_margin_seconds=5.0)
+
+    # expiry 2.0 with a 5.0 margin refreshes every max(2.0 - 5.0, 2.0 / 2) = 1.0 s, so a 1.2 s
+    # ceiling fits the first assert and one refresh: ceil(1.2 / 1.0) = 2 asserts, then one clear.
+    await working_signal._run_loop(_record(), channel, 2.0, settings)
+
+    assert len(_actives(channel)) == 2, channel.started_at
+    assert len(_clears(channel)) == 1
+
+
+class _EarlyClock(_Clock):
+    """An event loop whose every timer fires 0.4 ms before its delay has passed on the monotonic
+    clock — the most a whole-millisecond timer grid can cut off a sleep."""
+
+    async def sleep(self, delay: float) -> None:
+        self.t += max(delay - 0.0004, 0.0)
+        await _REAL_SLEEP(0)
+
+
+async def test_early_timers_add_no_refresh_when_the_ceiling_is_a_whole_number_of_intervals(monkeypatch):
+    clock = _EarlyClock()
+    monkeypatch.setattr(working_signal, "_now", clock.now)
+    monkeypatch.setattr(asyncio, "sleep", clock.sleep)
+    channel = _SlowCountingChannel(clock, latency=0.0)
+
+    async def _get_record(message_id: str) -> ConversationRecord:
+        return _record(message_id, status=DeliveryStatus.PENDING_DELIVERY)
+
+    _install_store(monkeypatch, _get_record)
+    settings = ConversationsSettings(working_signal_max_seconds=2.0, working_signal_refresh_margin_seconds=5.0)
+
+    # A 1.0 s interval and a 2.0 s ceiling: refreshes are due at 0.0 and 1.0 s; the one due at
+    # 2.0 s is AT the ceiling, so ceil(2.0 / 1.0) = 2 asserts however early each timer fires.
+    await working_signal._run_loop(_record(), channel, 2.0, settings)
+
+    assert len(_actives(channel)) == 2, channel.started_at
+    assert len(_clears(channel)) == 1
+    assert all(started < 2.0 for started in channel.started_at[:2])
+
+
+class _StallingChannel(_SlowCountingChannel):
+    """A counting channel whose FIRST frame stalls for ``stall`` seconds of the fake clock; every
+    later frame is instant."""
+
+    def __init__(self, clock: _Clock, *, stall: float) -> None:
+        super().__init__(clock, latency=0.0)
+        self._stall = stall
+
+    async def signal_working(self, *, recipient, sender_identity=None, provider_message_id=None, active=True) -> None:
+        await super().signal_working(
+            recipient=recipient, sender_identity=sender_identity, provider_message_id=provider_message_id, active=active
+        )
+        if len(self.started_at) == 1:
+            self._clock.t += self._stall
+
+
+async def test_a_stalled_frame_skips_the_refreshes_it_overran_instead_of_bursting(monkeypatch):
+    clock = _install_clock(monkeypatch)
+    # The first frame takes 2.5 intervals, overrunning the refreshes due at 1.0 and 2.0 s.
+    channel = _StallingChannel(clock, stall=2.5)
+
+    async def _get_record(message_id: str) -> ConversationRecord:
+        return _record(message_id, status=DeliveryStatus.PENDING_DELIVERY)
+
+    _install_store(monkeypatch, _get_record)
+    settings = ConversationsSettings(working_signal_max_seconds=6.0, working_signal_refresh_margin_seconds=5.0)
+
+    await working_signal._run_loop(_record(), channel, 2.0, settings)
+
+    # The overrun slots are skipped, never sent back to back: the next refresh is the 3.0 s slot,
+    # then one per 1.0 s interval up to the last slot before the 6.0 s ceiling.
+    assert channel.started_at[:-1] == [0.0, 3.0, 4.0, 5.0]
+    assert len(_clears(channel)) == 1
+
+
+class _OverrunningClock(_Clock):
+    """A starved event loop: every sleep ends ``overrun`` seconds after its delay."""
+
+    def __init__(self, overrun: float) -> None:
+        super().__init__()
+        self._overrun = overrun
+
+    async def sleep(self, delay: float) -> None:
+        self.t += max(delay, 0.0) + self._overrun
+        await _REAL_SLEEP(0)
+
+
+async def test_a_sleep_that_overruns_the_ceiling_sends_nothing_past_it(monkeypatch):
+    clock = _OverrunningClock(overrun=5.0)
+    monkeypatch.setattr(working_signal, "_now", clock.now)
+    monkeypatch.setattr(asyncio, "sleep", clock.sleep)
+    channel = _SlowCountingChannel(clock, latency=0.0)
+    reads: list[str] = []
+
+    async def _get_record(message_id: str) -> ConversationRecord:
+        reads.append(message_id)
+        return _record(message_id, status=DeliveryStatus.PENDING_DELIVERY)
+
+    _install_store(monkeypatch, _get_record)
+    settings = ConversationsSettings(working_signal_max_seconds=3.0, working_signal_refresh_margin_seconds=5.0)
+
+    # The refresh due at 1.0 s is woken at 6.0 s, past the 3.0 s ceiling: the loop stops there.
+    await working_signal._run_loop(_record(), channel, 2.0, settings)
+
+    assert len(_actives(channel)) == 1
+    assert reads == []
+    assert len(_clears(channel)) == 1
+
+
 async def test_a_store_read_fault_stops_the_loop_with_a_warning(monkeypatch, caplog):
     _install_clock(monkeypatch)
     channel = _CountingChannel()

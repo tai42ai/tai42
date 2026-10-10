@@ -82,14 +82,20 @@ async def test_recycle_apply_rolls_the_fleet_and_self_defers_applier(
     # rejoin) before it returns, so give the client room.
     applied = await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True, timeout=200.0)
     assert applied["refused"] == [], f"a recycle apply on a supervised shape refused a key: {applied}"
+    assert applied["recycle_stopped"] is None, f"the recycle roll stopped: {applied}"
 
     # The recycle report: each recycled backend sibling row carries its pre-recycle
     # generation (never a post-recycle life), and the applying serve worker's own recycle is
     # the deferred self-exit carrying its own name + current generation.
     recycle = applied["recycle"]
     fresh = applied["fresh"]
-    backend_rows = [e for e in recycle if e["kind"] == "backend" and e["status"] == "recycled"]
+    backend_rows = [e for e in recycle if e["kind"] == "backend"]
     assert backend_rows, f"backend not recycled: {applied}"
+    # Every backend target converged: a row the roll stopped at (timed-out / failed) names
+    # why in its detail; a recycled row carries none.
+    for e in backend_rows:
+        assert e["status"] == "recycled", f"a backend row did not converge: {e} in {applied}"
+        assert e["detail"] is None, f"a recycled backend row carries a detail: {e}"
     for e in backend_rows:
         assert e["name"] in before_backend, f"a recycled backend row named an unknown slot: {e} not in {before_backend}"
         assert e["generation_before"] == before_backend[e["name"]], (

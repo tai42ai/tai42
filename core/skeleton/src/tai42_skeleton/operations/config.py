@@ -601,18 +601,25 @@ async def apply_profile(name: str) -> OperationResponse:
     epoch under it, persist env-write-LAST, broadcast the reload, and recycle the fleet for recycle-class
     diffs. NO request body.
 
-    The response is the dedicated ``profileApplyResponse``
-    ``{hot, recycle:[{name, kind, status, generation_before}], fresh:[{name, kind,
-    generation}], refused:[] on success, fanout}`` — key names + worker identities only,
-    never env values. ``recycle`` is one line per recycled/timed-out sibling (plus the
-    applier's own deferred self-exit line when it must self-exit); ``fresh`` is the
-    per-kind new ready lives observed since the pre-apply snapshot, capacity evidence never
-    claimed as any target's successor. A refusal (X-band key, dangling ``!ENV``, a recycle-
-    class diff the deployment shape cannot carry) aborts upfront with a loud 400 naming
-    the key, before anything is snapshotted, built, or persisted. When the diff carries
-    serve-affecting recycle keys the applier's OWN recycle is armed as a post-response
-    graceful self-exit (a Starlette ``BackgroundTask``) — its supervisor respawns it on
-    the new env. 404 for an absent name.
+    The response is the dedicated ``profileApplyResponse`` ``{hot, recycle:[{name, kind, status,
+    generation_before, detail}], fresh:[{name, kind, generation}], refused:[],
+    recycle_stopped:{kind, name, detail} | null, fanout}`` — key names + worker identities only,
+    never env values. ``recycle`` is one line per sibling the roll reached (plus the applier's
+    own deferred self-exit line when it is armed). A ``recycled`` line is confirmed on reality;
+    the roll stops at the first line that is not: ``timed-out`` (its old life did not go, fresh
+    capacity did not boot, or it never returned to ready, within the step budget) or ``failed``
+    (the worker refused the op, or the bus could not be reached while it was in hand), its
+    ``detail`` naming why — or when the bus could not be read before a target was reached.
+    ``recycle_stopped`` names where the roll stopped and why (``null`` when it ran to its end; a
+    ``null`` name when no target was in hand). Later siblings and the applier's own recycle are
+    then not attempted, and the call still answers with the report: the env is persisted and the
+    fleet reloaded. ``fresh`` is the per-kind new ready lives observed since the pre-apply
+    snapshot, capacity evidence never claimed as any target's successor. ``refused`` is ``[]``:
+    a refusal (X-band key, dangling ``!ENV``, a recycle-class diff the deployment shape cannot
+    carry) aborts upfront with a loud 400 naming the key, before anything is snapshotted, built,
+    or persisted. When the diff carries serve-affecting recycle keys and the roll converged, the
+    applier's OWN recycle is armed as a post-response graceful self-exit (a Starlette
+    ``BackgroundTask``) — its supervisor respawns it on the new env. 404 for an absent name.
     """
     _require_profile_store()
     try:
@@ -632,8 +639,8 @@ async def apply_profile(name: str) -> OperationResponse:
         except ValueError as exc:
             raise BadRequestError(str(exc)) from exc
     # Arm the applier's own deferred self-exit as a POST-FLUSH BackgroundTask iff the diff
-    # carries serve-affecting recycle keys (never a bare shape — refused upfront). An
-    # inline ``create_task`` is FORBIDDEN: it would race the response body flush and sever
-    # the transport before the report ships.
-    background = BackgroundTask(request_serve_graceful_exit) if outcome.serve_affecting else None
+    # carries serve-affecting recycle keys and the roll converged (never a bare shape —
+    # refused upfront). An inline ``create_task`` is FORBIDDEN: it would race the response
+    # body flush and sever the transport before the report ships.
+    background = BackgroundTask(request_serve_graceful_exit) if outcome.self_exit_armed else None
     return OperationResponse(profile_apply_response(outcome), background)

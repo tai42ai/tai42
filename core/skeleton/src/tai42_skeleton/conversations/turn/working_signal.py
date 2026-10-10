@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from typing import Any
 
@@ -136,15 +137,19 @@ def stop(message_id: str) -> None:
 async def _run_loop(record: ConversationRecord, channel: Any, expiry: float, settings: ConversationsSettings) -> None:
     """Assert the working indicator now, then re-assert it under ``expiry`` until the turn sends.
 
-    Refreshes every ``max(expiry - margin, expiry / 2)`` seconds so each frame lands before the
-    vendor lifetime lapses, re-reading the record each cycle to stop once it leaves the in-flight
-    states, and never running past the hard ceiling. On stop it clears the indicator once, only if
-    an assert was sent.
+    Refreshes every ``max(expiry - margin, expiry / 2)`` seconds, on a fixed grid from the loop's
+    start, so each frame lands before the vendor lifetime lapses, re-reading the record each cycle
+    to stop once it leaves the in-flight states, and never running past the hard ceiling: a refresh
+    is sent only when its grid slot falls before the ceiling, so one loop sends at most
+    ``ceil(ceiling / interval)`` asserts. On stop it clears the indicator once, only if an assert
+    was sent.
     """
     interval = max(expiry - settings.working_signal_refresh_margin_seconds, expiry / 2)
-    ceiling_deadline = _now() + settings.working_signal_max_seconds
+    started = _now()
+    ceiling_deadline = started + settings.working_signal_max_seconds
     consecutive_failures = 0
     active_sent = False
+    slot = 0
     try:
         while True:
             if await _signal(channel, record):
@@ -154,9 +159,22 @@ async def _run_loop(record: ConversationRecord, channel: Any, expiry: float, set
                 consecutive_failures += 1
                 if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
                     break
-            remaining = ceiling_deadline - _now()
-            await asyncio.sleep(min(interval, remaining))
+            # Refreshes are due on a fixed grid, ``started + n * interval``, and the decision to
+            # send another is taken on that grid, never on the instant a sleep happened to end:
+            # the event loop's timers fire on their own grid (uvloop rounds every delay to the
+            # millisecond), so a sleep can end a fraction of a millisecond early on this clock and
+            # a wake-time check would send one more frame at the ceiling. The next slot is the one
+            # after the slot just served, or the first one still ahead when a slow cycle overran
+            # some (those are skipped, never sent back to back).
+            slot = max(slot + 1, math.floor((_now() - started) / interval) + 1)
+            next_due = started + slot * interval
+            if next_due >= ceiling_deadline:
+                # No refresh is due before the ceiling: hold the indicator until it, then stop.
+                await asyncio.sleep(max(ceiling_deadline - _now(), 0.0))
+                break
+            await asyncio.sleep(max(next_due - _now(), 0.0))
             if _now() >= ceiling_deadline:
+                # The sleep overran the ceiling (a starved event loop): send nothing past it.
                 break
             try:
                 rec = await cache.get_conversations_manager().records.get_record(record.message_id)

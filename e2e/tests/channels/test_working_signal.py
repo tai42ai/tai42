@@ -20,10 +20,13 @@ bridged turn open past several refresh intervals.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 
 import pytest
+from tai42_skeleton.conversations.settings import ConversationsSettings
 
+from tai42_e2e.manifests.bridge import WORKING_SIGNAL_CAPPED_MAX_SECONDS, WORKING_SIGNAL_STUB_EXPIRY_SECONDS
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 
@@ -41,6 +44,9 @@ pytestmark = pytest.mark.needs(
 _UNREACHABLE_CALLBACK = "https://127.0.0.1:9/callback"
 
 _IN_FLIGHT_DONE = {"provisional", "delivered"}
+
+# The working-signal stacks leave the refresh margin at the skeleton's default.
+_DEFAULT_REFRESH_MARGIN_SECONDS = ConversationsSettings.model_fields["working_signal_refresh_margin_seconds"].default
 
 
 def _overlap_start_expr(marker: str, *, hold_seconds: float) -> str:
@@ -256,9 +262,15 @@ async def test_a_low_ceiling_caps_the_working_signal_count(
     await _wait_record_status(stack, route_name, message_id, _IN_FLIGHT_DONE, deadline=30.0)
 
     records = _signal_records(stack, provider_message_id)
-    # The ceiling bounded the refreshes: a 6s turn at a ~1s interval would produce ~6 asserts, but
-    # the low ceiling caps it to a couple.
-    assert 1 <= _active_count(records) <= 3, records
+    # The ceiling bounded the refreshes. The loop refreshes every max(expiry - margin, expiry / 2)
+    # seconds on a fixed grid from its start and sends a refresh only when its grid slot falls
+    # before the ceiling, so it asserts at most ceil(ceiling / interval) times — with the stub's
+    # 2.0 s lifetime and the 5.0 s default margin, an interval of 1.0 s and a 1.2 s ceiling: 2,
+    # where the 6 s turn held uncapped would see ~6.
+    interval = max(
+        WORKING_SIGNAL_STUB_EXPIRY_SECONDS - _DEFAULT_REFRESH_MARGIN_SECONDS, WORKING_SIGNAL_STUB_EXPIRY_SECONDS / 2
+    )
+    assert 1 <= _active_count(records) <= math.ceil(WORKING_SIGNAL_CAPPED_MAX_SECONDS / interval), records
     # The ceiling break clears the indicator once.
     assert any(not record["active"] for record in records), records
 

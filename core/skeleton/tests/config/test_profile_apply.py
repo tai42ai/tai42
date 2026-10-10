@@ -14,6 +14,7 @@ booting a server. One test uses the REAL :func:`build_and_swap_epoch` (its own i
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from collections.abc import Awaitable, Callable, Iterator
@@ -29,7 +30,17 @@ from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind, WorkerRow, WorkerState
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
-from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, FreshLife, RecycleReport, RecycleRow
+from tai42_skeleton.app.recycle import (
+    FAILED,
+    RECYCLED,
+    TIMED_OUT,
+    FreshLife,
+    RecycleError,
+    RecycleReport,
+    RecycleRow,
+    RecycleStop,
+    RecycleTimeoutError,
+)
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations._broadcast import SELF_DEFERRED, profile_apply_response
@@ -70,8 +81,11 @@ def _swap_spy() -> tuple[Callable[..., Awaitable[Epoch]], dict[str, Any]]:
 
 def _orchestrate_spy(
     report: RecycleReport | None = None,
+    *,
+    raises: RecycleError | None = None,
 ) -> tuple[Callable[..., Awaitable[RecycleReport]], dict[str, Any]]:
-    """An ``orchestrate`` seam that records its kwargs and returns a crafted report."""
+    """An ``orchestrate`` seam that records its kwargs and returns a crafted report, or
+    raises ``raises`` (the roll stopping)."""
     seen: dict[str, Any] = {}
 
     async def spy(
@@ -82,12 +96,16 @@ def _orchestrate_spy(
         target_kinds: Any,
         applier_self_deferred: bool,
         step_timeout: float,
+        expected: Any = None,
     ) -> RecycleReport:
+        seen["expected"] = None if expected is None else dict(expected)
         seen["excluded_name"] = excluded_name
         seen["applier_generation"] = applier_generation
         seen["target_kinds"] = list(target_kinds)
         seen["applier_self_deferred"] = applier_self_deferred
         seen["step_timeout"] = step_timeout
+        if raises is not None:
+            raise raises
         out = report or RecycleReport(
             rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=RECYCLED)],
             fresh=[FreshLife(name="serve-b", kind="serve", generation=2)],
@@ -486,7 +504,7 @@ def test_profile_apply_response_shape() -> None:
         recycle=RecycleReport(
             rows=[
                 RecycleRow(name="serve-b", kind="serve", generation_before=1, status=RECYCLED),
-                RecycleRow(name="backend-z", kind="backend", generation_before=4, status=TIMED_OUT),
+                RecycleRow(name="backend-z", kind="backend", generation_before=4, status=RECYCLED),
             ],
             fresh=[FreshLife(name="serve-b", kind="serve", generation=2)],
         ),
@@ -497,21 +515,34 @@ def test_profile_apply_response_shape() -> None:
     response = profile_apply_response(outcome)
     assert response["hot"] == ["HOT_A", "HOT_B"]
     assert response["refused"] == []  # empty on success BY CONSTRUCTION
-    # Recycle rows carry the pre-apply identity + terminal status; no generation_after.
-    assert {"name": "serve-b", "kind": "serve", "status": "recycled", "generation_before": 1} in response["recycle"]
-    assert {"name": "backend-z", "kind": "backend", "status": "timed-out", "generation_before": 4} in response[
-        "recycle"
-    ]
+    # Recycle rows carry the pre-apply identity + terminal status + detail; no generation_after.
+    assert {
+        "name": "serve-b",
+        "kind": "serve",
+        "status": "recycled",
+        "generation_before": 1,
+        "detail": None,
+    } in response["recycle"]
+    assert {
+        "name": "backend-z",
+        "kind": "backend",
+        "status": "recycled",
+        "generation_before": 4,
+        "detail": None,
+    } in response["recycle"]
     # The per-kind fresh list surfaces the new lives — informational, never a successor.
     assert response["fresh"] == [{"name": "serve-b", "kind": "serve", "generation": 2}]
     # The applier's OWN line — always kind "serve", carrying its own current generation.
     applier = [entry for entry in response["recycle"] if entry["status"] == SELF_DEFERRED]
-    assert applier == [{"name": "serve-applier", "kind": "serve", "status": SELF_DEFERRED, "generation_before": 7}]
+    assert applier == [
+        {"name": "serve-applier", "kind": "serve", "status": SELF_DEFERRED, "generation_before": 7, "detail": None}
+    ]
     # No generation_after / names-only replacements anywhere in the surfaced report.
     blob = json.dumps(response)
     assert "generation_after" not in blob
     assert "replacements" not in blob
     assert "fanout" in response
+    assert response["recycle_stopped"] is None
 
 
 def test_profile_apply_response_omits_applier_when_not_serve_affecting() -> None:
@@ -553,7 +584,59 @@ def test_recycle_rows_carry_their_own_kind() -> None:
         fleet=FleetResult(op="reload_config", results=[]),
     )
     (entry,) = profile_apply_response(outcome)["recycle"]
-    assert entry == {"name": "backend-1", "kind": "backend", "status": "recycled", "generation_before": 1}
+    assert entry == {
+        "name": "backend-1",
+        "kind": "backend",
+        "status": "recycled",
+        "generation_before": 1,
+        "detail": None,
+    }
+
+
+def test_a_roll_that_stopped_yields_its_rows_and_no_self_deferred_entry() -> None:
+    # The roll stopped at a timed-out row: the applier's own recycle is not armed, so
+    # no self-deferred line appears although the diff is serve-affecting.
+    detail = "old life still present; the recycle op was not confirmed by the target (worker missing)"
+    outcome = ProfileApplyOutcome(
+        hot=[],
+        recycle=RecycleReport(
+            rows=[
+                RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED),
+                RecycleRow(name="backend-2", kind="backend", generation_before=3, status=TIMED_OUT, detail=detail),
+            ],
+            stopped=RecycleStop(kind="backend", name="backend-2", detail=detail),
+        ),
+        self_identity=_identity("serve-applier", 7),
+        serve_affecting=True,
+        fleet=FleetResult(op="reload_config", results=[]),
+    )
+    assert outcome.self_exit_armed is False
+    response = profile_apply_response(outcome)
+    assert response["recycle"] == [
+        {"name": "backend-1", "kind": "backend", "status": "recycled", "generation_before": 1, "detail": None},
+        {"name": "backend-2", "kind": "backend", "status": "timed-out", "generation_before": 3, "detail": detail},
+    ]
+    assert response["recycle_stopped"] == {"kind": "backend", "name": "backend-2", "detail": detail}
+
+
+def test_a_roll_stopped_with_no_target_in_hand_yields_the_stop_and_no_self_deferred_entry() -> None:
+    # Every row recycled, but the bus could not be read for the next step: the stop has
+    # no row, and the response says where the roll stopped instead of reading complete.
+    detail = "bus unreachable while reading the fresh capacity of the backend roll: ConnectionError: Error 111"
+    outcome = ProfileApplyOutcome(
+        hot=[],
+        recycle=RecycleReport(
+            rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED)],
+            stopped=RecycleStop(kind="backend", name=None, detail=detail),
+        ),
+        self_identity=_identity("serve-applier", 7),
+        serve_affecting=True,
+        fleet=FleetResult(op="reload_config", results=[]),
+    )
+    assert outcome.self_exit_armed is False
+    response = profile_apply_response(outcome)
+    assert all(entry["status"] != SELF_DEFERRED for entry in response["recycle"])
+    assert response["recycle_stopped"] == {"kind": "backend", "name": None, "detail": detail}
 
 
 # ---------------------------------------------------------------------------
@@ -586,3 +669,189 @@ async def test_expected_membership_is_censused_before_the_swap(monkeypatch: pyte
 
     assert sibling.pttl_ms == 0
     assert bus.expected_at_start_calls == [{"serve-b": 1}]
+
+
+# ---------------------------------------------------------------------------
+# A roll that stops is reported in the outcome, never raised past the pipeline
+# ---------------------------------------------------------------------------
+
+
+def _stopped(status: str, detail: str) -> RecycleReport:
+    return RecycleReport(
+        rows=[
+            RecycleRow(name="serve-b", kind="serve", generation_before=1, status=RECYCLED),
+            RecycleRow(name="backend-1", kind="backend", generation_before=2, status=status, detail=detail),
+        ],
+        stopped=RecycleStop(kind="backend", name="backend-1", detail=detail),
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "detail", "make_error"),
+    [
+        pytest.param(
+            TIMED_OUT,
+            "old life still present",
+            lambda report: RecycleTimeoutError("backend-1", "old life still present", report),
+            id="timed-out",
+        ),
+        pytest.param(
+            FAILED,
+            "RuntimeError: boom",
+            lambda report: RecycleError("recycle: worker 'backend-1' did not apply the recycle op (boom)", report),
+            id="failed",
+        ),
+    ],
+)
+async def test_a_roll_that_stops_returns_the_partial_report(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    status: str,
+    detail: str,
+    make_error: Callable[[RecycleReport], RecycleError],
+) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+    store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
+    bus = FakeBus(origin="serve-applier", remotes=["serve-b"])
+    spy, _ = _swap_spy()
+    partial = _stopped(status, detail)
+    orch, _seen = _orchestrate_spy(raises=make_error(partial))
+    with caplog.at_level(logging.ERROR):
+        outcome = await _service(store, bus).apply_replace_env(
+            {"TAI_BUS_NAMESPACE": "new"},
+            driven=True,
+            save_previous=_PrevSpy(),
+            build_and_swap=spy,
+            orchestrate=orch,
+        )
+    assert outcome.recycle is partial
+    assert outcome.serve_affecting is True
+    assert outcome.self_exit_armed is False
+    # The env persisted before the roll ran: the apply landed.
+    assert store.env == {"TAI_BUS_NAMESPACE": "new"}
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR and "recycle" in r.getMessage()]
+    assert len(errors) == 1
+    assert "backend-1" in errors[0].getMessage()
+    assert status in errors[0].getMessage()
+
+
+async def test_a_stop_without_a_row_for_the_target_escapes(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The bus replied without naming the published target: a bus contract violation,
+    # not an outcome of the roll, so it is not folded into the report.
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+    store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
+    spy, _ = _swap_spy()
+    error = RecycleError(
+        "recycle: worker 'backend-1' did not apply the recycle op (no reply from the target)", RecycleReport()
+    )
+    orch, _seen = _orchestrate_spy(raises=error)
+    with pytest.raises(RecycleError, match="no reply from the target"):
+        await _service(store, FakeBus(origin="serve-applier")).apply_replace_env(
+            {"TAI_BUS_NAMESPACE": "new"},
+            driven=True,
+            save_previous=_PrevSpy(),
+            build_and_swap=spy,
+            orchestrate=orch,
+        )
+
+
+def test_self_exit_is_armed_only_on_a_converged_serve_affecting_roll() -> None:
+    def outcome(recycle: RecycleReport | None, *, serve_affecting: bool) -> ProfileApplyOutcome:
+        return ProfileApplyOutcome(
+            hot=[],
+            recycle=recycle,
+            self_identity=_identity("serve-applier", 1),
+            serve_affecting=serve_affecting,
+            fleet=FleetResult(op="reload_config", results=[]),
+        )
+
+    converged = RecycleReport(rows=[RecycleRow(name="b", kind="backend", generation_before=1, status=RECYCLED)])
+    assert outcome(converged, serve_affecting=True).self_exit_armed is True
+    assert outcome(converged, serve_affecting=False).self_exit_armed is False
+    assert outcome(_stopped(TIMED_OUT, "x"), serve_affecting=True).self_exit_armed is False
+    assert outcome(None, serve_affecting=False).self_exit_armed is False
+
+
+class _OrderedBus(FakeBus):
+    """A fake bus whose census carries a backend pair beside the serve rows and records
+    each census read into a shared event list."""
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(origin="serve-applier", remotes=["serve-b"])
+        now = "2026-01-01T00:00:00+00:00"
+        self._events = events
+        self._backends = [
+            WorkerRow(
+                name=name,
+                kind=WorkerKind.backend,
+                pid=3,
+                generation=generation,
+                joined_at=now,
+                beat_at=now,
+                state=state,
+                pttl_ms=15000,
+            )
+            for name, generation, state in (
+                ("backend-1", 2, WorkerState.ready),
+                ("backend-2", 1, WorkerState.resyncing),
+            )
+        ]
+
+    async def census(self) -> list[WorkerRow]:
+        self._events.append("census")
+        return [*await super().census(), *self._backends]
+
+
+async def test_the_recycle_targets_are_pinned_before_the_swap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+    store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
+    events: list[str] = []
+    bus = _OrderedBus(events)
+
+    async def swap(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+        events.append("swap")
+        return Epoch(number=0)
+
+    orch, seen = _orchestrate_spy()
+    await _service(store, bus).apply_replace_env(
+        {"TAI_BUS_NAMESPACE": "new"},
+        driven=True,
+        save_previous=_PrevSpy(),
+        build_and_swap=swap,
+        orchestrate=orch,
+    )
+    # Every census row of a target kind except the applier — gap rows included.
+    assert seen["expected"] == {
+        "serve-b": (WorkerKind.serve, 1),
+        "backend-1": (WorkerKind.backend, 2),
+        "backend-2": (WorkerKind.backend, 1),
+    }
+    assert "census" in events
+    assert events.index("census") < events.index("swap")
+
+
+async def test_a_stop_with_no_target_in_hand_is_reported_not_re_raised(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+    store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
+    spy, _ = _swap_spy()
+    detail = "bus unreachable while reading the census at the start of the backend roll: ConnectionError: Error 111"
+    partial = RecycleReport(stopped=RecycleStop(kind="backend", name=None, detail=detail))
+    orch, _seen = _orchestrate_spy(raises=RecycleError(f"recycle: {detail}", partial))
+    with caplog.at_level(logging.ERROR):
+        outcome = await _service(store, FakeBus(origin="serve-applier")).apply_replace_env(
+            {"TAI_BUS_NAMESPACE": "new"},
+            driven=True,
+            save_previous=_PrevSpy(),
+            build_and_swap=spy,
+            orchestrate=orch,
+        )
+    assert outcome.recycle is partial
+    assert outcome.self_exit_armed is False
+    assert store.env == {"TAI_BUS_NAMESPACE": "new"}
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR and "recycle" in r.getMessage()]
+    assert len(errors) == 1
+    assert "backend" in errors[0]
+    assert "no target in hand" in errors[0]
+    assert "bus unreachable" in errors[0]

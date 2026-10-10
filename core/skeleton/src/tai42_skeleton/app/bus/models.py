@@ -22,13 +22,13 @@ logger = logging.getLogger(__name__)
 # identity ``name``.
 _OP_PAYLOAD_KEY = "payload"
 
-# Transport errors that a reconnect loop recovers from and a publish reports as the
-# bus-unreachable shape. ``ClientDisconnectedError`` is the pooled ``client_ctx``
-# wrapper for a severed connection, so it belongs here alongside the raw redis
-# transport errors: a real bus outage arrives wrapped, and must fold into the
-# bus-unreachable report (publish) and drive a reconnect + re-register (subscription),
-# never escape as a bare error.
-_TRANSPORT_ERRORS: tuple[type[Exception], ...] = (
+# The transport errors any bus read or write raises on an outage. ``publish`` folds them
+# into its bus-unreachable result and the subscription reconnects + re-registers on them;
+# a consumer that must REPORT an outage rather than raise it catches this tuple.
+# ``ClientDisconnectedError`` is the pooled ``client_ctx`` wrapper for a severed
+# connection, so it belongs here alongside the raw redis transport errors: a real bus
+# outage arrives wrapped.
+TRANSPORT_ERRORS: tuple[type[Exception], ...] = (
     RedisConnectionError,
     RedisTimeoutError,
     ClientDisconnectedError,
