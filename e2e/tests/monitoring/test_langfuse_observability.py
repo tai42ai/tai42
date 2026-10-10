@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
+from urllib.parse import urlencode
 
 import pytest
 
 from tai42_e2e import wait_for_async
+from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.stack import TaiStack
 
@@ -25,11 +28,45 @@ pytestmark = [
 ]
 
 
+def _run_window_start() -> str:
+    """The instant a test's own runs start at or after, whole seconds (rounding down
+    only widens the window), as the run list's ``from`` bound."""
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+async def _marked_run(api: ApiClient, marker: str, since: str) -> dict:
+    """The run-list row of the test's OWN trace: a row created at or after ``since``
+    whose input carries ``marker``.
+
+    The Langfuse project keeps every earlier run's traces and ingests new ones with a
+    delay, so the newest row is whatever arrived last — another run's trace, never
+    reliably this test's. ``from`` narrows the list server-side to runs created since
+    the test began; the marker, which only this test's calls carry in their input,
+    picks its own trace among them. A trace that never arrives within the deadline
+    fails naming the marker."""
+    query = urlencode({"from": since, "pageSize": 100})
+
+    async def marked_row() -> dict | None:
+        runs = await api.get(f"/api/observability/runs?{query}")
+        items = runs.get("items") if isinstance(runs, dict) else None
+        for row in items or []:
+            if isinstance(row, dict) and marker in json.dumps(row.get("inputPreview")):
+                return row
+        return None
+
+    return await wait_for_async(
+        marked_row,
+        deadline=60.0,
+        message=f"observability reader never served a run created since {since} whose input carries {marker!r}",
+    )
+
+
 @pytest.mark.needs("probe-tools")
 async def test_tool_run_spans_reach_langfuse_and_serve_back(
     monitoring_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
     payload = uniq("trace")
+    since = _run_window_start()
     async with monitoring_stack.mcp() as mcp:
         # e2e_echo_monitor is the monitor-wrapped branch: each standalone call opens
         # one SpanKind.TOOL trace, which the langfuse backend records — the "run" the
@@ -41,23 +78,12 @@ async def test_tool_run_spans_reach_langfuse_and_serve_back(
 
     # READ side: the observability routes source exclusively from the registered
     # monitoring backend's reader and answer empty under the no-op default, so
-    # non-zero data proves the Langfuse reader end to end. Ingestion is async
-    # through the Langfuse worker, hence a generous deadline.
-    async def reader_serves_data() -> bool:
-        runs = await api.get("/api/observability/runs")
-        items = runs.get("items") if isinstance(runs, dict) else None
-        return bool(items)
-
-    await wait_for_async(
-        reader_serves_data,
-        deadline=60.0,
-        message="observability reader never served langfuse-sourced runs",
-    )
+    # serving this call's own trace (its payload in the input) proves the Langfuse
+    # reader end to end.
+    row = await _marked_run(api, payload, since)
 
     # The list row is a SUMMARY: status / tokens / latency are first-class, and no
     # trace body (observations/spans) nor per-observation model rides on the row.
-    runs = await api.get("/api/observability/runs")
-    row = runs["items"][0]
     assert row["status"] in ("success", "error")
     assert "totalTokens" in row
     assert "latencyMs" in row
@@ -89,6 +115,7 @@ async def test_agent_run_trace_reaches_langfuse_and_serves_back(
     monitoring_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
     marker = uniq("agentrun")
+    since = _run_window_start()
     llm_stub.reset()
     # One content frame ends the agent's LLM->tool->LLM loop immediately (no tool
     # call); the whole run is traced natively by the agents plugin's monitoring
@@ -101,20 +128,11 @@ async def test_agent_run_trace_reaches_langfuse_and_serves_back(
     api = monitoring_stack.api()
 
     # READ side: the observability run list exposes each trace's input via
-    # ``inputPreview`` (a server-bounded preview string — the short user message is
-    # kept intact). The run-list HTTP filter has no name/input clause, so match the marker
-    # client-side over the served items: its presence proves THIS agent run's trace
-    # reached Langfuse and is served back through the platform read path only.
-    async def marker_run_served() -> bool:
-        runs = await api.get("/api/observability/runs")
-        items = runs.get("items") if isinstance(runs, dict) else None
-        return bool(items) and marker in json.dumps(items)
-
-    await wait_for_async(
-        marker_run_served,
-        deadline=60.0,
-        message="observability reader never served the marked agent run",
-    )
+    # ``inputPreview`` (a server-bounded preview — the short user message is kept
+    # intact). The run-list HTTP filter has no name/input clause, so the marker is
+    # matched over the served rows: its presence proves THIS agent run's trace reached
+    # Langfuse and is served back through the platform read path only.
+    await _marked_run(api, marker, since)
 
 
 async def _create_preset(api, name: str, base_tool: str, fixed_kwargs: dict) -> None:
