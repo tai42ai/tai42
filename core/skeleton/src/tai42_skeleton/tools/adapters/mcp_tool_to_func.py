@@ -155,7 +155,9 @@ def _build_input_value(input_model: type[BaseModel], **kwargs):
         if exposed in kwargs:
             data[field.alias or field_name] = kwargs[exposed]
     input_instance = input_model.model_validate(data)
-    return input_instance.model_dump(exclude_none=True, by_alias=True)
+    # Only fields still at their default stay off the wire (the child fills them); an
+    # explicitly-passed ``None`` that differs from the default is forwarded as ``null``.
+    return input_instance.model_dump(exclude_defaults=True, by_alias=True)
 
 
 # -- Transport dispatch -------------------------------------------------------

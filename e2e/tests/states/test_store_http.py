@@ -216,6 +216,68 @@ async def test_core_stack_mount_check_reads_effective_parameters(
 
 
 @pytest.mark.needs("kind:states")
+async def test_core_stack_template_parameter_with_a_null_default_round_trips(
+    core_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """Over the upload door, a parameter whose default is an explicit ``null`` is saved and served
+    back with ``"default": null`` (a parameter with no default serves no ``default`` key), an
+    attach that supplies only the no-default parameter renders the ``null`` default into the
+    effective schema, and a declarations edit re-reads the template without refusing it."""
+    api = core_stack.api()
+    state = uniq("status")
+    template = uniq("nullable-mod").replace("_", "-")
+    parameters = {
+        "unused": {"schema": {"type": ["object", "null"]}, "default": None},
+        "label": {"schema": {"type": ["string", "null"]}, "default": None},
+        "item": {"schema": {"type": "object"}},
+    }
+
+    await api.put(
+        f"/api/states/{state}",
+        json={
+            "description": "e2e nullable defaults",
+            "schema": {"type": "object", "properties": {"note": {"type": "string"}}},
+            "subject_kinds": ["thread"],
+            "default_subject_kind": "thread",
+        },
+    )
+    saved = await api.put(
+        f"/api/state-templates/{template}",
+        json={
+            "kind": "state-template",
+            "name": template,
+            "parameters": parameters,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": ["string", "null"], "default": {"$parameter": "label"}},
+                    "item": {"$parameter": "item"},
+                },
+            },
+            "declarations": {"schema": {"type": "object", "properties": {"n": {"type": "integer"}}}},
+            "reconcile": {"orphans": {"content": "[]"}, "close": {"content": "."}, "resolutions": {"content": "[]"}},
+        },
+    )
+    assert saved["parameters"] == parameters
+    assert (await api.get(f"/api/state-templates/{template}"))["parameters"] == parameters
+
+    await api.put(
+        f"/api/states/{state}/attachments/{template}",
+        json={"path": ["box"], "parameters": {"item": {"type": "integer"}}, "declarations": {"n": 1}},
+    )
+    box = (await api.get(f"/api/states/{state}"))["effective_schema"]["properties"]["box"]
+    assert box["properties"]["label"] == {"type": ["string", "null"], "default": None}
+    assert box["properties"]["item"] == {"type": "integer"}
+
+    resp = await api.request_raw(
+        "PATCH", f"/api/states/{state}/attachments/{template}", json={"declarations": {"n": 2}}
+    )
+    assert resp.status_code == 200, resp.text
+    (row,) = await api.get(f"/api/states/{state}/attachments")
+    assert row["declarations"] == {"n": 2}
+
+
+@pytest.mark.needs("kind:states")
 async def test_core_stack_template_jq_input_and_update(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """The ``template_jq`` record sub-actions, end to end over the API door: a template
     declares input programs (named reads) and update programs (record operations) on a
