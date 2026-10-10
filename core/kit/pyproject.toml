@@ -111,7 +111,7 @@ typesafe = ["tai42-kit[llm]", "langchain-typesafe>=0.0.1a3,<0.1"]
 langgraph-checkpoint-postgres = [
     "tai42-kit[llm]",
     "langgraph-checkpoint-postgres>=3.0.5",
-    "psycopg[pool]>=3.3.2",
+    "psycopg[pool]>=3.3.6",
     # Imported directly by clients/impl/postgres_json.py (the kit pools' json loader),
     # which clients/impl/postgres.py imports.
     "orjson>=3.11.8,<4",
@@ -137,7 +137,7 @@ monitoring = [
 redis = ["redis>=5"]
 curl = ["curl-cffi>=0.16.3"]
 # orjson: imported directly by clients/impl/postgres_json.py (the pools' json loader).
-postgres = ["psycopg[binary,pool]>=3.3.2", "orjson>=3.11.8,<4"]
+postgres = ["psycopg[binary,pool]>=3.3.6", "orjson>=3.11.8,<4"]
 
 # OIDC discovery + JWKS + JWT verification (net/jwt.py imports joserfc at module top).
 jwt = ["joserfc>=1.7"]
