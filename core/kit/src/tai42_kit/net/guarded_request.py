@@ -62,8 +62,8 @@ async def _send(
     max_bytes: int,
     timeout: float,
 ) -> GuardedResponse:
-    # Each phase timer starts after the total deadline did, so with the same length it never
-    # fires first: the total deadline is the one that ends a slow call.
+    # The phase timers are the same length and start after the total deadline, so on a responsive
+    # loop the total deadline ends a slow call; either error is a GuardedRequestError.
     phases = httpx.Timeout(timeout)
     if url_guard.guard_enabled():
         client = httpx.AsyncClient(transport=PinningTransport(), follow_redirects=False, timeout=phases)
