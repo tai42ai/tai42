@@ -17,6 +17,8 @@ from tai42_kit.llm.settings import llm_provider_settings
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from tai42_kit.llm.checkpoint.retention import ThreadRetention
+
 RetentionMode = Literal["native_ttl", "sweep", "process"]
 
 
@@ -71,12 +73,15 @@ def durable_checkpoint_providers() -> frozenset[str]:
     return frozenset(name for name, facts in CHECKPOINT_PROVIDERS.items() if facts.durable)
 
 
-def checkpoint_park_horizon(provider: str) -> timedelta | None:
+def checkpoint_park_horizon(provider: str, retention: ThreadRetention | None = None) -> timedelta | None:
     """How long a parked run's checkpoint is kept on ``provider``; ``None`` when the store does not outlive the process.
 
-    On a durable provider a parked thread's last write is its park checkpoint, and the thread is kept
-    ``checkpoint_retention_waiting_minutes`` after it, so a park may wait at most that long.
+    On a durable provider a parked thread's last write is its park checkpoint, and the thread is kept its
+    waiting retention after it — the owner's declared one, else the platform's — so a park may wait at
+    most that long.
     """
     if not checkpoint_provider_facts(provider).durable:
         return None
+    if retention is not None:
+        return timedelta(minutes=retention.waiting_minutes)
     return timedelta(minutes=llm_provider_settings().checkpoint_retention_waiting_minutes)

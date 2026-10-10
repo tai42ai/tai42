@@ -20,7 +20,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 from prometheus_client import REGISTRY
 from tai42_contract.app import tai42_app
 from tai42_contract.manifest import ApiToolsConfig
-from tai42_kit.llm.checkpoint import liveness, register_live_thread_filter
+from tai42_kit.llm.checkpoint import ThreadRetention, liveness, register_live_thread_filter
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.settings import reset_all_settings
 
@@ -99,8 +99,9 @@ async def test_finished_past_the_horizon_is_deleted_and_forgotten(store_env) -> 
     now = datetime.now(UTC)
     for thread_id in ("done-old", "done-new", "open"):
         await _put(saver, thread_id)
-    await ledger.mark(["done-old"], now - timedelta(minutes=45))
-    await ledger.mark(["done-new"], now - timedelta(minutes=5))
+    # A mark carries its due time: due a moment ago goes, due in the future is kept.
+    await ledger.mark(["done-old"], now - timedelta(seconds=1))
+    await ledger.mark(["done-new"], now + timedelta(minutes=25))
 
     result = await checkpoints_ops.sweep_checkpoints()
 
@@ -113,7 +114,7 @@ async def test_finished_past_the_horizon_is_deleted_and_forgotten(store_env) -> 
     assert result["finished_minutes"] == 30
     assert result["skipped"] == "waiting horizon: provider 'memory' keeps threads for the process lifetime"
     assert await _threads(saver) == {"done-new", "open"}
-    assert await ledger.finished_before(now, limit=10) == ["done-new"]
+    assert await ledger.finished_before(now + timedelta(minutes=30), limit=10) == ["done-new"]
 
 
 async def test_a_finished_thread_a_filter_claims_is_spared_logged_counted_and_kept(
@@ -183,14 +184,20 @@ async def test_sqlite_waiting_past_the_horizon_is_deleted_unless_claimed(store_e
     await _put(saver, "stale", ts=now - timedelta(hours=2))
     await _put(saver, "parked", ts=now - timedelta(hours=2))
     await _put(saver, "fresh", ts=now - timedelta(minutes=5))
+    await _put(saver, "declared-short", ts=now - timedelta(minutes=5))
+    await _put(saver, "declared-long", ts=now - timedelta(minutes=50))
+    ledger = await registry.ledger("sqlite", db)
+    await ledger.start(["declared-short"], ThreadRetention(waiting_minutes=2, finished_minutes=1))
+    await ledger.start(["declared-long"], ThreadRetention(waiting_minutes=55, finished_minutes=1))
     register_live_thread_filter("probe", _claiming("parked"))
 
     result = await checkpoints_ops.sweep_checkpoints()
 
-    assert result["waiting_swept"] == ["stale"]
+    assert result["waiting_swept"] == ["declared-short", "stale"]
     assert result["spared"] == ["parked"]
     assert result["skipped"] is None
-    assert await _threads(saver) == {"parked", "fresh"}
+    assert await _threads(saver) == {"parked", "fresh", "declared-long"}
+    assert await ledger.declared_waiting(["declared-short", "declared-long"]) == {"declared-long": 55}
 
 
 class _Store:
@@ -216,8 +223,10 @@ class _Ledger:
     def __init__(self, finished: list[str] | None = None) -> None:
         self.finished = list(finished or [])
         self.forgotten: list[str] = []
+        self.cutoffs: list[datetime] = []
 
     async def finished_before(self, cutoff: datetime, limit: int) -> list[str]:
+        self.cutoffs.append(cutoff)
         return self.finished[:limit]
 
     async def forget(self, thread_ids: list[str]) -> None:
@@ -248,11 +257,11 @@ async def test_postgres_waiting_past_the_horizon_is_deleted_unless_claimed(monke
     store = _Store({"stale": 1, "parked": 1, "fresh": 1})
     ledger = _Ledger()
     _install_store(monkeypatch, store_env, "postgres", store, ledger)
-    cutoffs: list[datetime] = []
+    calls: list[tuple[datetime, int]] = []
 
-    async def _stale(pool: Any, *, cutoff: datetime) -> list[str]:
+    async def _stale(pool: Any, *, now: datetime, default_minutes: int) -> list[str]:
         assert pool == "pool"
-        cutoffs.append(cutoff)
+        calls.append((now, default_minutes))
         return ["parked", "stale"]
 
     monkeypatch.setattr(postgres_store, "stale_threads", _stale)
@@ -264,7 +273,9 @@ async def test_postgres_waiting_past_the_horizon_is_deleted_unless_claimed(monke
     assert result["spared"] == ["parked"]
     assert set(store.rounds) == {"parked", "fresh"}
     assert ledger.forgotten == ["stale"]
-    assert datetime.now(UTC) - timedelta(minutes=61) < cutoffs[0] < datetime.now(UTC) - timedelta(minutes=59)
+    [(swept_at, default_minutes)] = calls
+    assert default_minutes == 60
+    assert datetime.now(UTC) - timedelta(minutes=1) < swept_at <= datetime.now(UTC)
 
 
 async def test_redis_waiting_is_left_to_the_key_ttl(monkeypatch, store_env) -> None:
@@ -278,6 +289,8 @@ async def test_redis_waiting_is_left_to_the_key_ttl(monkeypatch, store_env) -> N
     assert result["waiting_swept"] == []
     assert result["skipped"] == "waiting horizon: provider 'redis' expires threads by their key TTL"
     assert set(store.rounds) == {"waiting"}
+    # The ledger stores each mark's due time, so the sweep asks for what is due now.
+    assert datetime.now(UTC) - timedelta(minutes=1) < ledger.cutoffs[0] <= datetime.now(UTC)
 
 
 async def test_a_thread_that_survives_a_delete_round_is_deleted_on_the_next(monkeypatch, store_env) -> None:

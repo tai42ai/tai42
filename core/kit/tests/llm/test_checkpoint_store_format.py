@@ -103,6 +103,16 @@ async def test_sqlite_another_generation_is_refused(sqlite_store):
     assert str(excinfo.value) == _refusal("sqlite", "1")
 
 
+async def test_sqlite_a_generation_two_store_is_refused(sqlite_store):
+    _saver, resource = sqlite_store
+    await ensure_store_format(resource)
+    await resource.handle.execute("UPDATE tai42_checkpoint_format SET generation = 2")
+    await resource.handle.commit()
+    with pytest.raises(CheckpointStoreFormatError) as excinfo:
+        await ensure_store_format(resource)
+    assert str(excinfo.value) == _refusal("sqlite", "2")
+
+
 async def test_sqlite_marked_store_with_data_proceeds(sqlite_store):
     saver, resource = sqlite_store
     await ensure_store_format(resource)

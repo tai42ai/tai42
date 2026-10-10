@@ -479,3 +479,62 @@ async def test_a_delete_round_that_removes_nothing_raises(redis_saver: Any, monk
     )
     await redis_saver.adelete_thread(thread_id)
     assert await _thread_keys(redis_saver, thread_id) == {"checkpoint": 0, "checkpoint_write": 0}
+
+
+# --------------------------------------------------------------------------- #
+# A saver view: the same store and client, its own waiting TTL on every key it writes
+# --------------------------------------------------------------------------- #
+async def _thread_ttls(client: Any, thread_id: str) -> dict[str, int]:
+    keys = [k async for k in client.scan_iter(match=f"*{thread_id}*")]
+    return {(k.decode() if isinstance(k, bytes) else k): await client.ttl(k) for k in keys}
+
+
+async def test_a_view_stamps_its_own_waiting_on_every_key_and_shares_the_store() -> None:
+    from tai42_kit.llm.checkpoint.checkpoint import create_redis_saver_view
+
+    resource, closer = await create_checkpoint_resource("redis", real_redis_url())
+    try:
+        default: Any = get_saver_from_resource("redis", resource)
+        view: Any = await create_redis_saver_view(resource, 2)
+        assert view.ttl_config["default_ttl"] == 2
+        assert view._redis is resource.redis_client
+        short = f"view-{uuid.uuid4().hex}"
+        long = f"default-{uuid.uuid4().hex}"
+        for saver, thread_id in ((view, short), (default, long)):
+            saved = await saver.aput(
+                _config(thread_id), empty_checkpoint(), {"source": "input", "step": 0, "parents": {}}, {}
+            )
+            await saver.aput_writes(saved, [("v", 1)], task_id="task-1")
+        short_ttls = await _thread_ttls(resource.redis_client, short)
+        kinds = {key.split(":", 1)[0] for key in short_ttls}
+        assert {"checkpoint", "checkpoint_latest", "checkpoint_write", "write_keys_zset"} <= kinds
+        for key, ttl in short_ttls.items():
+            assert 60 < ttl <= 120, key
+        for key, ttl in (await _thread_ttls(resource.redis_client, long)).items():
+            assert 10080 * 60 - 60 <= ttl <= 10080 * 60, key
+        # Each reads the other's thread; a delete through either removes it whole.
+        assert await default.aget_tuple(_config(short)) is not None
+        assert await view.aget_tuple(_config(long)) is not None
+        await default.adelete_thread(short)
+        await view.adelete_thread(long)
+        assert await _thread_ttls(resource.redis_client, short) == {}
+        assert await _thread_ttls(resource.redis_client, long) == {}
+    finally:
+        await closer()
+
+
+async def test_the_registry_hands_a_declared_waiting_view_on_real_redis() -> None:
+    from tai42_kit.llm.checkpoint import ThreadRetention
+    from tai42_kit.llm.checkpoint.checkpoint_registry import CheckpointRegistry
+
+    reg = CheckpointRegistry()
+    url = real_redis_url()
+    try:
+        view: Any = await reg.get_checkpointer("redis", url, ThreadRetention(2, 1))
+        default: Any = await reg.get_checkpointer("redis", url)
+        assert view is not default
+        assert view.ttl_config["default_ttl"] == 2
+        assert default.ttl_config["default_ttl"] == 10080
+        assert await reg.get_checkpointer("redis", url, ThreadRetention(2, 2)) is view
+    finally:
+        await reg.close_all()

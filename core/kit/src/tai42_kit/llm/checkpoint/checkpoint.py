@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from redis.asyncio import Redis as AsyncRedis
 
     from tai42_kit.llm.checkpoint.codec import CheckpointCodec
+    from tai42_kit.llm.checkpoint.retention import ThreadRetention
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +238,25 @@ async def _create_postgres_checkpoint(conn_string: str | None) -> tuple[Checkpoi
     return CheckpointResource("postgres", pool, ledger), close_postgres
 
 
+def _redis_ttl_config(waiting_minutes: int) -> dict[str, Any]:
+    # Every key a write stamps carries the waiting retention, and a read never re-arms it: a
+    # thread lives that long after its last write. A parked run's last write is its park
+    # checkpoint, and the latest checkpoint carries its channel values inline, so older
+    # checkpoints expiring first never breaks a resume.
+    return {"default_ttl": waiting_minutes, "refresh_on_read": False}
+
+
+async def _setup_redis_saver(saver: Any) -> None:
+    try:
+        await saver.asetup()
+    except Exception as e:
+        # asetup() is idempotent; only the benign "already exists" race
+        # is safe to ignore — any other setup failure must surface.
+        if "already exists" not in str(e).lower():
+            raise
+        logger.debug("Redis checkpoint setup already applied; ignoring: %s", e)
+
+
 async def _create_redis_checkpoint(conn_string: str | None) -> tuple[CheckpointResource, CleanupFn]:
     if conn_string is None:
         # An unset conn string means the base Redis namespace.
@@ -247,11 +267,7 @@ async def _create_redis_checkpoint(conn_string: str | None) -> tuple[CheckpointR
     from tai42_kit.clients.impl.redis import async_redis_from_url
     from tai42_kit.llm.checkpoint.codec import GuardedAsyncRedisSaver
 
-    # Every key a write stamps carries the waiting retention, and a read never re-arms it: a
-    # thread lives that long after its last write. A parked run's last write is its park
-    # checkpoint, and the latest checkpoint carries its channel values inline, so older
-    # checkpoints expiring first never breaks a resume.
-    ttl_config = {"default_ttl": llm_provider_settings().checkpoint_retention_waiting_minutes, "refresh_on_read": False}
+    ttl_config = _redis_ttl_config(llm_provider_settings().checkpoint_retention_waiting_minutes)
 
     # The client is injected, never left to the saver: handed a URL, the
     # saver builds its own client, marks itself the owner, and its teardown
@@ -278,14 +294,7 @@ async def _create_redis_checkpoint(conn_string: str | None) -> tuple[CheckpointR
             await client.aclose()
 
     try:
-        try:
-            await saver.asetup()
-        except Exception as e:
-            # asetup() is idempotent; only the benign "already exists" race
-            # is safe to ignore — any other setup failure must surface.
-            if "already exists" not in str(e).lower():
-                raise
-            logger.debug("Redis checkpoint setup already applied; ignoring: %s", e)
+        await _setup_redis_saver(saver)
     except BaseException:
         # setup failed (or was cancelled): run the same cleanup path so the
         # saver and the client are not leaked. No cleanup fn is returned here.
@@ -350,3 +359,35 @@ def get_saver_from_resource(provider: str, resource: CheckpointResource) -> Base
         case _:
             saver = resource.handle
     return _guard_saver_serialization(saver, facts)
+
+
+def saver_view_waiting(provider: str, retention: ThreadRetention | None) -> int | None:
+    """The waiting minutes of the saver view ``retention`` needs on ``provider``.
+
+    ``None`` when the store's own saver serves it.
+
+    Only a store whose saver stamps the waiting retention on every key it writes (``native_ttl``)
+    needs a view, and only for a waiting other than the platform's. Every other store applies a
+    declared retention through its finished-thread ledger.
+    """
+    if retention is None or checkpoint_provider_facts(provider).retention != "native_ttl":
+        return None
+    if retention.waiting_minutes == llm_provider_settings().checkpoint_retention_waiting_minutes:
+        return None
+    return retention.waiting_minutes
+
+
+async def create_redis_saver_view(resource: CheckpointResource, waiting_minutes: int) -> BaseCheckpointSaver:
+    """A Redis saver over ``resource``'s client and indexes whose writes carry ``waiting_minutes`` as their key TTL.
+
+    The view reads, writes and deletes the same key space as the resource's own saver; only the
+    TTL it stamps differs. It owns no client: the resource's cleanup closes the client.
+    """
+    if resource.provider != "redis" or resource.redis_client is None:
+        raise ValueError(f"a Redis saver view needs a redis checkpoint resource, got {resource.provider!r}")
+    from tai42_kit.llm.checkpoint.codec import GuardedAsyncRedisSaver
+
+    view = GuardedAsyncRedisSaver(redis_client=resource.redis_client, ttl=_redis_ttl_config(waiting_minutes))
+    _guard_saver_serialization(view, checkpoint_provider_facts("redis"))
+    await _setup_redis_saver(view)
+    return view

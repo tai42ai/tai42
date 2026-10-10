@@ -71,3 +71,25 @@ def test_park_horizon_of_a_non_durable_provider_is_none(provider):
 def test_park_horizon_refuses_an_unknown_provider():
     with pytest.raises(UnknownCheckpointProviderError):
         checkpoint_park_horizon("cassandra")
+
+
+@pytest.mark.parametrize("provider", ["redis", "postgres"])
+def test_park_horizon_of_a_durable_provider_is_a_declared_retention_waiting(monkeypatch, provider):
+    from tai42_kit.llm.checkpoint import ThreadRetention
+
+    monkeypatch.setattr(
+        providers_mod,
+        "llm_provider_settings",
+        lambda: SimpleNamespace(checkpoint_retention_waiting_minutes=2880),
+    )
+    assert checkpoint_park_horizon(provider, ThreadRetention(waiting_minutes=2, finished_minutes=1)) == timedelta(
+        minutes=2
+    )
+    assert checkpoint_park_horizon(provider, None) == timedelta(minutes=2880)
+
+
+@pytest.mark.parametrize("provider", ["sqlite", "memory"])
+def test_park_horizon_of_a_non_durable_provider_is_none_whatever_the_retention(provider):
+    from tai42_kit.llm.checkpoint import ThreadRetention
+
+    assert checkpoint_park_horizon(provider, ThreadRetention(2, 1)) is None
