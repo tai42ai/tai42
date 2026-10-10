@@ -230,6 +230,19 @@ async def test_create_unknown_scope_is_400(store: _Fakes) -> None:
     assert "does not exist" in _body(resp)["error"]
 
 
+async def test_create_with_no_scope_and_no_condition_is_400_and_writes_nothing(store: _Fakes) -> None:
+    # A key with neither a scope nor a condition grants nothing, and every door reads such a
+    # policy as no key at all (the claim-link door answers "not a valid API key" for it), so
+    # the mint refuses it instead of answering 200 for a key no door accepts.
+    resp = await api_keys.create_api_key(_req(body={"user_id": "u1", "description": "desc", "scopes": []}))
+    assert resp.status_code == 400
+    assert _body(resp)["error"] == (
+        "an api key needs at least one scope or a condition: a key with neither grants nothing, "
+        "and every door treats it as no key"
+    )
+    assert await management.get_policy_body("u1") is None
+
+
 # -- claim links -------------------------------------------------------------
 
 
@@ -401,6 +414,34 @@ async def test_modify_scopes_round_trip_through_route(store: _Fakes) -> None:
     assert resp.status_code == 200
     assert _body(resp)["data"] == {"user_id": "u1", "updated": True, "scopes": ["scope-b"]}
     assert store.pg.policy_body("u1")["scopes"] == ["scope-b"]
+
+
+_EMPTY_POLICY_EDIT_ERROR = (
+    "the edit leaves the policy with neither a scope nor a condition: a policy with neither grants "
+    "nothing, and every door treats it as no key; revoke the key instead"
+)
+
+
+async def test_edit_to_no_scope_and_no_condition_is_400_and_writes_nothing(store: _Fakes) -> None:
+    # The edit door refuses the same empty policy the mint refuses: a key edited to neither a
+    # scope nor a condition would answer 200 here and then read as no key at every door.
+    await api_keys.add_scope_url(_req(body={"scope_id": "scope-a", "url": "/a"}))
+    await api_keys.create_api_key(_req(body={"user_id": "u1", "description": "d", "scopes": ["scope-a"]}))
+
+    resp = await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"scopes": []}))
+    assert resp.status_code == 400
+    assert _body(resp)["error"] == _EMPTY_POLICY_EDIT_ERROR
+    assert store.pg.policy_body("u1")["scopes"] == ["scope-a"]
+
+
+async def test_modify_scopes_removing_the_last_grant_is_400_and_writes_nothing(store: _Fakes) -> None:
+    await api_keys.add_scope_url(_req(body={"scope_id": "scope-a", "url": "/a"}))
+    await api_keys.create_api_key(_req(body={"user_id": "u1", "description": "d", "scopes": ["scope-a"]}))
+
+    resp = await api_keys.modify_api_key_scopes(_req(path_params={"user_id": "u1"}, body={"remove": ["scope-a"]}))
+    assert resp.status_code == 400
+    assert _body(resp)["error"] == _EMPTY_POLICY_EDIT_ERROR
+    assert store.pg.policy_body("u1")["scopes"] == ["scope-a"]
 
 
 async def test_modify_scopes_duplicate_within_add_is_400(store: _Fakes) -> None:
@@ -1162,9 +1203,18 @@ async def test_list_routes_catalogs_route_table(monkeypatch: pytest.MonkeyPatch)
         "tags": [],
         "summary": "",
         "action": None,
+        "declared_public": False,
     }
     # The unassigned-routes bucket: no mapping → null.
-    assert data[1] == {"path": "/api/n", "methods": ["GET"], "mapped": None, "tags": [], "summary": "", "action": None}
+    assert data[1] == {
+        "path": "/api/n",
+        "methods": ["GET"],
+        "mapped": None,
+        "tags": [],
+        "summary": "",
+        "action": None,
+        "declared_public": False,
+    }
     # A scope-mapped route reports its scope id.
     assert data[2] == {
         "path": "/api/z",
@@ -1173,6 +1223,7 @@ async def test_list_routes_catalogs_route_table(monkeypatch: pytest.MonkeyPatch)
         "tags": [],
         "summary": "",
         "action": None,
+        "declared_public": False,
     }
 
 
@@ -1231,6 +1282,37 @@ async def test_probe_request_app_is_route_bearing(monkeypatch: pytest.MonkeyPatc
         # offered tags or an action-class for it.
         transport = next(entry for entry in catalog if entry["path"] == "/mcp")
         assert (transport["tags"], transport["summary"], transport["action"]) == ([], "", None)
+
+
+async def test_list_routes_marks_the_routes_public_by_their_declaration(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A route declared public answers everyone whatever scope a row maps it to, so the
+    # catalogue says so: ``declared_public`` is the same declaration the access check reads.
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
+
+    async def _mappings() -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(management, "get_all_route_mappings", _mappings)
+    async with app.app_context(Manifest.model_validate({})):
+        star = app.http_app()
+        routing_app = getattr(star, "mcp_lifespan_app", star)
+        catalog = _body(await api_keys.list_routes(cast(Request, SimpleNamespace(app=routing_app))))["data"]
+    by_path = {entry["path"]: entry for entry in catalog}
+    assert by_path["/health"]["declared_public"] is True
+    assert by_path["/api/auth/routes"]["declared_public"] is False
+
+
+async def test_add_scope_url_refuses_a_route_public_by_its_declaration(store: _Fakes) -> None:
+    # Mapping a declared-public route into a scope would read as protecting it while it
+    # stays open to everyone, so the write door refuses it and writes nothing.
+    resp = await api_keys.add_scope_url(_req(body={"scope_id": "studio", "url": "/health"}))
+    assert resp.status_code == 400
+    assert _body(resp)["error"] == (
+        "'/health' is public by its own declaration and stays open to everyone whatever scope it is "
+        "mapped to, so it cannot be mapped into scope 'studio'"
+    )
+    assert store.pg.route("/health") is None
 
 
 # -- public route pins (/api/auth/public-routes) -----------------------------

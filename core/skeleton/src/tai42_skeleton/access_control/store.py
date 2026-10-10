@@ -533,7 +533,8 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         field keeps its stored value. Supplied scopes are validated against live routes
         with their route rows locked ``FOR SHARE`` in the same transaction, so a concurrent removal
         of a scope's last route serializes rather than committing against a dead
-        scope. Raises ``ValueError`` if any supplied scope does not exist.
+        scope. Raises ``ValueError`` if any supplied scope does not exist, or if the edit leaves
+        neither a scope nor a condition (worded for a key).
         """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -543,6 +544,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
                 body = await resolve_policy_update(self, cur, user_id, updates)
                 if body is None:
                     return None
+                refuse_empty_policy_edit(updates, body, principal=False)
                 await write_policy_body(cur, user_id, body)
             return body
 
@@ -645,7 +647,9 @@ async def resolve_policy_update(
 
     Supplied scopes are validated with their route rows locked ``FOR SHARE``; the row is
     locked ``FOR UPDATE``. Server-owned claims are carried from the stored row; a supplied
-    ``disabled`` claim that differs from the stored state raises ``ValueError``. Writes nothing.
+    ``disabled`` claim that differs from the stored state raises ``ValueError``. The caller
+    refuses a body left with neither a scope nor a condition (:func:`refuse_empty_policy_edit`)
+    before it writes. Writes nothing.
     """
     if updates.get("scopes"):
         await store._lock_and_validate_scopes(cur, updates["scopes"])
@@ -670,6 +674,30 @@ async def resolve_policy_update(
     if "condition" in updates:
         body["condition"] = updates["condition"]
     return body
+
+
+# The refusal of an edit that leaves a policy with neither a scope nor a condition, per row:
+# a key is revoked through the key door, a principal is disabled or deleted through the
+# principals door (the key door's revoke answers 404 for a principal).
+EMPTY_KEY_POLICY_EDIT_MESSAGE = (
+    "the edit leaves the policy with neither a scope nor a condition: a policy with neither "
+    "grants nothing, and every door treats it as no key; revoke the key instead"
+)
+EMPTY_PRINCIPAL_POLICY_EDIT_MESSAGE = (
+    "the edit leaves the principal's policy with neither a scope nor a condition: a policy with neither "
+    "grants nothing, and every door treats it as no key; disable or delete the principal instead"
+)
+
+
+def refuse_empty_policy_edit(updates: dict[str, Any], body: dict[str, Any], *, principal: bool) -> None:
+    """Raise ``ValueError`` when an edit leaves ``body`` with neither a scope nor a condition.
+
+    Such a policy grants nothing and reads as no key at every door (``policy_is_empty``). The
+    message names the repair for the row edited: ``principal`` for a principal's own row,
+    otherwise a key's. An edit that supplies no field changes nothing and is not refused.
+    """
+    if updates and not body["scopes"] and body["condition"] is None:
+        raise ValueError(EMPTY_PRINCIPAL_POLICY_EDIT_MESSAGE if principal else EMPTY_KEY_POLICY_EDIT_MESSAGE)
 
 
 async def resolve_policy_restore(cur: Any, user_id: str, body: dict[str, Any]) -> dict[str, Any] | None:

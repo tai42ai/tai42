@@ -84,8 +84,8 @@ async def operator_send(
     # A rich operator send (media/template/options/schema present) stores one
     # :class:`AnswerPart`
     # carrying the text plus its rich fields — the shape the delivery machine sends as a rich
-    # part. A plain send keeps ``answer=text`` with no parts, byte-identical to the pre-rich
-    # path (and unbounded by the part message cap, which only governs a rich part's text).
+    # part. A plain send keeps ``answer=text`` with no parts (and unbounded by the part
+    # message cap, which only governs a rich part's text).
     if (
         media is None
         and template is None

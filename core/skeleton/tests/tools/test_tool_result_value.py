@@ -28,7 +28,7 @@ def _payload() -> dict[str, Any]:
     return {"mark": _MARK, "rows": [{"id": i, "tags": ["a", "b"], "nested": {"n": i}} for i in range(5)]}
 
 
-# -- the value equals today's reduction ---------------------------------------------------------
+# -- the value equals the reduction ---------------------------------------------------------------
 
 
 def test_an_unwrapped_structured_result_is_returned_as_fastmcp_reduced_it() -> None:

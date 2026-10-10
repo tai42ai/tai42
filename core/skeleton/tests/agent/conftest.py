@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -66,3 +67,28 @@ class _LogCapture(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         self.texts.append(self.format(record))
+
+
+class _ManualClock:
+    """A loop-time source that can be frozen and advanced by hand.
+
+    Delegates to the real loop clock until :meth:`freeze` pins it, after which it reports
+    ``frozen + offset`` and moves only when :meth:`advance` is called. An armed
+    ``asyncio.timeout`` deadline computed while pinned therefore cannot elapse until the
+    test advances past it deliberately.
+    """
+
+    def __init__(self, real: Callable[[], float]) -> None:
+        self._real = real
+        self._frozen: float | None = None
+        self._offset = 0.0
+
+    def __call__(self) -> float:
+        base = self._frozen if self._frozen is not None else self._real()
+        return base + self._offset
+
+    def freeze(self) -> None:
+        self._frozen = self._real()
+
+    def advance(self, seconds: float) -> None:
+        self._offset += seconds

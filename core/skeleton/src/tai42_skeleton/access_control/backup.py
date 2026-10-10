@@ -79,7 +79,10 @@ async def _restore_principals(payload: dict[str, Any], report: BackupSectionRepo
     principal row is created and the exported policy body is not re-written. The archived
     ``disabled`` flag is then applied with the raw flip (no last-admin count), enabled or
     disabled: it is the authority, and the flip writes the policy's ``disabled`` projection
-    from it whatever the archived or surviving policy carried.
+    from it whatever the archived or surviving policy carried. The flag lands with the
+    principal, before the route and token steps, so a later failure never leaves an archived
+    disabled principal enabled; the token restore re-mints its keys onto it while it stays
+    disabled.
     """
     for principal in payload.get("principals") or []:
         user_id = principal.get("user_id")
@@ -163,7 +166,14 @@ async def import_access_control(payload: dict[str, Any], mode: BackupMode) -> Ba
                 # the dedicated pin writer, never ``add_url_to_scope``.
                 await management.pin_route_public(url, patterns.get(url))
             else:
-                await management.add_url_to_scope(scope_id, url, patterns.get(url))
+                try:
+                    await management.add_url_to_scope(scope_id, url, patterns.get(url))
+                except ValueError as exc:
+                    # A mapping the writer refuses (a route public by its own declaration,
+                    # the universal grant) is a loud per-url error; the rest restores.
+                    report.errors.append(f"route {url!r}: {exc}")
+                    report.skipped += 1
+                    continue
             if existed:
                 report.updated += 1
             else:
@@ -213,6 +223,9 @@ async def _restore_token(token: dict[str, Any], report: BackupSectionReport) -> 
                 token.get("policy_data"),
                 condition,
                 owner_user_id=owner_user_id,
+                # A key outlives its owner being disabled, so an archive can hold a disabled
+                # owner's key: it is re-minted onto the owner as restored, still disabled.
+                owner_may_be_disabled=True,
             )
     except ValueError as exc:
         # Per-token failure (collided id, absent scope, bad condition) surfaced loudly.

@@ -1314,7 +1314,7 @@ async def test_import_access_control_existing_token_is_clean_skip(monkeypatch):
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(redis))
     # Provision a genuine live key: both storage homes populated.
     pg.add_principal("owner1")
-    await management.add_user_api_key("u1", "d", [], owner_user_id="owner1")
+    await management.add_user_api_key("u1", "d", ["*"], owner_user_id="owner1")
     fingerprint = pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM]
     _install(monkeypatch)
 
@@ -1360,7 +1360,7 @@ async def test_import_access_control_existing_token_not_reminted_under_overwrite
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(redis))
     # Provision a genuine live key: both storage homes populated.
     pg.add_principal("owner1")
-    await management.add_user_api_key("u1", "d", [], owner_user_id="owner1")
+    await management.add_user_api_key("u1", "d", ["*"], owner_user_id="owner1")
     fingerprint = pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM]
     _install(monkeypatch)
 

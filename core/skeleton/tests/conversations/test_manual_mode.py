@@ -380,7 +380,7 @@ async def test_manual_mode_via_a_thread_override_over_an_agent_default_route(env
 
 
 async def test_agent_default_route_still_runs_the_turn(env, monkeypatch):
-    # The default is agent mode: the turn runs and answers, byte-identical to today.
+    # The default is agent mode: the turn runs and answers.
     agent = ManualAgent()
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route(initial_mode="agent")), agent, channel)

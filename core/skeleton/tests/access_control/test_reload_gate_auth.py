@@ -80,7 +80,7 @@ async def test_provider_missing_during_reload_returns_retriable_reloading():
 
 async def test_provider_missing_outside_reload_stays_loud_401(caplog):
     # No reload in flight: a missing provider is a real fault. It fails closed as a
-    # generic 401 (exactly as before) and is logged loudly server-side.
+    # generic 401 and is logged loudly server-side.
     backend = _backend(_ProviderMissingVerifier())
     conn = _conn({"Authorization": "Bearer sk-x"})
 

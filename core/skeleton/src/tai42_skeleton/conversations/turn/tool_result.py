@@ -5,7 +5,7 @@ carrying the driver's outcome as an OPAQUE payload; the turn catches it and reco
 WHOLE through :func:`~tai42_skeleton.interactions.terminal_failure.failed_outcome_detail`, never
 reading a key inside it. A RETURNED value is a success the turn maps through ``reply_expr`` with NO
 status inspection, and a still-parked run is already a typed contract value the visit normalises.
-This module no longer classifies a returned envelope by status: it renders a value-free structural
+This module classifies no returned envelope by status: it renders a value-free structural
 shape diagnostic for a reply-mapping fault. No participant content ever crosses into a log line.
 """
 

@@ -217,7 +217,7 @@ def _reactions_attr(reactions: Any) -> str:
     a reaction, the pages (by title) whose advance fires one, and whether submission is
     checked by one — so the script posts an on-change / page-advance / submit round-trip to
     the ticket react door and applies the returned update. A static form (no reactions, or a
-    reactions block with no trigger) carries no attribute and keeps today's behavior.
+    reactions block with no trigger) carries no attribute and posts nothing.
     """
     if not isinstance(reactions, dict):
         return ""

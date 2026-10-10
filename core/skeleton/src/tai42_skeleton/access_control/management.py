@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 _RESERVED_USER_IDS = frozenset({"__root__"})
 
 
-def _is_minted_policy(body: Mapping[str, Any]) -> bool:
+def is_minted_policy(body: Mapping[str, Any]) -> bool:
     """Whether a policy ``body`` was minted as an api key.
 
     The single marker is a NON-NULL :data:`KEY_FINGERPRINT_CLAIM` value in
@@ -277,7 +277,7 @@ async def api_key_state(user_id: str) -> Literal["absent", "live", "orphaned", "
     provider = _identity_provider()
     if await _has_identity_record(provider, user_id):
         return "live"
-    if _is_minted_policy(body):
+    if is_minted_policy(body):
         return "orphaned"
     return "account"
 
@@ -288,8 +288,23 @@ async def api_key_state(user_id: str) -> Literal["absent", "live", "orphaned", "
 async def add_url_to_scope(scope_id: str, url: str, pattern: str | None = None) -> None:
     """Map ``url`` to ``scope_id`` (optionally with a dynamic ``pattern``); the policy cache is invalidated.
 
-    Mapping a url to the universal grant ``"*"`` raises ``ValueError`` with nothing written.
+    Mapping a url to the universal grant ``"*"`` raises ``ValueError`` with nothing written, as
+    does mapping a url a route public by its own declaration serves: such a route answers
+    everyone whatever its row says, so a scope mapping would read as protecting it while it
+    stays open.
     """
+    from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path
+    from tai42_skeleton.access_control.verifier import url_is_declared_public
+
+    try:
+        canonical = canonicalize_path(url)
+    except MalformedPathError:
+        canonical = None
+    if canonical is not None and url_is_declared_public(canonical, _settings()):
+        raise ValueError(
+            f"{url!r} is public by its own declaration and stays open to everyone whatever scope it is "
+            f"mapped to, so it cannot be mapped into scope {scope_id!r}"
+        )
     await access_control_store().add_url_to_scope(scope_id, url, pattern)
     await record_policy_change()
 
@@ -415,6 +430,30 @@ async def restore_policy_body(user_id: str, body: dict[str, Any]) -> dict[str, A
 # -- key mint / revoke / edit (cross-backend orchestration) ------------------
 
 
+async def _refuse_unmintable_policy(
+    scopes: list[str], policy_data: dict[str, Any] | None, condition: TemplatedText | None
+) -> None:
+    """Refuse, before any write, a mint policy no key may carry; ``ValueError`` names why."""
+    # The ``disabled`` claim is server-owned like the fingerprint and the owner claim,
+    # but a supplied value is refused rather than stamped over: a key starts enabled and is
+    # switched off by revoking it.
+    refuse_disabled_claim_at_mint(policy_data or {})
+    # A key with neither a scope nor a condition grants nothing, and every door reads such a
+    # policy as no key at all (``policy_is_empty``), so it is refused rather than minted.
+    if not scopes and condition is None:
+        raise ValueError(
+            "an api key needs at least one scope or a condition: a key with neither grants nothing, "
+            "and every door treats it as no key"
+        )
+    if scopes:
+        # A scope-typo guard. The universal "*" names no routed scope, so it is always
+        # valid to mint; every other scope must exist in the route table.
+        valid = set((await access_control_store().get_all_existing_scopes()).values())
+        for scope in scopes:
+            if scope != UNIVERSAL_SCOPE and scope not in valid:
+                raise ValueError(f"scope {scope!r} does not exist or has no urls assigned")
+
+
 async def add_user_api_key(
     user_id: str,
     description: str,
@@ -423,6 +462,7 @@ async def add_user_api_key(
     condition: TemplatedText | None = None,
     *,
     owner_user_id: str,
+    owner_may_be_disabled: bool = False,
 ) -> tuple[str, dict[str, Any], str]:
     """Provision a new key for ``user_id`` and return ``(raw_sk_key, committed_body, key_fingerprint)``.
 
@@ -437,7 +477,10 @@ async def add_user_api_key(
     the same ``user_id`` leaves an old binding resolving to nothing.
 
     ``owner_user_id`` is REQUIRED: every api key belongs to a principal. The owner must be
-    an EXISTING, ENABLED principal (a loud ``ValueError`` naming the state otherwise). The
+    an EXISTING, ENABLED principal (a loud ``ValueError`` naming the state otherwise);
+    ``owner_may_be_disabled`` admits a disabled owner, left disabled — the backup restore
+    re-mints an archived key whose owner the archive holds disabled, and every door denies
+    that key while its owner stays disabled (the standing check's owner test). The
     owner claim is DUAL-HOMED at this single mint — written into the committed
     ``policy_data`` under ``OWNER_USER_ID_CLAIM``, the owner every door reads, and persisted
     by the provider on the identity record, whose copy arrives on every request and is
@@ -449,10 +492,11 @@ async def add_user_api_key(
     a key is switched off by revoking it.
 
     ORCHESTRATES the backends in a FAIL-CLOSED order. Raises ``ValueError`` if the
-    user id is already provisioned, if the owner is not an enabled principal, if
-    ``policy_data`` carries the ``disabled`` claim, or if any requested scope does not
-    exist (has no url mapping) — all checked BEFORE any write, so
-    a user error never leaves a half-provisioned key. Then:
+    user id is already provisioned, if the owner is not an enabled principal (unless
+    ``owner_may_be_disabled``), if ``policy_data`` carries the ``disabled`` claim, if the
+    key has neither a scope nor a condition, or if any requested scope does not exist (has
+    no url mapping) — all checked BEFORE any write, so a user error never leaves a
+    half-provisioned key. Then:
 
     1. the provider's ``provision`` writes the identity/key record FIRST — the key
        authenticates but GRANTS NOTHING until the policy below exists;
@@ -469,15 +513,15 @@ async def add_user_api_key(
     provider = _identity_provider()
     store = access_control_store()
 
-    # The owner MUST be an existing, enabled principal — every api key belongs to one.
-    # Checked with no side effect, so an ownerless/disabled/unknown owner raises before
-    # the provider mints anything.
+    # The owner MUST be an existing principal, enabled unless the caller admits a disabled
+    # one — every api key belongs to one. Checked with no side effect, so an
+    # ownerless/disabled/unknown owner raises before the provider mints anything.
     if not owner_user_id:
         raise ValueError("owner_user_id is required: every api key belongs to a principal")
     owner_principal = await store.get_principal(owner_user_id)
     if owner_principal is None:
         raise ValueError(f"owner principal {owner_user_id!r} does not exist; a key must belong to a principal")
-    if owner_principal["disabled"]:
+    if owner_principal["disabled"] and not owner_may_be_disabled:
         raise ValueError(f"owner principal {owner_user_id!r} is disabled; cannot mint a key for it")
 
     # Pre-checks with NO side effect, so a duplicate user or an unknown scope raises
@@ -495,17 +539,7 @@ async def add_user_api_key(
             f"user id {user_id!r} is already in use; to replace its key, revoke the key for "
             "that user id, then re-import"
         )
-    # The ``disabled`` claim is server-owned like the fingerprint and the owner claim below,
-    # but a supplied value is refused rather than stamped over: a key starts enabled and is
-    # switched off by revoking it.
-    refuse_disabled_claim_at_mint(policy_data or {})
-    if scopes:
-        # A scope-typo guard. The universal "*" names no routed scope, so it is always
-        # valid to mint; every other scope must exist in the route table.
-        valid = set((await store.get_all_existing_scopes()).values())
-        for scope in scopes:
-            if scope != UNIVERSAL_SCOPE and scope not in valid:
-                raise ValueError(f"scope {scope!r} does not exist or has no urls assigned")
+    await _refuse_unmintable_policy(scopes, policy_data, condition)
 
     # 1. Identity record FIRST (fail-closed order) — the provider owns it. The owner
     #    claim rides the record so it surfaces in AuthIdentity.claims on every request.
@@ -556,9 +590,12 @@ async def edit_user_payload(
 
     Returns the committed policy body on success, or ``None`` if ``user_id`` is not
     provisioned (a falsy sentinel the route's 404 guard tests). Raises ``ValueError``
-    if any supplied scope does not exist. A principal's own row is written under the
-    last-admin guard: an edit that demotes the last enabled admin principal raises
-    :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written.
+    if any supplied scope does not exist, or if the edit leaves the policy with neither a
+    scope nor a condition (the message names the repair for a key or for a principal). A
+    principal's own row is written under the last-admin guard: an edit that demotes the
+    last enabled admin principal raises
+    :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written, ahead of
+    the empty-policy refusal.
     """
     provider = _identity_provider()
     store = access_control_store()
@@ -696,7 +733,7 @@ async def revoke_api_key(user_id: str) -> bool:
     # No identity record: an orphaned MINTED policy row (it carries the key fingerprint) is
     # cleared here; a role-assigned account row and an unknown id are left untouched (False).
     body = await store.get_policy_body(user_id)
-    if body is None or not _is_minted_policy(body):
+    if body is None or not is_minted_policy(body):
         return False
     await _clear_policy_records(user_id)
     logger.info("access_control: revoked orphaned api key policy for user_id=%s (no identity record)", user_id)

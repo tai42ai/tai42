@@ -895,8 +895,8 @@ async def test_registered_authed_route_with_no_rows_resolves_universal_scope(mon
 
 
 async def test_declared_protection_tier_requires_a_method(monkeypatch):
-    """Method-less resolution (a websocket scope, a batch pre-read) keeps today's
-    behaviour: no method → the tier cannot read the served surface → []."""
+    """Method-less resolution (a websocket scope, a batch pre-read): no method → the tier
+    cannot read the served surface → []."""
     v = _verifier()
     _wire(monkeypatch, FakeAccessControlPg(), FakeRedis())
     assert await v.resolve_resource_ids("/api/tools") == []

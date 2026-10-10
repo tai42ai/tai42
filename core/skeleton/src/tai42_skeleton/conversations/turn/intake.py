@@ -71,7 +71,7 @@ async def accept(
     accountable key fails loudly rather than silently sharing one bucket.
 
     Non-empty ``params`` reach a tool target's payload under ``params``; ``None``/empty
-    leave the turn byte-identical to today. The door validates their bounds before accept;
+    leave the turn without a ``params`` block. The door validates their bounds before accept;
     this seam runs only a cheap isinstance sweep against its in-process caller.
 
     ``form`` is a structured participant submission (an ask-less form's answers) riding WITH the

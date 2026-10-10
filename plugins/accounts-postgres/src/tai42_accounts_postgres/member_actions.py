@@ -280,7 +280,8 @@ async def _remove_user(settings: AccountsProviderSettings, target: str | None) -
     The principal's policy goes first through the admin services (revoking owned keys),
     which refuse the last enabled admin (a conflict, nothing removed); then the sessions,
     the invites and the row. A mid-way failure leaves a re-deletable user, never an
-    orphaned live credential.
+    orphaned live credential: a re-run finds the principal already removed and completes
+    the remaining steps.
     """
     if target is None:
         raise MemberActionBadRequestError("removing a member requires a target member")
@@ -288,10 +289,14 @@ async def _remove_user(settings: AccountsProviderSettings, target: str | None) -
     existing = await store.get_by_user_id(target)
     if existing is None:
         raise MemberActionNotFoundError("user not found")
-    try:
-        await settings.admin.remove_policy(target)
-    except LastAdminError as exc:
-        raise MemberActionConflictError(str(exc)) from exc
+    admin = settings.admin
+    # The principal is absent only when an earlier run of this removal took it and then
+    # failed on a later step; the re-run goes on with the steps that did not complete.
+    if target in await admin.principal_roles([target]):
+        try:
+            await admin.remove_policy(target)
+        except LastAdminError as exc:
+            raise MemberActionConflictError(str(exc)) from exc
     await service.sessions_store().delete_for_user(target)
     await service.invites_store().delete_for_user(target)
     await store.delete(target)

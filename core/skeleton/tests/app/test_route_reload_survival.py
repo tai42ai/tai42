@@ -404,7 +404,7 @@ def test_package_walk_under_foreign_role_binds_a_mapped_route_submodule(foreign_
 def test_unmapped_route_submodule_in_a_foreign_walk_still_raises(foreign_role_dist: RouteRegistry) -> None:
     # The loud-failure floor: a route submodule the walk reaches with NEITHER its own
     # binding in the map NOR any active binding calls ``mount_base()`` at import and must
-    # still raise exactly as today, aborting boot rather than serving a
+    # still raise, aborting boot rather than serving a
     # silently mis-mounted route.
     app = TaiMCP(name="foreign-role-unmapped")
     with tai42_app.bound(app), pytest.raises(MountRegistrationError, match="no mount binding present"):
@@ -458,7 +458,7 @@ def test_foreign_walk_submodule_failure_rolls_back_symmetrically(foreign_role_di
     # never registers fails the bind-time completeness check. Because the walk newly binds
     # it, the importer guards it with the same savepoint/rollback the own-role import uses:
     # the row it DID commit is rolled back before the fault propagates, so a failed foreign
-    # walk leaves NO half-registered state — symmetric with a first-import failure today.
+    # walk leaves NO half-registered state — symmetric with a first-import failure.
     registry = foreign_role_dist
     app = TaiMCP(name="foreign-role-rollback")
     binding = MountBinding(

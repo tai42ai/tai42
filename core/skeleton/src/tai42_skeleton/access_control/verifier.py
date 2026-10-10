@@ -20,7 +20,7 @@ from tai42_skeleton.access_control.path_canon import (
 from tai42_skeleton.access_control.policy import policy_enforcer
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.store import access_control_store
-from tai42_skeleton.app.route_registry import load_all_routes, route_registry
+from tai42_skeleton.app.route_registry import RouteMetadata, load_all_routes, route_registry
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +116,71 @@ def reset_registered_reserved_paths() -> None:
     """
     global _registered_reserved_paths
     _registered_reserved_paths = None
+
+
+def spa_shell_fallback_admits(path: str, method: str | None, settings: AccessControlSettings) -> bool:
+    """SPA-shell public fallback (GET-only, last tier).
+
+    A GET to an UNMAPPED canonical path outside the control plane that is NOT a registered route is
+    served by the SPA catch-all as the dataless index.html shell — treat it as public so a
+    deep-link refresh reaches the shell. It never opens a mutation (GET only) nor the
+    API/control-plane surface.
+
+    The registered-route check is CONCRETE-only:
+    ``registered_reserved_get_paths_cached()`` holds the canonical paths of concrete
+    GET routes outside the control plane, so a concrete request matching a TEMPLATED route's pattern
+    (e.g. ``/reports/5`` for ``/reports/{id}``) is not seen here and — absent a route
+    row — would be served the shell. The boot audit (``check_spa_shell_public``) closes
+    that gap by construction: it refuses to start when any templated ``authed=True``
+    GET route exists that is neither under the control plane nor consciously
+    acknowledged, so no such route can reach this tier. This fallback's
+    safety for templated routes rests on that audit; the code deliberately does not build
+    a second (shadow) matcher.
+    """
+    return (
+        settings.spa_shell_public
+        and method == "GET"
+        # Segment-aware, mirroring the SPA catch-all's own control-plane exclusion, so the
+        # public surface is exactly the shell surface: the control plane never opens.
+        and not under_control_plane(path)
+        # The DERIVED reserved check (both sides canonical): any real registered
+        # GET route outside the control plane (health/ready/…) resolves via its own path,
+        # never via the shell fallback — no static list.
+        and path not in registered_reserved_get_paths_cached()
+        # Operational paths the registry does not surface as concrete GET routes.
+        and path not in settings.reserved_operational_supplement
+        # Belt-and-suspenders: keeps ``/api/auth`` (and any reserved prefix) gated.
+        and not under_reserved_prefix(path, settings)
+    )
+
+
+# Every HTTP method a route can serve; a url is public by declaration when ANY method's
+# route at it is (a scope row is keyed by url alone and cannot gate that method).
+_HTTP_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+
+
+def declares_public_reach(meta: RouteMetadata | None, path: str, settings: AccessControlSettings) -> bool:
+    """Whether the registered route ``meta`` serving canonical ``path`` is public by its declaration.
+
+    The declared-public tier of :meth:`AccessControlVerifier.resolve_resource_ids`: a route
+    registered ``authed=False`` answers everyone with no route row, outside the reserved
+    management prefixes (which never resolve public). The routes catalogue reports it and the
+    scope-mapping writer refuses it through this same predicate.
+    """
+    return meta is not None and meta.public and not under_reserved_prefix(path, settings)
+
+
+def url_is_declared_public(path: str, settings: AccessControlSettings) -> bool:
+    """Whether a request to canonical ``path`` on any method reaches a route public by its declaration."""
+    return any(declares_public_reach(route_registry.match(path, method), path, settings) for method in _HTTP_METHODS)
+
+
+def under_reserved_prefix(path: str, settings: AccessControlSettings) -> bool:
+    """Whether ``path`` is the access-control management surface that must never resolve public.
+
+    True when ``path`` equals a reserved prefix or is a route beneath it.
+    """
+    return any(under_prefix(path, prefix) for prefix in settings.reserved_public_pin_prefixes)
 
 
 class AccessControlVerifier(TokenVerifier):
@@ -328,10 +393,8 @@ class AccessControlVerifier(TokenVerifier):
         # drops it here too. The one handler route ``match`` does not answer for is the
         # bare rest-converter fallback (the SPA shell catch-all), which owns no shape and
         # is granted by the shell-fallback tier below instead.
-        if method is not None and not self._is_reserved_prefix(path):
-            matched = route_registry.match(path, method)
-            if matched is not None and matched.public:
-                return self.settings.public_resource_id
+        if method is not None and declares_public_reach(route_registry.match(path, method), path, self.settings):
+            return self.settings.public_resource_id
 
         return None
 
@@ -425,46 +488,12 @@ class AccessControlVerifier(TokenVerifier):
         return set()
 
     def _is_spa_shell_fallback(self, path: str, method: str | None) -> bool:
-        """SPA-shell public fallback (GET-only, last tier).
-
-        A GET to an UNMAPPED canonical path outside the control plane that is NOT a registered route is
-        served by the SPA catch-all as the dataless index.html shell — treat it as public so a
-        deep-link refresh reaches the shell. It never opens a mutation (GET only) nor the
-        API/control-plane surface.
-
-        The registered-route check is CONCRETE-only:
-        ``registered_reserved_get_paths_cached()`` holds the canonical paths of concrete
-        non-/api GET routes, so a concrete request matching a TEMPLATED route's pattern
-        (e.g. ``/reports/5`` for ``/reports/{id}``) is not seen here and — absent a route
-        row — would be served the shell. The boot audit (``check_spa_shell_public``) closes
-        that gap by construction: it refuses to start when any templated ``authed=True``
-        GET route exists that is neither under the control plane nor consciously
-        acknowledged, so no such route can reach this tier. This fallback's
-        safety for templated routes rests on that audit; the code deliberately does not build
-        a second (shadow) matcher.
-        """
-        return (
-            self.settings.spa_shell_public
-            and method == "GET"
-            # Segment-aware, mirroring the SPA catch-all's own control-plane exclusion, so the
-            # public surface is exactly the shell surface: the control plane never opens.
-            and not under_control_plane(path)
-            # The DERIVED reserved check (both sides canonical): any real registered
-            # GET route outside the control plane (health/ready/…) resolves via its own path,
-            # never via the shell fallback — no static list.
-            and path not in registered_reserved_get_paths_cached()
-            # Operational paths the registry does not surface as concrete GET routes.
-            and path not in self.settings.reserved_operational_supplement
-            # Belt-and-suspenders: keeps ``/api/auth`` (and any reserved prefix) gated.
-            and not self._is_reserved_prefix(path)
-        )
+        """Whether a GET to ``path`` falls to the SPA-shell public tier — see :func:`spa_shell_fallback_admits`."""
+        return spa_shell_fallback_admits(path, method, self.settings)
 
     def _is_reserved_prefix(self, path: str) -> bool:
-        """Whether ``path`` is the access-control management surface that must never resolve public.
-
-        True when ``path`` equals a reserved prefix or is a route beneath it.
-        """
-        return any(under_prefix(path, prefix) for prefix in self.settings.reserved_public_pin_prefixes)
+        """Whether ``path`` is under a reserved prefix — see :func:`under_reserved_prefix`."""
+        return under_reserved_prefix(path, self.settings)
 
     def _normalize_auto(self, path: str) -> str:
         path = UUID_PATTERN.sub("/{uuid}", path)

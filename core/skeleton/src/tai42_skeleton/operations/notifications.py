@@ -254,7 +254,7 @@ async def list_notifications() -> dict:
 
     A RESTRICTED caller reads its OWN per-identity feed (complete within its own
     bound — never truncated by other identities' volume, never a broadcast); an
-    UNRESTRICTED caller reads the shared feed unchanged (today's operator view).
+    UNRESTRICTED caller reads the shared feed unchanged (the operator view).
     """
     # OFF gate: the internal feed lives on the interactions Redis; with none
     # configured the honest answer is the empty collection — no store touched.

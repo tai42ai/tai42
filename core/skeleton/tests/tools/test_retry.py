@@ -98,7 +98,7 @@ def test_registry_duplicate_registration_raises():
         registry.register("fetch_page", _policy())
 
 
-# -- no policy: exactly today's behavior --------------------------------------
+# -- no policy: one untouched attempt ------------------------------------------
 
 
 async def test_no_policy_is_a_single_untouched_attempt(sleeps, backend):

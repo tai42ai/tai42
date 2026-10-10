@@ -3,7 +3,7 @@
 Cover ``/api/states*``, ``/api/state-templates*``, ``/api/state-retention/prune`` and
 ``/api/state-pending-saves*``.
 
-Each model DESCRIBES the inner payload a states operation returns today — the shape the
+Each model DESCRIBES the inner payload a states operation returns — the shape the
 route adapter wraps in the ``{"data": ...}`` success envelope — and never re-declares the
 envelope or reshapes a wire body. The persisted wire shapes (``StateDeclaration``,
 ``StateTemplateDocument``, ``StateRecord``, ``ApplyResult``, ``WritesPage``, ``ConsumerRow``,

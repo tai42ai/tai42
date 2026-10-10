@@ -168,6 +168,10 @@ async def test_one_last_admin_guard_counts_every_admin_principal(
         "deleting the keys-only owner as the last admin",
     )
     _refused(
+        await root.request_raw("PUT", f"/api/auth/api-keys/{_SEEDED_OWNER}", json={"condition": {"content": "true"}}),
+        "demoting the last admin's own policy through the key door",
+    )
+    _refused(
         await root.request_raw("PUT", f"/api/auth/api-keys/{_SEEDED_OWNER}", json={"scopes": []}),
         "emptying the last admin's own policy through the key door",
     )

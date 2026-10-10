@@ -38,7 +38,7 @@ import json
 import logging
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
@@ -54,6 +54,7 @@ from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.monitoring.registry import get_monitoring
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import validation_error_fields
 from tai42_skeleton.operations.observability import ExportRunsQuery
 from tai42_skeleton.operations.observability import get_metrics as _get_metrics_op
 from tai42_skeleton.operations.observability import (
@@ -193,9 +194,6 @@ get_resolved_span_value = register_operation_route(
 )
 
 
-_RESOLVE_VALUES = ("true", "false")
-
-
 class TraceExportQuery(BaseModel):
     """The trace export's options."""
 
@@ -228,10 +226,11 @@ class TraceExportQuery(BaseModel):
 async def export_run_trace(request: Request) -> Response:
     """Single run's full trace as a downloadable JSON file; ``resolve=true`` resolves every span's references first."""
     trace_id = request.path_params["trace_id"]
-    raw_resolve = request.query_params.get("resolve", "false")
-    if raw_resolve not in _RESOLVE_VALUES:
-        return _error(f"resolve must be {one_of(_RESOLVE_VALUES)}", 400)
-    resolve = raw_resolve == "true"
+    try:
+        query = TraceExportQuery.model_validate(dict(request.query_params))
+    except ValidationError as exc:
+        return JSONResponse({"error": validation_error_fields(exc)}, status_code=400)
+    resolve = query.resolve
     reader = get_monitoring().reader
     try:
         trace = await reader.get_trace(trace_id)

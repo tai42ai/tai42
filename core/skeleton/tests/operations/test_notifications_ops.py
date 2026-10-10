@@ -744,8 +744,8 @@ async def test_restricted_notify_scopes_unset_audience_to_self(sink_redis) -> No
 
 
 async def test_unrestricted_notify_may_address_any_identity(sink_redis) -> None:
-    # Regression guard: an unrestricted caller (no bound owner claim) is NOT clamped
-    # — it may address any identity, exactly as before.
+    # An unrestricted caller (no bound owner claim) is NOT clamped — it may address
+    # any identity.
     await notifications_ops.notify_user("hi alice", audience="alice")
 
     own = await notifications_sink.read_notifications(audience="alice")

@@ -122,7 +122,7 @@ def _seed_caller(pg: FakeAccessControlPg, caller_id: str, *, scopes, condition=N
 async def test_admin_creates_self_owned_key_by_default(wired):
     pg, spy = wired
     _seed_caller(pg, "admin1", scopes=["*"])
-    resp = await _call(router.create_api_key, "admin1", _req({"user_id": "k1", "description": "d", "scopes": []}))
+    resp = await _call(router.create_api_key, "admin1", _req({"user_id": "k1", "description": "d", "scopes": ["*"]}))
     assert resp.status_code == 200
     # The ownerless option is gone: an admin's mint defaults to its own principal.
     assert spy.provision_owners["k1"] == "admin1"
@@ -135,7 +135,7 @@ async def test_admin_may_mint_for_a_named_service_principal(wired):
     resp = await _call(
         router.create_api_key,
         "admin1",
-        _req({"user_id": "k1", "description": "d", "scopes": [], "owner_user_id": "svc"}),
+        _req({"user_id": "k1", "description": "d", "scopes": ["*"], "owner_user_id": "svc"}),
     )
     assert resp.status_code == 200
     assert spy.provision_owners["k1"] == "svc"
@@ -170,9 +170,13 @@ async def test_laundered_owned_star_key_is_not_admin(wired):
 async def test_non_admin_create_forces_self_owner(wired):
     pg, spy = wired
     _seed_caller(pg, "alice", scopes=["read"])
-    # Empty scopes keep the mint's route-validation out of scope; the pin is the forced
-    # self-ownership, not scope validity.
-    resp = await _call(router.create_api_key, "alice", _req({"user_id": "k1", "description": "d", "scopes": []}))
+    # No scope (a condition alone) keeps the mint's route-validation out of scope; the pin is
+    # the forced self-ownership, not scope validity.
+    resp = await _call(
+        router.create_api_key,
+        "alice",
+        _req({"user_id": "k1", "description": "d", "scopes": [], "condition": {"content": "true"}}),
+    )
     assert resp.status_code == 200
     assert spy.provision_owners["k1"] == "alice"
 
@@ -200,7 +204,9 @@ async def test_non_admin_create_rejects_superset_scopes(wired):
 async def test_owned_key_cannot_mint(wired):
     pg, _spy = wired
     _seed_caller(pg, "ownedcaller", scopes=["read"], owner="human")
-    resp = await _call(router.create_api_key, "ownedcaller", _req({"user_id": "k1", "description": "d", "scopes": []}))
+    resp = await _call(
+        router.create_api_key, "ownedcaller", _req({"user_id": "k1", "description": "d", "scopes": ["*"]})
+    )
     assert resp.status_code == 403
 
 
@@ -211,7 +217,7 @@ async def test_non_admin_revoke_own_key(wired):
     pg, _spy = wired
     _seed_caller(pg, "alice", scopes=["read"])
     # A key alice owns.
-    await management.add_user_api_key("k1", "d", [], owner_user_id="alice")
+    await management.add_user_api_key("k1", "d", ["*"], owner_user_id="alice")
     resp = await _call(router.revoke_api_key, "alice", _req(path_params={"user_id": "k1"}, method="DELETE"))
     assert resp.status_code == 200
 
@@ -241,7 +247,7 @@ async def test_owner_claim_echo_accepted_on_edit(wired):
     pg, _spy = wired
     _seed_caller(pg, "admin1", scopes=["*"])
     pg.add_principal("bob")
-    await management.add_user_api_key("k1", "d", [], owner_user_id="bob")
+    await management.add_user_api_key("k1", "d", ["*"], owner_user_id="bob")
     # Echoing the same owner claim back is accepted.
     resp = await _call(
         router.edit_api_key,
@@ -262,8 +268,8 @@ async def test_non_admin_listing_shows_only_own(wired):
     pg, _spy = wired
     _seed_caller(pg, "alice", scopes=["read"])
     pg.add_principal("bob")
-    await management.add_user_api_key("mine", "d", [], owner_user_id="alice")
-    await management.add_user_api_key("theirs", "d", [], owner_user_id="bob")
+    await management.add_user_api_key("mine", "d", ["*"], owner_user_id="alice")
+    await management.add_user_api_key("theirs", "d", ["*"], owner_user_id="bob")
     resp = await _call(router.list_tokens_payload, "alice", _req(method="GET"))
     users = {entry["user_id"] for entry in _body(resp)["data"]}
     assert users == {"mine"}
@@ -274,8 +280,8 @@ async def test_admin_listing_shows_all(wired):
     _seed_caller(pg, "admin1", scopes=["*"])
     pg.add_principal("alice")
     pg.add_principal("bob")
-    await management.add_user_api_key("mine", "d", [], owner_user_id="alice")
-    await management.add_user_api_key("theirs", "d", [], owner_user_id="bob")
+    await management.add_user_api_key("mine", "d", ["*"], owner_user_id="alice")
+    await management.add_user_api_key("theirs", "d", ["*"], owner_user_id="bob")
     resp = await _call(router.list_tokens_payload, "admin1", _req(method="GET"))
     users = {entry["user_id"] for entry in _body(resp)["data"]}
     assert {"mine", "theirs"} <= users

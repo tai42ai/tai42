@@ -4,7 +4,7 @@ request; an answered sensitive question persists ONLY the status (never the
 response body) while the blocked waiter still receives the full answer; and a
 late duplicate to a sensitive question takes the already-answered path with no
 body — by design, not a bug. The non-sensitive path keeps its response body
-byte-for-byte as before (regression).
+byte-for-byte.
 """
 
 from __future__ import annotations
@@ -90,8 +90,8 @@ async def test_sensitive_late_duplicate_already_answered_no_body(fake_redis):
 
 
 async def test_non_sensitive_answer_keeps_response_body(fake_redis):
-    # Regression: the default path is unchanged — the response body is persisted
-    # and reconstructs on read exactly as before.
+    # The default path persists the response body and reconstructs it on read
+    # byte-for-byte.
     store = InteractionStore("t:")
     await store.add(fake_redis, _request("i1", "g", store, sensitive=False), idle_ttl=100)
     assert "sensitive" not in fake_redis._hashes[store.state_key("i1")]

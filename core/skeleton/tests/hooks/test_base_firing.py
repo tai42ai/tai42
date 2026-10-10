@@ -343,7 +343,7 @@ async def test_hook_pinned_tool_kwargs_are_not_overridable_by_a_trigger_link(mak
 
 
 async def test_none_override_is_byte_identical(make_app):
-    # No override ⇒ exactly today's merge (regression guard for universal_webhook).
+    # No override ⇒ the plain merge (the universal_webhook case).
     app = make_app()
     manager = InMemoryHooksManager(_settings())
     await manager.register(

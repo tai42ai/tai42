@@ -478,8 +478,10 @@ class FakeAdminServices:
 
     async def remove_policy(self, user_id: str) -> None:
         self.calls.append(("remove_policy", user_id))
+        if user_id not in self.roles:
+            raise KeyError(f"cannot remove unknown principal: {user_id!r}")
         self._refuse_if_last_admin(user_id)
-        self.roles.pop(user_id, None)
+        self.roles.pop(user_id)
         self.disabled.discard(user_id)
 
     async def set_user_disabled(self, user_id: str, disabled: bool) -> None:

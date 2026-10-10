@@ -99,7 +99,7 @@ def _json_request(method: str, path: str, *, body: Any = None, **path_params: st
 
 def _run_request(name: str, body: Any) -> Request:
     """A POST for the authored-run door whose client never disconnects, so the
-    disconnect monitor stays False and the run drains to completion."""
+    disconnect monitor's read blocks and the run drains to completion."""
     payload = json.dumps(body).encode()
     scripted = [{"type": "http.request", "body": payload, "more_body": False}]
     idx = {"i": 0}
@@ -109,7 +109,9 @@ def _run_request(name: str, body: Any) -> Request:
         if i < len(scripted):
             idx["i"] += 1
             return scripted[i]
-        return {"type": "http.request", "body": b"", "more_body": False}
+        # Past the body the read blocks, as a real server's does until the client drops.
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable: the live connection never reports a message")
 
     scope = {
         "type": "http",

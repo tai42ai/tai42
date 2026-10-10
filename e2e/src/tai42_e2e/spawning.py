@@ -108,6 +108,10 @@ def spawn_serve_fleet(stack: TaiStack, tai: str, manifest_path: Path, family_dir
             str(workers),
             "--manifest-path",
             str(manifest_path),
+            # Forwarded to uvicorn: how long a booting worker has to answer its master's
+            # health ping before the master kills it (see the harness setting).
+            "--timeout-worker-healthcheck",
+            str(stack.infra.settings.worker_healthcheck_timeout),
         ]
         # Multiple workers on the stateful http transport pin each MCP session
         # to the worker that created it, which the skeleton refuses to start;

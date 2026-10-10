@@ -226,7 +226,7 @@ async def test_operator_send_with_media_stores_a_rich_part_and_delivers_it(env, 
 
     record = await _store().get_record(message_id)
     assert record is not None
-    # The legacy joined text is preserved for every plain reader; the rich part carries the
+    # The joined text is kept for every plain-text reader; the rich part carries the
     # media/options the delivery machine sends alongside it.
     assert record.answer == "here you go"
     assert record.answer_parts is not None

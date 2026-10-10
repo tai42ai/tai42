@@ -57,7 +57,7 @@ async def _reconcile_lost_with_liveness(
     SAME reconcile point, marked ``lost`` (the one-way CAS, so exactly one reader wins
     and only one dispatches) AND re-dispatched as a DETACHED background task replaying
     ``run_recorded`` from scratch under the principal's reconstructed CURRENT-grant
-    identity. An un-flagged record keeps today's quiet ``lost`` EXACTLY.
+    identity. An un-flagged record keeps its quiet ``lost`` EXACTLY.
     """
     if record.get("status") != _RUNNING or liveness_present:
         return record

@@ -564,7 +564,7 @@ async def test_callback_post_bound_answered_missing_verifier_500(wired, verifier
 
 
 async def test_unbound_external_callback_unchanged(wired):
-    # No verifier binding -> today's ticket-only behavior, GET serves the confirm.
+    # No verifier binding -> the ticket alone authorizes, GET serves the confirm.
     await _seed(wired)
     resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
     assert resp.status_code == 200

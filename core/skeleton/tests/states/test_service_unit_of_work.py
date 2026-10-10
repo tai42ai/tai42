@@ -505,7 +505,7 @@ def _n7_binding() -> StateBinding:
 async def test_binding_updates_write_the_store_directly_with_no_unit_open(svc: StatesService, pg: FakeStatesPg) -> None:
     await svc.put_declaration(_decl())
     await apply_binding_updates(_binding_app(svc), _n7_binding(), {}, {}, door_id="d1")
-    assert pg.records  # no unit open — the write lands in the store, as today
+    assert pg.records  # no unit open — the write lands in the store directly
     view = await svc.read("notes", _subject())
     assert view is not None
     assert view.data == {"n": 7}

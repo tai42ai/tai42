@@ -76,7 +76,7 @@ _ApplyContext = tuple[int, list[str], "ApplyEntry"]
 
 
 # The ambient unit of work bound to the caller's scope. Homed here (not the kit) because only the
-# skeleton's own facet reads consult it; a door outside any unit reads ``None`` and behaves as today.
+# skeleton's own facet reads consult it; a door outside any unit reads ``None`` and writes straight to the store.
 _current_state_unit: ContextVar[_StateUnit | None] = ContextVar("tai42_states_unit", default=None)
 
 

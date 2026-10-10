@@ -25,6 +25,7 @@ from tai42_kit.settings.cache_registry import (
 )
 
 from tai42_skeleton.app import epoch as epoch_mod
+from tai42_skeleton.app import epoch_retire as epoch_retire_mod
 from tai42_skeleton.app import retired_generations as retired_mod
 from tai42_skeleton.app.epoch import (
     Epoch,
@@ -280,7 +281,7 @@ async def test_retire_cancels_periodic_loops_and_calls_drain_epoch(monkeypatch: 
     ) -> None:
         drained_supervisors.append(deadline if deadline is not None else -1.0)
 
-    monkeypatch.setattr(epoch_mod, "drain_epoch", _fake_drain_epoch)
+    monkeypatch.setattr(epoch_retire_mod, "drain_epoch", _fake_drain_epoch)
     monkeypatch.setattr("tai42_skeleton.operations.tool_runs.drain_supervisors", _fake_drain_supervisors)
 
     retired_number = boot_epoch.number
@@ -979,7 +980,7 @@ async def _door_reload_with_a_concurrent_request(release_within_budget: bool) ->
         answered.set_result(None)
         await request
     async with asyncio.timeout(5.0):
-        await asyncio.gather(*epoch_mod._deferred_retire_tasks)
+        await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
     if not release_within_budget:
         answered.set_result(None)
         await request
@@ -1066,7 +1067,7 @@ async def test_a_door_driven_reload_starts_the_new_generations_tasks_outside_the
             del driver
             boot.release()  # the driver's response is flushed and its task is gone
             async with asyncio.timeout(5.0):
-                await asyncio.gather(*epoch_mod._deferred_retire_tasks)
+                await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
         assert len(generation_tasks) == 2
         assert all(_request_context_state not in task.get_context() for task in generation_tasks)
         assert "Stale settings instance" not in caplog.text

@@ -209,16 +209,17 @@ async def test_route_row_audit_passes_a_canonical_table(monkeypatch: pytest.Monk
     await startup.check_route_rows_canonical()
 
 
-async def test_route_row_audit_refuses_non_canonical_rows_with_the_reset_instruction(
+async def test_route_row_audit_refuses_non_canonical_rows_naming_the_rows_to_correct_or_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stored_rows(monkeypatch, {"/api/ok": "s", "/api/x/": "s", "/api//y": "s", "/api/%00z": "s"})
     with pytest.raises(RuntimeError) as exc:
         await startup.check_route_rows_canonical()
     assert str(exc.value) == (
-        "access_control: the route table holds non-canonical rows: ['/api/%00z', '/api//y', '/api/x/'] — reset "
-        "the access-control store (the canonical form decodes each segment once, collapses slashes and dot "
-        "segments, and drops a trailing slash)"
+        "access_control: the route table holds non-canonical rows: ['/api/%00z', '/api//y', '/api/x/'] — "
+        "correct or delete these rows in the access_control_routes table (the canonical form decodes each "
+        "segment once, collapses slashes and dot segments, and drops a trailing slash; a url with no "
+        "canonical form can only be deleted)"
     )
 
 
@@ -328,6 +329,20 @@ async def test_spa_check_fails_on_unacknowledged_public_declaration(monkeypatch:
     # flag is not a control — the reviewer must consciously acknowledge it.
     _bind_spa_check(monkeypatch, [_meta("/dashboard", ("GET",), False)], derived={"/dashboard"})
     with pytest.raises(RuntimeError, match="/dashboard"):
+        await check_spa_shell_public()
+
+
+async def test_spa_check_fails_when_the_shell_tier_would_serve_a_control_plane_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The terminal-deny confirmation asks the resolver's own SPA-shell tier about a GET probe
+    # under each control-plane prefix: a tier that would serve the probe the public shell
+    # fails the boot.
+    import tai42_skeleton.access_control.verifier as verifier_module
+
+    _bind_spa_check(monkeypatch, [_meta("/health", ("GET",), False)], derived={"/health"}, acknowledged=("/health",))
+    monkeypatch.setattr(verifier_module, "spa_shell_fallback_admits", lambda path, method, settings: True)
+    with pytest.raises(RuntimeError, match=r"control-plane probe '/api/__boot_probe__' is not excluded"):
         await check_spa_shell_public()
 
 

@@ -561,7 +561,7 @@ async def test_services_remove_policy_revokes_owned_keys(mem, pg: FakeAccessCont
     # deletes both his policy row and his principal row.
     pg.add_principal("bob")
     await access_control_store().create_policy("bob", [])
-    await management.add_user_api_key("bob-key", "machine", [], owner_user_id="bob")
+    await management.add_user_api_key("bob-key", "machine", ["*"], owner_user_id="bob")
     services = SkeletonAccountsAdminServices()
     await services.remove_policy("bob")
     assert "bob-key" not in provider.identities  # owned key revoked

@@ -324,6 +324,30 @@ async def test_remove_member_cannot_delete_last_admin(wire):
     assert "th" in wire.sessions.rows
 
 
+async def test_remove_member_retried_after_a_mid_way_failure_completes(wire, monkeypatch):
+    # The principal goes first; when a later step fails, the user row is still there and the
+    # removal is re-run: the retry finds the principal already gone and completes the rest.
+    _add_user(wire, "usr-1", role="admin")  # keeps an admin alive
+    _add_user(wire, "usr-2", role="viewer", password_hash="h")
+    wire.sessions.rows["th"] = {"user_id": "usr-2", "last_seen_at": future(0), "absolute_expires_at": future()}
+    real_delete = wire.sessions.delete_for_user
+
+    async def failing_delete(user_id, keep_token_hash=None):
+        raise RuntimeError("sessions store unavailable")
+
+    monkeypatch.setattr(wire.sessions, "delete_for_user", failing_delete)
+    with pytest.raises(RuntimeError, match="sessions store unavailable"):
+        await _provider(wire).invoke_member_action(REMOVE_MEMBER, target="usr-2", payload=NoInput())
+    assert "usr-2" in wire.users.rows
+    assert "usr-2" not in wire.admin.roles
+
+    monkeypatch.setattr(wire.sessions, "delete_for_user", real_delete)
+    result = await _provider(wire).invoke_member_action(REMOVE_MEMBER, target="usr-2", payload=NoInput())
+    assert isinstance(result, NoResult)
+    assert "usr-2" not in wire.users.rows
+    assert wire.sessions.rows == {}
+
+
 async def test_remove_member_unknown_not_found(wire):
     with pytest.raises(MemberActionNotFoundError, match="user not found"):
         await _provider(wire).invoke_member_action(REMOVE_MEMBER, target="ghost", payload=NoInput())

@@ -736,7 +736,7 @@ async def test_unrestricted_caller_keeps_full_shared_view(wired):
     await _seed(wired, "ra", user_id="alice", score=1.0)
     await _seed(wired, "rb", user_id="bob", score=2.0)
     # An authenticated but unrestricted caller (no owner claim) reads the shared
-    # window and may GET any run — today's view, regression-pinned.
+    # window and may GET any run.
     with _identity(user_id="op1", owner=None):
         entries = _json(await router.list_tool_runs(_list("alpha")))["data"]
         assert {e["run_id"] for e in entries} == {"ra", "rb"}

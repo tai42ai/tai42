@@ -615,8 +615,8 @@ async def test_a_multi_part_send_resumes_at_the_unsent_part(monkeypatch, fake, s
     assert record.outbound_message_ids == ["w1-1", "w2-1", "w2-2"]
 
 
-async def test_a_single_plain_text_answer_is_byte_identical_to_the_old_path(monkeypatch, fake, store):
-    """A plain single-message answer (answer_parts=None) degenerates to exactly today's send:
+async def test_a_single_plain_text_answer_is_one_chunked_part(monkeypatch, fake, store):
+    """A plain single-message answer (answer_parts=None) is sent as:
     one part, chunked by width, its chunks ledgered as part 0 (proven by a mid-send crash below,
     since a completed send clears the ledger)."""
     await store.create_record(_record("m-single", "aaaaaaaaaabbbbbbbbbb"))  # 20 chars, 2 chunks at width 10
@@ -640,7 +640,7 @@ async def test_a_single_plain_text_answer_is_byte_identical_to_the_old_path(monk
 
 async def test_a_media_part_is_delivered_with_its_media(monkeypatch, fake, store):
     """A media part rides a ChannelNotification carrying its media — the executor builds the
-    notification from the part's content fields, exactly as a single notification does today."""
+    notification from the part's content fields, as a single notification is built."""
     # A short message so this module's width-10 chunking does not split it — the media rides
     # the part's one (final, non-blank) chunk.
     part = AnswerPart(message="look", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")])

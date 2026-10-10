@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from typing import Any, cast
 
 import pytest
@@ -15,7 +15,7 @@ from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools.turn_budget import TurnBudgetMiddleware, _turn_budget_armed, turn_budget
 
-from .conftest import _budget_flag, _fixture_flag, _plain_tools_manifest
+from .conftest import _budget_flag, _fixture_flag, _ManualClock, _plain_tools_manifest
 
 # -- deterministic budget expiry against a parked tool ------------------------
 # The turn budget arms an ``asyncio.timeout`` the moment a dispatch reaches the shared
@@ -27,31 +27,6 @@ from .conftest import _budget_flag, _fixture_flag, _plain_tools_manifest
 # These tests take the loop clock under control: freeze it before the dispatch arms the
 # budget, let the fixture tool run to its park and signal it, then advance the clock past
 # the deadline once — firing the timer with the task provably suspended at the park.
-
-
-class _ManualClock:
-    """A loop-time source that can be frozen and advanced by hand.
-
-    Delegates to the real loop clock until :meth:`freeze` pins it, after which it reports
-    ``frozen + offset`` and moves only when :meth:`advance` is called. An armed
-    ``asyncio.timeout`` deadline computed while pinned therefore cannot elapse until the
-    test advances past it deliberately.
-    """
-
-    def __init__(self, real: Callable[[], float]) -> None:
-        self._real = real
-        self._frozen: float | None = None
-        self._offset = 0.0
-
-    def __call__(self) -> float:
-        base = self._frozen if self._frozen is not None else self._real()
-        return base + self._offset
-
-    def freeze(self) -> None:
-        self._frozen = self._real()
-
-    def advance(self, seconds: float) -> None:
-        self._offset += seconds
 
 
 async def _expire_while_parked(coro: Awaitable[Any], parked: asyncio.Event) -> TurnTimeoutError:

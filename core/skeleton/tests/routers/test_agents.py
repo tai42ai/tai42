@@ -11,13 +11,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncGenerator
 from typing import Any
 
+import httpx
 import pytest
 from pydantic import BaseModel
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
+from starlette.routing import Route
+from starlette.testclient import TestClient
 from tai42_contract.agent.events import (
     AsksFinal,
     InterruptFinal,
@@ -38,6 +44,7 @@ from tai42_skeleton.agent import (
     ToolCallStep,
     ToolResultStep,
 )
+from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.operations import agents as agent_ops
 from tai42_skeleton.routers import agents as router
 from tai42_skeleton.routers import interactions as interactions_router
@@ -167,9 +174,12 @@ def _make_run_request(name: str, body: bytes, *, disconnect: bool = False) -> Re
             idx["i"] += 1
             return scripted[i]
         # Past the scripted messages: a disconnected client keeps reporting
-        # disconnect; a live one reports a benign (non-disconnect) frame so the
-        # monitor's ``is_disconnected`` stays False.
-        return {"type": "http.disconnect"} if disconnect else {"type": "http.request", "body": b"", "more_body": False}
+        # disconnect; for a live one the read blocks, as a real server's does until
+        # the client drops.
+        if disconnect:
+            return {"type": "http.disconnect"}
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable: the live connection never reports a message")
 
     scope = {
         "type": "http",
@@ -396,6 +406,55 @@ async def test_run_disconnect_cancels_underlying_run(one_agent):
     assert agent.cancelled is True
 
 
+def _post_through_httpx(app: Starlette, path: str, body: bytes) -> str:
+    async def post() -> str:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(path, content=body, headers={"content-type": "application/json"})
+        assert resp.status_code == 200, resp.text
+        return resp.text
+
+    return asyncio.run(post())
+
+
+def _post_through_starlette_testclient(app: Starlette, path: str, body: bytes) -> str:
+    with TestClient(app) as client:
+        resp = client.post(path, content=body, headers={"content-type": "application/json"})
+    assert resp.status_code == 200, resp.text
+    return resp.text
+
+
+@pytest.mark.parametrize("post", [_post_through_httpx, _post_through_starlette_testclient])
+def test_run_streams_to_its_end_through_a_real_asgi_client(one_agent, post):
+    # The run door served as an ASGI app behind the stack's one ``receive``-wrapping
+    # middleware: the client's own ``receive`` feeds the body read, the response's
+    # disconnect listener and the run's disconnect monitor, and the finished run ends
+    # the response without waiting for the client to drop. The client runs on a daemon
+    # thread so a response that never ends fails the test at the deadline.
+    one_agent(_FakeAgent([MessageFinal(text="done")]))
+    app = Starlette(
+        routes=[Route("/api/agents/{name}/runs", router.run_agent, methods=["POST"])],
+        middleware=[Middleware(BodyLimitMiddleware)],
+    )
+    outcome: dict[str, Any] = {}
+
+    def client() -> None:
+        try:
+            outcome["text"] = post(app, "/api/agents/faker/runs", b'{"prompt":"hi"}')
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=client, daemon=True)
+    thread.start()
+    thread.join(_MONITOR_STOP_TIMEOUT)
+    assert not thread.is_alive(), "the response did not end after the run finished"
+    if "error" in outcome:
+        raise outcome["error"]
+    text = outcome["text"]
+    frames = _data_frames([f"{block}\n\n" for block in text.split("\n\n") if block])
+    assert [f["type"] for f in frames] == ["message_final", "stream.end"]
+    assert frames[0]["text"] == "done"
+
+
 # -- run route: input / lookup errors ----------------------------------------
 
 
@@ -602,7 +661,7 @@ async def test_run_recursion_limit_outcome_emits_a_terminal_event(one_agent):
 
 async def test_run_user_park_emits_the_suspended_frame_parked(one_agent, monkeypatch):
     # ``parked``: an async ask to the USER surfaces as the suspended frame carrying the park's
-    # interaction ids (today's ``SuspendedFinal`` shape). With no caller ask in the run's parked
+    # interaction ids (the ``SuspendedFinal`` shape). With no caller ask in the run's parked
     # list, the whole park classifies as ``parked``.
     monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
     one_agent(_FakeAgent([SuspendedFinal(interaction_ids=["i1", "i2"], thread_id="t1")]))
@@ -721,3 +780,49 @@ async def test_run_on_a_held_subject_ends_with_one_stream_error_naming_the_save(
     frames = _data_frames(await _collect(resp))
     assert frames == [{"type": "stream.error", "message": message}]
     assert agent.received_kwargs is None  # no run started
+
+
+# -- run route: the disconnect monitor -----------------------------------------
+
+
+async def test_disconnect_monitor_stops_when_cancelled_while_it_reads_the_connection():
+    # The stream cancels its disconnect monitor once the run has ended, and then awaits it:
+    # a monitor that outlived that cancellation would hold the finished stream open until
+    # the client hung up. The cancellation here lands while the monitor is reading the
+    # connection (a live client: the read blocks, as a real server's does), and must stop it.
+    entered = asyncio.Event()
+
+    async def receive() -> dict:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable: the live connection never reports a message")
+
+    scope = {"type": "http", "method": "POST", "path": "/api/agents/faker/runs", "headers": [], "query_string": b""}
+    monitor = asyncio.ensure_future(router._wait_until_disconnected(Request(scope, receive)))
+    await entered.wait()
+    monitor.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(monitor, _MONITOR_STOP_TIMEOUT)
+
+
+async def test_disconnect_monitor_returns_when_the_client_disconnects():
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    scope = {"type": "http", "method": "POST", "path": "/api/agents/faker/runs", "headers": [], "query_string": b""}
+    await asyncio.wait_for(router._wait_until_disconnected(Request(scope, receive)), _MONITOR_STOP_TIMEOUT)
+
+
+async def test_disconnect_monitor_raises_on_a_message_the_asgi_contract_does_not_allow():
+    # After the request body only ``http.disconnect`` may arrive; any other message is a
+    # server fault the monitor raises instead of reading it as a live or a gone client.
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {"type": "http", "method": "POST", "path": "/api/agents/faker/runs", "headers": [], "query_string": b""}
+    with pytest.raises(RuntimeError, match=r"only 'http\.disconnect' may follow it"):
+        await router._wait_until_disconnected(Request(scope, receive))
+
+
+# The longest a test waits for the disconnect monitor to stop before failing.
+_MONITOR_STOP_TIMEOUT = 5.0

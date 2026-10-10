@@ -4,7 +4,7 @@ Kept apart from the platform's own environment packages (the wp-content principl
 separate from the platform's packages).
 
 ``TAI_PLUGINS_PREFIX`` unset -> installs go into the running interpreter
-environment, which a container image discards on restart (today's behavior).
+environment, which a container image discards on restart (the default).
 Set -> the deployment OPTS IN to persistence: the installer installs each plugin's
 OWN distribution into the prefix while pip resolves shared dependencies against the
 running environment, so a package already importable in the environment is never
@@ -54,8 +54,8 @@ class PluginPrefixSettings(TaiBaseSettings):
     # on a fresh interpreter, so the group is excluded from the reload boundary.
     reload_class: ClassVar[ReloadClass] = "excluded"
 
-    # Absolute path to the persistent plugin-install prefix. Unset (None) keeps
-    # today's behavior: installs land in the running environment. Set opts into
+    # Absolute path to the persistent plugin-install prefix. Unset (None), the default:
+    # installs land in the running environment. Set opts into
     # restart-survival — plugins install here and boot puts it on ``sys.path``.
     prefix: str | None = None
 

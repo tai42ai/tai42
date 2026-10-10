@@ -121,7 +121,7 @@ async def substitute_media(
             # An already-stored SAME-ORIGIN served reference (any kind — document/video/audio
             # served by id, not only an image). A channel vendor fetches off-origin, so prepend
             # ``base_url`` to make it absolute; caption/filename ride unchanged. With no
-            # ``base_url`` this branch is skipped and the relative url passes through as before.
+            # ``base_url`` this branch is skipped and the relative url passes through unchanged.
             item = item.model_copy(update={"url": base_url.rstrip("/") + item.url})
         result.append(item)
     return result

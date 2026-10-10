@@ -377,8 +377,8 @@ async def test_restricted_ask_allows_own_identity(monkeypatch, fake_redis, fake_
 
 
 async def test_unrestricted_ask_may_address_any_identity(monkeypatch, fake_redis, fake_client_ctx) -> None:
-    # Regression guard: an unrestricted caller (no bound owner claim) is NOT clamped
-    # — it may address any identity, exactly as before.
+    # An unrestricted caller (no bound owner claim) is NOT clamped — it may address
+    # any identity.
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     store = InteractionStore(helper_module.interactions_settings().key_prefix)
     persisted = await _persisted_audience(fake_redis, store, audience="alice")

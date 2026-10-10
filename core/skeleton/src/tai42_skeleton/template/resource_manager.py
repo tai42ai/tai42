@@ -555,7 +555,7 @@ class ResourceManager:
         """Resolve ``template_id`` to a compiled template for ``locale``.
 
         ``None`` locale renders the bare id unchanged (the locale-agnostic callers — hooks,
-        authz, access-control — keep today's behavior). A present locale walks the fallback
+        authz, access-control — read the bare id). A present locale walks the fallback
         chain and returns the first stored variant; when NONE of the chain (variants AND the
         bare default) is stored, it refuses with :class:`TemplateLocaleNotFoundError` naming
         the template and locale, never a silent wrong-language render.

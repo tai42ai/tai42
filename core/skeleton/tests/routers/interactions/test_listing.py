@@ -243,7 +243,7 @@ async def test_list_restricted_shows_only_addressed(wired):
 async def test_list_unrestricted_shows_all(wired):
     await _seed_addressed(wired, "a1", "ga", "alice")
     await _seed_addressed(wired, "o1", "go", None)
-    # An unrestricted (authenticated, no owner) caller keeps today's full inbox.
+    # An unrestricted (authenticated, no owner) caller reads the full inbox.
     with _identity(user_id="op1", owner=None):
         page = await ops.list_interactions()
     assert sorted(item["interaction_id"] for item in page["items"]) == ["a1", "o1"]

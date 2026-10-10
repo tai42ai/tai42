@@ -1235,7 +1235,7 @@ async def test_channel_send_with_audience_records_template_on_feed(register_chan
 
 
 async def test_channel_without_audience_stores_nothing(register_channel, sink_redis):
-    # A plain channel send with no audience records nothing — today's behavior.
+    # A plain channel send with no audience records nothing.
     register_channel("fake", RecordingChannel())
 
     await notify_user("plain", channel="fake")

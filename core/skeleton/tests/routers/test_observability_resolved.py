@@ -150,3 +150,30 @@ async def test_export_trace_refuses_a_bad_resolve_value():
     _install_reference_trace()
     resp = await router.export_run_trace(_req(_q(resolve="maybe"), trace_id="t1"))
     assert resp.status_code == 400
+    assert _json(resp) == {"error": [{"loc": ["resolve"], "type": "bool_parsing"}]}
+
+
+@pytest.mark.parametrize("value", ["True", "1", "yes", "on"])
+async def test_export_trace_reads_resolve_as_the_boolean_the_query_model_declares(value):
+    # The export's query model declares ``resolve`` a boolean, and the published OpenAPI
+    # carries it as one: every spelling of true that boolean accepts resolves the export.
+    reader = _install(_FakeReader())
+    reader.traces_by_id["t1"] = _trace(
+        id="t1", observations=[_obs(id="a", output={"v": 1}), _obs(id="b", input=_ref("a", "output", "/v"))]
+    )
+    resp = await router.export_run_trace(_req(_q(resolve=value), trace_id="t1"))
+    assert resp.status_code == 200, bytes(resp.body)
+    spans = json.loads(bytes(resp.body))["spans"]
+    assert next(s for s in spans if s["id"] == "b")["input"] == 1
+
+
+@pytest.mark.parametrize("value", ["False", "0", "no", "off"])
+async def test_export_trace_leaves_references_for_a_false_resolve(value):
+    reader = _install(_FakeReader())
+    reader.traces_by_id["t1"] = _trace(
+        id="t1", observations=[_obs(id="a", output={"v": 1}), _obs(id="b", input=_ref("a", "output", "/v"))]
+    )
+    resp = await router.export_run_trace(_req(_q(resolve=value), trace_id="t1"))
+    assert resp.status_code == 200, bytes(resp.body)
+    spans = json.loads(bytes(resp.body))["spans"]
+    assert next(s for s in spans if s["id"] == "b")["input"] == _ref("a", "output", "/v")

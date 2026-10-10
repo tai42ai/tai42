@@ -226,12 +226,15 @@ class _PrincipalGuard:
     async def update_policy_fields(self, user_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """A partial policy edit under the guard, refused when it demotes the last enabled admin.
 
-        Returns the committed body, or ``None`` when the target has no policy row.
+        The last-admin refusal runs first, then the refusal of a policy left with neither a
+        scope nor a condition, worded for a principal. Returns the committed body, or ``None``
+        when the target has no policy row.
         """
         body = await _store.resolve_policy_update(self._store, self._cur, user_id, updates)
         if body is None:
             return None
         await self.refuse_if_last_admin(user_id, body)
+        _store.refuse_empty_policy_edit(updates, body, principal=True)
         await _store.write_policy_body(self._cur, user_id, body)
         return body
 

@@ -1,6 +1,6 @@
 """Response models for group-A operations (api_keys · conversations · manifest · marketplace · presets).
 
-Each model DESCRIBES the inner payload its operation returns today; the route adapter
+Each model DESCRIBES the inner payload its operation returns; the route adapter
 wraps that payload in the ``{"data": ...}`` success envelope, so nothing here re-declares
 the envelope. Bare-list and dynamic-map bodies are NAMED ``RootModel`` subclasses (the
 offline emitter registers ``components.schemas`` by ``model.__name__``, so a named class
@@ -61,7 +61,8 @@ class RouteMappingRow(BaseModel):
 
     ``mapped`` is the route's scope id, the public marker, or ``null`` when unmapped;
     ``action`` is its authorization action class, ``null`` when the route carries no
-    registry metadata.
+    registry metadata; ``declared_public`` is ``True`` when the route is public by its own
+    declaration and so answers everyone whatever scope it is mapped to.
     """
 
     path: str
@@ -70,6 +71,7 @@ class RouteMappingRow(BaseModel):
     tags: list[str]
     summary: str
     action: str | None
+    declared_public: bool
 
 
 class RouteMappingList(RootModel[list[RouteMappingRow]]):

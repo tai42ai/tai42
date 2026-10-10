@@ -5,7 +5,7 @@ its connection) instead of the distribution — but ONLY while that component's
 ``TAI_DB_BINDING_*`` is EXPLICITLY declared. Unset, the chain is a VISIBLE skip
 (a surfaced log line, no entry), never the default-database fallback and never the
 silent ``None`` no-migrations outcome. With no override the component is the
-distribution name, byte-identical to prior behavior.
+distribution name.
 
 No live Postgres — pure resolution against installed package metadata. The
 ``tai42-skeleton`` distribution is guaranteed installed, so its real ``sql/migrations``
@@ -117,8 +117,7 @@ def test_visible_skip_is_distinct_from_silent_no_migrations(caplog: pytest.LogCa
 
 def test_no_override_chain_is_unchanged(caplog: pytest.LogCaptureFixture) -> None:
     # With no override the component is the distribution name and the chain resolves
-    # WITHOUT any TAI_DB_BINDING_* declared — byte-identical to prior behavior, and
-    # never a skip.
+    # WITHOUT any TAI_DB_BINDING_* declared, and never a skip.
     spec = _spec(migrations="sql/migrations")
 
     with caplog.at_level(logging.WARNING, logger=_DISCOVERY_LOGGER):

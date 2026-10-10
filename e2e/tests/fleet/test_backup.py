@@ -45,6 +45,10 @@ async def _manifest_mcp_titles(stack: TaiStack) -> list[str]:
     return [entry["title"] for entry in manifest["mcp"]]
 
 
+# The test boots two multi-worker stacks of its own and waits out four config reloads, two
+# of them converged fleet-wide, more than the package's per-test 120 s holds on a loaded
+# host, so it carries its own bound.
+@pytest.mark.timeout(360)
 @pytest.mark.needs(
     "probe-tools",
     "mutable",

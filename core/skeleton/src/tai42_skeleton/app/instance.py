@@ -313,7 +313,7 @@ def build_app() -> TaiMCP:
             # traffic, so a bootstrap ``apply_role`` can never KeyError on a fresh deploy.
             app.lifecycle.on_startup(seed_roles)
             # The route table is read once per epoch build: a row stored in a form no request
-            # path reduces to fails the boot loudly (reset the access-control store).
+            # path reduces to fails the boot loudly, naming the rows to correct or delete.
             app.lifecycle.on_startup(check_route_rows_canonical)
             # The setup token is fixed once (SET NX on the shared AC Redis) and logged once
             # by the winner while no principal exists, so a fresh deployment can initialize
@@ -324,11 +324,11 @@ def build_app() -> TaiMCP:
             # The pre-auth surface is enumerated (visible at every boot) and an
             # authenticated route on it fails the boot closed.
             app.lifecycle.on_startup(check_always_public_routes)
-            # The non-/api public route surface is audited on every method: the derived
-            # reserved set is printed, an unacknowledged public-by-declaration non-/api route
-            # (any method) fails the boot closed, and the control-plane terminal-deny
-            # invariant is confirmed. Also on reload: a reload can add an authed non-/api GET
-            # route while the HTTP-edge verifier outlives it, so a stale reserved set would
+            # The route surface outside the control plane is audited on every method: the
+            # derived reserved set is printed, an unacknowledged public-by-declaration route
+            # there (any method) fails the boot closed, and the control-plane terminal-deny
+            # invariant is confirmed. Also on reload: a reload can add an authed GET route
+            # outside the control plane while the HTTP-edge verifier outlives it, so a stale reserved set would
             # serve that route the anonymous shell. The reset must run AFTER the reimport.
             app.lifecycle.on_startup(check_spa_shell_public)
             app.lifecycle.on_reload(check_spa_shell_public)

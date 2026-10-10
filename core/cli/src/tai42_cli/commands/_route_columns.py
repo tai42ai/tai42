@@ -52,7 +52,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         items_key=None, columns=("condition", "name", "description", "scopes", "base_tier", "allow_all", "grants")
     ),
     ("GET", "/api/auth/routes"): RouteShape(
-        items_key=None, columns=("path", "methods", "mapped", "tags", "summary", "action")
+        items_key=None, columns=("path", "methods", "mapped", "tags", "summary", "action", "declared_public")
     ),
     ("GET", "/api/auth/tokens-payload"): RouteShape(
         items_key=None,
