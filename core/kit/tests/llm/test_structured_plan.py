@@ -23,7 +23,6 @@ from tai42_kit.llm.structured import (
     StructuredOutputUnsupportedError,
     plan_structured_output,
 )
-from tai42_kit.utils.data.json_schema_util import inject_int64_bounds, json_schema_to_pydantic_model
 
 
 class _Fake:
@@ -258,8 +257,65 @@ def test_anthropic_recursive_schema_named_reason_and_tool_tier() -> None:
     assert "recursive schema" in str(excinfo.value)
     plan = plan_structured_output(_llm({"structured_output": True}), "anthropic", _RecNode)
     assert plan.mode == "tool"
-    assert isinstance(plan.bound_typed_dict, type)
-    assert issubclass(plan.bound_typed_dict, BaseModel)
+    # A pydantic-authored schema binds its own class, whatever its JSON schema holds.
+    assert plan.tool_schema is _RecNode
+
+
+def test_a_recursive_dict_schema_stays_tool_tier_dereferenced() -> None:
+    schema = {
+        "title": "Tree",
+        "type": "object",
+        "properties": {"node": {"$ref": "#/$defs/Node"}},
+        "$defs": {"Node": {"type": "object", "properties": {"next": {"$ref": "#/$defs/Node"}}}},
+    }
+    plan = plan_structured_output(_llm({}), "anthropic", schema)
+    assert plan.mode == "tool"
+    assert isinstance(plan.tool_schema, dict)
+    assert "$ref" not in plan.tool_schema["properties"]["node"]
+
+
+def test_a_recursive_dict_schema_with_a_root_ref_stays_tool_tier() -> None:
+    # The shape a self-referencing pydantic model's ``model_json_schema()`` emits: the root is a
+    # ``$ref`` into ``$defs``, so the object keys only appear once the root is resolved.
+    schema = _RecNode.model_json_schema()
+    assert "$ref" in schema
+    assert "type" not in schema
+    plan = plan_structured_output(_llm({}), "anthropic", schema)
+    assert plan.mode == "tool"
+    assert plan.validation_schema is schema
+    assert isinstance(plan.tool_schema, dict)
+    assert plan.tool_schema["type"] == "object"
+    assert set(plan.tool_schema["properties"]) == {"value", "child"}
+    assert "$ref" not in plan.tool_schema
+
+
+def test_a_root_ref_to_an_any_of_fans_out_like_an_authored_any_of() -> None:
+    schema = {
+        "title": "Either",
+        "$ref": "#/$defs/Choice",
+        "$defs": {
+            "Choice": {
+                "anyOf": [
+                    {"type": "object", "properties": {"a": {"type": "string"}}},
+                    {"type": "object", "properties": {"b": {"type": "integer"}}},
+                ]
+            }
+        },
+    }
+    plan = plan_structured_output(_llm({}), "anthropic", schema)
+    assert plan.mode == "tool"
+    assert isinstance(plan.tool_schema, dict)
+    assert [variant["title"] for variant in plan.tool_schema["oneOf"]] == ["Either_any0", "Either_any1"]
+
+
+def test_a_root_ref_to_an_array_is_refused_naming_the_array() -> None:
+    schema = {
+        "title": "Rows",
+        "$ref": "#/$defs/Rows",
+        "$defs": {"Rows": {"type": "array", "items": {"type": "string"}}},
+    }
+    with pytest.raises(ValueError, match="got a top-level array"):
+        plan_structured_output(_llm({}), "anthropic", schema)
 
 
 _SIXTEEN_UNION = {
@@ -343,8 +399,93 @@ def test_native_when_declared_bindable_and_representable() -> None:
 def test_tool_when_native_not_declared_and_forced_choice_allowed() -> None:
     plan = plan_structured_output(_llm({}), "openai", _SCHEMA)
     assert plan.mode == "tool"
-    assert isinstance(plan.bound_typed_dict, type)
-    assert issubclass(plan.bound_typed_dict, BaseModel)
+    assert plan.tool_schema == _SCHEMA
+
+
+_AUTHORED = {
+    "title": "Authored",
+    "description": "what the model fills",
+    "type": "object",
+    "properties": {
+        "count": {"type": "integer", "description": "how many"},
+        "when": {"type": "string", "format": "date-time"},
+        "label": {"type": "string", "default": "none"},
+        "kind": {"$ref": "#/$defs/Kind"},
+    },
+    "required": ["count"],
+    "$defs": {"Kind": {"type": "string", "enum": ["a", "b"], "description": "the kind"}},
+}
+
+
+def test_tool_schema_is_the_dereferenced_authored_dict() -> None:
+    plan = plan_structured_output(_llm({}), "openai", _AUTHORED)
+    assert plan.mode == "tool"
+    schema = plan.tool_schema
+    assert isinstance(schema, dict)
+    assert schema["description"] == "what the model fills"
+    assert schema["properties"]["count"] == {"type": "integer", "description": "how many"}
+    assert schema["properties"]["when"]["format"] == "date-time"
+    assert schema["properties"]["label"]["default"] == "none"
+    assert schema["properties"]["kind"] == {"type": "string", "enum": ["a", "b"], "description": "the kind"}
+    # The authored dict is never mutated and no int64 bound the author never wrote is added.
+    assert "$ref" in _AUTHORED["properties"]["kind"]
+    assert "minimum" not in schema["properties"]["count"]
+    assert "maximum" not in schema["properties"]["count"]
+
+
+class _Authored(BaseModel):
+    """A pydantic-authored response format."""
+
+    value: int
+
+
+def test_tool_schema_is_the_authored_pydantic_class() -> None:
+    plan = plan_structured_output(_llm({}), "openai", _Authored)
+    assert plan.tool_schema is _Authored
+
+
+def test_a_top_level_oneof_of_titled_objects_binds_as_authored() -> None:
+    schema = {
+        "title": "Either",
+        "oneOf": [
+            {"title": "Left", "type": "object", "properties": {"l": {"type": "string"}}},
+            {"title": "Right", "type": "object", "properties": {"r": {"type": "integer"}}},
+        ],
+    }
+    plan = plan_structured_output(_llm({}), "openai", schema)
+    assert plan.tool_schema == schema
+
+
+def test_a_top_level_anyof_is_presented_as_a_oneof_fan_out_with_variant_names() -> None:
+    schema = {
+        "title": "Either",
+        "anyOf": [
+            {"title": "Left", "type": "object", "properties": {"l": {"type": "string"}}},
+            {"type": "object", "properties": {"r": {"type": "integer"}}},
+        ],
+    }
+    plan = plan_structured_output(_llm({}), "openai", schema)
+    assert plan.tool_schema == {
+        "title": "Either",
+        "oneOf": [
+            {"title": "Left", "type": "object", "properties": {"l": {"type": "string"}}},
+            {"title": "Either_any1", "type": "object", "properties": {"r": {"type": "integer"}}},
+        ],
+    }
+    # Validation stays against the authored anyOf.
+    assert plan.validation_schema is schema
+
+
+@pytest.mark.parametrize(
+    ("schema", "kind"),
+    [
+        ({"title": "List", "type": "array", "items": {"type": "string"}}, "array"),
+        ({"title": "Scalar", "type": "string"}, "string"),
+    ],
+)
+def test_a_non_object_top_level_is_refused_at_plan_time(schema: dict[str, Any], kind: str) -> None:
+    with pytest.raises(ValueError, match=rf"the tool tier binds an object schema .* got a top-level {kind}"):
+        plan_structured_output(_llm({}), "openai", schema)
 
 
 _OPTIONAL_SCHEMA = {"title": "Opt", "type": "object", "properties": {"s": {"type": "string"}}}
@@ -356,17 +497,12 @@ _NESTED_OPTIONAL_SCHEMA = {
 
 
 @pytest.mark.parametrize("schema", [_OPTIONAL_SCHEMA, _NESTED_OPTIONAL_SCHEMA])
-def test_tool_tier_binds_a_pydantic_model_convertible_to_an_openai_tool(schema: dict[str, Any]) -> None:
-    # The tool tier binds a pydantic BaseModel (not a TypedDict), which langchain's
-    # tool-calling path converts to an OpenAI tool natively. A schema whose properties are
-    # all optional (no ``required``) must convert and bind cleanly through that path.
+def test_tool_tier_binds_a_dict_convertible_to_an_openai_tool(schema: dict[str, Any]) -> None:
+    # A schema whose properties are all optional (no ``required``) converts and binds cleanly.
     plan = plan_structured_output(_llm({}), "openai", schema)
     assert plan.mode == "tool"
-    assert isinstance(plan.bound_typed_dict, type)
-    assert issubclass(plan.bound_typed_dict, BaseModel)
-    # The exact shape langchain receives for the single-shot bind, and the bound model itself.
-    convert_to_openai_tool(json_schema_to_pydantic_model(inject_int64_bounds(schema), model_name=schema["title"]))
-    convert_to_openai_tool(plan.bound_typed_dict)
+    assert plan.tool_schema == schema
+    convert_to_openai_tool(schema)
 
 
 def test_tool_when_provider_has_no_native_binding() -> None:

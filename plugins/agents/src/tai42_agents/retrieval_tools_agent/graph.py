@@ -40,9 +40,10 @@ from langgraph.types import Send
 from langgraph.utils.runnable import RunnableCallable
 from pydantic import ValidationError
 from tai42_kit.llm.middleware.context_overflow import areduce_context, context_overflow_middlewares
-from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
+from tai42_kit.llm.middleware.leading_user import lead_with_user
 from tai42_kit.llm.middleware.rolling_cache_mark import roll_cache_marks
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
+from tai42_kit.llm.models import cache_mark_key, requires_leading_user_turn
 from tai42_kit.utils.data.string_util import text_to_md5
 
 from tai42_agents._internal.recovery import _tool_error_middleware
@@ -89,24 +90,6 @@ def _route_tool_calls(
     return destinations
 
 
-def _terminal_message_text(last: Any) -> str:
-    """Flatten a terminal message's content to its stripped text.
-
-    A content list is joined from its ``text`` parts; a non-string content yields "".
-    """
-    content = getattr(last, "content", "")
-    if isinstance(content, list):
-        texts: list[str] = []
-        for part in content:
-            if isinstance(part, dict):
-                if part.get("type") == "text":
-                    texts.append(part.get("text", ""))
-            elif isinstance(part, str):
-                texts.append(part)
-        content = "".join(texts)
-    return content.strip() if isinstance(content, str) else ""
-
-
 def _terminal_status(content: str) -> str:
     """Parse a terminal status JSON string and return its ``status`` value.
 
@@ -150,15 +133,19 @@ class RetrievalToolsGraph:
         self,
         tools: Sequence[BaseTool],
         llm: BaseChatModel,
+        provider: str,
         store: BaseStore | None = None,
         checkpoint: BaseCheckpointSaver | None = None,
         overwrite_store: bool = False,
         tools_limit: int = 10,
         system_prompt: str | None = None,
     ):
-        """Configure the graph with its ``tools``, ``llm``, store, checkpoint, and per-run prompt."""
+        """Configure the graph: ``tools``, ``llm`` (built for ``provider``), store, checkpoint, per-run prompt."""
         self.tools = list(tools)
         self.llm = llm
+        # The provider decides the request-scoped history shaping of each model call.
+        self._leads_with_user = requires_leading_user_turn(provider)
+        self._cache_mark_key = cache_mark_key(provider)
         self.store = store
         self.checkpoint = checkpoint
         # Per-run model configuration, prepended at each model call — never part
@@ -192,15 +179,12 @@ class RetrievalToolsGraph:
             raise ValueError("RetrievalToolsGraph requires a store to embed tool descriptions into")
 
         # The system purge runs first so a stored system message never reaches the other
-        # strategies or the model; the leading-user normalization runs last, after the
-        # history is reduced, so a thread opening with an assistant message leads user-first
-        # for the next model call. The per-run system prompt is shared with the
+        # strategies or the model. The per-run system prompt is shared with the
         # context-overflow middlewares so the trimming budget covers the full outgoing
         # request, prompt included.
         self._context_middlewares = [
             SystemPurgeMiddleware(),
             *await context_overflow_middlewares(system_prompt=self.system_prompt),
-            LeadingUserMiddleware(),
         ]
 
         for tool in self.tools:
@@ -270,11 +254,15 @@ class RetrievalToolsGraph:
             if self.system_prompt:
                 messages = [SystemMessage(content=self.system_prompt), *messages]
             # Raw graph node: wrap_model_call middleware never runs here, so the
-            # rolling cache-mark strip is applied request-scoped before the call —
-            # keeping only the newest cache_control breakpoint, never written back
-            # into state.
-            rolled = roll_cache_marks(messages)
-            messages = rolled if rolled is not None else messages
+            # provider's history shaping is applied request-scoped before the call —
+            # a leading user turn after the reduced history, and only the newest cache
+            # breakpoint — never written back into state.
+            if self._leads_with_user:
+                led = lead_with_user(messages)
+                messages = led if led is not None else messages
+            if self._cache_mark_key:
+                rolled = roll_cache_marks(messages, self._cache_mark_key)
+                messages = rolled if rolled is not None else messages
             response = await llm_with_tools.ainvoke(messages)
             return {"messages": [response]}
 
@@ -375,7 +363,7 @@ class RetrievalToolsGraph:
                 )
 
             # 2) no tool calls left: the message MUST be the terminal status JSON.
-            status = _terminal_status(_terminal_message_text(last))
+            status = _terminal_status(last.text.strip())
             if status == "continue":
                 # No tool_calls left; loop back through the context node so the
                 # history is reduced before the next agent turn.

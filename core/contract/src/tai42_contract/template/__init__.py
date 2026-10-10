@@ -179,12 +179,23 @@ class ExprMixin(BaseModel):
     ] = None
 
 
+class ImageReference(BaseModel, frozen=True):
+    """An addressable image a model can be handed: a public ``http(s)`` URL or a base64 ``data:`` URI.
+
+    ``mime`` is the asserted ``image/*`` mime; ``None`` only for a public URL whose suffix gives none.
+    """
+
+    url: str
+    mime: str | None
+
+
 __all__ = [
     "EXPRESSION_ANNOTATION_KEY",
     "TEMPLATED_TEXT_ANNOTATION",
     "TEMPLATED_TEXT_ANNOTATION_KEY",
     "ConditionMixin",
     "ExprMixin",
+    "ImageReference",
     "TemplateEviction",
     "TemplatedText",
     "expression_annotation",

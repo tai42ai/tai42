@@ -53,7 +53,7 @@ from tai42_contract.sandbox import (
     SandboxStreamChunk,
     SandboxStreamExit,
 )
-from tai42_kit.sandbox import ManagedSandbox, ManagedSandboxSession
+from tai42_kit.sandbox import ManagedSandbox, ManagedSandboxSession, SandboxDispatchSettings
 
 # Read granularity for draining a pipe — a fixed chunk keeps memory bounded while a reader
 # keeps pace with a fast producer (the host-provider constant).
@@ -445,6 +445,10 @@ class FakeSandbox(ManagedSandbox):
         # spec-reject persistent path is real rather than stubbed. Read once at construction
         # (recycle re-imports this module and rebuilds the provider on a settings flip).
         self._ephemeral_only = _truthy(os.environ.get(_EPHEMERAL_ONLY_ENV))
+
+    def dispatch_settings(self) -> SandboxDispatchSettings:
+        """The kit-declared dispatch defaults."""
+        return SandboxDispatchSettings()
 
     async def _create_session_resources(self, spec: SandboxSessionSpec) -> ManagedSandboxSession:
         # Provider-capability rejections (the kit already enforced the operator policy floor/

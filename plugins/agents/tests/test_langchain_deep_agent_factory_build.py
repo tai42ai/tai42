@@ -164,8 +164,7 @@ def test_resolve_subagent_emits_response_format() -> None:
     # The schema is pinned to the tool-calling strategy, never provider-dependent
     # auto-routing.
     assert isinstance(sub["response_format"], ToolStrategy)
-    # ...and bounded: an oversized int is a retryable parse failure, and the schema
-    # binds under the model's name.
+    # ...binding the authored class under its own name.
     _assert_bound_to_model(sub["response_format"], M)
 
 
@@ -191,8 +190,7 @@ def test_build_deep_agent_passes_response_format(monkeypatch: pytest.MonkeyPatch
     # The schema is pinned to the tool-calling strategy, never provider-dependent
     # auto-routing.
     assert isinstance(captured["response_format"], ToolStrategy)
-    # ...and bounded: an oversized int is a retryable parse failure, and the schema
-    # binds under the model's name.
+    # ...binding the authored class under its own name.
     _assert_bound_to_model(cast(ToolStrategy[Any], captured["response_format"]), M)
 
 
@@ -238,6 +236,43 @@ def test_build_deep_agent_pins_main_middleware_order(monkeypatch: pytest.MonkeyP
     assert stack[4] is _tool_error_middleware
 
 
+@pytest.mark.parametrize(("leading", "key"), [(True, "k1"), (True, None), (False, "k2"), (False, None)])
+def test_the_main_stack_carries_the_history_middlewares_each_predicate_answer_asks_for(
+    monkeypatch: pytest.MonkeyPatch, leading: bool, key: str | None
+) -> None:
+    import tai42_kit.llm.middleware as middleware_pkg
+
+    monkeypatch.setattr(middleware_pkg, "requires_leading_user_turn", lambda provider: leading)
+    monkeypatch.setattr(middleware_pkg, "cache_mark_key", lambda provider: key)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
+    asyncio.run(build_langchain_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
+    assert [type(mw) for mw in captured["middleware"][2:-1]] == (
+        ([LeadingUserMiddleware] if leading else []) + ([RollingCacheMarkMiddleware] if key else [])
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("anthropic", [RollingCacheMarkMiddleware]),
+        ("openai", [LeadingUserMiddleware, RollingCacheMarkMiddleware]),
+        ("google", [LeadingUserMiddleware]),
+    ],
+)
+def test_the_main_stack_follows_the_recorded_provider_table(
+    monkeypatch: pytest.MonkeyPatch, provider: str, expected: list[type]
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
+    asyncio.run(
+        build_langchain_deep_agent(
+            llm=_FAKE_LLM, provider=provider, store=InMemoryStore(), checkpointer=InMemorySaver()
+        )
+    )
+    assert [type(mw) for mw in captured["middleware"][2:-1]] == expected
+
+
 def test_compile_nested_subagent_pins_response_format_to_tool_strategy(monkeypatch: pytest.MonkeyPatch) -> None:
     class M(BaseModel):
         x: int
@@ -261,8 +296,7 @@ def test_compile_nested_subagent_pins_response_format_to_tool_strategy(monkeypat
     # provider-dependent auto-routing.
     threaded = calls[-1]["response_format"]
     assert isinstance(threaded, ToolStrategy)
-    # ...and bounded: an oversized int is a retryable parse failure, and the schema
-    # binds under the model's name.
+    # ...binding the authored class under its own name.
     _assert_bound_to_model(cast(ToolStrategy[Any], threaded), M)
 
 

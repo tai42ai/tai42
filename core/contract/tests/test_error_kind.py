@@ -313,3 +313,124 @@ def test_invalid_stamp_never_masquerades_as_a_real_kind():
     bare = Exception("nothing else to go on")
     setattr(bare, ERROR_KIND_ATTR, "also-bogus")
     assert error_kind(bare) is ErrorKind.UNKNOWN
+
+
+# -- The transport marker: is_transport_error ----------------------------------
+
+
+def test_transport_seeds_are_transport_errors():
+    from tai42_contract.errors import is_transport_error
+
+    assert is_transport_error(TimeoutError())
+    assert is_transport_error(ConnectionError())
+    # A builtin subclass inherits its registered ancestor's transport flag.
+    assert is_transport_error(ConnectionRefusedError())
+
+
+def test_client_disconnection_errors_are_transport_errors():
+    from tai42_contract.errors import is_transport_error
+
+    assert is_transport_error(ClientDisconnectedError("gone"))
+    assert is_transport_error(ClientConnectError("no connect"))
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        NotImplementedError(),
+        ValueError("x"),
+        Exception("unregistered"),
+        SandboxExecTimeoutError(timeout_seconds=1, stdout_len=0, stderr_len=0),
+        SandboxUnavailableError("down"),
+        OperatorMisconfiguredError("SOME_VAR", "p"),
+        MediaStoreUnavailableError("no store"),
+        MultichannelDisabledError(),
+        MonitoringReadNotSupportedError("write-only"),
+    ],
+)
+def test_non_transport_failures_are_not_transport_errors(exc: BaseException):
+    from tai42_contract.errors import is_transport_error
+
+    assert is_transport_error(exc) is False
+
+
+def test_states_not_configured_is_not_a_transport_error():
+    from tai42_contract.errors import is_transport_error
+    from tai42_contract.states.errors import StatesNotConfiguredError
+
+    assert is_transport_error(StatesNotConfiguredError("unbound")) is False
+
+
+def test_undeclared_pause_is_not_a_transport_error():
+    from tai42_contract.errors import is_transport_error
+    from tai42_contract.tools.meta import UndeclaredPauseError
+
+    assert is_transport_error(UndeclaredPauseError("t")) is False
+
+
+def test_transport_reads_no_cause_chain():
+    from tai42_contract.errors import is_transport_error
+
+    outer = RuntimeError("re-raised as the caller's own failure")
+    outer.__cause__ = TimeoutError()
+    assert is_transport_error(outer) is False
+
+
+def test_a_class_registered_transport_is_a_transport_error():
+    from tai42_contract.errors import is_transport_error
+
+    class _SyntheticWireError(Exception):
+        pass
+
+    class _SyntheticWireSubError(_SyntheticWireError):
+        pass
+
+    register_error_kind(_SyntheticWireError, ErrorKind.UNAVAILABLE, transport=True)
+    assert is_transport_error(_SyntheticWireError())
+    assert is_transport_error(_SyntheticWireSubError())
+    assert error_kind(_SyntheticWireSubError()) is ErrorKind.UNAVAILABLE
+
+
+def test_a_stamped_class_without_the_marker_is_not_a_transport_error():
+    from tai42_contract.errors import is_transport_error
+
+    class _SyntheticBudgetError(Exception):
+        __tai_error_kind__ = ErrorKind.TIMED_OUT
+
+    assert error_kind(_SyntheticBudgetError()) is ErrorKind.TIMED_OUT
+    assert is_transport_error(_SyntheticBudgetError()) is False
+
+
+def test_a_stamped_subclass_of_a_registered_transport_class_is_not_a_transport_error():
+    from tai42_contract.errors import is_transport_error
+
+    class _SyntheticOwnTimeoutError(TimeoutError):
+        __tai_error_kind__ = ErrorKind.TIMED_OUT
+
+    assert is_transport_error(_SyntheticOwnTimeoutError()) is False
+
+
+def test_the_instance_marker_beats_its_class():
+    from tai42_contract.errors import ERROR_TRANSPORT_ATTR, is_transport_error
+
+    err = ClientDisconnectedError("gone")
+    setattr(err, ERROR_TRANSPORT_ATTR, False)
+    assert is_transport_error(err) is False
+
+    budget = SandboxExecTimeoutError(timeout_seconds=1, stdout_len=0, stderr_len=0)
+    setattr(budget, ERROR_TRANSPORT_ATTR, True)
+    assert is_transport_error(budget) is True
+
+
+def test_a_non_bool_marker_raises():
+    from tai42_contract.errors import ERROR_TRANSPORT_ATTR, is_transport_error
+
+    err = Exception("bad marker")
+    setattr(err, ERROR_TRANSPORT_ATTR, "yes")
+    with pytest.raises(TypeError, match="must be a bool, got 'yes'"):
+        is_transport_error(err)
+
+
+def test_the_transport_keyword_leaves_error_kind_unchanged_for_every_seed():
+    # The seeds resolve to the same kinds whether or not they are transport failures.
+    test_builtin_registry_seeds()

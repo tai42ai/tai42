@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastmcp.tools.function_tool import FunctionTool
 from starlette.types import ASGIApp
+from tai42_contract.errors import OperationError
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 from tai42_contract.storage import Storage
@@ -36,7 +37,6 @@ from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.middleware.rate_limit import RateLimitMiddleware
 from tai42_skeleton.monitoring import registry as monitoring_registry
-from tai42_skeleton.operations import OperationError
 from tai42_skeleton.tools.binding import ToolBinding, UnknownToolError
 
 if TYPE_CHECKING:

@@ -50,7 +50,8 @@ For enforced isolation or network lockdown, install a container provider instead
 
 The `SANDBOX_LOCAL_` env group: `SANDBOX_LOCAL_ROOT` (the host workspace root) and
 `SANDBOX_LOCAL_BASE_PATH` (the clean-env `PATH`), plus the shared dispatch knobs
-(`SANDBOX_LOCAL_DEFAULT_TTL_SECONDS`, `SANDBOX_LOCAL_REAP_INTERVAL_SECONDS`,
-`SANDBOX_LOCAL_EXEC_DEFAULT_TIMEOUT_SECONDS`). See
+(`SANDBOX_LOCAL_REAP_INTERVAL_SECONDS` sets the platform reaper's sweep interval,
+`SANDBOX_LOCAL_EXEC_DEFAULT_TIMEOUT_SECONDS` the timeout of a short exec that names
+none). See
 [`docs/index.mdx`](src/tai42_sandbox_local/docs/index.mdx) for the full table and
 the durability model.

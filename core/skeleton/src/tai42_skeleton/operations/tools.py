@@ -51,10 +51,11 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import OperationError
 from tai42_contract.interactions import RunAnswer, RunResultAnswer, RunTerminalFailed
 from tai42_contract.secrets import unwrap_secrets
 from tai42_contract.states import StateSubject
-from tai42_contract.tools import UndeclaredPauseError
+from tai42_contract.tools import TOOL_META_BADGES, TOOL_META_HIDDEN, UndeclaredPauseError
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.app.bus.ops import ReloadTool, RemoveTool
@@ -63,7 +64,6 @@ from tai42_skeleton.operations import (
     BadRequestError,
     NotFoundError,
     NotSupportedError,
-    OperationError,
     OperationFailedError,
     PermissionDeniedError,
     UpstreamError,
@@ -139,9 +139,9 @@ async def tool_tags() -> list[dict]:
 
     One ``{name, tags, hidden, badges}`` entry per registered tool, ``tags`` and ``badges`` each
     sorted for a stable wire order. ``hidden`` is the tool's OWN declaration, read from the
-    FastMCP ``meta`` under the namespaced ``tai42/hidden`` key (a tool that never declared it is
+    FastMCP ``meta`` under ``TOOL_META_HIDDEN`` (a tool that never declared it is
     not hidden); ``badges`` is likewise the tool's OWN declared INFORMATIONAL capability badges,
-    read from ``meta`` under ``tai42/badges`` (a tool that declared none carries an empty list).
+    read from ``meta`` under ``TOOL_META_BADGES`` (a tool that declared none carries an empty list).
     The tool_meta overlay's tri-state override and its own badge set are merged on top
     client-side; this read exposes only the declaration. Additive to the flat names contract; a
     tool with no tags carries an empty list.
@@ -151,8 +151,8 @@ async def tool_tags() -> list[dict]:
         {
             "name": name,
             "tags": sorted(tool.tags),
-            "hidden": (tool.meta or {}).get("tai42/hidden") is True,
-            "badges": sorted((tool.meta or {}).get("tai42/badges") or []),
+            "hidden": (tool.meta or {}).get(TOOL_META_HIDDEN) is True,
+            "badges": sorted((tool.meta or {}).get(TOOL_META_BADGES) or []),
         }
         for name, tool in sorted(tools.items())
     ]

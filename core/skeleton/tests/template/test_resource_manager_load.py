@@ -1,6 +1,6 @@
 """ResourceManager unified content faces: ``load`` (scheme-disambiguated resolver,
-no silent fallback), ``load_file`` (text vs MediaBlock), and ``normalize_media``
-(image-only ContentPart). Storage is an in-memory binary-native double."""
+no silent fallback), ``load_file`` (text vs MediaBlock), and ``resolve_image``
+(an addressable image with its mime). Storage is an in-memory binary-native double."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import base64
 import pytest
 from fastmcp.utilities.types import Image
 from tai42_contract.storage import ObjectStat, Storage
+from tai42_contract.template import ImageReference
 
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
@@ -122,65 +123,65 @@ async def test_load_file_returns_media_block_for_image() -> None:
     assert isinstance(result, Image)
 
 
-# --- normalize_media: image-only ContentPart --------------------------------
+# --- resolve_image: an addressable image with its asserted mime ---------------
 
 
-async def test_normalize_media_passes_through_public_image_url() -> None:
+async def test_resolve_image_passes_through_public_image_url_with_its_suffix_mime() -> None:
     manager = _manager()
-    part = await manager.normalize_media("https://example.com/pic.png")
-    assert part == {"type": "image_url", "image_url": {"url": "https://example.com/pic.png"}}
+    ref = await manager.resolve_image("https://example.com/pic.png")
+    assert ref == ImageReference(url="https://example.com/pic.png", mime="image/png")
 
 
-async def test_normalize_media_url_indeterminable_suffix_passes_through() -> None:
+async def test_resolve_image_url_indeterminable_suffix_passes_through_with_no_mime() -> None:
     manager = _manager()
-    part = await manager.normalize_media("https://example.com/pic")
-    assert part["image_url"]["url"] == "https://example.com/pic"
+    ref = await manager.resolve_image("https://example.com/pic")
+    assert ref == ImageReference(url="https://example.com/pic", mime=None)
 
 
-async def test_normalize_media_non_image_url_raises() -> None:
+async def test_resolve_image_non_image_url_raises() -> None:
     manager = _manager()
     with pytest.raises(ValueError, match="requires an image"):
-        await manager.normalize_media("https://example.com/notes.txt")
+        await manager.resolve_image("https://example.com/notes.txt")
 
 
-async def test_normalize_media_passes_through_image_data_uri() -> None:
+async def test_resolve_image_passes_through_image_data_uri_with_its_mediatype() -> None:
     manager = _manager()
     uri = "data:image/png;base64," + base64.b64encode(_PNG).decode("ascii")
-    part = await manager.normalize_media(uri)
-    assert part["image_url"]["url"] == uri
+    ref = await manager.resolve_image(uri)
+    assert ref == ImageReference(url=uri, mime="image/png")
 
 
-async def test_normalize_media_non_image_data_uri_raises() -> None:
+async def test_resolve_image_non_image_data_uri_raises() -> None:
     manager = _manager()
     with pytest.raises(ValueError, match="requires an image"):
-        await manager.normalize_media("data:text/plain;base64,aGk=")
+        await manager.resolve_image("data:text/plain;base64,aGk=")
 
 
-async def test_normalize_media_storage_id_emits_base64_data_uri() -> None:
+async def test_resolve_image_storage_id_emits_base64_data_uri() -> None:
     manager = _manager({"logo.png": _PNG})
-    part = await manager.normalize_media("logo.png")
+    ref = await manager.resolve_image("logo.png")
     expected = "data:image/png;base64," + base64.b64encode(_PNG).decode("ascii")
-    assert part["image_url"]["url"] == expected
+    assert ref == ImageReference(url=expected, mime="image/png")
 
 
-async def test_normalize_media_non_image_storage_id_raises() -> None:
+async def test_resolve_image_non_image_storage_id_raises() -> None:
     manager = _manager({"notes.txt": b"hi"})
     with pytest.raises(ValueError, match="requires an image"):
-        await manager.normalize_media("notes.txt")
+        await manager.resolve_image("notes.txt")
 
 
-async def test_normalize_media_raw_bytes_emits_base64_data_uri() -> None:
+async def test_resolve_image_raw_bytes_emits_base64_data_uri() -> None:
     manager = _manager()
-    part = await manager.normalize_media(_PNG)
-    url: str = part["image_url"]["url"]
-    assert url.startswith("data:image/png;base64,")
-    assert base64.b64decode(url.split(",", 1)[1]) == _PNG
+    ref = await manager.resolve_image(_PNG)
+    assert ref.mime == "image/png"
+    assert ref.url.startswith("data:image/png;base64,")
+    assert base64.b64decode(ref.url.split(",", 1)[1]) == _PNG
 
 
-async def test_normalize_media_non_image_bytes_raises() -> None:
+async def test_resolve_image_non_image_bytes_raises() -> None:
     manager = _manager()
     with pytest.raises(ValueError, match="requires an image"):
-        await manager.normalize_media(b"just some plain text bytes, not an image")
+        await manager.resolve_image(b"just some plain text bytes, not an image")
 
 
 def test_media_block_alias_covers_fastmcp_union() -> None:

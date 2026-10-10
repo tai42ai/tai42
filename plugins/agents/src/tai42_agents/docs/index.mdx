@@ -142,6 +142,24 @@ Which faces carry it:
 | `retrieval_tools_agent` | excluded — its graph prepends the system prompt into the message list it rolls to the newest breakpoint, so a system mark there is stripped by any later turn mark; use `user_content_kwargs` to mark the user turn |
 | `claude_code` | not applicable — the system prompt is handed to the Agent SDK verbatim, never as a content block |
 
+### Per-provider history shaping
+
+Each provider answers two questions about the outgoing request, and every agent applies
+the answers at the model call only — nothing is written to the stored thread:
+
+- **A leading user turn.** When a history's first non-system message is an assistant turn
+  (an operator opened the thread), a provider that requires a user turn first gets an inert
+  `[conversation start]` user turn added to that one request.
+- **A rolling cache breakpoint.** A provider that takes a per-block cache mark keeps only the
+  newest marked block per request, so per-turn marking stays within the provider's per-request
+  breakpoint cap.
+
+## Final text
+
+`run` and `astream` hand back the same final text: the reply text of the last message — its
+plain text, or its text blocks joined with nothing between them. Thinking, reasoning, tool-use
+and server-tool blocks are never part of it.
+
 ## Run keywords
 
 Each agent's `run` and `astream` declare the keywords that agent reads — the platform's four
@@ -172,6 +190,27 @@ checkpoint ids its `langgraph_config` (or per-role configs) and `resume_checkpoi
 the continuity keys (`resume`, `resume_checkpoint_id`, `checkpoint_provider`) it reads. The
 platform refuses an id in its reserved `bridge:` namespace from that answer, and a conversation
 route refuses a start that sets a continuity key.
+
+## Session credentials
+
+`claude_code` and `langchain_deep_agent` turn their operator `creds` list into what a
+session receives by one rule:
+
+| Entry | Resolved channel | Where it lands |
+| --- | --- | --- |
+| `static` | its value | the session env, under its `env_name` |
+| `connection` | the `env` channel | the session env, under its own names (either delivery) |
+| `connection`, `delivery: env` | the access token | the session env, RAW, under the cred's `env_name` |
+| `connection`, `delivery: bearer` | the access token and the headers | one credential-helper file named after the cred's `env_name`: `Authorization: Bearer <token>` then one `<Name>: <value>` line per header |
+
+Refused loudly, naming the cred:
+
+- `connection cred '<env_name>' resolved HTTP headers, which delivery='env' cannot carry; use delivery='bearer'`
+- `required connection cred '<env_name>' resolved to no usable credential for the current caller (connection '<connection_id>')`
+
+A non-required connection cred that resolves to nothing injects nothing. The session env is
+fixed when the session is created: a persistent session keeps its create-time env until it is
+recreated, while bearer files are re-written every turn.
 
 ## Tool-error resilience
 
@@ -241,9 +280,10 @@ be a digest reference (a bare tag is rejected at run start).
 | `TAI_AGENTS_CLAUDE_CRASH_RESUME` | `false` | Re-dispatch a recycled detached run at-least-once (re-executes from scratch). Recycle-class. |
 
 Session creds (`TAI_AGENTS_CLAUDE_CREDS`) are a list of static values or per-caller
-connection references injected into a CLEAN session env (static) or a per-turn bearer
-credential-helper file (refreshable) — never the host env. A connection-reference cred
-resolves per-caller and fails closed on a door with no bound execution identity.
+connection references injected into a CLEAN session env or a per-turn bearer
+credential-helper file — never the host env. A connection-reference cred resolves per-caller
+and fails closed on a door with no bound execution identity. See
+[Session credentials](#session-credentials) for the one rule both sandbox agents apply.
 
 **Adapter-proxied platform tools.** Granted `tool_names` run under the run's own execution
 identity through the same `run_tool` seam every agent uses — the session reaches no

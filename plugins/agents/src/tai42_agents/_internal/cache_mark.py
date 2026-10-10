@@ -15,7 +15,7 @@ from tai42_agents.settings import agents_limits_settings
 
 
 def default_system_cache_mark(provider: str) -> dict[str, Any] | None:
-    """The system-prompt ``cache_control`` mark a face applies by default for ``provider``.
+    """The system-prompt cache mark a face applies by default for ``provider``.
 
     ``None`` when the server-wide default
     (``TAI_AGENTS_SYSTEM_PROMPT_CACHE_DEFAULT``) is off or the provider takes no

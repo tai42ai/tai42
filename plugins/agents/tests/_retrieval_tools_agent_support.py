@@ -168,7 +168,7 @@ class _ToolFake:
 
 
 def _graph(**kwargs: Any) -> RetrievalToolsGraph:
-    return RetrievalToolsGraph(tools=[], llm=MagicMock(), **kwargs)
+    return RetrievalToolsGraph(provider="anthropic", tools=[], llm=MagicMock(), **kwargs)
 
 
 async def _collect(agen: AsyncIterator[Any]) -> list[Any]:
@@ -194,7 +194,7 @@ def _patch_build_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     captured: dict[str, Any] = {}
 
     provider_settings = SimpleNamespace(
-        llm="def_llm",
+        llm="mistral",
         embedding="def_embedding",
         checkpoint="def_checkpoint",
         store="def_store",

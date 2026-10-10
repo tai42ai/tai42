@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from tai42_contract.monitoring import Monitoring
     from tai42_contract.sandbox import Sandbox, SandboxPolicy
     from tai42_contract.storage import Storage
-    from tai42_contract.template import TemplateEviction
+    from tai42_contract.template import ImageReference, TemplateEviction
     from tai42_contract.webhooks import WebhookVerifier
 
     from tai42_skeleton.template import ResourceManager
@@ -131,6 +131,10 @@ class StorageFacet(_Facet):
         stored resource is first touched.
         """
         return self._app._resource_manager
+
+    async def resolve_image(self, source: str | bytes) -> ImageReference:
+        """Resolve a stored id, a data URI, raw bytes or a public URL to an addressable image with its asserted mime."""
+        return await self._app._resource_manager.resolve_image(source)
 
     def on_template_evicted(self, func: Callable[[TemplateEviction], Any]) -> Callable[[TemplateEviction], Any]:
         """Register a synchronous handler called after the template store drops cached content in this process."""

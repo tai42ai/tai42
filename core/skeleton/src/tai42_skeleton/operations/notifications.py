@@ -43,6 +43,7 @@ from tai42_contract.channels import (
     check_interactive_composition,
     check_sections,
 )
+from tai42_contract.errors import UnavailableError
 from tai42_contract.interactions.models import FormData, FormPage, LocationElement, MediaItem, check_form_tag
 
 from tai42_skeleton.access_control.user import CrossIdentityAudienceError, request_identity
@@ -50,14 +51,7 @@ from tai42_skeleton.channels.notifications_sink import read_notifications
 from tai42_skeleton.channels.notify import SenderIdentityNotAllowedError
 from tai42_skeleton.channels.notify import notify_user as _notify_user
 from tai42_skeleton.interactions.settings import interactions_store_configured
-from tai42_skeleton.operations import (
-    BadRequestError,
-    ForbiddenError,
-    NotSupportedError,
-    UnavailableError,
-    UpstreamError,
-    operation,
-)
+from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotSupportedError, UpstreamError, operation
 from tai42_skeleton.operations.response_models_group_c import NotificationListing, NotifyResult
 
 with warnings.catch_warnings():

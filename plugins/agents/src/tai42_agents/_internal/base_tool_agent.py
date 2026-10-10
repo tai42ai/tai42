@@ -19,9 +19,8 @@ from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 from tai42_contract.agent.events import SuspendedFinal
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
+from tai42_kit.llm.middleware import history_middlewares
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
-from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
-from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_system_message, build_user_output, extract_structured_output
@@ -120,8 +119,7 @@ async def _compile_tools_agent(
         _async_park_middleware,
         SystemPurgeMiddleware(),
         *await context_overflow_middlewares(system_prompt=system_prompt),
-        LeadingUserMiddleware(),
-        RollingCacheMarkMiddleware(),
+        *history_middlewares(llm_provider),
         _tool_error_middleware,
     ]
     if structured_rail is not None:

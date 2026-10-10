@@ -56,6 +56,7 @@ from typing import Annotated, Any
 from pydantic import Field, model_validator
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import OpaqueJson
+from tai42_contract.errors import OperationError, UnavailableError
 from tai42_contract.interactions.door_contract import ParkableDoorMixin
 from tai42_contract.states import StateBinding, StateSubject
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
@@ -78,10 +79,8 @@ from tai42_skeleton.operations import (
     ConflictError,
     NotFoundError,
     NotSupportedError,
-    OperationError,
     OperationFailedError,
     PermissionDeniedError,
-    UnavailableError,
     operation,
 )
 from tai42_skeleton.operations._authority import assert_execution_key_bindable, resolve_caller

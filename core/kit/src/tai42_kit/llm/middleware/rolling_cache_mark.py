@@ -8,13 +8,13 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import AnyMessage
 
 
-def _is_mark(block: Any) -> bool:
-    """A content block carrying a prompt-caching breakpoint (a ``cache_control`` key)."""
-    return isinstance(block, dict) and "cache_control" in block
+def _is_mark(block: Any, mark_key: str) -> bool:
+    """A content block carrying a prompt-caching breakpoint under ``mark_key``."""
+    return isinstance(block, dict) and mark_key in block
 
 
-def _strip_blocks(content: list[Any]) -> list[Any] | str:
-    """Drop the ``cache_control`` key from every marked block in ``content``.
+def _strip_blocks(content: list[Any], mark_key: str) -> list[Any] | str:
+    """Drop ``mark_key`` from every marked block in ``content``.
 
     A block reduced to a bare ``{"type": "text", "text": ...}`` collapses to its
     plain string; a whole content list left as a single string collapses to that
@@ -22,8 +22,8 @@ def _strip_blocks(content: list[Any]) -> list[Any] | str:
     """
     stripped: list[Any] = []
     for block in content:
-        if _is_mark(block):
-            block = {key: value for key, value in block.items() if key != "cache_control"}
+        if _is_mark(block, mark_key):
+            block = {key: value for key, value in block.items() if key != mark_key}
             if set(block) == {"type", "text"} and block["type"] == "text":
                 block = block["text"]
         stripped.append(block)
@@ -32,8 +32,8 @@ def _strip_blocks(content: list[Any]) -> list[Any] | str:
     return stripped
 
 
-def roll_cache_marks(messages: list[AnyMessage]) -> list[AnyMessage] | None:
-    """Keep the ``cache_control`` mark only on the last message that carries one, stripping earlier ones.
+def roll_cache_marks(messages: list[AnyMessage], mark_key: str) -> list[AnyMessage] | None:
+    """Keep the ``mark_key`` mark only on the last message that carries one, stripping earlier ones.
 
     Returns a new message list (earlier marked messages replaced by stripped copies,
     the rest shared by reference) or ``None`` when history carries zero or one mark
@@ -48,7 +48,7 @@ def roll_cache_marks(messages: list[AnyMessage]) -> list[AnyMessage] | None:
     last_marked = None
     for index, message in enumerate(messages):
         content = message.content
-        if isinstance(content, list) and any(_is_mark(block) for block in content):
+        if isinstance(content, list) and any(_is_mark(block, mark_key) for block in content):
             last_marked = index
     if last_marked is None:
         return None
@@ -58,21 +58,21 @@ def roll_cache_marks(messages: list[AnyMessage]) -> list[AnyMessage] | None:
     for index in range(last_marked):
         message = messages[index]
         content = message.content
-        if not isinstance(content, list) or not any(_is_mark(block) for block in content):
+        if not isinstance(content, list) or not any(_is_mark(block, mark_key) for block in content):
             continue
-        rolled[index] = message.model_copy(update={"content": _strip_blocks(content)})
+        rolled[index] = message.model_copy(update={"content": _strip_blocks(content, mark_key)})
         changed = True
     return rolled if changed else None
 
 
 class RollingCacheMarkMiddleware(AgentMiddleware):
-    """Keep only the newest ``cache_control`` breakpoint at the model call.
+    """Keep only the newest prompt-caching breakpoint (the provider's ``mark_key``) at the model call.
 
-    Per-turn marking on a checkpointed thread persists a ``cache_control`` block into
-    history on every turn, and the provider caps breakpoints per request (Anthropic:
-    4), so an unbounded thread would exceed the cap. This strips every ``cache_control``
-    key but the newest before the provider call, so a growing history always sends a
-    single breakpoint and the whole stable prefix stays cacheable.
+    Per-turn marking on a checkpointed thread persists a marked block into history on
+    every turn, and the provider caps breakpoints per request, so an unbounded thread
+    would exceed the cap. This strips every ``mark_key`` but the newest before the
+    provider call, so a growing history always sends a single breakpoint and the whole
+    stable prefix stays cacheable.
 
     The rewrite is request-scoped through ``wrap_model_call`` — it never persists into
     checkpoint state, so history keeps its per-turn marks and each turn re-rolls them.
@@ -81,13 +81,18 @@ class RollingCacheMarkMiddleware(AgentMiddleware):
     one mark.
     """
 
+    def __init__(self, mark_key: str) -> None:
+        """Roll the breakpoints carried under ``mark_key`` (the provider's per-block cache key)."""
+        super().__init__()
+        self.mark_key = mark_key
+
     def wrap_model_call(
         self,
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], ModelResponse[Any]],
     ) -> ModelCallResult[Any]:
         """Roll the cache marks on ``request.messages`` before the synchronous model call."""
-        rolled = roll_cache_marks(request.messages)
+        rolled = roll_cache_marks(request.messages, self.mark_key)
         if rolled is not None:
             request = request.override(messages=rolled)
         return handler(request)
@@ -98,7 +103,7 @@ class RollingCacheMarkMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelCallResult[Any]:
         """Roll the cache marks on ``request.messages`` before the async model call."""
-        rolled = roll_cache_marks(request.messages)
+        rolled = roll_cache_marks(request.messages, self.mark_key)
         if rolled is not None:
             request = request.override(messages=rolled)
         return await handler(request)

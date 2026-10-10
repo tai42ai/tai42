@@ -12,6 +12,7 @@ from tai42_contract.errors import ClientConnectError
 from tai42_contract.manifest import TaiMCPConfig
 
 from tai42_kit.clients.base import PooledClient, is_loop_bound_runtime_error, reject_unknown_connection_kwargs
+from tai42_kit.clients.error_kinds import stamp_mcp_error_kind
 from tai42_kit.clients.settings import mcp_client_settings
 from tai42_kit.transport import get_mcp_transport
 
@@ -82,6 +83,9 @@ class FastMCPClient(PooledClient[Client]):
 
     async def _close(self, client: Client):
         await client.__aexit__(None, None, None)
+
+    def _classify_error(self, exc: BaseException) -> None:
+        stamp_mcp_error_kind(exc)
 
     def _disconnection_exceptions(self) -> tuple[type[BaseException], ...]:
         return (*super()._disconnection_exceptions(), anyio.ClosedResourceError, anyio.BrokenResourceError)

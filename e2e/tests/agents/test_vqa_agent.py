@@ -39,7 +39,7 @@ pytestmark = [
 async def test_vqa_agent_image_part_reaches_model_over_mcp(
     agents_stack: TaiStack, llm_stub: LlmStub, target_server: TargetServer, uniq: Callable[[str], str]
 ) -> None:
-    # A loopback image URL (image suffix so normalize_media accepts it as an image
+    # A loopback image URL (image suffix so the storage facet's resolve_image accepts it as an image
     # resource); it is never fetched — the model dereferences it — so the target
     # server need not serve the bytes. Loopback is in the URL-guard CIDR allowlist.
     image_url = f"{target_server.url}/{uniq('vqa')}.png"

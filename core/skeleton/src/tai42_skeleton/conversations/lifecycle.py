@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tai42_contract.app import tai42_app
+from tai42_contract.tools import TOOL_META_HIDDEN
 
 from tai42_skeleton.conversations.cache import get_conversations_manager
 
@@ -15,7 +16,7 @@ async def register_conversation_completion_tools() -> None:
     parked TOOL turn (the terminal outcome mapped through the route's ``reply_expr``).
 
     Both are mandatory bridge mechanisms (never operator-excludable catalog tools), so each is
-    registered ``force=True`` and ``tai42/hidden`` — never offered to a model, reached only
+    registered ``force=True`` and ``TOOL_META_HIDDEN`` — never offered to a model, reached only
     when a resumed run's resumer fires it. Registered in every epoch build, so the completion
     continuation the turn engine binds always resolves.
     """
@@ -30,14 +31,14 @@ async def register_conversation_completion_tools() -> None:
         deliver_agent_completion,
         name=COMPLETION_TOOL_NAME,
         tags={"conversations"},
-        meta={"tai42/hidden": True},
+        meta={TOOL_META_HIDDEN: True},
         force=True,
     )
     tai42_app.tools.tool(
         deliver_tool_completion,
         name=DELIVER_TOOL_COMPLETION_NAME,
         tags={"conversations"},
-        meta={"tai42/hidden": True},
+        meta={TOOL_META_HIDDEN: True},
         force=True,
     )
 

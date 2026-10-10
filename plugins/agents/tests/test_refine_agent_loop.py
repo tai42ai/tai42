@@ -267,8 +267,8 @@ def test_evaluator_graph_rolls_accumulated_cache_marks_on_a_reused_thread(monkey
             evaluator_message=TemplatedText(content=message),
             critic_message=TemplatedText(content="review it"),
             user_content_kwargs=mark,
-            evaluator_llm_provider="eval",
-            critic_llm_provider="critic",
+            evaluator_llm_provider="anthropic",
+            critic_llm_provider="openai",
             evaluator_langgraph_config=eval_cfg,
             critic_langgraph_config=critic_cfg,
         )

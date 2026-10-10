@@ -6,6 +6,16 @@ from typing import Final
 
 from tai42_contract.errors import ErrorKind
 
+TOOL_META_HIDDEN: Final = "tai42/hidden"
+"""Value ``True``: the tool declares itself hidden; the tool listing reports the declaration."""
+
+TOOL_META_BADGES: Final = "tai42/badges"
+"""A list of the tool's own informational capability badges; the tool listing reports them."""
+
+TOOL_META_CRASH_RESUME: Final = "tai42/crash_resume"
+"""Value ``True``: a detached recorded run of this tool (a hook or trigger fire, a background submit) found
+lost after a worker crash is resumed instead of left lost."""
+
 TOOL_META_PAUSES: Final = "tai42/pauses"
 """Value ``True``: this tool can pause — it can return a park signal (``SuspendedInteraction`` or
 ``ResumeBuffered``) because it parks, asks, or waits on a participant out of band. A tool without it never pauses."""
@@ -29,4 +39,10 @@ class UndeclaredPauseError(RuntimeError):
         )
 
 
-__all__ = ["TOOL_META_PAUSES", "UndeclaredPauseError"]
+__all__ = [
+    "TOOL_META_BADGES",
+    "TOOL_META_CRASH_RESUME",
+    "TOOL_META_HIDDEN",
+    "TOOL_META_PAUSES",
+    "UndeclaredPauseError",
+]

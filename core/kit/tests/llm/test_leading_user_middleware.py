@@ -1,90 +1,91 @@
-"""LeadingUserMiddleware.before_model: prepend a marker when the first non-system
-message is an assistant message, no-op on user-first and empty histories, and
-insert the marker after leading system messages.
+"""LeadingUserMiddleware: the outgoing request opens with a user turn; the thread never stores the marker.
+
+The rule (:func:`lead_with_user`) is pinned directly and through the ``wrap_model_call`` /
+``awrap_model_call`` hooks: the handler sees the led messages while the request's own messages
+stay untouched, so nothing reaches checkpoint state.
 """
 
 import pytest
 
 pytest.importorskip("langgraph")
 
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, SystemMessage
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
-from langgraph.runtime import Runtime
+from langchain.agents.middleware.types import ModelRequest, ModelResponse
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 
-from tai42_kit.llm.middleware.leading_user import _CONVERSATION_START_MARKER, LeadingUserMiddleware
-
-# before_model ignores the runtime; a default-constructed Runtime satisfies the
-# parameter type without a live graph execution context.
-_RUNTIME: Runtime[None] = Runtime()
+from tai42_kit.llm.middleware.leading_user import _CONVERSATION_START_MARKER, LeadingUserMiddleware, lead_with_user
 
 
-def test_leading_assistant_prepends_marker():
-    mw = LeadingUserMiddleware()
+def _request(messages: list[AnyMessage]) -> ModelRequest:
+    # The model is never invoked by the middleware; a sentinel satisfies the field.
+    return ModelRequest(model=object(), messages=messages)  # type: ignore[arg-type]
+
+
+def _capturing_handler(seen: list[list[AnyMessage]]):
+    def handler(request: ModelRequest) -> ModelResponse:
+        seen.append(request.messages)
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    return handler
+
+
+def test_leading_assistant_gains_a_marker_turn():
     ai = AIMessage("operator opener", id="a")
     human = HumanMessage("client reply", id="h")
-    update = mw.before_model({"messages": [ai, human]}, _RUNTIME)
+    led = lead_with_user([ai, human])
 
-    assert update is not None
-    out = update["messages"]
-    assert isinstance(out[0], RemoveMessage)
-    assert out[0].id == REMOVE_ALL_MESSAGES
-    # A marker user message now leads, ahead of the original assistant message.
-    assert isinstance(out[1], HumanMessage)
-    assert out[1].content == _CONVERSATION_START_MARKER
-    assert out[2] is ai
-    assert out[3] is human
+    assert led is not None
+    assert isinstance(led[0], HumanMessage)
+    assert led[0].content == _CONVERSATION_START_MARKER
+    assert led[1] is ai
+    assert led[2] is human
 
 
 def test_user_first_is_untouched():
-    mw = LeadingUserMiddleware()
     msgs: list[AnyMessage] = [HumanMessage("hi", id="1"), AIMessage("there", id="2")]
-    # Already user-first -> no rewrite, signalled by None.
-    assert mw.before_model({"messages": msgs}, _RUNTIME) is None
+    assert lead_with_user(msgs) is None
 
 
 def test_system_then_assistant_inserts_after_system():
-    mw = LeadingUserMiddleware()
     system = SystemMessage("rules", id="s")
     ai = AIMessage("operator opener", id="a")
-    update = mw.before_model({"messages": [system, ai]}, _RUNTIME)
+    led = lead_with_user([system, ai])
 
-    assert update is not None
-    out = update["messages"]
-    assert isinstance(out[0], RemoveMessage)
-    # The system message stays first; the marker sits between it and the assistant.
-    assert out[1] is system
-    assert isinstance(out[2], HumanMessage)
-    assert out[2].content == _CONVERSATION_START_MARKER
-    assert out[3] is ai
+    assert led is not None
+    assert led[0] is system
+    assert isinstance(led[1], HumanMessage)
+    assert led[1].content == _CONVERSATION_START_MARKER
+    assert led[2] is ai
 
 
 def test_empty_history_is_untouched():
-    mw = LeadingUserMiddleware()
-    assert mw.before_model({"messages": []}, _RUNTIME) is None
+    assert lead_with_user([]) is None
 
 
-def test_leading_marker_is_idempotent():
-    mw = LeadingUserMiddleware()
-    marker = HumanMessage(_CONVERSATION_START_MARKER, id="m")
+def test_wrap_model_call_leads_the_request_and_leaves_its_messages_alone():
     ai = AIMessage("operator opener", id="a")
-    # A history already led by the marker is user-first -> no second insertion.
-    assert mw.before_model({"messages": [marker, ai]}, _RUNTIME) is None
+    original: list[AnyMessage] = [ai]
+    seen: list[list[AnyMessage]] = []
+    LeadingUserMiddleware().wrap_model_call(_request(original), _capturing_handler(seen))
+
+    assert [m.content for m in seen[0]] == [_CONVERSATION_START_MARKER, "operator opener"]
+    assert original == [ai]
 
 
-def test_missing_ids_backfilled_before_rewrite():
-    mw = LeadingUserMiddleware()
-    ai = AIMessage("operator opener")
-    human = HumanMessage("client reply")
-    assert ai.id is None
-    assert human.id is None
-    update = mw.before_model({"messages": [ai, human]}, _RUNTIME)
-    assert update is not None
-    # Re-adding under REMOVE_ALL needs stable ids, so every message got one.
-    assert ai.id is not None
-    assert human.id is not None
+def test_wrap_model_call_passes_a_user_first_request_through():
+    original: list[AnyMessage] = [HumanMessage("hi", id="h")]
+    request = _request(original)
+    seen: list[list[AnyMessage]] = []
+    LeadingUserMiddleware().wrap_model_call(request, _capturing_handler(seen))
+    assert seen[0] is original
 
 
-async def test_abefore_model_reuses_sync_path():
-    mw = LeadingUserMiddleware()
-    msgs: list[AnyMessage] = [HumanMessage("hi", id="1")]
-    assert await mw.abefore_model({"messages": msgs}) is None
+async def test_awrap_model_call_leads_the_request():
+    ai = AIMessage("operator opener", id="a")
+    seen: list[list[AnyMessage]] = []
+
+    async def handler(request: ModelRequest) -> ModelResponse:
+        seen.append(request.messages)
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    await LeadingUserMiddleware().awrap_model_call(_request([ai]), handler)
+    assert [m.content for m in seen[0]] == [_CONVERSATION_START_MARKER, "operator opener"]

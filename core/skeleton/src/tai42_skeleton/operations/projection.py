@@ -27,9 +27,9 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from mcp.types import ToolAnnotations
+from tai42_contract.errors import OperationError
 
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE, reload_gate
-from tai42_skeleton.operations.errors import OperationError
 from tai42_skeleton.operations.registry import OperationRegistry, operation_registry
 from tai42_skeleton.routers.paths import AUTH_API_PREFIX
 

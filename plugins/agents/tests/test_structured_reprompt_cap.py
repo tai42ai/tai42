@@ -185,7 +185,9 @@ def _patch_invoke_seams(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, r
         lambda: SimpleNamespace(structured_output_reprompt_cap=3),
     )
     monkeypatch.setattr(
-        bta, "llm_provider_settings", lambda: SimpleNamespace(llm="p", checkpoint="c", checkpoint_conn_string="s")
+        bta,
+        "llm_provider_settings",
+        lambda: SimpleNamespace(llm="anthropic", checkpoint="c", checkpoint_conn_string="s"),
     )
     monkeypatch.setattr(bta, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda kwargs: dict(kwargs)))
 

@@ -20,13 +20,14 @@ from pydantic import ValidationError
 from tai42_contract.access_control import reset_request_secret_capability, set_request_secret_capability
 from tai42_contract.app import tai42_app
 from tai42_contract.states import StateContext
+from tai42_contract.tools import TOOL_META_CRASH_RESUME
 
 import tai42_skeleton.operations.tool_runs as _pkg
 from tai42_skeleton.states.context import state_context
 from tai42_skeleton.tools.binding.errors import UnknownToolError
 
 from . import supervisor
-from .models import _CRASH_RESUME_META_KEY, _LOST, _RUNNING
+from .models import _LOST, _RUNNING
 from .store import ToolRunStore
 
 if TYPE_CHECKING:
@@ -122,7 +123,7 @@ async def create_recorded_run(
 async def _tool_declares_crash_resume(tool_name: str) -> bool:
     """Whether ``tool_name``'s registration meta opts it into crash-resume (absent → ``False``).
 
-    Reads the generic ``tai42/crash_resume`` meta off the registered tool by name;
+    Reads the generic ``TOOL_META_CRASH_RESUME`` meta off the registered tool by name;
     an unregistered name is treated as un-flagged (the run itself fails loudly in
     ``run_tool``).
     """
@@ -130,7 +131,7 @@ async def _tool_declares_crash_resume(tool_name: str) -> bool:
         tool = await tai42_app.tools.get_tool(tool_name)
     except UnknownToolError:
         return False
-    return bool((tool.meta or {}).get(_CRASH_RESUME_META_KEY))
+    return bool((tool.meta or {}).get(TOOL_META_CRASH_RESUME))
 
 
 def _spawn_crash_resume(run_id: str, record: dict[str, str]) -> None:

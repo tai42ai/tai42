@@ -2,9 +2,7 @@
 structured-output extraction: pure message-shaping and
 structured-output-validation helpers."""
 
-import json
 from datetime import datetime
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -12,7 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 pytest.importorskip("langgraph")
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
 from tai42_kit.llm.runtime import (
     build_agent_input,
@@ -98,39 +96,45 @@ def test_build_user_output_empty():
     assert build_user_output({"messages": []}) == ""
 
 
-def test_build_user_output_no_content_attr():
-    # A final message without a .content attribute yields "".
-    assert build_user_output({"messages": ["plain-string-no-content-attr"]}) == ""
-
-
 def test_build_user_output_string_content():
-    msg = SimpleNamespace(content="hello")
-    assert build_user_output({"messages": [msg]}) == "hello"
+    assert build_user_output({"messages": [AIMessage(content="hello")]}) == "hello"
 
 
-def test_build_user_output_list_of_strings():
-    msg = SimpleNamespace(content=["a", "b"])
-    assert build_user_output({"messages": [msg]}) == "a\nb"
+def test_build_user_output_thinking_and_text_yields_only_the_text():
+    msg = AIMessage(
+        content=[
+            {"type": "thinking", "thinking": "let me see", "signature": "sig"},
+            {"type": "text", "text": "Hello"},
+        ]
+    )
+    assert build_user_output({"messages": [msg]}) == "Hello"
 
 
-def test_build_user_output_list_of_dicts_text_and_content_keys():
-    msg = SimpleNamespace(content=[{"text": "t1"}, {"content": "c2"}, {"other": "x"}])
-    out = build_user_output({"messages": [msg]})
-    # text key preferred, then content key, else the whole dict stringified.
-    assert out.split("\n")[0] == "t1"
-    assert out.split("\n")[1] == "c2"
-    assert "other" in out.split("\n")[2]
+def test_build_user_output_joins_split_text_blocks_with_nothing_between():
+    msg = AIMessage(
+        content=[
+            {"type": "text", "text": "The answer is "},
+            {"type": "text", "text": "42", "citations": [{"type": "char_location", "cited_text": "42"}]},
+            {"type": "text", "text": "."},
+        ]
+    )
+    assert build_user_output({"messages": [msg]}) == "The answer is 42."
 
 
-def test_build_user_output_mixed_list_serializes_json():
-    msg = SimpleNamespace(content=["a", {"b": 1}])
-    out = build_user_output({"messages": [msg]})
-    assert json.loads(out) == ["a", {"b": 1}]
+def test_build_user_output_ignores_server_tool_blocks():
+    msg = AIMessage(
+        content=[
+            {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "q"}},
+            {"type": "web_search_tool_result", "tool_use_id": "s1", "content": [{"type": "web_search_result"}]},
+            {"type": "text", "text": "found it"},
+        ]
+    )
+    assert build_user_output({"messages": [msg]}) == "found it"
 
 
-def test_build_user_output_unknown_type_coerced():
-    msg = SimpleNamespace(content=123)
-    assert build_user_output({"messages": [msg]}) == "123"
+def test_build_user_output_last_item_not_a_message_raises():
+    with pytest.raises(AttributeError):
+        build_user_output({"messages": [{"content": "a dict, not a message"}]})
 
 
 # --- structured-output extraction/validation -------------------------------

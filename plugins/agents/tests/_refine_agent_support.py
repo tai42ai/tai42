@@ -96,7 +96,7 @@ class CreateAgentRecorder:
 
 
 class _ProviderSettings:
-    llm = "fake-llm"
+    llm = "anthropic"
     checkpoint = "fake-ckpt"
     checkpoint_conn_string = None
 
@@ -238,7 +238,7 @@ def _patch_loop_real(
     monkeypatch.setattr(agent_mod, "create_agent", spy_create_agent)
 
     async def _get_llm_async(provider: str, **kwargs: Any) -> BaseChatModel:
-        return evaluator_model if provider == "eval" else critic_model
+        return evaluator_model if provider == "anthropic" else critic_model
 
     monkeypatch.setattr(agent_mod, "get_llm_async", _get_llm_async)
 
