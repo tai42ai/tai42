@@ -10,7 +10,11 @@ leg is READY, not run (real runs only on the e2e host with the filled creds file
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+from tai42_contract.connectors.providers import ProviderDescriptor
+from tai42_kit.plugins import load_plugin_spec
 
 from tai42_e2e import StackConfig, StackResources, Topology
 from tai42_e2e.child_env import origin_allowlist_env
@@ -20,11 +24,15 @@ from tai42_e2e.manifests import (
     DISCOVERED_ENV_PROVIDER_ID,
     DISCOVERED_REPROBE_INTERVAL_SECONDS,
     DOCUMENT_ORIGIN,
+    GITHUB_CLIENT_ID,
     GOOGLE_CLIENT_ID,
+    SHIPPED_CONNECTOR_ISSUERS,
+    SLACK_CLIENT_ID,
     _llm_env,
     build_discovered_connectors_stack,
     build_shipped_connectors_stack,
     build_stripe_stack,
+    discovered_candidate_descriptor,
 )
 from tai42_e2e.marketplace import _marketplace_source_env
 from tai42_e2e.settings import HarnessSettings
@@ -294,6 +302,56 @@ def test_connectors_real_routes_allowlist_to_public_origin(monkeypatch: pytest.M
     # the same allowlist key now routes to the PUBLIC origin the OAuth redirect is registered at
     assert cfg.public_allowlist_env_keys == ["CONNECTORS_REDIRECT_URI_ALLOWLIST"]
     assert cfg.public_base_url == "https://e2e.example"
+
+
+def test_connectors_real_slack_and_github_take_the_operator_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_E2E_REAL", "connector-slack,connector-github")
+    monkeypatch.setenv("E2E_PUBLIC_BASE_URL", "https://e2e.example")
+    monkeypatch.setenv("CONNECTORS_SLACK_CLIENT_ID", "live-slack-id")
+    monkeypatch.setenv("CONNECTORS_SLACK_CLIENT_SECRET", "live-slack-secret")
+    monkeypatch.setenv("CONNECTORS_GITHUB_CLIENT_ID", "live-github-id")
+    monkeypatch.setenv("CONNECTORS_GITHUB_CLIENT_SECRET", "live-github-secret")
+    cfg = build_shipped_connectors_stack(_res(), _VARIANTS)
+    assert (cfg.env["CONNECTORS_SLACK_CLIENT_ID"], cfg.env["CONNECTORS_SLACK_CLIENT_SECRET"]) == (
+        "live-slack-id",
+        "live-slack-secret",
+    )
+    assert (cfg.env["CONNECTORS_GITHUB_CLIENT_ID"], cfg.env["CONNECTORS_GITHUB_CLIENT_SECRET"]) == (
+        "live-github-id",
+        "live-github-secret",
+    )
+    # google and atlassian keep their fixture clients (independent toggles)
+    assert cfg.env["CONNECTORS_GOOGLE_CLIENT_ID"] == GOOGLE_CLIENT_ID
+    assert cfg.env["CONNECTORS_ATLASSIAN_CLIENT_ID"] == ATLASSIAN_CLIENT_ID
+    assert cfg.public_allowlist_env_keys == ["CONNECTORS_REDIRECT_URI_ALLOWLIST"]
+    assert cfg.public_base_url == "https://e2e.example"
+
+
+def test_connectors_mock_slack_and_github_keep_the_fixture_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_E2E_REAL", "connector-atlassian")
+    monkeypatch.setenv("E2E_PUBLIC_BASE_URL", "https://e2e.example")
+    monkeypatch.setenv("CONNECTORS_ATLASSIAN_CLIENT_ID", "live-atlassian-id")
+    monkeypatch.setenv("CONNECTORS_ATLASSIAN_CLIENT_SECRET", "live-atlassian-secret")
+    cfg = build_shipped_connectors_stack(_res(), _VARIANTS)
+    assert cfg.env["CONNECTORS_ATLASSIAN_CLIENT_ID"] == "live-atlassian-id"
+    assert cfg.env["CONNECTORS_SLACK_CLIENT_ID"] == SLACK_CLIENT_ID
+    assert cfg.env["CONNECTORS_GITHUB_CLIENT_ID"] == GITHUB_CLIENT_ID
+
+
+@pytest.mark.parametrize("name", ["atlassian", "slack", "github"])
+def test_the_discovered_candidate_keeps_the_shipped_descriptor_but_its_endpoints(name: str) -> None:
+    shipped = (
+        load_plugin_spec(Path(__file__).resolve().parents[3] / "plugins" / f"connector-{name}" / "tai-plugin.yml")
+        .provides[0]
+        .provider
+    )
+    assert shipped is not None
+    candidate = ProviderDescriptor.model_validate(discovered_candidate_descriptor(name))
+    assert candidate.is_discovered
+    assert candidate.oauth is None
+    assert candidate.issuer == SHIPPED_CONNECTOR_ISSUERS[name]
+    # Everything else byte for byte: the env client names, every sub-service, the authorize extras.
+    assert candidate.model_dump(exclude={"oauth", "issuer"}) == shipped.model_dump(exclude={"oauth", "issuer"})
 
 
 def _allowlist_cfg(*, public: bool) -> StackConfig:

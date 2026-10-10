@@ -851,6 +851,9 @@ def _fake_mcp_tool(name):
             "description": name,
             "inputSchema": {"type": "object", "properties": {}},
             "outputSchema": {},
+            "title": None,
+            "annotations": None,
+            "icons": None,
         },
     )()
 

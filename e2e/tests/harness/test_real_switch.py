@@ -176,3 +176,30 @@ def test_loud_fail_at_collection_in_subprocess(tmp_path: Path) -> None:
     assert proc.returncode != 0, combined
     assert "STRIPE_SECRET_KEY" in combined, combined
     assert "STRIPE_WEBHOOK_SECRET" in combined, combined
+
+
+@pytest.mark.parametrize(
+    ("service", "expected"),
+    [
+        (
+            "connector-slack",
+            ["CONNECTORS_SLACK_CLIENT_ID", "CONNECTORS_SLACK_CLIENT_SECRET", "CONNECTORS_SLACK_TEST_ACCOUNT_EMAIL"],
+        ),
+        (
+            "connector-github",
+            ["CONNECTORS_GITHUB_CLIENT_ID", "CONNECTORS_GITHUB_CLIENT_SECRET", "CONNECTORS_GITHUB_TEST_ACCOUNT_EMAIL"],
+        ),
+    ],
+)
+def test_vendor_connector_seams_name_their_client_and_test_account(service: str, expected: list[str]) -> None:
+    s = _settings(service)
+    assert s.missing_real_creds({}) == {service: expected}
+    # A connector seam receives the vendor's OAuth redirect: it needs the public origin.
+    assert s.real_inbound_services == frozenset({service})
+
+
+def test_the_consent_timeout_defaults_and_reads_its_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TAI_E2E_CONSENT_TIMEOUT", raising=False)
+    assert HarnessSettings().consent_timeout == 900.0
+    monkeypatch.setenv("TAI_E2E_CONSENT_TIMEOUT", "30")
+    assert HarnessSettings().consent_timeout == 30.0

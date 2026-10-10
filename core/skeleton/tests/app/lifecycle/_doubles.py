@@ -15,6 +15,9 @@ class _FakeMcpTool:
     description = "ping"
     inputSchema: ClassVar[dict] = {"type": "object", "properties": {}}
     outputSchema: ClassVar[dict] = {}
+    title = None
+    annotations = None
+    icons = None
 
 
 class _NoManifestConfig:

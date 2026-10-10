@@ -17,6 +17,8 @@ from tai42_contract.secrets import SecretValue
 from tai42_kit.clients import RedisConnectionSettings, current_client_epoch
 from tai42_kit.settings import KeyMaterial, TaiBaseSettings
 
+from tai42_e2e_fixtures.tool_display import E2E_ECHO_ANNOTATIONS, E2E_ECHO_TITLE
+
 
 class _E2eProbeRedisSettings(RedisConnectionSettings):
     """Points the probe-record client at the harness probe channel (logical DB
@@ -38,7 +40,7 @@ class E2eProbeSecretSettings(TaiBaseSettings):
     key_material: KeyMaterial | None = None
 
 
-@tai42_app.tools.tool(tags={"e2e"})
+@tai42_app.tools.tool(tags={"e2e"}, title=E2E_ECHO_TITLE, annotations=E2E_ECHO_ANNOTATIONS)
 def e2e_echo(payload: str) -> str:
     """Return ``payload`` unchanged — the default subject for extension
     attachment (prometheus / batch / proxy branches)."""

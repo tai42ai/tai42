@@ -8,6 +8,7 @@ from typing import Any
 from fastmcp.tools.base import Tool
 from fastmcp.tools.function_tool import FunctionTool
 from fastmcp.tools.tool_transform import TransformedTool
+from mcp.types import ToolAnnotations
 from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
@@ -53,6 +54,7 @@ class _BranchBase:
     orig_name: str
     orig_desc: str | None
     base_output_schema: dict[str, Any] | None
+    base_annotations: ToolAnnotations | None
 
 
 class _BranchBindingMixin(_ToolBindingBase):
@@ -99,6 +101,10 @@ class _BranchBindingMixin(_ToolBindingBase):
         # declares no output schema of its own inherits this, so the
         # structured-output contract survives the wrap.
         base_output_schema = _derive_output_schema(branch_base)
+        # A prebuilt Tool object's behaviour hints, which its branches serve: a branch wraps the
+        # same body, and a hint describes that body. A callable base's hints already ride in the
+        # caller's kwargs, which every branch copies.
+        base_annotations = func.annotations if is_obj else None
         return _BranchBase(
             func=func,
             is_obj=is_obj,
@@ -107,6 +113,7 @@ class _BranchBindingMixin(_ToolBindingBase):
             orig_name=orig_name,
             orig_desc=orig_desc,
             base_output_schema=base_output_schema,
+            base_annotations=base_annotations,
         )
 
     def _expanded_tools(self, prepared: _BranchBase) -> dict[str, _Branch]:
@@ -223,7 +230,8 @@ class _BranchBindingMixin(_ToolBindingBase):
     ) -> None:
         """Bind every branch (and the bare base) onto the server with shape-aware output-schema propagation.
 
-        Tracks each name under ``owner`` when given, and records every bound name that can pause:
+        A branch of a prebuilt Tool object also serves that object's behaviour hints. Tracks each
+        name under ``owner`` when given, and records every bound name that can pause:
         the base declares ``TOOL_META_PAUSES`` (a decorated tool through its ``meta``, a prebuilt
         tool through its own or its parent chain's), or the branch's stack holds a ``pauses=True``
         extension. A prebuilt tool's ``meta`` never rides onto its branches, so the registry, not a
@@ -253,6 +261,14 @@ class _BranchBindingMixin(_ToolBindingBase):
                 and not _declares_own_output_schema(tool_func)
             ):
                 bind_kwargs["output_schema"] = prepared.base_output_schema
+            # A branch of a prebuilt Tool object serves that object's behaviour hints unless the
+            # caller pinned annotations for every branch.
+            if (
+                not isinstance(tool_func, Tool)
+                and "annotations" not in bind_kwargs
+                and prepared.base_annotations is not None
+            ):
+                bind_kwargs["annotations"] = prepared.base_annotations
             self.bind_tool(tool_func, curr_name, prepared.orig_name, *args, description=tool_desc, **bind_kwargs)
             if owner is not None:
                 self._mcp_bound_tools.setdefault(owner, set()).add(curr_name)

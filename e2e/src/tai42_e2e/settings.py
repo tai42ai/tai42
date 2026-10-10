@@ -200,6 +200,22 @@ REAL_SERVICES: dict[str, RealService] = {
         ),
         inbound=True,
     ),
+    "connector-slack": RealService(
+        required_env=(
+            "CONNECTORS_SLACK_CLIENT_ID",
+            "CONNECTORS_SLACK_CLIENT_SECRET",
+            "CONNECTORS_SLACK_TEST_ACCOUNT_EMAIL",
+        ),
+        inbound=True,
+    ),
+    "connector-github": RealService(
+        required_env=(
+            "CONNECTORS_GITHUB_CLIENT_ID",
+            "CONNECTORS_GITHUB_CLIENT_SECRET",
+            "CONNECTORS_GITHUB_TEST_ACCOUNT_EMAIL",
+        ),
+        inbound=True,
+    ),
     "storage-s3": RealService(
         required_env=(
             "STORAGE_S3_BUCKET",
@@ -339,6 +355,10 @@ class HarnessSettings(BaseSettings):
     # the operator/domain-facing knob shared with the credential template). Unset
     # by default; an inbound real selection that lacks it fails loudly.
     public_base_url: str | None = Field(default=None, validation_alias=AliasChoices("E2E_PUBLIC_BASE_URL"))
+
+    # How long a real connector leg waits for the browser consent it asks for (``TAI_E2E_CONSENT_TIMEOUT``,
+    # seconds): a person signs in to the vendor with the test account; past it the leg fails.
+    consent_timeout: float = Field(default=900.0, gt=0)
 
     # The e2e target (``TAI_E2E_TARGET``): a running stack to drive instead of building
     # one — a bare origin or the name of a target file (see :mod:`tai42_e2e.target`).

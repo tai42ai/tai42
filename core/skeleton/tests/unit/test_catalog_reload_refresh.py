@@ -150,6 +150,9 @@ def test_reload_result_omits_skipped_tools_when_all_bind(monkeypatch: pytest.Mon
         description = "ok"
         inputSchema: ClassVar[dict] = {"type": "object", "properties": {"q": {"type": "string"}}}
         outputSchema: ClassVar[dict] = {}
+        title = None
+        annotations = None
+        icons = None
 
     cfg = TaiMCPConfig(title="svc", include=[], config=MCPConfig(type="http", url="http://x/mcp"))
     manifest = Manifest.model_validate({"mcp": [cfg.model_dump()]})
