@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Annotated, Any, TypedDict
+from zoneinfo import ZoneInfo
 
 import pydantic
 import pytest
@@ -64,6 +65,7 @@ def _tally() -> Tally:
 
 
 _TZ = timezone(timedelta(hours=2), "Plus Two")
+_BERLIN = ZoneInfo("Europe/Berlin")
 
 VALUES: dict[str, Any] = {
     "decimal": Decimal("1.50"),
@@ -74,7 +76,15 @@ VALUES: dict[str, Any] = {
     "time": time(3, 4, 5, 6),
     "uuid": uuid.UUID("12345678-1234-5678-1234-567812345678"),
     "timezone": _TZ,
-    "model": Outer(Count=5, inner=Inner(amount=Decimal("2.25"), at=datetime(2026, 1, 1, tzinfo=UTC))),
+    "zoned_datetime": datetime(2026, 3, 1, 10, 0, tzinfo=_BERLIN),
+    "zoned_datetime_fold": datetime(2026, 10, 25, 2, 30, tzinfo=_BERLIN, fold=1),
+    "named_offset_datetime": datetime(2026, 1, 2, 3, 4, tzinfo=_TZ),
+    "zoned_time": time(2, 30, tzinfo=_BERLIN, fold=1),
+    "zoneinfo": _BERLIN,
+    "pydantic_datetime": pydantic.TypeAdapter(datetime).validate_python("2026-03-01T10:00:00+02:00"),
+    "pydantic_time": pydantic.TypeAdapter(time).validate_python("02:30:00-05:00"),
+    "parsed_model": Inner.model_validate({"amount": "2.25", "at": "2026-01-01T00:00:00Z"}),
+    "model": Outer(Count=5, inner=Inner(amount=Decimal("2.25"), at=datetime(2026, 1, 1, tzinfo=_BERLIN))),
     "enum": Shade.DARK,
     "tuple": (1, "a", (2, 3)),
     "set": {1, 2, 3},
@@ -101,6 +111,17 @@ def _config(thread_id: str) -> dict[str, Any]:
     return {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
 
 
+def _assert_same_clock(got: Any, original: Any) -> None:
+    """A datetime or time read back carries the original's tzinfo, its zone name and its fold."""
+    assert got.tzinfo == original.tzinfo
+    assert got.utcoffset() == original.utcoffset()
+    assert got.tzname() == original.tzname()
+    assert got.fold == original.fold
+    if isinstance(original, datetime) and original.tzinfo is not None:
+        assert got.astimezone(UTC) == original.astimezone(UTC)
+        assert (got + timedelta(days=180)).isoformat() == (original + timedelta(days=180)).isoformat()
+
+
 async def _round_trip(saver: Any, value: Any) -> tuple[Any, Any]:
     thread_id = f"codec-{uuid.uuid4().hex}"
     checkpoint = empty_checkpoint()
@@ -123,6 +144,12 @@ async def test_value_round_trips_equal_on_both_paths(redis_saver: Any, name: str
     for got in (from_document, from_write):
         assert type(got) is type(original)
         assert got == original
+        if isinstance(original, (datetime, time)):
+            _assert_same_clock(got, original)
+        if isinstance(original, Outer):
+            _assert_same_clock(got.inner.at, original.inner.at)
+        if isinstance(original, Inner):
+            _assert_same_clock(got.at, original.at)
         if isinstance(original, dict):
             for key, item in original.items():
                 assert type(got[key]) is type(item)
