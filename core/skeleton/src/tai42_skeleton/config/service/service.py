@@ -43,19 +43,28 @@ the broadcast itself raises anything the bus does not fold into a returned
 bus-unreachable report, that too is re-raised as a ``FleetBroadcastError`` with the
 unreachable report shape — a stranded fleet never hides behind a local error, and a
 committed persist never escapes as a raw broadcast fault.
+
+The profile apply's recycle roll follows its broadcast under the same contract: a roll
+that stops (a target timed out, failed, or never returned to ready, or the bus could not
+be read) is a loud ERROR log and the partial recycle report in the returned outcome,
+never an exception past :meth:`ConfigService.apply_replace_env`; only a bus contract
+violation (a reply that does not name the published target), or a bus fault that is not
+an outage, escapes.
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from tai42_kit.fork_gate import fork_gate
 from tai42_kit.llm import release_loop_bound_resources
 
+from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
-from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
+from tai42_skeleton.app.recycle import RecycleError, RecycleReport, RecycleStop, orchestrate_recycle
 from tai42_skeleton.app.reload_gate import FORK_QUIESCE_SECONDS, reload_gate
 from tai42_skeleton.config.boundary import reload_class_by_env_var
 from tai42_skeleton.config.recycle_policy import (
@@ -76,8 +85,10 @@ from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, forma
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from tai42_skeleton.app.bus import WorkerBus
+    from tai42_skeleton.app.bus import WorkerBus, WorkerRow
     from tai42_skeleton.config.service.results import _FleetPublisher, _ManifestStore, _ReloadAdmin
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
@@ -408,7 +419,11 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
            this method returns nothing persisted.
         4. ``replace_env`` — the LAST env write, reached only after a successful build.
         5. Broadcast the reload to the fleet, then roll a recycle across it for the
-           recycle-class diff (the applier's own recycle is a deferred self-exit).
+           recycle-class diff over the targets pinned in step 1 (the applier's own
+           recycle is a deferred self-exit, armed only when the roll converged). A
+           roll that stops — on a target, or because the bus could not be read — is
+           logged at ERROR and returned as the outcome's partial recycle report, never
+           raised: the env is persisted and the fleet reloaded.
 
         ``build_and_swap`` / ``orchestrate`` default to the running primitives and are
         injectable so the ordering / drain / recycle contract is exercised in isolation.
@@ -442,11 +457,14 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         bus = cast("WorkerBus", self._bus)
         self_identity = bus.identity
 
-        # STEP 1d — pin the expected-confirmation membership BEFORE the swap in STEP 3.
-        # The swap is this door's local apply; the STEP 5 broadcast censuses only when it
-        # publishes, so without this a sibling whose presence faded across the rebuild
-        # would never be expected and the reload would report converged without it.
+        # STEP 1d — pin what the STEP 5 report is judged against BEFORE the swap in STEP 3
+        # can age it out: the reload's expected-confirmation membership and, for a
+        # recycle-class diff, the recycle targets. The swap is this door's local apply and
+        # the slowest one there is; a sibling whose presence faded across the rebuild (or
+        # whose slot was lost and is re-minting) would otherwise never be expected by the
+        # reload nor targeted by the roll, and either would report converged without it.
         at_start = await snapshot_membership(self._bus, "reload_config")
+        pinned_targets = _pinned_recycle_targets(await bus.census(), self_identity.name) if recycle_diff_keys else {}
 
         # STEP 2 (persist reserved snapshot) — save the CURRENT stored env as @previous
         # BEFORE the swap. A later failed build leaves it harmlessly reflecting the
@@ -487,14 +505,24 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         fleet = await self._broadcast_profile_reload(at_start)
         recycle_report: RecycleReport | None = None
         if recycle_diff_keys:
-            recycle_report = await orchestrate(
-                bus,
-                excluded_name=self_identity.name,
-                applier_generation=self_identity.generation,
-                target_kinds=CENSUS_TARGET_KINDS,
-                applier_self_deferred=serve_affecting,
-                step_timeout=_recycle_step_timeout(),
-            )
+            try:
+                recycle_report = await orchestrate(
+                    bus,
+                    excluded_name=self_identity.name,
+                    applier_generation=self_identity.generation,
+                    target_kinds=CENSUS_TARGET_KINDS,
+                    applier_self_deferred=serve_affecting,
+                    step_timeout=_recycle_step_timeout(),
+                    expected=pinned_targets,
+                )
+            except RecycleError as exc:
+                # A raise with no recorded stop is a bus contract violation, not an
+                # outcome of the roll: it is not reported as one.
+                stopped = exc.report.stopped
+                if stopped is None:
+                    raise
+                recycle_report = exc.report
+                _log_stopped_roll(exc.report, stopped, pinned_targets)
 
         return ProfileApplyOutcome(
             hot=hot,
@@ -503,3 +531,33 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
             serve_affecting=serve_affecting,
             fleet=fleet,
         )
+
+
+def _log_stopped_roll(
+    report: RecycleReport, stopped: RecycleStop, pinned: Mapping[str, tuple[WorkerKind, int]]
+) -> None:
+    """ERROR-log a recycle roll that stopped, naming where (the target, or no target in hand) and why."""
+    row = next((row for row in report.rows if row.name == stopped.name), None)
+    reached = {row.name for row in report.rows}
+    logger.error(
+        "recycle for the profile apply did not converge — stopped in the %s roll at %s (%s): %s; "
+        "%d pinned target(s) not reached; the applier's own recycle is not armed",
+        stopped.kind,
+        repr(stopped.name) if stopped.name is not None else "no target in hand",
+        row.status if row is not None else "no row",
+        stopped.detail,
+        len(set(pinned) - reached),
+    )
+
+
+def _pinned_recycle_targets(rows: list[WorkerRow], self_name: str) -> dict[str, tuple[WorkerKind, int]]:
+    """The recycle targets pinned at the apply's start, ``name -> (kind, generation)``.
+
+    Every census row of a recycle target kind except the applier, gap rows included:
+    the roll waits a target that is not ready back to ready before recycling it.
+    """
+    return {
+        row.name: (row.kind, row.generation)
+        for row in rows
+        if row.kind in CENSUS_TARGET_KINDS and row.name != self_name
+    }

@@ -101,16 +101,21 @@ def apply_response(result: ApplyResult) -> dict[str, Any]:
 def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
     """The DEDICATED profile-apply response — NOT :func:`apply_response`.
 
-    ``{hot, recycle, fresh, refused, fanout}``: ``hot`` are the hot-class diff key NAMES;
-    ``recycle`` is one ``{name, kind, status, generation_before}`` line per recycled /
-    timed-out sibling plus, when the applier itself must self-exit, the applier's own
-    deferred line ``{name: <self>, kind: "serve", status: SELF_DEFERRED,
-    generation_before: <self generation>}`` (the one shared ``"self-deferred"`` literal).
+    ``{hot, recycle, fresh, refused, recycle_stopped, fanout}``: ``hot`` are the hot-class diff key NAMES;
+    ``recycle`` is one ``{name, kind, status, generation_before, detail}`` line per target
+    the roll reached — ``recycled``, or, for the target the roll stopped at, ``timed-out``
+    or ``failed`` with the ``detail`` naming why — plus, when the applier's own self-exit
+    is armed (a serve-affecting diff whose roll converged), the applier's own deferred line
+    ``{name: <self>, kind: "serve", status: SELF_DEFERRED, generation_before: <self
+    generation>, detail: None}`` (the one shared ``"self-deferred"`` literal).
     ``fresh`` is the per-kind list of NEW READY lives observed since the pre-apply
     snapshot (``{name, kind, generation}``) — capacity evidence, never a claimed
     successor and never a post-recycle generation. ``refused`` is ``[]`` on success BY
     CONSTRUCTION — any refusal aborts the pipeline upfront, before a response is ever
-    built. ``fanout`` is the reload broadcast's fleet-fanout summary. NAMES-ONLY: the
+    built. ``recycle_stopped`` is ``None`` when the roll ran to its end, else where it
+    stopped and why ``{kind, name, detail}`` — ``name`` is ``None`` when the bus could not
+    be read with no target in hand, so a body whose rows all read ``recycled`` never
+    reads as a complete roll it was not. ``fanout`` is the reload broadcast's fleet-fanout summary. NAMES-ONLY: the
     report enumerates key names + worker identities, never env VALUES.
     """
     entries: list[dict[str, Any]] = []
@@ -118,11 +123,17 @@ def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
     recycle = outcome.recycle
     if recycle is not None:
         entries.extend(
-            {"name": row.name, "kind": row.kind, "status": row.status, "generation_before": row.generation_before}
+            {
+                "name": row.name,
+                "kind": row.kind,
+                "status": row.status,
+                "generation_before": row.generation_before,
+                "detail": row.detail,
+            }
             for row in recycle.rows
         )
         fresh = [{"name": life.name, "kind": life.kind, "generation": life.generation} for life in recycle.fresh]
-    if outcome.serve_affecting:
+    if outcome.self_exit_armed:
         # The applier's own recycle is a post-response self-exit it cannot confirm — a
         # serve worker carrying its own current generation, reported deferred with the
         # one shared literal.
@@ -132,13 +143,16 @@ def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
                 "kind": "serve",
                 "status": SELF_DEFERRED,
                 "generation_before": outcome.self_identity.generation,
+                "detail": None,
             }
         )
+    stopped = None if recycle is None or recycle.stopped is None else recycle.stopped.model_dump()
     return {
         "hot": list(outcome.hot),
         "recycle": entries,
         "fresh": fresh,
         "refused": [],
+        "recycle_stopped": stopped,
         "fanout": fleet_fanout(outcome.fleet),
     }
 

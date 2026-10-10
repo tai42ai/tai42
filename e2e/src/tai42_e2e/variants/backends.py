@@ -152,7 +152,7 @@ class CeleryVariant(BackendVariant):
         }
 
     def infra_check(self, settings: HarnessSettings) -> None:
-        admin = RabbitAdmin(settings.rabbitmq_management_url)
+        admin = RabbitAdmin(settings.rabbitmq_management_url, timeout=settings.boot_timeout)
         try:
             admin.check_reachable()
         except Exception as exc:
@@ -162,7 +162,7 @@ class CeleryVariant(BackendVariant):
 
     def allocate_broker(self, infra: Infra, stack_id: str) -> BrokerLease | None:
         settings = infra.settings
-        admin = RabbitAdmin(settings.rabbitmq_management_url)
+        admin = RabbitAdmin(settings.rabbitmq_management_url, timeout=settings.boot_timeout)
         vhost = f"tai42_e2e_{stack_id}"
         admin.create_vhost(vhost)
         return BrokerLease(broker_url=broker_url_for(settings.rabbitmq_url, vhost), admin=admin, vhost=vhost)

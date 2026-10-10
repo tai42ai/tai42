@@ -18,10 +18,22 @@ class RabbitAdmin:
     """A synchronous management-API client for one RabbitMQ broker. Provisions
     and reaps the per-stack vhosts the celery variant leases."""
 
-    def __init__(self, management_url: str) -> None:
+    def __init__(self, management_url: str, *, timeout: float) -> None:
         """``management_url`` carries the credentials inline
         (``http://guest:guest@host:15672``); they are split out into HTTP basic
-        auth and the base URL is rebuilt without the userinfo."""
+        auth and the base URL is rebuilt without the userinfo.
+
+        ``timeout`` bounds each management call, in seconds. The callers reuse
+        the harness's readiness deadline (``HarnessSettings.boot_timeout``) for
+        it; that deadline is sized for the serve stack's imports at boot, not
+        for the broker. The reuse suffices because the bound only has to exceed
+        the broker's service time: the broker serves a delete synchronously (it
+        deletes the vhost's queues and exchanges and stops its message stores
+        before it answers) and aborts a delete whose client hung up, leaving the
+        vhost half-deleted, so a bound below the service time is worse than
+        slow, while a long bound only delays the loud failure on a hung broker.
+        The broker's measured delete time under a loaded host stays below a
+        second, far inside that deadline."""
         parsed = urlparse(management_url)
         if parsed.hostname is None or parsed.port is None:
             raise ValueError(f"rabbitmq_management_url must include host and port: {management_url!r}")
@@ -29,17 +41,18 @@ class RabbitAdmin:
         password = parsed.password or "guest"
         self._base = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
         self._auth = httpx.BasicAuth(username, password)
+        self._timeout = timeout
 
     def check_reachable(self) -> None:
         """Hit the management overview so an absent or unreachable broker fails
         loudly at session start rather than cryptically at first dispatch."""
-        resp = httpx.get(f"{self._base}/api/overview", auth=self._auth, timeout=5.0)
+        resp = httpx.get(f"{self._base}/api/overview", auth=self._auth, timeout=self._timeout)
         resp.raise_for_status()
 
     def vhost_exists(self, name: str) -> bool:
         """Whether the named vhost is present on the broker. A 404 means absent;
         any other non-2xx is a real management-API failure and raises loudly."""
-        resp = httpx.get(f"{self._base}/api/vhosts/{name}", auth=self._auth, timeout=5.0)
+        resp = httpx.get(f"{self._base}/api/vhosts/{name}", auth=self._auth, timeout=self._timeout)
         if resp.status_code == httpx.codes.NOT_FOUND:
             return False
         resp.raise_for_status()
@@ -52,14 +65,14 @@ class RabbitAdmin:
         vhost is created, the half-created vhost is deleted before propagating so
         a partial failure leaves no orphan behind — symmetric to the leak-free
         teardown contract."""
-        put = httpx.put(f"{self._base}/api/vhosts/{name}", auth=self._auth, timeout=5.0)
+        put = httpx.put(f"{self._base}/api/vhosts/{name}", auth=self._auth, timeout=self._timeout)
         put.raise_for_status()
         try:
             perms = httpx.put(
                 f"{self._base}/api/permissions/{name}/guest",
                 auth=self._auth,
                 json={"configure": ".*", "write": ".*", "read": ".*"},
-                timeout=5.0,
+                timeout=self._timeout,
             )
             perms.raise_for_status()
         except Exception:
@@ -70,11 +83,17 @@ class RabbitAdmin:
         """Delete the vhost and confirm it is gone. A vhost still present after
         the delete is a broker-side leak — raised loudly, symmetric to a leaked
         Postgres database in stack teardown."""
-        resp = httpx.delete(f"{self._base}/api/vhosts/{name}", auth=self._auth, timeout=5.0)
+        try:
+            resp = httpx.delete(f"{self._base}/api/vhosts/{name}", auth=self._auth, timeout=self._timeout)
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(
+                f"vhost {name!r}: the broker did not answer its delete within {self._timeout}s; RabbitMQ "
+                "aborts a delete whose client hung up, so the vhost is left half-deleted (leak)"
+            ) from exc
         # 404 means it was already gone; any other non-2xx is a real failure.
         if resp.status_code != httpx.codes.NOT_FOUND:
             resp.raise_for_status()
-        check = httpx.get(f"{self._base}/api/vhosts/{name}", auth=self._auth, timeout=5.0)
+        check = httpx.get(f"{self._base}/api/vhosts/{name}", auth=self._auth, timeout=self._timeout)
         if check.status_code != httpx.codes.NOT_FOUND:
             raise RuntimeError(f"vhost {name!r} still present after delete (leak): HTTP {check.status_code}")
 

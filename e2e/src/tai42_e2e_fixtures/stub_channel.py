@@ -12,9 +12,10 @@ Registering NO route keeps the fixture additive: it touches only the channel
 registry, never the ``/api/*`` route table other stacks' gates enumerate.
 
 Beside the deliver-only stub, two working-signal stubs prove the skeleton's
-per-turn "working-on-it" refresh loop end to end: ``stub_working`` advertises a
-short vendor-indicator lifetime so the loop refreshes it repeatedly over a long
-turn, and ``stub_working_off`` advertises none so the loop never starts. Both
+per-turn "working-on-it" refresh loop end to end: ``stub_working`` advertises the
+short vendor-indicator lifetime the stack's ``E2E_WORKING_SIGNAL_EXPIRY_SECONDS``
+names (registered only when it is set) so the loop refreshes it repeatedly over a
+long turn, and ``stub_working_off`` advertises none so the loop never starts. Both
 record every ``signal_working`` call onto a harness probe list a test reads back,
 mirroring how :mod:`stub_form_channel` records a delivered form.
 """
@@ -37,9 +38,10 @@ STUB_CHANNEL_NAME = "stub"
 WORKING_SIGNAL_STUB_CHANNEL_NAME = "stub_working"
 WORKING_SIGNAL_OFF_STUB_CHANNEL_NAME = "stub_working_off"
 
-# The vendor-indicator lifetime the counting stub advertises, in seconds — short so a
-# few-second turn crosses several refresh intervals.
-WORKING_SIGNAL_STUB_EXPIRY_SECONDS = 2.0
+# The env var carrying the vendor-indicator lifetime ``stub_working`` advertises, in seconds.
+# The harness's working-signal stack profiles set it, so the value a spec derives its refresh
+# bounds from is the one the SUT runs with; a stack that sets none registers no ``stub_working``.
+WORKING_SIGNAL_STUB_EXPIRY_ENV = "E2E_WORKING_SIGNAL_EXPIRY_SECONDS"
 
 
 class _StubChannel:
@@ -128,10 +130,12 @@ class _CountingWorkingSignalChannel:
 
 
 tai42_app.channels.register(STUB_CHANNEL_NAME, _StubChannel())
-tai42_app.channels.register(
-    WORKING_SIGNAL_STUB_CHANNEL_NAME,
-    _CountingWorkingSignalChannel(working_signal_expiry_seconds=WORKING_SIGNAL_STUB_EXPIRY_SECONDS),
-)
+_working_signal_expiry = os.environ.get(WORKING_SIGNAL_STUB_EXPIRY_ENV)
+if _working_signal_expiry is not None:
+    tai42_app.channels.register(
+        WORKING_SIGNAL_STUB_CHANNEL_NAME,
+        _CountingWorkingSignalChannel(working_signal_expiry_seconds=float(_working_signal_expiry)),
+    )
 tai42_app.channels.register(
     WORKING_SIGNAL_OFF_STUB_CHANNEL_NAME,
     _CountingWorkingSignalChannel(working_signal_expiry_seconds=None),

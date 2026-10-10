@@ -25,6 +25,7 @@ from tai42_contract.versioning.errors import (
 )
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 
+from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, RecycleReport, RecycleRow, RecycleStop
 from tai42_skeleton.config.recycle_policy import CapabilityReport, Shape
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, OperationResponse
@@ -375,23 +376,27 @@ def _stub_apply_service(monkeypatch: pytest.MonkeyPatch, outcome: ProfileApplyOu
     return seen
 
 
-def _apply_outcome(*, serve_affecting: bool) -> ProfileApplyOutcome:
+def _apply_outcome(*, serve_affecting: bool, recycle: RecycleReport | None = None) -> ProfileApplyOutcome:
     from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind
 
     return ProfileApplyOutcome(
         hot=["A"],
-        recycle=None,
+        recycle=recycle,
         self_identity=WorkerIdentity(name="serve-applier", kind=WorkerKind.serve, pid=1, generation=1),
         serve_affecting=serve_affecting,
         fleet=FleetResult(op="reload_config", results=[]),
     )
 
 
+def _converged() -> RecycleReport:
+    return RecycleReport(rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED)])
+
+
 async def test_apply_arms_self_exit_when_serve_affecting(
     monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
 ) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
-    seen = _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=True))
+    seen = _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=True, recycle=_converged()))
     response = await config_ops.apply_profile("p")
     assert isinstance(response, OperationResponse)
     # A serve-affecting recycle arms the applier's OWN deferred self-exit as a post-flush
@@ -412,6 +417,53 @@ async def test_apply_no_self_exit_when_not_serve_affecting(
     response = await config_ops.apply_profile("p")
     assert isinstance(response, OperationResponse)
     assert response.background is None  # hot-only / backend-only / bare → no self-exit
+
+
+async def test_apply_does_not_arm_self_exit_when_the_roll_stopped(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
+    stopped = RecycleReport(
+        rows=[
+            RecycleRow(
+                name="backend-1",
+                kind="backend",
+                generation_before=1,
+                status=TIMED_OUT,
+                detail="old life still present",
+            )
+        ]
+    )
+    _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=True, recycle=stopped))
+    response = await config_ops.apply_profile("p")
+    assert isinstance(response, OperationResponse)
+    assert response.background is None
+    assert response.payload["recycle"] == [
+        {
+            "name": "backend-1",
+            "kind": "backend",
+            "status": "timed-out",
+            "generation_before": 1,
+            "detail": "old life still present",
+        }
+    ]
+
+
+async def test_apply_does_not_arm_self_exit_when_the_roll_stopped_with_no_target_in_hand(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
+    stopped = _converged()
+    stopped.stopped = RecycleStop(kind="backend", name=None, detail="bus unreachable while reading the census")
+    _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=True, recycle=stopped))
+    response = await config_ops.apply_profile("p")
+    assert isinstance(response, OperationResponse)
+    assert response.background is None
+    assert response.payload["recycle_stopped"] == {
+        "kind": "backend",
+        "name": None,
+        "detail": "bus unreachable while reading the census",
+    }
 
 
 async def test_apply_absent_is_404() -> None:

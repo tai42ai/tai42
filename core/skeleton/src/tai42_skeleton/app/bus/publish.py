@@ -13,7 +13,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.app.bus.models import (
     _OP_PAYLOAD_KEY,
-    _TRANSPORT_ERRORS,
+    TRANSPORT_ERRORS,
     FleetResult,
     LastOp,
     LocalApplyResult,
@@ -116,7 +116,7 @@ class WorkerBusPublishMixin:
 
         try:
             fleet = await self._broadcast(op_name, op, targets, expected_at_start)
-        except _TRANSPORT_ERRORS as exc:
+        except TRANSPORT_ERRORS as exc:
             logger.error("worker bus: publish of %r failed — bus unreachable", op_name, exc_info=True)
             return FleetResult(op=op_name, reachable=False, error=f"{type(exc).__name__}: {exc}")
 
@@ -329,7 +329,7 @@ class WorkerBusPublishMixin:
             timeout = max(0.01, next_deadline - now)
             try:
                 msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=timeout)
-            except _TRANSPORT_ERRORS as exc:
+            except TRANSPORT_ERRORS as exc:
                 # A blip mid-collection is reported loudly on the affected workers
                 # (below), never silently dropped.
                 transport_error = f"{type(exc).__name__}: {exc}"
@@ -469,7 +469,7 @@ class WorkerBusPublishMixin:
         """
         try:
             raw = await r.get(self._settings.presence_key(name))
-        except _TRANSPORT_ERRORS:
+        except TRANSPORT_ERRORS:
             logger.error("worker bus: presence re-check for %s failed", name, exc_info=True)
             return ("unreachable", None)
         if raw is None:
@@ -522,7 +522,9 @@ class WorkerBusPublishMixin:
 
         This is the fleet worker listing (it backs ``GET /api/fleet/workers``). The
         busless variant returns its ONE synthesized ready row, its ``beat_at``
-        computed fresh at call time (never frozen at construction).
+        computed fresh at call time (never frozen at construction). On an outage it
+        raises one of :data:`TRANSPORT_ERRORS` — a read that could not happen is never
+        a silent empty fleet.
         """
         if self._local:
             return [self._local_row()]

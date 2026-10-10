@@ -14,7 +14,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.app.bus.models import (
     _OP_PAYLOAD_KEY,
-    _TRANSPORT_ERRORS,
+    TRANSPORT_ERRORS,
     LastOp,
     OpOutcome,
     SlotLostError,
@@ -153,7 +153,7 @@ class WorkerBusSubscribeMixin:
                 # nothing to wait out) and re-mint a new life on re-entry.
                 logger.warning("worker bus: slot %s lost; re-minting a new life", exc)
                 continue
-            except _TRANSPORT_ERRORS:
+            except TRANSPORT_ERRORS:
                 last = self._identity.name if self._identity is not None else self._kind.value
                 logger.error(
                     "worker bus: subscription transport error for %s; reconnecting in %.2fs",
@@ -248,7 +248,7 @@ class WorkerBusSubscribeMixin:
             except SlotLostError:
                 exit_kind = "slot_lost"
                 raise
-            except _TRANSPORT_ERRORS:
+            except TRANSPORT_ERRORS:
                 exit_kind = "transport"
                 raise
             finally:
@@ -533,7 +533,7 @@ class WorkerBusSubscribeMixin:
             # CancelledError and reconnect-loop a stop that was meant to terminate.
             try:
                 released = await self._release_claim(r, self._identity.name)
-            except _TRANSPORT_ERRORS:
+            except TRANSPORT_ERRORS:
                 logger.warning(
                     "worker bus: claim release for %s failed on deliberate stop (transport) — leaving it to TTL",
                     self._identity.name,

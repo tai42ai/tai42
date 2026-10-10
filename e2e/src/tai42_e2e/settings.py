@@ -293,7 +293,11 @@ class HarnessSettings(BaseSettings):
     # up, backend present in the census), and for a restarted process to rejoin.
     # It bounds a wait on those readiness events; a boot imports the serve stack
     # twice in a multi-worker master (the master, then each spawned worker re-imports
-    # it), which takes tens of seconds on a loaded host.
+    # it), which takes tens of seconds on a loaded host. The same bound is reused
+    # for every RabbitMQ management call a stack's boot or teardown makes (a broker
+    # vhost provisioned, checked or reaped): such a call only needs a bound above the
+    # broker's service time, since RabbitMQ aborts a vhost delete whose client hung
+    # up, and a long bound only delays the loud failure on a hung broker.
     boot_timeout: float = 120.0
 
     # Seconds a booting uvicorn worker of a multi-worker ``tai serve`` has to answer

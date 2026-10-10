@@ -62,12 +62,32 @@ class ApplyResponse(BaseModel):
 
 
 class RecycleEntry(BaseModel):
-    """One recycled or self-deferred worker line in a profile-apply report."""
+    """One worker line in a profile-apply report.
+
+    ``status`` is ``recycled`` (confirmed on reality), ``timed-out`` or ``failed`` (the
+    target the roll stopped at), or ``self-deferred`` (the applier's own post-response
+    self-exit). ``detail`` names why a ``timed-out`` / ``failed`` target did not
+    converge, and is ``null`` otherwise.
+    """
 
     name: str
     kind: str
     status: str
     generation_before: int
+    detail: str | None = None
+
+
+class RecycleStop(BaseModel):
+    """Where a profile apply's recycle roll stopped and why.
+
+    ``name`` is the target the roll stopped at (its line in ``recycle`` carries the
+    target's own outcome), or ``null`` when the bus could not be read before a target was
+    reached.
+    """
+
+    kind: str
+    name: str | None
+    detail: str
 
 
 class FreshLife(BaseModel):
@@ -81,16 +101,18 @@ class FreshLife(BaseModel):
 class ProfileApplyResponse(BaseModel):
     """The dedicated profile-apply response.
 
-    ``hot`` are the hot-class diff key names; ``recycle`` the recycled/self-deferred worker lines;
+    ``hot`` are the hot-class diff key names; ``recycle`` the worker lines of the recycle roll;
     ``fresh`` the new ready lives seen since the pre-apply snapshot; ``refused`` is empty on success
-    (any refusal aborts the pipeline before a response is built); ``fanout`` the reload broadcast's
-    fleet summary. Names only — never env values.
+    (any refusal aborts the pipeline before a response is built); ``recycle_stopped`` is ``null``
+    when the roll ran to its end, otherwise where it stopped and why; ``fanout`` the reload
+    broadcast's fleet summary. Names only — never env values.
     """
 
     hot: list[str]
     recycle: list[RecycleEntry]
     fresh: list[FreshLife]
     refused: list[str]
+    recycle_stopped: RecycleStop | None = None
     fanout: FanoutSummary
 
 

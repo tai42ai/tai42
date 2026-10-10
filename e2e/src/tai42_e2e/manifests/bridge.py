@@ -116,6 +116,11 @@ WEB_MEDIA_EXPIRY_REAPER_INTERVAL_SECONDS = 1
 # turn — the observable a low ``CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS`` produces.
 WORKING_SIGNAL_CAPPED_MAX_SECONDS = 1.2
 
+# The vendor-indicator lifetime the ``stub_working`` channel advertises on a working-signal
+# profile (carried to the SUT as ``E2E_WORKING_SIGNAL_EXPIRY_SECONDS``), in seconds — short so a
+# few-second turn crosses several refresh intervals.
+WORKING_SIGNAL_STUB_EXPIRY_SECONDS = 2.0
+
 
 # Every channel a working-signal profile can deliver a bridged answer on needs a split cap, or
 # the send fails as a config error. The vendor mediums keep their platform defaults; the two
@@ -396,9 +401,11 @@ def build_working_signal_stack(res: StackResources, variants: Variants) -> Stack
     Identical to :func:`build_bridge_stack` (access control ON, the redis conversations backend a
     bridged turn accepts into, the probe tools whose ``e2e_channel_inbound`` drives a stub inbound
     and whose ``e2e_overlap_probe`` holds a turn open) with the ``tai42_e2e_fixtures.stub_channel``
-    module added, which registers ``stub_working`` (a vendor indicator the loop refreshes) and
-    ``stub_working_off`` (no indicator — the loop never starts). The two stub channels are added to
-    ``CONVERSATIONS_MAX_MESSAGE_CHARS`` so a bridged answer on them delivers. The working-signal
+    module added, which registers ``stub_working`` (a vendor indicator the loop refreshes, its
+    lifetime :data:`WORKING_SIGNAL_STUB_EXPIRY_SECONDS` passed as
+    ``E2E_WORKING_SIGNAL_EXPIRY_SECONDS``) and ``stub_working_off`` (no indicator — the loop never
+    starts). The two stub channels are added to ``CONVERSATIONS_MAX_MESSAGE_CHARS`` so a bridged
+    answer on them delivers. The working-signal
     ceiling stays at the operator default, so the loop stops at the first outbound send, not the
     ceiling — the leg that proves the refresh-then-stop behaviour."""
     base = build_bridge_stack(res, variants)
@@ -409,6 +416,7 @@ def build_working_signal_stack(res: StackResources, variants: Variants) -> Stack
     env = {
         **base.env,
         "CONVERSATIONS_MAX_MESSAGE_CHARS": json.dumps(_WORKING_SIGNAL_MAX_MESSAGE_CHARS),
+        "E2E_WORKING_SIGNAL_EXPIRY_SECONDS": str(WORKING_SIGNAL_STUB_EXPIRY_SECONDS),
     }
     return dataclasses.replace(base, name="working-signal", manifest=manifest, env=env)
 

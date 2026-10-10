@@ -116,8 +116,8 @@ class ProfileApplyOutcome:
     the fleet recycle report (``None`` when the diff carried no recycle-class key, so no
     recycle rolled), each row carrying its own kind. ``self_identity`` is the applying
     worker's own identity (name + generation) — the source for the self-deferred row's
-    ``generation_before``. ``serve_affecting`` is whether the applier must self-exit (arm
-    the post-response graceful exit). ``fleet`` is the reload broadcast report.
+    ``generation_before``. ``serve_affecting`` is whether the diff carries recycle keys
+    that affect the applier's own serve surface. ``fleet`` is the reload broadcast report.
     """
 
     hot: list[str]
@@ -125,3 +125,12 @@ class ProfileApplyOutcome:
     self_identity: WorkerIdentity
     serve_affecting: bool
     fleet: FleetResult
+
+    @property
+    def self_exit_armed(self) -> bool:
+        """Whether the applier's own deferred recycle (the post-response self-exit) happens.
+
+        Only for a serve-affecting diff whose roll converged: a roll that stopped never
+        recycles anything past the row it stopped at, the applier's self-exit included.
+        """
+        return self.serve_affecting and self.recycle is not None and self.recycle.converged

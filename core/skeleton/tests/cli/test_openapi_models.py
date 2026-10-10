@@ -600,3 +600,30 @@ def test_openapi_command_writes_to_out_path(tmp_path) -> None:
 def test_openapi_check_succeeds_on_a_valid_spec() -> None:
     result = CliRunner().invoke(app_module.app, ["openapi", "--check"])
     assert result.exit_code == 0, result.output
+
+
+def test_the_profile_apply_recycle_line_documents_an_optional_detail(spec: dict) -> None:
+    # A recycle line names why the roll stopped at it; the field is optional, so a line
+    # without it (a recycled or self-deferred worker) still validates.
+    schema = spec["components"]["schemas"]["RecycleEntry"]
+    assert "detail" in schema["properties"]
+    assert "detail" not in schema["required"]
+    validator = Draft202012Validator({**schema, "components": spec["components"]})
+    validator.validate({"name": "backend-1", "kind": "backend", "status": "recycled", "generation_before": 1})
+    validator.validate(
+        {"name": "backend-1", "kind": "backend", "status": "timed-out", "generation_before": 1, "detail": "x"}
+    )
+
+
+def test_the_profile_apply_response_documents_an_optional_recycle_stop(spec: dict) -> None:
+    # Where the roll stopped and why: a nullable reference to the stop model; a body
+    # without it (a roll that ran to its end) still validates.
+    schema = spec["components"]["schemas"]["ProfileApplyResponse"]
+    assert "recycle_stopped" in schema["properties"]
+    assert "recycle_stopped" not in schema["required"]
+    stop = spec["components"]["schemas"]["RecycleStop"]
+    assert set(stop["required"]) == {"kind", "name", "detail"}
+    validator = Draft202012Validator({**schema, "components": spec["components"]})
+    base = {"hot": [], "recycle": [], "fresh": [], "refused": [], "fanout": {"mode": "fleet"}}
+    validator.validate(base)
+    validator.validate({**base, "recycle_stopped": {"kind": "backend", "name": None, "detail": "bus unreachable"}})

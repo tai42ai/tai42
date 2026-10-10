@@ -83,6 +83,7 @@ from __future__ import annotations
 from tai42_kit.clients import client_ctx
 
 from tai42_skeleton.app.bus.models import (
+    TRANSPORT_ERRORS,
     FleetResult,
     LastOp,
     LocalApplyResult,
@@ -105,6 +106,7 @@ from tai42_skeleton.app.bus.worker_bus import WorkerBus
 WorkerBus.__module__ = __name__
 
 __all__ = [
+    "TRANSPORT_ERRORS",
     "FleetResult",
     "LastOp",
     "LocalApplyResult",
