@@ -432,7 +432,16 @@ async def test_get_unknown_run_404(wired):
 
 async def _seed_running(wired, run_id: str, tool_name: str = "alpha") -> None:
     started = wired.clock["t"].isoformat()
-    await wired.store.create_run(wired.fake, run_id, tool_name, started, wired.clock["t"].timestamp(), wired.settings)
+    await wired.store.create_run(
+        wired.fake,
+        run_id,
+        tool_name,
+        started,
+        wired.clock["t"].timestamp(),
+        result_ttl_seconds=wired.settings.result_ttl_seconds,
+        liveness_ttl_seconds=wired.settings.liveness_ttl_seconds,
+        recent_runs_limit=wired.settings.recent_runs_limit,
+    )
 
 
 async def test_running_with_liveness_is_not_lost(wired):
@@ -531,7 +540,7 @@ async def test_liveness_refresher_survives_a_transient_refresh_error():
     store = ToolRunStore("trtest:")
     redis = _FlakyOnceRedis()
     settings = ToolRunsSettings(liveness_ttl_seconds=1)  # cadence ~0.33s
-    task = asyncio.create_task(ops._refresh_liveness_loop(redis, store, "r1", settings))
+    task = asyncio.create_task(ops._refresh_liveness_loop(redis, store, "r1", settings.liveness_ttl_seconds))
     try:
         # The first refresh raises; a surviving loop reaches a later successful one
         # that finally sets the liveness key.
@@ -562,7 +571,16 @@ async def test_list_order_and_trim_to_limit(wired):
     base = wired.clock["t"]
     for i in range(5):
         ts = (base + timedelta(seconds=i)).isoformat()
-        await store.create_run(wired.fake, f"r{i}", "alpha", ts, float(i), settings)
+        await store.create_run(
+            wired.fake,
+            f"r{i}",
+            "alpha",
+            ts,
+            float(i),
+            result_ttl_seconds=settings.result_ttl_seconds,
+            liveness_ttl_seconds=settings.liveness_ttl_seconds,
+            recent_runs_limit=settings.recent_runs_limit,
+        )
 
     entries = _json(await router.list_tool_runs(_list("alpha")))["data"]
     # Newest first, trimmed to the limit.
@@ -657,7 +675,15 @@ async def _seed(
     wired, run_id: str, *, tool_name: str = "alpha", user_id: str | None = None, score: float = 1.0
 ) -> None:
     await wired.store.create_run(
-        wired.fake, run_id, tool_name, wired.clock["t"].isoformat(), score, wired.settings, user_id=user_id
+        wired.fake,
+        run_id,
+        tool_name,
+        wired.clock["t"].isoformat(),
+        score,
+        result_ttl_seconds=wired.settings.result_ttl_seconds,
+        liveness_ttl_seconds=wired.settings.liveness_ttl_seconds,
+        recent_runs_limit=wired.settings.recent_runs_limit,
+        user_id=user_id,
     )
 
 
@@ -717,7 +743,15 @@ async def test_restricted_list_stays_complete_when_shared_window_saturated(wired
 
     async def seed(run_id: str, own_id: str, score: float) -> None:
         await store.create_run(
-            wired.fake, run_id, "alpha", wired.clock["t"].isoformat(), score, settings, user_id=own_id
+            wired.fake,
+            run_id,
+            "alpha",
+            wired.clock["t"].isoformat(),
+            score,
+            result_ttl_seconds=settings.result_ttl_seconds,
+            liveness_ttl_seconds=settings.liveness_ttl_seconds,
+            recent_runs_limit=settings.recent_runs_limit,
+            user_id=own_id,
         )
 
     await seed("keyA-run", "keyA", 0.0)

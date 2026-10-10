@@ -21,7 +21,7 @@ import orjson
 from arq.jobs import Job, JobStatus
 from croniter import croniter
 
-from tai42_backend_arq.pool import RedisPoolManager
+from tai42_backend_arq import pool
 from tai42_backend_arq.records import parse_cron_or_interval
 from tai42_backend_arq.settings import TaskFailedError, arq_settings, job_deserializer
 
@@ -162,14 +162,13 @@ async def abort_schedule_task(key: str) -> None:
     The ``aborted`` marker is set to the job id first, so even a job whose
     cancellation is never processed exits without effect. Failures propagate.
     """
-    arq_redis: Any = await RedisPoolManager.get()
-
-    if await arq_redis.exists(key):
-        data = await arq_redis.hgetall(key)
-        prev_job_id = data.get(b"job_id", b"").decode()
-        if prev_job_id:
-            await arq_redis.hset(key, "aborted", prev_job_id)
-            await request_job_abort(Job(prev_job_id, redis=arq_redis, _deserializer=job_deserializer))
+    async with pool.arq_connection() as arq_redis:
+        if await arq_redis.exists(key):
+            data = await arq_redis.hgetall(key)
+            prev_job_id = data.get(b"job_id", b"").decode()
+            if prev_job_id:
+                await arq_redis.hset(key, "aborted", prev_job_id)
+                await request_job_abort(Job(prev_job_id, redis=arq_redis, _deserializer=job_deserializer))
 
 
 async def recover_stalled_schedules(ctx: dict[str, Any]) -> None:

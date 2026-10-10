@@ -61,8 +61,9 @@ async def submit_run(tool_name: str, arguments: dict[str, object], subject: Stat
     if not tool_runs_store_configured():
         raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
 
-    settings = _pkg.tool_runs_settings()
-    store = ToolRunStore(settings.key_prefix)
+    # Settings are read through the cached accessor at each use, never kept across an await (a
+    # configuration reload retires the instance a held local would pin).
+    store = ToolRunStore(_pkg.tool_runs_settings().key_prefix)
 
     # Resolve the name against the live registry BEFORE creating a record: an
     # unknown tool is a loud 404 up front, so a typo'd name never earns a
@@ -80,9 +81,10 @@ async def submit_run(tool_name: str, arguments: dict[str, object], subject: Stat
     # between them) so two concurrent submits cannot both pass the check before
     # either reserves its slot. The slot is released by the supervisor's
     # done-callback, or by the ``except`` below if the record write fails.
-    if not supervisor.reserve_active_slot(settings.max_concurrent_runs):
+    max_concurrent_runs = _pkg.tool_runs_settings().max_concurrent_runs
+    if not supervisor.reserve_active_slot(max_concurrent_runs):
         raise UnavailableError(
-            f"tool-run capacity reached ({settings.max_concurrent_runs} concurrent runs); "
+            f"tool-run capacity reached ({max_concurrent_runs} concurrent runs); "
             "retry later or raise TAI_TOOL_RUNS_MAX_CONCURRENT_RUNS"
         )
 
@@ -121,12 +123,11 @@ async def submit_run(tool_name: str, arguments: dict[str, object], subject: Stat
 
         submit_context = api_state_context_value(subject, owning_identity) if subject is not None else None
         try:
-            async with _pkg.client_ctx(RedisClient, settings.redis) as r:
+            async with _pkg.client_ctx(RedisClient, _pkg.tool_runs_settings().redis) as r:
                 run_id = await reconcile.create_recorded_run(
                     r,
                     store,
                     tool_name,
-                    settings,
                     user_id=owning_identity,
                     arguments=arguments,
                     extras=None,
@@ -159,10 +160,9 @@ async def get_run(run_id: str) -> dict:
     # genuine miss below, so the door is no oracle for the store's absence.
     if not tool_runs_store_configured():
         raise NotFoundError(f"run {run_id!r} not found")
-    settings = _pkg.tool_runs_settings()
-    store = ToolRunStore(settings.key_prefix)
+    store = ToolRunStore(_pkg.tool_runs_settings().key_prefix)
     _user_id, restricted = _pkg.request_identity()
-    async with _pkg.client_ctx(RedisClient, settings.redis) as r:
+    async with _pkg.client_ctx(RedisClient, _pkg.tool_runs_settings().redis) as r:
         record = await store.get_run(r, run_id)
         if record is None:
             raise NotFoundError(f"run {run_id!r} not found")
@@ -173,7 +173,7 @@ async def get_run(run_id: str) -> dict:
         # actionable while a ``404`` would lie about existence.
         if restricted is not None and record.get("user_id") != restricted:
             raise ForbiddenError("run belongs to another identity")
-        record = await reconcile._reconcile_lost(r, store, run_id, record, settings.result_ttl_seconds)
+        record = await reconcile._reconcile_lost(r, store, run_id, record, _pkg.tool_runs_settings().result_ttl_seconds)
     return views._run_view(run_id, record)
 
 
@@ -199,12 +199,13 @@ async def list_tool_runs(tool_name: str) -> list[dict]:
     # empty collection — no store touched.
     if not tool_runs_store_configured():
         return []
-    settings = _pkg.tool_runs_settings()
-    store = ToolRunStore(settings.key_prefix)
+    store = ToolRunStore(_pkg.tool_runs_settings().key_prefix)
     _user_id, restricted = _pkg.request_identity()
     entries: list[dict[str, Any]] = []
-    async with _pkg.client_ctx(RedisClient, settings.redis) as r:
-        run_ids = await store.recent_run_ids(r, tool_name, settings.recent_runs_limit, user_id=restricted)
+    async with _pkg.client_ctx(RedisClient, _pkg.tool_runs_settings().redis) as r:
+        run_ids = await store.recent_run_ids(
+            r, tool_name, _pkg.tool_runs_settings().recent_runs_limit, user_id=restricted
+        )
         # One pipeline for every record hash — no per-id N+1 of HGETALLs.
         records = await store.get_runs(r, run_ids)
         present: list[tuple[str, dict[str, str]]] = []
@@ -223,7 +224,7 @@ async def list_tool_runs(tool_name: str) -> list[dict]:
         liveness = dict(zip(running_ids, await store.liveness_present_many(r, running_ids), strict=True))
         for run_id, record in present:
             record = await reconcile._reconcile_lost_with_liveness(
-                r, store, run_id, record, liveness.get(run_id, True), settings.result_ttl_seconds
+                r, store, run_id, record, liveness.get(run_id, True), _pkg.tool_runs_settings().result_ttl_seconds
             )
             entries.append(views._list_view(run_id, record))
     return entries

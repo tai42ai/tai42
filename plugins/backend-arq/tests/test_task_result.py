@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from arq.jobs import JobStatus, ResultNotFound
 
-from tai42_backend_arq import tools
+from tai42_backend_arq import pool, tools
 from tai42_backend_arq.settings import TaskFailedError
+
+from .conftest import lease_of
 
 
 class _FakeJob:
@@ -36,7 +38,7 @@ class _FakeJob:
 async def _run(*, statuses: list[JobStatus], result: Any, timeout: float | None) -> Any:
     job = _FakeJob(statuses=statuses, result=result)
     with (
-        patch.object(tools.RedisPoolManager, "get", AsyncMock(return_value=object())),
+        patch.object(pool, "arq_connection", lease_of(object())),
         patch.object(tools, "Job", return_value=job),
     ):
         return await tools.backend_task_result("task-1", timeout=timeout)
@@ -119,7 +121,7 @@ async def test_own_cancellation_propagates_never_reads_as_stored_abort() -> None
             await asyncio.Event().wait()
 
     with (
-        patch.object(tools.RedisPoolManager, "get", AsyncMock(return_value=object())),
+        patch.object(pool, "arq_connection", lease_of(object())),
         patch.object(tools, "Job", return_value=_HangingJob()),
     ):
         task = asyncio.get_running_loop().create_task(tools.backend_task_result("task-1", timeout=5))
@@ -132,7 +134,7 @@ async def test_own_cancellation_propagates_never_reads_as_stored_abort() -> None
 async def test_task_status_returns_enum_value() -> None:
     job = _FakeJob(statuses=[JobStatus.queued], result=None)
     with (
-        patch.object(tools.RedisPoolManager, "get", AsyncMock(return_value=object())),
+        patch.object(pool, "arq_connection", lease_of(object())),
         patch.object(tools, "Job", return_value=job),
     ):
         assert await tools.backend_task_status("task-1") == "queued"

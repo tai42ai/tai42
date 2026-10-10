@@ -156,6 +156,8 @@ dev = [
     "redis>=5",
     # The jq envelope-encoding parity tests compare numpy scalars with json.dumps.
     "numpy>=2",
+    # The clients' connection-context tests run on uvloop as well as asyncio.
+    "uvloop>=0.22; sys_platform != 'win32'",
 ]
 
 [tool.setuptools]

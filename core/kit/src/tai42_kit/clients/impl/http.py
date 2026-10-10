@@ -1,4 +1,10 @@
-"""Pooled ``httpx`` client for app-owned outbound HTTP."""
+"""Pooled ``httpx`` client for app-owned outbound HTTP.
+
+On uvloop a keep-alive connection keeps the context of the request whose call opened it, so
+a connection opened in a client epoch's pool holds that request (and the serving generation
+that admitted it) until the pool is drained when that epoch retires: the transport offers
+no public seam to open its connections from another context.
+"""
 
 import httpx
 

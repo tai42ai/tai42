@@ -111,7 +111,15 @@ def runs_wired(monkeypatch):
 
 async def _seed_run(runs_wired, run_id: str, own_id: str, score: float) -> None:
     await runs_wired.store.create_run(
-        runs_wired.fake, run_id, "alpha", "2026-01-01T00:00:00+00:00", score, runs_wired.settings, user_id=own_id
+        runs_wired.fake,
+        run_id,
+        "alpha",
+        "2026-01-01T00:00:00+00:00",
+        score,
+        result_ttl_seconds=runs_wired.settings.result_ttl_seconds,
+        liveness_ttl_seconds=runs_wired.settings.liveness_ttl_seconds,
+        recent_runs_limit=runs_wired.settings.recent_runs_limit,
+        user_id=own_id,
     )
 
 

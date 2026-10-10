@@ -23,7 +23,6 @@ from tai42_contract.backend.runtime import CONSUMING_RUNTIME, ExecutionMode
 
 from tai42_backend_arq import worker
 from tai42_backend_arq.backend import ArqBackend
-from tai42_backend_arq.pool import RedisPoolManager
 from tai42_backend_arq.scheduler import recover_stalled_schedules
 from tai42_backend_arq.worker import ArqWorkerRuntime
 
@@ -78,15 +77,7 @@ class _StubPool:
 
 
 @pytest.fixture
-def pool_close(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    """The shared ArqRedis pool's close, stubbed — the runtime owns closing it."""
-    close = AsyncMock()
-    monkeypatch.setattr(RedisPoolManager, "close", close)
-    return close
-
-
-@pytest.fixture
-def worker_env(monkeypatch: pytest.MonkeyPatch, pool_close: AsyncMock) -> type[_FakeWorker]:
+def worker_env(monkeypatch: pytest.MonkeyPatch) -> type[_FakeWorker]:
     _FakeWorker.instances.clear()
     monkeypatch.setattr(worker, "Worker", _FakeWorker)
     return _FakeWorker
@@ -244,24 +235,22 @@ async def test_request_terminate_escalates_a_drain_to_a_cold_stop(worker_env) ->
 # -- teardown ------------------------------------------------------------------------
 
 
-async def test_aclose_closes_the_shared_pool_and_the_worker(worker_env, pool_close) -> None:
+async def test_aclose_closes_the_worker(worker_env) -> None:
     runtime = await _built()
 
     await runtime.aclose()
 
-    pool_close.assert_awaited_once()
     assert worker_env.latest().closed is True
 
 
-async def test_aclose_without_a_built_worker_still_closes_the_shared_pool(worker_env, pool_close) -> None:
+async def test_aclose_without_a_built_worker_returns_cleanly(worker_env) -> None:
     # The launch path closes on every exit, including one where ``build`` raised.
     await ArqWorkerRuntime.from_args([]).aclose()
 
-    pool_close.assert_awaited_once()
     assert worker_env.instances == []
 
 
-async def test_aclose_after_a_completed_drain_does_not_cancel_finished_work(pool_close) -> None:
+async def test_aclose_after_a_completed_drain_does_not_cancel_finished_work() -> None:
     """``Worker.close`` calls ``handle_sig(SIGUSR1)`` ITSELF when the worker was
     built with ``handle_signals=False`` (arq's embedded-worker path), and then
     gathers whatever is left in ``tasks``. Work the drain already finished must
@@ -288,10 +277,9 @@ async def test_aclose_after_a_completed_drain_does_not_cancel_finished_work(pool
     assert not finished.cancelled()
     assert finished.exception() is None
     assert pool.closed is True
-    pool_close.assert_awaited_once()
 
 
-async def test_aclose_severs_work_that_outlived_the_drain(pool_close) -> None:
+async def test_aclose_severs_work_that_outlived_the_drain() -> None:
     """The other face of the same arq behavior, pinned so it is not a surprise:
     ``close`` cancels whatever is STILL running and re-raises that cancellation
     out of its own gather.
@@ -318,7 +306,7 @@ async def test_aclose_severs_work_that_outlived_the_drain(pool_close) -> None:
 # -- the standalone entry point -------------------------------------------------------
 
 
-def test_main_runs_a_standalone_worker_with_arq_owning_the_signals(worker_env, pool_close) -> None:
+def test_main_runs_a_standalone_worker_with_arq_owning_the_signals(worker_env) -> None:
     """The direct CLI has no host chain to compose with and no app booting
     alongside it, so arq keeps its own handlers -- the only thing that would
     drain a SIGTERM there."""
@@ -360,7 +348,7 @@ async def test_launch_rejects_an_unknown_worker_option(worker_env) -> None:
     assert worker_env.instances == []
 
 
-async def test_launch_worker_parses_its_options_and_runs_the_worker(worker_env, pool_close) -> None:
+async def test_launch_worker_parses_its_options_and_runs_the_worker(worker_env) -> None:
     await ArqBackend().launch(["worker", "--max-jobs", "7", "--burst"])
 
     built = worker_env.latest()
@@ -369,10 +357,9 @@ async def test_launch_worker_parses_its_options_and_runs_the_worker(worker_env, 
     assert built.kwargs["job_timeout"] == 300
     assert built.ran is True
     assert built.closed is True
-    pool_close.assert_awaited_once()
 
 
-async def test_launch_does_not_consume_until_the_app_is_boot_ready(stub_app, worker_env, pool_close) -> None:
+async def test_launch_does_not_consume_until_the_app_is_boot_ready(stub_app, worker_env) -> None:
     """Building is not consuming, so the worker object may exist early; RUNNING
     it against a half-built tool registry would fail every job permanently."""
     stub_app.lifecycle.ready.clear()
@@ -391,9 +378,7 @@ async def test_launch_does_not_consume_until_the_app_is_boot_ready(stub_app, wor
             task.cancel()
 
 
-async def test_launch_refuses_to_consume_when_the_app_never_becomes_ready(
-    stub_app, worker_env, pool_close, monkeypatch
-) -> None:
+async def test_launch_refuses_to_consume_when_the_app_never_becomes_ready(stub_app, worker_env, monkeypatch) -> None:
     monkeypatch.setattr(ArqBackend, "ready_timeout", 0.05)
     stub_app.lifecycle.ready.clear()
 
@@ -403,10 +388,9 @@ async def test_launch_refuses_to_consume_when_the_app_never_becomes_ready(
     assert worker_env.latest().ran is False
     # Teardown runs on the refusal path too.
     assert worker_env.latest().closed is True
-    pool_close.assert_awaited_once()
 
 
-async def test_launch_cancellation_lets_the_arq_drain_finish_before_unwinding(worker_env, pool_close, monkeypatch):
+async def test_launch_cancellation_lets_the_arq_drain_finish_before_unwinding(worker_env, monkeypatch):
     """The sensitive path for this backend: arq's drain is itself a task on the
     serving loop, and the cancellation that requests it arrives on the same
     signal. If the base did not shield the run body, that cancellation would

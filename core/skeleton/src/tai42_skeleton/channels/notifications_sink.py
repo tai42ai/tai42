@@ -228,6 +228,14 @@ class NotificationSink:
         return [json.loads(item) for item in raw_items]
 
 
+def _notification_sink() -> NotificationSink:
+    """The sink over the interactions key prefix, bounded by the channels feed settings read now."""
+    bounds = channels_settings()
+    return NotificationSink(
+        interactions_settings().key_prefix, bounds.notifications_feed_max, bounds.notifications_feed_ttl_seconds
+    )
+
+
 async def record_notification(
     message: str,
     recipient: str | None = None,
@@ -265,10 +273,8 @@ async def record_notification(
 
     if not interactions_store_configured():
         raise NotSupportedError(INTERACTIONS_NOT_CONFIGURED_MESSAGE, extra={"code": INTERACTIONS_NOT_CONFIGURED_CODE})
-    settings = interactions_settings()
-    bounds = channels_settings()
-    sink = NotificationSink(settings.key_prefix, bounds.notifications_feed_max, bounds.notifications_feed_ttl_seconds)
-    async with client_ctx(RedisClient, settings.redis) as r:
+    sink = _notification_sink()
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         return await sink.record(
             r,
             message,
@@ -295,10 +301,8 @@ async def read_notifications(audience: str | None = None) -> list[dict]:
     :meth:`NotificationSink.read_for` (that identity's per-identity feed). Every
     Redis or serialization failure propagates loudly.
     """
-    settings = interactions_settings()
-    bounds = channels_settings()
-    sink = NotificationSink(settings.key_prefix, bounds.notifications_feed_max, bounds.notifications_feed_ttl_seconds)
-    async with client_ctx(RedisClient, settings.redis) as r:
+    sink = _notification_sink()
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         if audience is not None:
             return await sink.read_for(r, audience)
         return await sink.read(r)

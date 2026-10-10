@@ -115,8 +115,7 @@ async def visit(
     resumes = [item for item in resume if isinstance(item, ResumeItem)]
     takes = [item for item in resume if isinstance(item, TakeItem)]
 
-    settings = interactions_settings() if interactions_store_configured() else None
-    store = InteractionStore(settings.key_prefix) if settings is not None else None
+    store = InteractionStore(interactions_settings().key_prefix) if interactions_store_configured() else None
     ctx = current_state_context()
     candidates = ctx.candidates if ctx is not None else None
 
@@ -134,7 +133,7 @@ async def visit(
             "multi_run", "a visit resolves one held run: a live resume and a settled take cannot share one visit"
         )
 
-    parked = await _parked_index(store, settings, candidates) if (cancel or resume) else {}
+    parked = await _parked_index(store, candidates) if (cancel or resume) else {}
     for iid in (*cancel, *(item.id for item in resume)):
         if iid not in parked:
             raise ParkedEntryGoneError(f"interaction {iid!r} is not parked on this run's subject")
@@ -152,23 +151,21 @@ async def visit(
     #     before anything is cancelled, resumed, taken or started; a held subject refuses here. ---
     async with run_entry_drain():
         # --- 2. Cancel (each id → the one whole-chain kill seam). ---
-        cancelled = await _cancel_all(store, settings, cancel, parked)
+        cancelled = await _cancel_all(store, cancel, parked)
 
         # --- 3/4/5. At most one action besides cancel, then normalise what came back. ---
         if resumes:
-            result = await _drive_resumes(
-                store, settings, ctx, candidates, resumes, parked, receives_outcome, effective_answers
-            )
-            kind, value, asks, suspended = await _normalise(store, settings, candidates, result)
+            result = await _drive_resumes(store, ctx, candidates, resumes, parked, receives_outcome, effective_answers)
+            kind, value, asks, suspended = await _normalise(store, candidates, result)
             return VisitOutcome(
                 action="resumed", cancelled=cancelled, kind=kind, result=value, asks=asks, suspended=suspended
             )
         if takes:
-            value = await _take_all(store, settings, takes)
+            value = await _take_all(store, takes)
             return VisitOutcome(action="taken", cancelled=cancelled, kind="result", result=value)
         if start is not None:
             started = await _run_start(target_name, start, extras, state_binding)
-            kind, value, asks, suspended = await _normalise(store, settings, candidates, started)
+            kind, value, asks, suspended = await _normalise(store, candidates, started)
             return VisitOutcome(
                 action="started", cancelled=cancelled, kind=kind, result=value, asks=asks, suspended=suspended
             )
@@ -272,12 +269,12 @@ async def _assert_extras_declared(target_name: str, extras: Mapping[str, Any]) -
 
 
 async def _parked_index(
-    store: InteractionStore | None, settings: Any, candidates: SubjectCandidates | None
+    store: InteractionStore | None, candidates: SubjectCandidates | None
 ) -> dict[str, dict[str, Any]]:
     """The run's own parked list as ``{id: entry}`` — the pre-check's id match reads it."""
     if store is None or candidates is None:
         return {}
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         entries = await store.list_parked_for(r, candidates)
     return {entry["id"]: entry for entry in entries}
 
@@ -286,12 +283,12 @@ async def _parked_index(
 
 
 async def _cancel_all(
-    store: InteractionStore | None, settings: Any, cancel: list[str], parked: dict[str, dict[str, Any]]
+    store: InteractionStore | None, cancel: list[str], parked: dict[str, dict[str, Any]]
 ) -> list[str]:
     """Whole-chain kill each cancel id through the one teardown seam; return the ids acted on."""
     if not cancel or store is None:
         return list(cancel)
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         for iid in cancel:
             await kill_park(r, store, iid, parked[iid].get("group_id") or "", reason="cancelled")
     return list(cancel)
@@ -302,7 +299,6 @@ async def _cancel_all(
 
 async def _drive_resumes(
     store: InteractionStore | None,
-    settings: Any,
     ctx: StateContext | None,
     candidates: SubjectCandidates | None,
     resumes: list[ResumeItem],
@@ -321,7 +317,7 @@ async def _drive_resumes(
         raise ParkedEntryGoneError("no interactions store is configured")
     result: Any = None
     for item in resumes:
-        result = await _resume_one(store, settings, ctx, candidates, item, receives_outcome, effective_answers[item.id])
+        result = await _resume_one(store, ctx, candidates, item, receives_outcome, effective_answers[item.id])
         # The answer was claimed and its continuation driven: record this id on the
         # ambient run record's resumed-interaction list. A pre-check refusal raises
         # before ever reaching here, so nothing is recorded for a refused visit.
@@ -331,7 +327,6 @@ async def _drive_resumes(
 
 async def _resume_one(
     store: InteractionStore,
-    settings: Any,
     ctx: StateContext | None,
     candidates: SubjectCandidates | None,
     item: ResumeItem,
@@ -350,7 +345,7 @@ async def _resume_one(
     FORM's hidden fields dropped) — recorded and delivered, so a resumed run receives the same
     effective answer every other answer door records.
     """
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         state = await store.get_state(r, item.id)
         if state is None:
             raise ParkedEntryGoneError(f"interaction {item.id!r} vanished before its resume claim")
@@ -361,7 +356,7 @@ async def _resume_one(
             answered_by=_RESUMED_BY_CALLER,
             answered_at=_now(),
         )
-        due_ttl, due_first_attempt_at_ms = continuation_due_timing(settings)
+        due_ttl, due_first_attempt_at_ms = continuation_due_timing(interactions_settings())
         claimed = await store.record_answer(
             r,
             response,
@@ -421,12 +416,12 @@ def _mixed_context(
 # --- take ------------------------------------------------------------------
 
 
-async def _take_all(store: InteractionStore | None, settings: Any, takes: list[TakeItem]) -> Any:
+async def _take_all(store: InteractionStore | None, takes: list[TakeItem]) -> Any:
     """Atomically take each waiting outcome; return the LAST result (``failed`` re-raises)."""
     if store is None:
         raise ParkedEntryGoneError("no interactions store is configured")
     result: Any = None
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         for item in takes:
             outcome = await store.claim_outcome(r, item.id)
             if outcome is None:
@@ -469,7 +464,7 @@ async def _run_start(
 
 
 async def _normalise(
-    store: InteractionStore | None, settings: Any, candidates: SubjectCandidates | None, value: Any
+    store: InteractionStore | None, candidates: SubjectCandidates | None, value: Any
 ) -> tuple[_Kind, Any, list[ParkedEntry], SuspendedInteraction | None]:
     """Classify a start/resume return into ``(kind, result, asks, suspended)`` PER ASK.
 
@@ -480,9 +475,9 @@ async def _normalise(
     the final result.
     """
     if isinstance(value, SuspendedInteraction):
-        return await _normalise_suspended(store, settings, candidates, value)
+        return await _normalise_suspended(store, candidates, value)
     if isinstance(value, ResumeBuffered):
-        return await _normalise_buffered(store, settings, candidates, value)
+        return await _normalise_buffered(store, candidates, value)
     if value is None:
         return "none", None, [], None
     return "result", value, [], None
@@ -490,7 +485,6 @@ async def _normalise(
 
 async def _normalise_suspended(
     store: InteractionStore | None,
-    settings: Any,
     candidates: SubjectCandidates | None,
     sentinel: SuspendedInteraction,
 ) -> tuple[_Kind, Any, list[ParkedEntry], SuspendedInteraction | None]:
@@ -501,9 +495,9 @@ async def _normalise_suspended(
     sentinel itself back; the user-only ``parked`` kind returns the incoming sentinel unchanged.
     """
     if sentinel.caller_interaction_ids:
-        asks = await _entries_for(store, settings, candidates, sentinel.caller_interaction_ids)
+        asks = await _entries_for(store, candidates, sentinel.caller_interaction_ids)
         open_sentinel = await _open_step_sentinel(
-            store, settings, sentinel.interaction_ids, sentinel.caller_interaction_ids, sentinel.expiry_at
+            store, sentinel.interaction_ids, sentinel.caller_interaction_ids, sentinel.expiry_at
         )
         return "asks", None, asks, open_sentinel
     return "parked", None, [], sentinel
@@ -511,7 +505,6 @@ async def _normalise_suspended(
 
 async def _normalise_buffered(
     store: InteractionStore | None,
-    settings: Any,
     candidates: SubjectCandidates | None,
     buffered: ResumeBuffered,
 ) -> tuple[_Kind, Any, list[ParkedEntry], SuspendedInteraction | None]:
@@ -520,20 +513,19 @@ async def _normalise_buffered(
     Both kinds carry the re-park sentinel over the still-open ids of the step: the ``asks`` kind over
     ALL remaining ids (its caller subset split out), the ``parked`` kind over the user ids alone.
     """
-    index = await _parked_index(store, settings, candidates)
+    index = await _parked_index(store, candidates)
     caller_ids = [iid for iid in buffered.remaining_ids if index.get(iid, {}).get("to") == "caller"]
     user_ids = [iid for iid in buffered.remaining_ids if index.get(iid, {}).get("to") == "user"]
     if caller_ids:
         asks = [ParkedEntry(**index[iid]) for iid in caller_ids if iid in index]
-        open_sentinel = await _open_step_sentinel(store, settings, buffered.remaining_ids, caller_ids)
+        open_sentinel = await _open_step_sentinel(store, buffered.remaining_ids, caller_ids)
         return "asks", None, asks, open_sentinel
-    sentinel = await _open_step_sentinel(store, settings, user_ids, [])
+    sentinel = await _open_step_sentinel(store, user_ids, [])
     return "parked", None, [], sentinel
 
 
 async def _open_step_sentinel(
     store: InteractionStore | None,
-    settings: Any,
     open_ids: list[str],
     caller_ids: list[str],
     reported_expiry: datetime | None = None,
@@ -552,7 +544,7 @@ async def _open_step_sentinel(
         return None
     owners: set[str] = set()
     deadlines = [reported_expiry] if reported_expiry is not None else []
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         for iid in open_ids:
             state = await store.get_state(r, iid)
             if state is None:
@@ -576,10 +568,10 @@ async def _open_step_sentinel(
 
 
 async def _entries_for(
-    store: InteractionStore | None, settings: Any, candidates: SubjectCandidates | None, ids: list[str]
+    store: InteractionStore | None, candidates: SubjectCandidates | None, ids: list[str]
 ) -> list[ParkedEntry]:
     """The full parked entries of ``ids``, read back off the run's subject list after a park."""
-    index = await _parked_index(store, settings, candidates)
+    index = await _parked_index(store, candidates)
     return [ParkedEntry(**index[iid]) for iid in ids if iid in index]
 
 
@@ -608,14 +600,13 @@ async def normalise_started(value: Any) -> VisitOutcome:
 
     The same normalisation :func:`visit` applies to what ``start`` returned, exposed for a door
     that already ran its start inside its OWN visit and only needs the return classified into
-    caller asks / a re-park / a final result. Resolves the store, settings and ambient subject
+    caller asks / a re-park / a final result. Resolves the store and ambient subject
     candidates exactly as :func:`visit` does before it starts.
     """
-    settings = interactions_settings() if interactions_store_configured() else None
-    store = InteractionStore(settings.key_prefix) if settings is not None else None
+    store = InteractionStore(interactions_settings().key_prefix) if interactions_store_configured() else None
     ctx = current_state_context()
     candidates = ctx.candidates if ctx is not None else None
-    kind, result, asks, suspended = await _normalise(store, settings, candidates, value)
+    kind, result, asks, suspended = await _normalise(store, candidates, value)
     return VisitOutcome(action="started", cancelled=[], kind=kind, result=result, asks=asks, suspended=suspended)
 
 
@@ -637,9 +628,8 @@ async def list_parked_for(context: StateContext | None) -> list[ParkedEntry]:
     """
     if context is None or not interactions_store_configured():
         return []
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
-    async with client_ctx(RedisClient, settings.redis) as r:
+    store = InteractionStore(interactions_settings().key_prefix)
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         entries = await store.list_parked_for(r, context.candidates)
     return [ParkedEntry(**entry) for entry in entries]
 

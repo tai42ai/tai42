@@ -1,48 +1,59 @@
-"""Process-wide cached :class:`~arq.connections.ArqRedis` pool.
+"""The arq enqueue connection: an :class:`~arq.connections.ArqRedis` facade over the kit's pooled Redis client.
 
-arq-native operations (enqueue, ``Job`` status/result, schedule hashes) share
-one lazily created pool configured with this backend's JSON job (de)serializers.
-``close`` is wired to the app shutdown hook (see
-:mod:`tai42_backend_arq.lifecycle`).
+arq-native operations (enqueue, ``Job`` status/result, schedule hashes) lease the kit's
+pooled async Redis client for this backend's connection settings and drive arq through an
+``ArqRedis`` built over that client's connection pool, configured with this backend's JSON
+job (de)serializers and queue name. The pool is the kit's: one per client epoch, drained
+when the serving generation that leased it retires, its connections opened from an empty
+context. The facade owns nothing and is built per lease. An unreachable Redis fails loudly
+at first use, as for every kit-pooled client, through the client's own command retry.
 """
 
 from __future__ import annotations
 
-import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
 
-from arq import ArqRedis, create_pool
+from arq import ArqRedis
+from redis.asyncio import ConnectionPool
+from tai42_kit.clients import client_ctx
+from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_backend_arq.settings import arq_settings, job_deserializer, job_serializer
 
 
-class RedisPoolManager:
-    """The process-wide cached ``ArqRedis`` pool and its lifecycle."""
+def enqueue_client_kwargs() -> dict[str, Any]:
+    """The kit Redis client kwargs for this backend's connection settings.
 
-    _pool: ArqRedis | None = None
-    # Lazily created on the running loop it is first awaited on; dropped with the pool.
-    _lock: asyncio.Lock | None = None
+    The URL carries the host, port, database, credentials and TLS (``rediss://``); the
+    connection cap and arq's connect timeout ride beside it. Responses stay bytes, the
+    shape arq reads.
+    """
+    settings = arq_settings()
+    return {
+        "url": settings.redis_url,
+        "max_connections": settings.redis_max_connections,
+        "decode_responses": False,
+        "socket_connect_timeout": settings.redis_settings.conn_timeout,
+        "env_prefix": settings.model_config.get("env_prefix") or "",
+    }
 
-    @classmethod
-    async def get(cls) -> ArqRedis:
-        """The cached pool, creating it once on first await."""
-        if cls._pool is None:
-            # Double-checked under the lock so two pools can't race into existence.
-            if cls._lock is None:
-                cls._lock = asyncio.Lock()
-            async with cls._lock:
-                if cls._pool is None:
-                    cls._pool = await create_pool(
-                        arq_settings().redis_settings,
-                        default_queue_name=arq_settings().queue_name,
-                        job_serializer=job_serializer,
-                        job_deserializer=job_deserializer,
-                    )
-        return cls._pool
 
-    @classmethod
-    async def close(cls) -> None:
-        """Close and drop the cached pool (wired to the app shutdown hook)."""
-        if cls._pool:
-            await cls._pool.aclose()
-            cls._pool = None
-        cls._lock = None
+@asynccontextmanager
+async def arq_connection() -> AsyncIterator[Any]:
+    """Lease the kit's pooled Redis client and yield an ``ArqRedis`` over its connection pool.
+
+    Yielded as ``Any``: redis-py types each command's return as the union of its sync and
+    async shapes, while this async client's commands always return an awaitable.
+    """
+    async with client_ctx(RedisClient, **enqueue_client_kwargs()) as client:
+        connection_pool = client.connection_pool
+        if not isinstance(connection_pool, ConnectionPool):
+            raise TypeError(f"the kit Redis client's pool is {type(connection_pool).__name__}, not an asyncio pool")
+        yield ArqRedis(
+            pool_or_conn=connection_pool,
+            job_serializer=job_serializer,
+            job_deserializer=job_deserializer,
+            default_queue_name=arq_settings().queue_name,
+        )

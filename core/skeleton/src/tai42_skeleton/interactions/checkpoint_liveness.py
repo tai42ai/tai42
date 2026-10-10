@@ -29,12 +29,11 @@ async def threads_with_live_parks(provider: str, conn_string: str | None, thread
     expiry. Empty when the interactions store is unconfigured — no park could ever have been
     persisted. The checkpoint store does not change the answer: a park index entry names the thread.
     """
-    settings = interactions_settings()
-    if not settings.redis.redis_url:
+    if not interactions_settings().redis.redis_url:
         return set()
-    store = InteractionStore(settings.key_prefix)
+    store = InteractionStore(interactions_settings().key_prefix)
     parked: set[str] = set()
-    async with client_ctx(RedisClient, settings.redis) as conn:
+    async with client_ctx(RedisClient, interactions_settings().redis) as conn:
         for thread_id in thread_ids:
             if await store.thread_park_members(conn, thread_id) or await store.subject_members(
                 conn, "thread", thread_id

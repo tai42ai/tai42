@@ -237,10 +237,10 @@ async def test_redis_store_is_handed_a_client_built_from_the_resolved_url(monkey
     assert isinstance(client, AsyncRedis)
     assert client_target(client) == "vault:6380/3"
     # The WHOLE url survives the hand-off, not just the endpoint: ``rediss://``
-    # selects the TLS connection class (identity, not isinstance — the plain
-    # ``Connection`` is its base) and the credentials ride along with it.
+    # selects a TLS connection class (the plain TCP one is not an ``SSLConnection``)
+    # and the credentials ride along with it.
     pool = client.connection_pool
-    assert pool.connection_class is SSLConnection
+    assert issubclass(pool.connection_class, SSLConnection)
     assert pool.connection_kwargs["username"] == "user"
     assert pool.connection_kwargs["password"] == "pw"
 

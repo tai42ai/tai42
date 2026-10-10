@@ -79,13 +79,12 @@ async def cancel_parks_for_thread(thread_id: str, *, reason: str = "thread_delet
     """
     from tai42_skeleton.interactions.kill import kill_members
 
-    settings = interactions_settings()
-    if not settings.redis.redis_url:
+    if not interactions_settings().redis.redis_url:
         # Interactions off: no park could ever have been persisted, so there is nothing
         # to cancel (and no Redis to reach for). The delete op proceeds unaffected.
         return []
-    store = InteractionStore(settings.key_prefix)
-    async with client_ctx(RedisClient, settings.redis) as conn:
+    store = InteractionStore(interactions_settings().key_prefix)
+    async with client_ctx(RedisClient, interactions_settings().redis) as conn:
         thread_members = await store.thread_park_members(conn, thread_id)
         members = [*thread_members, *await store.subject_members(conn, "thread", thread_id)]
         reached = await kill_members(conn, store, members, reason=reason)
@@ -105,12 +104,11 @@ async def cancel_parks_for_person(person_id: str, *, reason: str = "person_erase
     from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
     from tai42_skeleton.interactions.kill import kill_members
 
-    settings = interactions_settings()
-    if not settings.redis.redis_url:
+    if not interactions_settings().redis.redis_url:
         return []
-    store = InteractionStore(settings.key_prefix)
+    store = InteractionStore(interactions_settings().key_prefix)
     thread_id = f"{PERSON_THREAD_PREFIX}{person_id}"
-    async with client_ctx(RedisClient, settings.redis) as conn:
+    async with client_ctx(RedisClient, interactions_settings().redis) as conn:
         thread_members = await store.thread_park_members(conn, thread_id)
         members = [
             *thread_members,
@@ -134,11 +132,10 @@ async def rekey_parks_for_merge(absorbed_id: str, survivor_id: str) -> None:
 
     if absorbed_id == survivor_id:
         return
-    settings = interactions_settings()
-    if not settings.redis.redis_url:
+    if not interactions_settings().redis.redis_url:
         return
-    store = InteractionStore(settings.key_prefix)
-    async with client_ctx(RedisClient, settings.redis) as conn:
+    store = InteractionStore(interactions_settings().key_prefix)
+    async with client_ctx(RedisClient, interactions_settings().redis) as conn:
         await store.rekey_subject(conn, kind="person", old_key=absorbed_id, new_key=survivor_id)
         await store.rekey_subject(
             conn,
@@ -366,22 +363,29 @@ async def ask(
     schema = validation.schema
     audience = validation.audience
 
-    settings = interactions_settings()
+    # The ask reads its settings through the cached accessor at each use and keeps none across an
+    # await: a sync ask blocks for its answer, and a configuration reload in the meantime retires
+    # the instance a held local would pin.
     # OFF gate — a loud, named raise before any state is written: an unconfigured
     # interactions store cannot hold the question, so ``ask`` fails naming the
     # env var that turns the feature on rather than reaching for an absent Redis.
-    require(settings.redis.redis_url, "the interactions store", "INTERACTIONS_REDIS_URL", "TAI_DEFAULT_REDIS_URL")
+    require(
+        interactions_settings().redis.redis_url,
+        "the interactions store",
+        "INTERACTIONS_REDIS_URL",
+        "TAI_DEFAULT_REDIS_URL",
+    )
 
     # Async resolves its resume continuation up front, before any state is written: an
     # async ask with no bound driver or no identity to rebind it as is a caller error
     # that must fail loudly. A sync ask carries an empty (all-None) binding.
     park_binding = park.resolve_async_continuation(to) if mode == "async" else park.AsyncParkBinding()
 
-    window = timing.resolve_deadline(mode, timeout, expiry_at, settings)
+    window = timing.resolve_deadline(mode, timeout, expiry_at, interactions_settings())
 
     interaction_id = str(uuid.uuid4())
     group = group_id or str(uuid.uuid4())
-    store = InteractionStore(settings.key_prefix)
+    store = InteractionStore(interactions_settings().key_prefix)
     reply_to = store.reply_key(interaction_id)
 
     # A ``to="caller"`` ask addresses another RUN, never a human: it performs NO send of any
@@ -396,7 +400,9 @@ async def ask(
     callback = (
         None
         if caller_addressed
-        else timing.mint_callback_ticket(settings, window, mode, force=validation.is_external or channel is not None)
+        else timing.mint_callback_ticket(
+            interactions_settings(), window, mode, force=validation.is_external or channel is not None
+        )
     )
 
     if validation.is_external and not caller_addressed:
@@ -418,7 +424,6 @@ async def ask(
 
     stored_media = await persist.persist_question(
         store,
-        settings,
         window,
         callback,
         park_binding,
@@ -467,7 +472,6 @@ async def ask(
         await delivery.deliver_with_retry(
             validation.channel_obj,
             delivery_frame,
-            settings,
             store,
             window,
             channel=channel,
@@ -504,7 +508,6 @@ async def ask(
 
     return await wait.await_answer(
         store,
-        settings,
         window,
         interaction_id=interaction_id,
         group=group,

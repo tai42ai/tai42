@@ -249,7 +249,6 @@ async def _inline_visit(wired: SimpleNamespace, state: InteractionState) -> None
     with run_delivery(RunDelivery("rd-the-visiting-turn", None)):
         await visit_module._resume_one(
             wired.store,
-            wired.settings,
             None,
             None,
             ResumeItem(id=state.request.interaction_id, payload="yes"),

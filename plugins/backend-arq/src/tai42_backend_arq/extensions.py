@@ -24,7 +24,7 @@ from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 from tai42_kit.utils.schedule_subject import SCHEDULE_STAMPED_DOOR_OPTS
 
-from tai42_backend_arq.pool import RedisPoolManager
+from tai42_backend_arq import pool
 from tai42_backend_arq.records import derive_cron_or_interval, next_run_after
 from tai42_backend_arq.scheduler import safe_schedule_transition, wait_job_result
 from tai42_backend_arq.settings import arq_settings
@@ -45,15 +45,14 @@ def sync_task(func: Callable[..., Any], name: str, description: str) -> Callable
 
     async def func_impl(*args: Any, **kwargs: Any) -> Any:
         kwargs = await prepare_backend_kwargs(func, arq_settings().tool_name_arg, name, kwargs)
-        arq_redis = await RedisPoolManager.get()
+        async with pool.arq_connection() as arq_redis:
+            job = await enqueue_task(arq_redis, *args, **kwargs)
+            timeout = arq_settings().task_timeout
 
-        job = await enqueue_task(arq_redis, *args, **kwargs)
-        timeout = arq_settings().task_timeout
-
-        try:
-            return await wait_job_result(job, timeout=timeout)
-        except TimeoutError:
-            raise TimeoutError(f"Job {job.job_id} did not complete within {timeout} seconds.") from None
+            try:
+                return await wait_job_result(job, timeout=timeout)
+            except TimeoutError:
+                raise TimeoutError(f"Job {job.job_id} did not complete within {timeout} seconds.") from None
 
     branch = create_function(
         func_signature=sig,
@@ -87,7 +86,6 @@ def schedule_task(func: Callable[..., Any], name: str, description: str) -> Call
     async def func_impl(*args: Any, **kwargs: Any) -> None:
         kwargs = await prepare_backend_kwargs(func, arq_settings().tool_name_arg, name, kwargs, scheduled=True)
 
-        arq_redis = await RedisPoolManager.get()
         schedule_name = kwargs.pop("backend_schedule_name", None)
         schedule_in = kwargs.pop("backend_schedule", None)
         if not schedule_name:
@@ -108,14 +106,15 @@ def schedule_task(func: Callable[..., Any], name: str, description: str) -> Call
             "enabled": "true",
         }
 
-        await safe_schedule_transition(
-            arq_redis,
-            schedule_name,
-            defer_by=defer_by,
-            last_scheduled_ts=last_scheduled_ts,
-            mapping_updates=mapping_updates,
-            enforce_job_id=None,
-        )
+        async with pool.arq_connection() as arq_redis:
+            await safe_schedule_transition(
+                arq_redis,
+                schedule_name,
+                defer_by=defer_by,
+                last_scheduled_ts=last_scheduled_ts,
+                mapping_updates=mapping_updates,
+                enforce_job_id=None,
+            )
 
     branch = create_function(
         func_signature=sig.replace(return_annotation=inspect.Signature.empty),
@@ -147,9 +146,9 @@ def async_task(func: Callable[..., Any], name: str, description: str) -> Callabl
     async def func_impl(*args: Any, **kwargs: Any) -> dict[str, Any]:
         kwargs = await prepare_backend_kwargs(func, arq_settings().tool_name_arg, name, kwargs)
 
-        arq_redis = await RedisPoolManager.get()
-        job = await enqueue_task(arq_redis, *args, **kwargs)
-        return {"task_id": job.job_id, "status": "submitted"}
+        async with pool.arq_connection() as arq_redis:
+            job = await enqueue_task(arq_redis, *args, **kwargs)
+            return {"task_id": job.job_id, "status": "submitted"}
 
     branch = create_function(
         func_signature=sig.replace(return_annotation=dict[str, Any]),

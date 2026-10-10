@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from tai42_skeleton.authz.identity import CallerIdentity
-    from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +76,6 @@ async def create_recorded_run(
     r: Any,
     store: ToolRunStore,
     tool_name: str,
-    settings: ToolRunsSettings,
     *,
     user_id: str | None,
     arguments: dict[str, Any],
@@ -98,6 +96,7 @@ async def create_recorded_run(
     indexes where the original's would have. Each door resolves its own source and passes it here:
     the hook door its ambient fire context, the submit door the ``door="api"`` context built from
     the submitted ``StateSubject`` (the same context the supervisor deposits around the live run).
+    The record's TTLs and index bound are read from the tool-runs settings at the write.
     Returns the generated ``run_id``.
     """
     crash_resume = await _tool_declares_crash_resume(tool_name)
@@ -109,7 +108,9 @@ async def create_recorded_run(
         tool_name,
         started.isoformat(),
         started.timestamp(),
-        settings,
+        result_ttl_seconds=_pkg.tool_runs_settings().result_ttl_seconds,
+        liveness_ttl_seconds=_pkg.tool_runs_settings().liveness_ttl_seconds,
+        recent_runs_limit=_pkg.tool_runs_settings().recent_runs_limit,
         user_id=user_id,
         arguments=arguments,
         extras=extras,

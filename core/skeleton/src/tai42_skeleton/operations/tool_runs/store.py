@@ -6,8 +6,6 @@ import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
-
 from .models import _RUNNING
 
 if TYPE_CHECKING:
@@ -36,7 +34,7 @@ class ToolRunStore:
     """Every tool-run key shape and the read/write operations behind one class.
 
     Operations take the redis client as an argument; each caller opens it from
-    the tool-runs settings via ``client_ctx(RedisClient, settings.redis)``. Loud
+    the tool-runs settings via ``client_ctx(RedisClient, tool_runs_settings().redis)``. Loud
     by contract — no swallowed errors, no silent fallback.
     """
 
@@ -74,7 +72,10 @@ class ToolRunStore:
         tool_name: str,
         started_at: str,
         score: float,
-        settings: ToolRunsSettings,
+        *,
+        result_ttl_seconds: int,
+        liveness_ttl_seconds: int,
+        recent_runs_limit: int,
         user_id: str | None = None,
         arguments: dict[str, Any] | None = None,
         extras: Mapping[str, Any] | None = None,
@@ -84,8 +85,8 @@ class ToolRunStore:
         """Persist a new ``running`` record, prime its liveness key, and index it in the recent-runs ZSET.
 
         Trims the ZSET to the newest ``recent_runs_limit`` members. The record hash and the
-        index both carry the record TTL so a tool that stops being run eventually drops its
-        index.
+        index both carry the record TTL (``result_ttl_seconds``) so a tool that stops being run
+        eventually drops its index; the liveness key carries ``liveness_ttl_seconds``.
 
         ``user_id`` is the OWNING identity of the run — always the caller's own id
         (each key is its own island). When present it is stamped onto
@@ -124,20 +125,20 @@ class ToolRunStore:
                 record["state_context"] = json.dumps(state_context.model_dump(mode="json"))
         pipe = r.pipeline()
         pipe.hset(run_key, mapping=record)
-        pipe.expire(run_key, settings.result_ttl_seconds)
-        pipe.set(self.liveness_key(run_id), "1", ex=settings.liveness_ttl_seconds)
+        pipe.expire(run_key, result_ttl_seconds)
+        pipe.set(self.liveness_key(run_id), "1", ex=liveness_ttl_seconds)
         pipe.zadd(recent_key, {run_id: score})
         # Trim to the newest N: rank 0..-(limit+1) is every member older than the
         # newest ``limit`` (lowest-scored first), removed in one call.
-        pipe.zremrangebyrank(recent_key, 0, -(settings.recent_runs_limit + 1))
-        pipe.expire(recent_key, settings.result_ttl_seconds)
+        pipe.zremrangebyrank(recent_key, 0, -(recent_runs_limit + 1))
+        pipe.expire(recent_key, result_ttl_seconds)
         if user_id is not None:
             # The per-identity index mirrors the shared index's shape exactly (same
             # bound, same TTL) so a restricted caller's own window stays complete.
             user_key = self.recent_key(tool_name, user_id)
             pipe.zadd(user_key, {run_id: score})
-            pipe.zremrangebyrank(user_key, 0, -(settings.recent_runs_limit + 1))
-            pipe.expire(user_key, settings.result_ttl_seconds)
+            pipe.zremrangebyrank(user_key, 0, -(recent_runs_limit + 1))
+            pipe.expire(user_key, result_ttl_seconds)
         await pipe.execute()
 
     async def refresh_liveness(self, r: Any, run_id: str, ttl: int) -> None:

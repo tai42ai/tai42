@@ -67,8 +67,8 @@ class SpyClient:
 
 
 def install_spy_client(monkeypatch) -> list[SpyClient]:
-    """Make ``AsyncRedis.from_url`` hand back close-counting spies."""
-    from redis.asyncio import Redis as AsyncRedis
+    """Make the kit's async Redis client builder hand back close-counting spies."""
+    from tai42_kit.clients.impl import redis as redis_impl
 
     built: list[SpyClient] = []
 
@@ -77,7 +77,7 @@ def install_spy_client(monkeypatch) -> list[SpyClient]:
         built.append(client)
         return client
 
-    monkeypatch.setattr(AsyncRedis, "from_url", staticmethod(_from_url))
+    monkeypatch.setattr(redis_impl, "async_redis_from_url", _from_url)
     return built
 
 
