@@ -259,6 +259,10 @@ class DockerSandbox(ManagedSandbox):
     def _settings(self) -> DockerSandboxSettings:
         return self._settings_override or docker_sandbox_settings()
 
+    def dispatch_settings(self) -> DockerSandboxSettings:
+        """The ``SANDBOX_DOCKER_`` group: its exec default and reap interval are this provider's."""
+        return self._settings()
+
     async def _engine(self) -> Any:
         if self._client is None:
             if self._injected_client is not None:

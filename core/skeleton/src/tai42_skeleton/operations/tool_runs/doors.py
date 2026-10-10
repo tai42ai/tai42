@@ -5,18 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import UnavailableError
 from tai42_contract.states import StateSubject
 from tai42_kit.clients.impl.redis import RedisClient
 
 import tai42_skeleton.operations.tool_runs as _pkg
-from tai42_skeleton.operations import (
-    BadRequestError,
-    ForbiddenError,
-    NotFoundError,
-    NotSupportedError,
-    UnavailableError,
-    operation,
-)
+from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotFoundError, NotSupportedError, operation
 from tai42_skeleton.operations.response_models_group_b import RunSubmitted, ToolRunListResponse, ToolRunView
 from tai42_skeleton.routers.tool_runs_settings import tool_runs_store_configured
 

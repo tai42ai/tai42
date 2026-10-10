@@ -180,6 +180,7 @@ def test_deep_agent_per_turn_marking_sends_one_breakpoint_on_a_reused_thread() -
     async def run_two_turns() -> list[BaseMessage]:
         agent = await build_langchain_deep_agent(
             llm=model,
+            provider="anthropic",
             store=InMemoryStore(),
             checkpointer=InMemorySaver(),
             tools=[],

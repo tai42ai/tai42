@@ -140,7 +140,7 @@ class VotingAgentInput(BaseModel):
     Anthropic prompt caching) onto the judge's last user message; a provider-unknown
     key surfaces as a loud provider error. On a checkpointed thread the model call keeps
     only the newest mark (older marks are stripped), so per-turn marking stays within the
-    provider's breakpoint cap (Anthropic: 4). The
+    provider's per-request breakpoint cap. The
     judge/voter system messages are internal fixed prompts, so ``system_content_kwargs``
     has no seat and is rejected.
 

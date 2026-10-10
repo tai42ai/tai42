@@ -22,9 +22,8 @@ The `SANDBOX_LOCAL_` env group.
 | --- | --- | --- |
 | `SANDBOX_LOCAL_ROOT` | `/var/lib/tai-sandbox-local` | Host workspace root. A persistent session's workspace is the named directory `<SANDBOX_LOCAL_ROOT>/<workspace_key>`. Changing it strands existing durable workspaces (recycle-class). |
 | `SANDBOX_LOCAL_BASE_PATH` | `/usr/local/bin:/usr/bin:/bin` | The `PATH` seeded into the clean subprocess env so a host subprocess resolves its binary without inheriting the host environment. A `spec.env` / per-exec `env` `PATH` overrides it. |
-| `SANDBOX_LOCAL_DEFAULT_TTL_SECONDS` | `3600` | Default reap deadline for an idle session. |
-| `SANDBOX_LOCAL_REAP_INTERVAL_SECONDS` | `300` | Interval of the reap sweep. |
-| `SANDBOX_LOCAL_EXEC_DEFAULT_TIMEOUT_SECONDS` | `300` | Default per-`exec` timeout. |
+| `SANDBOX_LOCAL_REAP_INTERVAL_SECONDS` | `300` | Sweep interval of the platform reaper while this provider is bound. |
+| `SANDBOX_LOCAL_EXEC_DEFAULT_TIMEOUT_SECONDS` | `300` | Timeout bounding a consumer's short exec that names none (e.g. the deep agent's file operations). |
 
 ## Security model — read this honestly
 

@@ -410,7 +410,7 @@ async def test_create_trigger_link_status_mapping(monkeypatch, status, error_nam
     async def _raise(**kwargs):
         raise TriggerLinkError(status, "boom")
 
-    from tai42_skeleton.operations.errors import OperationError
+    from tai42_contract.errors import OperationError
 
     monkeypatch.setattr(hooks_ops.trigger_links, "create_trigger_link", _raise)
     with pytest.raises(OperationError) as ei:

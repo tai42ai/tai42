@@ -241,7 +241,15 @@ def test_sandbox_abstract_methods_pinned_by_name():
     from tai42_contract.sandbox import Sandbox, SandboxExecHandle, SandboxSession
 
     assert Sandbox.__abstractmethods__ == frozenset(
-        {"create_session", "get_session", "list_sessions", "destroy_session", "reap"}
+        {
+            "create_session",
+            "get_session",
+            "list_sessions",
+            "destroy_session",
+            "reap",
+            "exec_default_timeout_seconds",
+            "reap_interval_seconds",
+        }
     )
     assert SandboxSession.__abstractmethods__ == frozenset(
         {"id", "workspace_path", "info", "exec", "exec_start", "put_file", "get_file", "touch", "destroy"}

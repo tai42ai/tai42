@@ -29,7 +29,7 @@ from tai42_contract.agent.events import InterruptFinal, StreamEvent, StructuredF
 from tai42_contract.app import tai42_app
 from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
-from tai42_contract.tools import ClientTool
+from tai42_contract.tools import TOOL_META_CRASH_RESUME, ClientTool
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_system_message, build_user_output, extract_structured_output
@@ -81,7 +81,7 @@ register_chained_park_tool()
 
 
 # The ``crash_resume`` setting is DECLARED to the skeleton at registration as
-# ``meta={"tai42/crash_resume": <setting>}`` on the run tool, threaded through the generic
+# ``meta={TOOL_META_CRASH_RESUME: <setting>}`` on the run tool, threaded through the generic
 # ``agents.agent(name, tags=..., meta=...)`` passthrough; the run-dispatch seam reads that key to
 # decide whether to re-invoke a recycled detached run. Captured ONCE at registration (the setting
 # is recycle-class, so a hot change re-registers and re-declares it). Sourced from the lightweight
@@ -91,7 +91,7 @@ register_chained_park_tool()
 @tai42_app.agents.agent(
     "langchain_deep_agent",
     tags={"agents"},
-    meta={"tai42/crash_resume": langchain_deep_agent_crash_resume()},
+    meta={TOOL_META_CRASH_RESUME: langchain_deep_agent_crash_resume()},
 )
 class DeepAgent(Agent):
     """A LangChain deep agent: planning, subagents, skills, and a filesystem."""

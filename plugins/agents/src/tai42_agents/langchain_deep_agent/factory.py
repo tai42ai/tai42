@@ -27,8 +27,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from tai42_contract.sandbox import SandboxSession
-from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
-from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
+from tai42_kit.llm.middleware import history_middlewares
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
@@ -409,7 +408,7 @@ async def build_langchain_deep_agent(
     auto-loaded as ``SKILLS_ROOT<name>/`` sources.
 
     ``system_prompt`` is the main agent's instructions; a ``SystemMessage`` carrying
-    a ``cache_control`` breakpoint marks the system prefix for prompt caching (kept
+    a prompt-caching breakpoint marks the system prefix for prompt caching (kept
     as the graph's per-run system message, which the rolling cache-mark middleware
     exempts, so the mark stays stable across turns).
 
@@ -453,8 +452,7 @@ async def build_langchain_deep_agent(
     main_middleware: list[Any] = [
         _async_park_middleware,
         SystemPurgeMiddleware(),
-        LeadingUserMiddleware(),
-        RollingCacheMarkMiddleware(),
+        *history_middlewares(provider),
         _tool_error_middleware,
     ]
     if structured_rail is not None:

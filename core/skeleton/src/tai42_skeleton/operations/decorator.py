@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from tai42_skeleton.operations.registry import OperationMetadata, OperationRegistry, operation_registry
 
 if TYPE_CHECKING:
-    from tai42_skeleton.operations.errors import OperationError
+    from tai42_contract.errors import OperationError
 
 # The attribute the metadata record is stamped onto the decorated function.
 OPERATION_ATTR = "__operation__"

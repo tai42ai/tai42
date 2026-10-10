@@ -30,6 +30,7 @@ from tai42_contract.sandbox import (
 )
 
 from tai42_kit.sandbox.session import ManagedSandboxSession
+from tai42_kit.sandbox.settings import SandboxDispatchSettings
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +300,22 @@ class ManagedSandbox(Sandbox):
         A seam so a test can drive reap/touch without wall-clock waits.
         """
         return datetime.now(UTC)
+
+    # -- dispatch settings ---------------------------------------------------
+
+    @abstractmethod
+    def dispatch_settings(self) -> SandboxDispatchSettings:
+        """The provider's own settings group carrying the dispatch knobs."""
+
+    @property
+    def exec_default_timeout_seconds(self) -> float:
+        """The provider's configured default for one short exec (``exec`` itself still requires a timeout)."""
+        return self.dispatch_settings().exec_default_timeout_seconds
+
+    @property
+    def reap_interval_seconds(self) -> float:
+        """The provider's configured reap sweep cadence."""
+        return self.dispatch_settings().reap_interval_seconds
 
     # -- provider primitives -------------------------------------------------
 

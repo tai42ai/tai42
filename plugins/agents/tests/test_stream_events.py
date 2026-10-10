@@ -7,7 +7,6 @@ the raise-on-malformed-chunk boundary.
 
 import asyncio
 import json
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -27,7 +26,6 @@ from tai42_agents._internal.stream_events import (
     aproject_agent_events,
     astream_tools_agent_events,
 )
-from tai42_agents._internal.text import text_of
 
 
 class _StubAgent:
@@ -318,7 +316,7 @@ def test_overwrite_wrapped_messages_are_unwrapped():
 
 def test_media_tool_result_is_media_safe_and_json_native():
     """A media-carrying tool result is media-safe: (a) its content is projected
-    verbatim, NEVER routed through ``text_of`` (which strips non-text blocks); and
+    verbatim, NEVER routed through a message's ``.text`` (which strips non-text blocks); and
     (b) the projected ``ToolResultStep.result`` is JSON-native, so
     ``model_dump_json`` round-trips it without raising."""
     media: list[str | dict[str, Any]] = [{"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"}]
@@ -327,10 +325,10 @@ def test_media_tool_result_is_media_safe_and_json_native():
     assert len(result_steps) == 1
     step = result_steps[0]
 
-    # Guard (a): the content passes through untouched. ``text_of`` would strip the
+    # Guard (a): the content passes through untouched. ``.text`` would strip the
     # image block to "" — so an equal, non-empty result proves it was NOT applied.
     assert step.result == media
-    assert text_of(SimpleNamespace(content=media)) == ""
+    assert ToolMessage(content=media, tool_call_id="c1").text == ""
 
     # Guard (b): the result is JSON-native, so serialization can't drop or fail on it.
     dumped = step.model_dump_json()

@@ -1,10 +1,11 @@
 """Settings for the Docker sandbox provider (the ``SANDBOX_DOCKER_`` env group).
 
 :class:`DockerSandboxSettings` mixes in
-:class:`~tai42_kit.sandbox.SandboxDispatchSettings`, the surface the kit sandbox
-base reads for the default session TTL, the reap interval, and the default
-per-``exec`` timeout: those names, defaults and reload classes are declared once
-there, under this group's own prefix.
+:class:`~tai42_kit.sandbox.SandboxDispatchSettings`, the reap interval and the
+default per-``exec`` timeout this provider dispatches (read through
+:meth:`DockerSandbox.dispatch_settings`): those names, defaults and reload classes
+are declared once there, under this group's own prefix. The group claims its prefix
+(``env_prefix_owned``): an unknown ``SANDBOX_DOCKER_*`` name is refused at boot.
 
 ``host`` is REQUIRED and has no default — a mis-wired deployment must fail loudly
 at first use rather than silently target a local socket. The mTLS client identity
@@ -18,7 +19,7 @@ ONLY at the engine call, never here.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.sandbox import SandboxDispatchSettings
@@ -31,6 +32,7 @@ class DockerSandboxSettings(SandboxDispatchSettings):
     model_config = SettingsConfigDict(
         env_prefix="SANDBOX_DOCKER_",
     )
+    env_prefix_owned: ClassVar[bool] = True
 
     # The REMOTE engine endpoint: a ``unix:///var/run/...`` socket path or a
     # ``tcp://host:port``. REQUIRED with no default so a mis-wired deployment fails

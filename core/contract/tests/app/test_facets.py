@@ -69,9 +69,10 @@ EXPECTED_FACADE = {
     "sandbox",
     "require_sandbox",
     "sandbox_policy",
-    # storage (4)
+    # storage (5)
     "register_storage",
     "resource_manager",
+    "resolve_image",
     "on_template_evicted",
     "template_reads",
     # connectors (3)

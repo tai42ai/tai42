@@ -18,13 +18,13 @@ from jinja2 import FunctionLoader, meta, pass_context
 from jinja2 import Template as JinjaTemplate
 from jinja2schema import JSONSchemaDraft4Encoder, infer, to_json_schema
 from tai42_contract.storage import Storage
-from tai42_contract.template import TemplatedText, TemplateEviction
+from tai42_contract.template import ImageReference, TemplatedText, TemplateEviction
 from tai42_kit.clients import shutdown_all_clients
 from tai42_kit.net import fetch_url
 
 from tai42_skeleton.template.absent_ids import AbsentTemplateIds
 from tai42_skeleton.template.data_uri import assert_image, data_uri, decode_data_uri
-from tai42_skeleton.template.media import ContentPart, MediaBlock
+from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.template.path_guard import safe_template_path
 from tai42_skeleton.template.reads import RecordingEnvironment, record_template_read
 from tai42_skeleton.template.settings import template_cache_settings
@@ -349,7 +349,7 @@ class ResourceManager:
         if scheme == "" and "://" not in source:
             # A bare storage id is a caller-supplied logical key; enforce root
             # containment before it reaches the provider, so this one seam guards
-            # every unguarded read (get_resource_by_id, file_loader, normalize_media's
+            # every unguarded read (get_resource_by_id, file_loader, resolve_image's
             # storage branch, and any future caller of ``load``).
             safe_template_path(source)
             data = await self.provider.load_bytes(source)
@@ -373,15 +373,15 @@ class ResourceManager:
         data, _mime = await self.load(source, with_mime=False)
         return await asyncio.to_thread(load_content, data, source)
 
-    async def normalize_media(self, source: str | bytes) -> ContentPart:
-        """Normalize an image reference to a model-ready LangChain ``ContentPart``.
+    async def resolve_image(self, source: str | bytes) -> ImageReference:
+        """Resolve an image reference to an addressable image with its asserted mime.
 
         Image-only: the resolved mime must be ``image/*`` or it raises. Per source
         kind, without a wasteful download:
 
         - a public ``http(s)`` URL is passed through unchanged (the model
-          dereferences it); a non-``image/*`` URL suffix raises here, an
-          indeterminable one passes through.
+          dereferences it) with its suffix mime; a non-``image/*`` URL suffix raises
+          here, an indeterminable one passes through with no mime.
         - a ``data:`` URI's mediatype is asserted ``image/*`` and passed through.
         - a storage ``id`` (or raw ``bytes``) is loaded and emitted as a base64
           ``data:`` URI that always carries a resolved image mime.
@@ -393,7 +393,7 @@ class ResourceManager:
             assert_image(mime, "<bytes>")
             if mime is None:
                 raise AssertionError
-            return {"type": "image_url", "image_url": {"url": data_uri(source, mime)}}
+            return ImageReference(url=data_uri(source, mime), mime=mime)
 
         parts = urlsplit(source)
         scheme = parts.scheme
@@ -401,21 +401,21 @@ class ResourceManager:
             mime, _ = mimetypes.guess_type(parts.path)
             if mime is not None and not mime.startswith("image/"):
                 raise ValueError(
-                    f"normalize_media requires an image resource; URL suffix mime is {mime!r} for {source!r}"
+                    f"resolve_image requires an image resource; URL suffix mime is {mime!r} for {source!r}"
                 )
-            return {"type": "image_url", "image_url": {"url": source}}
+            return ImageReference(url=source, mime=mime)
         if scheme == "data":
             mediatype = source[len("data:") :].partition(",")[0]
             mime = mediatype.split(";", 1)[0] or None
             assert_image(mime, source)
-            return {"type": "image_url", "image_url": {"url": source}}
+            return ImageReference(url=source, mime=mime)
 
         # Storage id (empty scheme) or a bad scheme -> load() validates and raises.
         data, mime = await self.load(source)
         assert_image(mime, source)
         if mime is None:
             raise AssertionError
-        return {"type": "image_url", "image_url": {"url": data_uri(data, mime)}}
+        return ImageReference(url=data_uri(data, mime), mime=mime)
 
     def _evict_engine_cache(self, matches: Callable[[str], bool]) -> None:
         """Drop every engine-cached dependency template whose name ``matches``.

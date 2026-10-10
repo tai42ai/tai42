@@ -33,6 +33,7 @@ from tai42_contract.accounts.errors import (
     MemberActionError,
     MemberActionNotFoundError,
 )
+from tai42_contract.errors import OperationError
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.operations import (
@@ -40,7 +41,6 @@ from tai42_skeleton.operations import (
     ConflictError,
     ForbiddenError,
     NotFoundError,
-    OperationError,
     ValidationRejectedError,
 )
 from tai42_skeleton.operations import member_actions as member_actions_ops

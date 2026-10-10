@@ -32,7 +32,13 @@ from tai42_contract.tools.invocation import (
     reset_current_tool_invocation,
     set_current_tool_invocation,
 )
-from tai42_contract.tools.meta import TOOL_META_PAUSES, UndeclaredPauseError
+from tai42_contract.tools.meta import (
+    TOOL_META_BADGES,
+    TOOL_META_CRASH_RESUME,
+    TOOL_META_HIDDEN,
+    TOOL_META_PAUSES,
+    UndeclaredPauseError,
+)
 from tai42_contract.tools.retry import (
     DEFAULT_RETRYABLE_KINDS,
     MAX_ATTEMPTS_CEILING,
@@ -361,6 +367,9 @@ __all__ = [
     "DEFAULT_RETRYABLE_KINDS",
     "MAX_ATTEMPTS_CEILING",
     "NEVER_RETRYABLE_KINDS",
+    "TOOL_META_BADGES",
+    "TOOL_META_CRASH_RESUME",
+    "TOOL_META_HIDDEN",
     "TOOL_META_PAUSES",
     "AppTools",
     "ClientTool",

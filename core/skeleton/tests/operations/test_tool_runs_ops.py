@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import UnavailableError
 from tai42_contract.interactions import AnswerFormat, InteractionRequest, RunTerminalFailed, SuspendedInteraction
 from tai42_contract.secrets import SecretValue
 from tai42_contract.states import StateContext, StateSubject, SubjectCandidates
@@ -26,13 +27,7 @@ from tai42_kit.utils.state_context import state_context
 from tai42_skeleton.interactions import visit as visit_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore
-from tai42_skeleton.operations import (
-    BadRequestError,
-    ForbiddenError,
-    NotFoundError,
-    NotSupportedError,
-    UnavailableError,
-)
+from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotFoundError, NotSupportedError
 from tai42_skeleton.operations import tool_runs as ops
 from tai42_skeleton.operations.decorator import operation_metadata_of
 from tai42_skeleton.operations.errors import PermissionDeniedError

@@ -39,11 +39,11 @@ from enum import Enum, auto
 from threading import RLock
 
 from cachetools import LRUCache, TTLCache, cached
+from tai42_contract.errors import UnavailableError
 from tai42_kit.settings import register_settings_reset
 
 from tai42_skeleton.conversations.settings import ConversationsSettings, conversations_settings
 from tai42_skeleton.conversations.thread_lease import ThreadTurnLease
-from tai42_skeleton.operations.errors import UnavailableError
 
 logger = logging.getLogger(__name__)
 

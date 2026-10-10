@@ -7,7 +7,7 @@ and the projection share:
 
 * the strategy handed to ``create_agent(response_format=…)`` — a :class:`NativeStrategy`
   (provider-native grammar, no forced tool choice) under the native plan, or a
-  ``ToolStrategy`` over the int64-bounded pydantic model under the tool plan (built with
+  ``ToolStrategy`` over the plan's ``tool_schema`` (the authored schema) under the tool plan (built with
   ``handle_errors=False`` so LangChain's own rail steps aside and the platform rail owns
   the retry);
 * the :class:`~tai42_agents._internal.structured_rail.StructuredOutputRailMiddleware`
@@ -32,7 +32,7 @@ from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel
 from tai42_kit.llm.models import native_structured_output_kwargs
 from tai42_kit.llm.runtime import validate_structured_output
-from tai42_kit.llm.structured import StructuredOutputPlan, plan_structured_output
+from tai42_kit.llm.structured import StructuredOutputPlan, StructuredOutputUnsupportedError, plan_structured_output
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 from tai42_agents._internal.outcomes import RepromptCounter, build_reprompt_handler
@@ -88,9 +88,11 @@ def structured_output_stack(
     if plan.mode == "native":
         strategy: Any = NativeStrategy(plan)
     else:
-        assert plan.bound_typed_dict is not None  # noqa: S101 (tool plan invariant; keeps the ToolStrategy call total)
-        strategy = ToolStrategy(plan.bound_typed_dict, handle_errors=False)
-    rail = StructuredOutputRailMiddleware(plan.validation_schema, cap)
+        assert plan.tool_schema is not None  # noqa: S101 (tool plan invariant; keeps the ToolStrategy call total)
+        # A dict top-level ``oneOf`` fans out to one tool per variant; a dict variant parses to
+        # the raw dict, so the rail is the single judge on both tiers.
+        strategy = ToolStrategy(plan.tool_schema, handle_errors=False)
+    rail = StructuredOutputRailMiddleware(plan.validation_schema, cap, schema_name=plan.name)
     return strategy, rail
 
 
@@ -110,6 +112,11 @@ def _native_json(message: AIMessage) -> Any:
     return json.loads(text)
 
 
+def _model_label(llm: BaseChatModel) -> str:
+    """The model id/name a provider exposes, for a loud error naming the model."""
+    return getattr(llm, "model_name", None) or getattr(llm, "model", None) or getattr(llm, "model_id", "") or "model"
+
+
 async def ainvoke_structured(
     llm: BaseChatModel,
     plan: StructuredOutputPlan,
@@ -119,8 +126,10 @@ async def ainvoke_structured(
     """Force structured output from a single model call, re-prompting under the per-run cap.
 
     Native: bind the kit kwargs, invoke, parse the JSON text, validate. Tool: bind the
-    int64-bounded pydantic model via ``with_structured_output`` (function-calling), invoke,
-    validate the parsed value. On a malformed / non-conforming payload the SAME capped
+    plan's ``tool_schema`` via ``with_structured_output`` (function-calling), invoke,
+    validate the parsed value. A fan-out schema (a top-level ``oneOf``) is refused with
+    :class:`~tai42_kit.llm.structured.StructuredOutputUnsupportedError` before any call:
+    this door binds one object schema. On a malformed / non-conforming payload the SAME capped
     re-prompt loop (counter + feedback shapes) as the graph rail runs; past the cap it
     raises :class:`~tai42_agents._internal.outcomes.RepromptCapError`, which each
     single-shot face maps to a typed, non-fatal outcome.
@@ -129,8 +138,19 @@ async def ainvoke_structured(
     threaded onto every model call so this single-shot door records under the run's trace,
     exactly like the graph doors. ``None`` runs uninstrumented.
     """
+    if plan.mode == "tool" and isinstance(plan.tool_schema, dict) and "oneOf" in plan.tool_schema:
+        raise StructuredOutputUnsupportedError(
+            model=_model_label(llm),
+            provider=plan.provider,
+            reasons=[
+                f"response_format {plan.name!r} is a oneOf/anyOf of objects; the single-call door binds one "
+                "object schema — use an agent loop face"
+            ],
+        )
     counter = RepromptCounter()
-    reprompt = build_reprompt_handler(agents_limits_settings().structured_output_reprompt_cap, lambda: counter)
+    reprompt = build_reprompt_handler(
+        agents_limits_settings().structured_output_reprompt_cap, lambda: counter, schema_name=plan.name
+    )
     conversation = list(messages)
     while True:
         exc: Exception
@@ -144,8 +164,8 @@ async def ainvoke_structured(
             except (json.JSONDecodeError, ValueError, *_VALIDATION_ERRORS) as caught:
                 exc = caught
         else:
-            assert plan.bound_typed_dict is not None  # noqa: S101 (tool plan invariant; keeps the bind call total)
-            bound = llm.with_structured_output(plan.bound_typed_dict, method="function_calling", include_raw=True)
+            assert plan.tool_schema is not None  # noqa: S101 (tool plan invariant; keeps the bind call total)
+            bound = llm.with_structured_output(plan.tool_schema, method="function_calling", include_raw=True)
             result = await bound.ainvoke(conversation, cast(RunnableConfig | None, config))
             raw = result.get("raw") if isinstance(result, dict) else None
             failure_message = raw if isinstance(raw, AIMessage) else None

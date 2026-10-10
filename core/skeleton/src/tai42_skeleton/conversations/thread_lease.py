@@ -30,11 +30,11 @@ from typing import Any
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
+from tai42_contract.errors import UnavailableError
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.conversations.settings import ConversationsSettings
-from tai42_skeleton.operations.errors import UnavailableError
 from tai42_skeleton.utils.redis_typing import eval_script
 
 logger = logging.getLogger(__name__)

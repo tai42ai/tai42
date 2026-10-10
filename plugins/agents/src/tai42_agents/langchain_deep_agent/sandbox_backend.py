@@ -41,6 +41,7 @@ from deepagents.backends.protocol import (
     WriteResult,
 )
 from deepagents.backends.sandbox import BaseSandbox
+from tai42_contract.app import tai42_app
 from tai42_contract.sandbox import SandboxError, SandboxFileNotFoundError, SandboxSession
 
 # Read-only imports of the sibling-owned skills backend + mount point (this module never
@@ -51,13 +52,6 @@ from tai42_agents.langchain_deep_agent.backend import (
     InlineSkillsBackend,
     TemplateSkillsBackend,
 )
-
-# Mirrors the kit ``SandboxDispatchSettings.exec_default_timeout_seconds`` default — the
-# SHORT-helper ceiling for a single derived file op (ls/read/glob/grep/edit/write), NOT a
-# coding-turn wall-clock. Deliberately a plain constant: the agents plugin declares no
-# sandbox-dispatch settings group of its own, and this is only the fallback used when
-# deepagents passes no per-call ``timeout``.
-_DEFAULT_EXEC_TIMEOUT_SECONDS = 300
 
 _ASYNC_ONLY = "SandboxSessionBackend is async-only; use aexecute/aupload_files/adownload_files."
 
@@ -82,8 +76,13 @@ class SandboxSessionBackend(BaseSandbox):
     """
 
     def __init__(self, session: SandboxSession) -> None:
-        """Bind the backend to a live ``session`` and derive its writable project root."""
+        """Bind the backend to a live ``session`` and derive its writable project root.
+
+        A derived file op (and an ``execute`` deepagents passes no ``timeout`` for) is bounded
+        by the bound provider's ``exec_default_timeout_seconds``, read once here.
+        """
         self._session = session
+        self._exec_default_timeout_seconds = tai42_app.sandboxes.require_sandbox().exec_default_timeout_seconds
         # The agent's writable tree, absolute under the provider's workspace root. Built
         # from ``session.workspace_path`` (never a hardcoded ``/workspace``) so the same
         # backend is provider-agnostic.
@@ -151,7 +150,7 @@ class SandboxSessionBackend(BaseSandbox):
         """
         if self._root_ready:
             return
-        await self._session.exec(["mkdir", "-p", self._root], timeout_seconds=_DEFAULT_EXEC_TIMEOUT_SECONDS)
+        await self._session.exec(["mkdir", "-p", self._root], timeout_seconds=self._exec_default_timeout_seconds)
         self._root_ready = True
 
     # -- derived file ops: re-base the deepagents virtual path under project ---------
@@ -205,7 +204,7 @@ class SandboxSessionBackend(BaseSandbox):
         result = await self._session.exec(
             ["sh", "-lc", command],
             cwd=self._root,
-            timeout_seconds=timeout if timeout is not None else _DEFAULT_EXEC_TIMEOUT_SECONDS,
+            timeout_seconds=timeout if timeout is not None else self._exec_default_timeout_seconds,
         )
         return ExecuteResponse(output=result.stdout + result.stderr, exit_code=result.exit_code, truncated=False)
 

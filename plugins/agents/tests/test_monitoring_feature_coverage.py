@@ -136,7 +136,9 @@ async def _collect(stream: Any) -> list[StreamEvent]:
 def _patch_tools_seams(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel) -> None:
     saver = InMemorySaver()
     monkeypatch.setattr(
-        bta, "llm_provider_settings", lambda: SimpleNamespace(llm="p", checkpoint="c", checkpoint_conn_string=None)
+        bta,
+        "llm_provider_settings",
+        lambda: SimpleNamespace(llm="anthropic", checkpoint="c", checkpoint_conn_string=None),
     )
     monkeypatch.setattr(bta, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda kwargs: dict(kwargs)))
     monkeypatch.setattr(bta, "context_overflow_middlewares", lambda **_: _empty_middlewares())
@@ -167,14 +169,14 @@ def test_tools_agent_model_call_records_under_the_run_trace(monkeypatch: pytest.
 def test_voting_agent_records_every_sub_run_under_one_trace(monkeypatch: pytest.MonkeyPatch) -> None:
     # One voter plus the judge each drive a tools-agent graph; all nest under ONE run trace.
     _patch_tools_seams(monkeypatch, _RecordingChatModel([AIMessage(content="verdict")]))
-    monkeypatch.setattr(voting_mod, "llm_provider_settings", lambda: SimpleNamespace(llm="p"))
+    monkeypatch.setattr(voting_mod, "llm_provider_settings", lambda: SimpleNamespace(llm="anthropic"))
 
     asyncio.run(
         _collect(
             VotingAgent().astream(
                 judge_message=TemplatedText(content="decide"),
                 voter_message=TemplatedText(content="vote"),
-                voters=[VoterSpec(provider="p")],
+                voters=[VoterSpec(provider="anthropic")],
             )
         )
     )
@@ -197,7 +199,7 @@ def test_refine_agent_records_every_sub_run_under_one_trace(monkeypatch: pytest.
     monkeypatch.setattr(
         refine_mod,
         "llm_provider_settings",
-        lambda: SimpleNamespace(llm="p", checkpoint="c", checkpoint_conn_string=None),
+        lambda: SimpleNamespace(llm="anthropic", checkpoint="c", checkpoint_conn_string=None),
     )
     monkeypatch.setattr(refine_mod, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda kwargs: dict(kwargs)))
     monkeypatch.setattr(refine_mod, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: False))

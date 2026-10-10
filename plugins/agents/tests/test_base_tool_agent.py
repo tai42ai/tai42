@@ -16,8 +16,11 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import tai42_kit.llm.middleware as middleware_pkg
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.messages import SystemMessage
+from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
+from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 from tai42_agents._internal import base_tool_agent as bta
@@ -45,7 +48,7 @@ def _patch_seams(
     monkeypatch.setattr(
         bta,
         "llm_provider_settings",
-        lambda: SimpleNamespace(llm="def_llm", checkpoint="def_checkpoint", checkpoint_conn_string="cp-conn"),
+        lambda: SimpleNamespace(llm="mistral", checkpoint="def_checkpoint", checkpoint_conn_string="cp-conn"),
     )
     monkeypatch.setattr(bta, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda kwargs: dict(kwargs)))
 
@@ -124,7 +127,7 @@ class TestBuildAgentAndInput:
         # A keyless call: the thread the builder minted is returned for the end-of-run mark.
         assert minted == "t"
         # Default providers fell back to the settings values.
-        assert captured["llm_provider"] == "def_llm"
+        assert captured["llm_provider"] == "mistral"
         assert captured["checkpoint"] == ("def_checkpoint", "cp-conn")
         assert captured["llm_kwargs"] == {"temperature": 0}
         # create_agent wired with the resolved model, tools, checkpointer, middleware.
@@ -135,13 +138,13 @@ class TestBuildAgentAndInput:
         # The park hook leads (it is the loop's first before_model hook, so it recognizes an
         # async-ask park before any compacting hook could evict its marked ToolMessage);
         # the system-purge middleware follows (state never carries a system message), the
-        # context-overflow middleware is threaded through, the rolling-cache-mark middleware
-        # keeps one breakpoint at the call, and the tool-error middleware is appended so a
+        # context-overflow middleware is threaded through, the provider's history middlewares
+        # shape the request at the call, and the tool-error middleware is appended so a
         # tool-logic failure never aborts the loop.
         assert isinstance(captured["create"]["middleware"][0], bta.AsyncParkMiddleware)
         assert isinstance(captured["create"]["middleware"][1], bta.SystemPurgeMiddleware)
         assert captured["create"]["middleware"][2] == "mw"
-        assert any(isinstance(mw, bta.RollingCacheMarkMiddleware) for mw in captured["create"]["middleware"])
+        assert [type(mw) for mw in captured["create"]["middleware"][3:-1]] == [LeadingUserMiddleware]
         assert captured["create"]["middleware"][-1] is bta._tool_error_middleware
         assert captured["create"]["debug"] is True
         # No response_format requested -> the text-behavior default is threaded through.
@@ -152,6 +155,35 @@ class TestBuildAgentAndInput:
         assert isinstance(captured["create"]["system_prompt"], SystemMessage)
         assert captured["create"]["system_prompt"].content == "sys-prompt"
         assert messages == {"messages": [{"role": "user", "content": "hi"}]}
+
+    @pytest.mark.parametrize(("leading", "key"), [(True, "k1"), (True, None), (False, "k2"), (False, None)])
+    def test_the_stack_carries_the_history_middlewares_each_predicate_answer_asks_for(
+        self, monkeypatch: pytest.MonkeyPatch, leading: bool, key: str | None
+    ) -> None:
+        captured = _patch_seams(monkeypatch)
+        monkeypatch.setattr(middleware_pkg, "requires_leading_user_turn", lambda provider: leading)
+        monkeypatch.setattr(middleware_pkg, "cache_mark_key", lambda provider: key)
+        asyncio.run(build_agent_and_input("sys", ["hi"], []))
+        history = captured["create"]["middleware"][3:-1]
+        assert [type(mw) for mw in history] == (
+            ([LeadingUserMiddleware] if leading else []) + ([RollingCacheMarkMiddleware] if key else [])
+        )
+        assert [mw.mark_key for mw in history if isinstance(mw, RollingCacheMarkMiddleware)] == ([key] if key else [])
+
+    @pytest.mark.parametrize(
+        ("provider", "expected"),
+        [
+            ("anthropic", [RollingCacheMarkMiddleware]),
+            ("openai", [LeadingUserMiddleware, RollingCacheMarkMiddleware]),
+            ("google", [LeadingUserMiddleware]),
+        ],
+    )
+    def test_the_stack_follows_the_recorded_provider_table(
+        self, monkeypatch: pytest.MonkeyPatch, provider: str, expected: list[type]
+    ) -> None:
+        captured = _patch_seams(monkeypatch)
+        asyncio.run(build_agent_and_input("sys", ["hi"], [], llm_provider=provider))
+        assert [type(mw) for mw in captured["create"]["middleware"][3:-1]] == expected
 
     def test_system_content_kwargs_become_a_system_prompt_content_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_seams(monkeypatch)
@@ -208,29 +240,20 @@ class TestBuildAgentAndInput:
         captured = _patch_seams(monkeypatch)
         schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
         asyncio.run(build_agent_and_input("sys", ["hi"], [], response_format=schema))
-        # The fake model carries no profile, so the plan takes the tool tier: the raw schema
-        # dict is bound as an int64-tightened pydantic-model ToolStrategy (handle_errors=False —
-        # the platform rail owns the retry) whose parse yields an instance while enforcing the
-        # injected int64 bound, and the rail is the innermost middleware.
-        from pydantic import BaseModel, TypeAdapter, ValidationError
-
+        # The fake model carries no profile, so the plan takes the tool tier: the authored schema
+        # dict is bound as the ToolStrategy schema (handle_errors=False — the platform rail owns
+        # the retry and is the single judge of the produced value), and the rail is the
+        # innermost middleware.
         threaded = captured["create"]["response_format"]
         assert isinstance(threaded, ToolStrategy)
         assert threaded.handle_errors is False
-        adapter = TypeAdapter(threaded.schema)
-        parsed = adapter.validate_python({"value": 7})
-        assert isinstance(parsed, BaseModel)
-        assert parsed.model_dump()["value"] == 7
-        with pytest.raises(ValidationError):
-            adapter.validate_python({"value": 9223372036854775807 + 1})
+        assert threaded.schema == schema
         assert isinstance(captured["create"]["middleware"][-1], StructuredOutputRailMiddleware)
 
     def test_explicit_providers_override_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_seams(monkeypatch)
-        asyncio.run(
-            build_agent_and_input("sys", ["hi"], [], llm_provider="my_llm", checkpoint_provider="my_checkpoint")
-        )
-        assert captured["llm_provider"] == "my_llm"
+        asyncio.run(build_agent_and_input("sys", ["hi"], [], llm_provider="xai", checkpoint_provider="my_checkpoint"))
+        assert captured["llm_provider"] == "xai"
         assert captured["checkpoint"][0] == "my_checkpoint"
 
 

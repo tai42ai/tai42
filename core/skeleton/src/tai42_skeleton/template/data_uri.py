@@ -29,4 +29,4 @@ def data_uri(data: bytes, mime: str) -> str:
 def assert_image(mime: str | None, source: object) -> None:
     """Guard the image-only media boundary: a resolved ``image/*`` mime is required."""
     if mime is None or not mime.startswith("image/"):
-        raise ValueError(f"normalize_media requires an image resource; resolved mime {mime!r} for {source!r}")
+        raise ValueError(f"resolve_image requires an image resource; resolved mime {mime!r} for {source!r}")

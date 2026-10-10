@@ -45,7 +45,8 @@ def _install_reference_trace() -> _FakeReader:
 
 
 async def _resolved(**query) -> tuple[int, dict]:
-    from tai42_skeleton.operations.errors import OperationError
+    from tai42_contract.errors import OperationError
+
     from tai42_skeleton.operations.observability import ResolvedSpanValueQuery, get_resolved_span_value
 
     params = ResolvedSpanValueQuery.model_validate(query)

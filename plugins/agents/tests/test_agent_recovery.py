@@ -118,7 +118,7 @@ class TestDeepAgentRecovery:
             dagent,
             "llm_provider_settings",
             lambda: SimpleNamespace(
-                llm="p", checkpoint="c", store="s", checkpoint_conn_string=None, store_conn_string=None
+                llm="anthropic", checkpoint="c", store="s", checkpoint_conn_string=None, store_conn_string=None
             ),
         )
         monkeypatch.setattr(dagent, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
@@ -436,7 +436,7 @@ class TestRefineAgentRecovery:
         monkeypatch.setattr(
             fagent,
             "llm_provider_settings",
-            lambda: SimpleNamespace(llm="eval", checkpoint="c", checkpoint_conn_string=None),
+            lambda: SimpleNamespace(llm="google", checkpoint="c", checkpoint_conn_string=None),
         )
         monkeypatch.setattr(fagent, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
         monkeypatch.setattr(fagent, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: False))
@@ -461,8 +461,8 @@ class TestRefineAgentRecovery:
             tai42_app.agents.get_agent("refine_agent").run(
                 evaluator_message=TemplatedText(content="draft it"),
                 critic_message=TemplatedText(content="review it"),
-                evaluator_llm_provider="eval",
-                critic_llm_provider="crit",
+                evaluator_llm_provider="google",
+                critic_llm_provider="openai",
                 evaluator_langgraph_config=_thread("eval-t"),
                 critic_langgraph_config=_thread("crit-t"),
                 max_iterations=2,
@@ -484,7 +484,7 @@ class TestRefineAgentRecovery:
             )
         )
 
-        self._seams(monkeypatch, {"eval": eval_model, "crit": crit_model}, saver)
+        self._seams(monkeypatch, {"google": eval_model, "openai": crit_model}, saver)
         assert self._run() == "final answer"
 
         reader = create_agent(eval_model, tools=[], checkpointer=saver)
@@ -503,7 +503,7 @@ class TestRefineAgentRecovery:
             [_tool_call("failing", "call_1"), AIMessage(content="draft"), AIMessage(content="final answer")]
         )
         crit_model = ScriptedChatModel([AIMessage(content=f"approved {self._approval()}")])
-        self._seams(monkeypatch, {"eval": eval_model, "crit": crit_model}, saver)
+        self._seams(monkeypatch, {"google": eval_model, "openai": crit_model}, saver)
 
         with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
             out = self._run(tool_names=["failing"])
@@ -519,7 +519,7 @@ class TestRefineAgentRecovery:
         app_tools.client_tools["failing"] = _raising_handle(RuntimeError("infra down"))
         eval_model = ScriptedChatModel([_tool_call("failing", "call_1"), AIMessage(content="unreached")])
         crit_model = ScriptedChatModel([AIMessage(content=f"approved {self._approval()}")])
-        self._seams(monkeypatch, {"eval": eval_model, "crit": crit_model}, saver)
+        self._seams(monkeypatch, {"google": eval_model, "openai": crit_model}, saver)
 
         with pytest.raises(RuntimeError, match="infra down"):
             self._run(tool_names=["failing"])
@@ -539,7 +539,12 @@ class TestRetrievalAgentRecovery:
             ragent,
             "llm_provider_settings",
             lambda: SimpleNamespace(
-                llm="p", embedding="e", checkpoint="c", store="s", checkpoint_conn_string=None, store_conn_string=None
+                llm="anthropic",
+                embedding="e",
+                checkpoint="c",
+                store="s",
+                checkpoint_conn_string=None,
+                store_conn_string=None,
             ),
         )
         monkeypatch.setattr(ragent, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
@@ -571,7 +576,9 @@ class TestRetrievalAgentRecovery:
         model = ScriptedChatModel([_status("done")])
 
         async def seed() -> None:
-            graph = await RetrievalToolsGraph(tools=[], llm=model, store=InMemoryStore(), checkpoint=saver).abuild()
+            graph = await RetrievalToolsGraph(
+                provider="anthropic", tools=[], llm=model, store=InMemoryStore(), checkpoint=saver
+            ).abuild()
             await graph.aupdate_state(
                 _thread("t-retr-repair"),
                 {"messages": [HumanMessage(content="first"), _tool_call("failing", "call_r")]},
@@ -588,7 +595,9 @@ class TestRetrievalAgentRecovery:
         assert out == "done"
 
         async def read() -> list[BaseMessage]:
-            graph = await RetrievalToolsGraph(tools=[], llm=model, store=InMemoryStore(), checkpoint=saver).abuild()
+            graph = await RetrievalToolsGraph(
+                provider="anthropic", tools=[], llm=model, store=InMemoryStore(), checkpoint=saver
+            ).abuild()
             return list((await graph.aget_state(_thread("t-retr-repair"))).values.get("messages", []))
 
         repairs = [m for m in asyncio.run(read()) if isinstance(m, ToolMessage) and m.tool_call_id == "call_r"]
@@ -617,7 +626,9 @@ class TestRetrievalAgentRecovery:
                 _status("", status="error"),
             ]
         )
-        graph = asyncio.run(RetrievalToolsGraph(tools=[alpha], llm=model, store=_StubStore([alpha_id])).abuild())
+        graph = asyncio.run(
+            RetrievalToolsGraph(provider="anthropic", tools=[alpha], llm=model, store=_StubStore([alpha_id])).abuild()
+        )
 
         with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
             events = asyncio.run(
@@ -660,7 +671,9 @@ class TestRetrievalAgentRecovery:
                 _status(""),
             ]
         )
-        graph = asyncio.run(RetrievalToolsGraph(tools=[alpha], llm=model, store=_StubStore([alpha_id])).abuild())
+        graph = asyncio.run(
+            RetrievalToolsGraph(provider="anthropic", tools=[alpha], llm=model, store=_StubStore([alpha_id])).abuild()
+        )
 
         with pytest.raises(RuntimeError, match="infra down"):
             asyncio.run(

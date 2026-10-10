@@ -8,13 +8,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, cast
 
-import pytest
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, PrivateAttr, TypeAdapter, ValidationError
+from pydantic import BaseModel, PrivateAttr
 from tai42_contract.template import TemplatedText
 
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
@@ -26,18 +25,12 @@ _INT64_OVERFLOW = 2**63
 
 
 def _assert_bound_to_model(strategy: ToolStrategy[Any], model: type[BaseModel]) -> None:
-    """A subagent whose response_format was ``model`` emits a bounded ToolStrategy:
-    its schema is a pydantic model (validated exactly as the tool-calling parse does,
-    via a ``TypeAdapter``) that parses a conforming value to an instance, rejects an
-    oversized int under the int64 bound, and binds under the model's name so structured
-    tool-name stream suppression still matches."""
-    adapter = TypeAdapter(strategy.schema)
-    parsed: Any = adapter.validate_python({"x": 1})
-    assert isinstance(parsed, BaseModel)
-    assert parsed.model_dump()["x"] == 1
-    with pytest.raises(ValidationError):
-        adapter.validate_python({"x": _INT64_OVERFLOW})
-    assert getattr(strategy.schema, "__name__", None) == model.__name__
+    """A subagent whose response_format was ``model`` emits a ToolStrategy binding the authored class.
+
+    The class's name is the structured tool's name, so structured tool-name stream suppression
+    still matches; the rail validates the produced value against the class."""
+    assert strategy.schema is model
+    assert strategy.schema_specs[0].name == model.__name__
 
 
 class _FakeRunnable:
