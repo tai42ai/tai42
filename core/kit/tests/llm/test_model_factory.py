@@ -10,11 +10,11 @@ import asyncio
 import hashlib
 import sys
 import types
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 import pytest
 from langchain_core.runnables import Runnable
-from pydantic import BaseModel, Field, JsonValue, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr
 from typing_extensions import TypedDict
 
 pytest.importorskip("langgraph")
@@ -37,7 +37,6 @@ _LLM_PROVIDERS = [
     ("google", "langchain_google_genai", "ChatGoogleGenerativeAI"),
     ("xai", "langchain_xai", "ChatXAI"),
     ("ollama", "langchain_ollama", "ChatOllama"),
-    ("huggingface", "langchain_huggingface", "ChatHuggingFace"),
 ]
 
 _EMBEDDING_PROVIDERS = [
@@ -48,20 +47,56 @@ _EMBEDDING_PROVIDERS = [
 ]
 
 
-def _install_fake_backend(monkeypatch, module_name: str, class_name: str):
-    """Inject (or extend) a fake provider module exposing a kwarg-capturing class."""
-    captured = {}
-
-    class _FakeBackend:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            self._is_fake = True
-
+def _set_module_attr(monkeypatch, module_name: str, name: str, value: Any) -> None:
+    """Expose ``value`` as ``module_name.name``, injecting the module when it is not installed."""
     mod = sys.modules.get(module_name)
     if mod is None:
         mod = types.ModuleType(module_name)
         monkeypatch.setitem(sys.modules, module_name, mod)
-    monkeypatch.setattr(mod, class_name, _FakeBackend, raising=False)
+    monkeypatch.setattr(mod, name, value, raising=False)
+
+
+def _fake_messages_create(self, *, max_tokens: int, messages: list, model: str, top_k: int | None = None) -> None:
+    """Stands in for the Anthropic SDK's messages call: its signature is what the kit reads."""
+
+
+def _install_fake_backend(monkeypatch, module_name: str, class_name: str):
+    """Inject (or extend) a fake provider module exposing a kwarg-capturing chat model class."""
+    captured = {}
+
+    class _FakeBackend(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        _is_fake: ClassVar[bool] = True
+
+        model: str | None = None
+        temperature: float | None = None
+        num_predict: int | None = None
+        reasoning: str | None = None
+        client_kwargs: dict | None = None
+        model_kwargs: dict | None = None
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            super().__init__(**kwargs)
+
+        # The hooks the kit asks a probe model which SDK call it will make.
+        @property
+        def _default_params(self) -> dict:
+            return dict(self.model_kwargs or {})
+
+        def _use_responses_api(self, payload: dict) -> bool:
+            return False
+
+        def _get_request_payload(self, messages: list) -> dict:
+            return dict(self.model_kwargs or {})
+
+    _set_module_attr(monkeypatch, module_name, class_name, _FakeBackend)
+    messages = types.SimpleNamespace(create=_fake_messages_create)
+    for module_name in ("anthropic", "anthropic.resources", "anthropic.resources.beta"):
+        if module_name not in sys.modules:
+            monkeypatch.setitem(sys.modules, module_name, types.ModuleType(module_name))
+    _set_module_attr(monkeypatch, "anthropic.resources", "Messages", messages)
+    _set_module_attr(monkeypatch, "anthropic.resources.beta", "Messages", messages)
     return captured
 
 
@@ -71,6 +106,159 @@ def test_build_llm_selects_provider_backend(monkeypatch, provider, module_name, 
     built = models._build_llm(provider, model="m", temperature=0.5)
     assert getattr(built, "_is_fake", False) is True
     assert captured == {"model": "m", "temperature": 0.5}
+
+
+def test_build_llm_forwards_an_sdk_parameter_the_chat_model_does_not_declare(monkeypatch):
+    captured = _install_fake_backend(monkeypatch, "langchain_anthropic", "ChatAnthropic")
+    models._build_llm("anthropic", model="m", top_k=3)
+    assert captured == {"model": "m", "model_kwargs": {"top_k": 3}}
+
+
+def test_build_llm_refuses_a_name_neither_declared_nor_an_sdk_parameter(monkeypatch):
+    captured = _install_fake_backend(monkeypatch, "langchain_anthropic", "ChatAnthropic")
+    with pytest.raises(ValueError, match=r"anthropic: 'frobnicate', 'seed' cannot reach the provider"):
+        models._build_llm("anthropic", model="m", seed=1, frobnicate=2)
+    # Only the probe the kit asks which SDK call it makes was built; no model was returned.
+    assert captured == {"model": "m", "model_kwargs": {"seed": 1, "frobnicate": 2}}
+
+
+def test_build_llm_refuses_a_name_given_both_directly_and_in_model_kwargs(monkeypatch):
+    _install_fake_backend(monkeypatch, "langchain_anthropic", "ChatAnthropic")
+    with pytest.raises(
+        ValueError, match=r"anthropic: 'top_k' and \"model_kwargs\['top_k'\]\" are the same setting given twice"
+    ):
+        models._build_llm("anthropic", model="m", top_k=3, model_kwargs={"top_k": 4})
+
+
+def test_build_llm_mistral_forwards_any_undeclared_name(monkeypatch):
+    captured = _install_fake_backend(monkeypatch, "langchain_mistralai", "ChatMistralAI")
+    models._build_llm("mistral", model="m", frobnicate=2)
+    assert captured == {"model": "m", "model_kwargs": {"frobnicate": 2}}
+
+
+def test_build_llm_google_refuses_an_undeclared_name_and_its_unsent_model_kwargs(monkeypatch):
+    captured = _install_fake_backend(monkeypatch, "langchain_google_genai", "ChatGoogleGenerativeAI")
+    with pytest.raises(ValueError, match=r"google: 'frobnicate', 'model_kwargs' cannot reach the provider"):
+        models._build_llm("google", model="m", frobnicate=2, model_kwargs={"x": 1})
+    assert captured == {}
+
+
+def _fake_parse_url_with_auth(url: str | None) -> tuple[str | None, dict[str, str] | None]:
+    """Stands in for ``langchain_ollama._utils.parse_url_with_auth``: no credentials in the URL."""
+    return url, None
+
+
+def test_build_llm_ollama_maps_the_flat_settings(monkeypatch):
+    captured = _install_fake_backend(monkeypatch, "langchain_ollama", "ChatOllama")
+    if "langchain_ollama._utils" not in sys.modules:
+        monkeypatch.setitem(sys.modules, "langchain_ollama._utils", types.ModuleType("langchain_ollama._utils"))
+    _set_module_attr(monkeypatch, "langchain_ollama._utils", "parse_url_with_auth", _fake_parse_url_with_auth)
+    models._build_llm("ollama", model="m", max_tokens=8, timeout=9, api_key="k", reasoning_effort="low")
+    assert captured == {
+        "model": "m",
+        "num_predict": 8,
+        "reasoning": "low",
+        "client_kwargs": {"timeout": 9, "headers": {"authorization": "Bearer k"}},
+    }
+
+
+def test_build_llm_ollama_refuses_an_undeclared_name(monkeypatch):
+    captured = _install_fake_backend(monkeypatch, "langchain_ollama", "ChatOllama")
+    with pytest.raises(ValueError, match=r"ollama: 'n' cannot reach the provider"):
+        models._build_llm("ollama", model="m", n=2)
+    assert captured == {}
+
+
+def test_build_llm_ollama_refuses_a_setting_given_under_both_names(monkeypatch):
+    captured = _install_fake_backend(monkeypatch, "langchain_ollama", "ChatOllama")
+    with pytest.raises(ValueError, match=r"ollama: 'max_tokens' and 'num_predict' are the same setting given twice"):
+        models._build_llm("ollama", model="m", max_tokens=8, num_predict=9)
+    with pytest.raises(
+        ValueError, match=r"ollama: 'timeout' and \"client_kwargs\['timeout'\]\" are the same setting given twice"
+    ):
+        models._build_llm("ollama", model="m", timeout=9, client_kwargs={"timeout": 3})
+    assert captured == {}
+
+
+def _fake_chat_completion(
+    self,
+    messages: list,
+    *,
+    model: str | None = None,
+    stream: bool = False,
+    max_tokens: int | None = None,
+    n: int | None = None,
+    seed: int | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+) -> None:
+    """Stands in for ``huggingface_hub.InferenceClient.chat_completion``: its signature is what the kit reads."""
+
+
+def _install_fake_huggingface(monkeypatch):
+    """Inject fake ``ChatHuggingFace`` / ``HuggingFaceEndpoint`` / ``InferenceClient`` recording the build."""
+    captured: dict[str, dict] = {}
+
+    class _FakeEndpoint:
+        def __init__(self, **kwargs):
+            captured["endpoint"] = kwargs
+
+    class _FakeChat:
+        def __init__(self, **kwargs):
+            captured["chat"] = kwargs
+            self._is_fake = True
+
+    _set_module_attr(monkeypatch, "langchain_huggingface", "ChatHuggingFace", _FakeChat)
+    _set_module_attr(monkeypatch, "langchain_huggingface", "HuggingFaceEndpoint", _FakeEndpoint)
+    _set_module_attr(
+        monkeypatch, "huggingface_hub", "InferenceClient", types.SimpleNamespace(chat_completion=_fake_chat_completion)
+    )
+    return captured, _FakeEndpoint
+
+
+_CLEARED_SAMPLING = {"temperature": None, "top_p": None, "typical_p": None}
+
+
+def test_build_llm_huggingface_wraps_a_hosted_endpoint(monkeypatch):
+    captured, endpoint_cls = _install_fake_huggingface(monkeypatch)
+    built: Any = models._build_llm(
+        "huggingface", model="org/m", api_key="tok", timeout=9, max_tokens=8, temperature=0.5, top_p=0.4, seed=7
+    )
+    assert getattr(built, "_is_fake", False) is True
+    assert captured["endpoint"] == {
+        "repo_id": "org/m",
+        "huggingfacehub_api_token": "tok",
+        "timeout": 9,
+        **_CLEARED_SAMPLING,
+    }
+    chat = captured["chat"]
+    assert isinstance(chat.pop("llm"), endpoint_cls)
+    assert chat == {"model_kwargs": {"temperature": 0.5, "top_p": 0.4, "seed": 7}}
+    assert built.max_tokens == 8
+
+
+def test_build_llm_huggingface_sends_the_key_to_a_base_url_as_a_bearer_header(monkeypatch):
+    captured, _ = _install_fake_huggingface(monkeypatch)
+    built: Any = models._build_llm("huggingface", model="org/m", base_url="https://x.endpoints.example", api_key="tok")
+    assert captured["endpoint"] == {
+        "endpoint_url": "https://x.endpoints.example",
+        "server_kwargs": {"headers": {"authorization": "Bearer tok"}},
+        **_CLEARED_SAMPLING,
+    }
+    assert built.max_tokens is None
+
+
+def test_build_llm_huggingface_base_url_selects_the_endpoint_url(monkeypatch):
+    captured, _ = _install_fake_huggingface(monkeypatch)
+    models._build_llm("huggingface", model="org/m", base_url="http://127.0.0.1:8080")
+    assert captured["endpoint"] == {"endpoint_url": "http://127.0.0.1:8080", **_CLEARED_SAMPLING}
+
+
+def test_build_llm_huggingface_refuses_a_name_the_chat_completion_does_not_take(monkeypatch):
+    captured, _ = _install_fake_huggingface(monkeypatch)
+    with pytest.raises(ValueError, match=r"huggingface: 'api_version', 'top_k' cannot reach the provider"):
+        models._build_llm("huggingface", model="org/m", top_k=2, api_version="v1")
+    assert captured == {}
 
 
 def test_build_llm_openai_branch_builds_real_chatopenai():
@@ -172,8 +360,14 @@ def test_get_embedding_unwraps_secretstr_api_key(monkeypatch):
     assert not isinstance(captured["api_key"], SecretStr)
 
 
+def _fake_sentence_transformer_init(self, model_name_or_path: str | None = None, *, token: str | None = None) -> None:
+    """Stands in for ``SentenceTransformer.__init__``: its signature is what the kit reads."""
+
+
 @pytest.mark.parametrize(("provider", "module_name", "class_name"), _EMBEDDING_PROVIDERS)
 def test_build_embedding_selects_provider_backend(monkeypatch, provider, module_name, class_name):
+    loader = types.SimpleNamespace(__init__=_fake_sentence_transformer_init)
+    _set_module_attr(monkeypatch, "sentence_transformers", "SentenceTransformer", loader)
     captured = _install_fake_backend(monkeypatch, module_name, class_name)
     built = embedding._build_embedding(provider, model="e")
     assert getattr(built, "_is_fake", False) is True

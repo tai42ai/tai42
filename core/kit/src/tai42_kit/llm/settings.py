@@ -113,14 +113,16 @@ class EmbeddingSettings(TaiBaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="EMBEDDING_")
 
+    # What each provider's embedding builder (``llm/embedding.py``) does with a setting; one it cannot
+    # carry is refused at build, naming it.
     model: str = "text-embedding-3-small"  # Required by all providers
-    base_url: str | None = None  # Used by OpenAI (self-hosted), Mistral, Ollama
-    api_key: SecretStr | None = None  # Used by OpenAI, Google, Mistral
-    api_version: str | None = None  # Optional, used by OpenAI, Mistral
-    timeout: int | None = None  # Optional for all
-    user_agent: str | None = None  # Used by HuggingFace (optional header)
-    task: str | None = None  # HuggingFace-specific ("feature-extraction", etc.)
-    model_kwargs: dict[str, Any] | None = None  # HuggingFace, Ollama: optional params
+    base_url: str | None = None  # OpenAI, Mistral (its endpoint), Google, Ollama; refused by HuggingFace
+    api_key: SecretStr | None = None  # OpenAI, Mistral, Google, Ollama (bearer header), HuggingFace (hub token)
+    api_version: str | None = None  # Google (API version path segment); refused by the others
+    timeout: int | None = None  # OpenAI, Mistral, Ollama; refused by Google and HuggingFace
+    user_agent: str | None = None  # OpenAI, Google (request header); refused by the others
+    task: str | None = None  # No embedding builder carries it; refused by every provider
+    model_kwargs: dict[str, Any] | None = None  # OpenAI (call parameters), HuggingFace (loader parameters)
 
 
 class ClassifierSettings(TaiBaseSettings):
@@ -145,16 +147,18 @@ class LLMSettings(TaiBaseSettings):
     """Provider-agnostic chat-model configuration read from the ``LLM_`` env namespace."""
 
     model_config = SettingsConfigDict(env_prefix="LLM_")
+    # What each provider's chat builder (``llm/models.py``) does with a setting; one it cannot carry is
+    # refused at build, naming it.
     model: str = "gpt-4o"  # Common to all
     temperature: float | None = None  # Sent to the provider only when configured
-    max_tokens: int | None = None  # Common to most, optional in case default is used
-    timeout: int | None = None  # Optional but supported by most
-    base_url: str | None = None  # Ollama, OpenAI (self-hosted), Mistral
-    api_key: SecretStr | None = None  # OpenAI, Anthropic, Groq, etc.
-    api_version: str | None = None  # Optional, used in some providers (OpenAI, Mistral)
-    top_p: float | None = None  # Optional sampling param (OpenAI, Anthropic)
-    top_k: int | None = None  # Mistral (optional)
-    n: int | None = None  # Optional: number of completions (OpenAI)
+    max_tokens: int | None = None  # Sent by every provider (Ollama as num_predict)
+    timeout: int | None = None  # Applied by every provider's HTTP client
+    base_url: str | None = None  # The provider's API base URL (HuggingFace: a served endpoint)
+    api_key: SecretStr | None = None  # Every hosted provider; Ollama as a bearer header
+    api_version: str | None = None  # Google (API version path segment), Mistral (request body); refused by the others
+    top_p: float | None = None  # Sent by every provider
+    top_k: int | None = None  # Anthropic, Mistral, Google, Ollama; refused by OpenAI, xAI, HuggingFace
+    n: int | None = None  # OpenAI, xAI, Mistral, Google, HuggingFace; refused by Anthropic, Ollama
     # The LangChain cross-provider reasoning-effort field (ChatAnthropic, ChatOpenAI,
     # ChatXAI, ChatGoogleGenerativeAI all declare it). Dumped into the constructor
     # kwargs like max_tokens/temperature; per-node llm_kwargs still override. A level
