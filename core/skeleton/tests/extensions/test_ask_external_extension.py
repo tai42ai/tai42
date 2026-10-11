@@ -400,9 +400,13 @@ async def test_verifier_rejected_at_ask_time_when_malformed_or_unknown(monkeypat
     with pytest.raises(ValueError, match="verifier must be a"):
         await ask("Sign?", answer_format="external", link="https://x/{callback_url}", verifier=cast(Any, "not-a-dict"))
     with pytest.raises(ValueError, match="verifier must be a"):
-        await ask("Sign?", answer_format="external", link="https://x/{callback_url}", verifier={"name": "nope"})
+        await ask(
+            "Sign?", answer_format="external", link="https://x/{callback_url}", verifier=cast(Any, {"name": "nope"})
+        )
     with pytest.raises(ValueError, match="unknown webhook verifier"):
-        await ask("Sign?", answer_format="external", link="https://x/{callback_url}", verifier={"verifier": "nope"})
+        await ask(
+            "Sign?", answer_format="external", link="https://x/{callback_url}", verifier=cast(Any, {"verifier": "nope"})
+        )
 
 
 # --------------------------------------------------------------------------- #
