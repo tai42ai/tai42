@@ -621,10 +621,10 @@ def _install_fake_fastmcp(monkeypatch) -> list[_FakeBuiltApp]:
         def add_middleware(self, middleware) -> None:
             self._middleware.append(middleware)
 
-        def http_app(self, path=None, middleware=None):
+        def http_app(self, path=None, middleware=None, stateless_http=None):
             # Mirror FastMCP.http_app's signature: the builder passes ``path="/"``
             # so the streamable-HTTP endpoint sits at the sub-app root (matching the
-            # dispatcher's ``/`` rewrite).
+            # dispatcher's ``/`` rewrite), and the boot's stateless mode.
             app = _FakeBuiltApp(self._tools)
             app.http_path = path
             built.append(app)
@@ -861,7 +861,7 @@ async def test_build_propagates_a_lifespan_enter_failure(monkeypatch):
         def add_middleware(self, middleware) -> None:
             pass
 
-        def http_app(self, path=None, middleware=None):
+        def http_app(self, path=None, middleware=None, stateless_http=None):
             return _BadLifespanApp(self._tools)
 
     monkeypatch.setattr(sub_mcp_app_module, "FastMCP", _BadFastMCP)
