@@ -1,10 +1,10 @@
-"""The opaque ``schedules`` backup section, driven through the backup router.
+"""The ``schedules`` backup section, driven through the backup router.
 
-The section carries whatever the scheduling backend's ``backend_export_schedules``
-/ ``backend_import_schedules`` tools return, without parsing schedule internals.
-The ``tai42_app.tools`` facet is faked: an unbound backend has neither tool, so
-``run_tool`` raises the binding's real unknown-tool ``RuntimeError`` and the
-router records it per-section; a bound backend round-trips the document opaquely.
+The section carries the scheduling backend's ``backend_export_schedules`` rows validated
+as the contract's ``ScheduleRecord`` and reads the ``backend_import_schedules`` result as
+a ``ScheduleImportReport``. The ``tai42_app.tools`` facet is faked: an unbound backend has
+neither tool, so ``run_tool`` raises the binding's real unknown-tool error and the router
+records it per-section; a bound backend round-trips the records.
 """
 
 from __future__ import annotations
@@ -60,6 +60,20 @@ def _install(monkeypatch, tools: _FakeTools) -> None:
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(backup=registry, tools=tools))
 
 
+_EMPTY_REPORT = {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+
+
+def _record(name: str, tool: str, kwargs: dict) -> dict:
+    return {
+        "name": name,
+        "tool": tool,
+        "args": [],
+        "kwargs": kwargs,
+        "cadence": {"kind": "interval", "every": 60.0, "relative": False},
+        "enabled": True,
+    }
+
+
 # -- no backend: absence is a per-section error, not a crash -----------------
 
 
@@ -84,10 +98,7 @@ async def test_import_without_backend_reports_error_and_not_ok(monkeypatch):
 
 
 async def test_schedules_round_trip_through_bound_backend(monkeypatch):
-    backend_doc = [
-        {"name": "nightly", "cron": "0 0 * * *", "tool": "cleanup", "arguments": {"scope": "all"}},
-        {"name": "hourly", "cron": "0 * * * *", "tool": "sync", "arguments": {}},
-    ]
+    backend_doc = [_record("nightly", "cleanup", {"scope": "all"}), _record("hourly", "sync", {})]
     import_report = {"created": 2, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
     tools = _FakeTools(
         {
@@ -97,15 +108,15 @@ async def test_schedules_round_trip_through_bound_backend(monkeypatch):
     )
     _install(monkeypatch, tools)
 
-    # Export carries the backend's list verbatim.
+    # Export carries the backend's records, validated.
     doc = _json(await export_backup(_post_req({"sections": ["schedules"]})))
     assert doc["sections"]["schedules"] == backend_doc
     assert doc["errors"] == {}
 
     # Import hands the whole document back to the backend under ``schedules``, forwarding
     # the per-record mode across the tool boundary (skip is the default). The backend's
-    # result maps into the typed section report: its counts fill the typed fields, and any
-    # other count it carries (its ``skipped_existing`` tally) rides ``details``.
+    # report maps into the typed section report: its counts fill the typed fields, and its
+    # ``skipped_existing`` tally rides ``details``.
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["schedules"]})))["data"]
     assert data["ok"] is True
     assert data["sections"]["schedules"] == {
@@ -130,6 +141,7 @@ async def test_schedules_backend_structured_errors_render_as_strings(monkeypatch
         "created": 0,
         "updated": 0,
         "skipped": 1,
+        "skipped_existing": 0,
         "errors": [{"index": 0, "name": "nightly", "error": "unsupported schedule"}],
     }
     tools = _FakeTools({"backend_import_schedules": import_report})
@@ -144,7 +156,7 @@ async def test_schedules_backend_structured_errors_render_as_strings(monkeypatch
 
 
 async def test_schedules_import_forwards_overwrite_mode(monkeypatch):
-    backend_doc = [{"name": "nightly", "cron": "0 0 * * *", "tool": "cleanup", "arguments": {}}]
+    backend_doc = [_record("nightly", "cleanup", {})]
     import_report = {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": []}
     tools = _FakeTools({"backend_import_schedules": import_report})
     _install(monkeypatch, tools)
@@ -194,6 +206,7 @@ async def test_a_refused_binding_row_is_not_forwarded_to_the_backend_and_is_repo
         "created": 1,
         "updated": 0,
         "skipped": 1,
+        "skipped_existing": 0,
         # The backend saw [good, plain]: its row 1 is the payload's row 2.
         "errors": [{"index": 1, "name": "plain", "error": "unsupported schedule"}],
     }
@@ -218,7 +231,7 @@ async def test_a_malformed_binding_row_is_refused_per_row(monkeypatch):
     from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG
 
     _patch_binding_validation(monkeypatch)
-    tools = _FakeTools({"backend_import_schedules": {"created": 0, "updated": 0, "skipped": 0, "errors": []}})
+    tools = _FakeTools({"backend_import_schedules": _EMPTY_REPORT})
     _install(monkeypatch, tools)
     malformed = {"name": "bad", "kwargs": {SCHEDULE_STATE_BINDING_ARG: {"states": "not-a-list"}}}
 
@@ -236,7 +249,7 @@ async def test_a_store_fault_during_the_binding_check_fails_the_section(monkeypa
 
     for fault in (StatesError("store down"), StatesNotConfiguredError("store down")):
         _patch_binding_validation(monkeypatch, lambda b, fault=fault: fault)
-        tools = _FakeTools({"backend_import_schedules": {"created": 0, "updated": 0, "skipped": 0, "errors": []}})
+        tools = _FakeTools({"backend_import_schedules": _EMPTY_REPORT})
         _install(monkeypatch, tools)
 
         document = {"version": 1, "sections": {"schedules": [_bound_row("nightly", "status")]}}
@@ -252,7 +265,7 @@ async def test_a_document_that_is_not_a_row_list_is_forwarded_to_the_backend_unc
     # Only a row list carries bindings the platform can read; any other document is the backend's
     # to judge, forwarded as it is.
     calls = _patch_binding_validation(monkeypatch)
-    tools = _FakeTools({"backend_import_schedules": {"created": 0, "updated": 0, "skipped": 0, "errors": []}})
+    tools = _FakeTools({"backend_import_schedules": _EMPTY_REPORT})
     _install(monkeypatch, tools)
     opaque = {"format": "backend-native", "rows": [_bound_row("nightly", "status")]}
 
@@ -262,3 +275,25 @@ async def test_a_document_that_is_not_a_row_list_is_forwarded_to_the_backend_unc
     assert data["ok"] is True
     assert tools.run_calls == [("backend_import_schedules", {"schedules": opaque, "mode": "skip"})]
     assert calls == []
+
+
+async def test_an_export_that_is_not_schedule_records_is_a_section_error(monkeypatch):
+    legacy = [{"name": "nightly", "kwargs": {}, "schedule": {"__type__": "interval", "every": 60}, "enabled": True}]
+    _install(monkeypatch, _FakeTools({"backend_export_schedules": legacy}))
+    doc = _json(await export_backup(_post_req({"sections": ["schedules"]})))
+    assert "schedules" not in doc["sections"]
+    assert "ScheduleRecord" in doc["errors"]["schedules"]
+
+
+async def test_a_report_that_is_not_a_schedule_import_report_fails_the_section(monkeypatch):
+    # A report missing ``skipped_existing`` is not the contract's shape: the section errors loudly
+    # instead of filling zero defaults.
+    tools = _FakeTools({"backend_import_schedules": {"created": 1, "updated": 0, "skipped": 0, "errors": []}})
+    _install(monkeypatch, tools)
+    document = {"version": 1, "sections": {"schedules": [_record("nightly", "cleanup", {})]}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["schedules"]})))["data"]
+    assert data["ok"] is False
+    (error,) = data["sections"]["schedules"]["errors"]
+    assert (
+        "the scheduling backend's backend_import_schedules returned a report that is not ScheduleImportReport" in error
+    )

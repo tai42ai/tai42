@@ -19,6 +19,7 @@ import pytest
 from langgraph.checkpoint.base import empty_checkpoint
 from prometheus_client import REGISTRY
 from tai42_contract.app import tai42_app
+from tai42_contract.backend import CrontabCadence
 from tai42_contract.manifest import ApiToolsConfig
 from tai42_kit.llm.checkpoint import ThreadRetention, liveness, register_live_thread_filter
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
@@ -337,7 +338,7 @@ def test_projects_as_a_schedulable_tool() -> None:
 
 async def test_schedulable_via_create_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
     # A scheduler-capable backend (marker tools present) plus the projected sweep tool and
-    # its ``schedule_task`` vehicle: the create-schedule door translates a cadence onto that
+    # its ``schedule_task`` vehicle: the create-schedule door dispatches a cadence onto that
     # branch, so the sweep is schedulable.
     class _FakeTools:
         def __init__(self, registered: set[str]) -> None:
@@ -365,9 +366,10 @@ async def test_schedulable_via_create_schedule(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(schedules_ops, "authorize_submitted_tool", _allow)
 
-    result = await schedules_ops.create_schedule("sweep_checkpoints", {}, {"cron": "0 3 * * *"})
-    # The friendly cron is translated onto the sweep's ``schedule_task`` vehicle: the branch
-    # is dispatched with the cadence as ``backend_schedule`` under a derived name.
+    cadence = CrontabCadence(minute="0", hour="3")
+    result = await schedules_ops.create_schedule("sweep_checkpoints", {}, cadence=cadence)
+    # The cadence dispatches the sweep's ``schedule_task`` vehicle with the dumped cadence as
+    # ``backend_schedule`` under a derived name.
     assert result["scheduled"] == "sweep_checkpoints_schedule_task"
-    assert result["arguments"]["backend_schedule"] == "0 3 * * *"
+    assert result["arguments"]["backend_schedule"] == cadence.model_dump(mode="json")
     assert result["arguments"]["backend_schedule_name"].startswith("sweep_checkpoints_")

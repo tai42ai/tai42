@@ -2,8 +2,8 @@
 
 Scheduling any tool means branching it with the backend's ``schedule_task`` extension; a
 projected operation-tool (``sweep_checkpoints``) has no manifest extension hook of its own, so
-it schedules through ``run_tool_schedule_task`` — the scheduling analog of the universal
-``run_tool_sync_task`` door — which the schedule stack mints. This is the mechanism a
+it schedules on the ``run_tool`` base tool, whose ``run_tool_schedule_task`` vehicle — the
+scheduling analog of the universal ``run_tool_sync_task`` door — the schedule stack mints. This is the mechanism a
 deployment uses for native recurrence; external cron of ``tai checkpoints sweep`` is the
 busless alternative. Firing mechanics are proven per-backend by ``test_schedule_task``; the
 sweep's own execution semantics by the operation tests + the bridge API leg, so this asserts
@@ -33,9 +33,10 @@ async def test_checkpoint_sweep_is_schedulable(schedule_stack: TaiStack, uniq: C
     await api.post(
         "/api/schedules",
         json={
-            "tool_name": "run_tool_schedule_task",
+            "tool_name": "run_tool",
             "tool_kwargs": {"tool_name": "sweep_checkpoints", "arguments": {}},
-            "schedule_kwargs": {"backend_schedule_name": schedule_name, "backend_schedule": 3600},
+            "cadence": {"kind": "interval", "every": 3600},
+            "schedule_name": schedule_name,
         },
     )
     try:

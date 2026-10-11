@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from tai42_contract.access_control import caller_may_read_secrets
+from tai42_contract.backend import SCHEDULE_CADENCE_KEY, SCHEDULE_NAME_KEY
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.detached_util import in_detached_run
 
@@ -126,17 +127,35 @@ def test_task_opts_expose_callback_kwargs() -> None:
         "eta",
         "callback_kwargs",
     }
-    assert set(tasks_module.CELERY_SCHEDULE_OPTS) == {"backend_schedule_name", "backend_schedule"}
+    assert set(tasks_module.CELERY_SCHEDULE_OPTS) == {SCHEDULE_NAME_KEY, SCHEDULE_CADENCE_KEY}
 
 
-def test_tool_execution_retry_policy() -> None:
-    assert ConnectionError in tool_execution.autoretry_for
-    assert TimeoutError in tool_execution.autoretry_for
-    assert ValueError in tool_execution.dont_autoretry_for
-    assert tool_execution.max_retries == 5
-    assert tool_execution.retry_backoff is True
-    assert tool_execution.retry_backoff_max == 600
-    assert tool_execution.retry_jitter is True
+def test_neither_task_carries_an_autoretry_wrapper() -> None:
+    from tai42_backend_celery.core.tasks import callback_task
+
+    for task in (tool_execution, callback_task):
+        assert not hasattr(task, "_orig_run")
+        assert not getattr(task, "autoretry_for", ())
+
+
+def test_a_tool_body_raising_timeout_error_runs_once(monkeypatch: pytest.MonkeyPatch, stub_app) -> None:
+    # Builtin ``TimeoutError`` (and ``ConnectionError``) from a tool body is the tool's failure: the
+    # task never re-fires the body; retries are declared per tool and applied by the platform.
+    calls: list[dict[str, Any]] = []
+
+    async def _boom(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        raise TimeoutError("upstream too slow")
+
+    monkeypatch.setattr(tasks_module, "run_tool", _boom)
+    try:
+        result = tool_execution.apply(kwargs={"x": 1})
+    finally:
+        if tool_execution._loop is not None:  # close the task loop opened by apply()
+            tool_execution._loop.close()
+            tool_execution._loop = None
+    assert calls == [{"x": 1}]
+    assert isinstance(result.result, TimeoutError)
 
 
 def test_callback_task_runs_callback_execution(stub_app) -> None:

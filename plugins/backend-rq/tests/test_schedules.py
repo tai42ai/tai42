@@ -1,58 +1,25 @@
-"""ScheduleRecord validation and the shared schedule-apply path."""
+"""The shared schedule-apply path, the relative refusal, and the scheduler factory."""
 
 from __future__ import annotations
 
 from typing import Any
 
 import pytest
+from tai42_contract.backend import CrontabCadence, IntervalCadence
 
-from tai42_backend_rq.schedules import ScheduleRecord, apply_normalized_schedule, crontab_string, interval_seconds
-
-
-def test_schedule_record_accepts_canonical_interval():
-    record = ScheduleRecord(
-        name="s1",
-        schedule={"__type__": "interval", "every": 60.0, "relative": False},
-        enabled=True,
-    )
-    assert record.args == []
-    assert record.kwargs == {}
-
-
-def test_schedule_record_accepts_canonical_crontab():
-    record = ScheduleRecord(
-        name="s1",
-        schedule={
-            "__type__": "crontab",
-            "minute": "0",
-            "hour": "9",
-            "day_of_month": "*",
-            "month_of_year": "*",
-            "day_of_week": "1",
-        },
-        enabled=False,
-    )
-    assert record.enabled is False
-
-
-@pytest.mark.parametrize(
-    "schedule",
-    [
-        {"__type__": "nonsense"},
-        {"__type__": "interval", "every": "sixty"},
-        {"__type__": "interval", "every": True},
-        {"__type__": "interval", "every": 60, "relative": "yes"},
-        {"__type__": "crontab", "minute": "0"},
-    ],
+from tai42_backend_rq.queue import TaskBudgetQueue
+from tai42_backend_rq.schedules import (
+    apply_normalized_schedule,
+    crontab_string,
+    interval_seconds,
+    refuse_relative,
+    scheduler_for,
 )
-def test_schedule_record_rejects_malformed_schedules(schedule: dict[str, Any]):
-    with pytest.raises(ValueError):  # noqa: PT011 - each case has its own message
-        ScheduleRecord(name="s1", schedule=schedule, enabled=True)
 
 
 def test_interval_seconds_returns_whole_seconds():
-    assert interval_seconds({"__type__": "interval", "every": 60.0}) == 60
-    assert interval_seconds({"__type__": "interval", "every": 1}) == 1
+    assert interval_seconds(IntervalCadence(every=60.0)) == 60
+    assert interval_seconds(IntervalCadence(every=1)) == 1
 
 
 @pytest.mark.parametrize("every", [0.5, 90.5])
@@ -61,19 +28,25 @@ def test_interval_seconds_rejects_unrepresentable_values(every: float):
     interval would silently drift, and a sub-second one would truncate to 0
     and never recur — both must raise instead."""
     with pytest.raises(ValueError, match="whole seconds"):
-        interval_seconds({"__type__": "interval", "every": every})
+        interval_seconds(IntervalCadence(every=every))
 
 
 def test_crontab_string_builds_five_fields():
-    norm = {
-        "__type__": "crontab",
-        "minute": "0",
-        "hour": "9",
-        "day_of_month": "*",
-        "month_of_year": "*",
-        "day_of_week": "1",
-    }
-    assert crontab_string(norm) == "0 9 * * 1"
+    assert crontab_string(CrontabCadence(minute="0", hour="9", day_of_week="1")) == "0 9 * * 1"
+
+
+def test_refuse_relative():
+    refuse_relative(IntervalCadence(every=5))
+    refuse_relative(CrontabCadence())
+    with pytest.raises(
+        ValueError, match=r"the rq backend does not support relative interval schedules \(relative=True\)"
+    ):
+        refuse_relative(IntervalCadence(every=5, relative=True))
+
+
+def test_the_scheduler_moves_jobs_onto_the_task_budget_queue():
+    scheduler = scheduler_for(object())
+    assert scheduler.queue_class is TaskBudgetQueue
 
 
 class RecordingScheduler:
@@ -94,8 +67,7 @@ def _func() -> None:
 
 async def test_apply_interval_mirrors_meta():
     scheduler = RecordingScheduler()
-    norm = {"__type__": "interval", "every": 60.0, "relative": False}
-    await apply_normalized_schedule(scheduler, norm, _func, [1], {"a": 2}, "s1")
+    await apply_normalized_schedule(scheduler, IntervalCadence(every=60.0), _func, [1], {"a": 2}, "s1")
 
     [call] = scheduler.schedule_calls
     # Whole seconds as an int — the exact value the RQ scheduler itself keeps
@@ -110,24 +82,22 @@ async def test_apply_interval_mirrors_meta():
 
 async def test_apply_interval_rejects_fractional_seconds():
     scheduler = RecordingScheduler()
-    norm = {"__type__": "interval", "every": 0.5, "relative": False}
     with pytest.raises(ValueError, match="whole seconds"):
-        await apply_normalized_schedule(scheduler, norm, _func, [], {}, "s1")
+        await apply_normalized_schedule(scheduler, IntervalCadence(every=0.5), _func, [], {}, "s1")
     # Nothing was written for the rejected schedule.
+    assert scheduler.schedule_calls == []
+
+
+async def test_apply_refuses_a_relative_interval():
+    scheduler = RecordingScheduler()
+    with pytest.raises(ValueError, match="does not support relative interval schedules"):
+        await apply_normalized_schedule(scheduler, IntervalCadence(every=60, relative=True), _func, [], {}, "s1")
     assert scheduler.schedule_calls == []
 
 
 async def test_apply_crontab_mirrors_meta():
     scheduler = RecordingScheduler()
-    norm = {
-        "__type__": "crontab",
-        "minute": "30",
-        "hour": "6",
-        "day_of_month": "*",
-        "month_of_year": "*",
-        "day_of_week": "*",
-    }
-    await apply_normalized_schedule(scheduler, norm, _func, [], {}, "s2")
+    await apply_normalized_schedule(scheduler, CrontabCadence(minute="30", hour="6"), _func, [], {}, "s2")
 
     [(cron, call)] = scheduler.cron_calls
     assert cron == "30 6 * * *"
@@ -135,6 +105,35 @@ async def test_apply_crontab_mirrors_meta():
     assert call["id"] == "s2"
 
 
-async def test_apply_unknown_type_raises():
-    with pytest.raises(ValueError, match="Unsupported schedule type"):
-        await apply_normalized_schedule(RecordingScheduler(), {"__type__": "weird"}, _func, [], {}, "s3")
+def test_a_task_budget_queue_defaults_its_job_timeout_to_task_timeout(monkeypatch: pytest.MonkeyPatch):
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("RQ_TASK_TIMEOUT", "77")
+    reset_all_settings()
+    try:
+        queue = TaskBudgetQueue("default", connection=object())
+        explicit = TaskBudgetQueue("default", connection=object(), default_timeout=5)
+    finally:
+        monkeypatch.delenv("RQ_TASK_TIMEOUT", raising=False)
+        reset_all_settings()
+    assert queue._default_timeout == 77
+    assert explicit._default_timeout == 5
+
+
+def test_a_job_moved_onto_the_queue_without_a_timeout_gets_the_budget(monkeypatch: pytest.MonkeyPatch):
+    """rq gives a scheduled job without its own timeout the queue's default when it is moved."""
+    from rq.job import Job
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("RQ_TASK_TIMEOUT", "77")
+    reset_all_settings()
+    try:
+        queue = TaskBudgetQueue("default", connection=object())
+    finally:
+        monkeypatch.delenv("RQ_TASK_TIMEOUT", raising=False)
+        reset_all_settings()
+    job = Job.__new__(Job)
+    job.timeout = None
+    monkeypatch.setattr(queue, "get_redis_server_version", lambda: (7, 0, 0))
+    queue._prepare_for_queue(job)
+    assert job.timeout == 77

@@ -38,6 +38,14 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 from tai42_contract.app import tai42_app
+from tai42_contract.backend import (
+    SCHEDULE_CADENCE_KEY,
+    SCHEDULE_DELETE_TOOL,
+    SCHEDULE_LIST_TOOL,
+    SCHEDULE_NAME_KEY,
+    CrontabCadence,
+    ScheduleCreate,
+)
 from tai42_contract.errors import UnavailableError
 
 from tai42_skeleton.authz.resolver import OperationSurfaceUnsettledError
@@ -112,6 +120,7 @@ def install(monkeypatch: pytest.MonkeyPatch):
 
 
 _MARKERS = {"backend_list_schedules", "backend_delete_schedule"}
+_EVERY_MINUTE = CrontabCadence()
 
 
 def _assert_logged_server_side(caplog: pytest.LogCaptureFixture, detail: str) -> None:
@@ -176,13 +185,13 @@ async def test_list_vanished_marker_is_501(install, caplog) -> None:
     # It never ran, so the door answers the 501 the next request would answer — never a
     # 500 blaming the tool for "raising during execution". The caller sees a plain 501,
     # so the anomaly is recorded server-side as a WARNING naming the door and the tool.
-    install(_FakeTools(_MARKERS, run_exc=UnknownToolError(schedules_ops._LIST_TOOL)))
+    install(_FakeTools(_MARKERS, run_exc=UnknownToolError(SCHEDULE_LIST_TOOL)))
     with (
         caplog.at_level(logging.WARNING, logger=schedules_ops.logger.name),
         pytest.raises(NotSupportedError, match="no installed backend"),
     ):
         await schedules_ops.list_schedules()
-    _assert_warned_server_side(caplog, "list-schedules", schedules_ops._LIST_TOOL)
+    _assert_warned_server_side(caplog, "list-schedules", SCHEDULE_LIST_TOOL)
 
 
 async def test_list_maps_unknown_tool_raised_for_another_name_to_structured_500(install, caplog) -> None:
@@ -203,7 +212,7 @@ async def test_list_sibling_marker_unknown_tool_is_structured_500(install) -> No
     # The DELETE marker is not the tool the LIST door asked for, so an ``UnknownToolError``
     # naming it is the inner dispatch's failure like any other foreign name — a structured
     # 500, never the 501 reserved for this door's own marker vanishing.
-    install(_FakeTools(_MARKERS, run_exc=UnknownToolError(schedules_ops._DELETE_TOOL)))
+    install(_FakeTools(_MARKERS, run_exc=UnknownToolError(SCHEDULE_DELETE_TOOL)))
     with pytest.raises(OperationFailedError) as caught:
         await schedules_ops.list_schedules()
     assert caught.value.message == "schedule listing failed (unknown tool backend_delete_schedule)"
@@ -260,7 +269,7 @@ async def test_create_maps_unknown_tool_raised_for_another_name_to_structured_50
         caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name),
         pytest.raises(OperationFailedError) as caught,
     ):
-        await schedules_ops.create_schedule("send", {}, {})
+        await schedules_ops.create_schedule("send", {})
     assert caught.value.message == "schedule creation failed (unknown tool some_inner_tool)"
     _assert_logged_server_side(caplog, "No such tool: some_inner_tool.")
 
@@ -275,7 +284,7 @@ async def test_create_raise_during_execution_is_500(install, caplog) -> None:
         caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name),
         pytest.raises(OperationFailedError) as caught,
     ):
-        await schedules_ops.create_schedule("send", {}, {})
+        await schedules_ops.create_schedule("send", {})
     assert caught.value.message == "schedule creation failed (RuntimeError)"
     _assert_logged_server_side(caplog, "10.0.0.7:6379")
 
@@ -290,15 +299,15 @@ async def test_create_permission_denied_from_the_dispatch_passes_through(install
         caplog.at_level(logging.DEBUG, logger=schedules_ops.logger.name),
         pytest.raises(PermissionDeniedError, match="dispatch refused"),
     ):
-        await schedules_ops.create_schedule("send", {}, {})
+        await schedules_ops.create_schedule("send", {})
     _assert_nothing_logged_server_side(caplog)
 
 
 async def test_create_authorizes_the_submitted_tool_with_the_translated_dispatch(install, monkeypatch) -> None:
-    # A friendly ``cron`` on a base tool is translated onto the ``<tool>_schedule_task``
-    # branch: the submitted tool authorized against the live caller is that branch, on the
-    # exact arguments the dispatch fires — the tool kwargs plus the translated schedule
-    # keys, with a deterministically derived name.
+    # A cadence on a base tool dispatches its ``<tool>_schedule_task`` vehicle: the submitted
+    # tool authorized against the live caller is that vehicle, on the exact arguments the
+    # dispatch fires — the tool kwargs plus the schedule keys, with a deterministically
+    # derived name.
     install(_FakeTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
     seen: list[tuple] = []
 
@@ -306,17 +315,17 @@ async def test_create_authorizes_the_submitted_tool_with_the_translated_dispatch
         seen.append((tool_name, dict(arguments)))
 
     monkeypatch.setattr(schedules_ops, "authorize_submitted_tool", _spy)
-    out = await schedules_ops.create_schedule("send", {"to": "x"}, {"cron": "* * * * *"})
+    out = await schedules_ops.create_schedule("send", {"to": "x"}, cadence=_EVERY_MINUTE)
     assert out == "ok"
     assert len(seen) == 1
     name, arguments = seen[0]
     assert name == "send_schedule_task"
     assert arguments == {
         "to": "x",
-        "backend_schedule_name": arguments["backend_schedule_name"],
-        "backend_schedule": "* * * * *",
+        SCHEDULE_NAME_KEY: arguments[SCHEDULE_NAME_KEY],
+        SCHEDULE_CADENCE_KEY: _EVERY_MINUTE.model_dump(mode="json"),
     }
-    assert arguments["backend_schedule_name"].startswith("send_")
+    assert arguments[SCHEDULE_NAME_KEY].startswith("send_")
 
 
 async def test_create_binds_the_schedule_create_fire_around_the_recurring_dispatch(install, monkeypatch) -> None:
@@ -340,7 +349,7 @@ async def test_create_binds_the_schedule_create_fire_around_the_recurring_dispat
 
     monkeypatch.setattr(schedules_ops, "authorize_submitted_tool", _ok)
     assert in_schedule_create_fire() is False
-    out = await schedules_ops.create_schedule("send", {"to": "x"}, {"cron": "* * * * *"})
+    out = await schedules_ops.create_schedule("send", {"to": "x"}, cadence=_EVERY_MINUTE)
     assert out == "ok"
     assert seen["in_fire"] is True
     assert in_schedule_create_fire() is False
@@ -358,7 +367,7 @@ async def test_create_denied_tool_is_refused_before_scheduling(install, monkeypa
 
     monkeypatch.setattr(schedules_ops, "authorize_submitted_tool", _deny)
     with pytest.raises(PermissionDeniedError, match="not permitted"):
-        await schedules_ops.create_schedule("write_env", {"k": "v"}, {"cron": "* * * * *"})
+        await schedules_ops.create_schedule("write_env", {"k": "v"}, cadence=_EVERY_MINUTE)
 
 
 async def test_create_unsettled_operation_surface_is_503(install, monkeypatch) -> None:
@@ -374,7 +383,7 @@ async def test_create_unsettled_operation_surface_is_503(install, monkeypatch) -
 
     monkeypatch.setattr(schedules_ops, "authorize_submitted_tool", _unsettled)
     with pytest.raises(UnavailableError, match="retry shortly") as caught:
-        await schedules_ops.create_schedule("send", {"to": "x"}, {"cron": "* * * * *"})
+        await schedules_ops.create_schedule("send", {"to": "x"}, cadence=_EVERY_MINUTE)
     assert caught.value.status == 503
 
 
@@ -387,7 +396,7 @@ async def test_create_unknown_tool_is_404(install, caplog) -> None:
         caplog.at_level(logging.DEBUG, logger=schedules_ops.logger.name),
         pytest.raises(NotFoundError, match="unknown tool: typo"),
     ):
-        await schedules_ops.create_schedule("typo", {}, {})
+        await schedules_ops.create_schedule("typo", {})
     _assert_nothing_logged_server_side(caplog)
 
 
@@ -416,13 +425,13 @@ async def test_delete_vanished_marker_is_501(install, caplog) -> None:
     # It never ran, so the door answers the 501 the next request would answer — never a
     # 500 blaming the tool for "raising during execution". The caller sees a plain 501,
     # so the anomaly is recorded server-side as a WARNING naming the door and the tool.
-    install(_FakeTools(_MARKERS, run_exc=UnknownToolError(schedules_ops._DELETE_TOOL)))
+    install(_FakeTools(_MARKERS, run_exc=UnknownToolError(SCHEDULE_DELETE_TOOL)))
     with (
         caplog.at_level(logging.WARNING, logger=schedules_ops.logger.name),
         pytest.raises(NotSupportedError, match="no installed backend"),
     ):
         await schedules_ops.delete_schedule("nightly")
-    _assert_warned_server_side(caplog, "delete-schedule", schedules_ops._DELETE_TOOL)
+    _assert_warned_server_side(caplog, "delete-schedule", SCHEDULE_DELETE_TOOL)
 
 
 async def test_delete_maps_unknown_tool_raised_for_another_name_to_structured_500(install, caplog) -> None:
@@ -443,7 +452,7 @@ async def test_delete_sibling_marker_unknown_tool_is_structured_500(install) -> 
     # The LIST marker is not the tool the DELETE door asked for, so an ``UnknownToolError``
     # naming it is the inner dispatch's failure like any other foreign name — a structured
     # 500, never the 501 reserved for this door's own marker vanishing.
-    install(_FakeTools(_MARKERS, run_exc=UnknownToolError(schedules_ops._LIST_TOOL)))
+    install(_FakeTools(_MARKERS, run_exc=UnknownToolError(SCHEDULE_LIST_TOOL)))
     with pytest.raises(OperationFailedError) as caught:
         await schedules_ops.delete_schedule("nightly")
     assert caught.value.message == "schedule deletion failed (unknown tool backend_list_schedules)"
@@ -499,7 +508,7 @@ async def test_create_stamps_the_top_level_subject_as_the_reserved_door_arg(inst
 
     install(_RecordingTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
     out = await schedules_ops.create_schedule(
-        "send", {"to": "x"}, {"cron": "* * * * *"}, subject=StateSubject.model_validate(_VALID_SUBJECT)
+        "send", {"to": "x"}, cadence=_EVERY_MINUTE, subject=StateSubject.model_validate(_VALID_SUBJECT)
     )
     assert out == "ok"
     (arguments,) = dispatched
@@ -511,7 +520,7 @@ async def test_create_stamps_the_top_level_subject_as_the_reserved_door_arg(inst
 async def test_malformed_subject_is_refused_by_the_model() -> None:
     # A malformed top-level ``subject`` fails the model's ``StateSubject`` validation; the router surfaces it as a 400.
     with pytest.raises(ValidationError):
-        schedules_ops.ScheduleCreate.model_validate({"tool_name": "send", "subject": {"kind": "person"}})
+        ScheduleCreate.model_validate({"tool_name": "send", "subject": {"kind": "person"}})
 
 
 async def test_run_once_schedule_applies_binding_around_start_without_injecting_it(install, monkeypatch) -> None:
@@ -544,7 +553,7 @@ async def test_run_once_schedule_applies_binding_around_start_without_injecting_
 
     monkeypatch.setattr(schedules_ops, "authorize_submitted_tool", _noop_authz)
 
-    await schedules_ops.create_schedule("mytool", {}, {}, state_binding=binding)
+    await schedules_ops.create_schedule("mytool", {}, state_binding=binding)
     assert "state_binding" not in seen["args"]  # NOT leaked into the base tool's arguments
     assert seen["binding"] == binding  # deposited on the ambient invocation for the chokepoint
 
@@ -588,9 +597,9 @@ async def test_contract_jq_without_execution_key_is_refused_and_a_keyless_no_jq_
 
     install(_FakeTools(set(_MARKERS) | {"mytool"}, run_result="ran"))
     with pytest.raises(BadRequestError, match="execution_key"):
-        await schedules_ops.create_schedule("mytool", {}, {}, start_expr=TemplatedText(content="{k: .m}"))
+        await schedules_ops.create_schedule("mytool", {}, start_expr=TemplatedText(content="{k: .m}"))
 
-    result = await schedules_ops.create_schedule("mytool", {}, {})
+    result = await schedules_ops.create_schedule("mytool", {})
     assert result == "ran"  # keyless, no jq: accepted as a run-once dispatch
 
 
@@ -602,7 +611,7 @@ async def test_a_forged_reserved_schedule_door_key_is_refused(install) -> None:
     install(_FakeTools(set(_MARKERS) | {"mytool"}, run_result="ran"))
     for forged in ("backend_schedule_subject", "backend_schedule_contract"):
         with pytest.raises(BadRequestError, match="reserved schedule door key"):
-            await schedules_ops.create_schedule("mytool", {forged: {"x": 1}}, {})
+            await schedules_ops.create_schedule("mytool", {forged: {"x": 1}})
 
 
 async def test_run_once_returns_the_caller_ask_entries_for_an_asks_outcome(monkeypatch) -> None:
@@ -615,7 +624,7 @@ async def test_run_once_returns_the_caller_ask_entries_for_an_asks_outcome(monke
         _FakeTools(set(_MARKERS) | {"mytool"}),
         _OutcomeInteractions(VisitOutcome(action="started", kind="asks", asks=[ask])),
     )
-    result = await schedules_ops.create_schedule("mytool", {}, {})
+    result = await schedules_ops.create_schedule("mytool", {})
     assert result == [{"id": "c1", "status": "asking", "to": "caller", "question": "proceed?", "answer_format": "free"}]
 
 
@@ -630,7 +639,7 @@ async def test_run_once_returns_the_park_notice_for_a_parked_outcome(monkeypatch
             VisitOutcome(action="started", kind="parked", suspended=SuspendedInteraction(interaction_id="u1"))
         ),
     )
-    result = await schedules_ops.create_schedule("mytool", {}, {})
+    result = await schedules_ops.create_schedule("mytool", {})
     assert result == {"parked": ["u1"]}
 
 
@@ -664,7 +673,7 @@ async def test_create_with_a_binding_naming_an_undeclared_state_is_not_found(ins
     install(_FakeTools(set(_MARKERS) | {"mytool"}, run_result="ran"))
     _patch_schedule_binding_check(monkeypatch, StateNotFoundError("state 'ghost' is not declared"))
     with pytest.raises(NotFoundError, match=r"^invalid schedule: state 'ghost' is not declared$"):
-        await schedules_ops.create_schedule("mytool", {}, {}, state_binding=_ghost_binding())
+        await schedules_ops.create_schedule("mytool", {}, state_binding=_ghost_binding())
 
 
 @pytest.mark.parametrize("fault_class", ["StatesError", "StatesNotConfiguredError"])
@@ -675,7 +684,7 @@ async def test_create_with_a_store_fault_during_the_binding_check_propagates(ins
     fault = getattr(states_errors, fault_class)("store down")
     _patch_schedule_binding_check(monkeypatch, fault)
     with pytest.raises(type(fault)) as caught:
-        await schedules_ops.create_schedule("mytool", {}, {}, state_binding=_ghost_binding())
+        await schedules_ops.create_schedule("mytool", {}, state_binding=_ghost_binding())
     assert caught.value is fault
 
 
@@ -683,4 +692,36 @@ async def test_create_with_an_uncompilable_binding_jq_is_a_bad_request(install, 
     install(_FakeTools(set(_MARKERS) | {"mytool"}, run_result="ran"))
     _patch_schedule_binding_check(monkeypatch, ValueError("jq does not compile"))
     with pytest.raises(BadRequestError, match=r"^invalid schedule: jq does not compile$"):
-        await schedules_ops.create_schedule("mytool", {}, {}, state_binding=_ghost_binding())
+        await schedules_ops.create_schedule("mytool", {}, state_binding=_ghost_binding())
+
+
+async def test_list_answers_the_backend_rows_typed(install) -> None:
+    row = {"name": "n", "tool": "send", "cadence": {"kind": "interval", "every": 5}, "enabled": True}
+    install(_FakeTools(_MARKERS, run_result=[row]))
+    (listed,) = await schedules_ops.list_schedules()
+    assert listed.tool == "send"
+    assert listed.model_dump(mode="json", exclude_none=True) == {
+        **row,
+        "cadence": {**row["cadence"], "relative": False},
+    }
+
+
+async def test_list_rows_carrying_kwargs_are_a_structured_500(install) -> None:
+    row = {"name": "n", "tool": "send", "cadence": {"kind": "interval", "every": 5}, "enabled": True, "kwargs": {}}
+    install(_FakeTools(_MARKERS, run_result=[row]))
+    with pytest.raises(OperationFailedError) as caught:
+        await schedules_ops.list_schedules()
+    assert caught.value.message == (
+        "the scheduling backend's backend_list_schedules returned rows that are not ScheduleListRow: "
+        "0.kwargs: Extra inputs are not permitted"
+    )
+
+
+async def test_an_export_that_is_not_schedule_records_is_a_structured_500(install) -> None:
+    legacy = {"name": "n", "kwargs": {}, "schedule": {"__type__": "interval", "every": 5}, "enabled": True}
+    install(_FakeTools(_MARKERS | {"backend_export_schedules"}, run_result=[legacy]))
+    with pytest.raises(OperationFailedError) as caught:
+        await schedules_ops.export_schedules_raw()
+    assert caught.value.message.startswith(
+        "the scheduling backend's backend_export_schedules returned records that are not ScheduleRecord: "
+    )

@@ -332,7 +332,7 @@ def _seed_schedule(redis: Any, name: str = "s1", enabled: bool = True) -> str:
         b"target": b"tool_execution",
         b"args": orjson.dumps([]),
         b"kwargs": orjson.dumps({"backend_tool_name": "t"}),
-        b"schedule": orjson.dumps({"__type__": "interval", "every": 60.0, "relative": False}),
+        b"schedule": orjson.dumps({"kind": "interval", "every": 60.0, "relative": False}),
         b"cron_or_interval": b"60",
         b"enabled": b"true" if enabled else b"false",
         b"job_id": b"pending-1",
@@ -358,20 +358,44 @@ async def test_list_schedules(fake_redis, bind_pool) -> None:
     _seed_schedule(fake_redis)
 
     out = await tools.backend_list_schedules()
+    # A typed ``ScheduleListRow``: the fired tool and the cadence, never the stored args/kwargs.
     assert out == [
         {
             "name": "s1",
+            "tool": "t",
+            "cadence": {"kind": "interval", "every": 60.0, "relative": False},
             "enabled": True,
             "next_run_at_ts": 12345.0,
             "next_run_at_iso": datetime.fromtimestamp(12345.0, tz=UTC).isoformat(),
-            "schedule": {"__type__": "interval", "every": 60.0, "relative": False},
-            "target": "tool_execution",
-            "args": [],
-            "kwargs": {"backend_tool_name": "t"},
-            "recovery_error": None,
-            "recovery_failed_at": None,
+            "error": None,
         }
     ]
+
+
+_OLD_FORMAT = orjson.dumps({"__type__": "interval", "every": 60.0, "relative": False})
+
+
+async def test_an_un_reset_store_is_loud_on_list_export_and_get(fake_redis, bind_pool) -> None:
+    from tai42_backend_arq.records import ScheduleStoreFormatError
+
+    bind_pool(fake_redis)
+    key = _seed_schedule(fake_redis)
+    fake_redis._store[key][b"schedule"] = _OLD_FORMAT
+
+    for read in (tools.backend_list_schedules, tools.backend_export_schedules):
+        with pytest.raises(ScheduleStoreFormatError, match="delete the keys matching 'arq:schedule:\\*'"):
+            await read()
+    with pytest.raises(ScheduleStoreFormatError):
+        await tools.backend_get_schedule("s1")
+
+
+async def test_update_refuses_a_relative_interval(fake_redis, monkeypatch, bind_pool) -> None:
+    bind_pool(fake_redis)
+    monkeypatch.setattr(scheduler, "Job", _OkJob)
+    key = _seed_schedule(fake_redis)
+    with pytest.raises(ValueError, match="does not support relative interval schedules"):
+        await tools.backend_update_schedule("s1", new_schedule={"kind": "interval", "every": 30, "relative": True})
+    assert fake_redis._store[key][b"cron_or_interval"] == b"60"
 
 
 async def test_list_schedules_without_recorded_next_run(fake_redis, bind_pool) -> None:
@@ -391,9 +415,11 @@ async def test_get_schedule_and_exists(fake_redis, bind_pool) -> None:
     assert await tools.backend_schedule_exists("s1") is True
     assert await tools.backend_schedule_exists("nope") is False
     out = await tools.backend_get_schedule("s1")
+    assert out["name"] == "s1"
     assert out["enabled"] is True
     assert out["target"] == "tool_execution"
-    assert await tools.backend_get_schedule("nope") == {"status": "not_found"}
+    assert out["schedule"] == {"kind": "interval", "every": 60.0, "relative": False}
+    assert await tools.backend_get_schedule("nope") == {"status": "not_found", "name": "nope"}
 
 
 async def test_enable_disable_schedule(fake_redis, bind_pool) -> None:
@@ -464,7 +490,7 @@ async def test_get_schedule_and_run_now_skip_schedule_deleted_mid_read(fake_redi
     bind_pool(fake_redis)
     fake_redis._store["arq:schedule:vanished"] = {}
 
-    assert await tools.backend_get_schedule("vanished") == {"status": "not_found"}
+    assert await tools.backend_get_schedule("vanished") == {"status": "not_found", "name": "vanished"}
     assert await tools.backend_run_schedule_now("vanished") == {"status": "not_found"}
     assert fake_redis.enqueued == []
 
@@ -486,8 +512,8 @@ async def test_update_schedule_new_schedule(fake_redis, monkeypatch, bind_pool) 
     out = await tools.backend_update_schedule("s1", new_schedule=120)
 
     assert out["status"] == "updated"
-    assert out["previous_schedule"] == {"__type__": "interval", "every": 60.0, "relative": False}
-    assert out["new_schedule"] == {"__type__": "interval", "every": 120.0, "relative": False}
+    assert out["previous_schedule"] == {"kind": "interval", "every": 60.0, "relative": False}
+    assert out["new_schedule"] == {"kind": "interval", "every": 120.0, "relative": False}
     # The next-run timestamp is reported even when derived from the schedule.
     assert out["next_run_at_ts"] == pytest.approx(datetime.now(UTC).timestamp() + 120, abs=5)
     assert out["next_run_at_iso"]

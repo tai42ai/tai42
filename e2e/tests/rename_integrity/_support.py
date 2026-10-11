@@ -35,12 +35,10 @@ async def schedule_preset(stack: TaiStack, preset: str, schedule_name: str) -> N
     await stack.api().post(
         "/api/schedules",
         json={
-            "tool_name": f"{preset}_schedule_task",
+            "tool_name": preset,
             "tool_kwargs": {},
-            "schedule_kwargs": {
-                "backend_schedule_name": schedule_name,
-                "backend_schedule": _INERT_INTERVAL_SECONDS,
-            },
+            "cadence": {"kind": "interval", "every": _INERT_INTERVAL_SECONDS},
+            "schedule_name": schedule_name,
         },
         retry_on_reloading=True,
     )

@@ -137,11 +137,21 @@ def test_task_result_propagates_task_failure(monkeypatch):
 
 # --- narrowed schedule error handling ------------------------------------
 
+_TOOL_ARG = "custom_target"
+_INTERVAL_5 = {"__type__": "interval", "every": 5.0, "relative": False}
+_DEF_5 = json.dumps({"name": "job", "kwargs": {_TOOL_ARG: "echo"}, "schedule": _INTERVAL_5, "enabled": True})
+
+
+def _definition(name: str, *, enabled: bool = True, tool: str = "echo") -> str:
+    return json.dumps({"name": name, "kwargs": {_TOOL_ARG: tool}, "schedule": _INTERVAL_5, "enabled": enabled})
+
 
 class _FakeSettings:
     redbeat_redis_url = "redis://fake/0"
     redbeat_schedule_key = "redbeat::schedule"
     redbeat_key_prefix = "redbeat:"
+    # A NON-default tool-name key: the backend splits it out of stored kwargs itself.
+    tool_name_arg = _TOOL_ARG
 
     def redbeat_task_key(self, name):
         if name.startswith(self.redbeat_key_prefix):
@@ -210,14 +220,18 @@ async def test_update_schedule_sets_schedule_and_next_run(fake_settings, stub_ap
     stub_app.clients.client = redis
     out = await tools.backend_update_schedule("job", new_schedule=30, next_run_at_ts=1000.0)
     assert out["status"] == "updated"
-    assert out["new_schedule"] == {"__type__": "interval", "every": 30.0, "relative": False}
+    assert out["previous_schedule"] == {"kind": "interval", "every": 5.0, "relative": False}
+    assert out["new_schedule"] == {"kind": "interval", "every": 30.0, "relative": False}
+    # The stored definition carries RedBeat's own shape, written by the mapper.
+    stored = json.loads(redis.hashes["redbeat:job"]["definition"])
+    assert stored["schedule"] == {"__type__": "interval", "every": 30.0, "relative": False}
     assert out["next_run_at_ts"] == 1000.0
     # The zset member is the entry KEY (what Beat loads), never the bare name.
     assert redis.zset == {"redbeat:job": 1000.0}
 
 
 async def test_update_schedule_nothing_to_do_is_skipped(fake_settings, stub_app):
-    stub_app.clients.client = FakeRedis(hashes={"redbeat:job": {"definition": "{}"}})
+    stub_app.clients.client = FakeRedis(hashes={"redbeat:job": {"definition": _DEF_5}})
     out = await tools.backend_update_schedule("job")
     assert out["status"] == "skipped"
 
@@ -279,8 +293,8 @@ async def test_list_schedules_reports_bare_names_scores_and_enabled(fake_setting
     and ``enabled`` is read from each entry's definition."""
     stub_app.clients.client = FakeRedis(
         hashes={
-            "redbeat:a": {"definition": json.dumps({"name": "a", "enabled": True})},
-            "redbeat:b": {"definition": json.dumps({"name": "b", "enabled": False})},
+            "redbeat:a": {"definition": _definition("a")},
+            "redbeat:b": {"definition": _definition("b", enabled=False, tool="alerts")},
         },
         zset={"redbeat:a": 0.0, "redbeat:b": 1700000000.0},
     )
@@ -292,6 +306,20 @@ async def test_list_schedules_reports_bare_names_scores_and_enabled(fake_setting
     assert by_name["b"]["enabled"] is False
     assert by_name["b"]["next_run_at_ts"] == 1700000000.0
     assert by_name["b"]["next_run_at_iso"].startswith("2023-")
+    # Typed rows: the fired tool and the cadence, never the stored kwargs.
+    assert by_name["a"]["tool"] == "echo"
+    assert by_name["b"]["tool"] == "alerts"
+    assert by_name["a"]["cadence"] == {"kind": "interval", "every": 5.0, "relative": False}
+    assert set(by_name["a"]) == {"name", "tool", "cadence", "enabled", "next_run_at_ts", "next_run_at_iso", "error"}
+
+
+async def test_list_schedules_entry_without_the_tool_key_raises(fake_settings, stub_app):
+    stub_app.clients.client = FakeRedis(
+        hashes={"redbeat:a": {"definition": json.dumps({"name": "a", "kwargs": {}, "schedule": _INTERVAL_5})}},
+        zset={"redbeat:a": 0.0},
+    )
+    with pytest.raises(ValueError, match="carries no 'custom_target'"):
+        await tools.backend_list_schedules()
 
 
 async def test_list_schedules_dangling_zset_member_raises(fake_settings, stub_app):
@@ -324,7 +352,7 @@ async def test_list_schedules_omits_entry_deleted_after_snapshot(fake_settings, 
     absence, not a spurious dangling-member error."""
     stub_app.clients.client = _ConcurrentDeleteRedis(
         "redbeat:victim",
-        hashes={"redbeat:live": {"definition": json.dumps({"name": "live", "enabled": True})}},
+        hashes={"redbeat:live": {"definition": _definition("live")}},
         zset={"redbeat:live": 10.0, "redbeat:victim": 20.0},
     )
     out = await tools.backend_list_schedules()
@@ -336,7 +364,7 @@ async def test_export_schedules_omits_entry_deleted_after_snapshot(fake_settings
     live_definition = {
         "name": "live",
         "args": [],
-        "kwargs": {},
+        "kwargs": {_TOOL_ARG: "echo"},
         "schedule": {"__type__": "interval", "every": 30.0, "relative": False},
         "enabled": True,
     }
@@ -387,9 +415,9 @@ async def test_list_schedules_tolerates_delete_then_recreate_around_the_read(fak
     definition+membership read only ever observes consistent states."""
     stub_app.clients.client = _DeleteThenRecreateRedis(
         "redbeat:victim",
-        json.dumps({"name": "victim", "enabled": True}),
+        _definition("victim"),
         20.0,
-        hashes={"redbeat:live": {"definition": json.dumps({"name": "live", "enabled": True})}},
+        hashes={"redbeat:live": {"definition": _definition("live")}},
         zset={"redbeat:live": 10.0},
     )
     out = await tools.backend_list_schedules()
@@ -404,14 +432,14 @@ async def test_export_includes_disabled_entry_absent_from_zset(fake_settings, st
     enabled_def = {
         "name": "enabled-one",
         "args": [],
-        "kwargs": {"backend_tool_name": "echo"},
+        "kwargs": {_TOOL_ARG: "echo"},
         "schedule": {"__type__": "interval", "every": 30.0, "relative": False},
         "enabled": True,
     }
     disabled_def = {
         "name": "disabled-one",
         "args": [],
-        "kwargs": {"backend_tool_name": "alerts"},
+        "kwargs": {_TOOL_ARG: "alerts"},
         "schedule": {"__type__": "interval", "every": 60.0, "relative": False},
         "enabled": False,
     }
@@ -428,7 +456,8 @@ async def test_export_includes_disabled_entry_absent_from_zset(fake_settings, st
     by_name = {rec["name"]: rec for rec in exported}
     assert set(by_name) == {"enabled-one", "disabled-one"}
     assert by_name["disabled-one"]["enabled"] is False
-    assert by_name["disabled-one"]["kwargs"] == {"backend_tool_name": "alerts"}
+    assert by_name["disabled-one"]["tool"] == "alerts"
+    assert by_name["disabled-one"]["kwargs"] == {}
 
 
 async def test_export_schedules_tolerates_delete_then_recreate_around_the_read(fake_settings, stub_app):
@@ -436,13 +465,13 @@ async def test_export_schedules_tolerates_delete_then_recreate_around_the_read(f
     live_definition = {
         "name": "live",
         "args": [],
-        "kwargs": {},
+        "kwargs": {_TOOL_ARG: "echo"},
         "schedule": {"__type__": "interval", "every": 30.0, "relative": False},
         "enabled": True,
     }
     stub_app.clients.client = _DeleteThenRecreateRedis(
         "redbeat:victim",
-        json.dumps({"name": "victim", "enabled": True}),
+        _definition("victim"),
         20.0,
         hashes={"redbeat:live": {"definition": json.dumps(live_definition)}},
         zset={"redbeat:live": 10.0},
@@ -524,22 +553,22 @@ def roundtrip_redis(fake_settings, stub_app, monkeypatch):
     return redis
 
 
-_TOOL_ARG = "tool_name"
-
 _INTERVAL_RECORD = {
     "name": "nightly-sync",
+    "tool": "my_tool",
     "args": [],
-    "kwargs": {_TOOL_ARG: "my_tool"},
-    "schedule": {"__type__": "interval", "every": 30.0, "relative": False},
+    "kwargs": {"payload": "x"},
+    "cadence": {"kind": "interval", "every": 30.0, "relative": False},
     "enabled": True,
 }
 
 _CRONTAB_RECORD = {
     "name": "weekday-report",
+    "tool": "report_tool",
     "args": [],
-    "kwargs": {_TOOL_ARG: "report_tool"},
-    "schedule": {
-        "__type__": "crontab",
+    "kwargs": {},
+    "cadence": {
+        "kind": "crontab",
         "minute": "0",
         "hour": "9",
         "day_of_month": "*",
@@ -549,12 +578,18 @@ _CRONTAB_RECORD = {
     "enabled": False,
 }
 
+_EMPTY_ERRORS: list = []
+
 
 async def test_import_then_export_round_trips_interval_and_crontab(roundtrip_redis):
-    """Interval + crontab records survive an import/export cycle: kwargs
-    (tool name), schedule, and enabled all come back unchanged."""
+    """Interval + crontab records survive an import/export cycle through ``ScheduleRecord``:
+    the tool (stored under the backend's own non-default key), kwargs, cadence, and enabled
+    all come back unchanged."""
     result = await tools.backend_import_schedules([_INTERVAL_RECORD, _CRONTAB_RECORD])
-    assert result == {"created": 2, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+    assert result == {"created": 2, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": _EMPTY_ERRORS}
+
+    stored = json.loads(roundtrip_redis.hashes["redbeat:nightly-sync"]["definition"])
+    assert stored["kwargs"] == {"payload": "x", _TOOL_ARG: "my_tool"}
 
     exported = await tools.backend_export_schedules()
     by_name = {rec["name"]: rec for rec in exported}
@@ -565,73 +600,69 @@ async def test_import_then_export_round_trips_interval_and_crontab(roundtrip_red
 async def test_import_overwrite_replaces_existing(roundtrip_redis):
     """Under ``overwrite`` a re-import of the same name replaces it, counted 'updated'."""
     first = await tools.backend_import_schedules([_INTERVAL_RECORD])
-    assert first == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+    assert first == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": _EMPTY_ERRORS}
 
-    changed = dict(_INTERVAL_RECORD, schedule={"__type__": "interval", "every": 99.0, "relative": False})
+    changed = dict(_INTERVAL_RECORD, cadence={"kind": "interval", "every": 99.0, "relative": False})
     second = await tools.backend_import_schedules([changed], "overwrite")
-    assert second == {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": []}
+    assert second == {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": _EMPTY_ERRORS}
 
     exported = await tools.backend_export_schedules()
     assert len(exported) == 1  # upsert, not a duplicate
-    assert exported[0]["schedule"]["every"] == 99.0  # the replacement applied
+    assert exported[0]["cadence"]["every"] == 99.0  # the replacement applied
 
 
 async def test_import_skip_leaves_existing_untouched(roundtrip_redis):
     """Under ``skip`` (the default the host forwards) an existing name is left in
-    place — not re-applied — and counted in ``skipped_existing``. This is the mode
-    the backup restore passes across the tool boundary, so the tool must accept and
-    honor it on this backend exactly as every backend does."""
+    place — not re-applied — and counted in ``skipped_existing``."""
     first = await tools.backend_import_schedules([_INTERVAL_RECORD], "skip")
-    assert first == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+    assert first == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": _EMPTY_ERRORS}
 
-    changed = dict(_INTERVAL_RECORD, schedule={"__type__": "interval", "every": 99.0, "relative": False})
+    changed = dict(_INTERVAL_RECORD, cadence={"kind": "interval", "every": 99.0, "relative": False})
     second = await tools.backend_import_schedules([changed], "skip")
-    assert second == {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 1, "errors": []}
+    assert second == {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 1, "errors": _EMPTY_ERRORS}
 
     exported = await tools.backend_export_schedules()
     assert len(exported) == 1
-    assert exported[0]["schedule"]["every"] == 30.0  # the original is untouched
+    assert exported[0]["cadence"]["every"] == 30.0  # the original is untouched
 
 
-async def test_import_malformed_record_reported_in_errors_not_silent(roundtrip_redis):
-    """A malformed record lands in 'errors' loudly; valid siblings still import."""
-    malformed = {
+async def test_import_an_old_format_record_is_a_per_row_error(roundtrip_redis):
+    """A row in the old ``schedule``/no-``tool`` shape fails ``ScheduleRecord`` and lands in
+    'errors' loudly; valid siblings still import."""
+    old = {
         "name": "broken",
-        "schedule": {"__type__": "not-a-real-kind"},
+        "kwargs": {_TOOL_ARG: "x"},
+        "schedule": {"__type__": "interval", "every": 30.0, "relative": False},
         "enabled": True,
     }
-    result = await tools.backend_import_schedules([_INTERVAL_RECORD, malformed])
+    result = await tools.backend_import_schedules([_INTERVAL_RECORD, old])
     assert result["created"] == 1
     assert result["updated"] == 0
     assert len(result["errors"]) == 1
     assert result["errors"][0]["index"] == 1
     assert result["errors"][0]["name"] == "broken"
-    assert result["errors"][0]["error"]  # non-empty message, surfaced not swallowed
+    assert result["errors"][0]["error"]
+    assert "redbeat:broken" not in roundtrip_redis.hashes
 
 
-async def test_import_renormalizes_and_reports_broken_schedule(roundtrip_redis):
-    """A record that passes ScheduleRecord validation but is not a valid
-    normalized schedule (here a non-positive interval) is re-normalized on
-    import, so the failure surfaces loudly in 'errors' at one consistent spot
-    instead of persisting a broken entry. Valid siblings still import."""
-    broken = {
-        "name": "bad-interval",
-        "args": [],
-        "kwargs": {},
-        # __type__/every are numeric so ScheduleRecord accepts it, but a
-        # non-positive interval is not a valid normalized schedule.
-        "schedule": {"__type__": "interval", "every": -5, "relative": False},
-        "enabled": True,
-    }
+async def test_import_a_non_positive_interval_is_a_per_row_error(roundtrip_redis):
+    broken = dict(_INTERVAL_RECORD, name="bad-interval", cadence={"kind": "interval", "every": -5})
     result = await tools.backend_import_schedules([_INTERVAL_RECORD, broken])
     assert result["created"] == 1
-    assert result["updated"] == 0
     assert len(result["errors"]) == 1
-    assert result["errors"][0]["index"] == 1
     assert result["errors"][0]["name"] == "bad-interval"
     assert "every" in result["errors"][0]["error"]
-    # The broken schedule was not persisted.
     assert "redbeat:bad-interval" not in roundtrip_redis.hashes
+
+
+async def test_import_keeps_a_relative_interval(roundtrip_redis):
+    relative = dict(_INTERVAL_RECORD, cadence={"kind": "interval", "every": 30.0, "relative": True})
+    result = await tools.backend_import_schedules([relative])
+    assert result["errors"] == []
+    stored = json.loads(roundtrip_redis.hashes["redbeat:nightly-sync"]["definition"])
+    assert stored["schedule"] == {"__type__": "interval", "every": 30.0, "relative": True}
+    (exported,) = await tools.backend_export_schedules()
+    assert exported["cadence"]["relative"] is True
 
 
 async def test_export_raises_when_definition_missing(roundtrip_redis):
@@ -641,13 +672,12 @@ async def test_export_raises_when_definition_missing(roundtrip_redis):
         await tools.backend_export_schedules()
 
 
-async def test_import_rejects_an_unknown_normalized_kind(roundtrip_redis, monkeypatch):
-    """Defensive guard behind normalize_schedule: an unexpected kind lands in
-    the per-row errors instead of persisting a broken entry."""
-    monkeypatch.setattr(tools, "normalize_schedule", lambda s: {"__type__": "hourly"})
-    result = await tools.backend_import_schedules([_INTERVAL_RECORD])
-    assert result["created"] == 0
-    assert "Unsupported schedule type" in result["errors"][0]["error"]
+async def test_export_raises_on_an_entry_without_the_tool_key(roundtrip_redis):
+    definition = {"name": "orphan", "args": [], "kwargs": {}, "schedule": _INTERVAL_5, "enabled": True}
+    roundtrip_redis.hashes["redbeat:orphan"] = {"definition": json.dumps(definition)}
+    roundtrip_redis.zset["redbeat:orphan"] = 0.0
+    with pytest.raises(ValueError, match="schedule 'orphan' carries no 'custom_target'"):
+        await tools.backend_export_schedules()
 
 
 async def test_update_schedule_not_found(fake_settings, stub_app):
@@ -664,7 +694,7 @@ async def test_update_schedule_without_definition_is_skipped(fake_settings, stub
 
 
 async def test_update_schedule_next_run_in_ms_takes_precedence(fake_settings, stub_app):
-    redis = FakeRedis(hashes={"redbeat:job": {"definition": "{}"}})
+    redis = FakeRedis(hashes={"redbeat:job": {"definition": _DEF_5}})
     stub_app.clients.client = redis
     out = await tools.backend_update_schedule("job", next_run_in_ms=0, next_run_at_ts=1.0)
     assert out["status"] == "updated"

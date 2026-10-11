@@ -305,7 +305,7 @@ def worker_env(monkeypatch) -> dict[str, Any]:
     conn = FakeRedisConn()
     record["conn"] = conn
     monkeypatch.setattr(worker_module, "Redis", type("R", (), {"from_url": staticmethod(lambda url: conn)}))
-    monkeypatch.setattr(worker_module, "Queue", FakeQueue)
+    monkeypatch.setattr(worker_module, "TaskBudgetQueue", FakeQueue)
     monkeypatch.setattr(
         worker_module, "prepare_forking_worker", lambda: record.__setitem__("prepared", record["prepared"] + 1)
     )

@@ -124,12 +124,14 @@ def test_schedules_mutation(cli_stack: TaiStack, tmp_path: Path, uniq: Callable[
         tmp_path,
         "schedules",
         "add",
-        "run_tool_schedule_task",
+        "run_tool",
         "--tool-kwargs",
         '{"tool_name": "generate_uuid", "arguments": {}}',
-        # A long cadence so it registers without firing during the spec.
-        "--schedule-kwargs",
-        f'{{"backend_schedule_name": "{schedule_name}", "backend_schedule": 3600}}',
+        # A once-a-year crontab so it registers without firing during the spec.
+        "--cron",
+        "0 3 1 1 *",
+        "--schedule-name",
+        schedule_name,
     )
     assert added.returncode == 0, added.stderr
     try:

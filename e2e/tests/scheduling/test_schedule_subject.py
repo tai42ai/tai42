@@ -71,10 +71,11 @@ async def test_scheduled_job_with_subject_writes_record_via_the_schedule_door(
     await api.post(
         "/api/schedules",
         json={
-            "tool_name": "state_merge_schedule_task",
+            "tool_name": "state_merge",
             "tool_kwargs": {"state": state, "patch": {"last": marker}},
             "subject": _SUBJECT,
-            "schedule_kwargs": {"backend_schedule_name": schedule_name, "backend_schedule": _INTERVAL_SECONDS},
+            "cadence": {"kind": "interval", "every": _INTERVAL_SECONDS},
+            "schedule_name": schedule_name,
         },
         retry_on_reloading=True,
     )
@@ -111,10 +112,11 @@ async def test_malformed_schedule_subject_is_refused_at_create(
         "POST",
         "/api/schedules",
         json={
-            "tool_name": "state_merge_schedule_task",
+            "tool_name": "state_merge",
             "tool_kwargs": {"state": state, "patch": {"last": "x"}},
             "subject": {"kind": "job", "key": "j1"},
-            "schedule_kwargs": {"backend_schedule_name": uniq("bad"), "backend_schedule": _INTERVAL_SECONDS},
+            "cadence": {"kind": "interval", "every": _INTERVAL_SECONDS},
+            "schedule_name": uniq("bad"),
         },
     )
     assert resp.status_code == 400, resp.text
