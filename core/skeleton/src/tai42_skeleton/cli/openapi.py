@@ -62,7 +62,10 @@ _SERIALIZATION: JsonSchemaMode = "serialization"
 _ERROR_SCHEMA = "Error"
 _RELOADING_ERROR_SCHEMA = "ReloadingError"
 
-_PATH_PARAM = re.compile(r"\{([^}:]+)(?::[^}]+)?\}")
+_PATH_PARAM = re.compile(r"\{([^}:]+)(?::([^}]+))?\}")
+
+# The path-parameter extension naming a Starlette converter the spec template drops.
+_CONVERTER_EXTENSION = "x-tai42-converter"
 
 _NON_JSON_DESCRIPTIONS: dict[str, str] = {
     "text/event-stream": "Server-sent event stream.",
@@ -104,15 +107,24 @@ def _openapi_path(path: str) -> str:
 
 
 def _path_parameters(path: str) -> list[dict[str, Any]]:
-    return [
-        {
-            "name": name,
+    """One required string parameter per path placeholder.
+
+    A placeholder with Starlette's ``path`` converter matches across ``/`` separators; the
+    spec template drops the converter, so the parameter carries it as ``x-tai42-converter``
+    for a client building the path.
+    """
+    parameters: list[dict[str, Any]] = []
+    for match in _PATH_PARAM.finditer(path):
+        parameter: dict[str, Any] = {
+            "name": match.group(1),
             "in": "path",
             "required": True,
             "schema": {"type": "string"},
         }
-        for name in _PATH_PARAM.findall(path)
-    ]
+        if match.group(2) == "path":
+            parameter[_CONVERTER_EXTENSION] = "path"
+        parameters.append(parameter)
+    return parameters
 
 
 def _operation_id(method: str, path: str) -> str:

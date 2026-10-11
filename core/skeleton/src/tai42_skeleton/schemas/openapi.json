@@ -30109,7 +30109,8 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "x-tai42-converter": "path"
           }
         ],
         "responses": {
@@ -34826,7 +34827,8 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "x-tai42-converter": "path"
           }
         ],
         "responses": {
@@ -35051,7 +35053,8 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "x-tai42-converter": "path"
           }
         ],
         "responses": {
@@ -35137,7 +35140,8 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "x-tai42-converter": "path"
           }
         ],
         "responses": {
@@ -35225,7 +35229,8 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "x-tai42-converter": "path"
           }
         ],
         "responses": {
