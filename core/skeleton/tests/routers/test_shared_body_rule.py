@@ -6,6 +6,7 @@ not an object, and ``invalid <what>: <rule>; <rule>`` naming each violated rule,
 
 from __future__ import annotations
 
+import importlib
 import json
 from types import SimpleNamespace
 
@@ -83,14 +84,18 @@ async def test_the_backup_export_door_refuses_with_the_shared_text(raw: bytes, m
 
 
 @pytest.mark.parametrize(
-    ("extract", "what"),
+    ("extract", "what", "fields"),
     [
-        (extractors._extract_route_create, "conversation route"),
-        (extractors._extract_target_config, "conversation config"),
+        (extractors._extract_route_create, "conversation route", {"door": 12345678, "x": "s3cr3t-v4lue"}),
+        (
+            extractors._extract_target_config,
+            "conversation config",
+            {"multichannel": "s3cr3t-v4lue", "greeting_template": 12345678},
+        ),
     ],
 )
-async def test_a_model_refusal_names_the_rule_and_never_the_value(extract, what: str) -> None:
-    body = json.dumps({"door": 12345678, "secret_field_value": "s3cr3t-v4lue"}).encode()
+async def test_a_model_refusal_names_the_rule_and_never_the_value(extract, what: str, fields: dict) -> None:
+    body = json.dumps(fields).encode()
     with pytest.raises(BadRequestError) as excinfo:
         await extract(_request(body))
     message = excinfo.value.message
@@ -115,7 +120,8 @@ async def test_a_model_refusal_names_the_rule_and_never_the_value(extract, what:
 async def test_the_in_app_answer_and_react_doors_answer_the_shared_texts(
     extract: str, raw: bytes, message: str
 ) -> None:
-    from tai42_skeleton.routers.interactions import answer
+    # The package re-exports the door handlers under the module names; read the module itself.
+    answer = importlib.import_module("tai42_skeleton.routers.interactions.answer")
 
     with pytest.raises(BadRequestError) as excinfo:
         await getattr(answer, extract)(_request(raw))

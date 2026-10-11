@@ -452,7 +452,7 @@ async def test_put_binding_empty_verifier_400_not_500(monkeypatch: pytest.Monkey
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
     resp = await hooks.set_topic_verifier(cast(Request, _PutReq("events", {"verifier": "", "config": {}})))
     assert resp.status_code == 400
-    assert _body(resp)["error"] == "invalid verifier binding: String should have at least 1 character"
+    assert _body(resp)["error"] == "invalid verifier binding: verifier: String should have at least 1 character"
     assert manager._verifiers == {}
 
 
