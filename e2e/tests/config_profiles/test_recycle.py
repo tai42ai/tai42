@@ -195,6 +195,7 @@ async def test_recycle_drains_in_flight_backend_job(recycle_stack: TaiStack, uni
     assert "done" not in _values(), "the backend job completed before the recycle could fire mid-flight"
 
     before_backend = _lives(recycle_stack, "backend")
+    before_serve = _lives(recycle_stack, "serve")
     name = uniq("drainrecycle")
     await _profile_from_stored(recycle_stack, {_RECYCLE_VAR: uniq("mkey").upper()}, name)
     await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True, timeout=200.0)
@@ -211,6 +212,15 @@ async def test_recycle_drains_in_flight_backend_job(recycle_stack: TaiStack, uni
     )
     done_pids = {json.loads(rec)["pid"] for rec in recycle_stack.records(key) if json.loads(rec)["value"] == "done"}
     assert started_pid in done_pids, f"'done' came from a different pid than started ({started_pid} vs {done_pids})"
+
+    # The applier recycles itself after replying: the module's later legs start on its respawned life.
+    recycle_stack.wait_generation_bump("serve", before_serve, deadline=150.0)
+
+    async def serves_again() -> bool:
+        resp = await recycle_stack.api().request_raw("GET", "/health")
+        return resp.status_code == 200
+
+    await wait_for_async(serves_again, deadline=60.0, message="the respawned applier never served /health again")
 
 
 # The synthetic key a compose-marked stack declares pinned.

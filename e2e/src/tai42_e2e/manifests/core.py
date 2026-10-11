@@ -322,10 +322,11 @@ def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
     ``BACKEND_MANIFEST_KEY`` / ``BACKEND_TOOL_NAME_ARG`` are the recycle-class fields the flip
     test diffs (``reload_class="recycle"``, not in any refused tier on the ``harness`` shape).
     The recycle step budget is widened so a real worker RESPAWN boot fits inside the per-step
-    census wait ``orchestrate_recycle`` allows the replacement."""
+    census wait ``orchestrate_recycle`` allows the replacement. The backup router is mounted so
+    a backup ``env`` restore — an env write — rolls the same recycle."""
     manifest = {
         "default_routers": "none",
-        "routers_modules": _CORE_ROUTERS,
+        "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.backup"],
         "extensions_modules": _EXTENSION_MODULES,
         "backend_module": variants.backend.module,
         "storage_module": variants.storage.module,
