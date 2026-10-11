@@ -53,12 +53,13 @@ from tai42_contract.plugins.item import PluginItem
 from tai42_contract.plugins.routes import PATH_SEGMENT_SLUG_RE as PATH_SEGMENT_SLUG_RE
 from tai42_contract.plugins.routes import ROUTE_BASE_SEGMENT_RE as ROUTE_BASE_SEGMENT_RE
 from tai42_contract.plugins.routes import RouteDecl, RouteMethod, RoutesDecl
-from tai42_contract.plugins.spec import PluginPermissions, PluginSpec
+from tai42_contract.plugins.spec import PluginDelivery, PluginPermissions, PluginSpec
 
 __all__ = [
     "DATA_BLOCK_BY_KIND",
     "KIND_MANIFEST_BINDINGS",
     "ManifestBinding",
+    "PluginDelivery",
     "PluginItem",
     "PluginItemKind",
     "PluginPermissions",

@@ -133,6 +133,9 @@ class InviteCredential(BaseModel):
 LoginCredential = Annotated[PasswordCredential | InviteCredential, Field(discriminator="kind")]
 """The closed union of login credentials a provider can attach to a principal."""
 
+LoginCredentialKind = Literal["password", "invite"]
+"""The ``kind`` tags of :data:`LoginCredential`, one per credential variant."""
+
 
 class LoginAttachment(BaseModel):
     """The outcome of attaching a login to a principal.
@@ -400,6 +403,7 @@ __all__ = [
     "InvokeMemberActionResult",
     "LoginAttachment",
     "LoginCredential",
+    "LoginCredentialKind",
     "LoginMethod",
     "MemberAction",
     "MemberActionCatalog",

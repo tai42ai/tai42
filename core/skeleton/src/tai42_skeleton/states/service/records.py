@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from time import monotonic
-from typing import Any
+from typing import Any, Literal, get_args
 
 from psycopg import AsyncConnection
 from tai42_contract.states.errors import (
@@ -53,6 +53,11 @@ from tai42_skeleton.states.store import make_cursor, store_settings_retention
 from tai42_skeleton.states.store.trace import guard_skip_rows
 
 logger = logging.getLogger(__name__)
+
+#: How a fold joins a subject to its survivor: ``switch`` drops the subject's record, ``merge`` fills the
+#: survivor's absent top-level members from it (the survivor wins).
+FoldMode = Literal["switch", "merge"]
+FOLD_MODES: tuple[FoldMode, ...] = get_args(FoldMode)
 
 
 def _deadline() -> float:
@@ -286,11 +291,11 @@ class _RecordMixin(_StatesServiceBase):
         await drained(self, lambda: self._store.erase_subject(state, subject, origin=completed))
 
     async def fold(
-        self, state: str, subject: StateSubject, into: StateSubject, mode: str, *, origin: WriteOrigin
+        self, state: str, subject: StateSubject, into: StateSubject, mode: FoldMode, *, origin: WriteOrigin
     ) -> dict[str, Any]:
         """Fold ``subject`` into ``into`` (``switch`` drops, ``merge`` combines; survivor wins), return the report."""
         self._ensure_available()
-        if mode not in ("switch", "merge"):
+        if mode not in FOLD_MODES:
             raise SubjectFoldError(f"unknown fold mode {mode!r} (supported: merge, switch)")
         _version, subject_kinds, _default = await self._admit_subject(state, subject)
         await self._validate_subject_admitted(subject_kinds, state, into)

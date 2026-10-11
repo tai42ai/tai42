@@ -29,7 +29,14 @@
     "core/skeleton": {
       "package-name": "tai42-skeleton",
       "component": "tai42-skeleton",
-      "skip-changelog": true
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "src/tai42_skeleton/schemas/openapi.json",
+          "jsonpath": "$.info.version"
+        }
+      ]
     },
     "plugins/accounts-postgres": {
       "package-name": "tai42-accounts-postgres",

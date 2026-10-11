@@ -2352,6 +2352,11 @@
       }
     }
   },
+  "constants": {
+    "MEDIA_ID_PATTERN": "[A-Za-z0-9_-]{43}",
+    "MEDIA_ROUTE_PREFIX": "/api/interactions/media/",
+    "PERSON_KIND": "person"
+  },
   "contract_version": "16.2.0",
   "documents": {
     "AccessPolicy": {
