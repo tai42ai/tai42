@@ -560,6 +560,14 @@ class _ClosingSupervisor:
         self.log.append("closed")
 
 
+# The drain budget of the reload that defers its retire to a background tail.
+_DEFERRED_DRAIN_BUDGET_S = 5.0
+# How long the deferred tail may take once its driver answered: twice the drain budget, the one
+# phase of the tail that can wait (the gate turnover, the wait on the finished driver and the
+# close do not). A tail that never ends (a driver or gate waiter never released) fails here.
+_DEFERRED_TAIL_BOUND_S = 2 * _DEFERRED_DRAIN_BUDGET_S
+
+
 async def test_reload_over_session_manager_defers_supervisor_close(monkeypatch: pytest.MonkeyPatch) -> None:
     """A door-driven reload — its own request still admitted on the retiring epoch, e.g. an
     MCP tool call served by that epoch's FastMCP session manager — must NOT ``aclose`` the
@@ -579,7 +587,10 @@ async def test_reload_over_session_manager_defers_supervisor_close(monkeypatch: 
     async def _driver() -> None:
         async with reload_gate.driving():
             await build_and_swap_epoch(
-                {"TAI_EPOCH_DRIVER": "v"}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=5.0
+                {"TAI_EPOCH_DRIVER": "v"},
+                rebuild=lambda: None,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=_DEFERRED_DRAIN_BUDGET_S,
             )
         swapped.set()
         await answer.wait()
@@ -597,13 +608,18 @@ async def test_reload_over_session_manager_defers_supervisor_close(monkeypatch: 
         # ...and did NOT close the session manager serving the still-in-flight driver.
         assert closed == [], "reload aclose()d the session manager serving its own driving request"
         answer.set()  # the driver finishes (its response flushed) -> the deferred task closes
-        await request
-        # With the driver finished the deferred task is bounded by the drain budget, and its
-        # drain ends inside it.
-        await deferred
+        try:
+            async with asyncio.timeout(_DEFERRED_TAIL_BOUND_S):
+                await request
+                await deferred
+        except TimeoutError:
+            pytest.fail(
+                f"the deferred retire did not finish within {_DEFERRED_TAIL_BOUND_S} s of the driver answering: "
+                f"in flight {boot.in_flight}, engaged {boot.engaged}, gate waiters {boot.gate_waiters}"
+            )
         assert closed == ["closed"]
         assert drains
-        assert max(drains) < 5.0, "the deferred drain ran out its budget"
+        assert max(drains) < _DEFERRED_DRAIN_BUDGET_S, "the deferred drain ran out its budget"
     finally:
         answer.set()
         os.environ.pop("TAI_EPOCH_DRIVER", None)
