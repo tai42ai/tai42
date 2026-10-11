@@ -26,6 +26,9 @@ from collections.abc import Callable
 from tai42_e2e import ports
 from tai42_e2e.waiting import wait_for
 
+# How long the relay waits to open its upstream connection for an accepted client.
+UPSTREAM_CONNECT_TIMEOUT = 5.0
+
 
 class TcpRelay:
     """A threaded TCP forwarder to one upstream ``(host, port)``.
@@ -210,7 +213,7 @@ class TcpRelay:
                     self._fail_listener(listener, exc)
                 return
             try:
-                upstream = socket.create_connection(self._upstream, timeout=5.0)
+                upstream = socket.create_connection(self._upstream, timeout=UPSTREAM_CONNECT_TIMEOUT)
             except OSError as exc:
                 # The relay cannot reach the store it fronts: that is infra being
                 # down, not an injected outage — surface it and stop serving rather
@@ -218,6 +221,10 @@ class TcpRelay:
                 client.close()
                 self._fail_listener(listener, exc)
                 return
+            # The timeout bounds the connect only: a forwarded connection blocks on its
+            # reads until a peer or a ``sever`` closes it, so an idle one (a pub/sub
+            # subscription between messages) is never ended by the relay.
+            upstream.settimeout(None)
             self._start_pair(client, upstream)
 
     def _start_pair(self, client: socket.socket, upstream: socket.socket) -> None:
