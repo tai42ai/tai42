@@ -26,6 +26,7 @@ _FIXTURE_TOOLS = frozenset(
         "e2e_record",
         "e2e_sleep",
         "e2e_slow_task",
+        "e2e_hold_until_released",
         "e2e_drain_probe",
         "e2e_fail",
         "e2e_external_link",
