@@ -72,7 +72,6 @@ from tai42_e2e.marketplace import (
     registry_supports_declared_routes,
 )
 from tai42_e2e.oauth_idp import OAuthIdp
-from tai42_e2e_fixtures.oauth_mcp_server import OAuthMcpServer
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.procs import ProcessHandle
 from tai42_e2e.seeding import seed_studio_auth, seed_studio_routes
@@ -81,6 +80,7 @@ from tai42_e2e.stack import TaiStack
 from tai42_e2e.topology import Infra, StackConfig, StackResources
 from tai42_e2e.variants import Variants
 from tai42_e2e.waiting import WaitTimeoutError, wait_for
+from tai42_e2e_fixtures.oauth_mcp_server import OAuthMcpServer
 
 
 class StudioRunnerSettings(BaseSettings):
