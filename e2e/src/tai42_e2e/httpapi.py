@@ -19,6 +19,19 @@ import httpx
 
 from tai42_e2e.waiting import wait_for_async
 
+# How long a call polls past the reload gate's retriable ``reloading`` rejection, for the
+# admin API and the MCP edge alike. A liveness bound (a bound on a hang, not a performance
+# limit): twice the slowest legitimate wait measured on the fleet scenarios under host
+# load 104-122 on 20 cores, where a worker's reload held the gate for up to 9.9s before
+# the call was answered.
+RELOAD_GATE_DEADLINE = 20.0
+
+# The read timeout of one admin API call unless the call names its own. A liveness bound:
+# twice the slowest legitimate answer measured on the fleet scenarios under host load
+# 100-330 on 20 cores, a ``POST /api/fleet/reload-config`` answered after 82.8s (the
+# publisher's rebuild plus its wait for every sibling's acknowledgement).
+API_READ_TIMEOUT = 170.0
+
 
 class ApiError(AssertionError):
     """An admin API call returned an unexpected status; carries the body."""
@@ -48,7 +61,7 @@ class ApiClient:
     """Async admin-API client for one server port. Each call opens a short-lived
     connection, so the client is not bound to any event loop."""
 
-    def __init__(self, base_url: str, *, auth_token: str | None = None, timeout: float = 60.0) -> None:
+    def __init__(self, base_url: str, *, auth_token: str | None = None, timeout: float = API_READ_TIMEOUT) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._headers: dict[str, str] = {}
@@ -120,7 +133,7 @@ class ApiClient:
         headers: dict[str, str] | None = None,
         expect: int = 200,
         retry_on_reloading: bool = False,
-        ready_deadline: float = 10.0,
+        ready_deadline: float = RELOAD_GATE_DEADLINE,
         timeout: float | None = None,
     ) -> Any:
         """Issue a request, assert the status, and return the unwrapped
