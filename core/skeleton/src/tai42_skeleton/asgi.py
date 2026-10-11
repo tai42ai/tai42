@@ -38,7 +38,7 @@ import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from functools import partial
-from typing import Literal, get_args
+from typing import TYPE_CHECKING, Literal, get_args
 from uuid import uuid4
 
 from starlette.applications import Starlette
@@ -51,6 +51,9 @@ from tai42_skeleton.app.admission import EpochAdmissionApp
 from tai42_skeleton.app.stream_shutdown_watch import start_stream_shutdown_watch
 from tai42_skeleton.app.sub_mcp_app import SubAppLifespan
 from tai42_skeleton.config.config_mode import config_mode
+
+if TYPE_CHECKING:
+    from starlette.types import ASGIApp
 
 __all__ = ["Transport", "create_app", "lifespan"]
 
@@ -134,7 +137,9 @@ def _build_inner_app(app, transport: Transport, stateless_http: bool):
     return app.http_app()
 
 
-async def _enter_boot_serving_app(build_inner_app: Callable[[], ASGIApp], app_state: dict) -> None:
+async def _enter_boot_serving_app(
+    build_inner_app: Callable[[], ASGIApp], app_state: dict, *, stateless_http: bool
+) -> None:
     """Enter the boot epoch's FastMCP lifespan and point the dispatch slot at it.
 
     The lifespan is entered through a dedicated-task supervisor (not a hand-entered
@@ -146,7 +151,8 @@ async def _enter_boot_serving_app(build_inner_app: Callable[[], ASGIApp], app_st
     when middleware wraps ``inner_app``; that app is also the boot generation's serving
     surface (every request's scope points at it). The boot serving app is attached wrapped
     in this generation's admission counter so a later retire drains its work, together with
-    ``build_inner_app``, which every rebuilt generation builds its serving app with.
+    ``build_inner_app``, which every rebuilt generation builds its serving app with, and
+    ``stateless_http``, which the streamable-HTTP sub-MCP apps are built with.
     """
     inner_app = build_inner_app()
     boot_epoch = epoch.current_epoch()
@@ -156,7 +162,9 @@ async def _enter_boot_serving_app(build_inner_app: Callable[[], ASGIApp], app_st
         supervisor = SubAppLifespan(lifespan_app)
         await supervisor.start()
         boot_epoch.supervisor = supervisor
-    epoch.attach_boot_serving_app(EpochAdmissionApp(inner_app, boot_epoch), app_state, build_inner_app)
+    epoch.attach_boot_serving_app(
+        EpochAdmissionApp(inner_app, boot_epoch), app_state, build_inner_app, stateless_http=stateless_http
+    )
 
 
 @asynccontextmanager
@@ -185,7 +193,9 @@ async def _worker_lifespan(
             # The boot serving app is handed straight to the dispatch slot: this frame stays
             # suspended for the whole process, so it keeps no reference to a generation a
             # reload later retires.
-            await _enter_boot_serving_app(partial(_build_inner_app, app, transport, stateless_http), app_state)
+            await _enter_boot_serving_app(
+                partial(_build_inner_app, app, transport, stateless_http), app_state, stateless_http=stateless_http
+            )
             # Before the worker admits a request, so no request's context reaches the
             # loop-lifetime watch every streaming response relies on.
             await start_stream_shutdown_watch()

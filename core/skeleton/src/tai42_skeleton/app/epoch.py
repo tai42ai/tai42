@@ -331,6 +331,12 @@ def _default_streamable_http_app() -> ASGIApp:
 # the boot one does.
 _serving_app_builder: Callable[[], ASGIApp] = _default_streamable_http_app
 
+# Whether the worker booted its streamable-HTTP transport stateless, recorded with the
+# dispatch slot (``None`` while no boot serving app is attached). A streamable-HTTP sub-MCP
+# app is built in the same mode, so a multi-worker deployment's sub-MCP sessions are never
+# pinned to one worker.
+_boot_stateless_http: bool | None = None
+
 # The epoch a build is populating, for the span of ``build_and_swap_epoch``'s build
 # step (``None`` otherwise). A per-epoch startup handler that spawns a periodic loop
 # registers its cancel with THIS epoch, so the loop retires with the generation that
@@ -415,20 +421,36 @@ def install_boot_core(core: ServingCore) -> Epoch:
 
 
 def attach_boot_serving_app(
-    serving_app: ASGIApp, app_state: dict[str, Any], build_serving_app: Callable[[], ASGIApp]
+    serving_app: ASGIApp,
+    app_state: dict[str, Any],
+    build_serving_app: Callable[[], ASGIApp],
+    *,
+    stateless_http: bool,
 ) -> None:
     """Point the ASGI dispatch slot at the boot serving app.
 
     Called by the worker lifespan after it builds the serving app and enters its FastMCP
-    lifespan. Records the slot the build+swap primitive re-points, and
+    lifespan. Records the slot the build+swap primitive re-points,
     ``build_serving_app``, which builds a serving app on the same transport (SSE, or
-    stateful or stateless streamable HTTP) for every rebuilt generation.
+    stateful or stateless streamable HTTP) for every rebuilt generation, and whether that
+    transport is stateless (:func:`boot_stateless_http`).
     """
-    global _serving_slot, _serving_app_builder
+    global _serving_slot, _serving_app_builder, _boot_stateless_http
     _serving_slot = app_state
     _serving_app_builder = build_serving_app
+    _boot_stateless_http = stateless_http
     current_epoch().serving_app = serving_app
     app_state["app"] = serving_app
+
+
+def boot_stateless_http() -> bool | None:
+    """Whether the worker booted its streamable-HTTP transport stateless.
+
+    ``None`` while no boot serving app is attached (an embedded ``app_context`` caller
+    serves no transport), which leaves a streamable-HTTP build to fastmcp's own
+    ``stateless_http`` setting.
+    """
+    return _boot_stateless_http
 
 
 async def clear_epoch() -> None:
@@ -437,13 +459,14 @@ async def clear_epoch() -> None:
     Terminating its transports so a later lifespan in the same process starts
     from a clean slate.
     """
-    global _current, _serving_slot, _serving_app_builder, _loaded_env_keys
+    global _current, _serving_slot, _serving_app_builder, _boot_stateless_http, _loaded_env_keys
     current = _current
     if current is not None:
         await current.close_transports()
     _current = None
     _serving_slot = None
     _serving_app_builder = _default_streamable_http_app
+    _boot_stateless_http = None
     _loaded_env_keys = set()
     unbind_respawn_class_env()
     detach_retired_generations()
