@@ -102,6 +102,11 @@ def _caller_ask() -> SuspendedInteraction:
     )
 
 
+def _proxied_caller_ask(**_arguments: Any) -> SuspendedInteraction:
+    """The caller ask as a proxied tool a session calls with its own arguments."""
+    return _caller_ask()
+
+
 @contextlib.contextmanager
 def _holder_bindings() -> Iterator[str]:
     """Bind what a holding flow's visit binds around the held run: its continuation and a chained routing."""
@@ -226,7 +231,9 @@ def test_a_held_claude_code_run_parks_and_sends_its_caller_ask_up(monkeypatch: p
     # The runner calls its first proxied tool — here the caller ask — and stops on the park.
     monkeypatch.setattr(claude_workspace_module, "runner_payload_files", payload_for(TOOL_CALL_PARK))
     agent = ClaudeCodeAgent()
-    app = build_local_app(tool_runners={"ask": _caller_ask, _DELIVERY_TOOL: probe}, agents={"claude_code": agent})
+    app = build_local_app(
+        tool_runners={"ask": _proxied_caller_ask, _DELIVERY_TOOL: probe}, agents={"claude_code": agent}
+    )
 
     async def go() -> None:
         with tai42_app.bound(app):
