@@ -11,7 +11,6 @@ read frame ever carries it.
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from datetime import UTC, datetime
@@ -53,6 +52,8 @@ from tai42_skeleton.interactions.reaction import (
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.middleware.rate_limit import SKELETON_DOOR_BUDGET
+from tai42_skeleton.operations.adapter import parse_json_object
+from tai42_skeleton.operations.errors import BadRequestError
 from tai42_skeleton.operations.interactions import (
     _claim_or_serialization_error,
     _reply_ttl,
@@ -61,7 +62,6 @@ from tai42_skeleton.webhooks.verify import VERIFY_ERROR, WebhookVerifyFailure, v
 
 from .form_render import _FormRenderError, _render_form_page
 from .pages import _BASE_HEADERS, _CONFIRM_PAGE, _DONE_PAGE, _FORM_HTML_HEADERS, _HTML_HEADERS, _REPLY_PAGE
-from .parse import JSON_PARSE_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -264,11 +264,9 @@ def _parse_typed_answer(raw: bytes, fmt: AnswerFormat) -> Response | tuple[Any, 
         # text/select: an answer is required.
         return _callback_json({"error": "body must contain 'answer'"}, 400)
     try:
-        parsed = json.loads(raw)
-    except JSON_PARSE_ERRORS:
-        return _callback_json({"error": "body must be a JSON object"}, 400)
-    if not isinstance(parsed, dict):
-        return _callback_json({"error": "body must be a JSON object"}, 400)
+        parsed = parse_json_object(raw)
+    except BadRequestError as exc:
+        return _callback_json({"error": exc.message}, 400)
     if "answer" not in parsed:
         return _callback_json({"error": "body must contain 'answer'"}, 400)
     answer_params: dict[str, str] | None = None
@@ -364,12 +362,9 @@ async def _claim_verbatim_external(
         answer = _params_to_answer(request)
     else:
         try:
-            parsed = json.loads(raw)
-        except JSON_PARSE_ERRORS:
-            return _callback_json({"error": "body must be a JSON object"}, 400)
-        if not isinstance(parsed, dict):
-            return _callback_json({"error": "body must be a JSON object"}, 400)
-        answer = parsed
+            answer = parse_json_object(raw)
+        except BadRequestError as exc:
+            return _callback_json({"error": exc.message}, 400)
     return await _claim_external(r, store, settings, ticket, interaction_id, state, answer)
 
 
@@ -467,10 +462,10 @@ def _parse_react_body(raw: bytes) -> Response | tuple[Any, Any]:
     if not raw:
         return _callback_json({"error": "body must contain 'event' and 'values'"}, 400)
     try:
-        parsed = json.loads(raw)
-    except JSON_PARSE_ERRORS:
-        return _callback_json({"error": "body must be a JSON object"}, 400)
-    if not isinstance(parsed, dict) or "event" not in parsed or "values" not in parsed:
+        parsed = parse_json_object(raw)
+    except BadRequestError as exc:
+        return _callback_json({"error": exc.message}, 400)
+    if "event" not in parsed or "values" not in parsed:
         return _callback_json({"error": "body must contain 'event' and 'values'"}, 400)
     return parsed["event"], parsed["values"]
 
