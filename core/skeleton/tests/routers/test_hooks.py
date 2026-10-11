@@ -438,14 +438,13 @@ async def test_put_binding_malformed_body_400(monkeypatch: pytest.MonkeyPatch, r
 
 
 async def test_put_binding_empty_verifier_400_not_500(monkeypatch: pytest.MonkeyPatch, registry) -> None:
-    # An empty ``verifier`` name is a clean 400 (the router's non-empty check),
-    # never a 500 — nothing is stored. The contract model's ``min_length=1`` is
-    # the backing guarantee; the router surfaces it as a client error here.
+    # An empty ``verifier`` name is a clean 400 (the contract model's ``min_length=1``,
+    # surfaced by the router as a client error), never a 500 — nothing is stored.
     manager = _MgmtManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
     resp = await hooks.set_topic_verifier(cast(Request, _PutReq("events", {"verifier": "", "config": {}})))
     assert resp.status_code == 400
-    assert "non-empty 'verifier'" in _body(resp)["error"]
+    assert _body(resp)["error"] == "invalid verifier binding: String should have at least 1 character"
     assert manager._verifiers == {}
 
 
