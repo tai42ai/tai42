@@ -19,18 +19,32 @@ import time
 import zlib
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from rq.exceptions import NoSuchJobError
 from rq.job import JobStatus
-from rq_scheduler import Scheduler
 from tai42_contract.app import tai42_app
+from tai42_contract.backend import (
+    CrontabCadence,
+    IntervalCadence,
+    ScheduleImportError,
+    ScheduleImportMode,
+    ScheduleImportReport,
+    ScheduleListRow,
+    ScheduleRecord,
+)
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient, SyncRedisClient
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 
 from tai42_backend_rq.liveness import heartbeat_fresh
-from tai42_backend_rq.schedules import ScheduleRecord, apply_normalized_schedule, crontab_string, interval_seconds
+from tai42_backend_rq.schedules import (
+    apply_normalized_schedule,
+    crontab_string,
+    interval_seconds,
+    refuse_relative,
+    scheduler_for,
+)
 from tai42_backend_rq.settings import RqSettings, rq_settings
 from tai42_backend_rq.tasks import tool_execution
 
@@ -63,6 +77,27 @@ def _heartbeat_fresh(raw: bytes | str) -> bool:
     :mod:`tai42_backend_rq.liveness`.
     """
     return heartbeat_fresh(datetime.fromisoformat(_text(raw)))
+
+
+def _cadence_from_meta(name: str, meta: dict[str, Any]) -> IntervalCadence | CrontabCadence:
+    """The cadence a scheduled job's ``meta`` mirrors (interval seconds or cron string); neither raises."""
+    if meta.get("interval"):
+        return normalize_schedule(meta["interval"])
+    if meta.get("cron_string"):
+        return normalize_schedule(meta["cron_string"])
+    raise ValueError(
+        f"Schedule {name!r} has no 'interval' or 'cron_string' in its job meta; cannot reconstruct its schedule"
+    )
+
+
+def _split_tool(name: str, kwargs: dict[str, Any]) -> str:
+    """Pop and return the fired tool's name from a scheduled job's ``kwargs``; a job without it raises."""
+    tool_name_arg = rq_settings().tool_name_arg
+    if tool_name_arg not in kwargs:
+        raise ValueError(
+            f"schedule {name!r} carries no {tool_name_arg!r}; it was not created through this backend's schedule door"
+        )
+    return kwargs.pop(tool_name_arg)
 
 
 def _next_run_fields(ts: float | None) -> dict[str, Any]:
@@ -189,7 +224,7 @@ async def backend_cancel_task(task_id: str) -> str:
     """Cancel a running or queued task."""
     settings = rq_settings()
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
+        scheduler = scheduler_for(r)
 
         def _cancel() -> str:
             # A scheduled (recurring) entry cancels through the scheduler.
@@ -328,17 +363,16 @@ async def backend_delete_schedule(name: str) -> dict[str, Any]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_list_schedules() -> list[dict[str, Any]]:
-    """List all schedule entries.
+    """List all schedule entries as ``ScheduleListRow`` dumps.
 
-    Each row carries the canonical keys ``name``, ``enabled``,
-    ``next_run_at_ts`` and ``next_run_at_iso``, plus the backend-specific
-    ``meta`` extra (the job meta holding the interval seconds or cron string).
-    ``enabled`` is always true — RQ has no disabled-schedule state (disabling
+    Each row carries ``name``, the fired ``tool``, the ``cadence`` (rebuilt from the job
+    meta), ``enabled``, ``next_run_at_ts`` and ``next_run_at_iso`` — never the job's
+    arguments. ``enabled`` is always true — RQ has no disabled-schedule state (disabling
     deletes the job), so every listed schedule is live.
     """
     settings = rq_settings()
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
+        scheduler = scheduler_for(r)
 
         def _read() -> list[dict[str, Any]]:
             out: list[dict[str, Any]] = []
@@ -347,12 +381,13 @@ async def backend_list_schedules() -> list[dict[str, Any]]:
             for job, next_run in pairs:
                 run_at = next_run.replace(tzinfo=UTC) if next_run.tzinfo is None else next_run
                 out.append(
-                    {
-                        "name": job.id,
-                        "enabled": True,
+                    ScheduleListRow(
+                        name=job.id,
+                        tool=_split_tool(job.id, dict(job.kwargs)),
+                        cadence=_cadence_from_meta(job.id, dict(job.meta or {})),
+                        enabled=True,
                         **_next_run_fields(run_at.timestamp()),
-                        "meta": dict(job.meta or {}),
-                    }
+                    ).model_dump(mode="json")
                 )
             return out
 
@@ -364,7 +399,7 @@ async def backend_get_schedule(name: str) -> dict[str, Any]:
     """Get schedule details."""
     settings = rq_settings()
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
+        scheduler = scheduler_for(r)
 
         def _read() -> dict[str, Any]:
             if name not in scheduler:
@@ -375,11 +410,7 @@ async def backend_get_schedule(name: str) -> dict[str, Any]:
                 return {"status": "not_found", "name": name}
 
             meta = dict(job.meta or {})
-            schedule_def: dict[str, Any] = {}
-            if meta.get("interval"):
-                schedule_def = {"__type__": "interval", "every": meta["interval"]}
-            elif meta.get("cron_string"):
-                schedule_def = {"__type__": "crontab", "cron_string": meta["cron_string"]}
+            schedule_def = _cadence_from_meta(name, meta).model_dump(mode="json")
 
             score = r.zscore(settings.rq_scheduler_zset, name)
             return {
@@ -425,7 +456,7 @@ async def backend_run_schedule_now(name: str) -> dict[str, Any]:
     """
     settings = rq_settings()
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
+        scheduler = scheduler_for(r)
 
         def _run() -> dict[str, Any]:
             if name not in scheduler:
@@ -464,7 +495,7 @@ async def backend_update_schedule(
     """
     settings = rq_settings()
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
+        scheduler = scheduler_for(r)
 
         def _update() -> dict[str, Any]:
             if name not in scheduler:
@@ -488,10 +519,11 @@ async def backend_update_schedule(
 
             interval_recreated = False
             if new_schedule is not None:
-                norm = normalize_schedule(new_schedule)
-                # Checked before the cancel, so an unrepresentable interval raises
+                cadence = normalize_schedule(new_schedule)
+                # Checked before the cancel, so a relative or unrepresentable interval raises
                 # while the prior schedule is still intact.
-                new_interval = interval_seconds(norm) if norm["__type__"] == "interval" else None
+                refuse_relative(cadence)
+                new_interval = interval_seconds(cadence) if isinstance(cadence, IntervalCadence) else None
                 # Keep every custom meta key but no stale recurrence key of the
                 # replaced kind, so it reads back as one kind.
                 passthrough_meta = {k: v for k, v in old_meta.items() if k not in ("interval", "cron_string")}
@@ -512,8 +544,9 @@ async def backend_update_schedule(
                         meta={**passthrough_meta, "interval": interval},
                     )
                     interval_recreated = True
-                else:  # crontab — normalize_schedule yields no other kind
-                    cron = crontab_string(norm)
+                else:
+                    assert isinstance(cadence, CrontabCadence)  # noqa: S101 narrows the two-kind union
+                    cron = crontab_string(cadence)
                     interval = None
                     scheduler.cron(
                         cron,
@@ -541,18 +574,18 @@ async def backend_update_schedule(
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_export_schedules() -> list[dict[str, Any]]:
-    """Export every schedule as a portable record that round-trips through backend_import_schedules.
+    """Export every schedule as a ``ScheduleRecord`` dump that round-trips through backend_import_schedules.
 
-    Reads each scheduled Job directly, taking its args and kwargs (the tool
-    name the job runs) and reconstructing the canonical schedule dict from the
-    Job ``meta`` (interval seconds or cron string). RQ has no persisted
+    Reads each scheduled Job directly, splitting the fired ``tool`` out of its kwargs'
+    tool-name key (a job without it raises), taking its args and remaining kwargs, and
+    rebuilding the cadence from the Job ``meta`` (interval seconds or cron string). RQ has no persisted
     "enabled" flag because disabling a schedule deletes its job, so every
     exported record is emitted with ``enabled`` set to True. Each record's name
     is the Job id.
     """
     settings = rq_settings()
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
+        scheduler = scheduler_for(r)
 
         def _read_jobs() -> list[dict[str, Any]]:
             # Each Job field triggers a blocking Redis fetch; materialize them all
@@ -571,40 +604,30 @@ async def backend_export_schedules() -> list[dict[str, Any]]:
 
         records = []
         for job in jobs:
-            meta = job["meta"]
-            if "interval" in meta:
-                schedule = normalize_schedule(meta["interval"])
-            elif "cron_string" in meta:
-                schedule = normalize_schedule(meta["cron_string"])
-            else:
-                raise ValueError(
-                    f"Schedule {job['id']!r} has no 'interval' or 'cron_string' in its job meta; "
-                    "cannot reconstruct its schedule"
-                )
-
+            kwargs = job["kwargs"]
             record = ScheduleRecord(
                 name=job["id"],
+                tool=_split_tool(job["id"], kwargs),
                 args=job["args"],
-                kwargs=job["kwargs"],
-                schedule=schedule,
+                kwargs=kwargs,
+                cadence=_cadence_from_meta(job["id"], job["meta"]),
                 enabled=True,
             )
-            records.append(record.model_dump())
+            records.append(record.model_dump(mode="json"))
         return records
 
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_import_schedules(
-    schedules: list[dict[str, Any]], mode: Literal["skip", "overwrite"] = "skip"
+    schedules: list[dict[str, Any]], mode: ScheduleImportMode = "skip"
 ) -> dict[str, Any]:
     """Import schedule records produced by backend_export_schedules, keyed by name.
 
-    Each entry is validated as a ScheduleRecord and its schedule dict is
-    re-normalized so a partial or non-canonical schedule is validated before
-    any write. The canonical schedule is applied through the same logic the
-    schedule-create path uses: an interval schedule with ``scheduler.schedule``
-    and a crontab schedule with ``scheduler.cron``, restoring the stored args
-    and kwargs under the record's name as the Job id. The create is keyed on
+    Each entry is validated as a ``ScheduleRecord``. The cadence is applied through the
+    same logic the schedule-create path uses: an interval with ``scheduler.schedule``
+    and a crontab with ``scheduler.cron``, restoring the stored args and kwargs (the
+    record's ``tool`` injected back under the tool-name key) under the record's name as
+    the Job id. The create is keyed on
     that id, so it overwrites an existing job in place; no pre-cancel is
     performed, so a failure mid-apply never destroys the prior schedule.
     Whether a name already existed is read (read-only) before the write.
@@ -617,13 +640,12 @@ async def backend_import_schedules(
     The RQ backend has no disabled-schedule representation — disabling a
     schedule deletes its job — so a record with ``enabled=False`` is NOT
     enqueued as a live job; it is skipped and the reason is surfaced in
-    "errors". A canonical interval carrying ``relative=True`` cannot be
-    represented either, so the schedule is still created but the dropped flag
-    is surfaced in "errors". A record that fails validation or application is
-    collected in "errors" with its reason and never dropped silently.
+    "errors". A relative interval cannot be honoured either, so it is refused
+    as a per-row error before any write. A record that fails validation or
+    application is collected in "errors" with its reason and never dropped
+    silently.
 
-    Returns ``{"created", "updated", "skipped", "skipped_existing", "errors"}``
-    to match the shared section-report contract; each error row is
+    Returns a ``ScheduleImportReport`` dump; each error row is
     ``{"index", "name", "error"}``.
     """
     settings = rq_settings()
@@ -631,32 +653,31 @@ async def backend_import_schedules(
     updated = 0
     skipped = 0
     skipped_existing = 0
-    errors: list[dict[str, Any]] = []
+    errors: list[ScheduleImportError] = []
     async with _sync_redis(settings) as r:
-        scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
+        scheduler = scheduler_for(r)
         for index, entry in enumerate(schedules):
-            entry_name = entry.get("name") if isinstance(entry, dict) else None
+            raw_name = entry.get("name") if isinstance(entry, dict) else None
+            entry_name = raw_name if isinstance(raw_name, str) else None
             try:
                 record = ScheduleRecord.model_validate(entry)
                 name = record.name
-
-                # Re-normalize before any write so a partial schedule is validated.
-                norm = normalize_schedule(record.schedule)
+                refuse_relative(record.cadence)
 
                 # RQ cannot store a disabled schedule (disable == delete), so
                 # importing one as a live job would silently reactivate it.
                 if not record.enabled:
                     skipped += 1
                     errors.append(
-                        {
-                            "index": index,
-                            "name": name,
-                            "error": (
+                        ScheduleImportError(
+                            index=index,
+                            name=name,
+                            error=(
                                 f"schedule {name!r} has enabled=False; the RQ backend has no "
                                 "disabled-schedule representation (disabling deletes the job), so "
                                 "it was skipped rather than created as an active schedule"
                             ),
-                        }
+                        )
                     )
                     continue
 
@@ -669,21 +690,8 @@ async def backend_import_schedules(
                     skipped_existing += 1
                     continue
 
-                await apply_normalized_schedule(scheduler, norm, tool_execution, record.args, record.kwargs, name)
-
-                # A relative=True interval cannot be represented; the schedule was
-                # created, so surface the dropped flag (only after a successful apply).
-                if norm["__type__"] == "interval" and norm.get("relative"):
-                    errors.append(
-                        {
-                            "index": index,
-                            "name": name,
-                            "error": (
-                                f"schedule {name!r} has relative=True, which the RQ backend cannot "
-                                "represent; the schedule was created with the relative flag ignored"
-                            ),
-                        }
-                    )
+                kwargs = {**record.kwargs, settings.tool_name_arg: record.tool}
+                await apply_normalized_schedule(scheduler, record.cadence, tool_execution, record.args, kwargs, name)
 
                 if exists:
                     updated += 1
@@ -691,11 +699,7 @@ async def backend_import_schedules(
                     created += 1
             except Exception as exc:
                 # Collect-and-continue: one bad record must not abort the batch.
-                errors.append({"index": index, "name": entry_name, "error": repr(exc)})
-        return {
-            "created": created,
-            "updated": updated,
-            "skipped": skipped,
-            "skipped_existing": skipped_existing,
-            "errors": errors,
-        }
+                errors.append(ScheduleImportError(index=index, name=entry_name, error=repr(exc)))
+        return ScheduleImportReport(
+            created=created, updated=updated, skipped=skipped, skipped_existing=skipped_existing, errors=errors
+        ).model_dump()

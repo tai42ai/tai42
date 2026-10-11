@@ -435,6 +435,9 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "resumedInteractions",
         ),
     ),
+    ("GET", "/api/schedules"): RouteShape(
+        items_key=None, columns=("name", "tool", "cadence", "enabled", "next_run_at_ts", "next_run_at_iso", "error")
+    ),
     ("GET", "/api/state-pending-saves"): RouteShape(
         items_key="items",
         columns=(
@@ -503,7 +506,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         items_key=None, columns=("run_id", "tool_name", "status", "started_at", "finished_at")
     ),
     ("GET", "/api/tools"): RouteShape(items_key=None, columns=("value",)),
-    ("GET", "/api/tools/tags"): RouteShape(items_key=None, columns=("name", "tags", "hidden", "badges")),
+    ("GET", "/api/tools/tags"): RouteShape(items_key=None, columns=("name", "tags", "hidden", "badges", "schedulable")),
     ("PATCH", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"): RouteShape(
         items_key="folded_from", columns=("target_kind", "target_name", "kind", "key")
     ),

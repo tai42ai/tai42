@@ -1,5 +1,44 @@
 {
   "$defs": {
+    "CrontabCadence": {
+      "additionalProperties": false,
+      "description": "Fire on a five-field crontab (minute, hour, day of month, month, day of week).",
+      "properties": {
+        "day_of_month": {
+          "default": "*",
+          "title": "Day Of Month",
+          "type": "string"
+        },
+        "day_of_week": {
+          "default": "*",
+          "title": "Day Of Week",
+          "type": "string"
+        },
+        "hour": {
+          "default": "*",
+          "title": "Hour",
+          "type": "string"
+        },
+        "kind": {
+          "const": "crontab",
+          "default": "crontab",
+          "title": "Kind",
+          "type": "string"
+        },
+        "minute": {
+          "default": "*",
+          "title": "Minute",
+          "type": "string"
+        },
+        "month_of_year": {
+          "default": "*",
+          "title": "Month Of Year",
+          "type": "string"
+        }
+      },
+      "title": "CrontabCadence",
+      "type": "object"
+    },
     "FieldChangedEvent": {
       "additionalProperties": false,
       "description": "A declared ``field_changed`` input field changed.",
@@ -54,6 +93,34 @@
         "key_expr"
       ],
       "title": "HookSubject",
+      "type": "object"
+    },
+    "IntervalCadence": {
+      "additionalProperties": false,
+      "description": "Fire every ``every`` seconds; ``relative`` aligns the schedule to the interval's own clock.",
+      "properties": {
+        "every": {
+          "description": "The interval in seconds.",
+          "exclusiveMinimum": 0,
+          "title": "Every",
+          "type": "number"
+        },
+        "kind": {
+          "const": "interval",
+          "default": "interval",
+          "title": "Kind",
+          "type": "string"
+        },
+        "relative": {
+          "default": false,
+          "title": "Relative",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "every"
+      ],
+      "title": "IntervalCadence",
       "type": "object"
     },
     "OverlapPolicy": {
@@ -155,6 +222,33 @@
         }
       },
       "title": "PresetSeedToolMeta",
+      "type": "object"
+    },
+    "ScheduleRowError": {
+      "additionalProperties": false,
+      "description": "A backend's last scheduling failure for a schedule, when the backend records one.",
+      "properties": {
+        "at_iso": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "At Iso"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "title": "ScheduleRowError",
       "type": "object"
     },
     "StateAttach": {
@@ -329,6 +423,41 @@
         "regime"
       ],
       "title": "StateRegimeRule",
+      "type": "object"
+    },
+    "StateSubject": {
+      "additionalProperties": false,
+      "description": "One addressed subject: a scope ``(target_kind, target_name)`` plus ``(kind, key)`` within it.\n\nEquality (and identity across every store method) is all four fields. ``key`` is\nstripped and must be 1..512 characters; ``kind`` matches :data:`SUBJECT_KIND_RE`.\nFrozen so a validated subject cannot be mutated after it is read back.",
+      "properties": {
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "target_kind": {
+          "enum": [
+            "agent",
+            "tool"
+          ],
+          "title": "Target Kind",
+          "type": "string"
+        },
+        "target_name": {
+          "minLength": 1,
+          "title": "Target Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_kind",
+        "target_name",
+        "kind",
+        "key"
+      ],
+      "title": "StateSubject",
       "type": "object"
     },
     "StateTemplateDeclarations": {
@@ -2404,6 +2533,385 @@
         "grants"
       ],
       "title": "RoleDefinition",
+      "type": "object"
+    },
+    "ScheduleCreate": {
+      "additionalProperties": false,
+      "description": "Create a schedule that runs ``tool_name`` on ``cadence``, or once now when no cadence is given.\n\n``tool_kwargs`` are the arguments each fire passes to the tool, the tool's alone and forwarded\nuntouched — a tool whose OWN argument is named ``subject`` carries it here like any argument.\n``subject`` is the OPTIONAL top-level door field naming the ``schedule``-door state context each\nfire re-establishes: the create door stamps it onto the job, and the fire keys its state writes and\nparks on it (it never reaches the base tool). ``state_binding`` is the OPTIONAL door-layer binding\nthe fire applies around the started tool alone (never the base tool's). ``schedule_name`` names a\nrecurring schedule; without it the door derives one from the tool, its arguments and the cadence.\n\nA schedule is a parkable-driving door: it carries the four :class:`ParkableDoorMixin` jqs\n(``start_expr`` builds the fired tool's kwargs; ``cancel_expr`` / ``resume_expr`` act on the run's\nparked interactions; ``extras_expr`` builds the started run's extras), each evaluated over the\nfired tool's arguments with the run's parked interactions bound as ``$parked``. Any contract jq\nneeds an ``execution_key`` (the api-key ``user_id`` the recurring fire runs as, so a park it\nraises can be rebound and resumed under that authority).",
+      "properties": {
+        "cadence": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "crontab": "#/$defs/CrontabCadence",
+                  "interval": "#/$defs/IntervalCadence"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/IntervalCadence"
+                },
+                {
+                  "$ref": "#/$defs/CrontabCadence"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The cadence; none runs the tool once now.",
+          "title": "Cadence"
+        },
+        "cancel_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "cancel expression",
+            "language": "jq",
+            "returns": "null (cancel nothing), a parked interaction id, or a list of ids to cancel",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "execution_key": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The api-key user_id a contract-bearing recurring fire runs as (required with any contract jq).",
+          "title": "Execution Key"
+        },
+        "extras_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "extras expression",
+            "language": "jq",
+            "returns": "the extras mapping handed to the started target; null for no extras",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "resume_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "resume expression",
+            "language": "jq",
+            "returns": "null (resume nothing), {id, payload} to resume an ask with an answer, a bare id to take a waiting outcome, or a list of these",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "schedule_name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schedule Name"
+        },
+        "start_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "start expression",
+            "language": "jq",
+            "returns": "the object dispatched as the started target's kwargs; null starts nothing",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "state_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateSubject"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool_kwargs": {
+          "additionalProperties": true,
+          "title": "Tool Kwargs",
+          "type": "object"
+        },
+        "tool_name": {
+          "description": "The base tool to run.",
+          "minLength": 1,
+          "title": "Tool Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_name"
+      ],
+      "title": "ScheduleCreate",
+      "type": "object"
+    },
+    "ScheduleListRow": {
+      "additionalProperties": false,
+      "description": "One row of the schedule listing: no arguments, no kwargs.",
+      "properties": {
+        "cadence": {
+          "discriminator": {
+            "mapping": {
+              "crontab": "#/$defs/CrontabCadence",
+              "interval": "#/$defs/IntervalCadence"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IntervalCadence"
+            },
+            {
+              "$ref": "#/$defs/CrontabCadence"
+            }
+          ],
+          "title": "Cadence"
+        },
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScheduleRowError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "next_run_at_iso": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Run At Iso"
+        },
+        "next_run_at_ts": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Run At Ts"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "tool",
+        "cadence",
+        "enabled"
+      ],
+      "title": "ScheduleListRow",
+      "type": "object"
+    },
+    "ScheduleRecord": {
+      "additionalProperties": false,
+      "description": "One exported or imported schedule: the durable definition, never runtime state.",
+      "properties": {
+        "args": {
+          "items": {},
+          "title": "Args",
+          "type": "array"
+        },
+        "cadence": {
+          "discriminator": {
+            "mapping": {
+              "crontab": "#/$defs/CrontabCadence",
+              "interval": "#/$defs/IntervalCadence"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IntervalCadence"
+            },
+            {
+              "$ref": "#/$defs/CrontabCadence"
+            }
+          ],
+          "title": "Cadence"
+        },
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "kwargs": {
+          "additionalProperties": true,
+          "description": "The tool arguments plus the reserved door stamps the fire needs.",
+          "title": "Kwargs",
+          "type": "object"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "tool": {
+          "description": "The name of the tool the schedule fires.",
+          "minLength": 1,
+          "title": "Tool",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "tool",
+        "cadence",
+        "enabled"
+      ],
+      "title": "ScheduleRecord",
       "type": "object"
     },
     "StateAttach": {

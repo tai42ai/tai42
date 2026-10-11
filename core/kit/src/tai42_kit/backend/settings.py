@@ -10,8 +10,8 @@ from tai42_kit.settings import TaiBaseSettings
 class BackendDispatchSettings(TaiBaseSettings):
     """The three fields tool dispatch needs both sides to name identically.
 
-    They are the env key the resolved manifest is exported under, the synchronous dispatch
-    result timeout, and the kwarg name carrying the target tool name into a queued job.
+    They are the env key the resolved manifest is exported under, the dispatch job budget, and
+    the kwarg name carrying the target tool name into a queued job.
 
     Mixed into each side's own env group rather than shared as one group, so the
     NAMES, DEFAULTS and RELOAD CLASSES are declared once while each side keeps
@@ -30,5 +30,14 @@ class BackendDispatchSettings(TaiBaseSettings):
     registry_exclude: ClassVar[bool] = True
 
     manifest_key: str = Field(default="MANIFEST_KEY", json_schema_extra={"reload": "recycle"})
-    task_timeout: int = 300
+    task_timeout: int = Field(
+        default=300,
+        gt=0,
+        description=(
+            "The dispatch's job budget in seconds: the longest a dispatched job may run on the worker, "
+            "and how long a synchronous dispatch waits for its result. Worker-side limits are bound when "
+            "the worker starts, so a change converges through a process recycle."
+        ),
+        json_schema_extra={"reload": "recycle"},
+    )
     tool_name_arg: str = Field(default="backend_tool_name", json_schema_extra={"reload": "recycle"})

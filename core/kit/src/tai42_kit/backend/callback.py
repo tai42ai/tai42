@@ -27,6 +27,7 @@ from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_KEY_ARG,
     SCHEDULE_STAMPED_DOOR_OPTS,
     SCHEDULE_STATE_BINDING_ARG,
+    SCHEDULE_STATE_BINDING_REQUEST_KEY,
     SCHEDULE_SUBJECT_ARG,
     assert_no_reserved_schedule_keys,
     assert_schedule_create_fire,
@@ -93,7 +94,7 @@ async def prepare_backend_kwargs(
     kwargs[WORKER_SECRET_CAPABILITY_ARG] = caller_may_read_secrets()
     if scheduled:
         assert_schedule_create_fire()
-        state_binding = kwargs.pop("state_binding", None)
+        state_binding = kwargs.pop(SCHEDULE_STATE_BINDING_REQUEST_KEY, None)
         if state_binding is not None:
             kwargs[SCHEDULE_STATE_BINDING_ARG] = state_binding
         # The branch signature declares the create-door-stamped reserved keys so the dispatch

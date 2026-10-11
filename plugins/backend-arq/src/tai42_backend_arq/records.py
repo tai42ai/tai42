@@ -1,70 +1,67 @@
-"""Portable schedule records and schedule-shape helpers.
+"""Schedule-shape helpers over the contract's ``ScheduleCadence``.
 
-:class:`ScheduleRecord` is the JSON-safe document the export/import backup round
-trip emits and consumes — the durable definition only, never runtime state. The
-helpers convert between the normalized schedule dict, the compact
-``cron_or_interval`` form stored in the schedule hash (interval seconds or a
-5-field crontab string), and the next-run timing derived from it.
+The schedule hash stores the cadence as its JSON dump (field ``schedule``) and the compact
+``cron_or_interval`` form arq fires from (interval seconds or a 5-field crontab string).
+:func:`read_stored_cadence` reads the stored dump back and refuses a hash written in a
+format this backend no longer reads (:class:`ScheduleStoreFormatError`).
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
 
 from croniter import croniter
-from pydantic import BaseModel, Field, model_validator
+from pydantic import TypeAdapter, ValidationError
+from tai42_contract.backend import CrontabCadence, IntervalCadence, ScheduleCadence
+from tai42_contract.errors import ErrorKind
+
+_CADENCE: TypeAdapter[IntervalCadence | CrontabCadence] = TypeAdapter(ScheduleCadence)
 
 
-class ScheduleRecord(BaseModel):
-    """The durable definition of one schedule.
+class ScheduleStoreFormatError(RuntimeError):
+    """A schedule hash holds a ``schedule`` field this backend does not read.
 
-    Runtime state (job id, timestamps, abort markers) is absent and re-derived on import. ``kwargs`` carries the
-    queued call's keyword arguments verbatim (including the tool-name key).
+    The stored state conflicts with what this backend reads — deterministic, so no default
+    retry policy re-runs it. The message names the schedule and the key pattern to delete.
     """
 
-    name: str
-    args: list[Any] = Field(default_factory=list)
-    kwargs: dict[str, Any] = Field(default_factory=dict)
-    schedule: dict[str, Any]
-    enabled: bool
-
-    @model_validator(mode="after")
-    def _check_schedule_kind(self) -> ScheduleRecord:
-        kind = self.schedule.get("__type__")
-        if kind not in {"interval", "crontab"}:
-            raise ValueError(f"schedule '__type__' must be 'interval' or 'crontab', got {kind!r}")
-        if kind == "interval":
-            every = self.schedule.get("every")
-            # bool is an int subclass; a boolean 'every' is not a valid period.
-            if not isinstance(every, int | float) or isinstance(every, bool):
-                raise ValueError(f"interval schedule requires numeric 'every', got {every!r}")
-            relative = self.schedule.get("relative")
-            if relative is not None and not isinstance(relative, bool):
-                raise ValueError(f"interval 'relative' must be a bool, got {relative!r}")
-        else:  # crontab
-            missing = [
-                field
-                for field in ("minute", "hour", "day_of_month", "month_of_year", "day_of_week")
-                if field not in self.schedule
-            ]
-            if missing:
-                raise ValueError(f"crontab schedule missing required field(s): {missing}")
-        return self
+    __tai_error_kind__ = ErrorKind.CONFLICT
 
 
-def derive_cron_or_interval(norm: dict[str, Any]) -> int | float | str:
-    """Reduce a normalized schedule dict to its compact stored form.
+def read_stored_cadence(name: str, raw: bytes | str | None, pattern: str) -> IntervalCadence | CrontabCadence:
+    """The cadence stored in a schedule hash's ``schedule`` field.
 
-    An interval becomes its seconds value (int when whole); a crontab becomes
-    the standard 5-field expression string.
+    A missing field or one that is not a ``ScheduleCadence`` dump raises
+    :class:`ScheduleStoreFormatError` naming ``pattern`` (the schedule-key glob to delete).
     """
-    if norm["__type__"] == "interval":
-        every = float(norm["every"])
+    cause: ValidationError | None = None
+    if raw is not None:
+        try:
+            return _CADENCE.validate_json(raw)
+        except ValidationError as exc:
+            cause = exc
+    raise ScheduleStoreFormatError(
+        f"arq schedule {name!r} is stored in a format this backend no longer reads; delete the keys "
+        f"matching {pattern!r} and re-create the schedules"
+    ) from cause
+
+
+def refuse_relative(cadence: IntervalCadence | CrontabCadence) -> None:
+    """Raise for a relative interval: the arq scheduler cannot honour ``relative=True``."""
+    if isinstance(cadence, IntervalCadence) and cadence.relative:
+        raise ValueError("the arq backend does not support relative interval schedules (relative=True)")
+
+
+def derive_cron_or_interval(cadence: IntervalCadence | CrontabCadence) -> int | float | str:
+    """Reduce a cadence to its compact stored form.
+
+    An interval becomes its seconds value (int when whole); a crontab becomes the standard
+    5-field expression string.
+    """
+    if isinstance(cadence, IntervalCadence):
+        every = cadence.every
         return int(every) if every.is_integer() else every
-    if norm["__type__"] == "crontab":
-        return f"{norm['minute']} {norm['hour']} {norm['day_of_month']} {norm['month_of_year']} {norm['day_of_week']}"
-    raise ValueError(f"Unsupported schedule type: {norm['__type__']}")
+    return f"{cadence.minute} {cadence.hour} {cadence.day_of_month} {cadence.month_of_year} {cadence.day_of_week}"
 
 
 def parse_cron_or_interval(raw: str) -> int | float | str:
