@@ -467,7 +467,7 @@ async def test_callback_bound_missing_verifier_500(wired, verifier_registry):
 async def test_callback_a_stored_binding_of_another_shape_fails_closed(wired, verifier_registry, stored):
     # A present ``verifier`` value that is not a ``{"verifier", "config"}`` binding is NEVER read
     # as an unbound ticket-only question: 500 with the constant body, nothing recorded, the
-    # ticket unconsumed — even with a passing verifier registered under the old shape's name.
+    # ticket unconsumed — even with a passing verifier registered under the ``name`` key's value.
     verifier_registry.register("prov", _FakeVerifier())
     request = _external_request(wired.store).model_copy(
         update={"format_payload": {"url": "https://ext.example/resource", "verifier": stored}}
