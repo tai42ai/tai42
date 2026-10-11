@@ -125,6 +125,24 @@ def test_llm_real_unknown_provider_raises(monkeypatch: pytest.MonkeyPatch) -> No
         _llm_env(_res(llm_base_url="http://127.0.0.1:9/v1"))
 
 
+@pytest.mark.parametrize("env_var", ["REAL_E2E_LLM_PROVIDER", "REAL_E2E_EMBEDDING_PROVIDER"])
+@pytest.mark.parametrize("name", ["huggingface", "ollama"])
+def test_a_kit_provider_the_e2e_environment_does_not_install_is_refused_naming_the_selectable_ones(
+    env_var: str, name: str
+) -> None:
+    # The kit builds these providers, but their packages are not in the e2e environment, so the
+    # real legs cannot select them; the refusal lists the providers they can select.
+    from tai42_e2e.settings import real_embedding_provider, real_llm_provider
+
+    resolve = real_llm_provider if env_var == "REAL_E2E_LLM_PROVIDER" else real_embedding_provider
+    with pytest.raises(
+        ValueError,
+        match=rf"{env_var}={name!r} is not a known LLM provider; "
+        r"valid providers: anthropic, google, mistral, openai, xai$",
+    ):
+        resolve({env_var: name})
+
+
 # ---- classifier seam (independent toggle) -------------------------------
 
 

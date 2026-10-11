@@ -50,23 +50,22 @@ class ClassifierProvider:
     default_model: str
 
 
-# The real-LLM providers the kit builders accept (``tai42_kit.llm.models.get_llm`` /
-# ``embedding.get_embedding``), matched to the credential template's keys. A name
-# the operator puts in ``REAL_E2E_LLM_PROVIDER`` / ``_EMBEDDING_PROVIDER`` must be a key
-# here; an unknown name raises rather than silently falling back. Models carry cheap
-# defaults the operator overrides per provider via ``REAL_E2E_*_MODEL``.
+# The real-LLM providers the real ``llm`` / ``embeddings`` legs can select, matched to the
+# credential template's keys; each is a provider the kit builders accept
+# (``tai42_kit.llm.models.get_llm`` / ``embedding.get_embedding``) whose package the e2e
+# environment installs (``e2e/pyproject.toml``). A name the operator puts in
+# ``REAL_E2E_LLM_PROVIDER`` / ``_EMBEDDING_PROVIDER`` must be a key here; any other name,
+# huggingface included, raises rather than silently falling back. huggingface is not
+# selectable: the kit's ``huggingface`` extra is not installed in the e2e environment,
+# because its locked wheel closure is about 2.8 GB over 82 packages (torch and its CUDA
+# packages) and would be installed on every e2e CI shard. Models carry cheap defaults the
+# operator overrides per provider via ``REAL_E2E_*_MODEL``.
 LLM_PROVIDERS: dict[str, LlmProvider] = {
     "openai": LlmProvider("openai", "OPENAI_API_KEY", "gpt-4o-mini", "text-embedding-3-small"),
     "anthropic": LlmProvider("anthropic", "ANTHROPIC_API_KEY", "claude-haiku-4-5-20251001", None),
     "mistral": LlmProvider("mistral", "MISTRAL_API_KEY", "mistral-small-latest", "mistral-embed"),
     "google": LlmProvider("google", "GOOGLE_API_KEY", "gemini-2.0-flash", "models/text-embedding-004"),
     "xai": LlmProvider("xai", "XAI_API_KEY", "grok-3", None),
-    "huggingface": LlmProvider(
-        "huggingface",
-        "HUGGINGFACEHUB_API_TOKEN",
-        "HuggingFaceH4/zephyr-7b-beta",
-        "sentence-transformers/all-MiniLM-L6-v2",
-    ),
 }
 
 
