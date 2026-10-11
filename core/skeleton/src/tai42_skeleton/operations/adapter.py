@@ -167,9 +167,9 @@ async def _read_operation_kwargs(
 def _unwrap_operation_result(result: Any) -> tuple[Any, BackgroundTask | None]:
     """Split an operation result into ``(payload, background)``.
 
-    An :class:`OperationResponse` carries a post-flush ``BackgroundTask`` (the
-    profile-apply self-exit) alongside its payload; a bare payload returns
-    ``(result, None)``.
+    An :class:`OperationResponse` carries a post-flush ``BackgroundTask`` (an
+    env-change door's writer self-exit) alongside its payload; a bare payload
+    returns ``(result, None)``.
     """
     if isinstance(result, OperationResponse):
         return result.payload, result.background

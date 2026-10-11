@@ -3,10 +3,14 @@
 A recycled worker replies ``applied`` and then exits cleanly so its supervisor
 respawns it and the fresh process loads new store env at boot. The exit is a
 self-delivered SIGTERM: the process's already-installed graceful handler runs, so
-in-flight work drains before the process ends — never a hard kill. The recycle
-handler arms one of these on the bus's post-reply slot (fired AFTER the terminal
-reply); the serve primitive is ALSO the applier's own deferred self-exit, wired by
-the profile-apply response as a Starlette ``BackgroundTask``.
+in-flight work drains before the process ends — never a hard kill.
+
+Three callers pick a primitive through :func:`graceful_exit_for`: the recycle
+handler arms it on the bus's post-reply slot (fired AFTER the terminal reply); an
+env-change door arms it as the writer's own post-reply exit after a converged roll
+(``writer_exit_response``), run after the body flushes on the HTTP edge and by
+``run_after_reply`` once the call returned on the projected tool edge; and the
+lifespan calls it when a perpetual background task dies.
 """
 
 from __future__ import annotations
@@ -46,8 +50,9 @@ def request_backend_graceful_exit() -> None:
 def graceful_exit_for(kind: WorkerKind) -> Callable[[], None]:
     """Return the graceful self-exit primitive for a worker kind.
 
-    The recycle handler arms the returned callable on the bus's post-reply
-    slot, so it fires only after the terminal reply ships.
+    Every caller fires the returned callable after its reply ships: the recycle
+    handler on the bus's post-reply slot, an env-change door as the writer's
+    post-reply exit; the lifespan calls it directly when a perpetual task dies.
     """
     if kind is WorkerKind.serve:
         return request_serve_graceful_exit
