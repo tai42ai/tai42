@@ -144,6 +144,10 @@ class RedisAdmin:
         ``e2e:rec:{key}`` (logical DB 0)."""
         return cast(list[str], self._probe.lrange(f"e2e:rec:{key}", 0, -1))
 
+    def release(self, key: str) -> None:
+        """Release an ``e2e_hold_until_released`` probe held on ``key`` (logical DB 0)."""
+        self._probe.rpush(f"e2e:rel:{key}", "1")
+
     def record_keys(self) -> list[str]:
         """Every ``e2e_record`` probe key present (logical DB 0), the ``e2e:rec:``
         prefix stripped — for reading back records keyed on a value a test cannot
