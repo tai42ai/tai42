@@ -55,9 +55,10 @@ import json
 import math
 from typing import Any
 
+from tai42_kit.interactions import RADIO_OPTION_THRESHOLD, hidden_fields
+
 from tai42_channel_slack.form_blocks import (
     FIELD_ACTION_ID,
-    RADIO_OPTION_THRESHOLD,
     FormSchemaError,
     _apply_initial,
     _element,
@@ -191,32 +192,6 @@ def _page_header(title: str) -> dict[str, Any]:
     if len(title) > _MAX_HEADER_LEN:
         raise FormSchemaError(f"form page title {title!r} exceeds {_MAX_HEADER_LEN} characters")
     return {"type": "header", "text": {"type": "plain_text", "text": title}}
-
-
-def _evaluate_visible_when(predicate: dict[str, Any], values: dict[str, Any]) -> bool:
-    # Whether a property with ``predicate`` is VISIBLE given the known ``values`` — the SAME
-    # platform rule the answer facet enforces at submit, evaluated here so the modal shows/hides
-    # without ever calling the consumer. An absent controlling value reads as unset.
-    controlling = values.get(predicate["field"])
-    if "equals" in predicate:
-        return controlling == predicate["equals"]
-    if "in" in predicate:
-        return controlling in predicate["in"]
-    # notEmpty
-    return controlling not in (None, "", [], {})
-
-
-def _hidden_fields(properties: dict[str, Any], values: dict[str, Any]) -> set[str]:
-    # The properties HIDDEN by their ``visibleWhen`` predicate for the known ``values`` (a
-    # property with no predicate is always visible).
-    hidden: set[str] = set()
-    for name, prop in properties.items():
-        if not isinstance(prop, dict):
-            continue
-        predicate = prop.get("visibleWhen")
-        if isinstance(predicate, dict) and not _evaluate_visible_when(predicate, values):
-            hidden.add(str(name))
-    return hidden
 
 
 def _trigger_fields(properties: dict[str, Any], reactions: dict[str, Any] | None) -> set[str]:
@@ -379,7 +354,9 @@ def build_modal_blocks(
     field_errors = field_errors or {}
     required = _required_set(schema)
     properties = _properties(schema)
-    hidden = _hidden_fields(properties, values) if values is not None else set()
+    # The platform's own visibility rule, so the modal shows and hides exactly what the answer
+    # check enforces at submit, without ever calling the consumer.
+    hidden = hidden_fields(properties, values) if values is not None else set()
     triggers = _trigger_fields(properties, reactions)
     if pages is not None:
         blocks: list[dict[str, Any]] = []

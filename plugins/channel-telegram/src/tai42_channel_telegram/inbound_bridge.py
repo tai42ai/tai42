@@ -15,12 +15,11 @@ from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
 from tai42_contract.conversations import (
-    ENTRY_PARAM_VALUE_MAX_CHARS,
     BlankInboundTextError,
-    validate_entry_params,
 )
 from tai42_contract.interactions import MediaItem
 from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
+from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params, put_entry_param
 from tai42_kit.settings import require_secret
 
 from tai42_channel_telegram.correlation import (
@@ -44,9 +43,10 @@ logger = logging.getLogger(__name__)
 #                        a select/suggested-reply ask whose options carry none).
 #   reply_description  — a tapped sectioned-row's secondary description line, when it had one.
 #
-# All values are transport-bounded by the contract (:func:`validate_entry_params`); a value
-# over ``ENTRY_PARAM_VALUE_MAX_CHARS`` is dropped (never truncated), and in the rare event
-# the aggregate still overflows a bound the whole set is dropped and the turn bridges without
+# All values are transport-bounded by the contract through the kit's entry-params policy
+# (``tai42_kit.conversations.entry_params``): a value over ``ENTRY_PARAM_VALUE_MAX_CHARS`` is
+# dropped (never truncated; logged and counted), and in the rare event the aggregate still
+# overflows a bound the whole set is dropped (logged and counted) and the turn bridges without
 # it — a participant message is never lost to a params bound.
 
 # The shared ladder's outcome -> this webhook's ``{"data": {"status": ...}}`` ack. The
@@ -85,20 +85,6 @@ def _ignored(reason: str) -> JSONResponse:
     return JSONResponse({"data": {"status": "ignored"}}, status_code=200)
 
 
-def _put_param(params: dict[str, str], key: str, value: str | None) -> None:
-    """Add ``key`` iff ``value`` is a non-empty string within the contract's per-value cap.
-
-    An over-cap opaque value is dropped (never truncated — truncation would silently corrupt an
-    opaque token); a debug line records the drop without ever logging the value.
-    """
-    if not value:
-        return
-    if len(value) > ENTRY_PARAM_VALUE_MAX_CHARS:
-        logger.debug("dropping telegram inbound param %r: value over the %d-char cap", key, ENTRY_PARAM_VALUE_MAX_CHARS)
-        return
-    params[key] = value
-
-
 def _reply_params(option: StoredOption) -> dict[str, str] | None:
     """The opaque entry-params a bridged tap carries from the tapped option.
 
@@ -107,26 +93,9 @@ def _reply_params(option: StoredOption) -> dict[str, str] | None:
     select/suggested-reply ask's minted options, say.
     """
     params: dict[str, str] = {}
-    _put_param(params, "reply_id", option.id)
-    _put_param(params, "reply_description", option.description)
+    put_entry_param(params, "reply_id", option.id, door="telegram")
+    put_entry_param(params, "reply_description", option.description, door="telegram")
     return params or None
-
-
-def _sanitize_params(params: dict[str, str] | None) -> dict[str, str] | None:
-    """``params`` validated against the contract's transport bounds, or ``None`` when empty or violated.
-
-    A violation drops the WHOLE set (which would otherwise 5xx and have Telegram redeliver the same
-    poison update forever) and lets the turn proceed without params — the participant's message is
-    never lost to a params bound; the refusal names the bound/key, never an opaque value.
-    """
-    if not params:
-        return None
-    try:
-        validate_entry_params(params)
-    except ValueError as exc:
-        logger.warning("telegram inbound params rejected (%s); proceeding without params", exc)
-        return None
-    return params
 
 
 def _inbound_locale(update: dict[str, object]) -> str | None:
@@ -214,7 +183,7 @@ async def _resolve_answer(
             bridge_text=text,
             # Opaque tap enrichment (reply_id / reply_description); the ladder threads it to
             # the callback door on a forward and onto the bridged turn when the reply digresses.
-            params=_sanitize_params(params),
+            params=bound_entry_params(params, mode=OverBoundParamsMode.DROP, door="telegram"),
         ),
     )
     if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
@@ -258,7 +227,9 @@ async def _bridge(
             cap_key=str(chat_id),
             text=text,
             provider_message_id=str(update_id),
-            params=_sanitize_params(params),
+            # Telegram redelivers a 5xx forever: an over-bound set is dropped (logged and
+            # counted), never the participant's message.
+            params=bound_entry_params(params, mode=OverBoundParamsMode.DROP, door="telegram"),
             attachments=attachments,
             locale=_inbound_locale(update),
         )

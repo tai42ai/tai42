@@ -17,12 +17,10 @@ from tai42_contract.app import tai42_app
 from tai42_contract.conversations import InboundMediaKind, InboundRejectionReason
 from tai42_contract.interactions import (
     MediaOrigin,
-    MediaStoreUnavailableError,
-    MediaTooLargeError,
-    MediaTypeNotAllowedError,
 )
 from tai42_kit.conversations.inbound_media import build_inbound_media_params, inbound_media_placeholder
-from tai42_kit.net import MediaFetchError, UrlGuardError, open_media_stream
+from tai42_kit.net import open_media_stream
+from tai42_kit.net.media_faults import MEDIA_FETCH_AND_INGEST_FAULTS, media_fault_is_transient, media_rejection_reason
 from tai42_kit.settings import require_secret
 
 from tai42_channel_telegram.client import TelegramFilePermanentError, get_file
@@ -191,18 +189,10 @@ async def _bridge_media(
                 declared_size=member.declared_size or stream.content_length,
                 origin=origin,
             )
-    except MediaFetchError as exc:
-        if exc.transient:
+    except MEDIA_FETCH_AND_INGEST_FAULTS as exc:
+        if media_fault_is_transient(exc):
             raise
-        return await _reject_media(settings, media, update, InboundRejectionReason.COULD_NOT_RECEIVE)
-    except UrlGuardError:
-        return await _reject_media(settings, media, update, InboundRejectionReason.COULD_NOT_RECEIVE)
-    except MediaTooLargeError:
-        return await _reject_media(settings, media, update, InboundRejectionReason.TOO_LARGE)
-    except MediaTypeNotAllowedError:
-        return await _reject_media(settings, media, update, InboundRejectionReason.UNSUPPORTED_TYPE)
-    except MediaStoreUnavailableError:
-        return await _reject_media(settings, media, update, InboundRejectionReason.COULD_NOT_RECEIVE)
+        return await _reject_media(settings, media, update, media_rejection_reason(exc))
 
     text = media.caption or inbound_media_placeholder(member.kind, filename=ingested.item.filename, voice=member.voice)
     params = build_inbound_media_params(

@@ -24,19 +24,14 @@ or a channel-web ``?tai_pair=`` URL) around it is the operator's job, never the 
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime
 
-from tai42_contract.conversations import MultichannelDisabledError
+from tai42_contract.conversations import PAIR_CODE_PATTERN, MultichannelDisabledError
 
 from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.pair_codes import MintingConversation
-
-# The pair-code shape (``LINK-`` + 8 ``[A-Z0-9]``), matched as a whole token so a longer
-# alphanumeric run adjacent to a valid-looking prefix is not mistaken for a code.
-_CODE_RE = re.compile(r"\bLINK-[A-Z0-9]{8}\b")
 
 
 @dataclass(frozen=True)
@@ -76,7 +71,7 @@ def classify(text: str) -> PairingAction:
         return Link()
     if trimmed == "/unlink":
         return Unlink()
-    match = _CODE_RE.search(text)
+    match = PAIR_CODE_PATTERN.search(text)
     if match is not None:
         return Redeem(match.group(0))
     return Passthrough()

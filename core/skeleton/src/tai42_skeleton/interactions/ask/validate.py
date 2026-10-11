@@ -6,14 +6,15 @@ clamped ``audience``, normalized ``schema``) before any state is written.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import Channel
+from tai42_contract.hooks import TopicVerifierBinding
 from tai42_contract.interactions import AnswerFormat, check_addressing, check_ask_timing
 
 from tai42_skeleton.access_control.user import clamp_write_audience
@@ -28,7 +29,8 @@ class AskValidation:
     """The resolved outcome of the up-front validation.
 
     The parsed answer format, whether it is the external format, the resolved channel object
-    (reused by delivery), the write-clamped audience, and the normalized schema.
+    (reused by delivery), the write-clamped audience, the normalized schema, and the validated
+    verifier binding.
     """
 
     fmt: AnswerFormat
@@ -36,6 +38,7 @@ class AskValidation:
     channel_obj: Channel | None
     audience: str | None
     schema: type[BaseModel] | dict[str, Any] | None
+    verifier: TopicVerifierBinding | None
 
 
 def validate_ask_arguments(
@@ -48,7 +51,7 @@ def validate_ask_arguments(
     pages: Any,
     timeout: float | None,
     link: str | Callable[[str], Awaitable[str]] | None,
-    verifier: dict[str, Any] | None,
+    verifier: TopicVerifierBinding | Mapping[str, Any] | None,
     channel: str | None,
     recipient: str | None,
     audience: str | None,
@@ -79,12 +82,14 @@ def validate_ask_arguments(
     channel_obj, schema = _validate_channel_args(
         channel, link, verifier, fmt, schema, question, recipient, reaction_tool
     )
-    _validate_external_args(is_external, link, channel, schema, verifier)
+    binding = _validate_external_args(is_external, link, channel, schema, verifier)
     if fmt is AnswerFormat.FREE and schema is not None:
         # A FREE answer is checked against its schema; normalize it here so a bad schema fails
         # before any state is written.
         schema = normalize_schema(schema)
-    return AskValidation(fmt=fmt, is_external=is_external, channel_obj=channel_obj, audience=audience, schema=schema)
+    return AskValidation(
+        fmt=fmt, is_external=is_external, channel_obj=channel_obj, audience=audience, schema=schema, verifier=binding
+    )
 
 
 def _validate_timing_and_format(
@@ -202,8 +207,8 @@ def _validate_channel_form(
 
 def _validate_external_args(
     is_external: bool, link: Any, channel: str | None, schema: type[BaseModel] | dict[str, Any] | None, verifier: Any
-) -> None:
-    """Validate the external/non-external combos.
+) -> TopicVerifierBinding | None:
+    """Validate the external/non-external combos; return the validated verifier binding.
 
     External needs a ``link`` (or a channel) and normalizes its optional schema + validates its
     optional verifier; a non-external format forbids both ``link`` and ``verifier``.
@@ -215,33 +220,34 @@ def _validate_external_args(
         # the link builder does external work.
         if schema is not None:
             normalize_schema(schema)
-        if verifier is not None:
-            validate_verifier(verifier)
-    else:
-        if link is not None:
-            raise ValueError("link is only valid with answer_format 'external'")
-        # A verifier authenticates the external server-to-server callback; on a
-        # human-answerable format it would emit ``server_verified`` and make the UI
-        # render a non-actionable card no human can ever answer.
-        if verifier is not None:
-            raise ValueError("verifier is only valid with answer_format 'external'")
+        return validate_verifier(verifier) if verifier is not None else None
+    if link is not None:
+        raise ValueError("link is only valid with answer_format 'external'")
+    # A verifier authenticates the external server-to-server callback; on a
+    # human-answerable format it would emit ``server_verified`` and make the UI
+    # render a non-actionable card no human can ever answer.
+    if verifier is not None:
+        raise ValueError("verifier is only valid with answer_format 'external'")
+    return None
 
 
-def validate_verifier(verifier: Any) -> None:
-    """Reject a malformed or unknown ``verifier`` at ask-time, before any state is written.
+def validate_verifier(verifier: Any) -> TopicVerifierBinding:
+    """Validate ``verifier`` into a :class:`TopicVerifierBinding` naming a registered verifier, before any state.
 
-    It must be a dict carrying a non-empty ``name`` that resolves against the registered webhook
-    verifiers. A non-dict (or a typo'd/unregistered name) would otherwise slip through as an
-    unrecognised binding at the callback door and silently degrade the question to an open,
-    unverified one — so this is a hard guard (raise), never a soft ignore.
+    A binding of another shape (or a typo'd/unregistered name) would otherwise reach the callback
+    door as a malformed binding — so this is a hard guard (``ValueError``), never a soft ignore.
     """
-    name = verifier.get("name") if isinstance(verifier, dict) else None
-    if not isinstance(name, str) or not name:
-        raise ValueError("verifier must be a dict with a non-empty 'name'")
     try:
-        tai42_app.webhook_verifiers.get(name)
+        binding = TopicVerifierBinding.model_validate(verifier)
+    except ValidationError as exc:
+        raise ValueError(
+            f"verifier must be a {{'verifier': <name>, 'config': {{...}}}} binding: {exc.errors()[0]['msg']}"
+        ) from None
+    try:
+        tai42_app.webhook_verifiers.get(binding.verifier)
     except Exception as exc:
-        raise ValueError(f"unknown webhook verifier: {name!r}") from exc
+        raise ValueError(f"unknown webhook verifier: {binding.verifier!r}") from exc
+    return binding
 
 
 def validate_channel(channel: Any) -> Channel:

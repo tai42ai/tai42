@@ -379,7 +379,15 @@ unknown token.
   question already answered elsewhere → `409`, with no frame appended (the recorded
   answer is not this visitor's). A callback door that refuses the answer → `400`, and
   the record is put back so the visitor can re-answer — up to `MAX_ANSWER_RESTORES`
-  times, after which the question is left dropped and the refusal says so.
+  times, after which the question is left dropped and the refusal says so. Before
+  the forward, the record's stored callback URL is pinned against the platform's
+  callback prefix (`tai42_app.interactions.callback_url_prefix()`); a record outside
+  it, or a deployment with no `INTERACTIONS_PUBLIC_BASE_URL`, is refused — an `ERROR`
+  log names the interaction, reason and host (never the URL), the claimed record is
+  not restored, nothing is sent, and the door answers `500`. The session's link
+  params ride the answer and an over-bound set is refused `422` before the claim.
+  The reaction door (`POST /api/channels/web/questions/{interaction_id}/react`) pins
+  the same stored value before it forwards an event.
 - `POST /api/channels/web/forms/{token}` — body `{values}`, optionally
   `client_message_id` → `{message_id}`; submit an ask-less form card (a `chat.form`
   transcript entry). The token names the card's stored record — key

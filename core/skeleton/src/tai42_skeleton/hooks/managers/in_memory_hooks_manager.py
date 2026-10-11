@@ -18,7 +18,7 @@ class InMemoryHooksManager(BaseHooksManager):
         super().__init__(settings)
         self._hooks: dict[str, dict[str, HookParams]] = {}
         self._name_topic_map: dict[str, str] = {}
-        self._topic_verifiers: dict[str, dict[str, Any]] = {}
+        self._topic_verifiers: dict[str, TopicVerifierBinding] = {}
         # Full seen-set key -> monotonic expiry. Per-process, matching this manager's
         # single-worker validity (siblings do not share it, exactly as they do not
         # share registrations here); the Redis manager holds the cross-worker seen-set.
@@ -93,21 +93,19 @@ class InMemoryHooksManager(BaseHooksManager):
         """Store the verifier ``binding`` for ``topic``, validating its shape on write."""
         # Validate the shape on write (loud on a wrong shape) so both backends
         # enforce the same binding contract; store the canonical dict.
-        self._topic_verifiers[topic] = TopicVerifierBinding.model_validate(binding).model_dump()
+        self._topic_verifiers[topic] = TopicVerifierBinding.model_validate(binding)
 
-    async def get_topic_verifier(self, topic: str) -> dict[str, Any] | None:
-        """A copy of ``topic``'s verifier binding, or ``None`` when none is set."""
-        binding = self._topic_verifiers.get(topic)
-        # Return a copy so a caller cannot mutate the stored binding in place.
-        return dict(binding) if binding is not None else None
+    async def get_topic_verifier(self, topic: str) -> TopicVerifierBinding | None:
+        """``topic``'s verifier binding (a frozen model), or ``None`` when none is set."""
+        return self._topic_verifiers.get(topic)
 
     async def delete_topic_verifier(self, topic: str) -> bool:
         """Delete ``topic``'s verifier binding; returns ``True`` when one was present."""
         return self._topic_verifiers.pop(topic, None) is not None
 
-    async def all_topic_verifiers(self) -> dict[str, dict[str, Any]]:
-        """A copy of every topic's verifier binding, keyed by topic."""
-        return {topic: dict(binding) for topic, binding in self._topic_verifiers.items()}
+    async def all_topic_verifiers(self) -> dict[str, TopicVerifierBinding]:
+        """Every topic's verifier binding (frozen models), keyed by topic."""
+        return dict(self._topic_verifiers)
 
     async def claim_webhook_delivery(self, topic: str, replay_key: str, ttl_seconds: int) -> bool:
         """Claim a webhook delivery once per ``(topic, replay_key)`` within ``ttl_seconds``; ``True`` on first claim."""

@@ -29,8 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
-from datetime import UTC, datetime
 from typing import ClassVar
 
 from tai42_contract.channels import (
@@ -341,12 +339,6 @@ class WebChannel:
         ``media`` rides the same frame in order and renders through the same
         media-card component the notify path uses — display-only, never answered.
         """
-        if math.ceil((delivery.timeout_at - datetime.now(UTC)).total_seconds()) <= 0:
-            raise ChannelDeliveryError(
-                f"interaction {delivery.interaction_id} already timed out "
-                f"(timeout_at={delivery.timeout_at.isoformat()}); nothing was sent"
-            )
-
         identity, address = _split_recipient(delivery.recipient)
         record = QuestionRecord(
             callback_url=delivery.callback_url,

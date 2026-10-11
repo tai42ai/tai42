@@ -60,6 +60,13 @@ other or missing type → `file`). The message text rides the first bridged file
 every other turn gets a `[kind]` placeholder, so a caption-less share is never
 dropped as empty.
 
+Entry params are bounded at the door (at most 16 keys, each value at most 512 characters,
+the whole set at most 2048 bytes). Because Slack redelivers a failed webhook, this door
+**drops** rather than refuses: an over-cap value is dropped on its own, an over-bound set is
+dropped whole, and the participant's message still bridges. Every drop is logged at
+`WARNING` (naming the door and the bound, never a value) and counted on
+`tai_entry_params_dropped_total{door="slack"}`.
+
 A fetch that fails temporarily (a Slack 5xx, a timeout, a torn download) makes the
 door answer non-2xx so Slack redelivers and the turn is ingested on the retry. A
 permanent failure — a missing or unreachable body, a file over the operator's byte

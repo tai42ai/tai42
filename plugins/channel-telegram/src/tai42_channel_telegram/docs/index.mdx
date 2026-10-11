@@ -63,6 +63,13 @@ A bridged tap on an option with an **author-set id** carries that id back as
 `params.reply_id` (and a sectioned row's description as `params.reply_description`) —
 opaque enrichment a `tool` target can read from the turn's `params`.
 
+Entry params are bounded at the door (at most 16 keys, each value at most 512 characters,
+the whole set at most 2048 bytes). Because Telegram redelivers a failed webhook, this door
+**drops** rather than refuses: an over-cap value is dropped on its own, an over-bound set is
+dropped whole, and the participant's message still bridges. Every drop is logged at
+`WARNING` (naming the door and the bound, never a value) and counted on
+`tai_entry_params_dropped_total{door="telegram"}`.
+
 ## Inbound media
 
 A message carrying media is fetched from Telegram and ingested into the platform's

@@ -1,7 +1,7 @@
 """The ``confirm_stripe_payment`` tool: the webhook bridge that answers a paid ask.
 
 Validates a projected ``checkout.session.completed`` event and POSTs the whitelisted answer to the
-interaction callback door. The projection, the livemode assert, the SSRF pin and the bounded retry
+interaction callback door. The projection, the livemode assert, the callback pin and the bounded retry
 live in :mod:`tai42_tools_stripe._internal.tools.stripe_client`.
 
 This is a hook target and is NOT a user or agent tool: it holds the bridge secret and answers

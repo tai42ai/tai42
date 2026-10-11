@@ -54,6 +54,8 @@ import datetime
 import re
 from typing import Any
 
+from tai42_kit.interactions.form_vocabulary import DATE_CONSTRAINT_KEYS, FORM_WEEKDAYS, VISIBLE_WHEN_OPS
+
 _SCALAR_TYPES = ("string", "boolean", "integer", "number")
 # The string formats a channel form may declare, each with a value shape the answer
 # door validates (``date`` -> YYYY-MM-DD, ``time`` -> HH:MM[:SS], ``date-time`` -> RFC 3339).
@@ -61,19 +63,6 @@ _STRING_FORMATS = ("date", "time", "date-time")
 # The two formats that carry a real calendar date, so date constraints (bounds,
 # unavailable days, a range pairing) apply to them.
 _DATE_FORMATS = ("date", "date-time")
-
-# The lowercase weekday names an ``unavailableDates`` entry may name to exclude a
-# recurring weekday (alongside explicit ``YYYY-MM-DD`` dates).
-_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
-
-# The ``visibleWhen`` operators — exactly one of these rides a predicate.
-_VISIBLE_WHEN_OPS = ("equals", "in", "notEmpty")
-
-#: The option-count threshold a renderer uses to choose a radio group over a dropdown/select
-#: for a choice field: an ``enum`` (or per-send option list) with AT MOST this many choices
-#: renders as a radio group, more as a dropdown. One shared, documented constant so every
-#: surface draws the same short list the same way.
-RADIO_OPTION_THRESHOLD = 5
 
 _DATE_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
 
@@ -142,9 +131,6 @@ def _check_bound_date(name: str, key: str, value: Any) -> None:
         raise ValueError(f"form schema property {name!r} {key} must be a YYYY-MM-DD date, got {value!r}")
 
 
-_DATE_CONSTRAINT_KEYS = ("minDate", "maxDate", "unavailableDates", "rangeStart", "minDays", "maxDays")
-
-
 def _validate_date_bounds(name: str, prop: dict[str, Any]) -> None:
     if "minDate" in prop:
         _check_bound_date(name, "minDate", prop["minDate"])
@@ -159,10 +145,10 @@ def _validate_date_bounds(name: str, prop: dict[str, Any]) -> None:
         if not isinstance(entries, list):
             raise ValueError(f"form schema property {name!r} unavailableDates must be a list")
         for entry in entries:
-            if not (isinstance(entry, str) and (_is_iso_date(entry) or entry.lower() in _WEEKDAYS)):
+            if not (isinstance(entry, str) and (_is_iso_date(entry) or entry.lower() in FORM_WEEKDAYS)):
                 raise ValueError(
                     f"form schema property {name!r} unavailableDates entries must be a YYYY-MM-DD date or a "
-                    f"weekday name ({', '.join(_WEEKDAYS)}), got {entry!r}"
+                    f"weekday name ({', '.join(FORM_WEEKDAYS)}), got {entry!r}"
                 )
 
 
@@ -186,7 +172,7 @@ def _validate_date_constraints(name: str, prop: dict[str, Any]) -> None:
     # Shape-check the optional date-constraint keys on a property. Every key requires a
     # date property; the values must be well-formed; a range END field carries a
     # ``rangeStart`` and its span bounds, and a span key without ``rangeStart`` is a bug.
-    present = [key for key in _DATE_CONSTRAINT_KEYS if key in prop]
+    present = [key for key in DATE_CONSTRAINT_KEYS if key in prop]
     if present and not _prop_is_date(prop):
         raise ValueError(
             f"form schema property {name!r} carries date constraints {present} but is not a date property "
@@ -207,13 +193,13 @@ def _validate_visible_when(name: str, prop: dict[str, Any]) -> None:
     field = predicate.get("field")
     if not isinstance(field, str) or not field:
         raise ValueError(f"form schema property {name!r} visibleWhen must name a non-empty 'field'")
-    extra = set(predicate) - {"field", *_VISIBLE_WHEN_OPS}
+    extra = set(predicate) - {"field", *VISIBLE_WHEN_OPS}
     if extra:
         raise ValueError(f"form schema property {name!r} visibleWhen has unknown keys {sorted(extra)}")
-    ops = [op for op in _VISIBLE_WHEN_OPS if op in predicate]
+    ops = [op for op in VISIBLE_WHEN_OPS if op in predicate]
     if len(ops) != 1:
         raise ValueError(
-            f"form schema property {name!r} visibleWhen must carry exactly one of {', '.join(_VISIBLE_WHEN_OPS)}"
+            f"form schema property {name!r} visibleWhen must carry exactly one of {', '.join(VISIBLE_WHEN_OPS)}"
         )
     if "in" in predicate and (not isinstance(predicate["in"], list) or not predicate["in"]):
         raise ValueError(f"form schema property {name!r} visibleWhen 'in' must be a non-empty list")
@@ -304,42 +290,6 @@ def validate_channel_form_schema(schema: dict) -> None:
     channel_form_fields(schema)
 
 
-def evaluate_visible_when(predicate: dict[str, Any], values: dict[str, Any]) -> bool:
-    """Whether a property with ``predicate`` is VISIBLE given the submitted ``values``.
-
-    ``equals`` is visible iff the controlling field equals the given value; ``in`` iff its
-    value is one of the given list; ``notEmpty`` iff its value is present and not an empty
-    string / list / object. An absent controlling value reads as unset (``None``).
-    """
-    controlling = values.get(predicate["field"])
-    if "equals" in predicate:
-        return controlling == predicate["equals"]
-    if "in" in predicate:
-        return controlling in predicate["in"]
-    # notEmpty
-    return controlling not in (None, "", [], {})
-
-
-def hidden_fields(schema: dict[str, Any], values: dict[str, Any]) -> set[str]:
-    """The declared properties HIDDEN by their ``visibleWhen`` predicate for the submitted ``values``.
-
-    A property with no predicate is always visible. The predicate is evaluated on the
-    submitted values once (no cascading re-evaluation): the documented meaning of a
-    conditional field.
-    """
-    properties = schema.get("properties")
-    if not isinstance(properties, dict):
-        return set()
-    hidden: set[str] = set()
-    for name, prop in properties.items():
-        if not isinstance(prop, dict):
-            continue
-        predicate = prop.get("visibleWhen")
-        if isinstance(predicate, dict) and not evaluate_visible_when(predicate, values):
-            hidden.add(str(name))
-    return hidden
-
-
 def _answer_date(value: Any) -> datetime.date | None:
     """The calendar date a submitted date/date-time answer names, or ``None`` when it is not one.
 
@@ -366,7 +316,7 @@ def _date_bounds_mismatch(name: str, prop: dict[str, Any], the_date: datetime.da
         return f"date for {name!r} must be on or before {maximum}"
     unavailable = prop.get("unavailableDates")
     if isinstance(unavailable, list):
-        weekday = _WEEKDAYS[the_date.weekday()]
+        weekday = FORM_WEEKDAYS[the_date.weekday()]
         iso = the_date.isoformat()
         for entry in unavailable:
             if isinstance(entry, str) and (entry == iso or entry.lower() == weekday):

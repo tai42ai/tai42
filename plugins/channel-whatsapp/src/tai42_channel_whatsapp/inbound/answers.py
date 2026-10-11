@@ -15,8 +15,9 @@ from tai42_contract.channels import (
     InboundAnswerOutcome,
     InboundBridge,
 )
-from tai42_contract.conversations import BlankInboundTextError, validate_entry_params
+from tai42_contract.conversations import BlankInboundTextError
 from tai42_contract.interactions.models import LocationElement, MediaItem
+from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
 from tai42_kit.utils.data.form_text import render_form_text
 
 from tai42_channel_whatsapp.correlation import (
@@ -134,18 +135,12 @@ async def _bridge_inbound(
     or with blank text (an empty interactive title), is logged and skipped; a retryable
     overflow or infrastructure failure propagates as a 5xx so Meta redelivers.
 
-    ``params`` are validated against the contract's transport bounds HERE before accept: a
-    bound violation (which would otherwise 5xx and have Meta redeliver the same poison
-    message forever) drops the whole params set and bridges the turn without it — the
-    participant's message is never lost to a params bound. The refusal names the bound/key, never
-    an opaque value.
+    ``params`` are bounded HERE before accept: a bound violation (which would otherwise 5xx and
+    have Meta redeliver the same poison message forever) drops the whole params set (logged and
+    counted, naming the bound/key, never an opaque value) and bridges the turn without it — the
+    participant's message is never lost to a params bound.
     """
-    if params:
-        try:
-            validate_entry_params(params)
-        except ValueError as exc:
-            logger.warning("whatsapp inbound %s params rejected (%s); bridging without params", wamid, exc)
-            params = None
+    params = bound_entry_params(params, mode=OverBoundParamsMode.DROP, door="whatsapp")
     try:
         await tai42_app.conversations.accept(
             channel="whatsapp",

@@ -9,7 +9,7 @@ from anyio.to_thread import run_sync
 from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import validate_entry_params
+from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
 
 from tai42_channel_web.page import (
     HTML_CONTENT_TYPE,
@@ -97,7 +97,7 @@ def _read_link_params(request: Request, identity: str) -> tuple[dict[str, str], 
 
     A DUPLICATE key — checked on the RAW query, reserved names included, so ``?tai_pair=a&tai_pair=b`` is a
     400 too — is a bound violation; the reserved names are then stripped before validation. Param VALUES
-    never reach the log: the duplicate warning names no value, and ``validate_entry_params`` names only the
+    never reach the log: the duplicate warning names no value, and the bound refusal names only the
     violated bound (and at most a key).
     """
     pairs = request.query_params.multi_items()
@@ -107,7 +107,7 @@ def _read_link_params(request: Request, identity: str) -> tuple[dict[str, str], 
         return {}, _refusal_page(_LINK_PARAMS_INVALID_PAGE, 400)
     candidate = {key: value for key, value in pairs if key not in _RESERVED_QUERY_PARAMS}
     try:
-        return validate_entry_params(candidate), None
+        return bound_entry_params(candidate, mode=OverBoundParamsMode.REFUSE, door="web") or {}, None
     except ValueError as exc:
         logger.warning("web chat page refused link params for identity %s: %s", identity, exc)
         return {}, _refusal_page(_LINK_PARAMS_INVALID_PAGE, 400)

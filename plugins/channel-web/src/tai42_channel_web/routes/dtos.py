@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 from tai42_contract.channels import OPTION_ID_MAX_CHARS
+from tai42_contract.interactions import MEDIA_ID_RE
 
 # A web route identity is a URL segment naming a configured route; longer than this
 # is not one.
@@ -37,11 +38,6 @@ _MAX_ANSWER_OBJECT_BYTES = 32 * 1024
 # The retry key a page may put on a message POST: opaque to the server, and the only
 # thing that makes a re-POST resolve to the turn the lost first attempt started.
 _CLIENT_MESSAGE_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
-
-# A referenced attachment id is a served-media id — the 43-char ``token_urlsafe(32)``
-# shape the served route matches — so an id of any other shape is refused at the body
-# before the door tries to bind it.
-_ATTACHMENT_ID = re.compile(r"^[A-Za-z0-9_-]{43}$")
 
 
 _IDENTITY_REQUIREMENT = (
@@ -189,7 +185,7 @@ class MessageBody(IdentityBody):
         if not value:
             raise ValueError("attachment_ids must carry at least one attachment when present")
         for media_id in value:
-            if _ATTACHMENT_ID.match(media_id) is None:
+            if MEDIA_ID_RE.fullmatch(media_id) is None:
                 raise ValueError("each attachment id must be 43 characters of [A-Za-z0-9_-]")
         if len(set(value)) != len(value):
             raise ValueError("attachment_ids must not repeat an attachment")

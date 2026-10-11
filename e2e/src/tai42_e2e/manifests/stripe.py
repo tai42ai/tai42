@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 # (NOT ``post_only``), reading ``TAI_BRIDGE_CALLBACK_SECRET`` at the door. Author-bound as
 # the ask_external extension's ``config.verifier``, so an agent can never supply it.
 _STRIPE_ASK_VERIFIER = {
-    "name": "shared_secret",
+    "verifier": "shared_secret",
     "config": {"header": "X-TAI-Bridge-Secret", "secret_env": "TAI_BRIDGE_CALLBACK_SECRET"},
 }
 
@@ -40,7 +40,8 @@ def build_stripe_stack(res: StackResources, variants: Variants) -> StackConfig:
 
     ``INTERACTIONS_PUBLIC_BASE_URL`` is filled at boot with replica B's origin so the
     callback URL the platform mints is DIALABLE by the bridge running inside the stack (the
-    bridge's SSRF pin compares against this same value). The callback rate-limit windows are
+    bridge pins every answer POST against the callback prefix the platform mints from this same
+    value). The callback rate-limit windows are
     pinned high: the webhook loop, the forged-session rejection, and a reconciliation run
     that re-answers everything all share one 127.0.0.1 bucket."""
     manifest = {
@@ -115,7 +116,7 @@ def build_stripe_stack(res: StackResources, variants: Variants) -> StackConfig:
         run_metrics=False,
         auth=True,
         # Filled at boot with replica B's origin: the callback URL minted on A is dialable
-        # by the bridge, and the SSRF pin's ground truth is this same value. Real Stripe
+        # by the bridge, and the callback pin's prefix is minted from this same value. Real Stripe
         # delivers ``checkout.session.completed`` to the public origin, so the callback the
         # bridge answers is minted there instead of loopback.
         replica_b_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"],
