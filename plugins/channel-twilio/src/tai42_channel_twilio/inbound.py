@@ -38,13 +38,16 @@ from tai42_contract.conversations import (
 )
 from tai42_contract.interactions import (
     MediaOrigin,
-    MediaSourceReadError,
-    MediaStoreUnavailableError,
-    MediaTooLargeError,
-    MediaTypeNotAllowedError,
 )
+from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
 from tai42_kit.conversations.inbound_media import build_inbound_media_params, inbound_media_placeholder
-from tai42_kit.net import MediaFetchError, UrlGuardError, open_media_stream
+from tai42_kit.net import open_media_stream
+from tai42_kit.net.media_faults import (
+    MEDIA_FETCH_AND_INGEST_FAULTS,
+    inbound_media_kind_for_mime,
+    media_fault_is_transient,
+    media_rejection_reason,
+)
 from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 from tai42_kit.settings import require, require_secret
 
@@ -229,24 +232,6 @@ def _media_count(form: dict[str, str]) -> int:
     return int(raw)
 
 
-def _media_kind(content_type: str) -> InboundMediaKind:
-    """Map a Twilio ``MediaContentType`` onto the generic inbound-media wire kind.
-
-    By the mime major type: ``image``/``audio``/``video`` map to themselves,
-    ``application``/``text`` to ``document``; any other or missing major type to ``file``.
-    """
-    major = content_type.split("/", 1)[0].strip().lower()
-    if major == "image":
-        return InboundMediaKind.IMAGE
-    if major == "audio":
-        return InboundMediaKind.AUDIO
-    if major == "video":
-        return InboundMediaKind.VIDEO
-    if major in ("application", "text"):
-        return InboundMediaKind.DOCUMENT
-    return InboundMediaKind.FILE
-
-
 async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
     """Route an uncorrelated inbound message into the conversation bridge.
 
@@ -314,37 +299,6 @@ async def _accept_inbound(form: dict[str, str], message_sid: str) -> None:
         )
 
 
-# The kit fetch faults and the contract ingest faults one inbound media fetch can raise; every
-# other exception propagates (a bare or unexpected ingest failure must surface loudly).
-_MEDIA_FAILURES = (
-    MediaFetchError,
-    UrlGuardError,
-    MediaTooLargeError,
-    MediaTypeNotAllowedError,
-    MediaStoreUnavailableError,
-    MediaSourceReadError,
-)
-
-
-def _media_rejection_reason(exc: Exception) -> InboundRejectionReason | None:
-    """The rejection reason for a PERMANENT media failure, or ``None`` when the failure is TRANSIENT.
-
-    ``None`` means the caller must re-raise (redeliver): a transport fault, a 5xx, a 408 or a 429 at
-    fetch (``MediaFetchError.transient``) and a torn body read (``MediaSourceReadError``). Every other
-    caught failure is permanent: over-cap → ``TOO_LARGE``, disallowed type → ``UNSUPPORTED_TYPE``,
-    a gone media / SSRF-blocked url / absent store → ``COULD_NOT_RECEIVE``.
-    """
-    if isinstance(exc, MediaFetchError):
-        return None if exc.transient else InboundRejectionReason.COULD_NOT_RECEIVE
-    if isinstance(exc, MediaSourceReadError):
-        return None
-    if isinstance(exc, MediaTooLargeError):
-        return InboundRejectionReason.TOO_LARGE
-    if isinstance(exc, MediaTypeNotAllowedError):
-        return InboundRejectionReason.UNSUPPORTED_TYPE
-    return InboundRejectionReason.COULD_NOT_RECEIVE
-
-
 async def _accept_media_item(
     *,
     form: dict[str, str],
@@ -367,7 +321,7 @@ async def _accept_media_item(
     """
     media_url = form[f"MediaUrl{index}"]
     content_type = form[f"MediaContentType{index}"]
-    kind = _media_kind(content_type)
+    kind = inbound_media_kind_for_mime(content_type)
     provider_message_id = f"{message_sid}-{index}"
     try:
         async with open_media_stream(media_url, auth=(account_sid, auth_token), follow_redirects=True) as stream:
@@ -383,9 +337,8 @@ async def _accept_media_item(
                     message_id=provider_message_id,
                 ),
             )
-    except _MEDIA_FAILURES as exc:
-        reason = _media_rejection_reason(exc)
-        if reason is None:
+    except MEDIA_FETCH_AND_INGEST_FAULTS as exc:
+        if media_fault_is_transient(exc):
             # Transient (a 5xx/timeout at fetch, a torn body read): propagate so Twilio
             # redelivers — the ``MessageSid`` stays unmarked, so the redelivery is re-processed
             # rather than deduped away.
@@ -394,7 +347,7 @@ async def _accept_media_item(
             our_identity=our_identity,
             client_address=client_address,
             kind=kind,
-            reason=reason,
+            reason=media_rejection_reason(exc),
             caption=caption,
             declared_mime=content_type,
             message_sid=message_sid,
@@ -411,14 +364,20 @@ async def _accept_media_item(
         text=text,
         provider_message_id=provider_message_id,
         attachments=[ingested.item],
-        params=build_inbound_media_params(
+        # Twilio redelivers a 5xx: an over-bound set is dropped (logged and counted), never the
+        # participant's message.
+        params=bound_entry_params(
+            build_inbound_media_params(
+                door="twilio",
+                kind=kind,
+                media_id=ingested.media_id,
+                mime_type=ingested.mime,
+                sha256=ingested.sha256,
+                filename=ingested.item.filename,
+                size=ingested.size,
+            ),
+            mode=OverBoundParamsMode.DROP,
             door="twilio",
-            kind=kind,
-            media_id=ingested.media_id,
-            mime_type=ingested.mime,
-            sha256=ingested.sha256,
-            filename=ingested.item.filename,
-            size=ingested.size,
         ),
     )
 
@@ -463,7 +422,11 @@ async def _reject_media_item(
             cap_key=client_address,
             text=caption,
             provider_message_id=f"{message_sid}-{index}",
-            params=build_inbound_media_params(door="twilio", kind=kind, mime_type=declared_mime),
+            params=bound_entry_params(
+                build_inbound_media_params(door="twilio", kind=kind, mime_type=declared_mime),
+                mode=OverBoundParamsMode.DROP,
+                door="twilio",
+            ),
         )
 
 

@@ -35,7 +35,7 @@ async def create_stripe_webhook_endpoint(url: str, enabled_events: list[str]) ->
     to the new one, then delete the old endpoint -- the three webhook tools together enable it.
 
     ``url`` is where Stripe POSTs events TO us, so it is validated as an ``https`` URL with a host
-    and is NOT run through the outbound-callback SSRF pin (that pin guards POSTs this process dials;
+    and is NOT run through the outbound callback pin (that pin guards POSTs this process dials;
     this URL is dialed by Stripe, not by us). ``enabled_events`` must be a non-empty list of Stripe
     event types (e.g. ``["checkout.session.completed"]``). The created endpoint's ``livemode`` is
     asserted against the configured key's mode and a mismatch raises.

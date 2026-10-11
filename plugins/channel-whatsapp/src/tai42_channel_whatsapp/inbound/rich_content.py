@@ -29,19 +29,17 @@ from tai42_contract.conversations import InboundMediaKind, InboundRejectionReaso
 from tai42_contract.interactions import (
     IngestedMedia,
     MediaOrigin,
-    MediaSourceReadError,
-    MediaStoreUnavailableError,
-    MediaTooLargeError,
-    MediaTypeNotAllowedError,
 )
 from tai42_contract.interactions.models import LocationElement
+from tai42_kit.conversations.entry_params import put_entry_param
 from tai42_kit.conversations.inbound_media import build_inbound_media_params, inbound_media_placeholder
-from tai42_kit.net import MediaFetchError, UrlGuardError
+from tai42_kit.net import MediaFetchError
+from tai42_kit.net.media_faults import MEDIA_FETCH_AND_INGEST_FAULTS, media_fault_is_transient, media_rejection_reason
 
 from tai42_channel_whatsapp.client import fetch_media_metadata, media_endpoint_host, open_media_download
 from tai42_channel_whatsapp.correlation import already_seen, mark_seen
 from tai42_channel_whatsapp.inbound.answers import _bridge_inbound
-from tai42_channel_whatsapp.inbound.params import _merged_params, _put_param
+from tai42_channel_whatsapp.inbound.params import _merged_params
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +78,12 @@ async def _handle_media(
 
     try:
         ingested = await _fetch_and_ingest(media, kind, wa_id, wamid)
-    except _MEDIA_FAILURES as exc:
-        reason = _media_rejection_reason(exc)
-        if reason is None:
+    except MEDIA_FETCH_AND_INGEST_FAULTS as exc:
+        if media_fault_is_transient(exc):
             # Transient (a 5xx/timeout/torn read): 5xx the webhook so Meta redelivers — the wamid
             # is NOT marked seen, so the redelivery is re-processed rather than deduped away.
             raise
+        reason = media_rejection_reason(exc)
         await _reject_media(phone_number_id, wa_id, wamid, kind, caption, declared_mime, reason, params)
         return
 
@@ -106,43 +104,12 @@ async def _handle_media(
     )
 
 
-# The kit fetch faults and the contract ingest faults one inbound media fetch can raise; every
-# other exception propagates (a bare or unexpected ingest failure must surface loudly).
-_MEDIA_FAILURES = (
-    MediaFetchError,
-    UrlGuardError,
-    MediaTooLargeError,
-    MediaTypeNotAllowedError,
-    MediaStoreUnavailableError,
-    MediaSourceReadError,
-)
-
-
 def _media_caption(media: dict[str, Any]) -> str | None:
     """The inbound media message's caption, stripped, or ``None`` when blank or absent."""
     caption = media.get("caption")
     if isinstance(caption, str) and caption.strip():
         return caption.strip()
     return None
-
-
-def _media_rejection_reason(exc: Exception) -> InboundRejectionReason | None:
-    """The rejection reason for a PERMANENT media failure, or ``None`` when the failure is TRANSIENT.
-
-    ``None`` means the caller must re-raise (redeliver): a transport fault, a 5xx, a 408 or a 429 at
-    fetch (``MediaFetchError.transient``) and a torn body read (``MediaSourceReadError``). Every other
-    caught failure is permanent: over-cap → ``TOO_LARGE``, disallowed type → ``UNSUPPORTED_TYPE``,
-    a gone media / SSRF-blocked url / absent store → ``COULD_NOT_RECEIVE``.
-    """
-    if isinstance(exc, MediaFetchError):
-        return None if exc.transient else InboundRejectionReason.COULD_NOT_RECEIVE
-    if isinstance(exc, MediaSourceReadError):
-        return None
-    if isinstance(exc, MediaTooLargeError):
-        return InboundRejectionReason.TOO_LARGE
-    if isinstance(exc, MediaTypeNotAllowedError):
-        return InboundRejectionReason.UNSUPPORTED_TYPE
-    return InboundRejectionReason.COULD_NOT_RECEIVE
 
 
 async def _fetch_and_ingest(media: dict[str, Any], kind: InboundMediaKind, wa_id: str, wamid: str) -> IngestedMedia:
@@ -264,8 +231,8 @@ async def _handle_contacts(
     text = ", ".join(names) if names else "[contact card]"
 
     contact_params: dict[str, str] = {}
-    _put_param(contact_params, "contacts_count", str(len(contacts)))
-    _put_param(contact_params, "contacts", json.dumps(contacts, ensure_ascii=False))
+    put_entry_param(contact_params, "contacts_count", str(len(contacts)), door="whatsapp")
+    put_entry_param(contact_params, "contacts", json.dumps(contacts, ensure_ascii=False), door="whatsapp")
     await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=_merged_params(params, contact_params))
 
 
@@ -287,6 +254,6 @@ async def _handle_reaction(
     text = emoji.strip() if isinstance(emoji, str) and emoji.strip() else "[reaction removed]"
 
     reaction_params: dict[str, str] = {}
-    _put_param(reaction_params, "reaction_emoji", emoji)
-    _put_param(reaction_params, "reaction_message_id", reaction.get("message_id"))
+    put_entry_param(reaction_params, "reaction_emoji", emoji, door="whatsapp")
+    put_entry_param(reaction_params, "reaction_message_id", reaction.get("message_id"), door="whatsapp")
     await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=_merged_params(params, reaction_params))

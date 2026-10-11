@@ -29,6 +29,9 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 
 from tai42_contract.conversations import (
+    PAIR_CODE_ALPHABET,
+    PAIR_CODE_BODY_LENGTH,
+    PAIR_CODE_PREFIX,
     ConversationDoor,
     ConversationTargetKind,
     PairCodeInvalidError,
@@ -45,11 +48,6 @@ from tai42_skeleton.utils.redis_typing import awaited, eval_script
 _NO_BACKEND = "conversation pair codes require the redis conversations backend"
 
 _INVALID_CODE = "unknown, expired, or already redeemed pair code"
-
-# The pair-code alphabet and shape (``LINK-`` followed by 8 ``[A-Z0-9]`` characters).
-# Generated with the ``secrets`` CSPRNG.
-_CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-_CODE_BODY_LENGTH = 8
 
 # One atomic mint-with-rotation. KEYS[1]=open-code pointer, KEYS[2]=new code record key.
 # ARGV = new_code_hash, record_json, ttl_seconds, pair_code_key_prefix. A pre-existing new
@@ -93,8 +91,9 @@ class MintingConversation:
 
 
 def _generate_code() -> str:
-    body = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_BODY_LENGTH))
-    return f"LINK-{body}"
+    # Drawn from the ``secrets`` CSPRNG.
+    body = "".join(secrets.choice(PAIR_CODE_ALPHABET) for _ in range(PAIR_CODE_BODY_LENGTH))
+    return f"{PAIR_CODE_PREFIX}{body}"
 
 
 class ConversationPairCodeStore:

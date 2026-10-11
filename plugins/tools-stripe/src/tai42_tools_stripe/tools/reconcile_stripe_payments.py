@@ -2,7 +2,7 @@
 
 Re-derives the truth from Stripe's own Checkout Session list -- the system of record for whether
 money moved -- and re-answers anything the single-delivery webhook path lost, for as long as the
-ask is alive. The Stripe list call, the livemode assert, the SSRF pin, the answer builder and the
+ask is alive. The Stripe list call, the livemode assert, the callback pin, the answer builder and the
 bounded retry live in :mod:`tai42_tools_stripe._internal.tools.stripe_client`.
 
 This is NOT a user or agent tool: it holds the bridge secret and answers payment asks. Its callers
@@ -49,7 +49,7 @@ async def _answer_session(session: dict[str, Any], callback_url: str) -> tuple[s
     and, for ``failed`` only, the ``{session_id, error}`` record.
 
     A per-session verdict (door 404 → ``expired``, door 400 → ``rejected``) is counted,
-    never raised. Deployment-wide breakage (door 403, livemode mismatch, SSRF refusal,
+    never raised. Deployment-wide breakage (door 403, livemode mismatch, callback-pin refusal,
     transport error, retry exhaustion, unrecognised 200 body) becomes ``failed`` for the
     caller's terminal raise, so one unanswerable session never aborts the rest.
     """
@@ -64,7 +64,7 @@ async def _answer_session(session: dict[str, Any], callback_url: str) -> tuple[s
             return "rejected", None
         return "failed", {"session_id": session_id, "error": str(exc)}
     except Exception as exc:
-        # Batch collector: any non-CallbackDoorError (livemode mismatch, SSRF refusal,
+        # Batch collector: any non-CallbackDoorError (livemode mismatch, callback-pin refusal,
         # transport error, retry exhaustion) is recorded and surfaced by the caller's raise.
         return "failed", {"session_id": session_id, "error": str(exc)}
 
@@ -88,12 +88,13 @@ async def reconcile_stripe_payments(lookback_hours: int = 26) -> dict[str, Any]:
     the ask's lifetime -- an outage longer than the window needs a manual wide-window run.
 
     Sessions are answered SERIALLY and PACED by ``STRIPE_RECONCILE_ANSWER_INTERVAL_SECONDS``
-    (default 1.2s) to stay off the callback door's rate limiter. Outcomes split on per-session vs
-    deployment-wide: a door 404 is ``expired`` and a door 400 is ``rejected`` -- verdicts on one
-    session that are counted, reported and never raised. A door 403, a livemode mismatch, an
-    SSRF-pin refusal, a transport error, retry exhaustion and an unrecognised 200 body are all
-    deployment-wide breakage arriving one session at a time: they land in ``failed`` and the run
-    RAISES at the end, after every other session has been attempted. Skipped sessions (unpaid, or
+    (default 1.2s), which paces its answers so a batch does not burst the callback door. Outcomes
+    split on per-session vs deployment-wide: a door 404 is ``expired`` and a door 400 is
+    ``rejected`` -- verdicts on one session that are counted, reported and never raised. A door
+    403, a livemode mismatch, a callback-pin refusal (``CallbackUrlRefusedError``), a transport
+    error, retry exhaustion and an unrecognised 200 body are all deployment-wide breakage arriving
+    one session at a time: they land in ``failed`` and the run RAISES at the end, after every other
+    session has been attempted. Skipped sessions (unpaid, or
     with no ``tai_callback_url``) are not this tool's business and are not counted.
 
     Args:

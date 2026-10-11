@@ -16,6 +16,7 @@ from tai42_contract.conversations.answers import (
     ConversationAnswer,
     joined_answer_text,
 )
+from tai42_contract.conversations.errors import ThreadQueueOverflowError
 from tai42_contract.conversations.inbound import (
     EVENT_ID_MAX_CHARS,
     EVENT_KIND_RE,
@@ -56,6 +57,10 @@ from tai42_contract.conversations.routes import (
 )
 from tai42_contract.conversations.targets import (
     GREETING_PLACEHOLDER,
+    PAIR_CODE_ALPHABET,
+    PAIR_CODE_BODY_LENGTH,
+    PAIR_CODE_PATTERN,
+    PAIR_CODE_PREFIX,
     CrossTargetMergeError,
     MultichannelDisabledError,
     NotLinkedError,
@@ -94,6 +99,10 @@ __all__ = [
     "MEDIA_SHA256_PARAM",
     "MEDIA_SIZE_PARAM",
     "MEDIA_VOICE_PARAM",
+    "PAIR_CODE_ALPHABET",
+    "PAIR_CODE_BODY_LENGTH",
+    "PAIR_CODE_PATTERN",
+    "PAIR_CODE_PREFIX",
     "ROUTE_NAME_RE",
     "STICKER_ANIMATED_PARAM",
     "AnswerPart",
@@ -121,6 +130,7 @@ __all__ = [
     "PersonAddress",
     "TargetBindValidator",
     "TargetConversationConfig",
+    "ThreadQueueOverflowError",
     "TurnSupersededError",
     "current_conversation_turn",
     "joined_answer_text",

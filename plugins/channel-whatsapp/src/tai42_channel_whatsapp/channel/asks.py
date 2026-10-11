@@ -7,9 +7,6 @@ from tai42_contract.channels import ChannelDelivery
 from tai42_channel_whatsapp.channel.interactive import _send_choice
 from tai42_channel_whatsapp.client import send_message
 
-# Tier-1 answer formats resolve via the callback link, not a WhatsApp reply.
-_TIER1_FORMATS = frozenset({"confirm", "external"})
-
 
 def _render_link(delivery: ChannelDelivery) -> str:
     """The message body for a Tier-1 ask (``confirm`` or ``external``).

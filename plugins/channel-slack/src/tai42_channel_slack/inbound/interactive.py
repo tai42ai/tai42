@@ -20,6 +20,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
+from tai42_contract.interactions import FieldChangedEvent, SubmittedEvent
 from tai42_kit.utils.data.form_text import render_form_text
 
 from tai42_channel_slack.blocks import decode_reply_value, is_option_tap, is_reply_action
@@ -273,9 +274,8 @@ async def _run_field_reaction(
     never a stale or silent value. Returns ``(values_update, field_errors, banner)``. ``entered``
     (the values passed to the handler) is never mutated.
     """
-    event = {"kind": "field_changed", "field": field}
     try:
-        update = await tai42_app.interactions.react(interaction_id, event, entered)
+        update = await tai42_app.interactions.react(interaction_id, FieldChangedEvent(field=field), entered)
     except Exception:
         logger.exception("slack interactive: reaction for form %s field %r failed", interaction_id, field)
         return {}, {}, _REACTION_FAILURE_TEXT
@@ -376,7 +376,7 @@ async def _run_submitted_reaction(
     check passes, having folded any finalized values into ``answer`` for the forward.
     """
     try:
-        update = await tai42_app.interactions.react(interaction_id, {"kind": "submitted"}, answer)
+        update = await tai42_app.interactions.react(interaction_id, SubmittedEvent(), answer)
     except Exception:
         logger.exception("slack interactive: submitted reaction for form %s failed", interaction_id)
         return _errors_response(first_block, _REACTION_FAILURE_TEXT)

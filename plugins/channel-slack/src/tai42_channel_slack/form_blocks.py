@@ -15,12 +15,7 @@ import re
 from typing import Any
 
 from tai42_contract.channels import ChannelInputError
-
-# A short choice list (at or below this count) renders as a radio group / checkbox
-# group; a longer one as a single / multi select. One shared threshold for both the
-# single-choice (radio vs select) and the multiple-choice (checkboxes vs multi-select)
-# split, matching the other channels' renderers.
-RADIO_OPTION_THRESHOLD = 5
+from tai42_kit.interactions import RADIO_OPTION_THRESHOLD
 
 # One fixed action_id per input block: block_id is the field name, so the pair
 # ``state.values[<field name>][FIELD_ACTION_ID]`` reads a field's value directly, and

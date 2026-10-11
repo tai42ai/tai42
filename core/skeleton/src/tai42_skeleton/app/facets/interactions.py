@@ -9,7 +9,15 @@ from .base import _Facet
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
-    from tai42_contract.interactions import Ask, ParkedEntry, QuestionFormat, RunAnswer, Visit, VisitOutcome
+    from tai42_contract.interactions import (
+        Ask,
+        FormReactionEvent,
+        ParkedEntry,
+        QuestionFormat,
+        RunAnswer,
+        Visit,
+        VisitOutcome,
+    )
     from tai42_contract.states import StateContext
 
 
@@ -49,7 +57,9 @@ class InteractionsFacet(_Facet):
             answer_format, options=options, schema=schema, data=data, pages=pages, reactions=reactions
         )
 
-    async def react(self, interaction_id: str, event: dict[str, Any], partial_values: dict[str, Any]) -> dict[str, Any]:
+    async def react(
+        self, interaction_id: str, event: FormReactionEvent, partial_values: dict[str, Any]
+    ) -> dict[str, Any]:
         """Run an OPEN reacting form's handler for ``event`` with the values filled so far — the ONE reaction seam.
 
         Delegates to :func:`tai42_skeleton.interactions.reaction.react`: asserts the interaction
@@ -90,6 +100,12 @@ class InteractionsFacet(_Facet):
         from tai42_skeleton.interactions.authorization import redelivery_horizon_seconds
 
         return redelivery_horizon_seconds()
+
+    def callback_url_prefix(self) -> str | None:
+        """The absolute prefix every callback URL this platform mints starts with; ``None`` with no public base."""
+        from tai42_skeleton.interactions.settings import callback_url_prefix, interactions_settings
+
+        return callback_url_prefix(interactions_settings())
 
     @property
     def visit(self) -> Visit:

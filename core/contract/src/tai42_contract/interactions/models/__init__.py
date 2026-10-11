@@ -11,15 +11,21 @@ location models, and the per-send form models sit beside them.
 
 from __future__ import annotations
 
-from tai42_contract.interactions.models.formats import AnswerFormat, AnswerMismatchPolicy
+from tai42_contract.interactions.models.formats import CALLBACK_LINK_FORMATS, AnswerFormat, AnswerMismatchPolicy
 from tai42_contract.interactions.models.forms import (
     FORM_TAG_MAX_CHARS,
     FORM_TAG_RE,
     DisplayBlock,
+    FieldChangedEvent,
     FormData,
     FormOption,
     FormPage,
+    FormReactionEvent,
+    FormReactionEventBody,
+    FormReactionEventKind,
     FormReactions,
+    PageAdvancedEvent,
+    SubmittedEvent,
     check_form_data,
     check_form_pages,
     check_form_reactions,
@@ -36,6 +42,7 @@ from tai42_contract.interactions.models.media import (
     MEDIA_CAPTION_MAX_CHARS,
     MEDIA_DATA_URI_MAX_CHARS,
     MEDIA_FILENAME_MAX_CHARS,
+    MEDIA_ID_RE,
     MEDIA_MAX_ITEMS,
     MEDIA_ROUTE_PREFIX,
     MEDIA_TOTAL_URI_CHARS,
@@ -64,6 +71,7 @@ from tai42_contract.interactions.models.response import (
 )
 
 __all__ = [
+    "CALLBACK_LINK_FORMATS",
     "FILE_MEDIA_KINDS",
     "FORM_TAG_MAX_CHARS",
     "FORM_TAG_RE",
@@ -73,6 +81,7 @@ __all__ = [
     "MEDIA_CAPTION_MAX_CHARS",
     "MEDIA_DATA_URI_MAX_CHARS",
     "MEDIA_FILENAME_MAX_CHARS",
+    "MEDIA_ID_RE",
     "MEDIA_MAX_ITEMS",
     "MEDIA_ROUTE_PREFIX",
     "MEDIA_TOTAL_URI_CHARS",
@@ -82,9 +91,13 @@ __all__ = [
     "AnswerFormat",
     "AnswerMismatchPolicy",
     "DisplayBlock",
+    "FieldChangedEvent",
     "FormData",
     "FormOption",
     "FormPage",
+    "FormReactionEvent",
+    "FormReactionEventBody",
+    "FormReactionEventKind",
     "FormReactions",
     "IngestedMedia",
     "InteractionRequest",
@@ -94,8 +107,10 @@ __all__ = [
     "MediaItem",
     "MediaKind",
     "MediaOrigin",
+    "PageAdvancedEvent",
     "ResumeBuffered",
     "RunFailed",
+    "SubmittedEvent",
     "SuspendedInteraction",
     "check_addressing",
     "check_form_data",

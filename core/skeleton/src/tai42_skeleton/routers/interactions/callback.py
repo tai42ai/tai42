@@ -17,20 +17,20 @@ import sys
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
-from tai42_contract.app import tai42_app
-from tai42_contract.conversations import validate_entry_params
+from tai42_contract.hooks import TopicVerifierBinding
 from tai42_contract.interactions import (
+    CALLBACK_LINK_FORMATS,
     AnswerFormat,
     AnswerMismatchError,
     InteractionResponse,
     InteractionState,
     QuestionFormat,
 )
-from tai42_contract.webhooks import WebhookVerificationError
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
 from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 
 from tai42_skeleton.app.http import http_surface
@@ -56,6 +56,7 @@ from tai42_skeleton.operations.interactions import (
     _claim_or_serialization_error,
     _reply_ttl,
 )
+from tai42_skeleton.webhooks.verify import VERIFY_ERROR, WebhookVerifyFailure, verify_webhook
 
 from .form_render import _FormRenderError, _render_form_page
 from .pages import _BASE_HEADERS, _CONFIRM_PAGE, _DONE_PAGE, _FORM_HTML_HEADERS, _HTML_HEADERS, _REPLY_PAGE
@@ -200,13 +201,13 @@ async def _claim_external(
     return await _record_callback_answer(r, store, settings, ticket, interaction_id, state, answer)
 
 
-def _callback_verifier(state: InteractionState) -> dict | None:
-    """The verifier binding stashed in the external ``format_payload`` (``{"name", "config"}``).
+def _verifier_bound(state: InteractionState) -> bool:
+    """Whether the external question carries a verifier binding at all.
 
-    ``None`` for an unbound ticket-only external question.
+    Presence of the ``verifier`` key is the only test: a present value that does not validate is
+    bound (and refused by :func:`_verify_callback`), never read as an unbound ticket-only question.
     """
-    binding = (state.request.format_payload or {}).get("verifier")
-    return binding if isinstance(binding, dict) else None
+    return "verifier" in (state.request.format_payload or {})
 
 
 async def _verify_callback(request: Request, raw: bytes, state: InteractionState) -> tuple[Response | None, bool]:
@@ -222,34 +223,33 @@ async def _verify_callback(request: Request, raw: bytes, state: InteractionState
     path stays open; only a passing body-signature verifier returns
     ``(None, True)``.
 
-    Fails CLOSED: a signature failure -> 401 (constant message); an unknown
-    verifier name / missing secret env / verifier bug -> 500.
+    Fails CLOSED (:func:`verify_webhook`): a signature failure -> 401 (constant message); an
+    unknown verifier name / missing secret env / verifier bug -> 500. A stored binding that is
+    not a :class:`TopicVerifierBinding` is a 500 too, so a binding of another shape can never
+    open an unverified door.
     """
-    binding = _callback_verifier(state)
-    if binding is None:
+    if not _verifier_bound(state):
         return None, False
-    name = binding.get("name")
-    config = binding.get("config") or {}
     interaction_id = state.request.interaction_id
-    if not isinstance(name, str):
-        logger.error("callback verify: malformed verifier binding (no name) for interaction %s", interaction_id)
-        return _callback_json({"error": "webhook verification error"}, 500), False
     try:
-        verifier = tai42_app.webhook_verifiers.get(name)
-    except Exception:
-        logger.exception("callback verify: no registered verifier %r for interaction %s", name, interaction_id)
-        return _callback_json({"error": "webhook verification error"}, 500), False
-    post_only = bool(getattr(verifier, "post_only", False))
+        binding = TopicVerifierBinding.model_validate((state.request.format_payload or {})["verifier"])
+    except ValidationError:
+        binding = None
+    if binding is None:
+        logger.error("callback verify: malformed verifier binding for interaction %s", interaction_id)
+        return _callback_json({"error": VERIFY_ERROR}, 500), False
     try:
-        await verifier.verify(raw, request.headers, config)
-    except WebhookVerificationError as exc:
-        # Log the reason (never the raw body verbatim); return a constant message.
-        logger.warning("callback verification failed for interaction %s: %s", interaction_id, exc)
-        return _callback_json({"error": "webhook verification failed"}, 401), False
-    except Exception:
-        logger.error("callback verifier error for interaction %s", interaction_id, exc_info=True)
-        return _callback_json({"error": "webhook verification error"}, 500), False
-    return None, post_only
+        verdict = await verify_webhook(
+            binding,
+            raw,
+            request.headers,
+            method=request.method,
+            subject=f"interaction {interaction_id}",
+            with_replay_defense=False,
+        )
+    except WebhookVerifyFailure as exc:
+        return _callback_json({"error": exc.message}, exc.status), False
+    return None, verdict.post_only
 
 
 def _parse_typed_answer(raw: bytes, fmt: AnswerFormat) -> Response | tuple[Any, dict[str, str] | None]:
@@ -280,7 +280,9 @@ def _parse_typed_answer(raw: bytes, fmt: AnswerFormat) -> Response | tuple[Any, 
         if not isinstance(raw_params, dict):
             return _callback_json({"error": "params must be a JSON object"}, 400)
         try:
-            answer_params = validate_entry_params(raw_params)
+            answer_params = bound_entry_params(
+                raw_params, mode=OverBoundParamsMode.REFUSE, door="interactions-callback"
+            )
         except ValueError as exc:
             return _callback_json({"error": f"invalid params: {exc}"}, 400)
     return parsed["answer"], answer_params
@@ -435,7 +437,7 @@ async def _callback_get(request: Request, r: Any, store: InteractionStore) -> Re
         # State pruned while the ticket lives out its TTL tail — plain 404, never
         # a confirm page for a dead interaction.
         return PlainTextResponse(_CALLBACK_GET_NOT_FOUND, status_code=404, headers=_BASE_HEADERS)
-    if _callback_verifier(state) is not None:
+    if _verifier_bound(state):
         # A verifier-bound question is server-to-server ONLY: the browser confirm
         # form posts an EMPTY body (answer in query params) and can never carry a
         # provider signature, so no page is ever served here — not a confirm page
@@ -457,7 +459,7 @@ async def _callback_get(request: Request, r: Any, store: InteractionStore) -> Re
             logger.exception("form callback GET: unrenderable schema for interaction %s", interaction_id)
             return PlainTextResponse("Internal Server Error", status_code=500, headers=_BASE_HEADERS)
         return HTMLResponse(page, headers=_FORM_HTML_HEADERS)
-    if state.request.answer_format in (AnswerFormat.CONFIRM, AnswerFormat.EXTERNAL):
+    if state.request.answer_format in CALLBACK_LINK_FORMATS:
         # Only these formats map the confirm form's empty-body POST to an
         # answer (confirm -> True, external -> the query-param payload).
         return HTMLResponse(_CONFIRM_PAGE, headers=_HTML_HEADERS)

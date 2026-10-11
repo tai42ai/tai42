@@ -80,6 +80,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from tai42_contract.channels import ChannelInputError
+from tai42_contract.interactions import FormReactionEventKind
 
 from tai42_channel_whatsapp.flows_components import (
     _RESERVED_PROPERTY,
@@ -138,9 +139,6 @@ _CONTINUE_LABEL = "Continue"
 # A static (navigate-only) Flow carries none. Meta's current data-endpoint version.
 _DATA_API_VERSION = "3.0"
 
-# The ``visibleWhen`` predicate operators (mirrors the kit) — a property carries exactly one.
-_VISIBLE_WHEN_OPS = ("equals", "in", "notEmpty")
-
 # The reaction-event markers an endpoint-driven Flow carries in a ``data_exchange`` action's
 # payload so the data endpoint maps the vendor request onto a ``react(...)`` event. They are
 # reserved property names on a REACTING form (refused like ``flow_token``) so a field value can
@@ -149,11 +147,6 @@ _REACTION_EVENT_KEY = "tai42_event"
 _REACTION_FIELD_KEY = "tai42_field"
 _REACTION_PAGE_KEY = "tai42_page"
 _RESERVED_REACTION_KEYS = frozenset({_REACTION_EVENT_KEY, _REACTION_FIELD_KEY, _REACTION_PAGE_KEY})
-
-# The three reaction event kinds (mirrors the contract ``FormReactions`` triggers).
-_EVENT_FIELD_CHANGED = "field_changed"
-_EVENT_PAGE_ADVANCED = "page_advanced"
-_EVENT_SUBMITTED = "submitted"
 
 # The screen a data-endpoint response names to COMPLETE a reacting Flow (Meta's reserved
 # terminal screen); the completed answer rides ``extension_message_response.params``.
@@ -326,7 +319,7 @@ def _review_readback(spec: _RenderSpec) -> list[dict[str, Any]]:
 
 
 def _reaction_event_payload(
-    kind: str,
+    kind: FormReactionEventKind,
     marker_key: str | None,
     marker_value: str | None,
     this_fields: list[str],
@@ -342,7 +335,7 @@ def _reaction_event_payload(
     earlier ones through their ``__val`` carrier), so the data endpoint hands the react facet
     partial values keyed exactly as the stored schema. Later (unfilled) fields are omitted.
     """
-    payload: dict[str, str] = {_REACTION_EVENT_KEY: kind}
+    payload: dict[str, str] = {_REACTION_EVENT_KEY: kind.value}
     if marker_key is not None and marker_value is not None:
         payload[marker_key] = marker_value
     for name in this_fields:
@@ -369,7 +362,7 @@ def _attach_field_reaction(
     action = {
         "name": "data_exchange",
         "payload": _reaction_event_payload(
-            _EVENT_FIELD_CHANGED, _REACTION_FIELD_KEY, name, this_fields, earlier_fields, names, variants
+            FormReactionEventKind.FIELD_CHANGED, _REACTION_FIELD_KEY, name, this_fields, earlier_fields, names, variants
         ),
     }
     ctype = component["type"]
@@ -416,7 +409,7 @@ def _terminal_footer(
     # form completes directly with the flat union of every field, keyed by human-readable label.
     if spec.submitted:
         payload = _reaction_event_payload(
-            _EVENT_SUBMITTED, None, None, this_fields, earlier_fields, spec.names, variants
+            FormReactionEventKind.SUBMITTED, None, None, this_fields, earlier_fields, spec.names, variants
         )
         return {
             "type": "Footer",
@@ -451,7 +444,13 @@ def _step_footer(
     routing_model[screen_id] = [next_screen]
     if page_title in spec.page_advanced:
         payload = _reaction_event_payload(
-            _EVENT_PAGE_ADVANCED, _REACTION_PAGE_KEY, page_title, this_fields, earlier_fields, spec.names, variants
+            FormReactionEventKind.PAGE_ADVANCED,
+            _REACTION_PAGE_KEY,
+            page_title,
+            this_fields,
+            earlier_fields,
+            spec.names,
+            variants,
         )
         return {
             "type": "Footer",

@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 from tai42_contract.channels import ChannelInputError
+from tai42_kit.interactions import DATE_CONSTRAINT_KEYS, FORM_WEEKDAYS, RADIO_OPTION_THRESHOLD
 
 # Meta injects ``flow_token`` into every Flow response to correlate the reply, so a
 # form property of that name is unanswerable on this channel: the reply handler
@@ -33,21 +34,11 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # check then rejects an impossible date (e.g. ``2026-13-40``).
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-#: The option-count threshold a choice field uses to choose a RadioButtonsGroup over a
-#: Dropdown — an ``enum`` of at most this many choices renders as a radio group, more as a
-#: dropdown. Mirrors the kit's single documented constant so every surface draws the same
-#: short list the same way (the plugin sits below the skeleton and cannot import it).
-RADIO_OPTION_THRESHOLD = 5
-
-# The platform date-constraint keys a date property may carry (mirrors the kit's
-# ``form_schema`` keys): bounds, excluded days, and a two-field range pairing. Their presence
-# makes a date field render as a bounded CalendarPicker rather than a bare DatePicker.
-_DATE_CONSTRAINT_KEYS = ("minDate", "maxDate", "unavailableDates", "rangeStart", "minDays", "maxDays")
-
-# The lowercase weekday names an ``unavailableDates`` entry may carry, in week order, and
-# their mapping onto Meta's CalendarPicker ``include-days`` enum codes. A weekday excluded by
-# ``unavailableDates`` is dropped from ``include-days`` (the days that STAY selectable).
-_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+# The platform's form vocabulary, from ``tai42_kit.interactions``: the radio/dropdown threshold,
+# the date-constraint keys whose presence makes a date field a bounded CalendarPicker, and the
+# weekday names an ``unavailableDates`` entry may carry. Each weekday maps onto Meta's
+# CalendarPicker ``include-days`` enum code below; an excluded weekday is dropped from
+# ``include-days`` (the days that STAY selectable).
 _WEEKDAY_CODES = {
     "monday": "Mon",
     "tuesday": "Tue",
@@ -204,7 +195,7 @@ def _choice_component_type(prop: dict[str, Any]) -> str:
 
 def _date_has_constraints(prop: dict[str, Any]) -> bool:
     """Whether a date property carries any platform date constraint (bounds, excluded days, a range pairing)."""
-    return any(key in prop for key in _DATE_CONSTRAINT_KEYS)
+    return any(key in prop for key in DATE_CONSTRAINT_KEYS)
 
 
 def _calendar_component(cname: str, label: str, required: bool, prop: dict[str, Any], init: str) -> dict[str, Any]:
@@ -233,11 +224,11 @@ def _calendar_component(cname: str, label: str, required: bool, prop: dict[str, 
     unavailable = prop.get("unavailableDates")
     if isinstance(unavailable, list):
         dates = [entry for entry in unavailable if isinstance(entry, str) and _ISO_DATE_RE.match(entry)]
-        excluded = {entry.lower() for entry in unavailable if isinstance(entry, str) and entry.lower() in _WEEKDAYS}
+        excluded = {entry.lower() for entry in unavailable if isinstance(entry, str) and entry.lower() in FORM_WEEKDAYS}
         if dates:
             component["unavailable-dates"] = dates
         if excluded:
-            component["include-days"] = [_WEEKDAY_CODES[day] for day in _WEEKDAYS if day not in excluded]
+            component["include-days"] = [_WEEKDAY_CODES[day] for day in FORM_WEEKDAYS if day not in excluded]
     return component
 
 

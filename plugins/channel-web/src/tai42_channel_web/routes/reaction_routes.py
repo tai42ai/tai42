@@ -20,6 +20,7 @@ from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_kit.clients.impl.http import HttpxClient
 
+from tai42_channel_web.routes.callback_pin import pin_stored_callback
 from tai42_channel_web.routes.dtos import ReactionResultResponse, _reaction_refusal
 from tai42_channel_web.routes.envelope import _error, _json_body, _ok
 from tai42_channel_web.routes.session_access import (
@@ -197,6 +198,8 @@ async def web_react(request: Request) -> Response:
     if isinstance(owned, JSONResponse):
         return owned
     record = owned
+    # The STORED value is pinned, never the derived ``/react`` URL (the pin refuses a second segment).
+    pin_stored_callback(record.callback_url, interaction_id=interaction_id, forwarded="reaction")
 
     forwarded = await _forward_reaction(_react_url(record.callback_url), event, values)
     return _apply_reaction_result(forwarded)

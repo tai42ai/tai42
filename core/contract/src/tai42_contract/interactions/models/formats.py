@@ -7,6 +7,7 @@ names what a channel-delivered ask does with a reply the answer door rejects.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Final
 
 
 class AnswerFormat(StrEnum):
@@ -21,6 +22,10 @@ class AnswerFormat(StrEnum):
     # optional ``schema`` when the question carries one. A caller-addressed ask uses it
     # to receive a structured value another run hands back.
     FREE = "free"
+
+
+#: The answer formats completed by opening the callback link alone (no typed reply).
+CALLBACK_LINK_FORMATS: Final[frozenset[AnswerFormat]] = frozenset({AnswerFormat.CONFIRM, AnswerFormat.EXTERNAL})
 
 
 class AnswerMismatchPolicy(StrEnum):

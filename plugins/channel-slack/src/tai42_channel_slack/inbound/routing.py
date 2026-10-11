@@ -14,6 +14,7 @@ from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
 from tai42_contract.conversations import BlankInboundTextError
+from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
 
 from tai42_channel_slack.correlation import slack_thread_correlation_store
 from tai42_channel_slack.settings import SlackSettings
@@ -73,6 +74,9 @@ async def _bridge(
         return JSONResponse({"status": "ignored"})
     if our_identity is None:
         raise ValueError("the slack channel bridge is not configured: set CHANNEL_SLACK_BOT_USER_ID")
+    # Slack redelivers a 5xx, so an over-bound params set is dropped (logged and counted) and the
+    # participant's message still bridges.
+    params = bound_entry_params(params, mode=OverBoundParamsMode.DROP, door="slack")
     try:
         await tai42_app.conversations.accept(
             channel="slack",
