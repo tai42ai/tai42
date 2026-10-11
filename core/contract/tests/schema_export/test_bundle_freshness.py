@@ -48,3 +48,11 @@ def test_shape_difference_is_reported_by_document_name() -> None:
     drift = bundle_drift(fresh, committed)
     assert any("PresetBody" in line and "changed shape" in line for line in drift)
     assert not any("contract_version" in line for line in drift)
+
+
+def test_a_changed_constant_is_reported_as_its_own_line() -> None:
+    fresh = build_document_schemas()
+    committed = json.loads(json.dumps(fresh))
+    committed["constants"]["PERSON_KIND"] = "someone-else"
+    drift = bundle_drift(fresh, committed)
+    assert drift == ["the published constants changed"]

@@ -122,3 +122,21 @@ def test_templated_bodies_reference_the_marked_definition() -> None:
     for document in ("StateDeclaration", "StateTemplateDocument"):
         schema = bundle["documents"][document]
         assert templated_ref in set(_refs(schema["properties"]["schema"])), f"{document}.schema is not templated"
+
+
+def test_the_served_constants_are_the_contract_values() -> None:
+    from tai42_contract.interactions.models.media import MEDIA_ID_RE, MEDIA_ROUTE_PREFIX
+    from tai42_contract.schema_export.registry import SERVED_CONSTANTS
+    from tai42_contract.states.models import PERSON_KIND
+
+    assert dict(SERVED_CONSTANTS) == {
+        "PERSON_KIND": PERSON_KIND,
+        "MEDIA_ROUTE_PREFIX": MEDIA_ROUTE_PREFIX,
+        "MEDIA_ID_PATTERN": MEDIA_ID_RE.pattern,
+    }
+
+
+def test_the_bundle_carries_the_served_constants() -> None:
+    from tai42_contract.schema_export.registry import SERVED_CONSTANTS
+
+    assert build_document_schemas()["constants"] == dict(SERVED_CONSTANTS)
