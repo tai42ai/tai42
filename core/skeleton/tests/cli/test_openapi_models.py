@@ -669,6 +669,7 @@ def _enum_of(spec: dict, schema: dict) -> list[str]:
         ("FoldReport", "mode", ["switch", "merge"]),
         ("MetricsResult", "granularity", ["hour", "day", "week"]),
         ("ObservabilityRunView", "status", ["error", "success"]),
+        ("PrincipalRef", "kind", ["human", "service"]),
     ],
 )
 def test_a_closed_response_field_publishes_its_values(
