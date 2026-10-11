@@ -52,7 +52,9 @@ TOOL_MANIFEST_ENTRY = {"title": "fxt", "module": "tests.app._fixtures.tools_a", 
 TOOL_NAME = "greet"
 
 # Every test request runs under this bound: a guard that is missing lets a GET open a
-# stream that never ends, which must fail the test instead of hanging it.
+# stream that never ends, which must fail the test instead of hanging it. A served test's
+# request answers in at most 0.95 s (a profile apply) with the served modules running four
+# at a time at load 250-275 on 20 cores.
 REQUEST_TIMEOUT_S = 10.0
 # How long a test waits for a reload to swap the generation: an in-process rebuild of the
 # served app, measured at 1.5-5.5 s with eight served tests in parallel at load ~95 on 20

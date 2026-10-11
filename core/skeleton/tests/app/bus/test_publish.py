@@ -284,14 +284,29 @@ async def test_targeted_name_absent_from_census_is_departed(
     assert by_name["backend-9"].outcome == OpOutcome.departed
 
 
-async def test_expired_presence_worker_is_departed(wire_bus_client: None, server: fakeredis.FakeServer) -> None:
-    # heartbeat_ttl=0.3 → freshness bound ≈ 100ms. A 200ms TTL is FRESH at the census (so
-    # the target is expected) yet expires (200ms) well before the apply cut (600ms) — a
-    # genuine TTL expiry mid-apply, reported departed.
-    publisher = make_bus(heartbeat_ttl=0.3, ack_timeout=0.03, apply_timeout=0.6)
-    await _register_bare_presence(server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=200)
+async def test_expired_presence_worker_is_departed(
+    wire_bus_client: None, server: fakeredis.FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The target's presence is FRESH at the census (so it is expected), and its TTL runs out
+    # right after the census, well before the apply cut (600ms) — a genuine TTL expiry
+    # mid-apply, reported departed.
+    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.6)
+    await _register_bare_presence(server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000)
+    classify = publisher._classify_workers
+    censuses: list[dict[str, int | None]] = []
+
+    async def _census_then_expire(*args: Any, **kwargs: Any) -> Any:
+        censused = await classify(*args, **kwargs)
+        censuses.append(censused[0])
+        client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+        await client.pexpire(publisher._settings.presence_key("backend-1"), 1)
+        await client.aclose()
+        return censused
+
+    monkeypatch.setattr(publisher, "_classify_workers", _census_then_expire)
 
     result = await publisher.publish({"op": "reload_config"}, targets=["backend-1"], local=None)
+    assert censuses == [{"backend-1": 1}], "the target was not censused ready and fresh"
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-1"].outcome == OpOutcome.departed
     assert by_name["backend-1"].detail is not None

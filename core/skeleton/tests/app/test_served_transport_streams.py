@@ -190,6 +190,21 @@ async def _deferred_tails_finished() -> None:
         await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
 
 
+async def _until_set_while_running(event: asyncio.Event, call: asyncio.Task[object], bound: float, what: str) -> None:
+    """Wait for ``event`` while ``call`` runs: a call that ends first, or ``bound`` seconds passing, fails the test."""
+    waiter = asyncio.ensure_future(event.wait())
+    try:
+        await asyncio.wait({waiter, call}, timeout=bound, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        waiter.cancel()
+    if event.is_set():
+        return
+    if call.done():
+        outcome = call.exception() if call.exception() is not None else call.result()
+        pytest.fail(f"the call ended before {what}: {outcome!r}")
+    pytest.fail(f"{what} did not happen within {bound} s")
+
+
 def _drain_errors(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [record.getMessage() for record in caplog.records if DRAIN_ERROR in record.getMessage()]
 
@@ -244,11 +259,13 @@ async def test_a_held_call_stays_counted_beside_the_exempt_stream_and_answers_be
         ):
             boot = current_epoch()
             held = asyncio.create_task(held_session.call_tool("held_call", {}))
-            await state.held_started.wait()
+            await _until_set_while_running(state.held_started, held, REQUEST_TIMEOUT_S, "the held call started")
             assert await _settled_in_flight() == 1, "only the held call's POST is in flight"
             async with _session(url, call_timeout=HELD_CALL_TIMEOUT_S) as driving_session:
                 driving = asyncio.create_task(driving_session.call_tool("drive_reload", {}))
-                await state.driver_swapped.wait()
+                await _until_set_while_running(
+                    state.driver_swapped, driving, MCP_CALL_TIMEOUT_S, "the driven reload swapped"
+                )
                 # The retire's tail drains the held call for the budget, then reports it.
                 async with asyncio.timeout(DRAIN_BUDGET_S * 10):
                     while not _drain_errors(caplog):

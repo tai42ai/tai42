@@ -41,6 +41,8 @@ from tai42_skeleton.app.instance import build_app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.reload_gate import reload_gate
 
+from ._served_app import RELOAD_SWAP_BOUND_S
+
 # Bind the process app handle so the retire path's ``tool_runs`` import (which
 # registers an ``on_shutdown`` handler on the bound handle) resolves.
 tai42_app.bind(build_app())
@@ -66,6 +68,28 @@ def _serve(name: str):
         return _Serving(name)
 
     return _build
+
+
+def _time_drains(monkeypatch: pytest.MonkeyPatch, epoch: Epoch) -> list[float]:
+    """Record how long each in-flight drain of ``epoch`` waits, in seconds.
+
+    The drain is timed apart from the rest of the retire (settings reset, pool drain), whose
+    duration depends on the host: a drain that waits on a request runs out its whole budget,
+    one that finds the generation idle returns at once.
+    """
+    durations: list[float] = []
+    drain = epoch._drain_in_flight
+
+    async def _timed(deadline: float, **kwargs: bool) -> bool:
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        try:
+            return await drain(deadline, **kwargs)
+        finally:
+            durations.append(loop.time() - start)
+
+    monkeypatch.setattr(epoch, "_drain_in_flight", _timed)
+    return durations
 
 
 @pytest.fixture(autouse=True)
@@ -332,7 +356,7 @@ async def test_drain_in_flight_bounded_by_budget() -> None:
     assert ep.in_flight == 1
 
 
-async def test_a_drain_exempt_stream_does_not_block_the_retire_drain() -> None:
+async def test_a_drain_exempt_stream_does_not_block_the_retire_drain(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stream that exempted itself from its generation's in-flight drain (the interactions
     inbox SSE — it never completes on its own) does not hold the generation in-flight, so a
     bus-driven retire reads it idle and returns promptly, and the session-manager close still
@@ -340,8 +364,6 @@ async def test_a_drain_exempt_stream_does_not_block_the_retire_drain() -> None:
     retire — it pins that the exemption RELEASED the slot; it does NOT by itself distinguish a
     synchronous drain from a deferred one. That ordering — a NON-exempt request is WAITED for
     before ``aclose`` — is pinned by ``test_a_non_exempt_in_flight_request_is_drained_before_aclose``.)"""
-    import asyncio
-
     _install_boot("boot-app")
     boot = current_epoch()
     closed: list[str] = []
@@ -363,18 +385,18 @@ async def test_a_drain_exempt_stream_does_not_block_the_retire_drain() -> None:
     assert state.slot_released is True
     assert boot.in_flight == 0
 
-    loop = asyncio.get_running_loop()
-    start = loop.time()
+    drains = _time_drains(monkeypatch, boot)
     await build_and_swap_epoch(
         {"K": "v"},
         rebuild=lambda: None,
         build_serving_app=_serve("new-app"),
         drain_deadline=5.0,
     )
-    # The retire read the generation idle (the exempt slot was released) and returned promptly;
-    # a still-counted in-flight request would instead be WAITED for (next test). The
-    # session-manager close fired sync.
-    assert loop.time() - start < 1.0, "the drain-exempt stream stalled the retire"
+    # The retire's drain read the generation idle (the exempt slot was released) and returned
+    # well inside its budget; a still-counted in-flight request would instead be WAITED for
+    # until the budget ran out (next test). The session-manager close fired sync.
+    assert len(drains) == 1
+    assert drains[0] < 5.0, "the drain-exempt stream stalled the retire's drain"
     assert closed == ["closed"], "the retire did not close the old lifespan synchronously"
 
 
@@ -538,7 +560,7 @@ class _ClosingSupervisor:
         self.log.append("closed")
 
 
-async def test_reload_over_session_manager_defers_supervisor_close() -> None:
+async def test_reload_over_session_manager_defers_supervisor_close(monkeypatch: pytest.MonkeyPatch) -> None:
     """A door-driven reload — its own request still admitted on the retiring epoch, e.g. an
     MCP tool call served by that epoch's FastMCP session manager — must NOT ``aclose`` the
     old lifespan while that request is in flight: doing so tears down the transport
@@ -552,31 +574,36 @@ async def test_reload_over_session_manager_defers_supervisor_close() -> None:
     boot.supervisor = _ClosingSupervisor(closed)  # type: ignore[assignment]
     swapped = asyncio.Event()
     answer = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    took: list[float] = []
+    drains = _time_drains(monkeypatch, boot)
 
     async def _driver() -> None:
         async with reload_gate.driving():
-            start = loop.time()
             await build_and_swap_epoch(
                 {"TAI_EPOCH_DRIVER": "v"}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=5.0
             )
-            took.append(loop.time() - start)
         swapped.set()
         await answer.wait()
 
     request = _served_request(boot, _driver)
     try:
-        await asyncio.wait_for(swapped.wait(), timeout=5.0)
-        # Returned promptly (drain + close deferred, not awaited on the driving request)...
-        assert took[0] < 1.0, "reload self-waited the drain budget on its own driving request"
+        swap = asyncio.ensure_future(swapped.wait())
+        await asyncio.wait({swap, request}, timeout=RELOAD_SWAP_BOUND_S, return_when=asyncio.FIRST_COMPLETED)
+        swap.cancel()
+        assert swapped.is_set(), f"the driven reload did not swap: {request}"
+        # Returned with the drain + close deferred to a task still running, not awaited on the
+        # driving request...
+        [deferred] = epoch_retire_mod._deferred_retire_tasks
+        assert not deferred.done(), "reload awaited the drain on its own driving request"
         # ...and did NOT close the session manager serving the still-in-flight driver.
         assert closed == [], "reload aclose()d the session manager serving its own driving request"
         answer.set()  # the driver finishes (its response flushed) -> the deferred task closes
         await request
-        async with asyncio.timeout(2.0):
-            await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
+        # With the driver finished the deferred task is bounded by the drain budget, and its
+        # drain ends inside it.
+        await deferred
         assert closed == ["closed"]
+        assert drains
+        assert max(drains) < 5.0, "the deferred drain ran out its budget"
     finally:
         answer.set()
         os.environ.pop("TAI_EPOCH_DRIVER", None)
