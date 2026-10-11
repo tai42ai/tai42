@@ -107,3 +107,17 @@ async def test_the_built_stream_ends_in_a_disconnect() -> None:
     first = await built.receive()
     assert first == {"type": "http.request", "body": b"x", "more_body": False}
     assert await built.receive() == {"type": "http.disconnect"}
+
+
+class _Keyed(BaseModel):
+    counts: dict[str, int]
+    inner: _Probe | None = None
+
+
+def test_validate_body_stops_the_path_at_a_caller_chosen_key() -> None:
+    with pytest.raises(BadRequestError) as excinfo:
+        validate_body(_Keyed, {"counts": {"secret-key": "x"}, "inner": {"name": "ab", "count": 1}}, "keyed")
+    message = excinfo.value.message
+    assert "counts: Input should be a valid integer" in message
+    assert "inner.name: String should have at least 3 characters" in message
+    assert "secret-key" not in message
