@@ -331,14 +331,14 @@ async def test_create_missing_tool_name_400(install):
     install(_FakeTools(_MARKERS))
     resp = await router.create_schedule(_body_req(b'{"tool_kwargs": {}}'))
     assert resp.status_code == 400
-    assert _json(resp) == {"error": "invalid schedule create params: Field required"}
+    assert _json(resp) == {"error": "invalid schedule create params: tool_name: Field required"}
 
 
 async def test_create_tool_kwargs_not_object_400(install):
     install(_FakeTools(_MARKERS))
     resp = await router.create_schedule(_body_req(b'{"tool_name": "t", "tool_kwargs": []}'))
     assert resp.status_code == 400
-    assert _json(resp) == {"error": "invalid schedule create params: Input should be a valid dictionary"}
+    assert _json(resp) == {"error": "invalid schedule create params: tool_kwargs: Input should be a valid dictionary"}
 
 
 async def test_create_unknown_cadence_kind_400(install):
