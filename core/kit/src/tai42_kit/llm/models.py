@@ -1,4 +1,19 @@
-"""Provider-keyed construction of LangChain chat models."""
+"""Provider-keyed construction of LangChain chat models.
+
+One rule holds for every provider, here and in the embedding builders (``llm/embedding.py``): each
+kwarg handed to :func:`get_llm` reaches the provider — a connection setting (model, key, base URL,
+timeout) is configured on the provider's client, a generation setting is sent in its request — or
+the build refuses it with ``ValueError`` naming it. No setting is dropped. What a provider can carry
+is read from its own client: the chat model's declared fields (by name or alias) that it applies,
+plus, where the chat model forwards its ``model_kwargs`` into the SDK call, the parameters of the
+call that chat model makes (any name for Mistral, whose chat model writes them into its JSON request
+body). A name the kit carries that the chat model does not declare is passed to it as
+``model_kwargs``; a flat setting a provider takes under another name or in its client options is
+mapped there, and the same setting given twice is refused naming both. One case the build cannot see:
+OpenAI and xAI chat models switch to the responses call when a built-in tool is bound later (a
+``gpt-6`` model when any tool is bound), and a setting only the chat-completions call takes then fails
+that first call with ``TypeError``, before any request is sent.
+"""
 
 import asyncio
 import copy
@@ -6,8 +21,11 @@ from functools import lru_cache
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage
+from pydantic import BaseModel
 from tai42_contract.agent import TOOL_NAME_MAX_LEN
 
+from tai42_kit.llm._carry import carried, declared_names, parameters, refuse, refuse_twice, set_client_option
 from tai42_kit.llm._secret_kwargs import KwargsCacheKey, unwrap_secret_kwargs
 from tai42_kit.utils.data.json_schema_util import (
     adapt_native_schema,
@@ -73,39 +91,199 @@ def _build_llm(provider: str, **kwargs) -> BaseChatModel:
         case "anthropic":
             from langchain_anthropic import ChatAnthropic  # pyright: ignore[reportMissingImports]
 
-            return ChatAnthropic(**kwargs)
+            return ChatAnthropic(**carried("anthropic", kwargs, ChatAnthropic, _anthropic_call_parameters))
 
         case "mistral":
             from langchain_mistralai import ChatMistralAI  # pyright: ignore[reportMissingImports]
 
-            return ChatMistralAI(**kwargs)
+            # The chat model declares ``max_concurrent_requests`` but never reads it.
+            return ChatMistralAI(
+                **carried("mistral", kwargs, ChatMistralAI, None, unsent=frozenset({"max_concurrent_requests"}))
+            )
 
         case "openai":
             from langchain_openai import ChatOpenAI
 
-            return ChatOpenAI(**kwargs)
+            return ChatOpenAI(**carried("openai", kwargs, ChatOpenAI, _openai_call_parameters))
 
         case "google":
             from langchain_google_genai import ChatGoogleGenerativeAI  # pyright: ignore[reportMissingImports]
 
-            return ChatGoogleGenerativeAI(**kwargs)
+            # The chat model declares ``model_kwargs`` but never sends it.
+            return ChatGoogleGenerativeAI(
+                **carried("google", kwargs, ChatGoogleGenerativeAI, frozenset(), unsent=frozenset({"model_kwargs"}))
+            )
 
         case "xai":
             from langchain_xai import ChatXAI  # pyright: ignore[reportMissingImports]
 
-            return ChatXAI(**kwargs)
+            return ChatXAI(**carried("xai", kwargs, ChatXAI, _openai_call_parameters))
 
         case "ollama":
-            from langchain_ollama import ChatOllama  # pyright: ignore[reportMissingImports]
-
-            return ChatOllama(**kwargs)
+            return _build_ollama_chat(**kwargs)
 
         case "huggingface":
-            from langchain_huggingface import ChatHuggingFace  # pyright: ignore[reportMissingImports]
-
-            return ChatHuggingFace(**kwargs)
+            return _build_huggingface_chat(**kwargs)
 
     raise ValueError(f"Unsupported chat model provider: '{provider}'")
+
+
+def _openai_call_parameters(
+    model_cls: type[BaseModel], built: dict[str, Any], forwarded: dict[str, Any]
+) -> frozenset[str]:
+    """The parameters of the OpenAI SDK call the configured chat model makes.
+
+    The chat model picks the responses call or the chat-completions call from its own settings and
+    the request it builds (``BaseChatOpenAI._use_responses_api``); the kit asks it, on a model built
+    with the same settings, which one a request without tools takes.
+    """
+    from openai.resources.chat import Completions
+    from openai.resources.responses import Responses
+
+    probe: Any = model_cls(**built, **({"model_kwargs": forwarded} if forwarded else {}))
+    call = Responses.create if probe._use_responses_api(probe._default_params) else Completions.create
+    # The chat model fills the conversation, the model and streaming itself.
+    return parameters(call) - {"messages", "input", "model", "stream"}
+
+
+def _anthropic_call_parameters(
+    model_cls: type[BaseModel], built: dict[str, Any], forwarded: dict[str, Any]
+) -> frozenset[str]:
+    """The parameters of the Anthropic SDK call the configured chat model makes.
+
+    The chat model calls the beta messages endpoint when its request carries ``betas`` and the plain
+    one otherwise (``ChatAnthropic._create``); the kit builds that request, without tools, on a model
+    built with the same settings.
+    """
+    from anthropic.resources import Messages  # pyright: ignore[reportMissingImports]
+    from anthropic.resources.beta import Messages as BetaMessages  # pyright: ignore[reportMissingImports]
+
+    probe: Any = model_cls(**built, **({"model_kwargs": forwarded} if forwarded else {}))
+    payload = probe._get_request_payload([HumanMessage("")])
+    # The chat model fills the conversation, the model and streaming itself.
+    return parameters(BetaMessages.create if "betas" in payload else Messages.create) - {"messages", "model", "stream"}
+
+
+def _renamed(provider: str, kwargs: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
+    """``kwargs`` with each flat name in ``names`` under the provider's name, refusing both given."""
+    for flat, own in names.items():
+        if flat in kwargs and own in kwargs:
+            refuse_twice(provider, flat, own)
+    return {names.get(key, key): value for key, value in kwargs.items()}
+
+
+# The flat chat-model settings under the names Ollama's chat model takes.
+_OLLAMA_NAMES = {"max_tokens": "num_predict", "reasoning_effort": "reasoning"}
+
+
+def _build_ollama_chat(**kwargs: Any) -> BaseChatModel:
+    """A ``ChatOllama`` built from flat settings.
+
+    ``max_tokens`` is sent as ``num_predict`` and ``reasoning_effort`` as its reasoning level
+    (``reasoning``, sent as ``think``); ``timeout`` and ``api_key`` (a bearer ``authorization``
+    header) configure its HTTP client through ``client_kwargs``. ``ChatOllama`` forwards no
+    constructor name outside its declared fields, so every other name must be one of them.
+    """
+    from langchain_ollama import ChatOllama  # pyright: ignore[reportMissingImports]
+
+    renamed = _renamed("ollama", kwargs, _OLLAMA_NAMES)
+    _ollama_client_options("ollama", renamed)
+    return ChatOllama(**carried("ollama", renamed, ChatOllama, frozenset()))
+
+
+# The containers whose entries reach Ollama's HTTP clients: shared, then per client.
+_OLLAMA_CLIENT_OVERRIDES = ("sync_client_kwargs", "async_client_kwargs")
+
+
+def _ollama_client_options(provider: str, kwargs: dict[str, Any]) -> None:
+    """Move ``timeout`` and ``api_key`` into Ollama's ``client_kwargs`` (its HTTP clients' options).
+
+    ``api_key`` becomes a bearer ``authorization`` header. The same option set another way — in
+    ``client_kwargs`` or a per-client ``sync_client_kwargs`` / ``async_client_kwargs`` (header names
+    compared without letter case), or credentials in the ``base_url`` (with or without a scheme), which
+    Ollama's chat and embedding models turn into an ``Authorization`` header with the library's own
+    ``parse_url_with_auth`` — is refused as given twice, so the sync and the async client never send
+    different values.
+    """
+    if "timeout" in kwargs:
+        set_client_option(
+            provider,
+            kwargs,
+            ("client_kwargs", "timeout"),
+            kwargs.pop("timeout"),
+            flat="timeout",
+            also=_OLLAMA_CLIENT_OVERRIDES,
+        )
+    if "api_key" in kwargs:
+        from langchain_ollama._utils import parse_url_with_auth  # pyright: ignore[reportMissingImports]
+
+        _, url_auth = parse_url_with_auth(kwargs.get("base_url"))
+        if url_auth:
+            refuse_twice(provider, "api_key", "base_url")
+        bearer = f"Bearer {kwargs.pop('api_key')}"
+        set_client_option(
+            provider,
+            kwargs,
+            ("client_kwargs", "headers", "authorization"),
+            bearer,
+            flat="api_key",
+            header=True,
+            also=_OLLAMA_CLIENT_OVERRIDES,
+        )
+
+
+# What ``ChatHuggingFace`` fills itself in each chat-completion call.
+_HUGGINGFACE_MANAGED = frozenset(
+    {"messages", "model", "stream", "stream_options", "tools", "tool_choice", "response_format"}
+)
+# The chat model's own fields its chat path applies, beyond the generic chat-model ones.
+_HUGGINGFACE_CHAT_FIELDS = frozenset({"streaming", "stream_usage"})
+
+
+def _build_huggingface_chat(
+    *,
+    model: str,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    timeout: int | None = None,
+    max_tokens: int | None = None,
+    **kwargs: Any,
+) -> BaseChatModel:
+    """A ``ChatHuggingFace`` over a hosted Hugging Face Inference endpoint, built from flat settings.
+
+    ``ChatHuggingFace`` wraps a required ``llm``; the flat settings carry a hosted model's shape, so
+    the wrapped model is a ``HuggingFaceEndpoint`` configured with the connection settings: the hub
+    model ``model``, or, when ``base_url`` is set, the server at that URL, which serves its own model
+    (the library then takes the URL as the chat model's id); ``timeout``. ``api_key`` is the hub
+    token for a hub model; for a ``base_url`` it is sent as a bearer ``authorization`` header on
+    every request (the endpoint hands its token only to huggingface.co and hf.space hosts).
+    The chat path sends ``max_tokens`` and its ``model_kwargs`` in each chat-completion call, so
+    every generation setting goes there, and it must be a parameter
+    ``huggingface_hub.InferenceClient.chat_completion`` accepts. The endpoint's own sampling and
+    length defaults are not sent: only configured settings are.
+    """
+    from huggingface_hub import InferenceClient  # pyright: ignore[reportMissingImports]
+    from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint  # pyright: ignore[reportMissingImports]
+
+    request = parameters(InferenceClient.chat_completion) - _HUGGINGFACE_MANAGED
+    chat_fields = declared_names(BaseChatModel) | _HUGGINGFACE_CHAT_FIELDS
+    forwarded = {key: value for key, value in kwargs.items() if key in request}
+    chat_kwargs = {key: value for key, value in kwargs.items() if key in chat_fields and key not in request}
+    refuse("huggingface", [key for key in kwargs if key not in forwarded and key not in chat_kwargs])
+
+    endpoint_kwargs: dict[str, Any] = {"endpoint_url": base_url} if base_url else {"repo_id": model}
+    if api_key is not None and base_url:
+        endpoint_kwargs["server_kwargs"] = {"headers": {"authorization": f"Bearer {api_key}"}}
+    elif api_key is not None:
+        endpoint_kwargs["huggingfacehub_api_token"] = api_key
+    if timeout is not None:
+        endpoint_kwargs["timeout"] = timeout
+    endpoint = HuggingFaceEndpoint(**endpoint_kwargs, temperature=None, top_p=None, typical_p=None)
+    chat = ChatHuggingFace(llm=endpoint, model_kwargs=forwarded, **chat_kwargs)
+    # The chat model copies the endpoint's length default (``max_new_tokens``) when it has none of
+    # its own; only a configured ``max_tokens`` is sent.
+    chat.max_tokens = max_tokens
+    return chat
 
 
 def _model_label(llm: BaseChatModel) -> str:
