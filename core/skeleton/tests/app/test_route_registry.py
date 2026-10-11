@@ -3,9 +3,9 @@
 Each route DECLARES its behavioral OpenAPI properties (``reload_gated`` /
 ``reads_body`` / error statuses / success status) through
 :class:`DeclaredRouteMetadata`; a route that declares nothing records trivial
-defaults. The per-method success content type is derived from the responder each
-method uses. These tests pin the declared/default handling, the media-type
-derivation, and the record-time minimum-bar enforcement.
+defaults. The per-method success content type is the route's own
+``success_media_types`` declaration. These tests pin the declared/default handling,
+the media-type declaration, and the record-time minimum-bar enforcement.
 """
 
 from __future__ import annotations
@@ -20,39 +20,6 @@ from tai42_skeleton.app.route_registry import DeclaredRouteMetadata, RouteRegist
 async def _plain(request: Request) -> Response:
     """A plain read."""
     return JSONResponse({"data": []})
-
-
-async def _streams(request: Request) -> Response:
-    return Response("", media_type="text/event-stream")
-
-
-async def _callback_get(request: Request) -> Response:
-    from starlette.responses import HTMLResponse
-
-    return HTMLResponse("<h1>Confirm</h1>")
-
-
-async def _delegates_to_callback_get(request: Request) -> Response:
-    return await _callback_get(request)
-
-
-async def _method_dispatching_callback(request: Request) -> Response:
-    # GET serves the HTML confirm page; POST answers the ``{"data": ...}`` envelope —
-    # the two methods must derive different media types from one registration.
-    if request.method == "GET":
-        return await _callback_get(request)
-    return JSONResponse({"data": {}})
-
-
-def _csv_response(rows: list) -> Response:
-    return Response("", media_type="text/csv", headers={"Content-Disposition": "attachment"})
-
-
-async def _csv_or_json_export(request: Request) -> Response:
-    # One method serving two content types: a CSV body or a JSON download.
-    if request.query_params.get("format") == "json":
-        return Response("{}", media_type="application/json", headers={"Content-Disposition": "attachment"})
-    return _csv_response([])
 
 
 # -- Declared / default behavioral metadata ----------------------------------
@@ -128,87 +95,70 @@ def test_docstring_becomes_description() -> None:
     assert meta.description == "A plain read."
 
 
-# -- Success media-type derivation -------------------------------------------
+# -- Success media-type declaration ------------------------------------------
 
 
-def test_streaming_media_type_derivation() -> None:
-    registry = RouteRegistry()
+def _record_media(
+    registry: RouteRegistry,
+    methods: list[str],
+    media: dict[str, tuple[str, ...]] | None,
+    *,
+    enveloped: bool = True,
+) -> None:
+    from pydantic import BaseModel
+
+    class _Body(BaseModel):
+        ok: bool
+
     registry.record(
-        path="/api/stream",
-        methods=["GET"],
+        path="/api/declared",
+        methods=methods,
         name=None,
-        handler=_streams,
-        summary="Stream",
-        tags=["t"],
-        authed=True,
-        action="read",
-        request_model=None,
-        response_model=None,
-        no_body_reason="test fixture: response body not under test",
-    )
-    (meta,) = registry.routes()
-    assert meta.success_media_types == {"GET": ("text/event-stream",)}
-
-
-def test_media_type_follows_a_delegated_responder() -> None:
-    registry = RouteRegistry()
-    registry.record(
-        path="/api/callback",
-        methods=["GET"],
-        name=None,
-        handler=_delegates_to_callback_get,
-        summary="Callback",
+        handler=_plain,
+        summary="Declared",
         tags=["t"],
         authed=False,
         request_model=None,
-        response_model=None,
-        no_body_reason="test fixture: response body not under test",
+        response_model=_Body,
+        enveloped=enveloped,
+        success_media_types=media,
     )
-    (meta,) = registry.routes()
-    # The handler returns no response class of its own — the ``text/html`` surface
-    # is derived from the name of the delegated ``_callback_get`` responder.
-    assert meta.success_media_types == {"GET": ("text/html",)}
 
 
-def test_media_type_is_derived_per_method() -> None:
+def test_an_undeclared_method_publishes_json() -> None:
     registry = RouteRegistry()
-    registry.record(
-        path="/api/callback",
-        methods=["GET", "POST"],
-        name=None,
-        handler=_method_dispatching_callback,
-        summary="Callback",
-        tags=["t"],
-        authed=False,
-        request_model=None,
-        response_model=None,
-        no_body_reason="test fixture: response body not under test",
-    )
+    _record_media(registry, ["GET", "POST"], None)
     (meta,) = registry.routes()
-    # One registration, two methods: the GET branch serves the confirm page while
-    # POST answers the JSON envelope, so each method derives its own media type.
-    assert meta.success_media_types == {"GET": ("text/html",), "POST": ("application/json",)}
+    assert meta.success_media_types == {"GET": ("application/json",), "POST": ("application/json",)}
 
 
-def test_a_method_serving_two_content_types_lists_both() -> None:
+def test_a_declared_method_publishes_its_types_and_the_rest_json() -> None:
     registry = RouteRegistry()
-    registry.record(
-        path="/api/export",
-        methods=["GET"],
-        name=None,
-        handler=_csv_or_json_export,
-        summary="Export",
-        tags=["t"],
-        authed=True,
-        action="read",
-        request_model=None,
-        response_model=None,
-        no_body_reason="test fixture: response body not under test",
-    )
+    _record_media(registry, ["GET", "POST"], {"GET": ("text/csv", "application/octet-stream")})
     (meta,) = registry.routes()
-    # A single method that serves either a CSV body or a JSON download documents
-    # both content types rather than being falsely pinned to one.
-    assert meta.success_media_types == {"GET": ("text/csv", "application/octet-stream")}
+    assert meta.success_media_types == {"GET": ("text/csv", "application/octet-stream"), "POST": ("application/json",)}
+
+
+def test_a_media_key_outside_the_methods_is_refused() -> None:
+    with pytest.raises(ValueError, match="names method 'POST', which the route does not serve"):
+        _record_media(RouteRegistry(), ["GET"], {"POST": ("text/plain",)})
+
+
+def test_an_empty_media_tuple_is_refused() -> None:
+    with pytest.raises(ValueError, match="must name at least one media type"):
+        _record_media(RouteRegistry(), ["GET"], {"GET": ()})
+
+
+def test_a_non_json_type_on_a_raw_json_body_is_refused() -> None:
+    with pytest.raises(ValueError, match="non-JSON type on an enveloped=False route"):
+        _record_media(RouteRegistry(), ["GET"], {"GET": ("text/html",)}, enveloped=False)
+
+
+def test_a_raw_json_body_may_declare_json() -> None:
+    registry = RouteRegistry()
+    _record_media(registry, ["GET"], {"GET": ("application/json",)}, enveloped=False)
+    (meta,) = registry.routes()
+    assert meta.success_media_types == {"GET": ("application/json",)}
 
 
 # -- Record-time minimum bar --------------------------------------------------

@@ -565,3 +565,16 @@ def test_a_re_rate_never_refunds_a_drained_bucket(monkeypatch, small_settings):
     result = caps.admit_address("vip", per_hour=50)
     assert result is not AddressAdmission.ADMIT
     assert caps._buckets["vip"].tokens < 1
+
+
+def test_clamp_sync_wait_bounds_by_the_settings_max() -> None:
+    caps = TurnCaps(lambda: ConversationsSettings(sync_wait_max_seconds=30))
+    assert caps.clamp_sync_wait(5) == 5
+    assert caps.clamp_sync_wait(30) == 30
+    assert caps.clamp_sync_wait(99999) == 30
+
+
+def test_effective_rate_is_the_route_override_else_the_global_rate() -> None:
+    caps = TurnCaps(lambda: ConversationsSettings(per_address_turns_per_hour=40))
+    assert caps.effective_rate(None) == 40
+    assert caps.effective_rate(7) == 7

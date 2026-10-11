@@ -942,9 +942,9 @@ async def test_delete_route_cancels_parks_before_removing_the_routing_row(
     real_cancel = interactions_helper.cancel_parks_for_thread
     real_delete = manager.delete_route
 
-    async def _cancel(thread_id: str, *, reason: str = "thread_deleted"):
+    async def _cancel(thread_id: str, *, also_subjects=(), reason: str):
         order.append("cancel")
-        return await real_cancel(thread_id, reason=reason)
+        return await real_cancel(thread_id, also_subjects=also_subjects, reason=reason)
 
     async def _delete(route_name: str):
         order.append("delete_route")

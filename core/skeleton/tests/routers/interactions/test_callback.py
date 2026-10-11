@@ -911,3 +911,23 @@ async def test_callback_post_oversized_query_413_when_off(wired):
     _off(wired)
     resp = await router.callback(make_request("POST", path_params={"ticket": "NOPE"}, query="a=" + "z" * 100))
     assert resp.status_code == 413
+
+
+async def test_post_reads_the_body_once(wired, monkeypatch):
+    # The size guard's bounded read is the one read of the body: the claim takes those bytes.
+    from tai42_skeleton.routers.interactions import callback as callback_module
+
+    reads = []
+    real_read = callback_module.read_bounded_body
+
+    async def _counting_read(request, cap):
+        reads.append(cap)
+        return await real_read(request, cap)
+
+    monkeypatch.setattr(callback_module, "read_bounded_body", _counting_read)
+    task = asyncio.create_task(ask("Sign?", answer_format="external", link="{callback_url}", timeout=5))
+    await await_add_event(wired.fake, wired.store)
+    resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"signed":true}'))
+    assert resp.status_code == 200
+    assert await task == {"signed": True}
+    assert len(reads) == 1

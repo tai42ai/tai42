@@ -235,10 +235,11 @@ def test_declared_route_metadata_body_and_family_default_none():
     meta = DeclaredRouteMetadata(reload_gated=False, reads_body=False, error_statuses=(), success_status=200)
     assert meta.max_body_bytes is None
     assert meta.rate_limit_family is None
+    assert meta.rate_limit_budget is None
 
 
 def test_declared_route_metadata_carries_body_and_family_overrides():
-    from tai42_contract.app import DeclaredRouteMetadata
+    from tai42_contract.app import DeclaredRouteMetadata, RateLimitBudget
 
     meta = DeclaredRouteMetadata(
         reload_gated=False,
@@ -246,10 +247,35 @@ def test_declared_route_metadata_carries_body_and_family_overrides():
         error_statuses=(),
         success_status=200,
         max_body_bytes=26214400,
-        rate_limit_family="channels_web_uploads",
+        rate_limit_family="synthetic_uploads",
+        rate_limit_budget=RateLimitBudget(limit=20, burst=5),
     )
     assert meta.max_body_bytes == 26214400
-    assert meta.rate_limit_family == "channels_web_uploads"
+    assert meta.rate_limit_family == "synthetic_uploads"
+    assert meta.rate_limit_budget == RateLimitBudget(limit=20, burst=5)
+
+
+def test_rate_limit_budget_is_a_frozen_value_reexported():
+    import dataclasses
+
+    from tai42_contract import RateLimitBudget as TopLevel
+    from tai42_contract.app import RateLimitBudget as FromApp
+    from tai42_contract.app.facets import RateLimitBudget as Source
+
+    assert TopLevel is Source
+    assert FromApp is Source
+    budget = Source(limit=3, burst=2)
+    assert budget == Source(limit=3, burst=2)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        budget.limit = 4  # type: ignore[misc]
+
+
+def test_custom_route_declares_success_media_types_keyword():
+    from tai42_contract.app import AppHttp
+
+    param = inspect.signature(AppHttp.custom_route).parameters["success_media_types"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is None
 
 
 def test_facade_partition_against_frozen_surface():

@@ -16,9 +16,9 @@ from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.models import DeliveryStatus
+from tai42_skeleton.conversations.thread_ids import route_thread_id
 from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
-from tai42_skeleton.conversations.turn import keys as keys_module
 from tai42_skeleton.conversations.turn import outcome as outcome_module
 from tai42_skeleton.conversations.turn import overlap as overlap_module
 from tai42_skeleton.conversations.turn import record as record_module
@@ -220,7 +220,7 @@ async def test_tool_target_kwargs_carry_the_turn_thread_id(env, monkeypatch):
     message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "run it", "PID1")
     await _settle()
 
-    expected_thread = keys_module._thread_id("tool-line", "+15550002222")
+    expected_thread = route_thread_id("tool-line", "+15550002222")
     assert tools.calls[0]["arguments"] == {"tid": expected_thread}
     # The kwargs' thread_id is the very thread the turn's record was written under — the id
     # the thread doors accept (``DELETE .../thread?thread_id=``).

@@ -328,3 +328,18 @@ async def test_failed_register_and_unregister_do_not_bump_version(install):
     resp = await router.unregister_sub_mcp(_req(slug="ghost"))
     assert resp.status_code == 404
     assert version_key not in fake.redis._strings
+
+
+@pytest.mark.parametrize(
+    ("slug", "transport", "named"),
+    [("a/b", "http", "slug"), ("weather\n", "http", "slug"), ("weather", "carrier-pigeon", "transport")],
+)
+async def test_the_operation_refuses_a_bad_slug_or_transport_for_every_door(install, slug, transport, named):
+    # The projected MCP tool runs the operation directly, with no HTTP extractor in front:
+    # the core's rule refuses it with the same typed 400.
+    from tai42_skeleton.operations import BadRequestError
+    from tai42_skeleton.operations.sub_mcp import register_sub_mcp
+
+    with pytest.raises(BadRequestError, match=named) as excinfo:
+        await register_sub_mcp(slug=slug, tools=["get_forecast"], transport=transport)
+    assert excinfo.value.status == 400

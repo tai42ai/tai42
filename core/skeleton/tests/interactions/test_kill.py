@@ -708,7 +708,7 @@ async def test_erase_by_subject_key_reaches_a_park_on_another_thread(wired, monk
 
 
 async def test_merge_rekeys_the_index_stored_context_and_thread_index(wired, monkeypatch, kill_handlers):
-    from tai42_skeleton.interactions.helper import rekey_parks_for_merge
+    from tai42_skeleton.interactions.helper import rekey_park_subjects
 
     candidates = SubjectCandidates(
         target_kind="agent",
@@ -717,7 +717,9 @@ async def test_merge_rekeys_the_index_stored_context_and_thread_index(wired, mon
     )
     await _add_park(wired, iid="m1", delivery=None, run_delivery_id="rd-m", candidates=candidates)
 
-    await rekey_parks_for_merge("absorbed", "survivor")
+    await rekey_park_subjects(
+        [("person", "absorbed", "survivor"), ("thread", "bridge:@person:absorbed", "bridge:@person:survivor")]
+    )
 
     # The subject index moved from the absorbed person key to the survivor's.
     assert await wired.fake.smembers(wired.store.subject_parks_key("agent", "scope-m", "person", "absorbed")) == set()
@@ -791,8 +793,8 @@ async def test_cancel_parks_for_thread_kills_via_both_indices(wired, monkeypatch
     assert await wired.store.get_state(wired.fake, "conv") is None
 
 
-async def test_cancel_parks_for_person_reaches_thread_and_person_subjects(wired, monkeypatch, kill_handlers):
-    from tai42_skeleton.interactions.helper import cancel_parks_for_person
+async def test_cancel_parks_for_thread_also_reaches_the_extra_subjects(wired, monkeypatch, kill_handlers):
+    from tai42_skeleton.interactions.helper import cancel_parks_for_thread
 
     _wire_tools(monkeypatch, {"deliver_tool": lambda a: None})
     register_park_kill_handler(_recording_handler([]))
@@ -802,8 +804,19 @@ async def test_cancel_parks_for_person_reaches_thread_and_person_subjects(wired,
     await _add_park(wired, iid="byperson", delivery=None, run_delivery_id="rd-p1", candidates=person_c)
     await _add_park(wired, iid="bythread", delivery=None, run_delivery_id="rd-p2", candidates=thread_c)
 
-    reached = await cancel_parks_for_person("pP")
+    reached = await cancel_parks_for_thread(
+        "bridge:@person:pP", also_subjects=[("person", "pP")], reason="person_erased"
+    )
 
     assert set(reached) == {"byperson", "bythread"}
     assert await wired.store.get_state(wired.fake, "byperson") is None
     assert await wired.store.get_state(wired.fake, "bythread") is None
+
+
+async def test_rekey_park_subjects_skips_a_move_onto_itself(wired, monkeypatch, kill_handlers):
+    from tai42_skeleton.interactions.helper import rekey_park_subjects
+
+    candidates = SubjectCandidates(target_kind="agent", target_name="scope-s", by_kind={"person": "same"})
+    await _add_park(wired, iid="s1", delivery=None, run_delivery_id="rd-s", candidates=candidates)
+    await rekey_park_subjects([("person", "same", "same")])
+    assert await wired.fake.smembers(wired.store.subject_parks_key("agent", "scope-s", "person", "same")) == {"s1"}

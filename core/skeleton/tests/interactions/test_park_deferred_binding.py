@@ -495,7 +495,9 @@ async def test_person_erase_scrubs_the_stored_run_input(monkeypatch, fake_redis)
     raw = await wired.fake.hget(wired.store.state_key("pe1"), "run_input")
     assert raw is not None
 
-    reached = await helper_module.cancel_parks_for_person("alice")
+    reached = await helper_module.cancel_parks_for_thread(
+        "bridge:@person:alice", also_subjects=[("person", "alice")], reason="person_erased"
+    )
     assert "pe1" in reached
     # The state hash is gone — the run input left with it.
     assert await wired.store.get_state(wired.fake, "pe1") is None

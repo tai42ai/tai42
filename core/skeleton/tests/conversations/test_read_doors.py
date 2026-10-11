@@ -329,6 +329,8 @@ async def test_a_thread_reads_oldest_first_for_a_grant_holder(store, monkeypatch
     assert read["total"] == 2
     assert read["next_page"] is None
     assert read["order"] == "asc"
+    # A route-keyed thread aggregates no linked person.
+    assert read["person_id"] is None
     assert read["items"][0]["inbound_text"] == "ask t0"
     # The caller-safe projection, not the admin one.
     assert "error" not in read["items"][0]
