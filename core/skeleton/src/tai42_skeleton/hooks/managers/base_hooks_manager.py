@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from tai42_kit.interactions import DoorContractOutcome
 
 from tai42_contract.app import tai42_app
-from tai42_contract.hooks.models import HookParams, HookSubject
+from tai42_contract.hooks.models import HookParams, HookSubject, TopicVerifierBinding
 from tai42_contract.interactions.door_contract import PARKED_VARIABLE
 from tai42_contract.monitoring import MonitoringLevel, SpanKind
 from tai42_contract.states import StateContext, SubjectCandidates
@@ -211,8 +211,8 @@ class BaseHooksManager(ABC):
     # A binding is the ``{"verifier": <name>, "config": {...}}`` shape validated
     # against ``TopicVerifierBinding`` naming a registered webhook verifier and its
     # per-topic config. The config carries a ``secret_env`` (an env var NAME),
-    # never a secret value. Both manager backends store the same shape behind these
-    # four methods.
+    # never a secret value. Both manager backends validate on write and read, and the
+    # reads return the model.
 
     @abstractmethod
     async def set_topic_verifier(self, topic: str, binding: dict[str, Any]) -> None:
@@ -220,7 +220,7 @@ class BaseHooksManager(ABC):
         ...
 
     @abstractmethod
-    async def get_topic_verifier(self, topic: str) -> dict[str, Any] | None:
+    async def get_topic_verifier(self, topic: str) -> TopicVerifierBinding | None:
         """Return the webhook-verifier binding for ``topic``, or ``None`` when none is set."""
         ...
 
@@ -230,7 +230,7 @@ class BaseHooksManager(ABC):
         ...
 
     @abstractmethod
-    async def all_topic_verifiers(self) -> dict[str, dict[str, Any]]:
+    async def all_topic_verifiers(self) -> dict[str, TopicVerifierBinding]:
         """Return every topic's webhook-verifier binding, keyed by topic."""
         ...
 

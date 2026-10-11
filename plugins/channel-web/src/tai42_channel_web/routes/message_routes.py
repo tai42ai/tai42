@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import Response
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import BlankInboundTextError, validate_entry_params
+from tai42_contract.conversations import BlankInboundTextError, ThreadQueueOverflowError
 from tai42_contract.interactions import (
     IngestedMedia,
     MediaAlreadyBoundError,
@@ -22,6 +22,7 @@ from tai42_contract.interactions import (
     MediaOrigin,
 )
 from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
+from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
 from tai42_kit.conversations.inbound_media import build_inbound_media_params, inbound_media_placeholder
 from tai42_kit.utils.data.form_text import render_form_text
 
@@ -50,12 +51,6 @@ from tai42_channel_web.store.registrations import SessionRegistration
 from tai42_channel_web.store.transcript import append_message, transcript_order
 
 logger = logging.getLogger(__name__)
-
-# The store's per-thread FIFO overflow is a skeleton-internal type a channel plugin
-# cannot import (it sits below the skeleton); it is matched by class name to answer a
-# retriable 503 rather than an opaque 500. The channel accept path silently sheds
-# rate limits (no exception), so there is no 429 to map here.
-_THREAD_QUEUE_OVERFLOW = "ThreadQueueOverflowError"
 
 # ONE wording for a form token that is unknown, expired, or another conversation's:
 # no response may differ by which, or the refusal becomes a token/ownership oracle.
@@ -114,9 +109,7 @@ def _turn_params(registration: SessionRegistration, reply_id: str | None) -> dic
     params = dict(registration.params)
     if reply_id is not None:
         params["reply_id"] = reply_id
-    if not params:
-        return None
-    return validate_entry_params(params)
+    return bound_entry_params(params, mode=OverBoundParamsMode.REFUSE, door="web")
 
 
 async def _bind_attachments(
@@ -170,7 +163,7 @@ def _turn_text_and_params_for_media(
         sha256=first.sha256,
     )
     try:
-        merged = validate_entry_params({**(params or {}), **media_params})
+        merged = bound_entry_params({**(params or {}), **media_params}, mode=OverBoundParamsMode.REFUSE, door="web")
     except ValueError as exc:
         return text, params, _error(str(exc), 422)
     return turn_text, merged, None
@@ -242,10 +235,10 @@ async def _bridge_inbound_message(
             return _error(blank_message, 400)
         except LookupError as exc:
             return _error(str(exc), 404)
-        except Exception as exc:
-            if type(exc).__name__ == _THREAD_QUEUE_OVERFLOW:
-                return _error(str(exc), 503)
-            raise
+        except ThreadQueueOverflowError as exc:
+            # A full per-thread FIFO is retriable. The channel accept path sheds rate limits
+            # silently (no exception), so there is no 429 to map here.
+            return _error(str(exc), 503)
         await append_message(
             identity,
             address,

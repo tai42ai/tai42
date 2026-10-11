@@ -75,7 +75,7 @@ tools:
         - - name: ask_external
             config:
               verifier:
-                name: shared_secret
+                verifier: shared_secret
                 config:
                   header: X-TAI-Bridge-Secret
                   secret_env: TAI_BRIDGE_CALLBACK_SECRET
@@ -138,8 +138,8 @@ test-mode session is free to mint for any amount and satisfies a const pin exact
 guarantee (the ingress ACKs before the hook runs), so `reconcile_stripe_payments` re-derives paid
 sessions from Stripe's own list and re-answers anything the hook lost. Its default 26-hour
 `lookback_hours` covers a Checkout link's full ~24h lifetime plus slack, and answers are paced by
-`STRIPE_RECONCILE_ANSWER_INTERVAL_SECONDS` (default 1.2s) to stay off the callback door's rate
-limiter. **Cadence and lookback are a coupled pair — state and tune them together**, never one
+`STRIPE_RECONCILE_ANSWER_INTERVAL_SECONDS` (default 1.2s) so a batch does not burst the callback
+door. **Cadence and lookback are a coupled pair — state and tune them together**, never one
 number alone: at a 15-minute cadence a 26-hour lookback re-scans each paid session on ~104
 consecutive runs (every re-answer is an idempotent `already_answered` 200, but it is standing
 load). After an outage LONGER than the lookback, run `reconcile_stripe_payments` once by hand with a
@@ -207,7 +207,7 @@ returns the endpoint and its **one-time signing secret**:
 nowhere — no config, no env, no file. Persisting it (through the platform's config API) is the
 caller's job; a lost secret cannot be re-fetched. The `url` is where Stripe delivers events *to*
 us, so it is validated as an `https` URL with a host and is **not** run through the outbound
-callback SSRF pin (that pin guards URLs this process dials; this one is dialed by Stripe). The
+callback pin (that pin guards URLs this process dials; this one is dialed by Stripe). The
 created endpoint's `livemode` is asserted against the key's mode.
 
 `list_stripe_webhook_endpoints` returns `{ "endpoints": [{ "endpoint_id", "url", "status",
@@ -228,7 +228,7 @@ together enable it.
 | Request timeout | `STRIPE_REQUEST_TIMEOUT_SECONDS` | `20` | Per-request timeout. |
 | Reconcile pacing | `STRIPE_RECONCILE_ANSWER_INTERVAL_SECONDS` | `1.2` | Delay between reconcile answers. |
 | Bridge secret | `TAI_BRIDGE_CALLBACK_SECRET` | — | Authenticates the bridge to the callback door. Required for confirm/reconcile. |
-| Public base | `INTERACTIONS_PUBLIC_BASE_URL` | — | The origin the callback POST is pinned to. Required for confirm/reconcile. |
+| Public base | `INTERACTIONS_PUBLIC_BASE_URL` | — | Read by the platform, which mints the callback URL the POST is pinned to. Required for confirm/reconcile. |
 
 Secrets live only in the environment. A missing or empty required secret raises loudly (fails
 closed) — never a silently-unauthenticated request.

@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel
+from tai42_contract.hooks import TopicVerifierBinding
 from tai42_contract.interactions import AnswerFormat, FormData, FormPage, FormReactions
 
 _CALLBACK_PLACEHOLDER = "{callback_url}"
@@ -81,7 +82,7 @@ def build_payload(
     options: list[str] | None,
     schema: type[BaseModel] | dict[str, Any] | None,
     url: str | None = None,
-    verifier: dict[str, Any] | None = None,
+    verifier: TopicVerifierBinding | None = None,
     data: FormData | dict[str, Any] | None = None,
     pages: list[FormPage] | list[dict[str, Any]] | None = None,
     reactions: FormReactions | dict[str, Any] | None = None,
@@ -89,7 +90,7 @@ def build_payload(
     """Build the stored ``format_payload`` for ``answer_format``, or ``None`` when it carries none.
 
     The answer part (:func:`answer_payload`) plus, for EXTERNAL, its delivery keys: the ``url``
-    the human visits (always present) and an optional ``verifier`` (``{"name", "config"}``) the
+    the human visits (always present) and an optional ``verifier`` (stored as ``{"verifier", "config"}``) the
     callback route authenticates the signed server-to-server answer with — the client-facing
     serialization strips it (see ``routers.interactions``). The URL exists only after the link is
     resolved, so EXTERNAL is built after that step.
@@ -99,7 +100,7 @@ def build_payload(
         return answer
     payload: dict[str, Any] = {"url": url, **(answer or {})}
     if verifier is not None:
-        payload["verifier"] = verifier
+        payload["verifier"] = verifier.model_dump(mode="json")
     return payload
 
 

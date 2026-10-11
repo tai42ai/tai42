@@ -39,7 +39,9 @@ async def _export_webhooks() -> dict[str, Any]:
     # verified topic restores as a public door.
     return {
         "hooks": [params.model_dump(mode="json") for params in hooks.values()],
-        "topic_verifiers": await manager.all_topic_verifiers(),
+        "topic_verifiers": {
+            topic: binding.model_dump(mode="json") for topic, binding in (await manager.all_topic_verifiers()).items()
+        },
         **(await export_trigger_links()),
     }
 

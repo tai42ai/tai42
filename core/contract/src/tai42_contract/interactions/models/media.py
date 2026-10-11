@@ -13,6 +13,7 @@ import ipaddress
 import re
 from collections.abc import Sequence
 from enum import StrEnum
+from typing import Final
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, field_validator, model_validator
@@ -31,7 +32,8 @@ class MediaKind(StrEnum):
 # The media kinds that carry a fetchable file body (as opposed to ``LINK``, a labelled
 # anchor the human clicks through). They share one url discipline — an absolute https url, a
 # same-origin served-media reference, or an absolute served-media url — and only ``IMAGE``
-# additionally admits an inline ``data:image/*`` URI (the inbox CSP ``img-src`` renders it).
+# additionally admits an inline ``data:image/*`` URI (the inbox CSP ``img-src`` renders it); the
+# ask and channel-notify paths store such an image by reference before a channel sends it.
 FILE_MEDIA_KINDS = frozenset({MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.VIDEO, MediaKind.AUDIO})
 
 
@@ -71,8 +73,9 @@ LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 _DNS_LABEL = re.compile(r"[A-Za-z0-9-]{1,63}")
 
-# A stored-media id: the urlsafe-base64 (no padding) of 32 random bytes, 43 chars.
-_MEDIA_ID = re.compile(r"[A-Za-z0-9_-]{43}")
+#: A stored-media id: the urlsafe-base64 (no padding) of 32 random bytes, 43 chars. Always
+#: matched with ``fullmatch``.
+MEDIA_ID_RE: Final = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 def _is_media_route_url(value: str) -> bool:
@@ -80,7 +83,7 @@ def _is_media_route_url(value: str) -> bool:
     # followed by a well-formed 43-char stored-media id and nothing else.
     if not value.startswith(MEDIA_ROUTE_PREFIX):
         return False
-    return _MEDIA_ID.fullmatch(value[len(MEDIA_ROUTE_PREFIX) :]) is not None
+    return MEDIA_ID_RE.fullmatch(value[len(MEDIA_ROUTE_PREFIX) :]) is not None
 
 
 def _label_is_numberish(label: str) -> bool:
@@ -165,7 +168,7 @@ def _is_served_media_url(value: str) -> bool:
         return False
     if split.query or split.fragment or not split.path.startswith(MEDIA_ROUTE_PREFIX):
         return False
-    return _MEDIA_ID.fullmatch(split.path[len(MEDIA_ROUTE_PREFIX) :]) is not None
+    return MEDIA_ID_RE.fullmatch(split.path[len(MEDIA_ROUTE_PREFIX) :]) is not None
 
 
 def served_media_id(url: str) -> str | None:

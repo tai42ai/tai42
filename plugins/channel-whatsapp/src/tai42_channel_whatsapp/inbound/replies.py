@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from tai42_kit.conversations.entry_params import put_entry_param
+
 from tai42_channel_whatsapp.correlation import PendingQuestion, already_seen, peek_pending
 from tai42_channel_whatsapp.inbound.answers import _bridge_inbound, _resolve_answer
 from tai42_channel_whatsapp.inbound.forms import _handle_form_reply
-from tai42_channel_whatsapp.inbound.params import _merged_params, _put_param
+from tai42_channel_whatsapp.inbound.params import _merged_params
 
 
 async def _handle_text(
@@ -114,8 +116,8 @@ async def _handle_interactive(
         return
     reply_id, title, description = _extract_interactive_reply(interactive)
     reply_params: dict[str, str] = {}
-    _put_param(reply_params, "reply_id", reply_id)
-    _put_param(reply_params, "reply_description", description)
+    put_entry_param(reply_params, "reply_id", reply_id, door="whatsapp")
+    put_entry_param(reply_params, "reply_description", description, door="whatsapp")
 
     # Peek the pending ask (non-destructive) and check the tap against it. A non-answer
     # must not touch the pending — bridge the tap's title and leave the ask untouched.
@@ -155,7 +157,7 @@ async def _handle_button(
     text = text_value if isinstance(text_value, str) else ""
     payload = button.get("payload") if isinstance(button, dict) else None
     button_params: dict[str, str] = {}
-    _put_param(button_params, "button_payload", payload)
+    put_entry_param(button_params, "button_payload", payload, door="whatsapp")
 
     pending = await peek_pending(phone_number_id, wa_id)
     if pending is None:

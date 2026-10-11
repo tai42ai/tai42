@@ -19,12 +19,13 @@ per-tool index and the settings.
 | `STRIPE_SECRET_KEY` | unset | Stripe secret or restricted key. Missing or empty raises on every tool call. |
 | `STRIPE_API_BASE` | `https://api.stripe.com` | Stripe API origin. |
 | `STRIPE_REQUEST_TIMEOUT_SECONDS` | `20` | Per-request HTTP timeout in seconds. |
-| `STRIPE_RECONCILE_ANSWER_INTERVAL_SECONDS` | `1.2` | Serial pacing between answers in a reconciliation run. |
+| `STRIPE_RECONCILE_ANSWER_INTERVAL_SECONDS` | `1.2` | Serial pacing between answers in a reconciliation run, so a batch does not burst the callback door. |
 
 Two further values are read under their unprefixed platform names, shared with the
 rest of the deployment: `TAI_BRIDGE_CALLBACK_SECRET` (signs the answer the tools post
-back) and `INTERACTIONS_PUBLIC_BASE_URL` (the callback origin). Both must be present on
-every process — app and worker — that runs these tools.
+back) and `INTERACTIONS_PUBLIC_BASE_URL` (read by the platform, which mints the callback
+URL every answer POST is pinned to). Both must be present on every process — app and worker —
+that runs these tools.
 
 The tools reject a session whose `livemode` disagrees with the configured key's mode,
 so a worker's key must be the same mode (`sk_live_`/`rk_live_` vs `sk_test_`/`rk_test_`)

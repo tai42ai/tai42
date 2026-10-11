@@ -12,7 +12,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from tai42_skeleton.interactions.settings import InteractionsSettings
+from tai42_skeleton.interactions.settings import InteractionsSettings, callback_url_prefix
 
 
 @dataclass(frozen=True)
@@ -104,7 +104,8 @@ def mint_callback_ticket(
         return None
     # The settings validator guarantees a set public_base_url is https:// (or localhost
     # http://); only absence is checked here.
-    if settings.public_base_url is None:
+    prefix = callback_url_prefix(settings)
+    if prefix is None:
         raise RuntimeError(
             "external answer_format (and channel delivery) requires INTERACTIONS_PUBLIC_BASE_URL to be set"
         )
@@ -112,5 +113,5 @@ def mint_callback_ticket(
     ticket_ttl = max(1, math.ceil((window.timeout_at - window.created_at).total_seconds()))
     if mode == "async":
         ticket_ttl += window.park_ttl_margin_seconds
-    callback_url = f"{settings.public_base_url.rstrip('/')}/api/interactions/callback/{ticket}"
+    callback_url = f"{prefix}{ticket}"
     return CallbackTicket(ticket=ticket, ticket_ttl=ticket_ttl, callback_url=callback_url)

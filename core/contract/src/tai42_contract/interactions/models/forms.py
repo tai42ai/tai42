@@ -11,9 +11,10 @@ coverage with unique display slots, and reaction triggers that name real fields/
 from __future__ import annotations
 
 import re
-from typing import Any, Literal, cast
+from enum import StrEnum
+from typing import Annotated, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 
 _SCALAR_FORM_TYPES = ("string", "boolean", "integer", "number")
 
@@ -207,6 +208,48 @@ class FormReactions(BaseModel):
     def has_trigger(self) -> bool:
         """Whether this declares at least one reaction trigger (a field change, a page advance, or submit)."""
         return bool(self.field_changed or self.page_advanced or self.submitted)
+
+
+class FormReactionEventKind(StrEnum):
+    """The event kinds a reacting form fires on; one per :class:`FormReactions` trigger."""
+
+    FIELD_CHANGED = "field_changed"
+    PAGE_ADVANCED = "page_advanced"
+    SUBMITTED = "submitted"
+
+
+class FieldChangedEvent(BaseModel):
+    """A declared ``field_changed`` input field changed."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal[FormReactionEventKind.FIELD_CHANGED] = FormReactionEventKind.FIELD_CHANGED
+    field: str = Field(min_length=1)
+
+
+class PageAdvancedEvent(BaseModel):
+    """A declared ``page_advanced`` page was advanced past."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal[FormReactionEventKind.PAGE_ADVANCED] = FormReactionEventKind.PAGE_ADVANCED
+    page: str = Field(min_length=1)
+
+
+class SubmittedEvent(BaseModel):
+    """The form was submitted and its ``submitted`` reaction checks it before it is accepted."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal[FormReactionEventKind.SUBMITTED] = FormReactionEventKind.SUBMITTED
+
+
+#: One form-reaction event, discriminated on ``kind``.
+FormReactionEvent = Annotated[FieldChangedEvent | PageAdvancedEvent | SubmittedEvent, Field(discriminator="kind")]
+
+
+class FormReactionEventBody(RootModel[FormReactionEvent]):
+    """The published form of one form-reaction event."""
 
 
 def _schema_properties(schema: dict[str, Any]) -> dict[str, dict[str, Any]]:

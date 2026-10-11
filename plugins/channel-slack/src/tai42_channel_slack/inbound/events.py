@@ -29,13 +29,15 @@ from tai42_contract.conversations import InboundMediaKind, InboundRejectionReaso
 from tai42_contract.interactions import (
     IngestedMedia,
     MediaOrigin,
-    MediaSourceReadError,
-    MediaStoreUnavailableError,
-    MediaTooLargeError,
-    MediaTypeNotAllowedError,
 )
 from tai42_kit.conversations.inbound_media import build_inbound_media_params, inbound_media_placeholder
-from tai42_kit.net import MediaFetchError, UrlGuardError, open_media_stream
+from tai42_kit.net import open_media_stream
+from tai42_kit.net.media_faults import (
+    MEDIA_FETCH_AND_INGEST_FAULTS,
+    inbound_media_kind_for_mime,
+    media_fault_is_transient,
+    media_rejection_reason,
+)
 from tai42_kit.settings import require_secret
 
 from tai42_channel_slack.correlation import claim_dedupe, release_dedupe
@@ -160,28 +162,6 @@ async def _process_event(payload: dict, event_id: str) -> Response:
     return await _bridge(settings.bot_user_id, channel, text, event_id)
 
 
-def _media_kind(mimetype: str | None) -> InboundMediaKind:
-    """Map a Slack file ``mimetype`` onto the generic inbound-media wire kind.
-
-    By the mime major type: ``image``/``video``/``audio`` map to themselves,
-    ``application``/``text`` to ``document``; any other present major type
-    (e.g. ``model``/``font``) and a missing/blank ``mimetype`` (external or unprocessed
-    files may carry none) to ``file``.
-    """
-    if not mimetype:
-        return InboundMediaKind.FILE
-    major = mimetype.split("/", 1)[0].strip().lower()
-    if major == "image":
-        return InboundMediaKind.IMAGE
-    if major == "video":
-        return InboundMediaKind.VIDEO
-    if major == "audio":
-        return InboundMediaKind.AUDIO
-    if major in ("application", "text"):
-        return InboundMediaKind.DOCUMENT
-    return InboundMediaKind.FILE
-
-
 def _file_download_url(file: dict) -> str | None:
     """The URL the file's bytes are fetched from, or ``None`` when the file exposes none.
 
@@ -263,20 +243,10 @@ async def _fetch_and_ingest_file(
                 declared_size=declared_size or stream.content_length,
                 origin=origin,
             )
-    except MediaFetchError as exc:
-        if exc.transient:
+    except MEDIA_FETCH_AND_INGEST_FAULTS as exc:
+        if media_fault_is_transient(exc):
             raise
-        return InboundRejectionReason.COULD_NOT_RECEIVE
-    except UrlGuardError:
-        return InboundRejectionReason.COULD_NOT_RECEIVE
-    except MediaSourceReadError:
-        raise
-    except MediaTooLargeError:
-        return InboundRejectionReason.TOO_LARGE
-    except MediaTypeNotAllowedError:
-        return InboundRejectionReason.UNSUPPORTED_TYPE
-    except MediaStoreUnavailableError:
-        return InboundRejectionReason.COULD_NOT_RECEIVE
+        return media_rejection_reason(exc)
 
 
 async def _bridge_one_file(
@@ -303,7 +273,7 @@ async def _bridge_one_file(
         raise ValueError(f"slack file_share event {event_id} file {index} is not an object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     filename = _nonempty_str(file.get("name"))
     mime = _nonempty_str(file.get("mimetype"))
-    kind = _media_kind(mime)
+    kind = inbound_media_kind_for_mime(mime)
     url = _file_download_url(file)
     if url is None:
         # Nothing to fetch: a file with neither a fetchable body nor a name cannot be
@@ -408,7 +378,9 @@ async def _bridge_files(event: dict, our_identity: str | None, event_id: str) ->
             channel,
             caption,
             event_id,
-            params=build_inbound_media_params(door="slack", kind=_media_kind(first_mime), mime_type=first_mime),
+            params=build_inbound_media_params(
+                door="slack", kind=inbound_media_kind_for_mime(first_mime), mime_type=first_mime
+            ),
         )
         bridged = True
 

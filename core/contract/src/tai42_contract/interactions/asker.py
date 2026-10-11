@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from pydantic import BaseModel
 
+    from tai42_contract.hooks.models import TopicVerifierBinding
     from tai42_contract.interactions.models import FormData, FormPage, FormReactions, MediaItem
 
 
@@ -54,7 +55,7 @@ class Ask(Protocol):
         group_id: str | None = None,
         timeout: float | None = None,
         link: str | Callable[[str], Awaitable[str]] | None = None,
-        verifier: dict[str, Any] | None = None,
+        verifier: TopicVerifierBinding | None = None,
         channel: str | None = None,
         recipient: str | None = None,
         on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY,
@@ -108,7 +109,8 @@ class Ask(Protocol):
         advertise ``supports_form_reaction``; a ``channel=None`` reacting form is served
         by the in-app reaction door. Absent both is a static form.
 
-        ``verifier`` (``{"name", "config"}``) binds a registered webhook verifier
+        ``verifier`` (a :class:`~tai42_contract.hooks.TopicVerifierBinding`,
+        ``{"verifier", "config"}``) binds a registered webhook verifier
         to the external callback so the signed server-to-server answer is
         authenticated before it is recorded; it is only valid with
         ``answer_format="external"`` and forbidden otherwise.

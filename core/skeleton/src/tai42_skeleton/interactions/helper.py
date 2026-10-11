@@ -22,11 +22,12 @@ from __future__ import annotations
 # re-exported here so this module and the mint reference one shared module object.
 import secrets
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel
+from tai42_contract.hooks import TopicVerifierBinding
 from tai42_contract.interactions import (
     AnswerMismatchPolicy,
     FormData,
@@ -161,7 +162,7 @@ async def ask(
     group_id: str | None = None,
     timeout: float | None = None,
     link: str | Callable[[str], Awaitable[str]] | None = None,
-    verifier: dict[str, Any] | None = None,
+    verifier: TopicVerifierBinding | Mapping[str, Any] | None = None,
     channel: str | None = None,
     recipient: str | None = None,
     on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY,
@@ -194,10 +195,12 @@ async def ask(
     ``link`` is required for ``answer_format="external"`` (unless a ``channel``
     delivers the question) and forbidden otherwise.
 
-    ``verifier`` (``{"name", "config"}``) binds a registered webhook verifier to
-    the external callback so the signed server-to-server answer is authenticated
-    before it is recorded; it is only valid with ``answer_format="external"`` (a
-    verifier is meaningless without the external callback route). It is stashed
+    ``verifier`` (a :class:`~tai42_contract.hooks.TopicVerifierBinding`, or its
+    ``{"verifier", "config"}`` mapping validated into one before any state is written)
+    binds a registered webhook verifier to the external callback so the signed
+    server-to-server answer is authenticated before it is recorded; it is only valid
+    with ``answer_format="external"`` (a verifier is meaningless without the external
+    callback route). It is stashed
     server-side in the ``format_payload`` and stripped from the client frame.
 
     ``sensitive`` marks the answer body as not-to-be-persisted AND wraps the
@@ -411,7 +414,9 @@ async def ask(
             # ``link`` is non-None here (validated above); resolve BEFORE any persist so
             # a failed builder leaves zero state.
             final_url = await payload_shaping.resolve_link(link, callback.callback_url)  # type: ignore[arg-type]
-        format_payload = payload_shaping.build_payload(fmt, options, schema, url=final_url, verifier=verifier)
+        format_payload = payload_shaping.build_payload(
+            fmt, options, schema, url=final_url, verifier=validation.verifier
+        )
     else:
         format_payload = payload_shaping.build_payload(
             fmt, options, schema, data=data, pages=pages, reactions=reactions

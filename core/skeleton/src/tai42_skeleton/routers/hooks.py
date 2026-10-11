@@ -70,8 +70,8 @@ from pydantic import BaseModel, ValidationError
 from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
-from tai42_contract.hooks import HookRegister
-from tai42_contract.webhooks import FreshnessWindow, SeenSetClaim, WebhookVerificationError
+from tai42_contract.hooks import HookRegister, TopicVerifierBinding
+from tai42_contract.webhooks import FreshnessWindow, SeenSetClaim
 from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 
 from tai42_skeleton.access_control.settings import access_control_settings
@@ -96,6 +96,7 @@ from tai42_skeleton.operations.hooks import register_hook as _register_hook_op
 from tai42_skeleton.operations.hooks import set_topic_verifier as _set_topic_verifier_op
 from tai42_skeleton.operations.hooks import unregister_hook as _unregister_hook_op
 from tai42_skeleton.webhooks.settings import webhook_ingress_settings
+from tai42_skeleton.webhooks.verify import VERIFY_ERROR, WebhookVerifyFailure, verify_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -103,11 +104,6 @@ logger = logging.getLogger(__name__)
 # body reflects attacker-influenced content the caller should never cache or
 # have content-sniffed.
 _INGRESS_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"}
-
-# The constant failure message returned to the caller on a verification failure:
-# no oracle detail (a distinguishing message would leak which check failed). The
-# server-side log records the reason; the raw body is NEVER logged verbatim.
-_VERIFY_FAILED = "webhook verification failed"
 
 # The refusal a token-holder gets on an api-key-authed trigger link they rang with no
 # authenticated principal — actionable, and reachable only by a token holder.
@@ -317,7 +313,7 @@ async def _dispatch_trigger_link(resolved: ResolvedTrigger, payload: dict) -> No
 
 
 async def _verify_ingress(
-    request: Request, raw: bytes, binding: dict, topic: str, manager
+    request: Request, raw: bytes, binding: TopicVerifierBinding, topic: str, manager
 ) -> tuple[Response | None, bool]:
     """Verify the topic's bound verifier over the raw body, then enforce its replay defense.
 
@@ -326,51 +322,24 @@ async def _verify_ingress(
     legitimate first delivery, where ``post_only`` tells the caller whether to drop the
     unauthenticated query string (True for a body-signature verifier).
 
-    Fails CLOSED on every failure path: a signature failure -> 401 (constant message);
-    a ``post_only`` (body-signature) verifier rejecting GET -> 405; an unknown verifier
-    name / missing secret env / verifier bug / replay-store error -> 500. A refused
-    REPLAY is NOT a failure: it returns the idempotent already-seen 200 (nothing
+    Fails CLOSED on every failure path (:func:`verify_webhook`: 401 / 405 / 500 with the
+    constant bodies); a replay-store error or an unrecognized replay declaration is a 500. A
+    refused REPLAY is NOT a failure: it returns the idempotent already-seen 200 (nothing
     dispatched), because the sender's redelivery of an id already handled is correct.
     """
-    # ``get_topic_verifier`` validates the stored binding against
-    # ``TopicVerifierBinding`` (whose ``verifier`` carries ``min_length=1``), so
-    # ``verifier`` is a guaranteed non-empty str and ``config`` a dict here — no
-    # shape re-check needed.
-    name = binding["verifier"]
-    config = binding["config"]
     safe_topic = _sanitize_topic_for_log(topic)
     try:
-        verifier = tai42_app.webhook_verifiers.get(name)
-    except Exception:
-        # A bound name that no longer resolves (verifier module dropped from the
-        # manifest) must deny, not dispatch unverified. Loud 500, logged.
-        logger.exception("webhook verify: no registered verifier %r for topic %s", name, safe_topic)
-        return _error("webhook verification error", 500), False
-
-    post_only = bool(getattr(verifier, "post_only", False))
-    if post_only and request.method == "GET":
-        # A body-signature verifier signs the raw body; a GET door would sign an
-        # empty body while the real payload rides the URL unauthenticated.
-        return _error("this verified topic accepts POST delivery only", 405), False
-
-    try:
-        await verifier.verify(raw, request.headers, config)
-        # The verifier's per-scheme replay declaration, computed over the SAME raw
-        # bytes/headers only AFTER a passing verify. A missing required delivery-id
-        # header raises WebhookVerificationError here (fail-closed 401), exactly as a
-        # bad signature does; a binding misconfiguration raises -> 500 below.
-        defense = verifier.replay_defense(raw, request.headers, config)
-    except WebhookVerificationError as exc:
-        # Log the reason (never the raw body verbatim — a payload can itself hold
-        # sensitive data); return the constant no-oracle message.
-        logger.warning("webhook verification failed for topic %s: %s", safe_topic, exc)
-        return _error(_VERIFY_FAILED, 401), False
-    except Exception:
-        # A missing secret env var / verifier bug fails CLOSED as a loud 500, not
-        # a soft-open dispatch.
-        logger.error("webhook verifier error for topic %s", safe_topic, exc_info=True)
-        return _error("webhook verification error", 500), False
-
+        verdict = await verify_webhook(
+            binding,
+            raw,
+            request.headers,
+            method=request.method,
+            subject=f"topic {safe_topic}",
+            with_replay_defense=True,
+        )
+    except WebhookVerifyFailure as exc:
+        return _error(exc.message, exc.status), False
+    defense = verdict.replay_defense
     if isinstance(defense, SeenSetClaim):
         try:
             fresh = await manager.claim_webhook_delivery(topic, defense.key, defense.ttl_seconds)
@@ -378,21 +347,21 @@ async def _verify_ingress(
             # The seen-set store is unreachable: refuse to dispatch undefended rather
             # than let a possible replay through. Loud 500, logged.
             logger.error("webhook replay-defense store error for topic %s", safe_topic, exc_info=True)
-            return _error("webhook verification error", 500), False
+            return _error(VERIFY_ERROR, 500), False
         if not fresh:
             # A delivery id already claimed within the window: a replay (or the
             # sender's own redelivery). Refuse LOUDLY in the log, but answer the
             # idempotent already-seen 200 — nothing is dispatched, no hook re-fires.
             logger.warning("webhook replay refused for topic %s (delivery id already seen)", safe_topic)
-            return _ingress_json({"status": "already_seen", "topic": topic}), post_only
+            return _ingress_json({"status": "already_seen", "topic": topic}), verdict.post_only
     elif not isinstance(defense, FreshnessWindow):
         # Both known forms are handled above and here (a FreshnessWindow needs no
         # seen-set — its verify already stale-rejects). ANY other value is an
         # unrecognized replay declaration: never dispatch it undefended. Fail CLOSED
         # with a loud 500, logged — the same posture as a verifier bug.
         logger.error("webhook verify: unrecognized replay defense %r for topic %s", type(defense), safe_topic)
-        return _error("webhook verification error", 500), False
-    return None, post_only
+        return _error(VERIFY_ERROR, 500), False
+    return None, verdict.post_only
 
 
 # -- Hook management (AUTHED) — HTTP-edge extractors --------------------------
@@ -453,7 +422,7 @@ async def _extract_trigger_link_params(request: Request) -> dict:
 
 
 async def _extract_binding(request: Request) -> dict:
-    """Parse + structurally validate a PUT binding body into the operation's flat ``verifier`` / ``config`` args.
+    """Parse + validate a PUT binding body through :class:`TopicVerifierBinding` into the operation's args.
 
     The unknown-verifier check is the operation's, so the projected tool and CLI carry
     it too.
@@ -464,13 +433,11 @@ async def _extract_binding(request: Request) -> dict:
         raise BadRequestError("invalid JSON body") from exc
     if not isinstance(body, dict):
         raise BadRequestError("body must be a JSON object") from None
-    name = body.get("verifier")
-    if not isinstance(name, str) or not name:
-        raise BadRequestError("binding requires a non-empty 'verifier' name") from None
-    config = body.get("config", {})
-    if not isinstance(config, dict):
-        raise BadRequestError("binding 'config' must be a JSON object") from None
-    return {"verifier": name, "config": config}
+    try:
+        binding = TopicVerifierBinding.model_validate(body)
+    except ValidationError as exc:
+        raise BadRequestError(f"invalid verifier binding: {exc.errors()[0]['msg']}") from None
+    return {"verifier": binding.verifier, "config": binding.config}
 
 
 list_hooks = register_operation_route(

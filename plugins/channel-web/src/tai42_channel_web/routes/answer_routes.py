@@ -12,9 +12,10 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import validate_entry_params
 from tai42_kit.clients.impl.http import HttpxClient
+from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
 
+from tai42_channel_web.routes.callback_pin import pin_stored_callback
 from tai42_channel_web.routes.dtos import AnswerResultResponse, _answer_refusal
 from tai42_channel_web.routes.envelope import _error, _json_body, _ok
 from tai42_channel_web.routes.session_access import (
@@ -213,7 +214,7 @@ async def web_answer(request: Request) -> Response:
     # flows through the message door, so the answer body is the raw scalar/object plus
     # these params only.
     try:
-        params = validate_entry_params(dict(registration.params))
+        params = bound_entry_params(registration.params, mode=OverBoundParamsMode.REFUSE, door="web")
     except ValueError as exc:
         return _error(str(exc), 422)
 
@@ -221,6 +222,9 @@ async def web_answer(request: Request) -> Response:
     if isinstance(claimed, JSONResponse):
         return claimed
     record = claimed
+    # The claimed record is NOT restored on a refusal: a stored callback outside the platform's
+    # prefix is poisoned, and the raise answers 500 with nothing sent.
+    pin_stored_callback(record.callback_url, interaction_id=interaction_id, forwarded="answer")
 
     restores = settings.max_answer_restores
     try:

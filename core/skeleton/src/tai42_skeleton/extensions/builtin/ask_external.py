@@ -10,7 +10,8 @@ platform supplies it).
 
 The ``verifier`` that authenticates the signed server-to-server callback is
 AUTHOR-BOUND: it is supplied as extension config on the manifest ``extensions``
-entry (``{"name": "ask_external", "config": {"verifier": ...}}``) and closed over
+entry (``{"name": "ask_external", "config": {"verifier": {"verifier": <name>, "config": {...}}}}``,
+the inner value a :class:`~tai42_contract.hooks.TopicVerifierBinding`) and closed over
 at build time — it is NEVER an LLM-facing tool param, so a calling agent can
 neither drop nor forge the callback authentication.
 """
@@ -22,8 +23,10 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from makefun import create_function
+from pydantic import ValidationError
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_contract.hooks import TopicVerifierBinding
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.render import resolve_schema_body
@@ -38,6 +41,19 @@ _CONTROL_PARAMS = ("question", "answer_schema", "timeout")
 
 # The keys ``ask_external`` accepts in its author-supplied extension config.
 _CONFIG_KEYS = frozenset({"verifier"})
+
+
+def _author_verifier(raw: object) -> TopicVerifierBinding | None:
+    """The author-bound verifier binding, validated at wrap time (manifest load and reload)."""
+    if raw is None:
+        return None
+    try:
+        return TopicVerifierBinding.model_validate(raw)
+    except ValidationError as exc:
+        raise TaiValidationError(
+            f"ask_external config 'verifier' must be a {{'verifier': <name>, 'config': {{...}}}} binding: "
+            f"{exc.errors()[0]['msg']}"
+        ) from None
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="ask_external")
@@ -60,7 +76,7 @@ def ask_external(
     unknown = sorted(set(config) - _CONFIG_KEYS)
     if unknown:
         raise TaiValidationError(f"ask_external config has unknown key(s): {', '.join(unknown)}")
-    verifier = cast("dict[str, Any] | None", config.get("verifier"))
+    verifier = _author_verifier(config.get("verifier"))
 
     sig = inspect.signature(func)
     params = sig.parameters

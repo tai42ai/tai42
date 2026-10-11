@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from tai42_contract.channels import Channel, ChannelDelivery, ChannelDeliveryError
@@ -151,6 +152,20 @@ def build_delivery_frame(
     )
 
 
+def _refuse_expired(delivery_frame: ChannelDelivery, interaction_id: str) -> None:
+    """Raise a terminal delivery error when the delivery's ``timeout_at`` has passed; nothing is sent.
+
+    The one expired-delivery guard: :func:`deliver_with_retry` is the only caller of
+    ``Channel.deliver``, so no channel carries its own.
+    """
+    if delivery_frame.timeout_at <= datetime.now(UTC):
+        raise ChannelDeliveryError(
+            f"interaction {interaction_id} already timed out "
+            f"(timeout_at={delivery_frame.timeout_at.isoformat()}); nothing was sent",
+            retryable=False,
+        )
+
+
 async def deliver_with_retry(
     channel_obj: Channel,
     delivery_frame: ChannelDelivery,
@@ -186,6 +201,8 @@ async def deliver_with_retry(
         try:
             if retry_in is not None:
                 await asyncio.sleep(retry_in)
+            # Read after any backoff wait, so a deadline that passed during it is refused too.
+            _refuse_expired(delivery_frame, interaction_id)
             # Each attempt is bounded by what is left of the budget: a plugin that
             # consumes it is hung. Tier 1 of the send-outcome monitoring layer: one
             # ``send:<channel>`` span per delivery ATTEMPT (the retry loop makes

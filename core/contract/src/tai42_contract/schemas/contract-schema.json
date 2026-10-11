@@ -1,5 +1,27 @@
 {
   "$defs": {
+    "FieldChangedEvent": {
+      "additionalProperties": false,
+      "description": "A declared ``field_changed`` input field changed.",
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "kind": {
+          "const": "field_changed",
+          "default": "field_changed",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field"
+      ],
+      "title": "FieldChangedEvent",
+      "type": "object"
+    },
     "HookSubject": {
       "additionalProperties": false,
       "description": "The optional state subject a hook fire targets.\n\nCarries the conversation-target scope ``(target_kind, target_name)``, the subject ``kind`` (matching\n:data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` — a templated text\ncarrying (inline or by stored id) a jq program evaluated over the event payload at\nfire — it must yield a non-empty string, else the fire fails loudly like any hook\nerror. Frozen; deposited as the ambient state context so a state write during the fire\nis keyed and attributed to the hook.",
@@ -65,6 +87,28 @@
         }
       },
       "title": "OverlapPolicy",
+      "type": "object"
+    },
+    "PageAdvancedEvent": {
+      "additionalProperties": false,
+      "description": "A declared ``page_advanced`` page was advanced past.",
+      "properties": {
+        "kind": {
+          "const": "page_advanced",
+          "default": "page_advanced",
+          "title": "Kind",
+          "type": "string"
+        },
+        "page": {
+          "minLength": 1,
+          "title": "Page",
+          "type": "string"
+        }
+      },
+      "required": [
+        "page"
+      ],
+      "title": "PageAdvancedEvent",
       "type": "object"
     },
     "PresetSeedToolMeta": {
@@ -535,6 +579,20 @@
         }
       },
       "title": "StateUpdate",
+      "type": "object"
+    },
+    "SubmittedEvent": {
+      "additionalProperties": false,
+      "description": "The form was submitted and its ``submitted`` reaction checks it before it is accepted.",
+      "properties": {
+        "kind": {
+          "const": "submitted",
+          "default": "submitted",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "SubmittedEvent",
       "type": "object"
     },
     "TemplatedText": {
@@ -1566,6 +1624,29 @@
       ],
       "title": "ConversationRouteCreate",
       "type": "object"
+    },
+    "FormReactionEvent": {
+      "description": "The published form of one form-reaction event.",
+      "discriminator": {
+        "mapping": {
+          "field_changed": "#/$defs/FieldChangedEvent",
+          "page_advanced": "#/$defs/PageAdvancedEvent",
+          "submitted": "#/$defs/SubmittedEvent"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/FieldChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/PageAdvancedEvent"
+        },
+        {
+          "$ref": "#/$defs/SubmittedEvent"
+        }
+      ],
+      "title": "FormReactionEventBody"
     },
     "HookParams": {
       "description": "The stored hook record: :class:`HookRegister` plus the server-derived ``execution_key_fingerprint``.\n\nManagers persist this shape, never the request body.",

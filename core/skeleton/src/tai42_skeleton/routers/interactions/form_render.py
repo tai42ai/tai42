@@ -17,7 +17,9 @@ import html
 import json
 from typing import Any
 
-from tai42_skeleton.interactions.form_schema import RADIO_OPTION_THRESHOLD, channel_form_fields
+from tai42_kit.interactions.form_vocabulary import RADIO_OPTION_THRESHOLD
+
+from tai42_skeleton.interactions.form_schema import channel_form_fields
 
 from .pages import _FORM_SUBMIT_SCRIPT
 

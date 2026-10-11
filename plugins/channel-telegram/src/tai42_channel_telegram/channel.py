@@ -85,6 +85,7 @@ from tai42_contract.channels import (
     Option,
     OptionSection,
 )
+from tai42_contract.interactions import CALLBACK_LINK_FORMATS
 from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 from tai42_kit.settings import require, require_secret
 
@@ -97,10 +98,9 @@ from tai42_channel_telegram.correlation import (
 )
 from tai42_channel_telegram.settings import bot_numeric_id, telegram_settings
 
-# Tier-1 (confirm/external) is answered at the callback door via a tappable URL
-# button; text/select are Tier-2 (correlation, answered by tapping or typing).
-# ``form`` also targets the callback door but through a web_app webview button.
-_TIER1_FORMATS = frozenset({"confirm", "external"})
+# The callback-link formats (confirm/external) are answered at the callback door via a
+# tappable URL button; text/select are answered through the correlation (by tapping or
+# typing). ``form`` also targets the callback door but through a web_app webview button.
 
 # Telegram's hard cap on a button's ``callback_data`` (64 bytes). An author-set option id
 # is sent verbatim only when it fits; a longer id gets a minted token instead.
@@ -438,12 +438,6 @@ class TelegramChannel:
         token = _require_delivery_secret(telegram_settings().bot_token, "CHANNEL_TELEGRAM_BOT_TOKEN")
         target = _resolve_target(delivery.recipient)
 
-        if math.ceil((delivery.timeout_at - datetime.now(UTC)).total_seconds()) <= 0:
-            raise ChannelDeliveryError(
-                f"interaction {delivery.interaction_id} already timed out "
-                f"(timeout_at={delivery.timeout_at.isoformat()}); nothing was sent"
-            )
-
         # Refuse an unrenderable media item BEFORE any send so a multi-part delivery
         # never lands its media-or-text and then fails on an unsendable one.
         _reject_unrenderable_media(delivery.media)
@@ -468,7 +462,7 @@ class TelegramChannel:
             payload["reply_markup"] = {
                 "inline_keyboard": [[{"text": "Fill form", "web_app": {"url": delivery.callback_url}}]]
             }
-        elif delivery.answer_format in _TIER1_FORMATS:
+        elif delivery.answer_format in CALLBACK_LINK_FORMATS:
             payload["reply_markup"] = {"inline_keyboard": [[{"text": "Answer", "url": delivery.callback_url}]]}
         elif delivery.options:
             # A select ask (the answer set) or a text ask carrying suggested replies:
@@ -482,7 +476,7 @@ class TelegramChannel:
 
         data = await call_method(token, "sendMessage", payload, context=f"interaction {delivery.interaction_id}")
 
-        if delivery.answer_format == "form" or delivery.answer_format in _TIER1_FORMATS:
+        if delivery.answer_format == "form" or delivery.answer_format in CALLBACK_LINK_FORMATS:
             return
 
         message_id = _result_message_id(data, f"interaction {delivery.interaction_id}")

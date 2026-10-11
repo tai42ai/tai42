@@ -123,15 +123,14 @@ class RedisHooksManager(BaseHooksManager):
         async with client_ctx(RedisClient, self.settings.redis) as r:
             await awaited(r.hset(self.settings.topic_verifiers_key, topic, model.model_dump_json()))
 
-    async def get_topic_verifier(self, topic: str) -> dict[str, Any] | None:
+    async def get_topic_verifier(self, topic: str) -> TopicVerifierBinding | None:
         """Return ``topic``'s verifier binding, or ``None`` when none is set."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
             raw = await awaited(r.hget(self.settings.topic_verifiers_key, topic))
         if not raw:
             return None
-        # Validate on read: a wrong-shape stored value raises here (loud), and the
-        # ingress consumer gets a shape-guaranteed dict.
-        return TopicVerifierBinding.model_validate_json(raw).model_dump()
+        # Validate on read: a wrong-shape stored value raises here (loud).
+        return TopicVerifierBinding.model_validate_json(raw)
 
     async def delete_topic_verifier(self, topic: str) -> bool:
         """Delete ``topic``'s verifier binding; returns whether one was removed."""
@@ -139,15 +138,13 @@ class RedisHooksManager(BaseHooksManager):
             removed = await awaited(r.hdel(self.settings.topic_verifiers_key, topic))
         return removed > 0
 
-    async def all_topic_verifiers(self) -> dict[str, dict[str, Any]]:
+    async def all_topic_verifiers(self) -> dict[str, TopicVerifierBinding]:
         """Return every topic's verifier binding, keyed by topic."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
             data = await awaited(r.hgetall(self.settings.topic_verifiers_key))
         # Validate every entry on read (loud on a wrong shape), matching the
         # single-topic read.
-        return {
-            topic: TopicVerifierBinding.model_validate_json(binding).model_dump() for topic, binding in data.items()
-        }
+        return {topic: TopicVerifierBinding.model_validate_json(binding) for topic, binding in data.items()}
 
     async def claim_webhook_delivery(self, topic: str, replay_key: str, ttl_seconds: int) -> bool:
         """Claim one webhook delivery for ``replay_key`` under ``ttl_seconds``; ``True`` for the first claimant only."""
