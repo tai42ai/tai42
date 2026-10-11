@@ -467,8 +467,10 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
 
         # STEP 1c — the applying worker's own identity (name + generation), the source
         # for the self-deferred row's ``generation_before`` and the recycle exclusion.
+        # The applier is the bus member this process acts for: a job child a backend worker
+        # forked applies on that worker's behalf.
         bus = cast("WorkerBus", self._bus)
-        self_identity = bus.identity
+        self_identity = bus.member_identity
 
         # STEP 1d — pin what the STEP 5 report is judged against BEFORE the swap in STEP 3
         # can age it out: the reload's expected-confirmation membership and, for a
@@ -498,15 +500,20 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         # inherited ``importlib`` per-module lock. The async façade holds the gate on a
         # dedicated thread so ownership stays single-threaded and this loop is never
         # blocked while job spans drain.
-        async with reload_gate.driving(), fork_gate.exclusive_async(timeout=FORK_QUIESCE_SECONDS):
-            # Release the loop-bound kit resources BEFORE the build's settings reset drops
-            # their per-loop registries: build_and_swap_epoch opens with
-            # ``reset_all_settings()``, whose resource-registry reset REFUSES to drop a
-            # registry still holding live resources on a running loop (a prior agent run
-            # leaves a cached checkpoint saver behind). AppLifecycle._reload_config makes
-            # the same release before its own build_and_swap_epoch.
-            await release_llm_pools()
-            await build_and_swap(profile_env)
+        #
+        # A process that is not a bus member (a job child a backend worker forked) has no
+        # serving surface to swap: it builds nothing, and its member converges on the persisted
+        # env as a sibling through the STEP 5 broadcast.
+        if bus.identity.member:
+            async with reload_gate.driving(), fork_gate.exclusive_async(timeout=FORK_QUIESCE_SECONDS):
+                # Release the loop-bound kit resources BEFORE the build's settings reset drops
+                # their per-loop registries: build_and_swap_epoch opens with
+                # ``reset_all_settings()``, whose resource-registry reset REFUSES to drop a
+                # registry still holding live resources on a running loop (a prior agent run
+                # leaves a cached checkpoint saver behind). AppLifecycle._reload_config makes
+                # the same release before its own build_and_swap_epoch.
+                await release_llm_pools()
+                await build_and_swap(profile_env)
 
         # STEP 4 — env-write-LAST: persist the proposed env as the WHOLE stored map only
         # after the build succeeded. A failed build never reaches this line.
@@ -515,7 +522,7 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         # STEP 5 — broadcast the reload to the fleet (each sibling re-reads the persisted
         # store), then roll a recycle for the recycle-class diff. The applier's own recycle
         # is deferred to the post-response self-exit, reported as the applier self-entry.
-        fleet = await self._broadcast_profile_reload(at_start)
+        fleet = await self._broadcast_profile_reload(at_start, swapped=bus.identity.member)
         recycle_report: RecycleReport | None = None
         if recycle_diff_keys:
             recycle_report = await self._roll_recycle(

@@ -51,9 +51,10 @@ class OperationResponse:
     ``background`` to the response, so it runs after the body flushes — never an inline
     ``create_task`` that could race the flush and sever the transport before the reply ships.
     The projected tool edge (every tool door: MCP ``tools/call``, ``tai tools run``, an agent, a
-    preset, a schedule, a hook) answers with ``payload`` and runs ``background`` once the call
-    returned; the exit is graceful, so the in-flight reply drains before the worker stops and its
-    supervisor respawns it. One reply, true on every edge.
+    preset, a hook, a schedule or a submit run inside a backend job) runs ``background`` once the
+    operation returned and then answers with ``payload``; the exit is the worker's graceful stop,
+    whose drain lets the in-flight reply or job finish before the worker stops and its supervisor
+    respawns it. One reply, true on every edge.
     """
 
     payload: Any

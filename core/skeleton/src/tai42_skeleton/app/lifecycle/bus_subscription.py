@@ -1,6 +1,7 @@
 """The worker-bus subscription lifecycle and fleet-op dispatch."""
 
 import asyncio
+import functools
 import logging
 import time
 from typing import Any
@@ -9,7 +10,7 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.app.bus import WorkerBus, WorkerKind
 from tai42_skeleton.app.bus_settings import bus_settings
-from tai42_skeleton.app.graceful_exit import graceful_exit_for
+from tai42_skeleton.app.graceful_exit import request_graceful_exit
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.readiness_sentinel import write_ready_sentinel
 from tai42_skeleton.app.reload_gate import reload_gate
@@ -260,7 +261,7 @@ class BusSubscriptionMixin(LifecycleState):
         records a successful recycle before this process departs. The payload names the
         graceful-exit kind only — never an env value.
         """
-        kind = self.bus.identity.kind
+        identity = self.bus.identity
         await self.bus.mark_recycling()
-        self.bus.arm_post_reply(graceful_exit_for(kind))
-        return {"recycling": kind.value}
+        self.bus.arm_post_reply(functools.partial(request_graceful_exit, identity.pid))
+        return {"recycling": identity.kind.value}

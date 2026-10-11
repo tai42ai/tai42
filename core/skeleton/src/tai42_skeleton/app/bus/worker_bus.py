@@ -73,6 +73,9 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
         # Minted on the first successful claim (subscribe time); ``None`` until then
         # for a real bus. The busless variant self-mints below.
         self._identity: WorkerIdentity | None = None
+        # The bus member a forked child acts for, kept by the at-fork hook; ``None`` in a member
+        # (which acts for itself).
+        self._member_identity: WorkerIdentity | None = None
         self._joined_at: str | None = None
         # The in-memory presence-state object, alive only while subscribed.
         self._presence: _PresenceValue | None = None
@@ -117,6 +120,10 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
         post-claim, or a local bus). A member parent that has not yet claimed has no
         name to derive from — and a raise here is unraisable — so the identity is
         POISONED instead: any bus use in the child raises loudly at the use site.
+
+        The child keeps the member it acts for (:attr:`member_identity`): the parent itself
+        when the parent is a member, else the member the parent kept — the top of the lineage
+        however deep the forks go.
         """
         self._heartbeat_thread = None
         parent = self._identity
@@ -124,6 +131,8 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
             self._poisoned = True
             self._identity = None
             return
+        if parent.member:
+            self._member_identity = parent
         self._identity = WorkerIdentity(
             name=f"{parent.name}/fork-{os.getpid()}",
             kind=parent.kind,
@@ -168,6 +177,22 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
         if identity is None:
             raise RuntimeError("worker bus: identity is not minted yet — the slot has not been claimed")
         return identity
+
+    @property
+    def member_identity(self) -> WorkerIdentity:
+        """The bus member this process acts for: itself, or the member a forked child descends from.
+
+        The writer of a change is that member — a job child forked by a backend worker writes
+        on that worker's behalf: the roll excludes it, the reply reports it, its graceful exit
+        targets its pid. Raises as :attr:`identity` does before a claim or in a poisoned child.
+        """
+        identity = self.identity
+        if identity.member:
+            return identity
+        member = self._member_identity
+        if member is None:
+            raise RuntimeError(f"worker bus: the non-member {identity.name!r} carries no member it acts for")
+        return member
 
     def arm_post_reply(self, action: Callable[[], None]) -> None:
         """Arm the single-shot slot the subscription loop fires after the current op's terminal reply ships.

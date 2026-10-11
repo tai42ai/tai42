@@ -88,10 +88,14 @@ class _BroadcastMixin(_ConfigServiceBase):
             _log_stopped_roll(exc.report, stopped, pinned, change=change)
             return exc.report
 
-    async def _broadcast_profile_reload(self, expected_at_start: dict[str, int] | None) -> FleetResult:
+    async def _broadcast_profile_reload(
+        self, expected_at_start: dict[str, int] | None, *, swapped: bool
+    ) -> FleetResult:
         """Broadcast the profile apply's reload to the whole fleet AFTER the local swap already landed.
 
-        The swap IS this worker's local apply, so no second local reload runs here. Mirrors
+        The swap IS this worker's local apply, so no second local reload runs here; a process
+        that ran no swap (``swapped`` false: a non-member job child) publishes with no self
+        entry and its member converges as a sibling. Mirrors
         the post-persist contract: a raw broadcast failure surfaces as a
         :class:`FleetBroadcastError` carrying the honest bus-unreachable report, never a raw
         exception, so the committed env change is never hidden behind a broadcast fault.
@@ -105,8 +109,12 @@ class _BroadcastMixin(_ConfigServiceBase):
         # The swap was this worker's reload: its result states the same fact every reload does.
         from tai42_skeleton.app.lifecycle.config_reload import awaiting_respawn
 
-        local = LocalApplyResult(
-            outcome=OpOutcome.applied, payload={"status": "ok", "awaiting_respawn": awaiting_respawn()}
+        local = (
+            LocalApplyResult(
+                outcome=OpOutcome.applied, payload={"status": "ok", "awaiting_respawn": awaiting_respawn()}
+            )
+            if swapped
+            else None
         )
         try:
             report = await self._bus.publish({"op": "reload_config"}, None, local, expected_at_start=expected_at_start)
@@ -116,6 +124,25 @@ class _BroadcastMixin(_ConfigServiceBase):
             raise FleetBroadcastError("reload_config", report, broadcast_error) from broadcast_error
         log_non_convergence(report)
         return report
+
+    async def _local_reload(
+        self, bus: WorkerBus
+    ) -> tuple[LocalApplyResult | None, dict[str, Any] | None, Exception | None]:
+        """This process's own reload: ``(self entry, result, failure)``.
+
+        A member reloads through the gate; a failed reload is the ``failed`` self entry and the
+        failure, which the caller publishes before it re-raises. A non-member (a forked job
+        child) has no serving surface to converge and is never a fleet target: it reloads
+        nothing and gives no self entry, its member converging as a sibling; its result states
+        the store write it made.
+        """
+        if not bus.identity.member:
+            return None, {"status": "ok", "env_keys": len(self._read_stored_env())}, None
+        try:
+            result = await reload_gate.run(self._admin.reload_config, reimports=True)
+        except Exception as exc:
+            return LocalApplyResult(outcome=OpOutcome.failed, error=f"{type(exc).__name__}: {exc}"), None, exc
+        return LocalApplyResult(outcome=OpOutcome.applied, payload=result), result, None
 
     async def _reload_and_broadcast(
         self,
@@ -138,6 +165,11 @@ class _BroadcastMixin(_ConfigServiceBase):
         verdict for the change. ``recycle_keys`` and ``continues`` are exclusive. A local reload
         failure raises :class:`FleetBroadcastError` carrying ``recycle_keys`` as the change's
         unrolled keys, so a caller that recovers hands them to the reload that continues it.
+
+        The writer is the bus member this process acts for: a process that is not itself a
+        member (a job child a backend worker forked) runs no local reload — it has no serving
+        surface and the bus takes no self entry from it — and publishes the reload with no local
+        result; its member converges as a sibling and is the writer the roll excludes.
 
         Post-persist contract: this runs only after the persist has committed, and it
         guarantees EVERY subsequent failure — the local reload OR the broadcast itself
@@ -167,20 +199,15 @@ class _BroadcastMixin(_ConfigServiceBase):
         # slow enough for a sibling's presence to fade across it, and the publish census
         # below would then never expect a worker that was live when the op began.
         at_start = await snapshot_membership(self._bus, op_name)
+        bus = cast("WorkerBus", self._bus)
         identity: WorkerIdentity | None = None
         pinned: dict[str, tuple[WorkerKind, int]] = {}
         if recycle_keys:
-            identity = cast("WorkerBus", self._bus).identity
+            # The writer is the member this process acts for (a forked job child writes on
+            # behalf of the worker that forked it): the roll excludes it, the reply reports it.
+            identity = bus.member_identity
             pinned = await self._pin_recycle_targets(identity)
-        local_failure: Exception | None = None
-        local_result: dict[str, Any] | None = None
-        try:
-            local_result = await reload_gate.run(self._admin.reload_config, reimports=True)
-        except Exception as exc:
-            local_failure = exc
-            local = LocalApplyResult(outcome=OpOutcome.failed, error=f"{type(exc).__name__}: {exc}")
-        else:
-            local = LocalApplyResult(outcome=OpOutcome.applied, payload=local_result)
+        local, local_result, local_failure = await self._local_reload(bus)
 
         try:
             report = await self._bus.publish({"op": op_name}, None, local, expected_at_start=at_start)

@@ -114,11 +114,6 @@ class LifecycleState(ABC):
         # onto it.
         self._serving_loop: asyncio.AbstractEventLoop | None = None
 
-        # This process's worker kind, captured by ``app_context`` before the
-        # perpetual tasks spawn so their shared done-callback can request the
-        # right graceful-exit primitive. Defaults to ``serve`` so it is always
-        # defined even before ``app_context`` runs.
-        self._worker_kind: WorkerKind = WorkerKind.serve
         # Set once a perpetual task dies (an exception OR an unexpected clean
         # return — cancellation at shutdown is not death): ``(task name, reason)``
         # where the reason is the exception TYPE name or the literal ``"returned"``.

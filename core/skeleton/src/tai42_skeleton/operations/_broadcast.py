@@ -179,18 +179,21 @@ def writer_exit_response(payload: Any, *, armed: bool) -> Any:
     """Wrap an env-change door's ``payload``, arming the writer's own post-reply graceful self-exit when ``armed``.
 
     ``armed`` is the operation's ``self_exit_armed`` (a serve-affecting change whose roll
-    converged). Returns an ``OperationResponse`` whose background task is this worker's graceful
-    exit; the HTTP edge runs it after the body flushes and the projected tool edge after the call
-    returned, so the reply's ``self-deferred`` line holds on every edge.
+    converged). Returns an ``OperationResponse`` whose background task is the graceful exit of the
+    bus member this process acts for — itself, or, inside a forked job child, the member worker
+    that forked it — the writer the roll excluded and reported ``self-deferred``. The HTTP edge runs
+    it after the body flushes and the projected tool edge once the call returned; the worker's
+    graceful stop lets the in-flight reply (or job) finish first, so the reply's ``self-deferred``
+    line holds on every edge.
     """
     from starlette.background import BackgroundTask
 
-    from tai42_skeleton.app.graceful_exit import graceful_exit_for
+    from tai42_skeleton.app.graceful_exit import request_graceful_exit
     from tai42_skeleton.operations.adapter import OperationResponse
 
     if not armed:
         return OperationResponse(payload)
-    return OperationResponse(payload, BackgroundTask(graceful_exit_for(instance.app.bus.identity.kind)))
+    return OperationResponse(payload, BackgroundTask(request_graceful_exit, instance.app.bus.member_identity.pid))
 
 
 def recycle_roll(recycle: RecycleReport, writer: WorkerIdentity, *, self_exit_armed: bool) -> dict[str, Any]:
@@ -392,7 +395,9 @@ async def broadcast(
     :func:`snapshot_membership`.
     """
     bus = instance.app.bus
-    self_targeted = targets is None or bus.identity.name in targets
+    # A non-member (a forked job child) is never a fleet target — it has no serving surface of
+    # its own — so it applies nothing locally and its member converges as a sibling.
+    self_targeted = bus.identity.member and (targets is None or bus.identity.name in targets)
     # Validate the whole target set against the census BEFORE any local side effect,
     # so a typo'd worker name is a loud error and never a silent narrowing. A name
     # absent from the census is a caller mistake, surfaced as a 400 (never a bare 500).
