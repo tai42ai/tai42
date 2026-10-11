@@ -915,3 +915,39 @@ async def test_submit_unauthenticated_binds_nothing(wired):
     await _drain()
 
     assert tools.seen_identities == [None]
+
+
+async def test_a_background_run_of_a_turn_door_during_a_reload_records_the_refusal(wired):
+    # A detached run whose tool hands a turn to the conversation bridge while a reload holds the
+    # gate fails loudly: the turn admission refuses with the retriable ``unavailable`` kind before
+    # anything is written, and the run's record is ``failed`` with the reload refusal as its error.
+    from tai42_contract.errors import ErrorKind, ServerReloadingError, error_kind
+
+    from tai42_skeleton.app.reload_gate import REJECT_MESSAGE
+    from tai42_skeleton.conversations.turn import admission, api_door
+
+    wired.monkeypatch.setattr(admission, "reload_gate", SimpleNamespace(locked=True))
+    tools = wired.install()
+    raised: list[BaseException] = []
+
+    async def _never_connected() -> bool:
+        return False
+
+    async def _turn_door_tool(key, arguments, *, offload_sync=False, extras=None):
+        try:
+            return await api_door.submit_api_message(
+                "synthetic-route", "user-1", "hello", "caller-1", 0, client_connected=_never_connected
+            )
+        except ServerReloadingError as exc:
+            raised.append(exc)
+            raise
+
+    tools.run_tool = _turn_door_tool
+    out = await ops.submit_run("alpha", {})
+    await _drain()
+
+    (exc,) = raised
+    assert error_kind(exc) is ErrorKind.UNAVAILABLE
+    record = await wired.store.get_run(wired.fake, out["run_id"])
+    assert record["status"] == "failed"
+    assert record["error"] == REJECT_MESSAGE
