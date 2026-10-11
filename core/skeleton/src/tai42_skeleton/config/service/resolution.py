@@ -88,7 +88,8 @@ class _ResolutionMixin(_ConfigServiceBase):
         store never owned is left in place.
         """
         stored = self._read_stored_env()
-        carried = {key: value for key, value in os.environ.items() if key in x_band_env_keys()}
+        x_band = x_band_env_keys()
+        carried = {key: value for key, value in os.environ.items() if key in x_band}
         effective = {key: value for key, value in os.environ.items() if key not in stored}
         effective.update(profile_env)
         effective.update(carried)
