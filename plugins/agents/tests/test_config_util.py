@@ -18,12 +18,14 @@ returned config.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from langchain_core.callbacks import BaseCallbackHandler
 from opentelemetry import context as otel_context
 from tai42_contract.app import tai42_app
 from tai42_contract.monitoring import MONITORING_PARENT_SPAN_ID_KEY, MONITORING_TRACE_ID_KEY, TraceContext
-from tai42_kit.llm import MonitoringCallbackHandler, RunTrace
+from tai42_kit.llm import InvalidRunTraceError, MonitoringCallbackHandler, RunTrace
 from tai42_kit.settings import reset_all_settings
 
 from tai42_agents._internal.config_util import (
@@ -33,6 +35,16 @@ from tai42_agents._internal.config_util import (
     with_run_trace_lineage,
 )
 from tai42_agents.settings import AgentsLimitsSettings, agents_limits_settings
+
+TRACE_A = "a" * 32
+TRACE_B = "b" * 32
+TRACE_C = "c" * 32
+TRACE_D = "d" * 32
+TRACE_E = "e" * 32
+FLOW_TRACE = "f" * 32
+SPAN_A = "a" * 16
+SPAN_B = "b" * 16
+FLOW_SPAN = "f" * 16
 
 
 def _callbacks(trace: RunTrace) -> list[object]:
@@ -86,8 +98,8 @@ def test_existing_config_is_preserved_and_extended() -> None:
     existing = {
         "configurable": {
             "thread_id": "keep-me",
-            MONITORING_TRACE_ID_KEY: "trace-123",
-            MONITORING_PARENT_SPAN_ID_KEY: "parent-9",
+            MONITORING_TRACE_ID_KEY: TRACE_A,
+            MONITORING_PARENT_SPAN_ID_KEY: SPAN_A,
         },
         "callbacks": [existing_cb],
     }
@@ -104,10 +116,10 @@ def test_existing_config_is_preserved_and_extended() -> None:
     assert len(callbacks) == 2
     # The explicit trace/parent ids flow into the TraceContext.
     ctx = _bound(result)
-    assert ctx.trace_id == "trace-123"
-    assert ctx.parent_span_id == "parent-9"
-    assert result.context.trace_id == "trace-123"
-    assert result.context.parent_span_id == "parent-9"
+    assert ctx.trace_id == TRACE_A
+    assert ctx.parent_span_id == SPAN_A
+    assert result.context.trace_id == TRACE_A
+    assert result.context.parent_span_id == SPAN_A
 
 
 def test_ambient_trace_context_is_adopted_when_no_explicit_id() -> None:
@@ -116,13 +128,13 @@ def test_ambient_trace_context_is_adopted_when_no_explicit_id() -> None:
     # minting a fresh, orphaned one.
     from tai42_contract.monitoring import TraceContext, ambient_trace_context
 
-    with ambient_trace_context(TraceContext(trace_id="flow-trace", parent_span_id="flow-span")):
+    with ambient_trace_context(TraceContext(trace_id=FLOW_TRACE, parent_span_id=FLOW_SPAN)):
         trace = init_langgraph_config()
 
     ctx = _bound(trace)
-    assert ctx.trace_id == "flow-trace"
-    assert ctx.parent_span_id == "flow-span"
-    assert trace.context.trace_id == "flow-trace"
+    assert ctx.trace_id == FLOW_TRACE
+    assert ctx.parent_span_id == FLOW_SPAN
+    assert trace.context.trace_id == FLOW_TRACE
 
 
 def test_explicit_trace_id_wins_over_ambient() -> None:
@@ -130,13 +142,21 @@ def test_explicit_trace_id_wins_over_ambient() -> None:
     # never overrides it.
     from tai42_contract.monitoring import TraceContext, ambient_trace_context
 
-    existing = {"configurable": {MONITORING_TRACE_ID_KEY: "explicit-trace"}}
-    with ambient_trace_context(TraceContext(trace_id="flow-trace", parent_span_id="flow-span")):
+    existing = {"configurable": {MONITORING_TRACE_ID_KEY: TRACE_B}}
+    with ambient_trace_context(TraceContext(trace_id=FLOW_TRACE, parent_span_id=FLOW_SPAN)):
         trace = init_langgraph_config(existing)
 
     ctx = _bound(trace)
-    assert ctx.trace_id == "explicit-trace"
+    assert ctx.trace_id == TRACE_B
     assert ctx.parent_span_id is None
+
+
+def test_an_explicit_trace_id_no_writer_can_record_is_refused() -> None:
+    trace_id = str(uuid.uuid4())
+    with pytest.raises(InvalidRunTraceError) as raised:
+        init_langgraph_config({"configurable": {MONITORING_TRACE_ID_KEY: trace_id}})
+    assert MONITORING_TRACE_ID_KEY in str(raised.value)
+    assert repr(trace_id) in str(raised.value)
 
 
 def test_fresh_trace_minted_when_no_explicit_and_no_ambient() -> None:
@@ -157,7 +177,7 @@ def test_fresh_trace_minted_when_no_explicit_and_no_ambient() -> None:
     [
         (None, "fresh root (no explicit id, no ambient)"),
         (
-            {"configurable": {MONITORING_TRACE_ID_KEY: "explicit-root"}},
+            {"configurable": {MONITORING_TRACE_ID_KEY: TRACE_C}},
             "explicit root (caller propagated id, no parent)",
         ),
     ],
@@ -182,7 +202,9 @@ def test_nested_run_keeps_the_otel_context() -> None:
     key = otel_context.create_key("attribution-probe-nested")
     token = otel_context.attach(otel_context.set_value(key, "live"))
     try:
-        init_langgraph_config({"configurable": {MONITORING_TRACE_ID_KEY: "t", MONITORING_PARENT_SPAN_ID_KEY: "p"}})
+        init_langgraph_config(
+            {"configurable": {MONITORING_TRACE_ID_KEY: TRACE_E, MONITORING_PARENT_SPAN_ID_KEY: SPAN_A}}
+        )
         assert otel_context.get_value(key) == "live"
     finally:
         otel_context.detach(token)
@@ -233,7 +255,7 @@ def test_default_recursion_limit_env_override_flows_into_effective_config(
 
 def test_input_config_is_not_mutated() -> None:
     existing = {
-        "configurable": {MONITORING_TRACE_ID_KEY: "trace-abc"},
+        "configurable": {MONITORING_TRACE_ID_KEY: TRACE_D},
         "callbacks": ["existing-cb"],
     }
 
@@ -242,7 +264,7 @@ def test_input_config_is_not_mutated() -> None:
     # The caller's dict, its ``configurable`` section, and its ``callbacks``
     # list are all left exactly as they were passed in.
     assert existing == {
-        "configurable": {MONITORING_TRACE_ID_KEY: "trace-abc"},
+        "configurable": {MONITORING_TRACE_ID_KEY: TRACE_D},
         "callbacks": ["existing-cb"],
     }
 
@@ -302,9 +324,9 @@ def test_with_run_trace_lineage_threads_a_root_context() -> None:
     from tai42_contract.monitoring import TraceContext
 
     base = {"configurable": {"thread_id": "keep"}}
-    out = with_run_trace_lineage(base, TraceContext(trace_id="run-1"))
+    out = with_run_trace_lineage(base, TraceContext(trace_id=TRACE_E))
     # The shared trace id is threaded; a root context pins no parent anchor.
-    assert out["configurable"][MONITORING_TRACE_ID_KEY] == "run-1"
+    assert out["configurable"][MONITORING_TRACE_ID_KEY] == TRACE_E
     assert MONITORING_PARENT_SPAN_ID_KEY not in out["configurable"]
     # The caller's own keys survive and the input is left untouched.
     assert out["configurable"]["thread_id"] == "keep"
@@ -314,10 +336,10 @@ def test_with_run_trace_lineage_threads_a_root_context() -> None:
 def test_with_run_trace_lineage_threads_a_nested_anchor() -> None:
     from tai42_contract.monitoring import TraceContext
 
-    out = with_run_trace_lineage(None, TraceContext(trace_id="run-1", parent_span_id="anchor"))
+    out = with_run_trace_lineage(None, TraceContext(trace_id=TRACE_E, parent_span_id=SPAN_B))
     # A context carrying an anchor threads the parent span id too, so the sub-run nests under it.
-    assert out["configurable"][MONITORING_TRACE_ID_KEY] == "run-1"
-    assert out["configurable"][MONITORING_PARENT_SPAN_ID_KEY] == "anchor"
+    assert out["configurable"][MONITORING_TRACE_ID_KEY] == TRACE_E
+    assert out["configurable"][MONITORING_PARENT_SPAN_ID_KEY] == SPAN_B
 
 
 def test_build_run_config_keyless_run_pins_no_thread() -> None:
