@@ -16,6 +16,12 @@ from tai42_e2e.stack import TaiStack
 
 pytestmark = pytest.mark.needs("probe-tools", "mutable", "topology:replicas")
 
+# How long a config write may meet a replica's reload gate. A write right after a sibling's
+# fleet reload can reach a replica still rebuilding from that fan-out: the sibling's report
+# names it ``timed_out`` past the bus apply timeout, and under load the rebuild ends within
+# the 60 s the harness gives one reload POST (writes measured at 16-42 s under load).
+_SIBLING_RELOAD_S = 60.0
+
 
 def _tool_text(result: Any) -> str:
     """Return a tool call's scalar payload as text.
@@ -53,6 +59,9 @@ async def _backend_call(stack: TaiStack, name: str) -> str:
     return _tool_text(result)
 
 
+# The module stack boot inside this test's timer (120) + the preset create (10 gate poll + 60) +
+# the two store reads (2 x 15) + A's reload (the sibling-reload poll 60 + 60) + the read (15): 355.
+@pytest.mark.timeout(375)
 async def test_preset_create_always_persists(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     name = uniq("preset")
     api_a = replicas_stack.api(port=replicas_stack.port_a)
@@ -75,10 +84,18 @@ async def test_preset_create_always_persists(replicas_stack: TaiStack, uniq: Cal
     names_b = [p["name"] for p in await replicas_stack.api(port=replicas_stack.port_b).get("/api/presets")]
     assert name in names_a
     assert name in names_b
-    await api_a.post("/api/config/env", json={"env": {}})
+    await api_a.request(
+        "POST", "/api/config/env", json={"env": {}}, retry_on_reloading=True, ready_deadline=_SIBLING_RELOAD_S
+    )
     assert name in [p["name"] for p in await api_a.get("/api/presets")]
 
 
+# The module stack boot, which runs inside this test's timer when it is the first test of its
+# run or CI shard (120) + the preset create (10 gate poll + 60) + the two reads and A's preset
+# call (3 x 15) + B's reload (the sibling-reload poll 60 + 60) + B's rebind poll (5) + the new
+# version and its call (60 + 15) + the backend poll (5) + the rollback and its call (60 + 15) +
+# the backend poll (5): 520.
+@pytest.mark.timeout(540)
 @pytest.mark.needs("kind:backend", "setting:extension:sync_task")
 async def test_preset_created_on_a_visible_on_b_and_rebinds_on_reload(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
@@ -105,7 +122,9 @@ async def test_preset_created_on_a_visible_on_b_and_rebinds_on_reload(
     assert await _call_preset(replicas_stack, replicas_stack.port_a, name) == baked
 
     # B's live binding follows only after B's own reload.
-    await api_b.post("/api/config/env", json={"env": {}})
+    await api_b.request(
+        "POST", "/api/config/env", json={"env": {}}, retry_on_reloading=True, ready_deadline=_SIBLING_RELOAD_S
+    )
 
     async def b_serves_baked() -> bool:
         try:

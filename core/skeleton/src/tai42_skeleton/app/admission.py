@@ -4,7 +4,10 @@ Every HTTP request a generation serves is admitted on it by :class:`EpochAdmissi
 counted until it ends, so a retire drains exactly that generation's live work. The record
 travels with the request (on its ASGI scope and in the context), so a long-lived stream can
 exempt itself from the retire drain and the reload gate can record the request that drives
-or waits on it (:func:`current_request_admission`).
+or waits on it (:func:`current_request_admission`). A call of an MCP session served on a
+long-lived stream (the SSE transport, where every call answers on the session's stream) is
+admitted as a request of its own (:func:`admit_session_call`), counted until its reply is
+handed to the transport.
 """
 
 from __future__ import annotations
@@ -34,7 +37,8 @@ class RequestAdmission:
     drives a gated body, else by the wrapper when the request ends. While the request
     waits on the reload gate its slot is not counted (it cannot move until the gate is
     released); it is counted again when the wait ends. ``finished`` is set when the
-    request ends.
+    request ends. ``session_call`` marks the record of one call of a session served on a
+    long-lived stream (:func:`admit_session_call`).
     """
 
     epoch: Epoch
@@ -43,6 +47,13 @@ class RequestAdmission:
     finished: asyncio.Event = field(default_factory=asyncio.Event)
     _counted: bool = True
     _waits: int = 0
+    session_call: bool = False
+
+    def finish(self) -> None:
+        """Record that the request ended: it drives nothing any more and its slot is released."""
+        self.epoch.driving.discard(self)
+        self.release_slot()
+        self.finished.set()
 
     def release_slot(self) -> None:
         """Release this request's in-flight slot on its generation for good; a second call is a no-op."""
@@ -90,17 +101,22 @@ _admission: ContextVar[RequestAdmission | None] = ContextVar("admission", defaul
 def current_request_admission() -> RequestAdmission | None:
     """The admission record of the request this code runs on behalf of, or ``None``.
 
-    The HTTP request the MCP SDK's request context names comes first (fastmcp's
-    ``get_http_request``): inside a streamable-HTTP tool body that is the POST carrying the
-    ``tools/call``, while the ``_admission`` ContextVar there still holds the record of the
-    request that created the session. When that request has already ended — on the SSE
-    transport the message POST is answered before the call runs, and the call answers on
-    the session's stream — or when there is none (a plain route handler), the ContextVar's
-    record: on SSE the session stream's, which the session's calls run under. A record whose
-    request already ended resolves to ``None``: a task that inherited a finished request's
-    context acts for no request.
+    A call of a session served on a long-lived stream runs under its own record
+    (:func:`admit_session_call`), which comes first: on the SSE transport the message POST
+    that delivered the call is answered before the call runs and is not the request the call
+    answers on. Otherwise the HTTP request the MCP SDK's request context names comes first
+    (fastmcp's ``get_http_request``): inside a streamable-HTTP tool body that is the POST
+    carrying the ``tools/call``, while the ``_admission`` ContextVar there still holds the
+    record of the request that created the session. When that request has already ended, or
+    when there is none (a plain route handler), the ContextVar's record. A record whose
+    request already ended resolves to ``None`` (a task that inherited a finished request's
+    context acts for no request), and so does a long-lived stream's: it never finishes on its
+    own, so nothing can wait for it.
     """
-    state: RequestAdmission | None = None
+    state = _admission.get()
+    if state is not None and state.session_call and not state.finished.is_set():
+        return state
+    state = None
     try:
         request = get_http_request()
     except RuntimeError:
@@ -109,9 +125,35 @@ def current_request_admission() -> RequestAdmission | None:
         state = request.scope.get(_ADMISSION_SCOPE_KEY)
     if state is None or state.finished.is_set():
         state = _admission.get()
-    if state is None or state.finished.is_set():
+    if state is None or state.finished.is_set() or state.long_lived:
         return None
     return state
+
+
+def admit_session_call() -> RequestAdmission | None:
+    """Admit the MCP call running in the current task as a request of its own when its session runs on a stream.
+
+    On the SSE transport a session runs inside its ``GET`` stream, which is exempt from the
+    retire drain, and every call of the session runs in its own task under that stream's
+    record while its message ``POST`` has already been answered. Such a call is admitted on
+    the stream's generation with a record of its own, set as the current task's record, and
+    counted until the task ends — after the MCP SDK has handed the call's reply to the
+    transport — so a retire drains it and waits for it when it drives a gated body, before
+    the generation's close ends the session. Returns the call's record, or ``None`` (nothing
+    admitted) when the current code runs under no live long-lived stream: a streamable-HTTP
+    call is counted by its own ``POST``.
+    """
+    stream = _admission.get()
+    if stream is None or not stream.long_lived or stream.finished.is_set():
+        return None
+    task = asyncio.current_task()
+    if task is None:
+        raise RuntimeError("an MCP session call is admitted from inside its own task")
+    stream.epoch.admit()
+    call = RequestAdmission(epoch=stream.epoch, session_call=True)
+    _admission.set(call)
+    task.add_done_callback(lambda _task: call.finish())
+    return call
 
 
 class EpochAdmissionApp:
@@ -145,9 +187,7 @@ class EpochAdmissionApp:
             await self._app(scope, receive, send)
         finally:
             _admission.reset(admission_token)
-            self._epoch.driving.discard(state)
-            state.release_slot()
-            state.finished.set()
+            state.finish()
 
 
 def mark_current_request_drain_exempt() -> None:
@@ -162,14 +202,16 @@ def mark_current_request_drain_exempt() -> None:
     not wait on it.
 
     Whether the retire's transport close ends the stream is the caller's own fact. The
-    streamable-HTTP standalone stream ends when the close terminates its session. The inbox
-    stream (a plain Starlette route on its own redis connection) and the SSE session stream
-    (the session runs inside it) are not severed by the close: they keep running on the
-    retired generation until the client disconnects, so that generation (its ASGI stack and
-    that stack's collaborators) stays reachable, uncounted, until then, and its certification
-    runs once its serving surface is collected after the disconnect. An exempted stream reads
-    its configuration through the cached settings accessors at each use, so it keeps no
-    settings object of its own across a reload.
+    streamable-HTTP standalone stream ends when the close terminates its session. The SSE
+    session stream is ended by its generation's close, after the session's calls (each
+    admitted on its own, :func:`admit_session_call`) have answered within the drain budget.
+    The inbox stream (a plain Starlette route on its own redis connection) is not severed by
+    the close: it keeps running on the retired generation until the client disconnects, so
+    that generation (its ASGI stack and that stack's collaborators) stays reachable,
+    uncounted, until then, and its certification runs once its serving surface is collected
+    after the disconnect. An exempted stream reads its configuration through the cached
+    settings accessors at each use, so it keeps no settings object of its own across a
+    reload.
 
     Releases this request's in-flight slot NOW so ``_drain_in_flight`` no longer waits on it,
     and marks the record ``long_lived``; the record releases the slot exactly once, so the

@@ -5,7 +5,8 @@ before the gate is released, so a retire neither counts it against the drain bud
 severs it. These cases cover the shapes that reach the gate from somewhere other than the
 request's or the supervisor's own task: a supervised run whose tool call runs in a child
 task, a request that starts waiting after the retire began, two calls sharing one
-request record (an SSE session), and a driver acting through a long-lived stream.
+request record, and a call of an SSE session (its own request, running under the session's
+stream) that drives a reload.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import logging
 import pytest
 
 from tai42_skeleton.app import epoch_retire as epoch_retire_mod
-from tai42_skeleton.app.admission import mark_current_request_drain_exempt
+from tai42_skeleton.app.admission import admit_session_call, mark_current_request_drain_exempt
 from tai42_skeleton.app.epoch import build_and_swap_epoch, current_epoch
 from tai42_skeleton.app.reload_gate import reload_gate
 
@@ -162,6 +163,65 @@ async def test_a_request_reaching_the_gate_during_a_synchronous_drain_is_not_cou
     assert DRAIN_ERROR not in caplog.text
 
 
+@pytest.mark.parametrize("gives_up", ["at-once", "during-the-supervisor-drain"])
+async def test_a_gate_waiter_giving_up_after_the_synchronous_drain_ended_leaves_no_request_severed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, gives_up: str
+) -> None:
+    """A bus-delivered reload (no driver) drains synchronously; a request of the retiring
+    generation starts waiting on the gate (the synchronous drain stops waiting) and then gives
+    up before the retire reads the generation again. The ordinary request still in flight is
+    drained before the transports close, within the budget, and nothing is reported."""
+    _install_boot("boot-app")
+    boot = current_epoch()
+    log: list[str] = []
+    boot.supervisor = _ClosingSupervisor(log)  # type: ignore[assignment]
+    go = asyncio.Event()
+    budget = 1.0
+
+    async def _ordinary() -> None:
+        await asyncio.sleep(0.3)
+        log.append("answered")
+
+    async def _lookup() -> None:
+        await go.wait()
+        async with reload_gate.synchronized():
+            log.append("waiter acquired")
+
+    ordinary = _served_request(boot, _ordinary)
+    waiter = _served_request(boot, _lookup)
+    await asyncio.sleep(0)
+    loop = asyncio.get_running_loop()
+
+    if gives_up == "during-the-supervisor-drain":
+        from tai42_skeleton.operations import tool_runs
+
+        drain_supervisors = tool_runs.drain_supervisors
+
+        async def _waiter_leaves_then_drain(*args: object, **kwargs: object) -> None:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+            await drain_supervisors(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(tool_runs, "drain_supervisors", _waiter_leaves_then_drain)
+
+    def _waiter_arrives_then_leaves() -> None:
+        go.set()
+        if gives_up == "at-once":
+            loop.call_soon(waiter.cancel)
+
+    with caplog.at_level(logging.ERROR):
+        async with reload_gate.synchronized():  # the bus-delivered reload holds the gate
+            loop.call_later(0.02, _waiter_arrives_then_leaves)
+            await build_and_swap_epoch(
+                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=budget
+            )
+        await asyncio.gather(ordinary, waiter, return_exceptions=True)
+        await _deferred_tails_finished()
+    assert log == ["answered", "closed"], f"the retire closed under an in-flight request: {log}"
+    assert boot.in_flight == 0
+    assert DRAIN_ERROR not in caplog.text
+
+
 async def test_a_request_waiting_on_the_gate_after_the_tail_turned_over_is_never_severed() -> None:
     """The retire's tail has let the gate turn over and waits for its driver; another reload
     then holds the gate and a request of the retiring generation starts waiting on it. The
@@ -212,8 +272,8 @@ async def test_a_request_waiting_on_the_gate_after_the_tail_turned_over_is_never
 
 
 async def test_two_calls_sharing_one_request_record_wait_on_the_gate_independently() -> None:
-    """Two calls acting for one request (an SSE session runs every call under its stream's
-    record) wait on the gate together; one giving up leaves the other recorded as waiting."""
+    """Two tasks acting for one request (child tasks copy its record) wait on the gate
+    together; one giving up leaves the other recorded as waiting."""
     _install_boot("boot-app")
     boot = current_epoch()
     waiters: list[asyncio.Task[None]] = []
@@ -243,46 +303,76 @@ async def test_two_calls_sharing_one_request_record_wait_on_the_gate_independent
     assert boot.in_flight == 0
 
 
-async def test_a_driver_acting_through_a_long_lived_stream_is_not_awaited_by_the_close(
+async def test_a_session_call_driving_a_reload_answers_before_the_close(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A reload driven by a call of an SSE session (every call answers on the session's
-    stream, which exempted itself from the drain) defers the retire, so the reload answers
-    at once; the stream ends only when its client disconnects and the transport close does
-    not sever it, so the close does not wait for it."""
+    """A reload driven by a call of an SSE session (the call runs in its own task under the
+    session stream, which exempted itself from the drain) defers the retire, so the reload
+    answers at once; the call is its own request, so the close, which ends the session,
+    waits until the call's task has answered."""
     _install_boot("boot-app")
     boot = current_epoch()
     log: list[str] = []
     boot.supervisor = _ClosingSupervisor(log)  # type: ignore[assignment]
-    disconnect = asyncio.Event()
     loop = asyncio.get_running_loop()
     took: list[float] = []
+    answer = asyncio.Event()
 
-    async def _session_stream() -> None:
-        mark_current_request_drain_exempt()
+    async def _session_call() -> None:
+        admit_session_call()
         async with reload_gate.driving():
             start = loop.time()
             await build_and_swap_epoch(
                 {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=0.5
             )
             took.append(loop.time() - start)
+        await answer.wait()
         log.append("driver answered")
-        await disconnect.wait()
+
+    async def _session_stream() -> None:
+        mark_current_request_drain_exempt()
+        await asyncio.create_task(_session_call())
 
     with caplog.at_level(logging.ERROR):
         stream = _served_request(boot, _session_stream)
-        try:
-            await _deferred_tails_finished_after_the_swap(took)
-            assert log == ["driver answered", "closed"]
-        finally:
-            disconnect.set()
-            await stream
+        async with asyncio.timeout(2.0):
+            while not took:
+                await asyncio.sleep(0)
+        await asyncio.sleep(0.1)
+        assert log == [], "the close ran before the session's driver answered"
+        answer.set()
+        await stream
+        await _deferred_tails_finished()
+    assert log == ["driver answered", "closed"]
     assert took[0] < 0.25, "the reload drained synchronously inside its own driver"
+    assert (boot.driving, boot.in_flight) == (set(), 0)
     assert DRAIN_ERROR not in caplog.text
 
 
-async def _deferred_tails_finished_after_the_swap(took: list[float]) -> None:
+async def test_a_session_call_driving_a_body_that_does_not_swap_drives_nothing_once_it_answered() -> None:
+    """A call of an SSE session drives a gated body that keeps the generation (an MCP
+    re-probe); once the call answered, the open session leaves nothing driving."""
+    _install_boot("boot-app")
+    boot = current_epoch()
+    hold = asyncio.Event()
+    seen: dict[str, object] = {}
+
+    async def _session_call() -> None:
+        admit_session_call()
+        async with reload_gate.driving():
+            seen["driving"] = len(boot.driving)
+
+    async def _session_stream() -> None:
+        mark_current_request_drain_exempt()
+        await asyncio.create_task(_session_call())
+        await asyncio.sleep(0)
+        seen["after"] = (boot.engaged, boot.in_flight)
+        await hold.wait()
+
+    stream = _served_request(boot, _session_stream)
     async with asyncio.timeout(2.0):
-        while not took:
+        while "after" not in seen:
             await asyncio.sleep(0)
-    await _deferred_tails_finished()
+    hold.set()
+    await stream
+    assert seen == {"driving": 1, "after": (False, 0)}

@@ -116,7 +116,14 @@ async def list_workers() -> WorkerListing:
     response_model=FleetResult,
 )
 async def fleet_reload_config(targets: list[str] | None) -> FleetResult:
-    """Soft-restart the worker fleet, optionally restricted to the named ``targets``."""
+    """Soft-restart the worker fleet, optionally restricted to the named ``targets``.
+
+    Called over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that
+    worker), the reload answers on the session that called it and then retires that session with the
+    generation it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an
+    SSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave
+    that worker out, nothing reloads there and the session keeps working.
+    """
     # ``targets`` is validated at the HTTP edge (the route's ``_reload_targets``
     # extractor raises ``BadRequestError`` for a malformed body / non-string-list
     # targets), so the route answers a loud 400 there — the operation receives an

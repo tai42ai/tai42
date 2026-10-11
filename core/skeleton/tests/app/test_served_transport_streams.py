@@ -18,6 +18,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -35,6 +36,8 @@ from tai42_skeleton.app.reload_gate import reload_gate
 from . import _reload_drive_state
 from ._served_app import (
     ADMIN_KEY,
+    MCP_CALL_TIMEOUT_S,
+    RELOAD_SWAP_BOUND_S,
     REQUEST_TIMEOUT_S,
     ResponseLog,
     bearer,
@@ -58,6 +61,10 @@ MANIFEST = {
 TOOLS = ["drive_reload", "held_call"]
 DRAIN_BUDGET_S = 2.0
 DRAIN_ERROR = "still in flight after the drain budget"
+# A held tool call answers only once the test releases it: after the in-flight settle (2), a
+# second session's open (REQUEST_TIMEOUT_S), the reload's rebuild and swap (RELOAD_SWAP_BOUND_S)
+# and the wait for the drain's report (DRAIN_BUDGET_S * 10).
+HELD_CALL_TIMEOUT_S = 2 + REQUEST_TIMEOUT_S + RELOAD_SWAP_BOUND_S + DRAIN_BUDGET_S * 10
 DOORS = ["streamable-main", "streamable-mount", "sse-main", "sse-mount"]
 
 
@@ -99,27 +106,36 @@ async def _door_url(monkeypatch: pytest.MonkeyPatch, door: str) -> AsyncIterator
 
 
 @asynccontextmanager
-async def _session(url: str) -> AsyncIterator[ClientSession]:
-    """An initialised SDK client session at ``url`` whose server-to-client stream the server has opened."""
+async def _session(url: str, *, call_timeout: float = MCP_CALL_TIMEOUT_S) -> AsyncIterator[ClientSession]:
+    """An initialised SDK client session at ``url`` whose server-to-client stream the server has opened.
+
+    ``call_timeout`` is the session's read timeout: a call unanswered by then fails with the
+    SDK's named timeout error. A streamable-HTTP POST's HTTP read bound stays above it.
+    """
     log = ResponseLog()
     factory = logging_client_factory(log)
+    read_timeout = timedelta(seconds=call_timeout)
     if url.endswith("/sse"):
         async with (
             sse_client(url, headers=bearer(ADMIN_KEY), timeout=REQUEST_TIMEOUT_S, httpx_client_factory=factory) as (
                 read,
                 write,
             ),
-            ClientSession(read, write) as session,
+            ClientSession(read, write, read_timeout_seconds=read_timeout) as session,
         ):
             await session.initialize()
             await session.list_tools()
             yield session
         return
-    client = factory(headers=bearer(ADMIN_KEY), timeout=httpx.Timeout(REQUEST_TIMEOUT_S))
+    # The HTTP read bound stays above the session's: the SDK's streamable-HTTP client ends a
+    # POST whose HTTP read times out without telling the caller, so that call would wait unbounded.
+    client = factory(
+        headers=bearer(ADMIN_KEY), timeout=httpx.Timeout(REQUEST_TIMEOUT_S, read=call_timeout + REQUEST_TIMEOUT_S)
+    )
     async with (
         client,
         streamable_http_client(url, http_client=client) as (read, write, _session_id),
-        ClientSession(read, write) as session,
+        ClientSession(read, write, read_timeout_seconds=read_timeout) as session,
     ):
         await session.initialize()
         await session.list_tools()
@@ -222,12 +238,15 @@ async def test_a_held_call_stays_counted_beside_the_exempt_stream_and_answers_be
     stream), and its reply is delivered on its own POST while the driver keeps the transports open."""
     state = _reload_drive_state.reset(hold_driver=True)
     with caplog.at_level(logging.ERROR):
-        async with _door_url(monkeypatch, "streamable-main") as url, _session(url) as held_session:
+        async with (
+            _door_url(monkeypatch, "streamable-main") as url,
+            _session(url, call_timeout=HELD_CALL_TIMEOUT_S) as held_session,
+        ):
             boot = current_epoch()
             held = asyncio.create_task(held_session.call_tool("held_call", {}))
             await state.held_started.wait()
             assert await _settled_in_flight() == 1, "only the held call's POST is in flight"
-            async with _session(url) as driving_session:
+            async with _session(url, call_timeout=HELD_CALL_TIMEOUT_S) as driving_session:
                 driving = asyncio.create_task(driving_session.call_tool("drive_reload", {}))
                 await state.driver_swapped.wait()
                 # The retire's tail drains the held call for the budget, then reports it.

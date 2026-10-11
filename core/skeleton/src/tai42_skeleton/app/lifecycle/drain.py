@@ -6,7 +6,10 @@ released, which happens only after the retire it drives has returned; the retire
 counts it against the budget and never severs it, and waits for a driver to answer — its
 own bounds (the rebuild, the fleet apply timeout, a recycle step) bound that wait. A stream
 that lives as long as its session (the interactions inbox stream, an MCP transport's
-server-to-client stream) exempts itself and is never waited for.
+server-to-client stream) exempts itself and is never waited for: an MCP transport's stream
+ends with its session when the retire closes the transports, after the session's calls
+(each counted on its own) have answered within the budget, while the inbox stream survives
+the reload until its client disconnects.
 
 A module whose in-flight work a retire or recycle must wait for declares its own budget
 on the app's :class:`DrainBudgetRegistry`; the budget used is the largest declared one,

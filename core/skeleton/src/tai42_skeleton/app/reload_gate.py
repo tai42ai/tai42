@@ -50,6 +50,10 @@ the lock cannot move, so it leaves the in-flight count while it waits:
 * :meth:`ReloadGate.synchronized` — the holder only waits a reload out or reads under
   the lock (a tool lookup that missed mid-rebuild, a re-probe pass). It is recorded as
   waiting while it waits and is ordinary in-flight work again once it holds the lock.
+
+A call of an SSE session acts for its own admission record, not the session stream's
+(:func:`~tai42_skeleton.app.admission.admit_session_call`), so it is recorded exactly as a
+request is and its record finishes once its reply is handed to the transport.
 """
 
 from __future__ import annotations

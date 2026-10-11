@@ -21,7 +21,12 @@ from tai42_contract.sub_mcp import RouteConfig
 from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 
 from tai42_skeleton.access_control.path_canon import under_prefix
-from tai42_skeleton.app.transport_stream import TransportStreamDrainExemptMiddleware
+from tai42_skeleton.app.transport_stream import (
+    SessionCallAdmissionMiddleware,
+    TransportStreamDrainExemptMiddleware,
+    bind_sse_session_ender,
+    transport_session_ender,
+)
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.settings.audit_log import audit_log_settings
@@ -135,6 +140,9 @@ class SubAppLifespan:
     def __init__(self, sub_app: ASGIApp) -> None:
         """Hold ``sub_app`` and the events/state its dedicated lifespan task coordinates on."""
         self._sub_app = sub_app
+        # How ``sub_app``'s transport ends the sessions it serves outside its lifespan (an
+        # SSE app's, recorded when it was assembled); ``None`` for every other app.
+        self._end_sessions = transport_session_ender(sub_app)
         self._started = asyncio.Event()
         self._stop = asyncio.Event()
         # Holds an enter failure (raised by start) OR a teardown failure (raised by
@@ -185,18 +193,26 @@ class SubAppLifespan:
             raise
 
     async def aclose(self) -> None:
-        """Signal the lifespan task to exit and await it, re-raising any teardown failure.
+        """End the app's transport sessions, then exit the lifespan task and await it, re-raising a teardown failure.
 
-        Idempotent — a second call just re-observes the finished task.
+        An SSE app's sessions run inside their own streams, outside the lifespan, so they are
+        ended first (:func:`~tai42_skeleton.app.transport_stream.bind_sse_session_ender`); the
+        lifespan exits even when ending them fails. Idempotent — a second call just
+        re-observes the finished task.
         """
         if self._task is None:
             return
-        self._stop.set()
-        # Await the run task so the lifespan's ``__aexit__`` (its ContextVar reset)
-        # runs to completion in the task/context that entered it. A teardown failure
-        # re-raises here (the run task carries it), preserving the "a failed teardown
-        # is never reported as clean" contract the callers rely on.
-        await self._task
+        end_sessions = None if self._stop.is_set() else self._end_sessions
+        try:
+            if end_sessions is not None:
+                await end_sessions()
+        finally:
+            self._stop.set()
+            # Await the run task so the lifespan's ``__aexit__`` (its ContextVar reset)
+            # runs to completion in the task/context that entered it. A teardown failure
+            # re-raises here (the run task carries it), preserving the "a failed teardown
+            # is never reported as clean" contract the callers rely on.
+            await self._task
 
 
 class SubMcpAppRouter:
@@ -452,6 +468,9 @@ class SubMcpAppRouter:
         failure that task has already unwound it and ``start()`` re-raises.
         """
         mcp = FastMCP(f"{slug}-MCP")
+        # A call of an SSE session on this mount is counted against the drain on its own,
+        # outermost so every call is counted, refused or not (as on the main server).
+        mcp.add_middleware(SessionCallAdmissionMiddleware())
 
         # Load tools
         for name in config.tools:
@@ -511,9 +530,12 @@ class SubMcpAppRouter:
             clean_root = self.root_prefix.rstrip("/")
             base_path = f"{clean_root}/{slug}"
             sse_path = f"{base_path}/sse"
+            message_path = f"{base_path}/messages"
             sub_app = create_sse_app(
-                mcp, message_path=f"{base_path}/messages", sse_path=sse_path, middleware=sub_middleware(sse_path)
+                mcp, message_path=message_path, sse_path=sse_path, middleware=sub_middleware(sse_path)
             )
+            # The mount's sessions end with the lifespan that owns it (its generation's close).
+            bind_sse_session_ender(sub_app, message_path)
         else:
             # Serve the streamable-HTTP endpoint at the sub-app ROOT. The
             # dispatcher rewrites an ``/app/{slug}`` request to sub-app scope path

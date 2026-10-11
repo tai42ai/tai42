@@ -18,7 +18,7 @@ from contextvars import ContextVar
 import pytest
 from pydantic_settings import BaseSettings
 from tai42_contract.app import tai42_app
-from tai42_kit.clients.base import current_client_epoch
+from tai42_kit.clients.base import advance_client_epoch, current_client_epoch
 from tai42_kit.settings import reset_all_settings
 from tai42_kit.settings.cache_registry import (
     _stamp_settings,
@@ -846,16 +846,6 @@ async def test_a_build_failing_after_its_lifespan_entered_closes_that_lifespan()
 
 
 async def test_a_clean_build_and_swap_cycle_leaves_no_stale_settings() -> None:
-    # The boot app bound at import (under process epoch 0) permanently holds an
-    # epoch-0 AccessControlSettings through its AuthAdapter/verifier/backend/policy
-    # singletons — legitimate live holders of the boot generation. Advance past epoch
-    # 0 so the generation this cycle retires is a fresh one no permanent singleton
-    # pins; the test then asserts THIS build/swap cycle leaves no stale holder,
-    # independent of process history (a split worker may run it with the epoch still
-    # at boot).
-    from tai42_kit.clients.base import advance_client_epoch
-
-    advance_client_epoch()
     _install_boot("boot-app")
 
     # The retire resets the settings and then sweeps the retired generation; a clean
@@ -913,8 +903,6 @@ _KEPT_GENERATIONS: list[object] = []
 @pytest.fixture
 def _access_control_on(monkeypatch: pytest.MonkeyPatch) -> None:
     """Access control and the redis identity provider on, the app's build slot restored after the test."""
-    from tai42_kit.clients.base import advance_client_epoch
-
     from tai42_skeleton.app import instance
 
     monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "true")
@@ -1071,9 +1059,6 @@ async def test_a_surface_collected_on_another_thread_is_certified_on_the_serving
     import asyncio
     import threading
 
-    from tai42_kit.clients.base import advance_client_epoch
-
-    advance_client_epoch()
     _install_boot("boot-app")
     held: list[object] = []
 
@@ -1103,9 +1088,6 @@ def test_no_certification_is_scheduled_on_a_closed_loop() -> None:
 
 
 async def test_clear_epoch_disarms_the_pending_certifications() -> None:
-    from tai42_kit.clients.base import advance_client_epoch
-
-    advance_client_epoch()
     _install_boot("boot-app")
     await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_serve("served-app"), drain_deadline=0.1)
     surface = current_epoch().serving_app
@@ -1136,11 +1118,6 @@ async def _door_reload_with_a_concurrent_request(release_within_budget: bool) ->
     after the concurrent request's drain is decided. Returns the order of the driver's
     answer and the transport close.
     """
-    from tai42_kit.clients.base import advance_client_epoch
-
-    # The app bound at import holds its own scaffold core's settings for the process life;
-    # move past the epoch it was read under so only this reload's generation is swept.
-    advance_client_epoch()
     _install_boot("boot-app")
     await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_serve("served-app"), drain_deadline=0.1)
     boot = current_epoch()
@@ -1236,11 +1213,6 @@ async def test_a_door_driven_reload_starts_the_new_generations_tasks_outside_the
     import asyncio
     import logging
 
-    from tai42_kit.clients.base import advance_client_epoch
-
-    # The app bound at import holds its own scaffold core's settings for the process life;
-    # move past the epoch it was read under so only this reload's generation is swept.
-    advance_client_epoch()
     _install_boot("boot-app")
     boot = current_epoch()
     retired_number = boot.number
@@ -1305,8 +1277,6 @@ def test_the_sweep_flags_a_leaked_retired_settings_instance() -> None:
     leaked = _Leaky()
     _stamp_settings(leaked)
     retired = current_client_epoch()
-    from tai42_kit.clients.base import advance_client_epoch
-
     advance_client_epoch()
     # A still-reachable retired-epoch instance is reported (never dropped).
     stale = sweep_stale_settings(retired)

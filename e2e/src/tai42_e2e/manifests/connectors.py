@@ -44,6 +44,14 @@ _FIXTURE_MANAGED_SERVER = McpServerDescriptor(
 )
 
 
+# The reload probe budget every stack that seeds the managed stdio server declares. The
+# server is a cold Python subprocess per probe, and under load its start takes 3-8 s: past
+# the platform's short reload probe budget (3 s), so a reload would record it unavailable
+# and its tools would stay unbound until a later re-probe. The stack sizes the reload probe
+# to the platform's cold-boot probe bound (15 s), the bound a boot probes the same child with.
+MANAGED_SERVER_RELOAD_PROBE_ENV = {"TAI_MCP_MCP_RELOAD_PROBE_TIMEOUT": "15"}
+
+
 def _fixture_connector_descriptors(idp_base: str) -> list[dict[str, object]]:
     """The four fixture provider descriptors serialized for the manifest ``connectors``
     field. ``idp_base`` stamps the OAuth provider's authorize/token endpoints at the
@@ -182,7 +190,7 @@ def build_connectors_stack(res: StackResources, variants: Variants) -> StackConf
         "api_tools": _PROJECTED_API_TOOLS,
         "user_tools": ["ask", "reload_config"],
     }
-    env = _base_env(res, variants)
+    env = {**_base_env(res, variants), **MANAGED_SERVER_RELOAD_PROBE_ENV}
     # The connector store binds to the ``default`` database (skeleton component) _base_env
     # already declares, so it is live (store-configured); its Redis cache rides the shared
     # ``_redis_feature_env``.

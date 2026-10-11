@@ -33,7 +33,7 @@ from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.settings.cache import mcp_reload_probe_timeout
+from tai42_skeleton.settings.cache import mcp_probe_timeout, mcp_reload_probe_timeout
 
 
 def _row(category: str = "error", message: str = "", http_status: int | None = None) -> dict:
@@ -349,9 +349,10 @@ async def test_in_flight_probe_does_not_block_gated_writes(monkeypatch):
 
         assert await asyncio.wait_for(gated_write(), timeout=1) == "ok"
         assert not reload_gate.locked  # nothing holds the gate during the probe
-        # Parity with _load_mcps: the reprobe path probes on the short reload budget,
-        # never the generous cold-boot timeout the under-gate bug used.
-        assert seen["timeout"] == mcp_reload_probe_timeout()
+        # The probe holds nothing, so it runs on the cold-boot bound: a server whose start
+        # outlasts the short reload budget still binds through the re-probe.
+        assert seen["timeout"] == mcp_probe_timeout()
+        assert seen["timeout"] != mcp_reload_probe_timeout()
     finally:
         release.set()
         await asyncio.sleep(0)  # let the pass finish and release the gate

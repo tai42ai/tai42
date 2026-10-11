@@ -15,9 +15,7 @@ while still returning a delivered record, so that log is its only detection.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
 
 import pytest
 from pydantic import BaseModel
@@ -36,10 +34,9 @@ from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.turn import CompletionDeliveryError, deliver_agent_completion
 from tai42_skeleton.conversations.turn import outcome as outcome_module
-from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.runs.chokepoint import delivery_fire
 
-from .conftest import FakeManager
+from .conftest import FakeManager, _settle
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -100,21 +97,6 @@ def env(monkeypatch):
 
 def _store() -> ConversationRecordStore:
     return ConversationRecordStore(ConversationsSettings())
-
-
-async def _settle(timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
-        if not tasks:
-            await asyncio.sleep(0)
-            # Recompute after the yield: a task can appear between the two checks, so wait on
-            # the fresh list (asyncio.wait raises on an empty set), and return only when it
-            # is still empty.
-            tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
-            if not tasks:
-                return
-        await asyncio.wait(tasks, timeout=0.05)
 
 
 def _wire(monkeypatch, manager: FakeManager, channel: FakeChannel) -> None:

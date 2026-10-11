@@ -218,6 +218,10 @@ async def write_env(env: dict[str, str], secret_keys: list[str] | None = None) -
 
     ``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;
     the marks variable itself is never accepted as an ``env`` key.
+
+    Called over MCP, the reload answers on the session that called it and then retires that session with
+    the generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,
+    and an SSE session's stream closes), so the client starts a new session to go on.
     """
     if SECRET_MARKS_ENV_VAR in env:
         raise BadRequestError("set secret marks through the 'secret_keys' field, not as an env key")
@@ -254,6 +258,12 @@ async def reload_config(targets: list[str] | None = None) -> Any:
     Heavy (a full re-init); meant for env/config saves, not tool edits. A convergence
     op: its whole purpose is aligning siblings to persisted state, so a failed local
     reload still broadcasts and then re-raises with the fleet report attached.
+
+    Called over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that
+    worker), the reload answers on the session that called it and then retires that session with the
+    generation it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an
+    SSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave
+    that worker out, nothing reloads there and the session keeps working.
     """
     # Run the heavy sync reload on a worker thread through the gate so this call (on
     # the serving loop) does not freeze it.
@@ -619,6 +629,10 @@ async def apply_profile(name: str) -> OperationResponse:
     or persisted. When the diff carries serve-affecting recycle keys and the roll converged, the
     applier's OWN recycle is armed as a post-response graceful self-exit (a Starlette
     ``BackgroundTask``) — its supervisor respawns it on the new env. 404 for an absent name.
+
+    Called over MCP, the reload answers on the session that called it and then retires that session with
+    the generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,
+    and an SSE session's stream closes), so the client starts a new session to go on.
     """
     _require_profile_store()
     try:

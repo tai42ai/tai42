@@ -6,8 +6,6 @@ fails is a loud error outcome. Pairing turns stay live under manual mode.
 
 from __future__ import annotations
 
-import asyncio
-import time
 from contextlib import asynccontextmanager
 
 import pytest
@@ -37,11 +35,10 @@ from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
 from tai42_skeleton.conversations.turn import overlap as overlap_module
 from tai42_skeleton.conversations.turn import record as record_module
-from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.conversations.turn import target as target_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
-from .conftest import FakeManager, _connected, rendered_user_message, serve_stores
+from .conftest import FakeManager, _connected, _settle, rendered_user_message, serve_stores
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -194,21 +191,6 @@ def env(monkeypatch):
 
 def _store() -> ConversationRecordStore:
     return ConversationRecordStore(ConversationsSettings())
-
-
-async def _settle(timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
-        if not tasks:
-            await asyncio.sleep(0)
-            # Recompute after the yield: a task can appear between the two checks, so wait on
-            # the fresh list (asyncio.wait raises on an empty set), and return only when it
-            # is still empty.
-            tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
-            if not tasks:
-                return
-        await asyncio.wait(tasks, timeout=0.05)
 
 
 def _wire(monkeypatch, manager: FakeManager, agent: Agent | None = None, channel: FakeChannel | None = None) -> None:

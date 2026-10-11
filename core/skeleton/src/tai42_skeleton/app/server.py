@@ -48,7 +48,7 @@ from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.media_facet import MediaFacet
 from tai42_skeleton.app.serving_core import ServingCore, record_sse_surface, record_streamable_http_surface
 from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
-from tai42_skeleton.app.transport_stream import TransportStreamDrainExemptMiddleware
+from tai42_skeleton.app.transport_stream import TransportStreamDrainExemptMiddleware, bind_sse_session_ender
 from tai42_skeleton.config import ConfigManagerFactory
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
@@ -487,6 +487,8 @@ class TaiMCP(TaiMCPLifecycleMixin):
             auth=self._fast_mcp.auth,
             middleware=self._base_middleware(middleware, stream_path=actual_path),
         )
+        # Its sessions end with the lifespan that owns it (its generation's close).
+        bind_sse_session_ender(base_app, actual_message_path)
         record_sse_surface(actual_path, actual_message_path)
 
         # Install the shared error-envelope handlers on the base app's own middleware
@@ -522,6 +524,8 @@ class TaiMCP(TaiMCPLifecycleMixin):
         )
         # Record what THIS build actually mounted, resolving ``stateless_http`` the same way.
         if transport == "sse":
+            # Its sessions end with the lifespan that owns it (its generation's close).
+            bind_sse_session_ender(base_app, fastmcp.settings.message_path)
             record_sse_surface(stream_path, fastmcp.settings.message_path)
         else:
             record_streamable_http_surface(

@@ -163,8 +163,11 @@ class Epoch:
     async def close_transports(self) -> None:
         """Close this generation's FastMCP lifespan and every adopted sub-app lifespan.
 
-        Each close runs even when another fails; a failure is re-raised once every close
-        was attempted (one failure as itself, several as an ``ExceptionGroup``).
+        Each lifespan's close first ends the sessions its transport keeps outside the
+        lifespan (an SSE app's, see :meth:`~tai42_skeleton.app.sub_mcp_app.SubAppLifespan.aclose`);
+        the streamable-HTTP session manager terminates its own on the lifespan's exit. Each close runs even when another
+        fails; a failure is re-raised once every close was attempted (one failure as itself,
+        several as an ``ExceptionGroup``).
         """
         lifespans = [self.supervisor] if self.supervisor is not None else []
         lifespans.extend(self._adopted_transports)
@@ -211,12 +214,12 @@ class Epoch:
         Unbounded here by design: a driver's remaining work is the reload's own tail, which
         the gated body's own bounds already bound (the rebuild, the fleet apply timeout, a
         recycle step). The sets are live, so a driver that engages during the wait is seen.
-        A driver acting through a long-lived stream (a call of an SSE session, answering on
-        the session's stream) is not waited for: the stream ends only when its client
-        disconnects, and closing the transports does not sever it.
+        A call of an SSE session is a request of its own here (its record finishes once the
+        MCP SDK has handed its reply to the transport), so the close that ends the session
+        comes after the driver's answer.
         """
         while True:
-            requests = [state for state in self.driving if not state.long_lived]
+            requests = list(self.driving)
             tasks = list(self.driving_tasks)
             if not requests and not tasks:
                 return
@@ -237,7 +240,7 @@ class Epoch:
         """
         self._periodic_cancels.append(cancel)
 
-    async def _drain_in_flight(self, deadline: float, *, until_gate_wait: bool = False) -> None:
+    async def _drain_in_flight(self, deadline: float, *, until_gate_wait: bool = False) -> bool:
         """Wait, bounded by ``deadline``, for this generation's admitted requests to finish.
 
         Counts only the work that can finish on its own: a request driving a gated body has
@@ -245,12 +248,14 @@ class Epoch:
         waiting on the gate is not counted while it waits. A request still in flight past the
         budget is logged loudly and the retire proceeds (the fresh epoch already serves new
         traffic). With ``until_gate_wait`` the wait also ends, unreported, as soon as work of
-        this generation starts waiting on the gate: the retire then hands the drain to its
-        deferred tail.
+        this generation starts waiting on the gate, and the call returns ``True``: the drain
+        is not finished, and its caller either hands it to the deferred tail or resumes it.
+        Returns ``False`` once the generation is idle or the budget is spent.
         """
         if self._idle.is_set():
-            return
-        waits = [asyncio.ensure_future(self._idle.wait())]
+            return False
+        idle = asyncio.ensure_future(self._idle.wait())
+        waits = [idle]
         if until_gate_wait:
             self._engagement.clear()
             waits.append(asyncio.ensure_future(self._engagement.wait()))
@@ -265,6 +270,8 @@ class Epoch:
                 self.number,
                 self._in_flight,
             )
+            return False
+        return idle not in done and not self._idle.is_set()
 
     async def _cancel_periodic_loops(self, deadline: float) -> None:
         """Cancel every periodic loop this generation owns, each BOUNDED by ``deadline``.

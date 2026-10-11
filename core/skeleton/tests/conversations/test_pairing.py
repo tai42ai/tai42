@@ -46,10 +46,9 @@ from tai42_skeleton.conversations.turn import intake as intake_module
 from tai42_skeleton.conversations.turn import outcome as outcome_module
 from tai42_skeleton.conversations.turn import overlap as overlap_module
 from tai42_skeleton.conversations.turn import pairing as pairing_module
-from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
-from .conftest import FakeManager, _connected, rendered_user_message
+from .conftest import FakeManager, _connected, _settle, rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 _CODE_RE = re.compile(r"LINK-[A-Z0-9]{8}")
@@ -248,21 +247,6 @@ _TARGET = PairingTarget(target_kind="agent", target_name="assistant")
 
 
 _TOOL_TARGET = PairingTarget(target_kind="tool", target_name="pinger")
-
-
-async def _settle(timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
-        if not tasks:
-            await asyncio.sleep(0)
-            # Recompute after the yield: a task can appear between the two checks, so wait on
-            # the fresh list (asyncio.wait raises on an empty set), and return only when it
-            # is still empty.
-            tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
-            if not tasks:
-                return
-        await asyncio.wait(tasks, timeout=0.05)
 
 
 async def _answer_of(message_id: str) -> str:

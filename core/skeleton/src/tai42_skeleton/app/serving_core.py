@@ -14,6 +14,7 @@ from tai42_skeleton.app.http import HttpSurface
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import MOUNT_METHODS, route_registry
 from tai42_skeleton.app.sessions import ReloadRejectionMiddleware, SessionRegistry, SessionTrackingMiddleware
+from tai42_skeleton.app.transport_stream import SessionCallAdmissionMiddleware
 from tai42_skeleton.backend.registry import BackendHolder
 from tai42_skeleton.backup import BackupRegistry, register_core_sections
 from tai42_skeleton.channels.registry import ChannelRegistry
@@ -154,6 +155,9 @@ class ServingCore:
         # every incoming message, so the list_changed broadcast primitive sees every
         # connected client. Protocol-level infra, registered on the raw server.
         self._session_registry = SessionRegistry()
+        # A call of an SSE session is counted against its generation's drain on its own
+        # (its session stream is exempt); outermost, so every call is counted, refused or not.
+        self._fast_mcp.add_middleware(SessionCallAdmissionMiddleware())
         self._fast_mcp.add_middleware(SessionTrackingMiddleware(self._session_registry))
         # A session ``tools/call`` is a run surface too: reject it with the same
         # retriable "reloading" error while the reload gate is held.

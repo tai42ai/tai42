@@ -9,7 +9,7 @@ from tai42_contract.manifest import TaiMCPConfig
 from tai42_skeleton.app import lifecycle as _lifecycle
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.reload_gate import reload_gate
-from tai42_skeleton.settings.cache import mcp_reload_probe_timeout
+from tai42_skeleton.settings.cache import mcp_probe_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +67,10 @@ class McpReprobeMixin(LifecycleState):
 
         ``snapshot`` is the ``{title: config}`` a reprobe pass captured under the
         gate. The probe is a network read that mutates no shared state, so it runs
-        unlocked and on the SHORT reload budget (parity with ``_load_mcps``, not the
-        generous cold-boot timeout) — a persistently-down server therefore never
-        holds the gate across the probe. The gate is re-acquired only to apply, and
+        off the gate and holds nothing while it waits; it is bounded by the cold-boot
+        probe budget (``mcp_probe_timeout``), so a server whose start outlasts a
+        rebuild's short reload budget binds here, exactly as it binds at boot and
+        through the ``reload_failed_mcps`` door. The gate is re-acquired only to apply, and
         each title is re-verified STILL failed AND STILL in the manifest before its
         bind: a concurrent admin reload/deregister may have cleared or removed it
         while probing, and a stale/removed title must not be re-applied. Returns the
@@ -77,7 +78,7 @@ class McpReprobeMixin(LifecycleState):
         """
         titles = list(snapshot)
         probes = await asyncio.gather(
-            *(self._probe_mcp(snapshot[t], timeout=mcp_reload_probe_timeout()) for t in titles),
+            *(self._probe_mcp(snapshot[t], timeout=mcp_probe_timeout()) for t in titles),
             return_exceptions=True,
         )
         out: list[dict[str, Any]] = []
@@ -114,7 +115,7 @@ class McpReprobeMixin(LifecycleState):
 
         Each pass sleeps the current interval, then — only when a server is
         currently failed — SNAPSHOTS the failed titles under the reload gate, PROBES
-        them off the gate on the short reload budget, and re-acquires the gate to
+        them off the gate on the cold-boot probe budget, and re-acquires the gate to
         rebind the recovered tools and clear them from the failed set, logging the
         outcome at INFO. The gate wraps only the brief snapshot and apply, never the
         probe: holding it across the network probe would stall every reload-gated

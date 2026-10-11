@@ -14,7 +14,9 @@ severed. When the generation has such work — from the start, or as soon as a r
 waiting on the gate during the synchronous drain — the retire leaves the transports open and
 hands the drain and the close to a background tail that lets the gate turn over, drains the
 ordinary work within the budget, waits for every driver to answer, repeats while work of the
-generation still waits on the gate, and only then closes.
+generation still waits on the gate, and only then closes. A call of an SSE session is a
+request of its own here, counted until its reply is handed to the transport, so closing the
+transports — which ends the generation's SSE sessions — never overtakes a driver's answer.
 """
 
 from __future__ import annotations
@@ -72,6 +74,9 @@ async def retire_epoch(old: Epoch, retired: int, deadline: float | None) -> None
     """
     budget = _drain_budget(deadline)
     await old._cancel_periodic_loops(budget)
+    loop = asyncio.get_running_loop()
+    drain_ends = loop.time() + budget
+    drain_unfinished = False
     if not old.engaged:
         # Drain this generation's in-flight requests SYNCHRONOUSLY before the transport
         # close below, so a real request (an MCP tool call, a sync REST tool run) finishes
@@ -79,9 +84,11 @@ async def retire_epoch(old: Epoch, retired: int, deadline: float | None) -> None
         # its own — the interactions-inbox SSE the Studio shell holds, an MCP transport's
         # server-to-client stream — EXEMPTS itself from this drain
         # (``mark_current_request_drain_exempt``): it can never drain, so waiting on it is
-        # pointless. A request that starts waiting on the gate meanwhile ends this wait: the
-        # generation is then engaged and the tail drains it.
-        await old._drain_in_flight(budget, until_gate_wait=True)
+        # pointless. A request that starts waiting on the gate meanwhile ends this wait
+        # unfinished: the generation is then engaged and the tail drains it, or, when that
+        # request has stopped waiting by the time the retire reads the generation again, the
+        # drain resumes below within what is left of the budget.
+        drain_unfinished = await old._drain_in_flight(budget, until_gate_wait=True)
 
     from tai42_skeleton.operations.tool_runs import drain_supervisors
 
@@ -98,8 +105,12 @@ async def retire_epoch(old: Epoch, retired: int, deadline: float | None) -> None
         logger.exception("epoch %d retire: background-run drain failed", old.number)
 
     # Read again after the drains: a request of this generation may have reached the gate
-    # while they ran.
+    # while they ran. A synchronous drain that a gate wait ended unfinished resumes for as
+    # long as the generation is not engaged (that waiter gave up), within the same budget.
     deferred = old.engaged
+    while drain_unfinished and not deferred:
+        drain_unfinished = await old._drain_in_flight(max(0.0, drain_ends - loop.time()), until_gate_wait=True)
+        deferred = old.engaged
     if not deferred:
         # Close the retired generation's transports: the FastMCP lifespan's ``__aexit__``
         # terminates every live session and drops its session manager, so the fresh epoch

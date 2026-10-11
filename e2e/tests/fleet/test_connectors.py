@@ -47,6 +47,7 @@ pytestmark = [
         "setting:PYTHONHASHSEED=0",
         "setting:managed-mcp-server",
         "setting:manifest:connectors-fixtures",
+        "setting:TAI_MCP_MCP_RELOAD_PROBE_TIMEOUT=15",
     ),
 ]
 
@@ -74,6 +75,10 @@ def _connectors_stack(fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp)
     return fresh_stack(build_fleet_connectors_stack, resource_kwargs=connectors_resource_kwargs(oauth_idp.base_url))
 
 
+# Each test boots its own stack (120) + the baseline poll (60); each manifest write over REST
+# polls past the reload gate (10) and answers within the HTTP bound (60), then the fleet
+# converges (60) and the tool poll runs (30): connect + disconnect, 2 x (70 + 60 + 30).
+@pytest.mark.timeout(510)
 async def test_noauth_connect_disconnect_converges(
     fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp, uniq: Callable[[str], str]
 ) -> None:
@@ -113,6 +118,9 @@ async def test_noauth_connect_disconnect_converges(
     )
 
 
+# The fresh stack boot (120) + the baseline poll (60) + the connect (70 + 60 + two tool polls
+# 30 + 30) + each toggle (70 + 60 + 30), twice.
+@pytest.mark.timeout(700)
 async def test_sub_service_toggle_converges(
     fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp, uniq: Callable[[str], str]
 ) -> None:
@@ -198,6 +206,10 @@ async def test_sub_service_toggle_converges(
     assert await _serves(stack, alpha_tool), f"managed tool {alpha_tool} not served after toggle-on"
 
 
+# The fresh stack boot (120) + the baseline poll (60) + the start and completion writes (70 +
+# 10 authorize + 70) + the convergence (60) + the tool poll (30) + the reconnect and its
+# completion (70 + 10 + 70) + the convergence (60).
+@pytest.mark.timeout(640)
 @pytest.mark.needs("helper:idp")
 async def test_oauth_complete_and_reconnect_converges(
     fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp, uniq: Callable[[str], str]

@@ -204,9 +204,14 @@ def test_finalize_app_setup_mounts_router_and_applies_middleware():
 def test_sse_app_builds_and_finalizes():
     a = _fresh()
     sentinel = MagicMock()
-    with patch.object(server_module, "create_sse_app", return_value=sentinel) as mk:
+    with (
+        patch.object(server_module, "create_sse_app", return_value=sentinel) as mk,
+        patch.object(server_module, "bind_sse_session_ender") as bind,
+    ):
         result = a.sse_app()
     mk.assert_called_once()
+    # The built app's sessions are ended through its message endpoint when its lifespan closes.
+    bind.assert_called_once_with(sentinel, "/messages")
     # The SSE app must carry the server's auth so /sse + /messages are gated when
     # access control is on (mirrors http_app); an unauthenticated SSE surface
     # would bypass it.
@@ -266,7 +271,10 @@ def test_sse_app_registers_error_handlers():
     # 500, the {"error": "not found"} 404, and a reload plugin boot-abort reaches the caller.
     a = _fresh()
     sentinel = MagicMock()
-    with patch.object(server_module, "create_sse_app", return_value=sentinel):
+    with (
+        patch.object(server_module, "create_sse_app", return_value=sentinel),
+        patch.object(server_module, "bind_sse_session_ender"),
+    ):
         a.sse_app()
     _assert_error_handlers_installed(sentinel)
 
