@@ -16,13 +16,13 @@ from datetime import UTC, datetime
 import pytest
 from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
 
-from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations import persons as persons_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.thread_ids import PERSON_THREAD_PREFIX
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import NotFoundError
 
@@ -270,6 +270,8 @@ async def test_api_caller_reads_both_its_api_leg_and_the_channel_leg(fake, monke
     # BOTH legs, one merged history — the api leg AND the channel-leg record.
     assert [item["message_id"] for item in read["items"]] == ["api-1", "chan-1"]
     assert read["total"] == 2
+    # The transcript serves the person the thread aggregates.
+    assert read["person_id"] == _PERSON_ID
 
 
 async def test_another_grant_holder_reads_the_person_thread(fake, monkeypatch):
@@ -392,3 +394,12 @@ async def test_a_target_mismatch_is_404(fake, monkeypatch):
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     with pytest.raises(NotFoundError, match="thread not found"):
         await ops.get_conversation_thread("chat-api", _THREAD)
+
+
+@pytest.mark.parametrize("q", [None, "anything"])
+async def test_a_person_thread_naming_no_person_is_the_uniform_404(fake, monkeypatch, q):
+    fake.seed_route("chat-api")
+    _wire_manager(monkeypatch, _api_route("chat-api"))
+    _as_caller(monkeypatch, _Caller("root", is_admin=True))
+    with pytest.raises(NotFoundError, match="thread not found"):
+        await ops.get_conversation_thread("chat-api", PERSON_THREAD_PREFIX, q=q)

@@ -214,6 +214,8 @@ async def test_channel_listing_is_admin_only_and_transcript_reads_for_a_grant_ho
     await reader.get(f"/api/conversations/{route_name}/threads", expect=403)
     real = await reader.get(_transcript_path(route_name, thread_id), expect=200)
     assert real["total"] == 2
+    # A route-keyed thread aggregates no linked person.
+    assert real["person_id"] is None
     absent = await reader.request_raw("GET", _transcript_path(route_name, "bridge:nope"))
     assert absent.status_code == 404
     assert absent.json() == {"error": "conversation thread not found: 'bridge:nope'"}, absent.text

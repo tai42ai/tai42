@@ -87,6 +87,8 @@ class _StubHttp:
         action: str | None = None,
         declared: Any = None,
         no_body_reason: str | None = None,
+        enveloped: bool = True,
+        success_media_types: Any = None,
     ) -> Callable[[Any], Any]:
         # ``action`` is recorded as metadata only — the stub enforces nothing (the
         # fail-closed authed-without-action refusal is the core registry's, exercised
@@ -100,6 +102,8 @@ class _StubHttp:
                     action=action,
                     summary=summary,
                     tags=tags,
+                    declared=declared,
+                    success_media_types=success_media_types,
                     handler=fn,
                 )
             )
