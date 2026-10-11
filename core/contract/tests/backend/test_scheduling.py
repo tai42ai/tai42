@@ -25,8 +25,10 @@ _CADENCE: TypeAdapter[IntervalCadence | CrontabCadence] = TypeAdapter(ScheduleCa
 def test_both_cadences_parse_through_the_discriminator() -> None:
     interval = _CADENCE.validate_python({"kind": "interval", "every": 30})
     crontab = _CADENCE.validate_python({"kind": "crontab", "minute": "0", "hour": "9"})
+    assert isinstance(interval, IntervalCadence)
     assert interval == IntervalCadence(every=30.0)
     assert interval.relative is False
+    assert isinstance(crontab, CrontabCadence)
     assert crontab == CrontabCadence(minute="0", hour="9")
     assert crontab.day_of_week == "*"
 
@@ -120,7 +122,7 @@ def test_a_list_row_carries_no_kwargs() -> None:
 
 
 def test_an_import_report_refuses_an_unknown_key() -> None:
-    report = {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 2, "errors": []}
+    report: dict[str, Any] = {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 2, "errors": []}
     assert ScheduleImportReport.model_validate(report).skipped_existing == 2
     with pytest.raises(ValidationError):
         ScheduleImportReport.model_validate({**report, "extra": 1})

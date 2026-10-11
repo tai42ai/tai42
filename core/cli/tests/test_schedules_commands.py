@@ -157,6 +157,9 @@ def test_schedules_add_an_invalid_body_is_a_bad_parameter(monkeypatch: pytest.Mo
     assert bodies == []
 
 
+_BINDING = {"states": [{"state": "status", "subject_expr": {"content": ".x"}, "templates": ["t1"]}]}
+
+
 def test_schedules_add_sends_the_door_contract_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -165,7 +168,7 @@ def test_schedules_add_sends_the_door_contract_flags(monkeypatch: pytest.MonkeyP
         assert body["cancel_expr"] == {"content": "$parked[].id"}
         assert body["resume_expr"] == {"content": "$parked[0].id"}
         assert body["extras_expr"] == {"content": "{warm: .seed}"}
-        assert body["state_binding"] == {"states": []}
+        assert body["state_binding"] == _BINDING
         return data_response({"name": "report"})
 
     result = run_cli(
@@ -186,7 +189,7 @@ def test_schedules_add_sends_the_door_contract_flags(monkeypatch: pytest.MonkeyP
             "--extras-expr",
             "{warm: .seed}",
             "--state-binding",
-            '{"states": []}',
+            json.dumps(_BINDING),
         ],
     )
     assert result.exit_code == 0, result.output

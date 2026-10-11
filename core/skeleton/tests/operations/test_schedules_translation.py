@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+from typing import Any
 
 import pytest
 from tai42_contract.backend import SCHEDULE_CADENCE_KEY, CrontabCadence, IntervalCadence, ScheduleRecord
@@ -43,7 +44,7 @@ def _demo_calls() -> list[dict]:
     return importlib.import_module(_TOOLS_MODULE).demo_calls
 
 
-def _backend():
+def _backend() -> Any:
     return importlib.import_module(_TOOLS_MODULE)
 
 
