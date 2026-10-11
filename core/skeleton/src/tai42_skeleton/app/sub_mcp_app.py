@@ -17,6 +17,7 @@ from fastmcp.server.middleware import MiddlewareContext
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.types import ASGIApp
+from tai42_contract.plugins import PATH_SEGMENT_SLUG_RE
 from tai42_contract.sub_mcp import RouteConfig
 from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 
@@ -42,16 +43,14 @@ def sub_mcp_access_pattern(slug: str) -> str:
 
 
 # A slug is dispatched as ONE path segment, so it must be a single lowercase-safe
-# segment: a ``/`` (or a trailing newline) would mint a route that is unreachable
-# and undeletable. Validated here at the core so EVERY caller — the HTTP router
-# AND the backup-restore path — is checked, not just the route. ``\Z`` (not ``$``)
-# anchors the true end of string so a trailing ``\n`` cannot slip through.
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
+# segment (``PATH_SEGMENT_SLUG_RE``): a ``/`` (or a trailing newline) would mint a route
+# that is unreachable and undeletable. Validated here at the core so EVERY caller — the
+# registration operation AND the backup-restore path — is checked.
 
 # The transports the dispatcher + build path support end to end. Owned here at the
 # core (where the build path consumes it) and validated at registration so an
 # unknown transport is rejected loudly rather than silently built as ``http``; the
-# HTTP router imports this same set for its request-shape 400.
+# registration operation refuses anything else with a 400.
 _VALID_TRANSPORTS = ("http", "sse", "stdio")
 
 
@@ -63,8 +62,8 @@ def validate_registration(slug: str, transport: str) -> None:
     slug that would mint an unreachable/undeletable route, or a transport the build
     path cannot serve, is caught in exactly one place.
     """
-    if not _SLUG_RE.match(slug):
-        raise ValueError(f"slug {slug!r} must match {_SLUG_RE.pattern} (one lowercase path segment)")
+    if not PATH_SEGMENT_SLUG_RE.match(slug):
+        raise ValueError(f"slug {slug!r} must match {PATH_SEGMENT_SLUG_RE.pattern} (one lowercase path segment)")
     if transport not in _VALID_TRANSPORTS:
         raise ValueError(f"transport {transport!r} must be one of {_VALID_TRANSPORTS}")
 

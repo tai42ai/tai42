@@ -6,10 +6,11 @@ import logging
 
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
-from tai42_contract.app import tai42_app
+from tai42_contract.app import DeclaredRouteMetadata, tai42_app
 
 from tai42_channel_web.routes.dtos import _MAX_IDENTITY_CHARS, _clean_identity
 from tai42_channel_web.routes.envelope import _NOSNIFF, _error
+from tai42_channel_web.routes.limits import CHAT_RATE_LIMIT_BUDGET, CHAT_RATE_LIMIT_FAMILY
 from tai42_channel_web.routes.session_access import (
     _SESSION_MISSING,
     _SESSION_MISSING_CODE,
@@ -30,6 +31,15 @@ logger = logging.getLogger(__name__)
     tags=["channels"],
     response_model=None,
     no_body_reason="SSE StreamingResponse: text/event-stream, no fixed body",
+    success_media_types={"GET": ("text/event-stream",)},
+    declared=DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=False,
+        error_statuses=(400, 401, 501, 503),
+        success_status=200,
+        rate_limit_family=CHAT_RATE_LIMIT_FAMILY,
+        rate_limit_budget=CHAT_RATE_LIMIT_BUDGET,
+    ),
 )
 async def web_stream(request: Request) -> Response:
     """Open the SSE feed of the session's own conversation.

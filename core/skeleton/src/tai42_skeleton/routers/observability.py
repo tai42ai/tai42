@@ -216,6 +216,7 @@ class TraceExportQuery(BaseModel):
     tags=["observability"],
     response_model=None,
     no_body_reason="Trace export: raw JSON attachment download",
+    success_media_types={"GET": ("application/octet-stream",)},
     query_model=TraceExportQuery,
     declared=DeclaredRouteMetadata(
         reload_gated=False,
@@ -268,6 +269,7 @@ async def export_run_trace(request: Request) -> Response:
     tags=["observability"],
     response_model=None,
     no_body_reason="Runs export: text/csv attachment download",
+    success_media_types={"GET": ("text/csv", "application/octet-stream")},
     query_model=ExportRunsQuery,
     declared=DeclaredRouteMetadata(
         reload_gated=False,

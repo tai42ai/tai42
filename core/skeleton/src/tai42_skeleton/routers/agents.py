@@ -69,7 +69,6 @@ from tai42_contract.tools import tool_call_frame
 from tai42_skeleton.agent.thread_reservation import ReservedThreadNamespaceError, run_kwargs_from_tool_input
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.http import http_surface
-from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.operations import agents as agent_ops
 from tai42_skeleton.operations import operation_metadata_of, register_operation_route
@@ -306,7 +305,7 @@ async def _produce(
     budget/attribution seam stays inside the drive. A cancellation (client disconnect) propagates into
     ``astream`` and re-raises so the abandoned run stops.
     """
-    from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
+    from tai42_skeleton.states.api_context import live_door_scope
 
     captured: dict[str, StreamEvent] = {}
 
@@ -314,8 +313,8 @@ async def _produce(
         return await _drive_capturing_terminal(agent, run_kwargs, queue, captured)
 
     try:
-        async with caller_execution_identity(caller_key):
-            with api_state_context(subject, caller_key), tool_call_frame(name=target_name):
+        async with live_door_scope(subject, caller_key, attribute=False):
+            with tool_call_frame(name=target_name):
                 outcome = await tai42_app.interactions.visit(
                     target_name=target_name,
                     cancel=[],
@@ -439,6 +438,7 @@ async def _agent_event_stream(
     request_model=AgentRunInput,
     response_model=None,
     no_body_reason="Agent run: SSE StreamingResponse (text/event-stream)",
+    success_media_types={"POST": ("text/event-stream",)},
     declared=DeclaredRouteMetadata(
         reload_gated=True,
         reads_body=True,
@@ -449,10 +449,6 @@ async def _agent_event_stream(
 )
 async def run_agent(request: Request) -> Response:
     """Stream a run of the named agent as SSE; 404 for an unknown agent, retriable while a reload holds the gate."""
-    # An agent run dispatched against registries a reload is tearing down would
-    # race the rebuild — reject while the gate is held (retriable).
-    if reload_gate.locked:
-        return reload_gate.reject_response()
     name = request.path_params["name"]
     agent = agent_ops._agents_registry().get(name)
     if agent is None:
@@ -489,6 +485,7 @@ async def run_agent(request: Request) -> Response:
     request_model=AgentRunInput,
     response_model=None,
     no_body_reason="Authored-agent run: SSE StreamingResponse",
+    success_media_types={"POST": ("text/event-stream",)},
     declared=DeclaredRouteMetadata(
         reload_gated=True,
         reads_body=True,
@@ -509,10 +506,6 @@ async def run_authored_agent(request: Request) -> Response:
     ``from_tool_input`` before ``astream`` — never a raw splat that would bypass
     validation and the field mapping.
     """
-    # An agent run dispatched against registries a reload is tearing down would
-    # race the rebuild — reject while the gate is held (retriable).
-    if reload_gate.locked:
-        return reload_gate.reject_response()
     name = request.path_params["name"]
     try:
         spec = instance.app.preset_manager.get_spec(name)

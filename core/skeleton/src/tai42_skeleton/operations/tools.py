@@ -77,7 +77,7 @@ from tai42_skeleton.operations.response_models_group_b import (
     ToolTagListResponse,
 )
 from tai42_skeleton.operations.response_models_group_c import RunAnswerResponse
-from tai42_skeleton.tools.binding import ToolResultEncodingError, UnknownToolError, find_lone_surrogate
+from tai42_skeleton.tools.binding import ToolResultEncodingError, UnknownToolError
 
 if TYPE_CHECKING:
     from fastmcp.tools import Tool
@@ -251,42 +251,28 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
     # before. An already-bound identity (an inline fire reaching this op) is never
     # clobbered. Function-local imports keep the operations→authz edge lazy,
     # matching the repo's guarded authz-edge idiom.
-    from contextlib import nullcontext
-
-    from tai42_contract.monitoring import RunAttribution
-
     from tai42_skeleton.access_control.user import request_identity
-    from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
-    from tai42_skeleton.tools.attribution import run_attribution
+    from tai42_skeleton.states.api_context import live_door_scope, unencodable_outcome
 
-    # The caller's own principal, resolved once: it both attributes the run and (when no
-    # execution identity is bound yet) is the key the dispatch's identity is rebuilt from.
+    # The caller's own principal, resolved once: it both attributes the run (so a runs-index
+    # row the dispatch registers is born with a ``user_id``) and, when no execution identity
+    # is bound yet, is the key the dispatch's identity is rebuilt from.
     caller_key, _restricted = request_identity()
-    async with caller_execution_identity(caller_key):
+    async with live_door_scope(subject, caller_key, attribute=True):
         try:
-            # Deposit the caller's identity as this run's attribution so a runs-index row the
-            # dispatch registers (a preset target) is born with a ``user_id`` rather than NULL;
-            # ``run_tool``'s attribution stamp reads it. With no resolved caller the deposit is
-            # skipped and the row's identity stays unset.
-            attribution = (
-                run_attribution(RunAttribution(user_id=caller_key)) if caller_key is not None else nullcontext()
-            )
             # This envelope serves ONLY the live synchronous caller (a background submit
             # runs through ``submit_run``/``_supervise``, never this line), so a wrapped
             # secret in the result is revealed here for the one door that hands the caller
             # the real value; every recorder masks its own copy instead.
-            with attribution, api_state_context(subject, caller_key):
-                outcome = await tai42_app.interactions.visit(
-                    target_name=tool_name,
-                    cancel=[],
-                    resume=[],
-                    start=lambda extras: tai42_app.tools.run_tool(
-                        tool_name, arguments, offload_sync=True, extras=extras
-                    ),
-                    extras={},
-                    receives_outcome=True,
-                )
-                return _run_tool_return(outcome)
+            outcome = await tai42_app.interactions.visit(
+                target_name=tool_name,
+                cancel=[],
+                resume=[],
+                start=lambda extras: tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True, extras=extras),
+                extras={},
+                receives_outcome=True,
+            )
+            return _run_tool_return(outcome)
         except ToolResultEncodingError as exc:
             # The tool ran but produced output no JSON encoder can render (a lone UTF-16
             # surrogate). That is the tool's OUTPUT at fault, not the caller's request (never a
@@ -325,17 +311,9 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
             # output: refuse it LOUDLY through the SAME named path as an un-encodable result — a 502
             # naming the tool and the offending JSON path — never stringified past the encoder into
             # the delivered body (which would re-introduce the transport 500 the guard exists to stop).
-            offending_path = find_lone_surrogate(exc.outcome)
-            if offending_path is not None:
-                logger.warning(
-                    "run-tool: %r failed with an outcome that cannot be JSON-encoded at %s",
-                    tool_name,
-                    offending_path,
-                )
-                raise UpstreamError(
-                    str(ToolResultEncodingError(tool_name, offending_path)),
-                    extra={"tool": tool_name, "path": offending_path},
-                ) from exc
+            refusal = unencodable_outcome(tool_name, exc.outcome)
+            if refusal is not None:
+                raise UpstreamError(str(refusal), extra={"tool": refusal.tool_name, "path": refusal.json_path}) from exc
             raise OperationFailedError("tool run failed", extra={"outcome": exc.outcome}) from exc
         except UndeclaredPauseError as exc:
             # The tool ran and parked without declaring that it can pause: the deployment's

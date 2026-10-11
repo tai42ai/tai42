@@ -70,15 +70,13 @@ with the read-one route door.
 Also here: the two authed turn-submission doors (message + event). Importing this package
 registers every route.
 Thin adapters over ``tai42_skeleton.operations.conversations`` — no routing logic here.
-``get_current_user_id`` and ``reload_gate`` are homed at this package alias so a test's patch
-here is the single seam the submission doors read through at call time.
+``get_current_user_id`` is homed at this package alias so a test's patch here is the single
+seam the submission doors read through at call time.
 """
 
 from __future__ import annotations
 
 from tai42_contract.access_control import get_current_user_id
-
-from tai42_skeleton.app.reload_gate import reload_gate
 
 from .extractors import (
     _extract_message_search_query,
@@ -154,7 +152,6 @@ __all__ = [
     "list_conversation_routes",
     "list_conversation_threads",
     "list_failed_conversations",
-    "reload_gate",
     "search_conversation_messages",
     "send_conversation_event",
     "send_conversation_message",

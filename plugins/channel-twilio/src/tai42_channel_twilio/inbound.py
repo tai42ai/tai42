@@ -243,9 +243,10 @@ async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
     turn is never blank. A permanent media failure notifies the participant once and acks;
     a transient fetch/read fault propagates so Twilio redelivers. A message with no route
     bound, or with no body and no media, is logged and success-acked (the provider must
-    not retry-storm a permanently-unrouted or empty message); a retryable overflow or
-    infrastructure failure propagates as a 5xx so Twilio redelivers rather than silently
-    dropping it.
+    not retry-storm a permanently-unrouted or empty message); a retryable overflow, a
+    message refused while the server reloads, or an infrastructure failure propagates as a
+    5xx so Twilio redelivers when its webhook URL carries the ``#rp=5xx`` override, rather
+    than silently dropping it.
     """
     try:
         await _accept_inbound(form, message_sid)

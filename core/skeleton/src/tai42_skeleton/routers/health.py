@@ -62,6 +62,7 @@ class ReadinessStatus(BaseModel):
     tags=["health"],
     response_model=None,
     no_body_reason="Liveness probe: text/plain",
+    success_media_types={"GET": ("text/plain",)},
     authed=False,
 )
 async def health_check(request):

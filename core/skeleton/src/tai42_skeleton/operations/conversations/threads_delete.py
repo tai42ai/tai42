@@ -10,13 +10,21 @@ import sys
 from typing import Any
 
 from tai42_contract.errors import UnavailableError
+from tai42_contract.states import PERSON_KIND
 
-from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
+from tai42_skeleton.conversations.person_thread import person_routes
+from tai42_skeleton.conversations.thread_ids import (
+    RouteThreadId,
+    ThreadIdError,
+    parse_thread_id,
+    person_thread_id,
+    route_thread_id,
+)
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.errors import ConflictError, NotSupportedError
 from tai42_skeleton.operations.response_models_group_a import PersonDeleteResult, ThreadDeleteResult
 
-from .backend import _person_routes, _require_backend, _thread_not_found
+from .backend import _require_backend, _thread_not_found
 from .models import ThreadDeleteQuery
 from .routes import _validate_route_name
 
@@ -43,17 +51,26 @@ async def _thread_delete_routes(thread_id: str, route_name: str) -> list[str]:
     authority is the door's grantable write action — the same grant that creates a route —
     never derived here.
     """
-    if not thread_id.startswith(PERSON_THREAD_PREFIX):
-        prefix = f"{BRIDGE_THREAD_PREFIX}{route_name}:"
-        if not thread_id.startswith(prefix):
-            raise BadRequestError(
-                f"thread_id {thread_id!r} is not a thread of route {route_name!r}: it must start with {prefix!r}"
-            )
+    try:
+        parsed = parse_thread_id(thread_id)
+    except ThreadIdError as exc:
+        raise _not_a_thread_of(thread_id, route_name) from exc
+    if isinstance(parsed, RouteThreadId):
+        if parsed.route_name != route_name:
+            raise _not_a_thread_of(thread_id, route_name)
         return [route_name]
-    person = await _require_backend().persons.get_by_id(thread_id[len(PERSON_THREAD_PREFIX) :])
-    if person is None or route_name not in _person_routes(person):
+    person = await _require_backend().persons.get_by_id(parsed.person_id)
+    if person is None or route_name not in person_routes(person):
         raise _thread_not_found(thread_id)
-    return sorted(_person_routes(person))
+    return sorted(person_routes(person))
+
+
+def _not_a_thread_of(thread_id: str, route_name: str) -> BadRequestError:
+    """The 400 for a thread id that is not a thread of ``route_name``."""
+    prefix = route_thread_id(route_name, "")
+    return BadRequestError(
+        f"thread_id {thread_id!r} is not a thread of route {route_name!r}: it must start with {prefix!r}"
+    )
 
 
 async def _delete_thread_checkpoint(thread_id: str) -> None:
@@ -154,7 +171,7 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
         # the same per-thread FIFO the teardown holds; idempotent, so a retry re-runs it.
         from tai42_skeleton.interactions.helper import cancel_parks_for_thread
 
-        await cancel_parks_for_thread(thread_id)
+        await cancel_parks_for_thread(thread_id, reason="thread_deleted")
         await _delete_thread_checkpoint(thread_id)
         removed = 0
         for name in route_names:
@@ -202,7 +219,7 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
 
     store = manager.records
     person_store = manager.persons
-    thread_id = f"{PERSON_THREAD_PREFIX}{person_id}"
+    thread_id = person_thread_id(person_id)
     person = await person_store.get_by_id(person_id)
     caps = get_turn_caps()
     if person is None:
@@ -217,12 +234,12 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
             # the checkpoint is forgotten regardless, so a lingering park would otherwise be
             # orphaned exactly as on the linked branch. Reaches both the aggregated thread and the
             # person subject, whole-chain.
-            from tai42_skeleton.interactions.helper import cancel_parks_for_person
+            from tai42_skeleton.interactions.helper import cancel_parks_for_thread
 
-            await cancel_parks_for_person(person_id)
+            await cancel_parks_for_thread(thread_id, also_subjects=[(PERSON_KIND, person_id)], reason="person_erased")
             await _delete_thread_checkpoint(thread_id)
         return {"person_id": person_id, "removed": 0, "erased": False}
-    route_names = sorted(_person_routes(person))
+    route_names = sorted(person_routes(person))
     in_flight_409 = f"conversation person {person_id!r} has a turn in flight; retry once it drains"
     if await store.thread_has_live_intake(thread_id):
         raise ConflictError(in_flight_409)
@@ -236,9 +253,9 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
         # Kill every async park addressed to the person BEFORE its indexes go, so the
         # forget-me does not orphan a parked ``ask`` — whole-chain, across the aggregated thread
         # and the person subject, under the same per-thread FIFO.
-        from tai42_skeleton.interactions.helper import cancel_parks_for_person
+        from tai42_skeleton.interactions.helper import cancel_parks_for_thread
 
-        await cancel_parks_for_person(person_id)
+        await cancel_parks_for_thread(thread_id, also_subjects=[(PERSON_KIND, person_id)], reason="person_erased")
         await _delete_thread_checkpoint(thread_id)
         removed = 0
         for name in route_names:

@@ -15,10 +15,12 @@ from tai42_contract.conversations import (
     Person,
     PersonAddress,
 )
+from tai42_contract.states import PERSON_KIND
 
 from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.pairing import Link, Redeem, Unlink
 from tai42_skeleton.conversations.persons import PairingTarget
+from tai42_skeleton.conversations.thread_ids import person_thread_id
 from tai42_skeleton.conversations.turn.outcome import (
     _pairing_reply,
     _ResolvedOutcome,
@@ -206,10 +208,15 @@ async def _redeem_turn(multichannel: _Multichannel, person: Person, action: Rede
     survivor = await manager.persons.merge(person.person_id, minting_person.person_id)
     # Re-key every park/outcome of the absorbed person onto the survivor, so a resume after the
     # merge addresses the surviving subject (its person id and its aggregated person-thread key).
-    from tai42_skeleton.interactions.helper import rekey_parks_for_merge
+    from tai42_skeleton.interactions.helper import rekey_park_subjects
 
     for absorbed_id in {person.person_id, minting_person.person_id} - {survivor.person_id}:
-        await rekey_parks_for_merge(absorbed_id, survivor.person_id)
+        await rekey_park_subjects(
+            [
+                (PERSON_KIND, absorbed_id, survivor.person_id),
+                ("thread", person_thread_id(absorbed_id), person_thread_id(survivor.person_id)),
+            ]
+        )
     return _pairing_reply(_LINKED_TEXT)
 
 

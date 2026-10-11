@@ -4,7 +4,8 @@ An adapter route is declarative: this helper registers the HTTP surface over
 :meth:`HttpSurface.custom_route`, and the generated handler parses/validates the
 flat typed parameters, calls the operation, wraps the success payload in the
 ``{"data": ...}`` envelope, and maps the operation's declared errors to statuses.
-It honors the reload gate per the operation's metadata and NEVER performs
+Its reload gate is declared from the operation's metadata and enforced by the
+route surface. It NEVER performs
 authorization — that is a separate consumer (the HTTP middleware at the route
 edge, ``AuthzMiddleware`` at the tool edge).
 """
@@ -12,7 +13,7 @@ edge, ``AuthzMiddleware`` at the tool edge).
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -21,10 +22,11 @@ from pydantic import BaseModel, ValidationError
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.types import Message
 from tai42_contract.errors import OperationError
 
-from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata, RouteAction
+from tai42_skeleton.operations.errors import BadRequestError
 
 if TYPE_CHECKING:
     from tai42_skeleton.operations.registry import OperationMetadata
@@ -72,6 +74,51 @@ def validation_error_fields(exc: ValidationError) -> list[dict[str, Any]]:
     client learns WHICH field failed and HOW, never WHAT was sent.
     """
     return [{"loc": list(error["loc"]), "type": error["type"]} for error in exc.errors(include_url=False)]
+
+
+async def read_json_object(request: Request) -> dict[str, Any]:
+    """The request body as a JSON object; ``BadRequestError`` for a malformed body or a non-object one.
+
+    The refusal texts carry nothing of the input.
+    """
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise BadRequestError("invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise BadRequestError("body must be a JSON object")
+    return body
+
+
+def validate_body[M: BaseModel](model: type[M], body: Mapping[str, Any], what: str) -> M:
+    """``body`` validated as ``model``; ``BadRequestError("invalid <what>: …")`` naming each violated rule.
+
+    Value-free: each pydantic error's ``msg`` names the bound it violates, never the input, so the
+    refusal never echoes what was sent.
+    """
+    try:
+        return model.model_validate(body)
+    except ValidationError as exc:
+        raise BadRequestError(f"invalid {what}: " + "; ".join(error["msg"] for error in exc.errors())) from exc
+
+
+def request_with_body(request: Request, body: bytes) -> Request:
+    """A request over the same ASGI scope whose body stream yields ``body`` once — the bytes a door already read.
+
+    Built through Starlette's public constructor, so a parser reading ``json()``, ``form()`` or
+    ``body()`` of it sees exactly the bytes the door bounded; after the one body message the
+    stream reports a disconnect.
+    """
+    sent = False
+
+    async def receive() -> Message:
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request(request.scope, receive)
 
 
 def _declared_metadata(
@@ -186,11 +233,8 @@ def _build_handler(
     reads_body = method in _BODY_METHODS
 
     async def handler(request: Request) -> Response:
-        # An adapter route racing a registry teardown answers a retriable
-        # 503 — the reload gate is honored on the route edge.
-        if op.reload_gated and reload_gate.locked:
-            return reload_gate.reject_response()
-
+        # A ``reload_gated`` operation's 503 is the route surface's: ``custom_route`` wraps
+        # this handler from the declared metadata.
         try:
             kwargs = await _read_operation_kwargs(request, path_params, context_extractor, request_model, reads_body)
             result = await op.func(**kwargs)

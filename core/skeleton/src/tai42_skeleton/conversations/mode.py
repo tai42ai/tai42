@@ -28,8 +28,9 @@ from tai42_contract.conversations import CONVERSATION_MODES, ConversationMode, C
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
-from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
+from tai42_skeleton.conversations.person_thread import person_routes
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.thread_ids import person_id_of
 from tai42_skeleton.operations.errors import NotSupportedError
 from tai42_skeleton.utils.redis_typing import awaited
 
@@ -116,16 +117,16 @@ async def default_mode(route: ConversationRoute, thread_id: str) -> Conversation
     agent-served on a channel an operator meant to hold by hand, else ``agent``. A person
     row that has vanished falls back to the named route's default.
     """
-    if not thread_id.startswith(PERSON_THREAD_PREFIX):
+    person_id = person_id_of(thread_id)
+    if person_id is None:
         return route.initial_mode
     from tai42_skeleton.conversations.cache import get_conversations_manager
 
     manager = get_conversations_manager()
-    person = await manager.persons.get_by_id(thread_id[len(PERSON_THREAD_PREFIX) :])
+    person = await manager.persons.get_by_id(person_id)
     if person is None:
         return route.initial_mode
-    route_names = {name for address in person.addresses for name in address.routes}
-    return await default_mode_for_routes(manager, route_names)
+    return await default_mode_for_routes(manager, person_routes(person))
 
 
 async def default_mode_for_routes(manager: BaseConversationsManager, route_names: Iterable[str]) -> ConversationMode:

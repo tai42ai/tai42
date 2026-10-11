@@ -50,7 +50,6 @@ ordering are documented on the operation module.
 
 from __future__ import annotations
 
-from json import JSONDecodeError
 from typing import Any, cast
 
 from pydantic import ValidationError
@@ -61,6 +60,7 @@ from tai42_contract.template import TemplatedText
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.user import TaiUser
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object
 from tai42_skeleton.operations.api_keys import add_scope_url as _add_scope_url_op
 from tai42_skeleton.operations.api_keys import create_api_key as _create_api_key_op
 from tai42_skeleton.operations.api_keys import create_claim_link as _create_claim_link_op
@@ -90,16 +90,6 @@ from tai42_skeleton.operations.roles import update_role as _update_role_op
 from tai42_skeleton.routers.paths import AUTH_API_PREFIX
 
 # -- HTTP-edge body parsing --------------------------------------------------
-
-
-async def _json_body(request: Request) -> dict:
-    try:
-        body = await request.json()
-    except (JSONDecodeError, ValueError) as exc:
-        raise BadRequestError(f"invalid JSON body: {exc}") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("request body must be a JSON object")
-    return body
 
 
 def _require_str(body: dict, key: str) -> str:
@@ -161,7 +151,7 @@ def _opt_int(body: dict, key: str) -> int | None:
 
 
 async def _extract_add_scope_url(request: Request) -> dict:
-    body = await _json_body(request)
+    body = await read_json_object(request)
     return {
         "scope_id": _require_str(body, "scope_id"),
         "url": _require_str(body, "url"),
@@ -170,17 +160,17 @@ async def _extract_add_scope_url(request: Request) -> dict:
 
 
 async def _extract_remove_scope_url(request: Request) -> dict:
-    body = await _json_body(request)
+    body = await read_json_object(request)
     return {"url": _require_str(body, "url")}
 
 
 async def _extract_pin_public_route(request: Request) -> dict:
-    body = await _json_body(request)
+    body = await read_json_object(request)
     return {"url": _require_str(body, "url"), "pattern": _opt_str(body, "pattern")}
 
 
 async def _extract_unpin_public_route(request: Request) -> dict:
-    body = await _json_body(request)
+    body = await read_json_object(request)
     return {"url": _require_str(body, "url")}
 
 
@@ -192,7 +182,7 @@ async def _extract_list_routes(request: Request) -> dict:
 
 
 async def _extract_create_api_key(request: Request) -> dict:
-    body = await _json_body(request)
+    body = await read_json_object(request)
     return {
         "user_id": _require_str(body, "user_id"),
         "description": _require_str(body, "description"),
@@ -207,7 +197,7 @@ async def _extract_edit_api_key(request: Request) -> dict:
     # A PATCH-style partial edit: only the fields actually PRESENT in the body are
     # collected, so an absent field is preserved by the operation at its stored value
     # (distinct from an explicit ``null``/``{}``/``""`` that clears an optional gate).
-    body = await _json_body(request)
+    body = await read_json_object(request)
     updates: dict[str, Any] = {}
     if "description" in body:
         updates["description"] = _require_str(body, "description")
@@ -223,7 +213,7 @@ async def _extract_edit_api_key(request: Request) -> dict:
 async def _extract_key_scopes(request: Request) -> dict:
     # Granular scope edit: ``add``/``remove`` each absent → an empty list; present →
     # a strict list-of-strings (the op refuses both-empty). ``user_id`` binds by path.
-    body = await _json_body(request)
+    body = await read_json_object(request)
     return {
         "add": _require_str_list(body, "add") if "add" in body else [],
         "remove": _require_str_list(body, "remove") if "remove" in body else [],
@@ -231,12 +221,12 @@ async def _extract_key_scopes(request: Request) -> dict:
 
 
 async def _extract_create_claim_link(request: Request) -> dict:
-    body = await _json_body(request)
+    body = await read_json_object(request)
     return {"api_key": _require_str(body, "api_key"), "ttl_seconds": _opt_int(body, "ttl_seconds")}
 
 
 async def _extract_validate_condition(request: Request) -> dict:
-    body = await _json_body(request)
+    body = await read_json_object(request)
     return {
         "condition": _opt_templated_text(body, "condition"),
         "sample_context": _opt_dict(body, "sample_context"),
@@ -244,7 +234,7 @@ async def _extract_validate_condition(request: Request) -> dict:
 
 
 async def _extract_rollback_policy(request: Request) -> dict:
-    body = await _json_body(request)
+    body = await read_json_object(request)
     version = body.get("version")
     # A bool is an ``int`` subclass in Python; reject it explicitly so ``true`` is a
     # loud 400, not a silent version 1.

@@ -57,6 +57,7 @@ from tai42_skeleton.operations import (
     UpstreamError,
     operation,
 )
+from tai42_skeleton.operations._paging import next_page, page_bounds
 from tai42_skeleton.operations.response_models_group_c import (
     InteractionActionResult,
     InteractionWindow,
@@ -469,25 +470,6 @@ class InteractionWindowQuery(BaseModel):
     )
 
 
-def _page_bounds(page: int, page_size: int) -> tuple[int, int]:
-    """The ``(offset, limit)`` a page/pageSize pair names.
-
-    Both must be at least 1 and ``page`` at most :data:`MAX_INTERACTIONS_PAGE`; a page size
-    above the cap is capped, never refused.
-    """
-    if page < 1 or page_size < 1:
-        raise BadRequestError(f"page and page_size must be >= 1, got page={page} page_size={page_size}")
-    if page > MAX_INTERACTIONS_PAGE:
-        raise BadRequestError(f"page must be <= {MAX_INTERACTIONS_PAGE}, got page={page}")
-    limit = min(page_size, MAX_INTERACTIONS_PAGE_SIZE)
-    return (page - 1) * limit, limit
-
-
-def _next_page(page: int, limit: int, total: int) -> int | None:
-    """The next page number, or ``None`` on the last page, read from the filtered total."""
-    return page + 1 if page * limit < total else None
-
-
 @operation(
     name="list_interactions",
     summary="List pending interactions",
@@ -513,7 +495,9 @@ async def list_interactions(page: int = 1, page_size: int = 50) -> dict:
     carry the same shape as the stream's add frames, and ``truncated`` is always
     ``false`` (the pending index is the whole set, sliced in memory).
     """
-    offset, limit = _page_bounds(page, page_size)
+    offset, limit = page_bounds(
+        page, page_size, max_page=MAX_INTERACTIONS_PAGE, max_page_size=MAX_INTERACTIONS_PAGE_SIZE
+    )
     # OFF gate: with no store configured nothing is pending — the honest empty page
     # (the malformed-window 400 above still applies, so the door is no configured oracle).
     if not interactions_store_configured():
@@ -534,7 +518,7 @@ async def list_interactions(page: int = 1, page_size: int = 50) -> dict:
         "total": total,
         "page": page,
         "page_size": limit,
-        "next_page": _next_page(page, limit, total),
+        "next_page": next_page(page, limit, total),
         "truncated": False,
     }
 

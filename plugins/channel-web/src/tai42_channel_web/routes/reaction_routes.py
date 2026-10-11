@@ -17,12 +17,13 @@ from typing import Any
 import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from tai42_contract.app import tai42_app
+from tai42_contract.app import DeclaredRouteMetadata, tai42_app
 from tai42_kit.clients.impl.http import HttpxClient
 
 from tai42_channel_web.routes.callback_pin import pin_stored_callback
 from tai42_channel_web.routes.dtos import ReactionResultResponse, _reaction_refusal
 from tai42_channel_web.routes.envelope import _error, _json_body, _ok
+from tai42_channel_web.routes.limits import CHAT_RATE_LIMIT_BUDGET, CHAT_RATE_LIMIT_FAMILY
 from tai42_channel_web.routes.session_access import (
     _CROSS_ORIGIN,
     _CROSS_ORIGIN_CODE,
@@ -162,6 +163,14 @@ def _apply_reaction_result(forwarded: httpx.Response) -> Response:
     summary="React to a pending web chat form question",
     tags=["channels"],
     response_model=ReactionResultResponse,
+    declared=DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=True,
+        error_statuses=(400, 401, 403, 404, 409, 413, 422, 500, 501, 502),
+        success_status=200,
+        rate_limit_family=CHAT_RATE_LIMIT_FAMILY,
+        rate_limit_budget=CHAT_RATE_LIMIT_BUDGET,
+    ),
 )
 async def web_react(request: Request) -> Response:
     """Forward a mid-form reaction to a pending web form question's ticket react door.

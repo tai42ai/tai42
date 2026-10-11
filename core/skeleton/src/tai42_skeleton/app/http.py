@@ -5,8 +5,9 @@ custom-route passthrough; :meth:`finalize` applies the stack (plus the sub-MCP
 mount) around whichever ASGI app the launch surface builds.
 """
 
+import functools
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel
@@ -16,6 +17,7 @@ from starlette.responses import Response
 
 from tai42_skeleton.app.mount_map import MountBinding, MountRegistrationError, current_mount_binding, note_registered
 from tai42_skeleton.app.raw_path_route import RawPathRoute, SpaFallbackRoute
+from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import CORE_OWNER, MOUNT_METHODS, RouteOwner, route_registry
 
 if TYPE_CHECKING:
@@ -48,6 +50,18 @@ def record_sub_mcp_mount(prefix: str) -> None:
         name="sub_mcp_mount",
         summary="Sub-MCP app mount",
     )
+
+
+def _reload_gated(fn: Callable[[Request], Awaitable[Response]]) -> Callable[[Request], Awaitable[Response]]:
+    """``fn`` refusing with the reload gate's retriable ``503`` while a config reload holds the gate."""
+
+    @functools.wraps(fn)
+    async def gated(request: Request) -> Response:
+        if reload_gate.locked:
+            return reload_gate.reject_response()
+        return await fn(request)
+
+    return gated
 
 
 class HttpSurface:
@@ -103,6 +117,7 @@ class HttpSurface:
         declared: "DeclaredRouteMetadata | None" = None,
         no_body_reason: str | None = None,
         enveloped: bool = True,
+        success_media_types: Mapping[str, tuple[str, ...]] | None = None,
     ) -> Callable[[Callable[[Request], Awaitable[Response]]], Callable[[Request], Awaitable[Response]]]:
         """Register the handler with FastMCP AND record its OpenAPI metadata.
 
@@ -126,6 +141,10 @@ class HttpSurface:
 
         ``pre_auth`` requires the resolved route to be public and ``any_authenticated``
         requires it to be authenticated; a contradiction is a ``ValueError``.
+
+        A route declaring ``reload_gated`` is served — and returned — wrapped: while a config
+        reload holds the gate it answers the retriable reload ``503`` without entering the
+        handler. The registry records the undecorated handler.
         """
         binding = current_mount_binding()
         if binding is not None:
@@ -185,8 +204,10 @@ class HttpSurface:
                 public=resolved_public,
                 no_body_reason=no_body_reason,
                 enveloped=enveloped,
+                success_media_types=success_media_types,
             )
-            return fastmcp_route(fn)
+            served = _reload_gated(fn) if declared is not None and declared.reload_gated else fn
+            return fastmcp_route(served)
 
         return decorator
 

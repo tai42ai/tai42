@@ -233,12 +233,16 @@ Settings are read from the `CHANNEL_WEB_` environment group (see `WebSettings` /
 | `CHANNEL_WEB_ENTRY_ATTEMPTS_PER_WINDOW` | no (10) | [Entry gate](#entry-gate): entry-code guesses one client bucket may make per throttle window |
 | `CHANNEL_WEB_ENTRY_THROTTLE_WINDOW_SECONDS` | no (300) | [Entry gate](#entry-gate): the throttle window, seconds |
 
-Flood control on these public doors is **not** this plugin's. Every
-`/api/channels/web/*` door is public, so the app-level rate limiter throttles it as
-the `channels_web` family (requests per caller, tuned via
-`TAI_RATE_LIMIT_FAMILIES__CHANNELS_WEB__LIMIT` / `__BURST` / `__ENABLED`, bucketed
-with `TAI_RATE_LIMIT_TRUSTED_PROXIES` behind a reverse proxy), and the operator's
-ingress bounds what reaches the platform at all. What the plugin bounds is the one
+Flood control on these public doors is the app-level rate limiter's; the plugin
+declares the budgets on its routes. The chat doors (page, assets, stream, session
+rotate, messages, forms, answer, react) charge the `channels_web` family at 120
+requests a minute and 30 per 10 s; the upload door charges `channels_web_uploads` at
+20 and 5. The families are declared, so they hold whatever mount base the plugin is
+installed under. An operator tunes either field by field
+(`TAI_RATE_LIMIT_FAMILIES__CHANNELS_WEB__LIMIT` / `__BURST` / `__ENABLED`, and the
+same under `CHANNELS_WEB_UPLOADS`), callers are bucketed with
+`TAI_RATE_LIMIT_TRUSTED_PROXIES` behind a reverse proxy, and the operator's ingress
+bounds what reaches the platform at all. What the plugin bounds is the one
 resource it owns — the dedicated store connection an open SSE stream pins, capped
 per visitor and per process — and it reads no client address to do it.
 

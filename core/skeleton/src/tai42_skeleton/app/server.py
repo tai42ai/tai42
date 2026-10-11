@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.connectors.store import ConnectorTokenStore
+from tai42_contract.errors import ServerReloadingError
 from tai42_contract.manifest import TaiMCPConfig
 from tai42_contract.storage import Storage
 from tai42_contract.template import TemplatedText
@@ -46,6 +47,7 @@ from tai42_skeleton.app.facets import (
 )
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.media_facet import MediaFacet
+from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.serving_core import ServingCore, record_sse_surface, record_streamable_http_surface
 from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
 from tai42_skeleton.config import ConfigManagerFactory
@@ -145,17 +147,25 @@ async def _fleet_broadcast_error_handler(request: Request, exc: Exception) -> Re
     return await _internal_error_handler(request, exc)
 
 
+async def _server_reloading_handler(request: Request, exc: Exception) -> Response:
+    """The reload gate's retriable 503 for work refused while a config reload holds the gate."""
+    return reload_gate.reject_response()
+
+
 def _install_error_handlers(base_app: Any) -> None:
     """Install the shared error-envelope handlers on a freshly built base app.
 
     ``FleetBroadcastError`` / ``CorePluginBootError`` render the operator-facing reload
-    failure; every other unexpected exception falls back to the generic masked 500, and the
-    router's native 404 is rendered as the shared envelope.
+    failure; ``ServerReloadingError`` (a turn refused while a reload holds the gate, raised
+    from any door, a plugin's included) renders the reload gate's retriable 503; every other
+    unexpected exception falls back to the generic masked 500, and the router's native 404 is
+    rendered as the shared envelope.
     """
     from tai42_skeleton.marketplace.compat import CorePluginBootError
     from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
     base_app.add_exception_handler(Exception, _internal_error_handler)
+    base_app.add_exception_handler(ServerReloadingError, _server_reloading_handler)
     base_app.add_exception_handler(FleetBroadcastError, _fleet_broadcast_error_handler)
     base_app.add_exception_handler(CorePluginBootError, _core_plugin_boot_error_handler)
     base_app.add_exception_handler(404, _not_found_handler)

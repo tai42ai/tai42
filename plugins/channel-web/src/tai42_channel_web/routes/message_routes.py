@@ -13,7 +13,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import Response
-from tai42_contract.app import tai42_app
+from tai42_contract.app import DeclaredRouteMetadata, tai42_app
 from tai42_contract.conversations import BlankInboundTextError, ThreadQueueOverflowError
 from tai42_contract.interactions import (
     IngestedMedia,
@@ -34,6 +34,7 @@ from tai42_channel_web.routes.dtos import (
     _object_refusal,
 )
 from tai42_channel_web.routes.envelope import _body_refusal, _error, _json_body, _ok
+from tai42_channel_web.routes.limits import CHAT_RATE_LIMIT_BUDGET, CHAT_RATE_LIMIT_FAMILY
 from tai42_channel_web.routes.session_access import (
     _CROSS_ORIGIN,
     _CROSS_ORIGIN_CODE,
@@ -257,6 +258,14 @@ async def _bridge_inbound_message(
     summary="Send a web chat message into the visitor's conversation",
     tags=["channels"],
     response_model=MessageAcceptedResponse,
+    declared=DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=True,
+        error_statuses=(400, 401, 403, 404, 409, 413, 422, 501, 503),
+        success_status=200,
+        rate_limit_family=CHAT_RATE_LIMIT_FAMILY,
+        rate_limit_budget=CHAT_RATE_LIMIT_BUDGET,
+    ),
 )
 async def web_messages(request: Request) -> Response:
     """Bridge one visitor message into their own web conversation.
@@ -327,6 +336,14 @@ async def web_messages(request: Request) -> Response:
     summary="Submit an ask-less web form into the visitor's conversation",
     tags=["channels"],
     response_model=MessageAcceptedResponse,
+    declared=DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=True,
+        error_statuses=(400, 401, 403, 404, 413, 422, 501, 503),
+        success_status=200,
+        rate_limit_family=CHAT_RATE_LIMIT_FAMILY,
+        rate_limit_budget=CHAT_RATE_LIMIT_BUDGET,
+    ),
 )
 async def web_form_submit(request: Request) -> Response:
     """Bridge one ask-less form submission as a participant message.

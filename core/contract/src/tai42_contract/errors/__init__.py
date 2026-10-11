@@ -187,6 +187,16 @@ class ClientConnectError(ClientDisconnectedError):
     __tai_error_kind__ = ErrorKind.UNAVAILABLE
 
 
+class ServerReloadingError(Exception):
+    """The server is applying a config reload and refuses new work; retry shortly.
+
+    Neither a ``ValueError`` nor a ``LookupError``: a caller that acknowledges and drops bad
+    input must not swallow a refusal the sender is meant to retry.
+    """
+
+    __tai_error_kind__ = ErrorKind.UNAVAILABLE
+
+
 class OperationError(Exception):
     """Base class for every declared operation failure.
 
@@ -230,6 +240,7 @@ __all__ = [
     "ClientDisconnectedError",
     "ErrorKind",
     "OperationError",
+    "ServerReloadingError",
     "UnavailableError",
     "error_kind",
     "is_transport_error",

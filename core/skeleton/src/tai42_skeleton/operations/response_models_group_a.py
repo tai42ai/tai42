@@ -273,7 +273,8 @@ class TranscriptEnvelope(BaseModel):
     """A page of a thread's records (admin full records or the caller_view subset).
 
     ``order`` is the direction served; ``next_page`` is ``null`` on the last page; ``unreadable`` counts
-    the members whose row was gone or unparseable, omitted from the page.
+    the members whose row was gone or unparseable, omitted from the page; ``person_id`` names the linked
+    person a person thread aggregates (``null`` for a route-keyed thread).
     """
 
     items: list[ConversationRecordView]
@@ -284,6 +285,7 @@ class TranscriptEnvelope(BaseModel):
     order: str
     truncated: bool
     unreadable: int = 0
+    person_id: str | None
 
 
 class MessageSearchEnvelope(BaseModel):

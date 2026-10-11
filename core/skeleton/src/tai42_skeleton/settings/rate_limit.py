@@ -8,8 +8,9 @@ statement the client-address resolver reads is a deployment-wide fact owned by
 :mod:`tai42_kit.utils.client_address` (env ``TAI_RATE_LIMIT_TRUSTED_*``), read here
 through that resolver, not declared on this config.
 
-Budgets resolve in one order, most specific first: a ``families`` override for the
-door family, else the ``default_*`` budget every derived family starts from. A
+Budgets resolve field by field, most specific first: a ``families`` override for the
+door family, else the budget the family's routes declare
+(``DeclaredRouteMetadata.rate_limit_budget``), else the ``default_*`` budget. A
 family is the door's own path stem (``trigger``, ``universal_webhook``,
 ``interactions_callback``, ``channels_web``, …) as
 :func:`tai42_skeleton.middleware.rate_limit.family_of` derives it, so families keep
@@ -20,6 +21,7 @@ Settings are read at call time.
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.app import RateLimitBudget
 from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
@@ -47,28 +49,6 @@ class FamilyOverride(BaseModel):
     enabled: bool | None = None
     limit: int | None = Field(default=None, gt=0)
     burst: int | None = Field(default=None, gt=0)
-
-
-# The budgets the skeleton's own doors ship with, keyed by family. These are
-# DEFAULTS, not coverage: a family absent here is still throttled, at the
-# ``default_*`` budget. An operator's ``families`` entry overrides whatever a family
-# resolves to here.
-#
-# The three single-request doors are held at the tighter 60/min + 10/10s: one
-# request buys real work (a webhook fan-out, a ticket redemption, a tool run per
-# trigger GET). The web chat family is wider because ONE first page load is the page
-# plus every bundle file it links, all in one burst. The web UPLOAD family is far
-# tighter than the chat family: an upload request carries up to the per-kind media
-# cap, so its cost class is far above a text message; a text-sized budget would admit
-# large byte volume. A route charges this family only by DECLARING it (a three-segment
-# family the path derivation never produces — see the rate-limit middleware).
-SHIPPED_FAMILY_BUDGETS: dict[str, FamilyOverride] = {
-    "universal_webhook": FamilyOverride(limit=60, burst=10),
-    "interactions_callback": FamilyOverride(limit=60, burst=10),
-    "trigger": FamilyOverride(limit=60, burst=10),
-    "channels_web": FamilyOverride(limit=120, burst=30),
-    "channels_web_uploads": FamilyOverride(limit=20, burst=5),
-}
 
 
 def _first_set[T](*candidates: T | None) -> T:
@@ -117,8 +97,8 @@ class RateLimitSettings(TaiBaseSettings):
     # The budget every derived door family starts from — the flood backstop a public
     # door gets with no configuration at all. Deliberately wide: it must not throttle
     # a legitimate browser fan-out (one page load is the shell plus every asset) or a
-    # busy vendor webhook, and a family that needs a tighter ceiling states it in
-    # SHIPPED_FAMILY_BUDGETS or in ``families``. Must be positive.
+    # busy vendor webhook, and a family that needs a tighter ceiling declares it on its
+    # routes (or an operator sets it in ``families``). Must be positive.
     default_enabled: bool = True
     default_limit: int = Field(default=600, gt=0)
     default_burst: int = Field(default=120, gt=0)
@@ -140,19 +120,18 @@ class RateLimitSettings(TaiBaseSettings):
         """
         return {name.lower(): override for name, override in value.items()}
 
-    def budget_for(self, family: str) -> FamilyBudget:
+    def budget_for(self, family: str, *, declared: RateLimitBudget | None) -> FamilyBudget:
         """The budget charged to ``family``.
 
-        Resolved most-specific first: the operator's ``families`` override, then the shipped
-        per-family default, then the ``default_*`` budget. Each of the three fields resolves
-        independently, so an override naming only a limit keeps the shipped burst.
+        Resolved most-specific first: the operator's ``families`` override, then the budget the
+        family's routes declare (``declared``), then the ``default_*`` budget. Each field resolves
+        independently, so an override naming only a limit keeps the declared burst.
         """
-        shipped = SHIPPED_FAMILY_BUDGETS.get(family, FamilyOverride())
         operator = self.families.get(family, FamilyOverride())
         return FamilyBudget(
-            enabled=_first_set(operator.enabled, shipped.enabled, self.default_enabled),
-            limit=_first_set(operator.limit, shipped.limit, self.default_limit),
-            burst=_first_set(operator.burst, shipped.burst, self.default_burst),
+            enabled=_first_set(operator.enabled, self.default_enabled),
+            limit=_first_set(operator.limit, declared.limit if declared else None, self.default_limit),
+            burst=_first_set(operator.burst, declared.burst if declared else None, self.default_burst),
         )
 
     def any_family_enabled(self) -> bool:

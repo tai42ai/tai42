@@ -22,7 +22,7 @@ from __future__ import annotations
 # re-exported here so this module and the mint reference one shared module object.
 import secrets
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any, Literal
 
@@ -51,10 +51,9 @@ __all__ = [
     "InteractionLimitError",
     "InteractionTimeoutError",
     "ask",
-    "cancel_parks_for_person",
     "cancel_parks_for_thread",
     "client_ctx",
-    "rekey_parks_for_merge",
+    "rekey_park_subjects",
     "secrets",
 ]
 
@@ -66,17 +65,19 @@ __all__ = [
 DELIVERY_FAILED_EVENT_TOPIC = "interactions_delivery_failed"
 
 
-async def cancel_parks_for_thread(thread_id: str, *, reason: str = "thread_deleted") -> list[str]:
-    """Whole-chain-kill every async ``ask`` park addressed to ``thread_id``.
+async def cancel_parks_for_thread(
+    thread_id: str, *, also_subjects: Sequence[tuple[str, str]] = (), reason: str
+) -> list[str]:
+    """Whole-chain-kill every async ``ask`` park addressed to ``thread_id``, and to each of ``also_subjects``.
 
-    The entry point a conversation thread/route delete calls so a parked question the deletion would
-    orphan is torn down instead of lingering muted until its expiry deadline. Reaches every park two
-    ways — the thread reverse index (a thread-bound background park) UNION the subject index for
-    ``(kind="thread", key=thread_id)`` (a conversation park on any scope) — and routes each through
-    the ONE whole-chain kill seam (:func:`kill_park`): the driver teardown fires and the run's single
-    FAILED is delivered, never a bare prune. Runs on its own connection. A no-op when the
-    interactions store is unconfigured. Idempotent — safe to re-run under a delete's retry. Returns
-    the interaction ids reached.
+    The entry point a conversation thread/route/person delete calls so a parked question the deletion
+    would orphan is torn down instead of lingering muted until its expiry deadline. Reaches every park
+    through the thread reverse index (a thread-bound background park) UNION the subject index for
+    ``(kind="thread", key=thread_id)`` (a conversation park on any scope) UNION the subject index of
+    every ``(kind, key)`` in ``also_subjects``, and routes each through the ONE whole-chain kill seam
+    (:func:`kill_park`): the driver teardown fires and the run's single FAILED is delivered, never a
+    bare prune. Runs on one connection. A no-op when the interactions store is unconfigured.
+    Idempotent — safe to re-run under a delete's retry. Returns the interaction ids reached.
     """
     from tai42_skeleton.interactions.kill import kill_members
 
@@ -89,6 +90,8 @@ async def cancel_parks_for_thread(thread_id: str, *, reason: str = "thread_delet
     async with client_ctx(RedisClient, settings.redis) as conn:
         thread_members = await store.thread_park_members(conn, thread_id)
         members = [*thread_members, *await store.subject_members(conn, "thread", thread_id)]
+        for kind, key in also_subjects:
+            members.extend(await store.subject_members(conn, kind, key))
         reached = await kill_members(conn, store, members, reason=reason)
         # Reconcile the reverse index: the kill prune already dropped a pruned member, this drops an
         # orphan whose state had vanished, and a concurrently-added park keeps its member.
@@ -96,57 +99,23 @@ async def cancel_parks_for_thread(thread_id: str, *, reason: str = "thread_delet
     return reached
 
 
-async def cancel_parks_for_person(person_id: str, *, reason: str = "person_erased") -> list[str]:
-    """Whole-chain-kill every park a person forget reaches — its aggregated thread AND its person subject.
+async def rekey_park_subjects(moves: Sequence[tuple[str, str, str]]) -> None:
+    """Re-key every park/outcome subject ``(kind, old key)`` onto ``(kind, new key)`` for each move.
 
-    A person's parks are addressed both under the aggregated ``bridge:@person:{id}`` thread and under
-    ``(kind="person", key=person_id)``, so the erase kills across both to reach a park on any scope.
-    Runs on one connection; idempotent under retry. Returns the interaction ids reached.
+    Moves the subject index membership, the stored subject descriptors and the thread index of each
+    subject. A move whose two keys are equal is skipped. A no-op when the interactions store is
+    unconfigured. Idempotent under retry.
     """
-    from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
-    from tai42_skeleton.interactions.kill import kill_members
-
-    settings = interactions_settings()
-    if not settings.redis.redis_url:
-        return []
-    store = InteractionStore(settings.key_prefix)
-    thread_id = f"{PERSON_THREAD_PREFIX}{person_id}"
-    async with client_ctx(RedisClient, settings.redis) as conn:
-        thread_members = await store.thread_park_members(conn, thread_id)
-        members = [
-            *thread_members,
-            *await store.subject_members(conn, "thread", thread_id),
-            *await store.subject_members(conn, "person", person_id),
-        ]
-        reached = await kill_members(conn, store, members, reason=reason)
-        await store.reconcile_thread_park_members(conn, thread_id, thread_members)
-    return reached
-
-
-async def rekey_parks_for_merge(absorbed_id: str, survivor_id: str) -> None:
-    """Re-key every park/outcome of an absorbed person onto the survivor — the person merge.
-
-    Moves the absorbed person's subject index membership, stored subject descriptors and thread
-    index across for BOTH re-keyed subject keys: the person id ``(kind="person")`` and the aggregated
-    person-thread key ``(kind="thread")``. A no-op when the interactions store is unconfigured or the
-    two ids are equal. Idempotent under retry.
-    """
-    from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
-
-    if absorbed_id == survivor_id:
+    pending = [(kind, old_key, new_key) for kind, old_key, new_key in moves if old_key != new_key]
+    if not pending:
         return
     settings = interactions_settings()
     if not settings.redis.redis_url:
         return
     store = InteractionStore(settings.key_prefix)
     async with client_ctx(RedisClient, settings.redis) as conn:
-        await store.rekey_subject(conn, kind="person", old_key=absorbed_id, new_key=survivor_id)
-        await store.rekey_subject(
-            conn,
-            kind="thread",
-            old_key=f"{PERSON_THREAD_PREFIX}{absorbed_id}",
-            new_key=f"{PERSON_THREAD_PREFIX}{survivor_id}",
-        )
+        for kind, old_key, new_key in pending:
+            await store.rekey_subject(conn, kind=kind, old_key=old_key, new_key=new_key)
 
 
 async def ask(

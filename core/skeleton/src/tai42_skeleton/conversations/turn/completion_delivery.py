@@ -13,10 +13,11 @@ from typing import Any
 from tai42_contract.conversations import AnswerPart, ConversationRoute
 from tai42_contract.interactions import PARK_COMPLETION_FAILED, PARK_COMPLETION_SUCCEEDED
 
-from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import DeliveryStatus
+from tai42_skeleton.conversations.person_thread import newest_person_thread_record
+from tai42_skeleton.conversations.thread_ids import BRIDGE_THREAD_PREFIX, PersonThreadId, ThreadIdError, parse_thread_id
 from tai42_skeleton.conversations.turn.context import _turn_block
 from tai42_skeleton.conversations.turn.errors import CompletionDeliveryError
 from tai42_skeleton.conversations.turn.outcome import _error_answer_text, _serialize_structured, _text_part
@@ -73,26 +74,23 @@ async def _resolve_completion_target(thread_id: str) -> tuple[ConversationRoute,
     thread outside the reserved namespace, an unknown/deleted route, or an empty person
     thread raises loudly rather than delivering to a guessed target.
     """
-    if thread_id.startswith(PERSON_THREAD_PREFIX):
-        person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
-        person = await cache.get_conversations_manager().persons.get_by_id(person_id)
+    try:
+        parsed = parse_thread_id(thread_id)
+    except ThreadIdError as exc:
+        if not thread_id.startswith(BRIDGE_THREAD_PREFIX):
+            raise CompletionDeliveryError(f"thread {thread_id!r} is not a reserved bridge thread") from exc
+        raise CompletionDeliveryError(f"parked thread {thread_id!r} is not a route-keyed bridge thread") from exc
+    if isinstance(parsed, PersonThreadId):
+        manager = cache.get_conversations_manager()
+        person = await manager.persons.get_by_id(parsed.person_id)
         if person is None:
             raise CompletionDeliveryError(f"no person for parked thread {thread_id!r}")
-        person_routes = sorted({route for address in person.addresses for route in address.routes})
-        newest, _ = await cache.get_conversations_manager().records.list_person_thread_records(
-            person_routes, thread_id, offset=0, limit=1, newest_first=True
-        )
-        if not newest.records:
+        record = await newest_person_thread_record(manager.records, person, thread_id)
+        if record is None:
             raise CompletionDeliveryError(f"person thread {thread_id!r} holds no record to infer a send target from")
-        record = newest.records[0]
         route_name, client_address = record.route_name, record.client_address
-    elif thread_id.startswith(BRIDGE_THREAD_PREFIX):
-        remainder = thread_id[len(BRIDGE_THREAD_PREFIX) :]
-        route_name, _, client_address = remainder.partition(":")
-        if not route_name or not client_address:
-            raise CompletionDeliveryError(f"parked thread {thread_id!r} is not a route-keyed bridge thread")
     else:
-        raise CompletionDeliveryError(f"thread {thread_id!r} is not a reserved bridge thread")
+        route_name, client_address = parsed.route_name, parsed.client_address
     route = await cache.get_conversations_manager().get_route(route_name)
     if route is None:
         raise CompletionDeliveryError(f"route {route_name!r} for parked thread {thread_id!r} no longer exists")

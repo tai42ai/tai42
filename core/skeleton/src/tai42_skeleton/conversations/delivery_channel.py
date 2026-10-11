@@ -14,6 +14,7 @@ import time
 from tai42_contract.channels import Channel, ChannelDeliveryError, ChannelInputError, ChannelNotification
 from tai42_contract.conversations import AnswerPart
 
+from tai42_skeleton.channels.capabilities import RICH_CAPABILITIES, unsupported_capability
 from tai42_skeleton.conversations.ledger import ChannelSendLedger, LedgerInconsistentError, SentChunk
 from tai42_skeleton.conversations.models import ConversationRecord
 from tai42_skeleton.conversations.records import ConversationRecordStore
@@ -175,28 +176,18 @@ def _unsupported_rich_capability(channel: Channel, parts: list[AnswerPart]) -> s
     """The name of the FIRST richer-send capability a part needs that ``channel`` lacks, or ``None``.
 
     ``None`` when every part is renderable. The capability flags are the same
-    OPTIONAL class attributes ``notify_user`` guards on, read defensively with ``getattr`` —
-    a text-only channel advertises none, so a plain-text answer always passes. A part that needs
+    :data:`RICH_CAPABILITIES` ``notify_user`` guards on — a text-only channel advertises none, so a
+    plain-text answer always passes. A part that needs
     an unadvertised capability can never be rendered, so the executor refuses the record loudly
     rather than handing the channel a field it drops.
     """
     for part in parts:
-        if part.media is not None and not getattr(channel, "supports_media_notifications", False):
-            return "media"
-        if part.location is not None and not getattr(channel, "supports_location_notifications", False):
-            return "location"
-        if part.template is not None and not getattr(channel, "supports_template_notifications", False):
-            return "template"
-        if part.options is not None and not getattr(channel, "supports_interactive_notifications", False):
-            return "interactive options"
-        if part.sections is not None and not getattr(channel, "supports_interactive_notifications", False):
-            # A sectioned list IS an interactive choice surface, same capability as flat options.
-            return "interactive sections"
-        if part.schema is not None and not getattr(channel, "supports_form_notifications", False):
-            return "form"
-        # A header/footer is a pure enhancement of an already-gated interactive message (it rides
-        # options/sections), so a channel that renders the choice surface but not the header/footer
-        # simply omits them — no capability gate, mirroring a media caption a channel may drop.
+        missing = unsupported_capability(
+            channel,
+            {field: getattr(part, field) for field, _flag, _label, _word in RICH_CAPABILITIES},
+        )
+        if missing is not None:
+            return missing[0]
     return None
 
 
