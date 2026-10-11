@@ -409,6 +409,9 @@ async def test_an_env_write_over_mcp_rolls_the_fleet_and_the_writer_recycles_its
     before_serve = _lives(recycle_stack, "serve")
 
     async with recycle_stack.mcp(auth=recycle_stack.auth_token) as mcp:
+        # The write's reload retires this session and the writer then exits: the tool listing
+        # is read first so the client asks this session nothing after the call answered.
+        await mcp.list_tools()
         result = await mcp.call_tool(
             "write_env", {"env": {_RECYCLE_VAR: uniq("mkey").upper()}}, retry_on_reloading=True, ready_deadline=30.0
         )
