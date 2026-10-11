@@ -21,7 +21,7 @@ from tai42_skeleton.app.bus.models import (
     _utcnow_iso,
 )
 from tai42_skeleton.app.bus.publish import WorkerBusPublishMixin
-from tai42_skeleton.app.bus.subscribe import WorkerBusSubscribeMixin
+from tai42_skeleton.app.bus.subscribe import WorkerBusSubscribeMixin, _HeartbeatThread
 from tai42_skeleton.app.bus_settings import BusSettings
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,8 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
         # ships (recycle's graceful self-exit). At most one op is in flight on the
         # single subscription task, so there is never more than one armed action.
         self._post_reply_slot: Callable[[], None] | None = None
+        # The current subscription life's heartbeat thread, alive only while subscribed.
+        self._heartbeat_thread: _HeartbeatThread | None = None
         if local:
             # The busless variant self-mints a full member identity at construction —
             # no claim, no INCR, no presence, no heartbeat (there is no connection).
@@ -107,13 +109,16 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
         derived name ``{parent-name}/fork-{pid}`` at generation 0 makes the child's
         published op a foreign identity the parent applies instead of skipping, and
         can never collide with a member: the child claims nothing, registers no
-        presence, and its inherited subscription task stays dormant.
+        presence, and its inherited subscription task stays dormant. A child inherits
+        only the forking thread, so the parent's heartbeat thread does not exist there:
+        its inherited handle is dropped and never stopped or joined in the child.
 
         The name is derived ONLY from a parent that HAS an identity (a member parent
         post-claim, or a local bus). A member parent that has not yet claimed has no
         name to derive from — and a raise here is unraisable — so the identity is
         POISONED instead: any bus use in the child raises loudly at the use site.
         """
+        self._heartbeat_thread = None
         parent = self._identity
         if parent is None:
             self._poisoned = True

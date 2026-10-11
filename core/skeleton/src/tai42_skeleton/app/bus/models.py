@@ -174,6 +174,13 @@ class _PresenceValue(BaseModel):
     stamp) mutate this ONE object and serialize it whole on every SET — no writer
     reconstructs the value from a redis read, so independent writers never silently
     drop each other's fields. ``name`` lives in the presence KEY, not this value.
+
+    Two threads share it: the subscription's loop and the heartbeat thread. Every
+    mutation is ONE attribute assignment of an immutable value, and every write
+    serializes the whole object, so neither side ever serializes a partial update; two
+    complete writes may land in either order within one beat interval, and the next
+    beat carries every assigned value. The subscription replaces or drops the object
+    only after it has stopped the heartbeat thread.
     """
 
     kind: WorkerKind

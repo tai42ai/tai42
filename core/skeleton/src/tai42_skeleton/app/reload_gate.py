@@ -2,13 +2,19 @@
 
 A reload (`admin.reload_config` / `admin.reload_mcp` / the failed-MCP re-probe)
 is heavy and synchronous: it re-reads env, resets settings caches, re-imports
-the manifest modules and re-probes every MCP server. Running it inline on the
-serving loop freezes health checks, MCP keepalives and in-flight SSE streams for
-its whole duration. The gate replaces that freeze:
+the manifest modules and re-probes every MCP server. Run inline on the serving
+loop, an MCP re-probe would freeze health checks, MCP keepalives and in-flight SSE
+streams for its whole duration. The gate keeps the bodies off the loop:
 
 * :meth:`ReloadGate.run` holds an :class:`asyncio.Lock` and awaits the heavy sync
-  body on a worker thread (`asyncio.to_thread`), so the serving loop keeps
-  running while the reload executes;
+  body on a worker thread (`asyncio.to_thread`). An MCP re-probe body runs there,
+  marshalling only short reconciles onto the serving loop, so the loop keeps
+  running while it executes. A config reload
+  marshals its rebuild back onto the serving loop (`config_reload`): the proposed
+  env and the cleared settings caches are process-wide, so the swap is atomic for
+  live requests only while nothing is served, and health/readiness probes, MCP
+  keepalives, in-flight streams and the generation's timers pause until the swap
+  returns. The worker-bus heartbeat runs on its own thread and does not pause;
 * while the lock is held, routes that dispatch a run or mutate the live
   tool/agent registries answer :meth:`reject_response` (HTTP 503, retriable), and
   the FastMCP session surface rejects tool calls the same way. Health, liveness

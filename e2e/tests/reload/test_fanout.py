@@ -29,6 +29,10 @@ async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: 
     # Seed a config change (polling past the boot-time reload gate), then fan the reload.
     await api_a.post("/api/config/env", json={"env": {marker: "1"}}, retry_on_reloading=True)
 
+    # Every worker's life (slot name -> generation) before the reload: a rebuild blocks a
+    # worker's serving loop, never its bus heartbeat, so no worker loses its slot to it.
+    lives_before = {worker.name: worker.generation for worker in replicas_stack.census()}
+
     async with replicas_stack.mcp(port=replicas_stack.port_a) as mcp:
         # Prime the SDK's per-session tool-output-schema cache so the post-call result
         # validation issues no follow-up tools/list: reload_config retires this session
@@ -45,6 +49,8 @@ async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: 
     census = {worker.name for worker in replicas_stack.census()}
     assert census <= outcomes.keys(), f"not every census worker was in the report: census={census} report={outcomes}"
     assert all(outcomes[name] == "applied" for name in census), f"a worker did not apply: {data}"
+    lives_after = {worker.name: worker.generation for worker in replicas_stack.census()}
+    assert lives_after == lives_before, f"a worker lost its bus slot across the reload: {lives_before} -> {lives_after}"
 
     # B's subscription applied the op too (asynchronous via the admin route).
     async def b_has_marker() -> bool:

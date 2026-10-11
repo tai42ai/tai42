@@ -20,7 +20,10 @@ class ConfigReloadMixin(LifecycleState):
         untouched.
 
         The build's fresh FastMCP lifespan is loop-affine, so the swap runs ON the
-        serving loop even though this body is driven from a reload-gate worker thread.
+        serving loop even though this body is driven from a reload-gate worker thread,
+        and blocks that loop for the rebuild's length: health and readiness probes, MCP
+        keepalives, in-flight streams and the generation's timers pause until the swap
+        returns. The worker-bus heartbeat runs on its own thread and does not pause.
         """
         env = self._config_manager.read_env()
 
