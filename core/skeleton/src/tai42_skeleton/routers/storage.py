@@ -36,7 +36,8 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
-from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations import operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object
 from tai42_skeleton.operations.storage import (
     _NO_PROVIDER_MESSAGE,
     _UNSAFE_ID_MESSAGE,
@@ -60,12 +61,7 @@ async def _extract_upload(request: Request) -> dict:
 
     The operation validates the field shapes.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object")
+    body = await read_json_object(request)
     return {
         "resource_id": body.get("id"),
         "content_text": body.get("content_text"),

@@ -10,8 +10,6 @@ token-gated, per-IP throttled, and one-shot (see :mod:`tai42_skeleton.operations
 
 from __future__ import annotations
 
-from json import JSONDecodeError
-
 from pydantic import ValidationError
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
@@ -19,11 +17,11 @@ from tai42_contract.setup import SetupRequest
 from tai42_kit.utils.client_address import XFF_HEADER, client_bucket
 
 from tai42_skeleton.operations import (
-    BadRequestError,
     ValidationRejectedError,
     operation_metadata_of,
     register_operation_route,
 )
+from tai42_skeleton.operations.adapter import read_json_object
 from tai42_skeleton.operations.setup import setup_deployment as _setup_deployment_op
 
 
@@ -37,10 +35,7 @@ async def _extract_setup(request: Request) -> dict:
     Owns the parse (so the operation stays request-free yet can read the client bucket): a malformed
     body is a 400 and a schema-invalid one a 422, before any token or initialize work runs.
     """
-    try:
-        body = await request.json()
-    except (JSONDecodeError, ValueError) as exc:
-        raise BadRequestError("invalid JSON body") from exc
+    body = await read_json_object(request)
     try:
         parsed = SetupRequest.model_validate(body)
     except ValidationError as exc:
