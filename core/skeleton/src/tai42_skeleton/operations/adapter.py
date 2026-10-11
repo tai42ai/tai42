@@ -12,6 +12,7 @@ edge, ``AuthzMiddleware`` at the tool edge).
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -79,6 +80,18 @@ def validation_error_fields(exc: ValidationError) -> list[dict[str, Any]]:
     return [{"loc": list(error["loc"]), "type": error["type"]} for error in exc.errors(include_url=False)]
 
 
+# A body that does not parse: ``json.JSONDecodeError`` (and an undecodable byte sequence) is a
+# ``ValueError``; a deeply nested body raises ``RecursionError`` out of the decoder. Any other
+# exception is a server bug and propagates.
+JSON_PARSE_ERRORS = (ValueError, RecursionError)
+
+
+def _json_object(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise BadRequestError("body must be a JSON object")
+    return body
+
+
 async def read_json_object(request: Request) -> dict[str, Any]:
     """The request body as a JSON object; ``BadRequestError`` for a malformed body or a non-object one.
 
@@ -86,11 +99,18 @@ async def read_json_object(request: Request) -> dict[str, Any]:
     """
     try:
         body = await request.json()
-    except ValueError as exc:
+    except JSON_PARSE_ERRORS as exc:
         raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object")
-    return body
+    return _json_object(body)
+
+
+def parse_json_object(raw: bytes) -> dict[str, Any]:
+    """``raw`` — body bytes a door already read under its own bound — as a JSON object, by the same rule."""
+    try:
+        body = json.loads(raw)
+    except JSON_PARSE_ERRORS as exc:
+        raise BadRequestError("invalid JSON body") from exc
+    return _json_object(body)
 
 
 def validate_body[M: BaseModel](model: type[M], body: Mapping[str, Any], what: str) -> M:

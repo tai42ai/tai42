@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 
 from starlette.requests import Request
@@ -15,11 +14,10 @@ from tai42_skeleton.operations import (
     operation_metadata_of,
     register_operation_route,
 )
+from tai42_skeleton.operations.adapter import parse_json_object
 from tai42_skeleton.operations.interactions import answer_interaction as _answer_interaction_op
 from tai42_skeleton.operations.interactions import cancel_interaction as _cancel_interaction_op
 from tai42_skeleton.operations.interactions import react_interaction as _react_interaction_op
-
-from .parse import JSON_PARSE_ERRORS
 
 # This submodule's OWN package object (the one it was imported as part of), captured at
 # import time from ``sys.modules`` — NOT ``from tai42_skeleton.routers import interactions``,
@@ -41,11 +39,8 @@ async def _extract_answer(request: Request) -> dict:
         raw = await read_bounded_body(request, settings.callback_max_body_bytes)
     except RequestBodyTooLargeError as exc:
         raise PayloadTooLargeError("payload too large") from exc
-    try:
-        body = json.loads(raw)
-    except JSON_PARSE_ERRORS as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict) or "answer" not in body:
+    body = parse_json_object(raw)
+    if "answer" not in body:
         raise BadRequestError("body must contain 'answer'")
     return {"answer": body["answer"]}
 
@@ -71,11 +66,8 @@ async def _extract_react(request: Request) -> dict:
         raw = await read_bounded_body(request, settings.callback_max_body_bytes)
     except RequestBodyTooLargeError as exc:
         raise PayloadTooLargeError("payload too large") from exc
-    try:
-        body = json.loads(raw)
-    except JSON_PARSE_ERRORS as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict) or "event" not in body or "values" not in body:
+    body = parse_json_object(raw)
+    if "event" not in body or "values" not in body:
         raise BadRequestError("body must contain 'event' and 'values'")
     return {"event": body["event"], "values": body["values"]}
 
