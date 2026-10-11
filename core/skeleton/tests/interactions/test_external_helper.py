@@ -14,6 +14,7 @@ from typing import cast
 import pytest
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
+from tai42_contract.hooks import TopicVerifierBinding
 from tai42_contract.interactions import InteractionResponse
 from tai42_kit.settings import reset_all_settings
 
@@ -62,7 +63,7 @@ async def test_link_forbidden_without_external():
 
 async def test_verifier_forbidden_without_external():
     with pytest.raises(ValueError, match="verifier is only valid with answer_format 'external'"):
-        await ask("q", verifier={"verifier": "github", "config": {}})
+        await ask("q", verifier=TopicVerifierBinding(verifier="github"))
 
 
 async def test_external_rejects_options(monkeypatch, fake_redis, fake_client_ctx):
