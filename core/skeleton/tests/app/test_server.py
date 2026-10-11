@@ -30,6 +30,7 @@ from tai42_contract.storage import Storage
 from tai42_skeleton.app import server as server_module
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.server import TaiMCP
+from tai42_skeleton.app.transport_stream import TransportStreamDrainExemptMiddleware
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
@@ -214,7 +215,13 @@ def test_sse_app_builds_and_finalizes():
     # the audit trail then the body-size cap: the cap must be in that list so an
     # over-cap escape becomes a 413 before any error handler can commit a 500, and
     # the audit line wraps it so an over-cap 413 is audited like any other outcome.
-    assert [m.cls for m in mk.call_args.kwargs["middleware"]] == [AuditLogMiddleware, BodyLimitMiddleware]
+    assert [m.cls for m in mk.call_args.kwargs["middleware"]] == [
+        AuditLogMiddleware,
+        BodyLimitMiddleware,
+        TransportStreamDrainExemptMiddleware,
+    ]
+    # The transport's stream (``GET /sse``) is the one exempted from the retire drain.
+    assert mk.call_args.kwargs["middleware"][2].kwargs == {"stream_path": "/sse"}
     # finalize mounts the sub-app router on the base, then wraps only the always-on
     # outer RateLimitMiddleware around it.
     sentinel.mount.assert_called_once()
@@ -234,7 +241,9 @@ def test_http_app_builds_and_finalizes():
     assert [m.cls for m in mcp.http_app.call_args.kwargs["middleware"]] == [
         AuditLogMiddleware,
         BodyLimitMiddleware,
+        TransportStreamDrainExemptMiddleware,
     ]
+    assert mcp.http_app.call_args.kwargs["middleware"][2].kwargs == {"stream_path": "/mcp"}
     sentinel.mount.assert_called_once()
     # finalize wraps only the always-on outer RateLimitMiddleware around the base.
     assert isinstance(result, RateLimitMiddleware)

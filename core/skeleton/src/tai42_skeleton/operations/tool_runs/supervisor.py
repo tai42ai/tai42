@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -67,6 +68,11 @@ logger = logging.getLogger(__name__)
 _SUPERVISORS: set[asyncio.Task[None]] = set()
 _SUPERVISOR_EPOCH: dict[asyncio.Task[None], int] = {}
 
+# The enrolled supervisor whose run the current code belongs to. Set in the supervisor
+# task's own context at enrollment, so every task the run spawns (an agent's tool node
+# runs each tool call in a child task) carries it too.
+_running_supervisor: ContextVar[asyncio.Task[None] | None] = ContextVar("running_supervisor", default=None)
+
 
 def reserve_active_slot(limit: int) -> bool:
     """Synchronously claim one of ``limit`` per-worker concurrency slots.
@@ -97,10 +103,13 @@ def _enroll_supervisor(task: asyncio.Task[None]) -> None:
 
     A whole-server drain cancels-and-awaits it and an epoch retire drains
     exactly this generation's runs — sequencing its terminal write ahead of the pooled
-    clients' close. A ``None`` epoch (a loop-less unit context) tags nothing.
+    clients' close. A ``None`` epoch (a loop-less unit context) tags nothing. ``task`` is
+    enrolled before its first step, so its context is not yet entered and the run's own
+    supervisor is set in it.
     """
     from tai42_skeleton.app.epoch import current_epoch_or_none
 
+    task.get_context().run(_running_supervisor.set, task)
     _SUPERVISORS.add(task)
     epoch = current_epoch_or_none()
     if epoch is not None:
@@ -108,14 +117,15 @@ def _enroll_supervisor(task: asyncio.Task[None]) -> None:
 
 
 def running_supervisor() -> tuple[asyncio.Task[Any], int] | None:
-    """The enrolled supervisor task this code runs in and the epoch number that admitted its run.
+    """The enrolled supervisor whose run this code belongs to and the epoch number that admitted the run.
 
-    ``None`` outside an enrolled supervisor (or for one no epoch tagged). The reload gate
-    reads it to record a supervised run that drives a reload, so that generation's retire
-    leaves it running.
+    Found in the supervisor's task and in every task its run spawned. ``None`` outside a
+    run, once the run has finished (a task that outlived it acts for no run), or for a run
+    no epoch tagged. The reload gate reads it to record a supervised run that drives a
+    reload, so that generation's retire leaves it running.
     """
-    task = asyncio.current_task()
-    if task is None or task not in _SUPERVISORS:
+    task = _running_supervisor.get()
+    if task is None or task.done() or task not in _SUPERVISORS:
         return None
     epoch = _SUPERVISOR_EPOCH.get(task)
     return None if epoch is None else (task, epoch)

@@ -99,6 +99,43 @@ async def test_the_epoch_under_construction_cancels_its_own_sweep(monkeypatch: p
     await cancel()
 
 
+async def test_a_cancel_swallowed_inside_a_pass_still_stops_the_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pass whose awaited call absorbs the cancellation and returns normally (the Postgres pool's
+    checkout check catches ``CancelledError``, discards the connection and hands out another) still
+    ends the sweep: the cancel was requested, so the loop stops once the pass returns."""
+    _settings(monkeypatch, interval=0.01)
+    cancels: list[Callable[[], Awaitable[None]]] = []
+    monkeypatch.setattr(
+        epoch_mod, "epoch_under_construction_or_none", lambda: SimpleNamespace(register_periodic_loop=cancels.append)
+    )
+    in_pass = asyncio.Event()
+    swallow = True
+
+    async def _pass() -> None:
+        in_pass.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            if not swallow:
+                raise
+            await asyncio.sleep(0)  # the call is retried and returns normally
+
+    monkeypatch.setattr(sweep_mod, "sweep_pass", _pass)
+    sweep_mod.start_state_outbox_sweep()
+    task = sweep_mod._sweep_task
+    assert task is not None
+    await in_pass.wait()
+    (cancel,) = cancels
+    unwind = asyncio.ensure_future(cancel())
+    try:
+        await asyncio.wait([task], timeout=2)
+        assert task.cancelled(), "the sweep went on after its cancel was swallowed inside a pass"
+    finally:
+        swallow = False
+        task.cancel()
+        await asyncio.wait([task, unwind], timeout=2)
+
+
 def test_a_sweep_task_that_died_is_logged(caplog: pytest.LogCaptureFixture) -> None:
     died = SimpleNamespace(cancelled=lambda: False, exception=lambda: RuntimeError("boom"))
     cancelled = SimpleNamespace(cancelled=lambda: True, exception=lambda: None)

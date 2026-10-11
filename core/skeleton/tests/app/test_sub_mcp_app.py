@@ -27,6 +27,7 @@ from starlette.applications import Starlette
 from starlette.types import ASGIApp
 from tai42_contract.sub_mcp import RouteConfig
 
+from tai42_skeleton.app import admission as admission_mod
 from tai42_skeleton.app import sub_mcp_app as sub_mcp_app_module
 from tai42_skeleton.app.sub_mcp_app import (
     ROOT_PREFIX,
@@ -271,7 +272,7 @@ async def test_a_mount_session_driving_a_reload_keeps_its_lifespan_until_it_answ
     async def _app(scope: Any, receive: Any, send: Any) -> None:
         await _driver()
 
-    await epoch_mod.EpochAdmissionApp(_app, boot)({"type": "http"}, None, None)  # type: ignore[arg-type]
+    await admission_mod.EpochAdmissionApp(_app, boot)({"type": "http"}, None, None)  # type: ignore[arg-type]
     async with asyncio.timeout(5.0):
         await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
     assert order == ["driver answered", "mount closed"]

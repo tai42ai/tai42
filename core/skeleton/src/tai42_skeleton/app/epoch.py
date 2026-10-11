@@ -34,22 +34,23 @@ import contextvars
 import logging
 import os
 import weakref
+from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from fastmcp.server.dependencies import get_http_request
 from tai42_kit.clients import advance_client_epoch, current_client_epoch
 from tai42_kit.settings import reset_all_settings
 from tai42_kit.settings.cache_registry import restamp_settings_born_after, settings_birth_mark
 
+from tai42_skeleton.app.admission import EpochAdmissionApp
 from tai42_skeleton.app.epoch_retire import retire_epoch
 from tai42_skeleton.app.retired_generations import detach_retired_generations
 
 if TYPE_CHECKING:
-    from starlette.types import ASGIApp, Receive, Scope, Send
+    from starlette.types import ASGIApp
 
+    from tai42_skeleton.app.admission import RequestAdmission
     from tai42_skeleton.app.server import ServingCore
     from tai42_skeleton.app.sub_mcp_app import SubAppLifespan
 
@@ -82,13 +83,19 @@ class Epoch:
     # :func:`gate_party`): the requests and tool-run supervisors that drive a gated body
     # (until they finish) and those waiting to acquire the gate. A retire never counts them
     # against the drain budget and never closes this generation's transports under them.
+    # A request or task can wait more than once at a time (two calls of one SSE session share
+    # the session stream's record; two child tasks of one supervised run share the run), so
+    # ``waiting_tasks`` counts each task's concurrent waits and a request record counts its own.
     driving: set[RequestAdmission] = field(default_factory=set)
     waiting: set[RequestAdmission] = field(default_factory=set)
     driving_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
-    waiting_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+    waiting_tasks: Counter[asyncio.Task[Any]] = field(default_factory=Counter)
     _surface: weakref.ref[object] | None = None
     _in_flight: int = 0
     _idle: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set whenever work of this generation starts waiting on the reload gate, so a
+    # synchronous drain stops waiting and the retire defers instead.
+    _engagement: asyncio.Event = field(default_factory=asyncio.Event)
     _periodic_cancels: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
     # Sub-app lifespans that served this generation and were dropped from the sub-MCP cache
     # while it was live (see :meth:`adopt_transport`); closed with ``supervisor``.
@@ -178,18 +185,45 @@ class Epoch:
         """Whether any work of this generation drives or waits on the reload gate."""
         return bool(self.driving or self.waiting or self.driving_tasks or self.waiting_tasks)
 
+    @property
+    def gate_waiters(self) -> bool:
+        """Whether a request or tool-run supervisor of this generation is waiting to acquire the reload gate."""
+        return bool(self.waiting or self.waiting_tasks)
+
+    def note_gate_wait(self) -> None:
+        """Signal that work of this generation started waiting on the reload gate (see :meth:`_drain_in_flight`)."""
+        self._engagement.set()
+
+    def begin_task_wait(self, task: asyncio.Task[Any]) -> None:
+        """Record one wait of the tool-run supervisor ``task`` on the reload gate."""
+        self.waiting_tasks[task] += 1
+        self.note_gate_wait()
+
+    def end_task_wait(self, task: asyncio.Task[Any]) -> None:
+        """Record that one wait of ``task`` on the reload gate ended."""
+        self.waiting_tasks[task] -= 1
+        if self.waiting_tasks[task] <= 0:
+            del self.waiting_tasks[task]
+
     async def _wait_driving(self) -> None:
         """Wait for every request and tool-run supervisor driving a gated body of this generation to finish.
 
         Unbounded here by design: a driver's remaining work is the reload's own tail, which
         the gated body's own bounds already bound (the rebuild, the fleet apply timeout, a
         recycle step). The sets are live, so a driver that engages during the wait is seen.
+        A driver acting through a long-lived stream (a call of an SSE session, answering on
+        the session's stream) is not waited for: the stream ends only when its client
+        disconnects, and closing the transports does not sever it.
         """
-        while self.driving or self.driving_tasks:
-            for state in list(self.driving):
+        while True:
+            requests = [state for state in self.driving if not state.long_lived]
+            tasks = list(self.driving_tasks)
+            if not requests and not tasks:
+                return
+            for state in requests:
                 await state.finished.wait()
                 self.driving.discard(state)
-            for task in list(self.driving_tasks):
+            for task in tasks:
                 await asyncio.wait([task])
                 self.driving_tasks.discard(task)
 
@@ -203,20 +237,30 @@ class Epoch:
         """
         self._periodic_cancels.append(cancel)
 
-    async def _drain_in_flight(self, deadline: float) -> None:
+    async def _drain_in_flight(self, deadline: float, *, until_gate_wait: bool = False) -> None:
         """Wait, bounded by ``deadline``, for this generation's admitted requests to finish.
 
         Counts only the work that can finish on its own: a request driving a gated body has
-        released its slot (:func:`gate_party`), as has a drain-exempt stream. A request still
-        in flight past the budget is logged loudly and the retire proceeds (the fresh epoch
-        already serves new traffic).
+        released its slot (:func:`gate_party`), as has a drain-exempt stream, and a request
+        waiting on the gate is not counted while it waits. A request still in flight past the
+        budget is logged loudly and the retire proceeds (the fresh epoch already serves new
+        traffic). With ``until_gate_wait`` the wait also ends, unreported, as soon as work of
+        this generation starts waiting on the gate: the retire then hands the drain to its
+        deferred tail.
         """
         if self._idle.is_set():
             return
+        waits = [asyncio.ensure_future(self._idle.wait())]
+        if until_gate_wait:
+            self._engagement.clear()
+            waits.append(asyncio.ensure_future(self._engagement.wait()))
         try:
-            await asyncio.wait_for(self._idle.wait(), timeout=deadline)
-        except TimeoutError:
-            logger.exception(
+            done, _pending = await asyncio.wait(waits, timeout=deadline, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for wait in waits:
+                wait.cancel()
+        if not done:
+            logger.error(
                 "epoch %d retire: %d request(s) still in flight after the drain budget",
                 self.number,
                 self._in_flight,
@@ -234,141 +278,26 @@ class Epoch:
         progress.
         """
         for cancel in self._periodic_cancels:
+            # The cancel runs as its own task, so the bound holds even for a cancel that
+            # suppresses ``CancelledError`` around its await of the loop task (it would
+            # otherwise swallow the timeout's own cancellation and return as if done).
+            unwind = asyncio.ensure_future(cancel())
             try:
-                await asyncio.wait_for(cancel(), timeout=deadline)
-            except TimeoutError:
-                logger.exception(
+                done, _pending = await asyncio.wait([unwind], timeout=deadline)
+            except asyncio.CancelledError:
+                unwind.cancel()
+                raise
+            if not done:
+                unwind.cancel()
+                logger.error(
                     "epoch %d retire: a periodic-loop cancel exceeded the %.1fs budget; abandoning it",
                     self.number,
                     deadline,
                 )
-            except Exception:
-                logger.exception("epoch %d retire: a periodic-loop cancel failed", self.number)
-
-
-@dataclass(eq=False)
-class RequestAdmission:
-    """The per-request admission record the serving epoch counts.
-
-    A MUTABLE object shared between the admission wrapper and the request's own
-    coroutine tree (mutation is visible even when the request's work runs in a child
-    task, unlike a ``ContextVar`` set that would not propagate back to the wrapper).
-    The request's in-flight slot is released exactly once: early by a long-lived stream
-    that exempts itself from the retire drain or by a request that drives a gated body,
-    else by the wrapper when the request ends. ``finished`` is set when the request ends.
-    """
-
-    epoch: Epoch
-    slot_released: bool = False
-    finished: asyncio.Event = field(default_factory=asyncio.Event)
-
-    def release_slot(self) -> None:
-        """Release this request's in-flight slot on its generation; a second call is a no-op."""
-        if self.slot_released:
-            return
-        self.slot_released = True
-        self.epoch.release()
-
-
-# The ASGI scope key the admission wrapper stores each request's record under, so the
-# record is found from the request itself wherever its scope travels (a sub-app's copied
-# scope, the request an MCP SDK attaches to every message it routes).
-_ADMISSION_SCOPE_KEY = "tai42.admission"
-
-# The admission record of the request in flight on THIS coroutine tree (``None`` off a served
-# request). Read through :func:`current_request_admission`, never directly: a task that
-# copied a request's context (an MCP session's server task copies its ``initialize``
-# request's) carries a record that does not name the request it is serving now.
-_admission: ContextVar[RequestAdmission | None] = ContextVar("admission", default=None)
-
-
-def current_request_admission() -> RequestAdmission | None:
-    """The admission record of the request this code runs on behalf of, or ``None``.
-
-    The HTTP request the MCP SDK's request context names comes first (fastmcp's
-    ``get_http_request``): inside an MCP tool body that is the POST carrying the
-    ``tools/call``, while the ``_admission`` ContextVar there still holds the record of
-    the request that created the session. Otherwise (a plain route handler) the
-    ContextVar's record. A record whose request already ended resolves to ``None``: a
-    task that inherited a finished request's context acts for no request.
-    """
-    state: RequestAdmission | None = None
-    try:
-        request = get_http_request()
-    except RuntimeError:
-        request = None
-    if request is not None:
-        state = request.scope.get(_ADMISSION_SCOPE_KEY)
-    if state is None:
-        state = _admission.get()
-    if state is None or state.finished.is_set():
-        return None
-    return state
-
-
-class EpochAdmissionApp:
-    """ASGI wrapper that counts every request against the epoch that served it.
-
-    The swap re-points the dispatch slot to the NEW epoch's wrapper, so a request
-    that entered under the old wrapper still finishes there — the count is exact per
-    generation and the retire drains only that generation's admitted work.
-    Non-HTTP scopes pass straight through uncounted.
-    """
-
-    def __init__(self, app: ASGIApp, epoch: Epoch) -> None:
-        """Bind this wrapper to ``app`` and the ``epoch`` it counts requests against."""
-        self._app = app
-        self._epoch = epoch
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Count the HTTP request against its epoch for the life of the call; pass non-HTTP scopes through."""
-        if scope["type"] != "http":
-            await self._app(scope, receive, send)
-            return
-        self._epoch.admit()
-        # Publish this request's admission record, on the scope and in the context, so a
-        # long-lived stream can exempt itself from the retire drain and the reload gate can
-        # record the request that drives or waits on it (``current_request_admission``). The
-        # record is a shared object, so a slot released by the request's own work is seen here.
-        state = RequestAdmission(epoch=self._epoch)
-        scope[_ADMISSION_SCOPE_KEY] = state
-        admission_token = _admission.set(state)
-        try:
-            await self._app(scope, receive, send)
-        finally:
-            _admission.reset(admission_token)
-            self._epoch.driving.discard(state)
-            self._epoch.waiting.discard(state)
-            state.release_slot()
-            state.finished.set()
-
-
-def mark_current_request_drain_exempt() -> None:
-    """Exempt the CURRENT request from its generation's in-flight RETIRE DRAIN.
-
-    Called by a handler that has committed to a LONG-LIVED stream which never completes on its
-    own — the interactions inbox SSE (``GET /api/interactions/stream``) the Studio shell holds
-    open. That stream is a PLAIN Starlette route on its own redis connection; the retire's
-    ``supervisor.aclose()`` closes only the FastMCP session-manager (the MCP transports), so it
-    does NOT sever this stream — it keeps running on the retired generation until the client
-    disconnects. An infinite stream can therefore never "drain", so a retire that WAITED on it
-    would burn the whole drain budget and, on a fleet sibling, delay the reload ack past the
-    fleet-convergence window. The retire must not wait on it.
-
-    Releases this request's in-flight slot NOW so ``_drain_in_flight`` no longer waits on it;
-    the record releases it exactly once, so the admission wrapper does not release it a SECOND
-    time at request end. A no-op off a served request or if already released. Only a genuinely
-    long-lived stream calls this; every real / short request stays counted, so a retire STILL
-    drains in-flight work (an MCP tool call, a sync REST tool run) BEFORE the ``aclose``. The
-    exempted stream reads its own configuration through the cached settings accessors at each
-    use, so it keeps no settings object of its own across a reload; the generation serving it
-    (its ASGI stack and that stack's collaborators) stays reachable, uncounted, until the
-    client disconnects, and that generation's certification runs once its serving surface is
-    collected after the disconnect.
-    """
-    state = current_request_admission()
-    if state is not None:
-        state.release_slot()
+                continue
+            failure = unwind.exception()
+            if failure is not None:
+                logger.error("epoch %d retire: a periodic-loop cancel failed", self.number, exc_info=failure)
 
 
 # -- process serving generation ------------------------------------------------
@@ -378,6 +307,19 @@ def mark_current_request_drain_exempt() -> None:
 # lifespan) and dropped at worker-lifespan exit.
 _current: Epoch | None = None
 _serving_slot: dict[str, Any] | None = None
+
+
+def _default_streamable_http_app() -> ASGIApp:
+    """The serving app of a process that attached none of its own: the default streamable-HTTP app."""
+    from tai42_skeleton.app import instance
+
+    return instance.app.http_app()
+
+
+# Builds the serving app on the transport the process serves (recorded by the worker
+# lifespan with the boot serving app), so every rebuilt generation serves the transport
+# the boot one does.
+_serving_app_builder: Callable[[], ASGIApp] = _default_streamable_http_app
 
 # The epoch a build is populating, for the span of ``build_and_swap_epoch``'s build
 # step (``None`` otherwise). A per-epoch startup handler that spawns a periodic loop
@@ -462,14 +404,19 @@ def install_boot_core(core: ServingCore) -> Epoch:
     return _current
 
 
-def attach_boot_serving_app(serving_app: ASGIApp, app_state: dict[str, Any]) -> None:
+def attach_boot_serving_app(
+    serving_app: ASGIApp, app_state: dict[str, Any], build_serving_app: Callable[[], ASGIApp]
+) -> None:
     """Point the ASGI dispatch slot at the boot serving app.
 
-    Called by the worker lifespan after it builds the ``http_app`` and enters its
-    FastMCP lifespan. Records the slot the build+swap primitive re-points.
+    Called by the worker lifespan after it builds the serving app and enters its FastMCP
+    lifespan. Records the slot the build+swap primitive re-points, and
+    ``build_serving_app``, which builds a serving app on the same transport (SSE, or
+    stateful or stateless streamable HTTP) for every rebuilt generation.
     """
-    global _serving_slot
+    global _serving_slot, _serving_app_builder
     _serving_slot = app_state
+    _serving_app_builder = build_serving_app
     current_epoch().serving_app = serving_app
     app_state["app"] = serving_app
 
@@ -480,12 +427,13 @@ async def clear_epoch() -> None:
     Terminating its transports so a later lifespan in the same process starts
     from a clean slate.
     """
-    global _current, _serving_slot, _loaded_env_keys
+    global _current, _serving_slot, _serving_app_builder, _loaded_env_keys
     current = _current
     if current is not None:
         await current.close_transports()
     _current = None
     _serving_slot = None
+    _serving_app_builder = _default_streamable_http_app
     _loaded_env_keys = set()
     detach_retired_generations()
 
@@ -599,9 +547,9 @@ def _default_rebuild() -> None:
 async def _default_build_serving_app(epoch: Epoch) -> ASGIApp:
     """Build this generation's fresh dispatch handle off the just-built core and enter its FastMCP lifespan.
 
-    A fresh ``http_app`` is built off the ``_building`` core's fresh FastMCP, so its
-    route table — including a reload-added router — is snapshotted anew and actually
-    serves. Its FastMCP lifespan (a fresh streamable-http session manager) is entered
+    A fresh serving app on the process's transport is built off the ``_building`` core's
+    fresh FastMCP, so its route table — including a reload-added router — is snapshotted
+    anew and actually serves. Its FastMCP lifespan (a fresh session manager) is entered
     through a dedicated-task supervisor so the swap task can later close it in the same
     context; the built core (the retire drops it) and, weakly, the lifespan-bearing app
     (the serving surface every request's scope points at) are recorded on the epoch, and
@@ -615,7 +563,7 @@ async def _default_build_serving_app(epoch: Epoch) -> ASGIApp:
     if core is None:
         raise RuntimeError("no core was built for this epoch — the rebuild step must run first")
     try:
-        inner = app.http_app()
+        inner = _serving_app_builder()
         lifespan_app = getattr(inner, "mcp_lifespan_app", inner)
         supervisor = SubAppLifespan(lifespan_app)
         # Enter the fresh FastMCP lifespan (fresh session-manager task group); a

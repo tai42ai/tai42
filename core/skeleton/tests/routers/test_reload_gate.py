@@ -354,7 +354,7 @@ async def test_write_env_reloads_through_gate_same_result_shape(monkeypatch: pyt
 
 def _serve_on(epoch: Any, body: Any) -> asyncio.Task[None]:
     """Serve ``body`` as one HTTP request admitted on ``epoch`` by the real admission wrapper."""
-    from tai42_skeleton.app.epoch import EpochAdmissionApp
+    from tai42_skeleton.app.admission import EpochAdmissionApp
 
     async def _app(scope: Any, receive: Any, send: Any) -> None:
         await body()
@@ -380,8 +380,8 @@ async def test_driving_records_the_request_as_waiting_then_driving_until_it_fini
         request = _serve_on(epoch, _body)
         while not epoch.waiting:
             await asyncio.sleep(0)
-        # Waiting: still counted in flight, not yet driving.
-        assert (len(epoch.waiting), epoch.driving, epoch.in_flight) == (1, set(), 1)
+        # Waiting: it cannot move, so it is out of the in-flight count; not yet driving.
+        assert (len(epoch.waiting), epoch.driving, epoch.in_flight) == (1, set(), 0)
         assert reload_gate.locked
     await inside.wait()
     (state,) = epoch.driving
@@ -411,7 +411,8 @@ async def test_synchronized_records_the_request_as_waiting_only_while_it_waits()
         request = _serve_on(epoch, _body)
         while not epoch.waiting:
             await asyncio.sleep(0)
-        assert epoch.in_flight == 1
+        # Waiting: out of the in-flight count while it cannot move.
+        assert epoch.in_flight == 0
     await inside.wait()
     # Holding the gate as a pass-through: ordinary in-flight work again.
     assert (epoch.waiting, epoch.driving, epoch.in_flight) == (set(), set(), 1)
@@ -440,7 +441,8 @@ async def test_a_waiter_cancelled_on_the_gate_leaves_no_record() -> None:
 
 
 async def test_work_outside_any_request_or_run_holds_the_gate_and_records_nothing() -> None:
-    from tai42_skeleton.app.epoch import Epoch, current_request_admission
+    from tai42_skeleton.app.admission import current_request_admission
+    from tai42_skeleton.app.epoch import Epoch
 
     epoch = Epoch(number=0)
     assert current_request_admission() is None

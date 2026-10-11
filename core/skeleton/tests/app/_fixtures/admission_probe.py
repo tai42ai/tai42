@@ -9,8 +9,8 @@ from dataclasses import dataclass
 
 from tai42_contract.app import tai42_app
 
-from tai42_skeleton.app import epoch as epoch_mod
-from tai42_skeleton.app.epoch import RequestAdmission, current_request_admission
+from tai42_skeleton.app import admission as admission_mod
+from tai42_skeleton.app.admission import RequestAdmission, current_request_admission
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,7 @@ OBSERVED: list[Observation] = []
 async def admission_probe() -> int:
     """Record the request admission this call resolves and return the call's ordinal."""
     resolved = current_request_admission()
-    context_record = epoch_mod._admission.get()
+    context_record = admission_mod._admission.get()
     OBSERVED.append(
         Observation(
             resolved=resolved,

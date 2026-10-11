@@ -67,6 +67,10 @@ async def test_in_process_metrics_render_the_tool_counter(embed_stack: TaiStack)
     )
 
 
+# The MCP reload call may run to the harness read bound (150 s), so the per-test bound sits
+# above it: the stack boot inside the first test's timer (120) + the census wait (8) + the
+# env reload over REST (60) + the reload call's read bound (150) + a session re-init (15).
+@pytest.mark.timeout(360)
 @pytest.mark.needs("kind:backend", "mutable", "store:redis")
 async def test_reload_fans_out_from_embedded_worker(embed_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """Fleet config-reload fan-out works from an embedded worker: the config-reload

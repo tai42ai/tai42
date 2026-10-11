@@ -39,7 +39,8 @@ acquiring the lock from a foreign loop.
 
 The lock is never taken bare. Every holder enters through one of two context managers,
 which record on the serving generation the work engaged with the gate
-(:class:`GateParty`), so a retire of that generation never severs it:
+(:class:`GateParty`), so a retire of that generation never severs it. A request waiting for
+the lock cannot move, so it leaves the in-flight count while it waits:
 
 * :meth:`ReloadGate.driving` — the holder runs a gated body (a reload, a profile apply).
   While it waits for the lock its request or tool-run supervisor is recorded as
@@ -63,7 +64,8 @@ from starlette.responses import JSONResponse
 from tai42_kit.fork_gate import fork_gate
 
 if TYPE_CHECKING:
-    from tai42_skeleton.app.epoch import Epoch, RequestAdmission
+    from tai42_skeleton.app.admission import RequestAdmission
+    from tai42_skeleton.app.epoch import Epoch
 
 T = TypeVar("T")
 
@@ -105,10 +107,10 @@ class GateParty:
     """The work that is about to wait on, then hold, the reload gate, as the generation records it.
 
     ``request`` is the admission record of the request it acts for (``None`` off a served
-    request); ``task`` is the tool-run supervisor it runs in and ``task_epoch`` the
-    generation that admitted that run (both ``None`` outside a supervisor of the live
-    generation). A party with neither records nothing (the bus subscription, a periodic
-    loop, the retire's own tail).
+    request); ``task`` is the tool-run supervisor whose run it belongs to (its own task, or
+    a child task of it such as an agent's tool call) and ``task_epoch`` the generation that
+    admitted that run (both ``None`` outside a run of the live generation). A party with
+    neither records nothing (the bus subscription, a periodic loop, the retire's own tail).
     """
 
     request: RequestAdmission | None
@@ -116,18 +118,18 @@ class GateParty:
     task_epoch: Epoch | None
 
     def wait(self) -> None:
-        """Record the party as waiting on the gate."""
+        """Record the party as waiting on the gate; its request leaves the in-flight count while it waits."""
         if self.request is not None:
-            self.request.epoch.waiting.add(self.request)
+            self.request.begin_wait()
         if self.task is not None and self.task_epoch is not None:
-            self.task_epoch.waiting_tasks.add(self.task)
+            self.task_epoch.begin_task_wait(self.task)
 
     def stop_waiting(self) -> None:
         """Record that the party no longer waits (it acquired the gate, or gave up)."""
         if self.request is not None:
-            self.request.epoch.waiting.discard(self.request)
+            self.request.end_wait()
         if self.task is not None and self.task_epoch is not None:
-            self.task_epoch.waiting_tasks.discard(self.task)
+            self.task_epoch.end_task_wait(self.task)
 
     def drive(self) -> None:
         """Record the party as driving a gated body until its request or supervisor finishes.
@@ -147,7 +149,8 @@ class GateParty:
 
 def gate_party() -> GateParty:
     """The current request and tool-run supervisor, for the reload gate to record on their generation."""
-    from tai42_skeleton.app.epoch import current_epoch_or_none, current_request_admission
+    from tai42_skeleton.app.admission import current_request_admission
+    from tai42_skeleton.app.epoch import current_epoch_or_none
     from tai42_skeleton.operations.tool_runs.supervisor import running_supervisor
 
     supervisor = running_supervisor()

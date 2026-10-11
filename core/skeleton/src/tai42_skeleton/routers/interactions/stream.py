@@ -13,7 +13,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import request_identity
-from tai42_skeleton.app.epoch import mark_current_request_drain_exempt
+from tai42_skeleton.app.admission import mark_current_request_drain_exempt
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.interactions.caller_ask import is_caller_ask
@@ -180,13 +180,12 @@ async def _stream_events(request: Request, store: InteractionStore, cursor: str)
     _user_id, restricted_id = request_identity()
     restricted = restricted_id is not None
 
-    # Exempt this request from its serving generation's retire drain now: this is a
-    # plain Starlette route on its own redis connection — a reload's ``aclose`` closes
-    # only the FastMCP session-manager, so it does NOT sever this stream; the tail can
+    # Exempt this request from its serving generation's retire drain now: the tail can
     # never drain, so a retire that waited on it would burn its whole budget and, on a
-    # fleet sibling, stall fleet-reload convergence. The stream self-terminates on client
-    # disconnect. Only this long-lived stream opts out; real requests stay counted and
-    # are drained normally.
+    # fleet sibling, stall fleet-reload convergence. This is a plain Starlette route on its
+    # own redis connection, so the retire's transport close does not sever it; the stream
+    # self-terminates on client disconnect. Only this long-lived stream opts out; real
+    # requests stay counted and are drained normally.
     mark_current_request_drain_exempt()
 
     # Flush a no-op comment immediately, before the tail's first (blocking) XREAD: this

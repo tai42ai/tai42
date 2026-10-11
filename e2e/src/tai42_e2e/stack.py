@@ -424,7 +424,11 @@ class TaiStack:
         """The URL the tai app is served at on an app port: its origin plus the stack's path prefix."""
         return f"{self.origin(port)}{self.config.path_prefix}"
 
-    def mcp(self, port: int | None = None, path: str = "/mcp", *, auth: str | None = None) -> McpClient:
+    def mcp(self, port: int | None = None, path: str | None = None, *, auth: str | None = None) -> McpClient:
+        """A client for the MCP endpoint at ``path``, by default the one the stack's transport serves
+        (``/sse`` under ``tai serve --transport sse``, else ``/mcp``)."""
+        if path is None:
+            path = "/sse" if self.config.transport == "sse" else "/mcp"
         read_timeout = mcp_read_timeout(self.config.env, self.infra.settings.boot_timeout)
         return McpClient(f"{self.base_url(port)}{path}", auth=auth, read_timeout=read_timeout)
 

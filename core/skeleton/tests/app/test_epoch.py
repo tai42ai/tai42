@@ -26,16 +26,16 @@ from tai42_kit.settings.cache_registry import (
     sweep_stale_settings,
 )
 
+from tai42_skeleton.app import admission as admission_mod
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app import epoch_retire as epoch_retire_mod
 from tai42_skeleton.app import retired_generations as retired_mod
+from tai42_skeleton.app.admission import EpochAdmissionApp, mark_current_request_drain_exempt
 from tai42_skeleton.app.epoch import (
     Epoch,
-    EpochAdmissionApp,
     build_and_swap_epoch,
     current_epoch,
     current_epoch_or_none,
-    mark_current_request_drain_exempt,
 )
 from tai42_skeleton.app.instance import build_app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
@@ -352,12 +352,12 @@ async def test_a_drain_exempt_stream_does_not_block_the_retire_drain() -> None:
 
     boot.supervisor = _FakeSupervisor()  # type: ignore[assignment]
     boot.admit()  # the SSE request, admitted on this generation
-    token = epoch_mod._admission.set(epoch_mod.RequestAdmission(epoch=boot))
+    token = admission_mod._admission.set(admission_mod.RequestAdmission(epoch=boot))
     try:
-        state = epoch_mod._admission.get()
-        epoch_mod.mark_current_request_drain_exempt()
+        state = admission_mod._admission.get()
+        admission_mod.mark_current_request_drain_exempt()
     finally:
-        epoch_mod._admission.reset(token)
+        admission_mod._admission.reset(token)
     # Exempting released the request's in-flight slot, so the generation reads idle to the drain.
     assert state is not None
     assert state.slot_released is True
@@ -421,7 +421,7 @@ async def test_admission_wrapper_releases_an_exempt_stream_exactly_once() -> Non
     boot.admit()  # request A: a normal request still in flight
 
     async def _sse_app(scope, receive, send) -> None:
-        epoch_mod.mark_current_request_drain_exempt()  # request B (the SSE) exempts itself
+        admission_mod.mark_current_request_drain_exempt()  # request B (the SSE) exempts itself
 
     await EpochAdmissionApp(_sse_app, boot)({"type": "http"}, None, None)  # type: ignore[arg-type]
     # B released its slot exactly once; the wrapper did NOT release again, so A's slot survives.

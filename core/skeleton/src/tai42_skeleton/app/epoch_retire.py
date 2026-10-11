@@ -10,9 +10,11 @@ The drain budget bounds the work that can finish on its own. Work that drives or
 reload gate (recorded on the generation by
 :class:`~tai42_skeleton.app.reload_gate.GateParty`) cannot finish before the gate is released,
 which happens only after the retire returns: it is never counted against the budget and never
-severed. When the generation has such work the retire leaves the transports open and hands the
-drain and the close to a background tail that lets the gate turn over, drains the ordinary work
-within the budget, waits for every driver to answer, and only then closes.
+severed. When the generation has such work — from the start, or as soon as a request starts
+waiting on the gate during the synchronous drain — the retire leaves the transports open and
+hands the drain and the close to a background tail that lets the gate turn over, drains the
+ordinary work within the budget, waits for every driver to answer, repeats while work of the
+generation still waits on the gate, and only then closes.
 """
 
 from __future__ import annotations
@@ -73,12 +75,13 @@ async def retire_epoch(old: Epoch, retired: int, deadline: float | None) -> None
     if not old.engaged:
         # Drain this generation's in-flight requests SYNCHRONOUSLY before the transport
         # close below, so a real request (an MCP tool call, a sync REST tool run) finishes
-        # on the old epoch and is never severed mid-response. A long-lived stream that never
-        # completes — the interactions-inbox SSE the Studio shell holds — EXEMPTS itself
-        # from this drain (``mark_current_request_drain_exempt``): it is a plain Starlette
-        # route the transport close does NOT sever and can never drain, and it
-        # self-terminates on client disconnect, so waiting on it is pointless.
-        await old._drain_in_flight(budget)
+        # on the old epoch and is never severed mid-response. A stream that cannot finish on
+        # its own — the interactions-inbox SSE the Studio shell holds, an MCP transport's
+        # server-to-client stream — EXEMPTS itself from this drain
+        # (``mark_current_request_drain_exempt``): it can never drain, so waiting on it is
+        # pointless. A request that starts waiting on the gate meanwhile ends this wait: the
+        # generation is then engaged and the tail drains it.
+        await old._drain_in_flight(budget, until_gate_wait=True)
 
     from tai42_skeleton.operations.tool_runs import drain_supervisors
 
@@ -89,7 +92,7 @@ async def retire_epoch(old: Epoch, retired: int, deadline: float | None) -> None
             budget,
             epoch=old.number,
             reason="the serving epoch was retired by a config apply before the tool-run completed",
-            exclude=old.driving_tasks | old.waiting_tasks,
+            exclude={*old.driving_tasks, *old.waiting_tasks},
         )
     except Exception:
         logger.exception("epoch %d retire: background-run drain failed", old.number)
@@ -133,22 +136,27 @@ async def retire_epoch(old: Epoch, retired: int, deadline: float | None) -> None
 async def _deferred_drain_and_close(old: Epoch, retired: int, budget: float) -> None:
     """Background tail of an engaged generation's retire.
 
-    First lets the reload gate turn over: every request waiting on it when the retire ran
-    has then acquired it (a driver of its own gated body is from then on driving; a
-    pass-through is ordinary in-flight work again). Then drains the ordinary in-flight
-    requests within the drain budget (loud past it), waits for every request and
-    supervisor driving a gated body of this generation to finish — their responses flush
-    on the still-live transports, and their own bounds bound the wait — and only then
-    closes the transports and arms the retired generation's certification. Runs on the
-    serving loop (the lifespans' owner loop), so the close stays loop-correct.
+    First lets the reload gate turn over: every request waiting on it until then has
+    acquired it (a driver of its own gated body is from then on driving; a pass-through is
+    ordinary in-flight work again). Then drains the ordinary in-flight requests within the
+    drain budget (loud past it) and waits for every request and supervisor driving a gated
+    body of this generation to finish — their responses flush on the still-live
+    transports, and their own bounds bound the wait. Work of this generation that started
+    waiting on the gate meanwhile (behind another reload) turns the gate over again, until
+    none waits; only then are the transports closed and the retired generation's
+    certification armed. Runs on the serving loop (the lifespans' owner loop), so the close
+    stays loop-correct.
     """
     from tai42_skeleton.app.reload_gate import reload_gate
 
     try:
-        async with reload_gate.synchronized():
-            pass
-        await old._drain_in_flight(budget)
-        await old._wait_driving()
+        while True:
+            async with reload_gate.synchronized():
+                pass
+            await old._drain_in_flight(budget)
+            await old._wait_driving()
+            if not old.gate_waiters:
+                break
     finally:
         try:
             await old.close_transports()

@@ -18,6 +18,10 @@ from tai42_e2e.variants import short_presence_ttl_env
 pytestmark = pytest.mark.needs("store:redis", "setting:api_tools")
 
 
+# The MCP reload call may run to the harness read bound (150 s), so the per-test bound sits
+# above it: the stack boot inside the first test's timer (120) + the seeding env reload over
+# REST (60) + the reload call's read bound (150) + a session re-init (15) + the marker wait (5).
+@pytest.mark.timeout(360)
 @pytest.mark.needs("topology:replicas")
 async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     marker = uniq("E2E_MARKER").upper()
@@ -50,6 +54,11 @@ async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: 
     await wait_for_async(b_has_marker, deadline=5.0, message="B never observed the reloaded config marker")
 
 
+# Each MCP reload call may run to the harness read bound (125 s under the pinned 5 s apply
+# timeout), so the per-test bound sits above the sum: the stack boot inside the test (120) +
+# two reload calls (2 x 125) with a session re-init each (2 x 15) + the census wait (35) +
+# the two survivors' apply waits (2 x 120).
+@pytest.mark.timeout(720)
 @pytest.mark.needs("process", "kind:backend", "probe-tools")
 async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], infra: Infra) -> None:
     # Presence and its TTL live on the app-owned bus, so the dead-worker window is tunable

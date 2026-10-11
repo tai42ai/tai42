@@ -17,6 +17,8 @@ derives from its own settings (:func:`mcp_read_timeout`): the longest legitimate
 fleet reload, whose rebuild is boot-sized under load and whose fleet wait runs to the bus
 apply timeout — fits inside it, and a reply the server never delivers fails as the SDK's
 named request timeout ("Timed out while waiting for response to …") instead of hanging.
+A test whose call may run to this bound carries a per-test timeout above it
+(``@pytest.mark.timeout``), so the bound is what fires.
 """
 
 from __future__ import annotations
@@ -91,8 +93,9 @@ def _is_session_terminated(exc: BaseException) -> bool:
 
 class McpClient:
     """A short-lived fastmcp client bound to one MCP endpoint. Use as an async
-    context manager; each ``async with`` opens one streamable-http session. Every
-    request waits for its reply at most ``read_timeout`` seconds.
+    context manager; each ``async with`` opens one session (streamable-http, or SSE
+    for an endpoint ending in ``/sse``). Every request waits for its reply at most
+    ``read_timeout`` seconds.
 
     Session termination from an epoch swap is handled transparently: the
     listing/tool-call surface re-initialises a fresh session and re-issues (bounded

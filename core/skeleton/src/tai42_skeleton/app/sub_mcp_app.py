@@ -21,6 +21,7 @@ from tai42_contract.sub_mcp import RouteConfig
 from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 
 from tai42_skeleton.access_control.path_canon import under_prefix
+from tai42_skeleton.app.transport_stream import TransportStreamDrainExemptMiddleware
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.settings.audit_log import audit_log_settings
@@ -496,15 +497,22 @@ class SubMcpAppRouter:
         # ``/app/<unmatched>`` line. The outer gate has already bound the caller id, so
         # this inner line names the resolved principal. Off means ABSENT here, never a
         # registered no-op.
-        sub_middleware = [
-            *([Middleware(AuditLogMiddleware)] if audit_log_settings().enable else []),
-            Middleware(BodyLimitMiddleware),
-        ]
+        #
+        # The sub-app's transport stream is exempt from the retire drain inside its own
+        # stack too, matched on the stream path the sub-app serves.
+        def sub_middleware(stream_path: str) -> list[Middleware]:
+            return [
+                *([Middleware(AuditLogMiddleware)] if audit_log_settings().enable else []),
+                Middleware(BodyLimitMiddleware),
+                Middleware(TransportStreamDrainExemptMiddleware, stream_path=stream_path),
+            ]
+
         if config.transport == "sse":
             clean_root = self.root_prefix.rstrip("/")
             base_path = f"{clean_root}/{slug}"
+            sse_path = f"{base_path}/sse"
             sub_app = create_sse_app(
-                mcp, message_path=f"{base_path}/messages", sse_path=f"{base_path}/sse", middleware=sub_middleware
+                mcp, message_path=f"{base_path}/messages", sse_path=sse_path, middleware=sub_middleware(sse_path)
             )
         else:
             # Serve the streamable-HTTP endpoint at the sub-app ROOT. The
@@ -512,7 +520,7 @@ class SubMcpAppRouter:
             # ``/`` (see ``__call__``), so the endpoint must live at ``/`` — the
             # FastMCP default of ``/mcp`` would leave the rewritten ``/`` request
             # 404ing against the sub-app.
-            sub_app = mcp.http_app(path="/", middleware=sub_middleware)
+            sub_app = mcp.http_app(path="/", middleware=sub_middleware("/"))
 
         app_lifespan = SubAppLifespan(sub_app)
         # start() enters the lifespan in its dedicated task and blocks until it is

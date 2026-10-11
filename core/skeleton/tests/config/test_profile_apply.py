@@ -26,10 +26,12 @@ from tai42_kit.fork_gate import fork_gate
 # ``bus_settings`` is imported for its registration side effect — the apply's recycle
 # classification reflects only IMPORTED settings classes, and TAI_BUS_* are recycle-class.
 import tai42_skeleton.app.bus_settings  # noqa: F401
+from tai42_skeleton.app import admission as admission_mod
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app import instance
+from tai42_skeleton.app.admission import RequestAdmission
 from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind, WorkerRow, WorkerState
-from tai42_skeleton.app.epoch import Epoch, RequestAdmission, build_and_swap_epoch
+from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.recycle import (
     FAILED,
     RECYCLED,
@@ -254,13 +256,13 @@ async def test_apply_records_its_own_request_as_the_swaps_driver(monkeypatch: py
         driving_at_swap.append(request in serving.driving and serving.in_flight == 0)
         return Epoch(number=0)
 
-    token = epoch_mod._admission.set(request)
+    token = admission_mod._admission.set(request)
     try:
         outcome = await _service(store).apply_replace_env(
             {"MY_APP_FLAG": "new"}, save_previous=_PrevSpy(), build_and_swap=spy
         )
     finally:
-        epoch_mod._admission.reset(token)
+        admission_mod._admission.reset(token)
     assert driving_at_swap == [True]
     # env-write-LAST landed after a successful build.
     assert store.env == {"MY_APP_FLAG": "new"}
