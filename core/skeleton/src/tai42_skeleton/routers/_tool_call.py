@@ -13,6 +13,9 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from tai42_contract.states import StateSubject
 
+from tai42_skeleton.operations.adapter import read_json_object
+from tai42_skeleton.operations.errors import BadRequestError
+
 
 class ToolCallRequestError(Exception):
     """A malformed tool-call request body — carries the loud ``(message, status_code)`` the door returns.
@@ -39,11 +42,9 @@ async def read_tool_call(request: Request) -> tuple[str, dict[str, object], Stat
     it to the same loud 4xx both doors share.
     """
     try:
-        body = await request.json()
-    except ValueError as exc:
-        raise ToolCallRequestError("invalid JSON body", 400) from exc
-    if not isinstance(body, dict):
-        raise ToolCallRequestError("body must be a JSON object", 400)
+        body = await read_json_object(request)
+    except BadRequestError as exc:
+        raise ToolCallRequestError(exc.message, 400) from exc
     name = body.get("tool_name", "")
     if not isinstance(name, str) or not name:
         raise ToolCallRequestError("body must contain a non-empty 'tool_name'", 400)
