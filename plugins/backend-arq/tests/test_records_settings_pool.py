@@ -124,7 +124,7 @@ def test_dispatch_surface_is_the_shared_group_under_this_prefix() -> None:
     # through a recycle rather than in place.
     assert fields["manifest_key"].reload_class == "recycle"
     assert fields["tool_name_arg"].reload_class == "recycle"
-    assert fields["task_timeout"].reload_class == "hot"
+    assert fields["task_timeout"].reload_class == "recycle"
 
     # The abstract group itself never claims an env surface of its own.
     assert [group.name for group in registered_settings() if group.name == "BackendDispatchSettings"] == []

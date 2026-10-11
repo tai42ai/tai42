@@ -37,11 +37,13 @@ def test_the_decoder_reads_the_mapper_output(cadence: IntervalCadence | CrontabC
     decoded = json.loads(json.dumps(to_redbeat(cadence)), cls=RedBeatJSONDecoder)
     expected = to_celery_schedule(cadence)
     assert type(decoded) is type(expected)
-    if isinstance(expected, schedule) and not isinstance(expected, crontab):
+    if isinstance(expected, crontab):
+        assert decoded == expected
+    else:
+        assert isinstance(decoded, schedule)
+        assert not isinstance(decoded, crontab)
         assert decoded.run_every == expected.run_every
         assert decoded.relative == expected.relative
-    else:
-        assert decoded == expected
 
 
 def test_from_redbeat_refuses_an_unknown_type() -> None:

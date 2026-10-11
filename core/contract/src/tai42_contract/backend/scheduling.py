@@ -17,7 +17,7 @@ cadence specs is the kit's.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Final, Literal
+from typing import Annotated, Any, Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -70,12 +70,13 @@ class CrontabCadence(BaseModel):
         Applies only to a mapping carrying ``expression`` and none of the field keys; a mapping
         carrying both keeps ``expression`` as an unknown key, which the model refuses.
         """
-        if not isinstance(data, dict) or "expression" not in data:
+        if not isinstance(data, dict):
             return data
-        if any(field in data for field in _CRONTAB_FIELDS):
-            return data
-        rest: dict[str, Any] = {key: value for key, value in data.items() if key != "expression"}
-        expression = data["expression"]
+        mapping = cast("dict[str, Any]", data)
+        if "expression" not in mapping or any(field in mapping for field in _CRONTAB_FIELDS):
+            return mapping
+        rest: dict[str, Any] = {key: value for key, value in mapping.items() if key != "expression"}
+        expression: Any = mapping["expression"]
         if not isinstance(expression, str):
             raise ValueError("a crontab expression is a string")  # noqa: TRY004 pydantic reports ValueError
         parts = expression.split()
