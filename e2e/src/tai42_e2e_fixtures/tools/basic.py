@@ -245,6 +245,30 @@ async def e2e_slow_task(key: str, seconds: float) -> str:
 
 
 @tai42_app.tools.tool(tags={"e2e"})
+async def e2e_hold_until_released(key: str, seconds: float = 300.0) -> str:
+    """RPUSH a ``started`` marker onto ``e2e:rec:{key}``, then hold until ``e2e:rel:{key}`` holds a record.
+
+    The in-flight request a sibling's reload drains before its gate frees; released by the harness
+    (``RedisAdmin.release``), bounded at 300 s so a broken sequence fails loudly rather than hangs.
+    """
+    from collections.abc import Awaitable
+    from typing import Any, cast
+
+    from tai42_kit.clients import client_ctx
+    from tai42_kit.clients.impl.redis import RedisClient
+
+    if seconds > 300:
+        raise ValueError(f"e2e_hold_until_released bound exceeded: {seconds} > 300 seconds")
+    record = json.dumps({"value": "started", "pid": os.getpid()})
+    async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
+        await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", record))
+        released = await cast(Awaitable[Any], client.blpop([f"e2e:rel:{key}"], timeout=seconds))
+    if released is None:
+        raise TimeoutError(f"e2e_hold_until_released({key!r}) was never released within {seconds} seconds")
+    return "released"
+
+
+@tai42_app.tools.tool(tags={"e2e"})
 async def e2e_drain_probe(key: str, seconds: float) -> str:
     """RPUSH a ``started`` marker, sleep ``seconds`` (bounded at 30), then RPUSH a ``done``
     marker — both onto ``e2e:rec:{key}`` with this process's pid.
