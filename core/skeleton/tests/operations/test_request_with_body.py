@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from typing import Annotated, Literal
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, RootModel
 from starlette.requests import Request
 
 from tai42_skeleton.operations.adapter import read_json_object, request_with_body, validate_body
@@ -72,6 +73,26 @@ def test_validate_body_names_each_rule_and_never_the_value() -> None:
     assert "count: Input should be a valid integer" in message
     assert "secret-value" not in message
     assert "s3" not in message
+
+
+class _ProbeLeft(BaseModel):
+    kind: Literal["left"]
+
+
+class _ProbeRight(BaseModel):
+    kind: Literal["right"]
+
+
+class _ProbeUnion(RootModel[Annotated[_ProbeLeft | _ProbeRight, Field(discriminator="kind")]]):
+    pass
+
+
+def test_validate_body_names_an_unknown_union_tag_without_echoing_it() -> None:
+    with pytest.raises(BadRequestError) as excinfo:
+        validate_body(_ProbeUnion, {"kind": "secret-tag-value"}, "probe params")
+    message = excinfo.value.message
+    assert message == "invalid probe params: 'kind' must be one of the expected tags: 'left', 'right'"
+    assert "secret-tag-value" not in message
 
 
 # -- request_with_body -------------------------------------------------------------
