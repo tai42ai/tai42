@@ -1,5 +1,5 @@
 """Harness self-test for :mod:`tai42_e2e.tcprelay`: the relay round-trips bytes to
-its upstream, ``sever`` drops live connections and refuses new ones, ``restore``
+its upstream, keeps an idle connection open, ``sever`` drops live connections and refuses new ones, ``restore``
 re-opens the same port, and a stopped relay reports no leaked listener/thread (the
 teardown assertion the stack relies on)."""
 
@@ -11,6 +11,7 @@ from collections.abc import Iterator
 
 import pytest
 
+from tai42_e2e import tcprelay
 from tai42_e2e.tcprelay import TcpRelay, wait_relay_ready
 
 # Pure harness self-test: it boots no stack and exercises no backend seam, so
@@ -87,6 +88,28 @@ def test_relay_round_trips_bytes_to_upstream(echo: _EchoServer) -> None:
             client.sendall(b"hello-relay")
             assert _recv_exact(client, len(b"hello-relay")) == b"hello-relay"
     # The context manager stopped it; nothing leaked.
+    assert relay.is_leaked() is False
+
+
+def test_an_idle_connection_outlives_the_upstream_connect_timeout(
+    echo: _EchoServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The connect timeout bounds opening the upstream connection only: a forwarded
+    connection that carries no bytes for longer (an idle pub/sub subscription) stays
+    open until the client, the upstream or a ``sever`` closes it."""
+    monkeypatch.setattr(tcprelay, "UPSTREAM_CONNECT_TIMEOUT", 0.2)
+    with TcpRelay("127.0.0.1", echo.port) as relay:
+        wait_relay_ready(relay)
+        with socket.create_connection(("127.0.0.1", relay.port), timeout=2.0) as client:
+            client.sendall(b"a")
+            assert _recv_exact(client, 1) == b"a"
+            # Idle for five times the connect timeout: the relay must not end the stream.
+            # A read that returns (``b""``: the relay closed it) instead of timing out fails.
+            client.settimeout(1.0)
+            with pytest.raises(TimeoutError):
+                client.recv(1)
+            client.sendall(b"b")
+            assert _recv_exact(client, 1) == b"b"
     assert relay.is_leaked() is False
 
 
