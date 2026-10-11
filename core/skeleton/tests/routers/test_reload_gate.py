@@ -176,7 +176,7 @@ async def test_gated_routes_reject_while_reloading(monkeypatch: pytest.MonkeyPat
         assert resp.headers["Retry-After"] == "5"
         assert _json(resp) == {"error": REJECT_MESSAGE, "reloading": True}
 
-    async with reload_gate.lock:
+    async with reload_gate.synchronized():
         assert reload_gate.locked
         # A run surface.
         await _assert_rejected(await tools_router.run_tool(_body_req(b"{}", "/api/run-tool")))
@@ -262,7 +262,7 @@ async def test_middleware_rejects_session_tool_call_while_reloading() -> None:
         calls.append("dispatched")
         return "tool-result"
 
-    async with reload_gate.lock:
+    async with reload_gate.synchronized():
         with pytest.raises(ToolError) as excinfo:
             await middleware.on_call_tool(cast(Any, object()), call_next)
         assert str(excinfo.value) == REJECT_MESSAGE
@@ -347,3 +347,106 @@ async def test_write_env_reloads_through_gate_same_result_shape(monkeypatch: pyt
     assert admin.reload_thread is not None
     assert admin.reload_thread != threading.get_ident()
     assert not reload_gate.locked  # released after the route returns
+
+
+# -- the work engaged with the gate, recorded on its generation ----------------
+
+
+def _serve_on(epoch: Any, body: Any) -> asyncio.Task[None]:
+    """Serve ``body`` as one HTTP request admitted on ``epoch`` by the real admission wrapper."""
+    from tai42_skeleton.app.epoch import EpochAdmissionApp
+
+    async def _app(scope: Any, receive: Any, send: Any) -> None:
+        await body()
+
+    return asyncio.create_task(EpochAdmissionApp(_app, epoch)({"type": "http"}, None, None))  # type: ignore[arg-type]
+
+
+async def test_driving_records_the_request_as_waiting_then_driving_until_it_finishes() -> None:
+    from tai42_skeleton.app.epoch import Epoch
+
+    epoch = Epoch(number=0)
+    inside = asyncio.Event()
+    after_gate = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def _body() -> None:
+        async with reload_gate.driving():
+            inside.set()
+        after_gate.set()
+        await finish.wait()
+
+    async with reload_gate.synchronized():
+        request = _serve_on(epoch, _body)
+        while not epoch.waiting:
+            await asyncio.sleep(0)
+        # Waiting: still counted in flight, not yet driving.
+        assert (len(epoch.waiting), epoch.driving, epoch.in_flight) == (1, set(), 1)
+        assert reload_gate.locked
+    await inside.wait()
+    (state,) = epoch.driving
+    # Driving: out of the in-flight count, no longer waiting.
+    assert (epoch.waiting, epoch.in_flight, state.slot_released) == (set(), 0, True)
+    await after_gate.wait()
+    assert epoch.driving == {state}, "a driver stays recorded after the gated body until its request ends"
+    assert not reload_gate.locked
+    finish.set()
+    await request
+    assert (epoch.driving, epoch.waiting, epoch.in_flight, state.finished.is_set()) == (set(), set(), 0, True)
+
+
+async def test_synchronized_records_the_request_as_waiting_only_while_it_waits() -> None:
+    from tai42_skeleton.app.epoch import Epoch
+
+    epoch = Epoch(number=0)
+    inside = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def _body() -> None:
+        async with reload_gate.synchronized():
+            inside.set()
+            await finish.wait()
+
+    async with reload_gate.synchronized():
+        request = _serve_on(epoch, _body)
+        while not epoch.waiting:
+            await asyncio.sleep(0)
+        assert epoch.in_flight == 1
+    await inside.wait()
+    # Holding the gate as a pass-through: ordinary in-flight work again.
+    assert (epoch.waiting, epoch.driving, epoch.in_flight) == (set(), set(), 1)
+    finish.set()
+    await request
+    assert epoch.in_flight == 0
+
+
+async def test_a_waiter_cancelled_on_the_gate_leaves_no_record() -> None:
+    from tai42_skeleton.app.epoch import Epoch
+
+    epoch = Epoch(number=0)
+
+    async def _body() -> None:
+        async with reload_gate.driving():
+            raise AssertionError("never acquires")  # pragma: no cover
+
+    async with reload_gate.synchronized():
+        request = _serve_on(epoch, _body)
+        while not epoch.waiting:
+            await asyncio.sleep(0)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+    assert (epoch.waiting, epoch.driving, epoch.in_flight) == (set(), set(), 0)
+
+
+async def test_work_outside_any_request_or_run_holds_the_gate_and_records_nothing() -> None:
+    from tai42_skeleton.app.epoch import Epoch, current_request_admission
+
+    epoch = Epoch(number=0)
+    assert current_request_admission() is None
+    async with reload_gate.driving():
+        assert reload_gate.locked
+    async with reload_gate.synchronized():
+        assert reload_gate.locked
+    assert not reload_gate.locked
+    assert not epoch.engaged

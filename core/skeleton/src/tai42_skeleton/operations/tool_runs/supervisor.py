@@ -43,7 +43,7 @@ from .models import _DEFAULT_CANCEL_REASON, _FAILED, _PARKED, _SUCCEEDED
 from .store import ToolRunStore
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Collection, Iterator, Mapping
 
     from tai42_contract.monitoring import RunAttribution
     from tai42_contract.states import StateSubject
@@ -105,6 +105,20 @@ def _enroll_supervisor(task: asyncio.Task[None]) -> None:
     epoch = current_epoch_or_none()
     if epoch is not None:
         _SUPERVISOR_EPOCH[task] = epoch.number
+
+
+def running_supervisor() -> tuple[asyncio.Task[Any], int] | None:
+    """The enrolled supervisor task this code runs in and the epoch number that admitted its run.
+
+    ``None`` outside an enrolled supervisor (or for one no epoch tagged). The reload gate
+    reads it to record a supervised run that drives a reload, so that generation's retire
+    leaves it running.
+    """
+    task = asyncio.current_task()
+    if task is None or task not in _SUPERVISORS:
+        return None
+    epoch = _SUPERVISOR_EPOCH.get(task)
+    return None if epoch is None else (task, epoch)
 
 
 def _discard_supervisor(task: asyncio.Task[None]) -> None:
@@ -514,6 +528,7 @@ async def drain_supervisors(
     *,
     epoch: int | None = None,
     reason: str = _DEFAULT_CANCEL_REASON,
+    exclude: Collection[asyncio.Task[Any]] = (),
 ) -> None:
     """Cancel in-flight supervisors and wait, bounded, for each to write its terminal ``failed`` record.
 
@@ -528,9 +543,15 @@ async def drain_supervisors(
     ``reason`` is passed as the cancel message so each cancelled run records the actual
     cause. ``deadline`` is a drain budget in SECONDS — a relative duration, not an
     absolute time (mirrors the kit's ``drain_epoch`` vocabulary); defaults to
-    ``shutdown_drain_seconds``.
+    ``shutdown_drain_seconds``. ``exclude`` names supervisors left running: an epoch retire
+    passes the runs that drive or wait on the reload gate, which includes the run driving
+    that very retire.
     """
-    tasks = [t for t in _SUPERVISORS if not t.done() and (epoch is None or _SUPERVISOR_EPOCH.get(t) == epoch)]
+    tasks = [
+        t
+        for t in _SUPERVISORS
+        if not t.done() and t not in exclude and (epoch is None or _SUPERVISOR_EPOCH.get(t) == epoch)
+    ]
     if not tasks:
         return
     budget = deadline if deadline is not None else _pkg.tool_runs_settings().shutdown_drain_seconds

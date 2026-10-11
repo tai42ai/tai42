@@ -24,22 +24,14 @@ class ConfigReloadMixin(LifecycleState):
         """
         env = self._config_manager.read_env()
 
-        from tai42_skeleton.app.epoch import _reload_driven_by_request, build_and_swap_epoch
-
-        # Read in THIS context (the reload-gate worker thread, into which
-        # ``asyncio.to_thread`` copied the driving request's context): true when a
-        # door request drove this reload, so the retire excuses that still-admitted
-        # request instead of self-waiting the full drain budget on it. Captured here
-        # and passed explicitly — ``_swap`` runs on the serving loop via
-        # ``run_coroutine_threadsafe`` and does not inherit this thread's context.
-        driven_by_request = _reload_driven_by_request.get()
+        from tai42_skeleton.app.epoch import build_and_swap_epoch
 
         async def _swap() -> dict[str, Any]:
             # Release the loop-bound kit resources before the build's settings reset
             # drops their per-loop registries — it refuses to drop a registry still
             # holding live resources on a running loop.
             await _lifecycle.release_loop_bound_resources()
-            await build_and_swap_epoch(env, drain_tolerate_driver=driven_by_request)
+            await build_and_swap_epoch(env)
             return {"status": "ok", "env_keys": len(env)}
 
         loop = self._serving_loop

@@ -62,7 +62,7 @@ class _ResolutionMixin(_ToolBindingBase):
         try:
             await _authorize()
         except OperationSurfaceUnsettledError:
-            async with reload_gate.lock:
+            async with reload_gate.synchronized():
                 pass
             await _authorize()
 
@@ -110,7 +110,7 @@ class _ResolutionMixin(_ToolBindingBase):
         try:
             return await self.get_tool(key)
         except UnknownToolError:
-            async with reload_gate.lock:
+            async with reload_gate.synchronized():
                 pass
             return await self.get_tool(key)
 

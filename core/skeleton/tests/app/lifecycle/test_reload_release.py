@@ -39,7 +39,7 @@ async def test_the_reload_closes_the_store_when_the_checkpoint_close_fails(monke
     await store_registry()._get_or_init_resource("k", _store_resource)
     built: list[dict[str, str]] = []
 
-    async def _build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Any:
+    async def _build(env: dict[str, str]) -> Any:
         built.append(env)
 
     monkeypatch.setattr(epoch_mod, "build_and_swap_epoch", _build)
@@ -59,7 +59,7 @@ async def test_the_reload_releases_then_builds(monkeypatch: pytest.MonkeyPatch) 
     async def _release(**kwargs: Any) -> None:
         order.append("release")
 
-    async def _build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Any:
+    async def _build(env: dict[str, str]) -> Any:
         order.append("build")
 
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.release_loop_bound_resources", _release)

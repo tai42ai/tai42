@@ -252,6 +252,9 @@ class SubMcpAppRouter:
         # reset from a throwaway loop, or the sub-app's task group is torn down
         # cross-loop.
         self._owner_loop: asyncio.AbstractEventLoop | None = None
+        # How many lifespans hold the router open (one per serving generation whose
+        # FastMCP lifespan is entered); see :meth:`lifespan`.
+        self._lifespan_holders = 0
 
     @property
     def root_prefix(self):
@@ -350,17 +353,26 @@ class SubMcpAppRouter:
             await stack.aclose()
 
     def reset(self) -> None:
-        """Drop all routes + cached sub-apps and tear down their lifespans.
+        """Drop all routes + cached sub-apps and hand their lifespans to the generation they served.
 
-        Called on every start()/reload so a re-init stops serving sub-apps from
-        the previous generation. Each stale sub-app's lifespan is closed on the
-        loop it was entered on, and reset never block-waits a running loop: when a
-        loop is live the close is SCHEDULED onto it — via ``create_task`` when that
+        Called on every start()/reload so a re-init stops serving sub-apps from the
+        previous generation. While a serving generation is live (a rebuild runs under it)
+        each stale sub-app's lifespan is ADOPTED by that generation
+        (:meth:`~tai42_skeleton.app.epoch.Epoch.adopt_transport`): its sessions are that
+        generation's, and a tool call on one may be the very request driving the rebuild,
+        so the generation's retire closes them together with its own session manager,
+        after its drivers have answered.
+
+        With no live generation (a cold start, a bare test) the lifespans are closed here,
+        each on the loop it was entered on, and reset never block-waits a running loop:
+        when a loop is live the close is SCHEDULED onto it — via ``create_task`` when that
         is reset's own loop, via ``run_coroutine_threadsafe`` when it is a different
-        running loop — with a logged completion callback, so a teardown failure
-        still surfaces rather than being lost. Only when no loop is live at all is
-        the close driven inline on a one-shot loop.
+        running loop — with a logged completion callback, so a teardown failure still
+        surfaces rather than being lost. Only when no loop is live at all is the close
+        driven inline on a one-shot loop.
         """
+        from tai42_skeleton.app.epoch import current_epoch_or_none
+
         with self._state_lock:
             self._routes.clear()
             self._server_cache.clear()
@@ -370,6 +382,12 @@ class SubMcpAppRouter:
             self._route_generations.clear()
             stacks = list(self._app_exit_stacks.items())
             self._app_exit_stacks.clear()
+
+        live = current_epoch_or_none()
+        if live is not None:
+            for _slug, stack in stacks:
+                live.adopt_transport(stack)
+            return
 
         owner = self._owner_loop
         try:
@@ -595,28 +613,40 @@ class SubMcpAppRouter:
 
     @asynccontextmanager
     async def lifespan(self, app: Starlette) -> AsyncIterator[None]:
-        """Own the loop for lazily-built sub-app lifespans and close every one at shutdown."""
+        """Own the loop for lazily-built sub-app lifespans and close every one when the last holder exits.
+
+        Every serving generation's FastMCP lifespan enters this one process router's
+        lifespan, and the generations overlap while a retiring one closes after its
+        successor started serving. Only the exit of the last holder closes the sub-apps
+        still registered (and drops the owner loop): an earlier exit is a retiring
+        generation's, whose own sub-app lifespans it closes itself
+        (:meth:`~tai42_skeleton.app.epoch.Epoch.close_transports`), while the sub-apps
+        registered now serve the generation that is still live.
+        """
         # Record the loop that owns every lazily-built sub-app lifespan so a
         # reload driven from a throwaway loop closes them here instead.
         self._owner_loop = asyncio.get_running_loop()
+        self._lifespan_holders += 1
         try:
             yield
         finally:
-            self._owner_loop = None
-            # Close every sub-app still registered at shutdown, collecting
-            # failures instead of letting the first one mask the rest. Grab the
-            # stacks under the state lock; close them off-lock on this (owner) loop.
-            with self._state_lock:
-                stacks = list(self._app_exit_stacks.items())
-                self._app_exit_stacks.clear()
-            errors: list[Exception] = []
-            for _slug, stack in stacks:
-                try:
-                    await stack.aclose()
-                except Exception as e:
-                    errors.append(e)
-            if errors:
-                raise ExceptionGroup("sub-MCP app shutdown failures", errors)
+            self._lifespan_holders -= 1
+            if self._lifespan_holders == 0:
+                self._owner_loop = None
+                # Close every sub-app still registered at shutdown, collecting
+                # failures instead of letting the first one mask the rest. Grab the
+                # stacks under the state lock; close them off-lock on this (owner) loop.
+                with self._state_lock:
+                    stacks = list(self._app_exit_stacks.items())
+                    self._app_exit_stacks.clear()
+                errors: list[Exception] = []
+                for _slug, stack in stacks:
+                    try:
+                        await stack.aclose()
+                    except Exception as e:
+                        errors.append(e)
+                if errors:
+                    raise ExceptionGroup("sub-MCP app shutdown failures", errors)
 
     async def __call__(self, scope, receive, send):
         """Dispatch an ASGI request to the sub-app for its ``/app/{slug}`` path."""

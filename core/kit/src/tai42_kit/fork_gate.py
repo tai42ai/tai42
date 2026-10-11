@@ -69,8 +69,8 @@ class ForkGate:
     on the owning thread passes straight through without self-deadlocking.
     (:meth:`exclusive_async` does NOT nest with another ``exclusive_async`` or with
     a thread-held ``exclusive``: each takes its own holder thread, so a second one
-    is a different owner and waits. Nothing nests them today — the reload doors are
-    serialized externally by the serving loop's ``reload_gate.lock``.)
+    is a different owner and waits. Nothing nests them: the reload doors are
+    serialized externally by the serving loop's reload gate.)
 
     Degraded mode after a timeout
     -----------------------------
@@ -91,7 +91,7 @@ class ForkGate:
     Both weakenings end when the stolen holder exits. The release is therefore
     CONDITIONAL (``if self._owner == tid``): an original holder finishing after being
     stolen from must not un-own the stealer, which would let a job span fork straight
-    into the stealer's live re-import. Callers serialized by ``reload_gate.lock`` (every
+    into the stealer's live re-import. Callers serialized by the reload gate (every
     reload door in this codebase) never reach this state — only concurrent rebuild
     threads can.
     """

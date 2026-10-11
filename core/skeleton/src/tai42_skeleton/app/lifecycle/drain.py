@@ -1,5 +1,11 @@
 """The declared drain budget: how long a retiring generation may take to finish its in-flight work.
 
+The budget bounds the work that can finish on its own. A request or tool run that drives
+or waits on the reload gate cannot finish before the gate is released, which happens only
+after the retire it drives has returned; the retire never counts it against the budget and
+never severs it, and waits for it to answer — its own bounds (the rebuild, the fleet apply
+timeout, a recycle step) bound that wait.
+
 A module whose in-flight work a retire or recycle must wait for declares its own budget
 on the app's :class:`DrainBudgetRegistry`; the budget used is the largest declared one,
 read at call time so a settings change applies to the next drain. Each app owns its

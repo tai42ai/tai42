@@ -334,7 +334,7 @@ def test_a_fire_waits_out_an_in_flight_reload_instead_of_being_dropped(ac) -> No
             registered = dict(operation_registry._generation.committed())
 
             async def reload_window() -> None:
-                async with reload_gate.lock:
+                async with reload_gate.synchronized():
                     with operation_registry.rebuilding():
                         operation_registry.clear()
                         await asyncio.sleep(0.05)

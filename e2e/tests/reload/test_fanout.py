@@ -55,10 +55,8 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
     # Presence and its TTL live on the app-owned bus, so the dead-worker window is tunable
     # for every backend. Two knobs are pinned here:
     #  * a bounded ``TAI_BUS_APPLY_TIMEOUT`` so a reload's wait for the DEAD backend's apply
-    #    is cut short (naming it non-applied) instead of running to the 30s default — on
-    #    celery that long wait holds the driver's own streamable-http response until it
-    #    races the epoch-swap teardown and never arrives (an unbounded client hang); arq/rq
-    #    deliver fast, which is why only celery hung. Mirrors ``test_backend_fleet``.
+    #    is cut short (naming it non-applied) instead of running to the 30s default, which
+    #    keeps the test's runtime down. Mirrors ``test_backend_fleet``.
     #  * a generous heartbeat TTL so the corpse stays on the census long enough that a
     #    re-opened session (after a swap that dropped a prior attempt) still finds it there
     #    to name — the dead-worker naming is what this test asserts.
@@ -77,11 +75,9 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
 
     # Kill the backend, then dispatch the reload while the corpse still sits on the census
     # (the generous TTL keeps it there across any session-swap re-open). The reload names
-    # the dead worker non-applied. The pinned ``TAI_BUS_APPLY_TIMEOUT`` keeps the reload's
-    # wait for the dead backend's apply UNDER the server's deferred session-close budget, so
-    # the driving call's own streamable-http response is delivered before the swap retires
-    # its session; ``McpClient`` re-initialises transparently for any genuine mid-call
-    # termination. The prime skips the post-call ``tools/list`` on the retired session.
+    # the dead worker non-applied once the pinned apply timeout cuts its wait; the call's
+    # reply is delivered on its session before the swap retires it. The prime skips the
+    # post-call ``tools/list`` on the retired session.
     stack.kill("backend")
     async with stack.mcp(port=stack.port_a) as mcp:
         await mcp.list_tools()

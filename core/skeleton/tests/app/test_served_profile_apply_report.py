@@ -125,7 +125,7 @@ class _Pipeline(ConfigService):
     outage: bool
 
     async def apply_replace_env(self, profile_env: dict[str, str], **kwargs: Any) -> ProfileApplyOutcome:
-        async def swap(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+        async def swap(env: dict[str, str]) -> Epoch:
             return Epoch(number=0)
 
         async def stopping_roll(*_args: Any, **_kwargs: Any) -> RecycleReport:
@@ -145,7 +145,6 @@ class _Pipeline(ConfigService):
 
         outcome = await super().apply_replace_env(
             profile_env,
-            driven=kwargs["driven"],
             save_previous=save_previous,
             build_and_swap=swap,
             orchestrate=orchestrate_recycle if self.outage else stopping_roll,

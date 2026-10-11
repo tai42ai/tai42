@@ -84,7 +84,7 @@ class McpReprobeMixin(LifecycleState):
         # Every read/write of ``_failed_mcps`` (and the bind it drives) happens under
         # the reload gate; a worker-thread reload holds the same lock, so the
         # re-verify and apply below cannot race a concurrent mutation.
-        async with reload_gate.lock:
+        async with reload_gate.synchronized():
             manifest = self._manifest
             mcp_map = (manifest.mcp_map if manifest else {}) or {}
             for title, probe in zip(titles, probes, strict=True):
@@ -144,7 +144,7 @@ class McpReprobeMixin(LifecycleState):
                 # this is the only place the failed set is read concurrency-safely (a
                 # bare snapshot would race a concurrent mutation → dict-changed-size).
                 # The probe that follows runs OFF the gate.
-                async with reload_gate.lock:
+                async with reload_gate.synchronized():
                     self._refresh_manifest_mcp()
                     manifest = self._manifest
                     mcp_map = (manifest.mcp_map if manifest else {}) or {}

@@ -35,18 +35,35 @@ loop, so the lock is created once (on first use, or explicitly via
 :meth:`bind_to_running_loop` at lifespan startup) and bound to that loop for the
 process lifetime; an off-serving-loop caller reaches the gate by scheduling a
 coroutine onto the serving loop (``asyncio.run_coroutine_threadsafe``), never by
-acquiring the lock from a foreign loop. The raw lock is exposed via :attr:`lock`
-for an async-side holder (a re-probe pass that must block reloads while it runs).
+acquiring the lock from a foreign loop.
+
+The lock is never taken bare. Every holder enters through one of two context managers,
+which record on the serving generation the work engaged with the gate
+(:class:`GateParty`), so a retire of that generation never severs it:
+
+* :meth:`ReloadGate.driving` — the holder runs a gated body (a reload, a profile apply).
+  While it waits for the lock its request or tool-run supervisor is recorded as
+  waiting; once it holds the lock it is recorded as driving until it finishes, and its
+  request leaves the in-flight count: it cannot finish before the gate is released,
+  which happens only after the retire it drives has returned.
+* :meth:`ReloadGate.synchronized` — the holder only waits a reload out or reads under
+  the lock (a tool lookup that missed mid-rebuild, a re-probe pass). It is recorded as
+  waiting while it waits and is ordinary in-flight work again once it holds the lock.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from typing import TypeVar
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from starlette.responses import JSONResponse
 from tai42_kit.fork_gate import fork_gate
+
+if TYPE_CHECKING:
+    from tai42_skeleton.app.epoch import Epoch, RequestAdmission
 
 T = TypeVar("T")
 
@@ -81,6 +98,66 @@ REJECT_MESSAGE = "reloading — the server is applying a config reload; retry sh
 # (``RQ_TASK_TIMEOUT`` / ``rq_settings().task_timeout`` is NOT the relevant bound — it
 # caps how long the enqueuing caller waits for a result, not how long the job executes.)
 FORK_QUIESCE_SECONDS = 30.0
+
+
+@dataclass(eq=False)
+class GateParty:
+    """The work that is about to wait on, then hold, the reload gate, as the generation records it.
+
+    ``request`` is the admission record of the request it acts for (``None`` off a served
+    request); ``task`` is the tool-run supervisor it runs in and ``task_epoch`` the
+    generation that admitted that run (both ``None`` outside a supervisor of the live
+    generation). A party with neither records nothing (the bus subscription, a periodic
+    loop, the retire's own tail).
+    """
+
+    request: RequestAdmission | None
+    task: asyncio.Task[Any] | None
+    task_epoch: Epoch | None
+
+    def wait(self) -> None:
+        """Record the party as waiting on the gate."""
+        if self.request is not None:
+            self.request.epoch.waiting.add(self.request)
+        if self.task is not None and self.task_epoch is not None:
+            self.task_epoch.waiting_tasks.add(self.task)
+
+    def stop_waiting(self) -> None:
+        """Record that the party no longer waits (it acquired the gate, or gave up)."""
+        if self.request is not None:
+            self.request.epoch.waiting.discard(self.request)
+        if self.task is not None and self.task_epoch is not None:
+            self.task_epoch.waiting_tasks.discard(self.task)
+
+    def drive(self) -> None:
+        """Record the party as driving a gated body until its request or supervisor finishes.
+
+        A driving request leaves the in-flight count (its slot is released once): it cannot
+        finish before the gate is released, which happens only after a retire it drives has
+        returned, so the retire waits for it apart from the drain budget.
+        """
+        if self.request is not None:
+            self.request.epoch.driving.add(self.request)
+            self.request.release_slot()
+        if self.task is not None and self.task_epoch is not None and not self.task.done():
+            epoch = self.task_epoch
+            epoch.driving_tasks.add(self.task)
+            self.task.add_done_callback(epoch.driving_tasks.discard)
+
+
+def gate_party() -> GateParty:
+    """The current request and tool-run supervisor, for the reload gate to record on their generation."""
+    from tai42_skeleton.app.epoch import current_epoch_or_none, current_request_admission
+    from tai42_skeleton.operations.tool_runs.supervisor import running_supervisor
+
+    supervisor = running_supervisor()
+    task: asyncio.Task[Any] | None = None
+    task_epoch: Epoch | None = None
+    if supervisor is not None:
+        live = current_epoch_or_none()
+        if live is not None and live.number == supervisor[1]:
+            task, task_epoch = supervisor[0], live
+    return GateParty(request=current_request_admission(), task=task, task_epoch=task_epoch)
 
 
 class ReloadGate:
@@ -120,13 +197,42 @@ class ReloadGate:
         """
         self._serving_lock()
 
-    @property
-    def lock(self) -> asyncio.Lock:
-        """The raw serving-loop lock, for an async-side holder that must block reloads while it runs.
+    async def _acquire(self, party: GateParty) -> asyncio.Lock:
+        """Acquire the serving-loop lock with ``party`` recorded as waiting while it waits."""
+        lock = self._serving_lock()
+        party.wait()
+        try:
+            await lock.acquire()
+        finally:
+            party.stop_waiting()
+        return lock
 
-        Use ``async with reload_gate.lock: ...``.
+    @asynccontextmanager
+    async def driving(self) -> AsyncIterator[None]:
+        """Hold the gate to run a gated body, the current request or supervisor recorded as its driver.
+
+        Use ``async with reload_gate.driving(): ...`` around a body that rebuilds or swaps the
+        serving generation outside :meth:`run` (the profile apply).
         """
-        return self._serving_lock()
+        party = gate_party()
+        lock = await self._acquire(party)
+        try:
+            party.drive()
+            yield
+        finally:
+            lock.release()
+
+    @asynccontextmanager
+    async def synchronized(self) -> AsyncIterator[None]:
+        """Hold the gate without driving a reload: wait one out, or read under the lock.
+
+        Use ``async with reload_gate.synchronized(): ...``.
+        """
+        lock = await self._acquire(gate_party())
+        try:
+            yield
+        finally:
+            lock.release()
 
     @property
     def locked(self) -> bool:
@@ -139,7 +245,7 @@ class ReloadGate:
         return self._lock is not None and self._lock.locked()
 
     async def run(self, fn: Callable[[], T], *, reimports: bool) -> T:
-        """Hold the reload lock and await ``fn`` on a worker thread.
+        """Hold the reload lock through :meth:`driving` and await ``fn`` on a worker thread.
 
         The heavy reload bodies stay synchronous and unchanged; only the acquire
         and the thread offload live here, so the serving loop keeps running while
@@ -153,7 +259,7 @@ class ReloadGate:
         backend's jobs for the probe's duration to guard against a race it cannot cause.
         Required, never defaulted — adding a door is a decision about the fork gate.
         """
-        async with self._serving_lock():
+        async with self.driving():
             if not reimports:
                 return await asyncio.to_thread(fn)
             return await asyncio.to_thread(self._run_fork_exclusive, fn)

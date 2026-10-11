@@ -32,7 +32,7 @@ import httpx
 import yaml
 
 from tai42_e2e.httpapi import ApiClient
-from tai42_e2e.mcp import McpClient
+from tai42_e2e.mcp import McpClient, mcp_read_timeout
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for
 
@@ -236,7 +236,11 @@ class TargetStack(TaiStack):
 
     def mcp(self, port: int | None = None, path: str = "/mcp", *, auth: str | None = None) -> McpClient:
         del port
-        return McpClient(f"{self.target.url}{path}", auth=auth if auth is not None else self.auth_token)
+        # The target's own apply timeout is not known here: the platform default stands for it.
+        read_timeout = mcp_read_timeout({}, self._boot_timeout)
+        return McpClient(
+            f"{self.target.url}{path}", auth=auth if auth is not None else self.auth_token, read_timeout=read_timeout
+        )
 
     def api(self, port: int | None = None) -> ApiClient:
         del port

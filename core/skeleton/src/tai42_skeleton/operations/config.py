@@ -38,7 +38,6 @@ from tai42_kit.settings import present_env_value, registered_settings
 
 from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.app.bus import FleetResult
-from tai42_skeleton.app.epoch import _reload_driven_by_request
 from tai42_skeleton.app.graceful_exit import request_serve_graceful_exit
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config import config_mode
@@ -626,15 +625,10 @@ async def apply_profile(name: str) -> OperationResponse:
         body = await _profile_store().get_active_body(name)
     except SettingsProfileNotFoundError as exc:
         raise NotFoundError(f"settings profile {name!r} not found") from exc
-    # Read the reload-driving flag in THIS request context (``EpochAdmissionApp`` set it
-    # True for the admitted request): a door-driven apply MUST pass it so the retire
-    # excuses this still-admitted request from its in-flight drain rather than self-waiting
-    # the full drain budget on it.
-    driven = _reload_driven_by_request.get()
     with translate_backend_needs_bus(BadRequestError):
         try:
             outcome = await ConfigService.from_app().apply_replace_env(
-                _profile_env(body), driven=driven, save_previous=_save_previous_version
+                _profile_env(body), save_previous=_save_previous_version
             )
         except ValueError as exc:
             raise BadRequestError(str(exc)) from exc

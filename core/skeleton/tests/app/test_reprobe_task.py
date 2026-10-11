@@ -244,7 +244,7 @@ async def test_reprobe_snapshots_failed_set_under_the_gate_lock(monkeypatch, cap
     m._reprobe_sleep = fake_sleep  # type: ignore[method-assign]
 
     # Hold the gate exactly as a concurrent reload would while it mutates the set.
-    async with reload_gate.lock:
+    async with reload_gate.synchronized():
         task = asyncio.create_task(m._reprobe_failed_mcps_loop())
         await asyncio.sleep(0)  # let the pass reach the gate and block on it
         assert not reload_ran.is_set()  # blocked before snapshotting — no read yet
@@ -340,11 +340,11 @@ async def test_in_flight_probe_does_not_block_gated_writes(monkeypatch):
     try:
         await asyncio.wait_for(probing.wait(), timeout=5)  # the pass is mid-probe
 
-        # A reload-gated write takes reload_gate.lock; with the probe off the gate it
+        # A reload-gated write takes the reload gate; with the probe off the gate it
         # acquires promptly. Under the old under-gate probe the lock is held for the
         # whole (here, parked) probe, so this acquire would block and time out.
         async def gated_write() -> str:
-            async with reload_gate.lock:
+            async with reload_gate.synchronized():
                 return "ok"
 
         assert await asyncio.wait_for(gated_write(), timeout=1) == "ok"

@@ -8,9 +8,11 @@ running app.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
+import gc
 import os
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextvars import ContextVar
 
 import pytest
@@ -37,6 +39,7 @@ from tai42_skeleton.app.epoch import (
 )
 from tai42_skeleton.app.instance import build_app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
+from tai42_skeleton.app.reload_gate import reload_gate
 
 # Bind the process app handle so the retire path's ``tool_runs`` import (which
 # registers an ``on_shutdown`` handler on the bound handle) resolves.
@@ -277,7 +280,7 @@ async def test_retire_cancels_periodic_loops_and_calls_drain_epoch(monkeypatch: 
     drained_supervisors: list[float] = []
 
     async def _fake_drain_supervisors(
-        deadline: float | None = None, *, epoch: int | None = None, reason: str = ""
+        deadline: float | None = None, *, epoch: int | None = None, reason: str = "", exclude: object = ()
     ) -> None:
         drained_supervisors.append(deadline if deadline is not None else -1.0)
 
@@ -349,7 +352,7 @@ async def test_a_drain_exempt_stream_does_not_block_the_retire_drain() -> None:
 
     boot.supervisor = _FakeSupervisor()  # type: ignore[assignment]
     boot.admit()  # the SSE request, admitted on this generation
-    token = epoch_mod._admission.set(epoch_mod._AdmissionState(epoch=boot))
+    token = epoch_mod._admission.set(epoch_mod.RequestAdmission(epoch=boot))
     try:
         state = epoch_mod._admission.get()
         epoch_mod.mark_current_request_drain_exempt()
@@ -357,7 +360,7 @@ async def test_a_drain_exempt_stream_does_not_block_the_retire_drain() -> None:
         epoch_mod._admission.reset(token)
     # Exempting released the request's in-flight slot, so the generation reads idle to the drain.
     assert state is not None
-    assert state.drain_exempt is True
+    assert state.slot_released is True
     assert boot.in_flight == 0
 
     loop = asyncio.get_running_loop()
@@ -367,7 +370,6 @@ async def test_a_drain_exempt_stream_does_not_block_the_retire_drain() -> None:
         rebuild=lambda: None,
         build_serving_app=_serve("new-app"),
         drain_deadline=5.0,
-        drain_tolerate_driver=False,  # bus-driven (fleet sibling)
     )
     # The retire read the generation idle (the exempt slot was released) and returned promptly;
     # a still-counted in-flight request would instead be WAITED for (next test). The
@@ -405,7 +407,6 @@ async def test_a_non_exempt_in_flight_request_is_drained_before_aclose() -> None
         rebuild=lambda: None,
         build_serving_app=_serve("new-app"),
         drain_deadline=5.0,
-        drain_tolerate_driver=False,
     )
     await finisher
     assert order == ["released", "aclose"], f"a non-exempt request was not drained before aclose: {order}"
@@ -433,7 +434,7 @@ async def test_exemption_takes_effect_through_a_real_streaming_response() -> Non
     ``_admission`` ContextVar or call the exempt in the wrapper's own frame — but in production
     the exempt call runs INSIDE a ``StreamingResponse`` body, which Starlette iterates in a
     CHILD task (uvicorn's ASGI spec_version 2.3 branch). The whole fix therefore rests on (a) the
-    admission ContextVar propagating INTO that child task and (b) the shared ``_AdmissionState``
+    admission ContextVar propagating INTO that child task and (b) the shared ``RequestAdmission``
     mutation flowing back to the wrapper's frame. A future Starlette/uvicorn/middleware change
     that ran the body in a context the mark could not reach would silently no-op the exemption
     and every hand-set test would still pass — this one would fail. It drives a REAL
@@ -507,6 +508,36 @@ async def test_cancel_periodic_loops_bounded_by_budget() -> None:
     assert loop.time() - start < 1.0, "a wedged periodic-loop cancel wedged the retire"
 
 
+def _served_request(
+    epoch: Epoch,
+    body: Callable[[], Awaitable[None]],
+    *,
+    context: contextvars.Context | None = None,
+    surface: object | None = None,
+) -> asyncio.Task[None]:
+    """Serve ``body`` as one HTTP request admitted on ``epoch`` by the real admission wrapper.
+
+    ``surface`` is the serving surface the request's scope points at (``scope["app"]``).
+    """
+
+    async def _app(scope, receive, send) -> None:
+        await body()
+
+    scope = {"type": "http"} if surface is None else {"type": "http", "app": surface}
+    served = EpochAdmissionApp(_app, epoch)(scope, None, None)  # type: ignore[arg-type]
+    return asyncio.get_running_loop().create_task(served, context=context)
+
+
+class _ClosingSupervisor:
+    """A stand-in serving lifespan recording its close into ``log``."""
+
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
+
+    async def aclose(self) -> None:
+        self.log.append("closed")
+
+
 async def test_reload_over_session_manager_defers_supervisor_close() -> None:
     """A door-driven reload — its own request still admitted on the retiring epoch, e.g. an
     MCP tool call served by that epoch's FastMCP session manager — must NOT ``aclose`` the
@@ -514,42 +545,207 @@ async def test_reload_over_session_manager_defers_supervisor_close() -> None:
     delivering the tool's own response and the client hangs. ``build_and_swap`` must return
     promptly (the drain + close are DEFERRED, not awaited), the old session manager must
     stay live while the driver is in flight, and the deferred task closes it only once the
-    driver's request drains (its response flushed)."""
-    import asyncio
-
+    driver's request has finished (its response flushed)."""
     _install_boot("boot-app")
     boot = current_epoch()
     closed: list[str] = []
-
-    class _FakeSupervisor:
-        async def aclose(self) -> None:
-            closed.append("closed")
-
-    boot.supervisor = _FakeSupervisor()  # type: ignore[assignment]
-    boot.admit()  # the driving MCP tool call, still admitted on the epoch being retired
-    token = epoch_mod._reload_driven_by_request.set(True)
+    boot.supervisor = _ClosingSupervisor(closed)  # type: ignore[assignment]
+    swapped = asyncio.Event()
+    answer = asyncio.Event()
     loop = asyncio.get_running_loop()
+    took: list[float] = []
+
+    async def _driver() -> None:
+        async with reload_gate.driving():
+            start = loop.time()
+            await build_and_swap_epoch(
+                {"TAI_EPOCH_DRIVER": "v"}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=5.0
+            )
+            took.append(loop.time() - start)
+        swapped.set()
+        await answer.wait()
+
+    request = _served_request(boot, _driver)
     try:
-        start = loop.time()
-        await build_and_swap_epoch(
-            {"TAI_EPOCH_DRIVER": "v"},
-            rebuild=lambda: None,
-            build_serving_app=_serve("new-app"),
-            drain_deadline=5.0,
-            drain_tolerate_driver=True,
-        )
+        await asyncio.wait_for(swapped.wait(), timeout=5.0)
         # Returned promptly (drain + close deferred, not awaited on the driving request)...
-        assert loop.time() - start < 1.0, "reload self-waited the drain budget on its own driving request"
+        assert took[0] < 1.0, "reload self-waited the drain budget on its own driving request"
         # ...and did NOT close the session manager serving the still-in-flight driver.
         assert closed == [], "reload aclose()d the session manager serving its own driving request"
-        # The driver finishes (its response flushed) -> the deferred task drains + closes.
-        boot.release()
+        answer.set()  # the driver finishes (its response flushed) -> the deferred task closes
+        await request
         async with asyncio.timeout(2.0):
-            while closed != ["closed"]:
-                await asyncio.sleep(0.01)
+            await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
+        assert closed == ["closed"]
     finally:
-        epoch_mod._reload_driven_by_request.reset(token)
+        answer.set()
         os.environ.pop("TAI_EPOCH_DRIVER", None)
+
+
+async def test_a_driver_answering_past_the_drain_budget_keeps_its_transport(caplog: pytest.LogCaptureFixture) -> None:
+    """The driving request answers long after the drain budget (a fleet reload waits for its
+    siblings' replies after its own swap): its session manager stays open until it has
+    answered, and the drain never reports it as a straggler."""
+    import logging
+
+    _install_boot("boot-app")
+    boot = current_epoch()
+    log: list[str] = []
+    boot.supervisor = _ClosingSupervisor(log)  # type: ignore[assignment]
+    budget = 0.05
+
+    async def _driver() -> None:
+        async with reload_gate.driving():
+            await build_and_swap_epoch(
+                {"TAI_EPOCH_DRIVER": "v"},
+                rebuild=lambda: None,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=budget,
+            )
+        await asyncio.sleep(budget * 10)  # the fleet wait, ten drain budgets long
+        log.append("answered")
+
+    try:
+        with caplog.at_level(logging.ERROR):
+            await _served_request(boot, _driver)
+            async with asyncio.timeout(2.0):
+                await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
+    finally:
+        os.environ.pop("TAI_EPOCH_DRIVER", None)
+    assert log == ["answered", "closed"], f"the retire closed the transport under its driver: {log}"
+    assert "still in flight after the drain budget" not in caplog.text
+
+
+async def test_a_request_waiting_on_the_gate_is_never_severed() -> None:
+    """A door request of the retiring generation that waits on the gate while a bus-delivered
+    reload holds it (it passed the gate's entry check just before) is not severed by that
+    reload's retire: the retire defers its close, lets the gate turn over, and the waiter
+    runs its own gated body and answers before the transports close."""
+    _install_boot("boot-app")
+    boot = current_epoch()
+    log: list[str] = []
+    boot.supervisor = _ClosingSupervisor(log)  # type: ignore[assignment]
+
+    async def _waiter() -> None:
+        async with reload_gate.driving():
+            log.append("waiter ran its gated body")
+        await asyncio.sleep(0.05)
+        log.append("waiter answered")
+
+    async with reload_gate.synchronized():  # the bus-delivered reload, no request of its own
+        request = _served_request(boot, _waiter)
+        while not boot.waiting:
+            await asyncio.sleep(0)
+        await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=0.05)
+        assert log == [], "the retire closed (or let run) before the gate turned over"
+    await request
+    async with asyncio.timeout(2.0):
+        await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
+    assert log == ["waiter ran its gated body", "waiter answered", "closed"]
+
+
+@pytest.mark.parametrize("held_past_budget", [False, True], ids=["within-budget", "past-budget"])
+async def test_a_pass_through_waiter_is_ordinary_work_once_the_gate_turns_over(
+    held_past_budget: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A request that only waits a reload out (``synchronized``) is never severed while it
+    waits; once it holds the gate it is ordinary in-flight work, which the drain budget bounds."""
+    import logging
+
+    _install_boot("boot-app")
+    boot = current_epoch()
+    log: list[str] = []
+    boot.supervisor = _ClosingSupervisor(log)  # type: ignore[assignment]
+    budget = 0.1
+    release = asyncio.Event()
+
+    async def _lookup() -> None:
+        async with reload_gate.synchronized():
+            log.append("waited the reload out")
+        await release.wait()
+        log.append("answered")
+
+    with caplog.at_level(logging.ERROR):
+        async with reload_gate.synchronized():
+            request = _served_request(boot, _lookup)
+            while not boot.waiting:
+                await asyncio.sleep(0)
+            await build_and_swap_epoch(
+                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=budget
+            )
+        if held_past_budget:
+            async with asyncio.timeout(2.0):
+                await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
+            release.set()
+            await request
+            assert log == ["waited the reload out", "closed", "answered"]
+            assert "1 request(s) still in flight after the drain budget" in caplog.text
+        else:
+            await asyncio.sleep(0)
+            release.set()
+            await request
+            async with asyncio.timeout(2.0):
+                await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
+            assert log == ["waited the reload out", "answered", "closed"]
+            assert "still in flight after the drain budget" not in caplog.text
+
+
+async def test_the_supervised_run_driving_a_reload_survives_its_own_retire() -> None:
+    """A background run (a tool-run supervisor) that dispatches the reload is not cancelled by
+    the supervisor drain of the retire it drives: it completes and records its real outcome."""
+    from tai42_skeleton.operations.tool_runs import supervisor as supervisor_mod
+
+    _install_boot("boot-app")
+    boot = current_epoch()
+    outcome: list[str] = []
+
+    async def _supervised_reload() -> None:
+        await reload_gate.run(lambda: None, reimports=False)  # an unrelated gated body first
+        async with reload_gate.driving():
+            await build_and_swap_epoch(
+                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=0.5
+            )
+        await asyncio.sleep(0)  # the reload's tail (its fleet wait) runs after the swap
+        outcome.append("completed")
+
+    task = asyncio.create_task(_supervised_reload())
+    supervisor_mod._enroll_supervisor(task)
+    task.add_done_callback(supervisor_mod._discard_supervisor)
+    try:
+        await task
+    except asyncio.CancelledError as exc:
+        outcome.append(f"cancelled: {exc}")
+    assert current_epoch() is not boot
+    assert outcome == ["completed"]
+    async with asyncio.timeout(2.0):
+        await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
+    assert not boot.driving_tasks
+
+
+async def test_a_task_holding_a_finished_requests_context_drives_nothing() -> None:
+    """A task that copied a request's context and outlived it (an MCP session's server task, a
+    run spawned from a request) acts for no request: entering the gate releases no slot a
+    second time and records nothing as driving, so the in-flight count stays exact."""
+    _install_boot("boot-app")
+    boot = current_epoch()
+    copied: list[contextvars.Context] = []
+
+    async def _request_body() -> None:
+        copied.append(contextvars.copy_context())
+
+    await _served_request(boot, _request_body)
+    boot.admit()  # another request, still in flight
+    entered: list[bool] = []
+
+    async def _later() -> None:
+        async with reload_gate.driving():
+            entered.append(True)
+
+    await asyncio.get_running_loop().create_task(_later(), context=copied[0])
+    assert entered == [True]
+    assert boot.driving == set()
+    assert boot.in_flight == 1
+    boot.release()
 
 
 # -- stateful-session termination at swap --------------------------------------
@@ -931,15 +1127,15 @@ def _request_scoped_settings() -> _RequestScopedSettings:
     return _RequestScopedSettings()
 
 
-async def _door_reload_with_a_concurrent_request(release_within_budget: bool) -> None:
+async def _door_reload_with_a_concurrent_request(release_within_budget: bool) -> list[str]:
     """A door-driven reload while a concurrent request holds a settings instance across an await.
 
     The driving request and the concurrent one are both admitted on the retiring
     generation; the concurrent one read its settings before the reload and finishes
-    on the old generation (within the drain budget, or past it).
+    on the old generation (within the drain budget, or past it). The driver answers
+    after the concurrent request's drain is decided. Returns the order of the driver's
+    answer and the transport close.
     """
-    import asyncio
-
     from tai42_kit.clients.base import advance_client_epoch
 
     # The app bound at import holds its own scaffold core's settings for the process life;
@@ -948,9 +1144,12 @@ async def _door_reload_with_a_concurrent_request(release_within_budget: bool) ->
     _install_boot("boot-app")
     await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_serve("served-app"), drain_deadline=0.1)
     boot = current_epoch()
-    boot.admit()  # the driving request
+    order: list[str] = []
+    boot.supervisor = _ClosingSupervisor(order)  # type: ignore[assignment]
     boot.admit()  # the concurrent request
     answered = asyncio.get_running_loop().create_future()
+    swapped = asyncio.Event()
+    driver_answers = asyncio.Event()
 
     async def _concurrent_request() -> None:
         # The request runs inside the generation's serving surface and reads its settings.
@@ -961,31 +1160,41 @@ async def _door_reload_with_a_concurrent_request(release_within_budget: bool) ->
         assert scope["app"] is not None
         boot.release()
 
+    async def _driver() -> None:
+        async with reload_gate.driving():
+            await build_and_swap_epoch(
+                {"TAI_EPOCH_DOOR_RELOAD": "v"},
+                rebuild=lambda: None,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=0.5,
+            )
+        swapped.set()
+        await driver_answers.wait()
+        order.append("driver answered")
+
     request = asyncio.create_task(_concurrent_request())
     await asyncio.sleep(0)
-    token = epoch_mod._reload_driven_by_request.set(True)
+    driver = _served_request(boot, _driver)
     try:
-        await build_and_swap_epoch(
-            {"TAI_EPOCH_DOOR_RELOAD": "v"},
-            rebuild=lambda: None,
-            build_serving_app=_serve("new-app"),
-            drain_deadline=0.5,
-            drain_tolerate_driver=True,
-        )
+        await swapped.wait()
     finally:
-        epoch_mod._reload_driven_by_request.reset(token)
         os.environ.pop("TAI_EPOCH_DOOR_RELOAD", None)
-    boot.release()  # the driver's response is flushed
     if release_within_budget:
         answered.set_result(None)
         await request
+    else:
+        # The concurrent request outlives the budget: wait until the tail has reported it.
+        await asyncio.sleep(0.7)
+    driver_answers.set()
+    await driver
     async with asyncio.timeout(5.0):
         await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
     if not release_within_budget:
         answered.set_result(None)
         await request
-    del request
+    del request, driver
     await asyncio.sleep(0)
+    return order
 
 
 async def test_a_door_driven_reload_sweeps_after_the_in_flight_requests_finish(
@@ -993,10 +1202,12 @@ async def test_a_door_driven_reload_sweeps_after_the_in_flight_requests_finish(
 ) -> None:
     import logging
 
-    with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
-        await _door_reload_with_a_concurrent_request(release_within_budget=True)
+    with caplog.at_level(logging.ERROR):
+        order = await _door_reload_with_a_concurrent_request(release_within_budget=True)
     # The request finished on the old generation inside the drain budget, before the sweep.
     assert "Stale settings instance" not in caplog.text
+    assert "still in flight after the drain budget" not in caplog.text
+    assert order == ["driver answered", "closed"]
 
 
 async def test_a_door_driven_reload_reports_a_request_past_the_drain_budget_and_no_settings_it_releases(
@@ -1005,11 +1216,13 @@ async def test_a_door_driven_reload_reports_a_request_past_the_drain_budget_and_
     import logging
 
     with caplog.at_level(logging.ERROR):
-        await _door_reload_with_a_concurrent_request(release_within_budget=False)
-    # The drain reports the request it could not wait for; the request releases its settings
-    # when it ends, so nothing is reported while it runs on the retired generation or once
-    # that generation is certified.
-    assert "request(s) still in flight after the drain budget" in caplog.text
+        order = await _door_reload_with_a_concurrent_request(release_within_budget=False)
+    # The drain reports the concurrent request it could not wait for — never the driver, which
+    # it does not count — and the close waits for the driver's answer. The request releases its
+    # settings when it ends, so nothing is reported while it runs on the retired generation or
+    # once that generation is certified.
+    assert "1 request(s) still in flight after the drain budget" in caplog.text
+    assert order == ["driver answered", "closed"]
     assert "Stale settings instance" not in caplog.text
 
 
@@ -1030,7 +1243,11 @@ async def test_a_door_driven_reload_starts_the_new_generations_tasks_outside_the
     advance_client_epoch()
     _install_boot("boot-app")
     boot = current_epoch()
-    boot.admit()  # the driving request
+    retired_number = boot.number
+    # The surface every request of the generation points at: it stays reachable while the
+    # driving request (its task and context) lives, so the generation is judged after it.
+    surface = _Serving("boot-surface")
+    boot.record_serving_surface(surface)
     generation_tasks: list[asyncio.Task[bool]] = []
 
     def _spawn_generation_task() -> None:
@@ -1046,28 +1263,29 @@ async def test_a_door_driven_reload_starts_the_new_generations_tasks_outside_the
     async def _driving_request() -> None:
         # The request carries an object of the retiring generation in its context.
         _request_context_state.set(_request_scoped_settings())
-        token = epoch_mod._reload_driven_by_request.set(True)
         try:
-            await build_and_swap_epoch(
-                {"TAI_EPOCH_DOOR_RELOAD": "v"},
-                rebuild=lambda: None,
-                build_serving_app=_build,
-                establish_background_loops=_establish,
-                drain_deadline=1.0,
-                drain_tolerate_driver=True,
-            )
+            async with reload_gate.driving():
+                await build_and_swap_epoch(
+                    {"TAI_EPOCH_DOOR_RELOAD": "v"},
+                    rebuild=lambda: None,
+                    build_serving_app=_build,
+                    establish_background_loops=_establish,
+                    drain_deadline=1.0,
+                )
         finally:
-            epoch_mod._reload_driven_by_request.reset(token)
             os.environ.pop("TAI_EPOCH_DOOR_RELOAD", None)
 
     try:
         with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
-            driver = asyncio.create_task(_driving_request(), context=contextvars.Context())
+            driver = _served_request(boot, _driving_request, context=contextvars.Context(), surface=surface)
             await driver
-            del driver
-            boot.release()  # the driver's response is flushed and its task is gone
             async with asyncio.timeout(5.0):
                 await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
+            del driver, surface
+            gc.collect()
+            async with asyncio.timeout(5.0):
+                while any(generation.number == retired_number for generation in retired_mod.retired_generations()):
+                    await asyncio.sleep(0)
         assert len(generation_tasks) == 2
         assert all(_request_context_state not in task.get_context() for task in generation_tasks)
         assert "Stale settings instance" not in caplog.text
