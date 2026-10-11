@@ -52,6 +52,7 @@ from tai42_skeleton.interactions.reaction import (
 )
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore
+from tai42_skeleton.middleware.rate_limit import SKELETON_DOOR_BUDGET
 from tai42_skeleton.operations.interactions import (
     _claim_or_serialization_error,
     _reply_ttl,
@@ -90,11 +91,11 @@ def _callback_json(payload: dict, status_code: int) -> JSONResponse:
     return JSONResponse(payload, status_code=status_code, headers=dict(_BASE_HEADERS))
 
 
-async def _callback_post_size_guard(request: Request, settings: InteractionsSettings) -> Response | None:
+async def _callback_post_size_guard(request: Request, settings: InteractionsSettings) -> Response | bytes:
     """Enforce ``callback_max_body_bytes`` on BOTH the raw query string and the actual body bytes.
 
     The confirm-flow answer rides the URL, so both are capped. Return the 413 response
-    when either exceeds the cap, or ``None`` when both are within it.
+    when either exceeds the cap, else the bounded body bytes — the one read of the body.
     Runs identically in the OFF gate and the configured POST path so an oversized
     POST answers the SAME 413 whether or not the store is configured — the public
     door leaks no configured-vs-off oracle through the size cap.
@@ -102,13 +103,9 @@ async def _callback_post_size_guard(request: Request, settings: InteractionsSett
     if len(request.url.query.encode()) > settings.callback_max_body_bytes:
         return _callback_json({"error": "payload too large"}, 413)
     try:
-        body = await read_bounded_body(request, settings.callback_max_body_bytes)
+        return await read_bounded_body(request, settings.callback_max_body_bytes)
     except RequestBodyTooLargeError:
         return _callback_json({"error": "payload too large"}, 413)
-    # Cache the read bytes on the request (Starlette's own ``_body`` slot) so
-    # ``_callback_post`` replays them instead of re-consuming the drained stream.
-    request._body = body
-    return None
 
 
 def _params_to_answer(request: Request) -> dict:
@@ -376,19 +373,11 @@ async def _claim_verbatim_external(
     return await _claim_external(r, store, settings, ticket, interaction_id, state, answer)
 
 
-async def _callback_post(request: Request, r: Any, store: InteractionStore, settings: InteractionsSettings) -> Response:
+async def _callback_post(
+    request: Request, r: Any, store: InteractionStore, settings: InteractionsSettings, raw: bytes
+) -> Response:
+    """The answer claim over ``raw``, the body bytes the caller's size guard already read."""
     ticket = request.path_params["ticket"]
-
-    # Size caps (query string + actual body bytes) come first — the SAME guard the OFF
-    # gate runs, so an oversized POST answers 413 in both states. On success the body is
-    # cached, so the re-read below replays it.
-    oversized = await _callback_post_size_guard(request, settings)
-    if oversized is not None:
-        return oversized
-    # The size guard cached the bounded bytes on the request, so this replays them
-    # (never a re-consumed stream) and stays within the same cap.
-    raw = await read_bounded_body(request, settings.callback_max_body_bytes)
-
     interaction_id = await store.resolve_ticket(r, ticket)
     if interaction_id is None:
         # Uniform 404: same status and body whether the ticket never existed or
@@ -487,7 +476,7 @@ def _parse_react_body(raw: bytes) -> Response | tuple[Any, Any]:
 
 
 async def _callback_react(
-    request: Request, r: Any, store: InteractionStore, settings: InteractionsSettings
+    request: Request, r: Any, store: InteractionStore, settings: InteractionsSettings, raw: bytes
 ) -> Response:
     """The mid-form reaction claim for a ticketed channel-delivered reacting form.
 
@@ -495,13 +484,9 @@ async def _callback_react(
     capability, exactly as for the answer claim) and the SAME size caps: resolve the ticket,
     parse the event + partial values, and run the ONE ``react`` chokepoint. STATELESS — no
     answer is recorded and the durable record is untouched. A handler failure/deadline is a
-    loud 502 (never a stale/silent value).
+    loud 502 (never a stale/silent value). ``raw`` is the body the caller's size guard read.
     """
     ticket = request.path_params["ticket"]
-    oversized = await _callback_post_size_guard(request, settings)
-    if oversized is not None:
-        return oversized
-    raw = await read_bounded_body(request, settings.callback_max_body_bytes)
     interaction_id = await store.resolve_ticket(r, ticket)
     if interaction_id is None:
         return _callback_json({"error": "not found"}, 404)
@@ -539,6 +524,7 @@ class InteractionReactionAck(BaseModel):
         reads_body=False,
         error_statuses=(400, 404, 409, 413, 502),
         success_status=200,
+        rate_limit_budget=SKELETON_DOOR_BUDGET,
     ),
 )
 async def callback_react(request: Request) -> Response:
@@ -549,11 +535,16 @@ async def callback_react(request: Request) -> Response:
     # so an unconfigured store is no oracle on this public door.
     if not _pkg.interactions_store_configured():
         oversized = await _callback_post_size_guard(request, settings)
-        if oversized is not None:
+        if isinstance(oversized, Response):
             return oversized
         return _callback_json({"error": "not found"}, 404)
     async with _pkg.client_ctx(RedisClient, settings.redis) as r:
-        return await _callback_react(request, r, store, settings)
+        # Size caps (query string + actual body bytes) come first — the SAME guard the OFF
+        # gate runs, so an oversized POST answers 413 in both states.
+        guarded = await _callback_post_size_guard(request, settings)
+        if isinstance(guarded, Response):
+            return guarded
+        return await _callback_react(request, r, store, settings, guarded)
 
 
 class InteractionCallbackAck(BaseModel):
@@ -574,12 +565,14 @@ class InteractionCallbackAck(BaseModel):
     summary="External interaction callback door",
     tags=["interactions"],
     response_model=InteractionCallbackAck,
+    success_media_types={"GET": ("text/html",)},
     authed=False,
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=False,
         error_statuses=(400, 401, 404, 409, 413, 500),
         success_status=200,
+        rate_limit_budget=SKELETON_DOOR_BUDGET,
     ),
 )
 async def callback(request: Request) -> Response:
@@ -602,11 +595,16 @@ async def callback(request: Request) -> Response:
         # uniform 404, so an oversized POST answers 413 identically in both states —
         # the size cap is not a configured-vs-off oracle on this public door.
         oversized = await _callback_post_size_guard(request, settings)
-        if oversized is not None:
+        if isinstance(oversized, Response):
             return oversized
         return _callback_json({"error": "not found"}, 404)
 
     async with _pkg.client_ctx(RedisClient, settings.redis) as r:
         if request.method == "GET":
             return await _callback_get(request, r, store)
-        return await _callback_post(request, r, store, settings)
+        # Size caps (query string + actual body bytes) come first — the SAME guard the OFF
+        # gate runs, so an oversized POST answers 413 in both states.
+        guarded = await _callback_post_size_guard(request, settings)
+        if isinstance(guarded, Response):
+            return guarded
+        return await _callback_post(request, r, store, settings, guarded)

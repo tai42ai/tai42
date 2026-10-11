@@ -31,6 +31,7 @@ from tai42_kit.interactions import media_ingest_cap_settings
 
 from tai42_channel_web.routes.dtos import IdentityBody, UploadAcceptedResponse
 from tai42_channel_web.routes.envelope import _body_refusal, _error, _ok
+from tai42_channel_web.routes.limits import UPLOAD_RATE_LIMIT_BUDGET, UPLOAD_RATE_LIMIT_FAMILY
 from tai42_channel_web.routes.session_access import (
     _CROSS_ORIGIN,
     _CROSS_ORIGIN_CODE,
@@ -61,19 +62,15 @@ _UPLOAD_MAX_BODY_BYTES = media_ingest_cap_settings().max_cap + _UPLOAD_MULTIPART
 # read whole into memory.
 _UPLOAD_READ_CHUNK_BYTES = 64 * 1024
 
-# The upload door charges its own rate-limit family, disjoint from the message door's
-# path-derived ``channels_web``: an upload carries up to the per-kind byte cap, a heavier
-# cost class than a text send. ``RateLimitMiddleware`` honours this declared family over
-# the path stem.
-_UPLOAD_RATE_LIMIT_FAMILY = "channels_web_uploads"
-
 _UPLOAD_DECLARED = DeclaredRouteMetadata(
     reload_gated=False,
     reads_body=True,
     error_statuses=(400, 401, 403, 413, 415, 422, 501, 503),
     success_status=200,
     max_body_bytes=_UPLOAD_MAX_BODY_BYTES,
-    rate_limit_family=_UPLOAD_RATE_LIMIT_FAMILY,
+    # Its own family, disjoint from the chat doors': an upload is a heavier cost class.
+    rate_limit_family=UPLOAD_RATE_LIMIT_FAMILY,
+    rate_limit_budget=UPLOAD_RATE_LIMIT_BUDGET,
 )
 
 # The rejection copy + machine code per ingest outcome (the page maps each code to its

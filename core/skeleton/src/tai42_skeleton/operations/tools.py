@@ -47,14 +47,12 @@ surfaces as itself.
 from __future__ import annotations
 
 import logging
-from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_contract.errors import OperationError, UnavailableError
 from tai42_contract.interactions import RunAnswer, RunResultAnswer, RunTerminalFailed
-from tai42_contract.monitoring import RunAttribution
 from tai42_contract.secrets import unwrap_secrets
 from tai42_contract.states import StateSubject
 from tai42_contract.states.errors import StatePendingSaveFailedError, StatePendingSaveTimeoutError
@@ -83,8 +81,7 @@ from tai42_skeleton.operations.response_models_group_b import (
 )
 from tai42_skeleton.operations.response_models_group_c import RunAnswerResponse
 from tai42_skeleton.states import api_context
-from tai42_skeleton.tools.attribution import run_attribution
-from tai42_skeleton.tools.binding import ToolResultEncodingError, UnknownToolError, find_lone_surrogate
+from tai42_skeleton.tools.binding import ToolResultEncodingError, UnknownToolError
 
 if TYPE_CHECKING:
     from fastmcp.tools import Tool
@@ -265,34 +262,25 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
     # caller whose key carries no authority binds nothing and behaves exactly as
     # before. An already-bound identity (an inline fire reaching this op) is never
     # clobbered.
-    # The caller's own principal, resolved once: it both attributes the run and (when no
-    # execution identity is bound yet) is the key the dispatch's identity is rebuilt from.
+    # The caller's own principal, resolved once: it both attributes the run (so a runs-index
+    # row the dispatch registers is born with a ``user_id``) and, when no execution identity
+    # is bound yet, is the key the dispatch's identity is rebuilt from.
     caller_key, _restricted = access_control_user.request_identity()
-    async with api_context.caller_execution_identity(caller_key):
+    async with api_context.live_door_scope(subject, caller_key, attribute=True):
         try:
-            # Deposit the caller's identity as this run's attribution so a runs-index row the
-            # dispatch registers (a preset target) is born with a ``user_id`` rather than NULL;
-            # ``run_tool``'s attribution stamp reads it. With no resolved caller the deposit is
-            # skipped and the row's identity stays unset.
-            attribution = (
-                run_attribution(RunAttribution(user_id=caller_key)) if caller_key is not None else nullcontext()
-            )
             # This envelope serves ONLY the live synchronous caller (a background submit
             # runs through ``submit_run``/``_supervise``, never this line), so a wrapped
             # secret in the result is revealed here for the one door that hands the caller
             # the real value; every recorder masks its own copy instead.
-            with attribution, api_context.api_state_context(subject, caller_key):
-                outcome = await tai42_app.interactions.visit(
-                    target_name=tool_name,
-                    cancel=[],
-                    resume=[],
-                    start=lambda extras: tai42_app.tools.run_tool(
-                        tool_name, arguments, offload_sync=True, extras=extras
-                    ),
-                    extras={},
-                    receives_outcome=True,
-                )
-                return _run_tool_return(outcome)
+            outcome = await tai42_app.interactions.visit(
+                target_name=tool_name,
+                cancel=[],
+                resume=[],
+                start=lambda extras: tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True, extras=extras),
+                extras={},
+                receives_outcome=True,
+            )
+            return _run_tool_return(outcome)
         except OperationError:
             # A typed operation error is the tool's own answer (e.g. a PermissionDeniedError 403);
             # flattening it into ``OperationFailedError`` would report a refusal as a crash.
@@ -361,14 +349,9 @@ def _terminal_failure(tool_name: str, exc: RunTerminalFailed) -> OperationError:
     # output: refuse it LOUDLY through the SAME named path as an un-encodable result — a 502
     # naming the tool and the offending JSON path — never stringified past the encoder into
     # the delivered body (which would re-introduce the transport 500 the guard exists to stop).
-    offending_path = find_lone_surrogate(exc.outcome)
-    if offending_path is not None:
-        logger.warning(
-            "run-tool: %r failed with an outcome that cannot be JSON-encoded at %s",
-            tool_name,
-            offending_path,
-        )
-        return _unencodable_output(ToolResultEncodingError(tool_name, offending_path))
+    refusal = api_context.unencodable_outcome(tool_name, exc.outcome)
+    if refusal is not None:
+        return _unencodable_output(refusal)
     return OperationFailedError(FAILED_TERMINAL_MESSAGE, extra={"outcome": exc.outcome})
 
 

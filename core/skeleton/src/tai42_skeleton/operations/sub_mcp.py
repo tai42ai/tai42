@@ -24,7 +24,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 
-from tai42_skeleton.app.sub_mcp_app import sub_mcp_access_pattern, sub_mcp_mount_url
+from tai42_skeleton.app.sub_mcp_app import sub_mcp_access_pattern, sub_mcp_mount_url, validate_registration
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.response_models_group_c import (
     SubMcpMapListing,
@@ -75,11 +75,15 @@ async def list_sub_mcp() -> dict:
 )
 async def register_sub_mcp(slug: str, tools: list[str], transport: str = "http") -> dict:
     """Register or reload the sub-MCP app ``slug`` exposing ``tools`` on ``transport``; an unknown tool is a 404."""
+    # The slug and transport rules are the core's, checked first so every door (the HTTP
+    # route and the projected MCP tool) refuses them with the same 400.
+    try:
+        validate_registration(slug, transport)
+    except ValueError as exc:
+        raise BadRequestError(str(exc)) from exc
     # Resolve every tool against the live registry BEFORE registering: an unknown
     # name would otherwise blow up in ``_build_sub_app`` on the FIRST request (a
-    # generic 500 to a different caller), so reject it loudly here up front. The
-    # structural body validation (slug/transport/tool-name types) is done at the
-    # HTTP edge by the route's extractor, which raises the 400s.
+    # generic 500 to a different caller), so reject it loudly here up front.
     registered = await tai42_app.tools.get_tools()
     missing = sorted(t for t in tools if t not in registered)
     if missing:

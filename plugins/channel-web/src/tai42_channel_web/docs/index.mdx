@@ -278,6 +278,19 @@ no server-driven frame. Because the page owns the indicator it never lapses
 mid-turn, so this channel opts out of the platform's server-side working-on-it
 refresh.
 
+## Flood control
+
+Every web door is public, so the app's rate limiter throttles it per caller. The plugin
+declares the budgets on its routes: the chat doors (the page, its assets, the stream, the
+session rotate, messages, forms, answers and reactions) charge the `channels_web` family at
+120 requests a minute and 30 per 10 seconds, and the upload door charges
+`channels_web_uploads` at 20 and 5. The families are declared, so they hold whatever mount
+base the plugin is installed under. An operator tunes either field by field, for example
+`TAI_RATE_LIMIT_FAMILIES__CHANNELS_WEB__LIMIT=240`.
+
+The published API describes each door's real body: the page is `text/html`, an asset is
+`application/octet-stream`, and the stream is `text/event-stream`.
+
 ## See also
 
 - [Client conversations](/concepts/client-conversations) — the bridge model.

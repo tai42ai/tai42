@@ -102,6 +102,7 @@ async def _serve_inbound(media_id: str, *, head: bool) -> Response | None:
     tags=["interactions"],
     response_model=None,
     no_body_reason="Served interaction media: raw bytes by capability URL",
+    success_media_types={"GET": ("application/octet-stream",), "HEAD": ("application/octet-stream",)},
     authed=False,
     declared=DeclaredRouteMetadata(
         reload_gated=False,

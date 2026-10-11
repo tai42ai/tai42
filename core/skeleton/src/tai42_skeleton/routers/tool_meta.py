@@ -33,6 +33,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.plugins import TAG_RE
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object
 from tai42_skeleton.operations.tool_meta import (
     create_folder as _create_folder_op,
 )
@@ -60,16 +61,6 @@ from tai42_skeleton.operations.tool_meta import (
 # The overlay's merge-patch fields, in a fixed order for a stable "at least one of"
 # message.
 _PATCH_FIELDS = ("display_name", "folder_id", "tags", "hidden", "badges")
-
-
-async def _json_object(request: Request) -> dict[str, Any]:
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object") from None
-    return body
 
 
 def _require_str(body: dict[str, Any], field: str) -> str:
@@ -136,7 +127,7 @@ def _patch_badges(body: dict[str, Any], patch: dict[str, Any]) -> None:
 
 
 async def _extract_upsert(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     patch: dict[str, Any] = {}
     _patch_string(body, "display_name", patch)
     _patch_string(body, "folder_id", patch)
@@ -149,17 +140,17 @@ async def _extract_upsert(request: Request) -> dict[str, Any]:
 
 
 async def _extract_folder_create(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     return {"name": _require_str(body, "name"), "parent_id": _opt_str_or_null(body, "parent_id")}
 
 
 async def _extract_folder_rename(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     return {"name": _require_str(body, "name")}
 
 
 async def _extract_folder_move(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     return {"parent_id": _opt_str_or_null(body, "parent_id")}
 
 

@@ -17,6 +17,7 @@ from tai42_skeleton.conversations.caps import AddressAdmission, get_turn_caps
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
+from tai42_skeleton.conversations.turn.admission import refuse_turn_while_reloading
 from tai42_skeleton.conversations.turn.inbound_checks import (
     _checked_attachments,
     _checked_form,
@@ -60,6 +61,9 @@ async def accept(
 
     The ``message_id`` is a uuid4. See :meth:`AppConversations.accept`.
 
+    While a config reload holds the reload gate it refuses first with
+    :class:`~tai42_contract.errors.ServerReloadingError` (retriable), before any lookup or write.
+
     Idempotent on ``(channel, provider_message_id)``: a redelivery returns the existing
     ``message_id`` and starts no second turn. Every gate that can refuse runs before any
     state is written, so a refusal leaves the pair unclaimed. The turn runs in the
@@ -98,6 +102,7 @@ async def accept(
     any state is written — there is nothing to run a turn on — for the channel adapter to
     drop like an unrouted message.
     """
+    refuse_turn_while_reloading()
     checked_params = _checked_params(params)
     checked_form = _checked_form(form)
     checked_form_tag = _checked_form_tag(form_tag, form=checked_form)

@@ -32,15 +32,13 @@ Success bodies are ``{"data": ...}``; failures are ``{"error": "<message>"}``.
 
 from __future__ import annotations
 
-import json
-from json import JSONDecodeError
 from typing import Any
 
-from pydantic import ValidationError
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object, validate_body
 from tai42_skeleton.operations.manifest import ManifestReplace, SetMcpSecretEnv
 from tai42_skeleton.operations.manifest import add_agents_entries as _add_agents_entries_op
 from tai42_skeleton.operations.manifest import add_mcp_entries as _add_mcp_entries_op
@@ -63,27 +61,13 @@ from tai42_skeleton.operations.manifest import update_api_tools as _update_api_t
 from tai42_skeleton.operations.manifest import update_manifest as _update_manifest_op
 
 
-async def _json_object(request: Request) -> dict:
-    """Read a JSON-object request body.
-
-    Maps a malformed/non-object body to the door's explicit 400 (a plain request-model parse would answer 422).
-    """
-    try:
-        body = await request.json()
-    except (JSONDecodeError, ValueError) as exc:
-        raise BadRequestError(str(exc)) from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("request body must be a JSON object")
-    return body
-
-
 async def _extract_mcp_config(request: Request) -> dict[str, Any]:
     """The MCP-config replacement body → the operation's flat ``mcp`` kwarg.
 
     The hand-authored 400s (malformed body, missing ``mcp`` list) are preserved here;
     a malformed ENTRY is validated by the operation (also a 400).
     """
-    body = await _json_object(request)
+    body = await read_json_object(request)
     if "mcp" not in body:
         raise BadRequestError("body must carry an 'mcp' list")
     return {"mcp": body["mcp"]}
@@ -106,15 +90,15 @@ def _entries_kwargs(body: dict) -> dict[str, Any]:
 
 
 async def _extract_mcp_entries(request: Request) -> dict[str, Any]:
-    return _entries_kwargs(await _json_object(request))
+    return _entries_kwargs(await read_json_object(request))
 
 
 async def _extract_tools_entries(request: Request) -> dict[str, Any]:
-    return _entries_kwargs(await _json_object(request))
+    return _entries_kwargs(await read_json_object(request))
 
 
 async def _extract_agents_entries(request: Request) -> dict[str, Any]:
-    return _entries_kwargs(await _json_object(request))
+    return _entries_kwargs(await read_json_object(request))
 
 
 def _name_list(body: dict, field: str) -> list[str]:
@@ -133,7 +117,7 @@ async def _extract_api_tools_lists(request: Request) -> dict[str, Any]:
 
     Emptiness (all four empty) is the op's check.
     """
-    body = await _json_object(request)
+    body = await read_json_object(request)
     fields = ("include_add", "include_remove", "exclude_add", "exclude_remove")
     return {field: _name_list(body, field) for field in fields}
 
@@ -148,15 +132,9 @@ async def _optional_targets(request: Request) -> list[str] | None:
     whole-fleet default) is told apart from a malformed one (both of which the JSON parse
     alone would collapse to the same error).
     """
-    raw = await request.body()
-    if not raw.strip():
+    if not (await request.body()).strip():
         return None
-    try:
-        body = json.loads(raw)
-    except (JSONDecodeError, ValueError) as exc:
-        raise BadRequestError(f"invalid JSON body: {exc}") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("request body must be a JSON object")
+    body = await read_json_object(request)
     targets = body.get("targets")
     if targets is not None and (not isinstance(targets, list) or not all(isinstance(t, str) for t in targets)):
         raise BadRequestError("'targets' must be a list of worker names")
@@ -187,11 +165,7 @@ async def _extract_secret_env(request: Request) -> dict[str, Any]:
     and ``manifest_pointer`` are required; the env KEY is EITHER an explicit ``key`` OR a
     ``key_hint`` (exactly one — the op enforces the choice and refuses a colliding key).
     """
-    body = await _json_object(request)
-    try:
-        model = SetMcpSecretEnv.model_validate(body)
-    except ValidationError as exc:
-        raise BadRequestError(f"invalid secret-env body: {exc}") from exc
+    model = validate_body(SetMcpSecretEnv, await read_json_object(request), "secret-env body")
     return {
         "value": model.value,
         "key": model.key,
@@ -207,11 +181,7 @@ async def _extract_manifest_replace(request: Request) -> dict[str, Any]:
     intact); the operation loads and validates it. A body missing ``manifest_text`` (or
     a non-string one) is a loud 400 rather than the adapter's default 422.
     """
-    body = await _json_object(request)
-    try:
-        model = ManifestReplace.model_validate(body)
-    except ValidationError as exc:
-        raise BadRequestError(f"invalid manifest: {exc}") from exc
+    model = validate_body(ManifestReplace, await read_json_object(request), "manifest")
     return {"manifest_text": model.manifest_text}
 
 

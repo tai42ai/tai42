@@ -85,6 +85,7 @@ class _FlowTokenInvalidError(Exception):
     tags=["channels"],
     response_model=None,
     no_body_reason="Meta/WhatsApp Flow data endpoint: encrypted vendor request, encrypted vendor reply",
+    success_media_types={"POST": ("text/plain",)},
 )
 async def whatsapp_flow_data(request: Request) -> Response:
     """Meta's Flow data endpoint: authenticate, decrypt, react, encrypt.

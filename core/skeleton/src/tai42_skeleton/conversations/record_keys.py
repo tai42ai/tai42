@@ -6,8 +6,8 @@ settings, pure functions.
 
 from __future__ import annotations
 
-from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations.models import ConversationRecord
+from tai42_skeleton.conversations.thread_ids import RouteThreadId, ThreadIdError, parse_thread_id
 
 
 def _member(value: str | bytes) -> str:
@@ -16,16 +16,17 @@ def _member(value: str | bytes) -> str:
 
 
 def _thread_address_suffix(thread_id: str, route_name: str) -> str | None:
-    """The client-address suffix a route-keyed thread id carries, or ``None`` for a person thread.
+    """The client-address suffix a thread id of ``route_name`` carries, or ``None``.
 
-    A ``bridge:{route_name}:{client_address}`` id yields ``client_address``; a
-    ``bridge:@person:{id}`` thread carries no address to match.
+    A ``bridge:{route_name}:{client_address}`` id yields ``client_address``; a person thread, a
+    thread of another route and an id outside the grammar carry no address of this route to match.
     """
-    if thread_id.startswith(PERSON_THREAD_PREFIX):
+    try:
+        parsed = parse_thread_id(thread_id)
+    except ThreadIdError:
         return None
-    prefix = f"{BRIDGE_THREAD_PREFIX}{route_name}:"
-    if thread_id.startswith(prefix):
-        return thread_id[len(prefix) :]
+    if isinstance(parsed, RouteThreadId) and parsed.route_name == route_name:
+        return parsed.client_address
     return None
 
 

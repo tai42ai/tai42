@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel
-from tai42_contract.app import DeclaredRouteMetadata
+from tai42_contract.app import DeclaredRouteMetadata, RateLimitBudget
 
 from tai42_skeleton.app.route_registry.route_action import RouteAction
 from tai42_skeleton.app.route_shapes import Shape
@@ -149,6 +149,9 @@ class RouteMetadata:
     # path-derived family, so a door whose cost class differs from its path-siblings keeps a disjoint
     # counter and budget; ``None`` = the family is derived from the path.
     rate_limit_family: str | None = None
+    # The default budget of the route's rate-limit family, mirrored from the route's
+    # :attr:`DeclaredRouteMetadata.rate_limit_budget`; ``None`` = the app-wide default applies.
+    rate_limit_budget: RateLimitBudget | None = None
 
 
 @dataclass(frozen=True)

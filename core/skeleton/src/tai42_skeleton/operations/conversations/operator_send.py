@@ -15,13 +15,20 @@ from tai42_contract.conversations import AnswerPart, ConversationRoute
 from tai42_contract.errors import UnavailableError
 from tai42_contract.interactions import LocationElement, MediaItem
 
-from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations.address import canonical_address
+from tai42_skeleton.conversations.person_thread import newest_person_thread_record, person_routes
+from tai42_skeleton.conversations.thread_ids import (
+    PersonThreadId,
+    RouteThreadId,
+    ThreadIdError,
+    parse_thread_id,
+    route_thread_id,
+)
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.errors import NotSupportedError, OperationFailedError
 from tai42_skeleton.operations.response_models_group_a import ThreadMessageAck
 
-from .backend import _person_routes, _require_backend, _require_route, _thread_not_found
+from .backend import _require_backend, _require_route, _thread_not_found
 from .models import _OPTIONS_ADAPTER, _SECTIONS_ADAPTER, ThreadMessageSend
 from .routes import _validate_route_name
 
@@ -38,20 +45,25 @@ if TYPE_CHECKING:
 _pkg = sys.modules["tai42_skeleton.operations.conversations"]
 
 
-async def _route_keyed_target(named_route: ConversationRoute, thread_id: str, address: str | None) -> tuple[str, str]:
+def _route_keyed_target(
+    named_route: ConversationRoute, thread_id: str, parsed: RouteThreadId | None, address: str | None
+) -> tuple[str, str]:
     """The ``(route_name, client_address)`` a route-keyed thread's operator send targets.
 
-    The one route it lives on and the address embedded in its id. The id MUST carry the route's
-    ``bridge:{route_name}:`` prefix (the sole guard against reaching another route's thread) —
-    a mismatch is a loud 400. An explicit ``address`` must equal that embedded address.
+    The one route it lives on and the address embedded in its id. The id MUST be a thread of the
+    named route (``parsed``, ``None`` for an id outside the grammar) — the sole guard against
+    reaching another route's thread; a mismatch is a loud 400. An explicit ``address`` must equal
+    that embedded address.
     """
-    prefix = f"{BRIDGE_THREAD_PREFIX}{named_route.route_name}:"
-    if not thread_id.startswith(prefix):
+    prefix = route_thread_id(named_route.route_name, "")
+    if parsed is None and thread_id == prefix:
+        raise BadRequestError(f"thread_id {thread_id!r} carries no address after its route prefix")
+    if parsed is None or parsed.route_name != named_route.route_name:
         raise BadRequestError(
             f"thread_id {thread_id!r} is not a thread of route {named_route.route_name!r}: "
             f"it must start with {prefix!r}"
         )
-    embedded = thread_id[len(prefix) :]
+    embedded = parsed.client_address
     if not embedded.strip():
         raise BadRequestError(f"thread_id {thread_id!r} carries no address after its route prefix")
     if address is not None and address != canonical_address(embedded):
@@ -63,6 +75,7 @@ async def _person_target(
     manager: _Manager,
     named_route: ConversationRoute,
     thread_id: str,
+    person_id: str,
     address: str | None,
 ) -> tuple[str, str]:
     """The ``(route_name, client_address)`` a LINKED person's aggregated-thread operator send targets.
@@ -74,12 +87,11 @@ async def _person_target(
     record — its route and client_address — so the reply returns where they last wrote from;
     an empty thread offers none, which is a loud 400 asking for an explicit address.
     """
-    person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
     person = await manager.persons.get_by_id(person_id)
     if (
         person is None
         or (named_route.target_kind, named_route.target_name) != (person.target_kind, person.target_name)
-        or named_route.route_name not in _person_routes(person)
+        or named_route.route_name not in person_routes(person)
     ):
         raise _thread_not_found(thread_id)
     if address is not None:
@@ -88,14 +100,11 @@ async def _person_target(
             raise BadRequestError(f"address {address!r} is not one of the thread's person addresses")
         route_name = named_route.route_name if named_route.route_name in match.routes else min(match.routes)
         return route_name, match.address
-    newest, _ = await manager.records.list_person_thread_records(
-        sorted(_person_routes(person)), thread_id, offset=0, limit=1, newest_first=True
-    )
-    if not newest.records:
+    record = await newest_person_thread_record(manager.records, person, thread_id)
+    if record is None:
         raise BadRequestError(
             f"thread {thread_id!r} holds no record to infer a send address from; pass an explicit address"
         )
-    record = newest.records[0]
     return record.route_name, record.client_address
 
 
@@ -113,10 +122,15 @@ async def _resolve_operator_target(
     canonicalized by the caller — the only place a MALFORMED address maps to a 400 —
     so a ``ValueError`` from a store read here is server-side corruption, not a client error.
     """
-    if thread_id.startswith(PERSON_THREAD_PREFIX):
-        route_name, client_address = await _person_target(manager, named_route, thread_id, address)
+    try:
+        parsed: RouteThreadId | PersonThreadId | None = parse_thread_id(thread_id)
+    except ThreadIdError:
+        # Outside the grammar: the route-keyed check below refuses it with its 400.
+        parsed = None
+    if isinstance(parsed, PersonThreadId):
+        route_name, client_address = await _person_target(manager, named_route, thread_id, parsed.person_id, address)
     else:
-        route_name, client_address = await _route_keyed_target(named_route, thread_id, address)
+        route_name, client_address = _route_keyed_target(named_route, thread_id, parsed, address)
     target_route = named_route if route_name == named_route.route_name else await manager.get_route(route_name)
     if target_route is None:
         raise NotFoundError(f"conversation route not found: {route_name!r}")

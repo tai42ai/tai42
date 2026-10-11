@@ -14,6 +14,7 @@ from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.caps import AddressAdmission, AddressRateLimitedError, get_turn_caps
 from tai42_skeleton.conversations.models import DeliveryStatus
+from tai42_skeleton.conversations.turn.admission import refuse_turn_while_reloading
 from tai42_skeleton.conversations.turn.api_wait import ApiSubmitResult, _api_wait_or_callback
 from tai42_skeleton.conversations.turn.errors import ConversationRouteResolutionError, UnauthenticatedApiCallerError
 from tai42_skeleton.conversations.turn.inbound_checks import (
@@ -46,12 +47,15 @@ async def submit_api_message(
 ) -> ApiSubmitResult:
     """Accept one authed API-door message and run its turn.
 
-    ``wait_seconds`` (clamped to ``sync_wait_max_seconds`` by the door, ``0`` for the
-    pure-async path) bounds a sync wait: a turn that finishes inside it answers in the
+    ``wait_seconds`` (clamped here to ``sync_wait_max_seconds``, ``0`` for the pure-async
+    path) bounds a sync wait: a turn that finishes inside it answers in the
     ``200`` with the callback suppressed, otherwise the door returns ``202`` and the answer
     is POSTed to the callback. The inline ``200`` is claimed only while ``client_connected``
     reports the caller still connected; a hung-up caller's answer is left to the route's
     callback (or its terminal poll record) instead of written to a closed socket.
+
+    While a config reload holds the reload gate it refuses first with
+    :class:`~tai42_contract.errors.ServerReloadingError` (retriable), before any write.
 
     Admission runs in the channel door's order — rate cap, thread reservation, intake
     record — so a refusal writes nothing and a returned ``message_id`` always names a
@@ -81,6 +85,7 @@ async def submit_api_message(
     here (``_checked_form_tag``), stored on the record's ``inbound_form_tag``, and surfaced to a
     tool target's payload under the stable ``form_tag`` key only when present.
     """
+    refuse_turn_while_reloading()
     checked_params = _checked_params(params)
     checked_form = _checked_form(form)
     checked_form_tag = _checked_form_tag(form_tag, form=checked_form)
@@ -104,7 +109,7 @@ async def submit_api_message(
     caps = get_turn_caps()
     admission = caps.admit_address(_api_bucket_key(route.route_name, caller_principal), route.turns_per_hour_override)
     if admission is not AddressAdmission.ADMIT:
-        effective_rate = route.turns_per_hour_override or caps.settings.per_address_turns_per_hour
+        effective_rate = caps.effective_rate(route.turns_per_hour_override)
         raise AddressRateLimitedError(
             f"caller {caller_principal!r} is over its rate cap of "
             f"{effective_rate}/hour on route {route.route_name!r}; "
@@ -151,7 +156,9 @@ async def submit_api_message(
         location=checked_location,
     )
 
-    return await _api_wait_or_callback(task, message_id, thread_id, wait_seconds, client_connected)
+    return await _api_wait_or_callback(
+        task, message_id, thread_id, caps.clamp_sync_wait(wait_seconds), client_connected
+    )
 
 
 async def _get_api_route(route_name: str) -> ConversationRoute:

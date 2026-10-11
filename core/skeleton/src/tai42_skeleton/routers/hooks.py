@@ -66,10 +66,10 @@ from __future__ import annotations
 import logging
 
 from fastapi import Request
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, Response
-from tai42_contract.app import tai42_app
+from tai42_contract.app import DeclaredRouteMetadata, tai42_app
 from tai42_contract.hooks import HookRegister, TopicVerifierBinding
 from tai42_contract.webhooks import FreshnessWindow, SeenSetClaim
 from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
@@ -79,12 +79,13 @@ from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.hooks.cache import get_hooks_manager
 from tai42_skeleton.hooks.payload_parser import parse_any_payload
 from tai42_skeleton.hooks.trigger_links import ResolvedTrigger, TriggerLinkError, resolve_trigger_token
+from tai42_skeleton.middleware.rate_limit import SKELETON_DOOR_BUDGET
 from tai42_skeleton.operations import (
-    BadRequestError,
     PermissionDeniedError,
     operation_metadata_of,
     register_operation_route,
 )
+from tai42_skeleton.operations.adapter import read_json_object, request_with_body, validate_body
 from tai42_skeleton.operations.hooks import TriggerLinkCreate
 from tai42_skeleton.operations.hooks import create_trigger_link as _create_trigger_link_op
 from tai42_skeleton.operations.hooks import delete_topic_verifier as _delete_topic_verifier_op
@@ -150,6 +151,13 @@ class WebhookIngressResult(BaseModel):
     response_model=WebhookIngressResult,
     enveloped=False,
     authed=False,
+    declared=DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=True,
+        error_statuses=(400, 401, 405, 413, 500),
+        success_status=200,
+        rate_limit_budget=SKELETON_DOOR_BUDGET,
+    ),
 )
 async def universal_webhook(request: Request) -> Response:
     """Ingest a public webhook delivery for ``{topic}`` and dispatch it in the background."""
@@ -165,10 +173,7 @@ async def universal_webhook(request: Request) -> Response:
         raw = await read_bounded_body(request, cap)
     except RequestBodyTooLargeError:
         return _error("payload too large", 413)
-    # Cache the bounded bytes on the request so ``parse_any_payload`` re-reads them
-    # (json/xml/form) without re-consuming the already-drained stream. The verifier
-    # runs over these exact raw bytes BEFORE any parse.
-    request._body = raw
+    # The verifier runs over these exact raw bytes BEFORE any parse.
 
     manager = get_hooks_manager()
     binding = await manager.get_topic_verifier(topic)
@@ -186,7 +191,7 @@ async def universal_webhook(request: Request) -> Response:
             return verify_response
 
     try:
-        payload = await parse_any_payload(request, include_query=not strip_query)
+        payload = await parse_any_payload(request_with_body(request, raw), include_query=not strip_query)
     except ValueError as e:
         return _ingress_json({"status": "rejected", "topic": topic, "error": str(e)}, status_code=400)
 
@@ -211,6 +216,13 @@ class TriggerResult(BaseModel):
     response_model=TriggerResult,
     enveloped=False,
     authed=False,
+    declared=DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=True,
+        error_statuses=(400, 403, 404, 413, 501),
+        success_status=200,
+        rate_limit_budget=SKELETON_DOOR_BUDGET,
+    ),
 )
 async def trigger_link(request: Request) -> Response:
     """Fire a hook topic from a minted, token-bearing PUBLIC URL.
@@ -245,7 +257,6 @@ async def trigger_link(request: Request) -> Response:
         raw = await read_bounded_body(request, cap)
     except RequestBodyTooLargeError:
         return _error("payload too large", 413)
-    request._body = raw
 
     # Resolve first: an unknown/expired/revoked/verifier-bound/in-memory token is the
     # uniform 404 before any parse work.
@@ -263,7 +274,7 @@ async def trigger_link(request: Request) -> Response:
         return _error(_API_KEY_REQUIRED, 403)
 
     try:
-        payload = await parse_any_payload(request, include_query=True)
+        payload = await parse_any_payload(request_with_body(request, raw), include_query=True)
     except ValueError as e:
         # No topic echoed on the rejection — the link hides its topic.
         return _ingress_json({"status": "rejected", "error": str(e)}, status_code=400)
@@ -384,16 +395,7 @@ async def _extract_hook_params(request: Request) -> dict:
     the operation derives that server-side; a client-set one would pin an authorization
     anchor the server never verified.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object of hook params") from None
-    try:
-        params = HookRegister.model_validate(body)
-    except ValidationError as exc:
-        raise BadRequestError(f"invalid hook params: {exc}") from exc
+    params = validate_body(HookRegister, await read_json_object(request), "hook params")
     flat = params.model_dump()
     # ``model_dump`` lowers the binding to a plain dict, but the operation's
     # ``state_binding`` parameter (and its attach-on-use) needs the parsed model — pass the
@@ -408,17 +410,7 @@ async def _extract_trigger_link_params(request: Request) -> dict:
     Rejects a malformed body with an explicit 400 (the adapter's plain parse would
     yield 422; the ttl contract demands 400 for an absent/invalid ``ttl_seconds``).
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object of trigger-link params") from None
-    try:
-        params = TriggerLinkCreate.model_validate(body)
-    except ValidationError as exc:
-        raise BadRequestError(f"invalid trigger link params: {exc}") from exc
-    return params.model_dump()
+    return validate_body(TriggerLinkCreate, await read_json_object(request), "trigger link params").model_dump()
 
 
 async def _extract_binding(request: Request) -> dict:
@@ -427,16 +419,7 @@ async def _extract_binding(request: Request) -> dict:
     The unknown-verifier check is the operation's, so the projected tool and CLI carry
     it too.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object") from None
-    try:
-        binding = TopicVerifierBinding.model_validate(body)
-    except ValidationError as exc:
-        raise BadRequestError(f"invalid verifier binding: {exc.errors()[0]['msg']}") from None
+    binding = validate_body(TopicVerifierBinding, await read_json_object(request), "verifier binding")
     return {"verifier": binding.verifier, "config": binding.config}
 
 

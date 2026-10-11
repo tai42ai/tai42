@@ -9,13 +9,18 @@ the four doors from carrying per-door copies that drift.
 
 A door with no named subject deposits nothing (a null context manager): the run still executes, but
 an async park has no subject to index under.
+
+The three live doors (the synchronous run-tool door, the MCP edge, the agent SSE doors) wrap their
+run in :func:`live_door_scope` — the caller's execution identity, its run attribution, and the
+subject context, in that order — and refuse an un-encodable failed outcome through
+:func:`unencodable_outcome`.
 """
 
 from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager, contextmanager, nullcontext
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tai42_contract.states import StateContext, SubjectCandidates
 
@@ -26,6 +31,8 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from tai42_contract.states import StateSubject
+
+    from tai42_skeleton.tools.binding import ToolResultEncodingError
 
 logger = logging.getLogger(__name__)
 
@@ -100,3 +107,44 @@ async def caller_execution_identity(caller_key: str | None) -> AsyncIterator[Non
     finally:
         if token is not None:
             reset_execution_identity(token)
+
+
+@asynccontextmanager
+async def live_door_scope(
+    subject: StateSubject | None, caller_key: str | None, *, attribute: bool
+) -> AsyncIterator[None]:
+    """The scope a live door runs its caller's tool or agent in.
+
+    The caller's own execution identity (:func:`caller_execution_identity`), then — when
+    ``attribute`` and a caller resolved — the caller as the run's attribution, so a runs-index row
+    the dispatch registers is born with its ``user_id``, then the ``door="api"`` subject context
+    (:func:`api_state_context`).
+    """
+    from tai42_contract.monitoring import RunAttribution
+
+    from tai42_skeleton.tools.attribution import run_attribution
+
+    async with caller_execution_identity(caller_key):
+        attribution = (
+            run_attribution(RunAttribution(user_id=caller_key))
+            if attribute and caller_key is not None
+            else nullcontext()
+        )
+        with attribution, api_state_context(subject, caller_key):
+            yield
+
+
+def unencodable_outcome(tool_name: str, outcome: Any) -> ToolResultEncodingError | None:
+    """The refusal for a failed outcome no JSON encoder can render, or ``None`` when it encodes.
+
+    A lone UTF-16 surrogate passes ``json.dumps`` but breaks the utf-8 wire encode; the refusal
+    names the tool and the offending JSON path, and the finding is logged at WARNING. Each door
+    raises it through its own error.
+    """
+    from tai42_skeleton.tools.binding import ToolResultEncodingError, find_lone_surrogate
+
+    offending_path = find_lone_surrogate(outcome)
+    if offending_path is None:
+        return None
+    logger.warning("tool %r failed with an outcome that cannot be JSON-encoded at %s", tool_name, offending_path)
+    return ToolResultEncodingError(tool_name, offending_path)

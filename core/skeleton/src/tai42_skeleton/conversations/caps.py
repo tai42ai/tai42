@@ -228,6 +228,14 @@ class TurnCaps:
             self._applied_rate = new_rate
         self._gate.set_limit(current.max_concurrent_turns)
 
+    def clamp_sync_wait(self, seconds: int) -> int:
+        """``seconds`` bounded by ``sync_wait_max_seconds`` — the one clamp every door's sync wait takes."""
+        return min(seconds, self.settings.sync_wait_max_seconds)
+
+    def effective_rate(self, override: int | None) -> int:
+        """The per-hour turn rate a key runs at: a route's ``override``, else ``per_address_turns_per_hour``."""
+        return override if override is not None else self.settings.per_address_turns_per_hour
+
     # -- the per-key token bucket --------------------------------------------
 
     def admit_address(self, bucket_key: str, per_hour: int | None = None) -> AddressAdmission:
@@ -244,7 +252,7 @@ class TurnCaps:
         ever clamped down) — and one whose override changed adopts the new rate in place
         using the same clamp a reload does.
         """
-        rate = self.settings.per_address_turns_per_hour if per_hour is None else per_hour
+        rate = self.effective_rate(per_hour)
         now = _now()
         bucket = self._buckets.get(bucket_key)
         if bucket is None:

@@ -26,7 +26,7 @@ from tai42_contract.app.facets.messaging import (
     AppWebhookVerifiers,
     PendingMessage,
 )
-from tai42_contract.app.facets.routing import AppHttp, DeclaredRouteMetadata, RouteAction
+from tai42_contract.app.facets.routing import AppHttp, DeclaredRouteMetadata, RateLimitBudget, RouteAction
 from tai42_contract.app.facets.runtime import (
     AppAdmin,
     AppBackup,
@@ -65,5 +65,6 @@ __all__ = [
     "AppWebhookVerifiers",
     "DeclaredRouteMetadata",
     "PendingMessage",
+    "RateLimitBudget",
     "RouteAction",
 ]

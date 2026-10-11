@@ -41,19 +41,10 @@ from tai42_contract.manifest import ExtensionElement
 
 from tai42_skeleton.manifest import Manifest  # noqa: F401 — the model-validate seam tests patch
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object
 from tai42_skeleton.operations.tool_extensions import get_tool_extensions as _get_tool_extensions_op
 from tai42_skeleton.operations.tool_extensions import modify_tool_extension_combos as _modify_tool_extension_combos_op
 from tai42_skeleton.operations.tool_extensions import set_tool_extensions as _set_tool_extensions_op
-
-
-async def _json_object(request: Request) -> dict[str, Any]:
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object") from None
-    return body
 
 
 def _read_element(element: Any) -> ExtensionElement:
@@ -128,7 +119,7 @@ async def _extract_combos(request: Request) -> dict:
 
     Rejects a malformed structure with a loud 400 before the operation runs.
     """
-    body = await _json_object(request)
+    body = await read_json_object(request)
     return {"combos": _read_combos(body)}
 
 
@@ -137,7 +128,7 @@ async def _extract_combo_changes(request: Request) -> dict:
 
     Validates each combo's element shape at the edge (as the full-write POST does) before the operation runs.
     """
-    body = await _json_object(request)
+    body = await read_json_object(request)
     return {"add": _read_change_combos(body, "add"), "remove": _read_change_combos(body, "remove")}
 
 

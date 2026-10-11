@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -24,6 +24,11 @@ ROUTE_PARAM_SEGMENT_RE = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\}$")
 # hyphens, no leading/trailing hyphen. Segments join with ``/``; the base itself
 # is relative (no leading/trailing slash) and carries no templates.
 ROUTE_BASE_SEGMENT_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+
+
+# One lowercase URL path segment a platform record is addressed by (a hook's topic and name, a
+# sub-MCP slug). ``\Z`` anchors the true end of string so a trailing newline cannot slip through.
+PATH_SEGMENT_SLUG_RE: Final = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
 
 
 RouteMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
