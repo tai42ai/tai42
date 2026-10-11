@@ -27,6 +27,7 @@ from starlette.requests import Request
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object
 from tai42_skeleton.operations.config import apply_profile as _apply_profile_op
 from tai42_skeleton.operations.config import delete_profile as _delete_profile_op
 from tai42_skeleton.operations.config import diff_profile as _diff_profile_op
@@ -51,11 +52,8 @@ async def _extract_env_update(request: Request) -> dict[str, Any]:
     A plain request-model parse would answer 422. Yields the operation's flat ``env`` and
     ``secret_keys`` kwargs.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict) or not isinstance(body.get("env"), dict) or set(body) - {"env", "secret_keys"}:
+    body = await read_json_object(request)
+    if not isinstance(body.get("env"), dict) or set(body) - {"env", "secret_keys"}:
         raise BadRequestError(_ENV_BODY_SHAPE)
     env = body["env"]
     if not all(isinstance(v, str) for v in env.values()):
@@ -74,12 +72,7 @@ async def _extract_profile_body(request: Request) -> dict[str, Any]:
     Preserves the door's hand-authored 400s (a plain request-model parse would answer 422).
     ``description`` and ``secret_keys`` default to empty; ``env`` is a ``{str: str}`` map.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object")
+    body = await read_json_object(request)
     description = body.get("description", "")
     if not isinstance(description, str):
         raise BadRequestError("'description' must be a string")
@@ -97,12 +90,7 @@ async def _extract_profile_rollback(request: Request) -> dict[str, Any]:
 
     A missing or non-integer ``version`` is a loud 400.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object")
+    body = await read_json_object(request)
     version = body.get("version")
     if not isinstance(version, int) or isinstance(version, bool):
         raise BadRequestError("body must contain an integer 'version'")

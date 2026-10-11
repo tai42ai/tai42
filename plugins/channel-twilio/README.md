@@ -92,7 +92,8 @@ configuration at startup):
 
 1. Point the Twilio number's *"A message comes in"* webhook at
    `{public base URL}/api/channels/twilio/inbound`, HTTP POST (Twilio console
-   or REST API).
+   or REST API). Configure the inbound webhook URL with `#rp=5xx` (and `#rc=` of
+   at least 1) so a message refused while the server reloads is delivered again.
 2. Deploy behind a TLS-terminating proxy you control that sets
    `X-Forwarded-Proto` / `X-Forwarded-Host` — the webhook signature is
    validated against the public URL reconstructed from those headers, so it

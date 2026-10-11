@@ -40,6 +40,7 @@ from tai42_skeleton.hooks import settings as hooks_readiness
 from tai42_skeleton.interactions import settings as interactions_readiness
 from tai42_skeleton.marketplace import settings as marketplace_readiness
 from tai42_skeleton.marketplace.advisories import start_advisories_poll, stop_advisories_poll
+from tai42_skeleton.middleware.rate_limit import check_rate_limit_families
 from tai42_skeleton.plugins.registry import rebuild_studio_plugin_registry
 from tai42_skeleton.routers import tool_runs_settings
 from tai42_skeleton.settings import rate_limit
@@ -306,6 +307,11 @@ def build_app() -> TaiMCP:
         # deployment is a no-op.
         app.lifecycle.on_startup(assert_skeleton_schema_applied)
         _register_states_lifecycles(app)
+        # Every public route of one rate-limit family declares the same budget. Checked over
+        # the generation being built — at boot and on every reload, after the routers are
+        # re-imported — so a conflicting install fails before it serves.
+        app.lifecycle.on_startup(check_rate_limit_families)
+        app.lifecycle.on_reload(check_rate_limit_families)
         if settings.enable:
             # The configured identity providers probe their OWN record stores once at
             # startup, so a deployment against a backend a provider cannot use fails

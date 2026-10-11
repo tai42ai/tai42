@@ -15,8 +15,9 @@ from tai42_contract.conversations import ConversationDoor, ConversationRoute, Pe
 from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.pair_codes import MintingConversation
 from tai42_skeleton.conversations.persons import PairingTarget
+from tai42_skeleton.conversations.thread_ids import person_thread_id, route_thread_id
 from tai42_skeleton.conversations.turn.errors import ConversationRouteResolutionError
-from tai42_skeleton.conversations.turn.keys import _person_thread_id, _thread_id, _throttle_source_key
+from tai42_skeleton.conversations.turn.keys import _throttle_source_key
 
 
 @dataclass(frozen=True)
@@ -135,8 +136,8 @@ async def _resolve_thread_id(route: ConversationRoute, multichannel: _Multichann
             address=multichannel.address,
         )
         if person is not None and len(person.addresses) > 1:
-            return _person_thread_id(person.person_id)
-    return _thread_id(route.route_name, address)
+            return person_thread_id(person.person_id)
+    return route_thread_id(route.route_name, address)
 
 
 async def _resolve_channel_route(channel: str, our_identity_canonical: str) -> ConversationRoute:

@@ -23,6 +23,7 @@ from starlette.requests import Request
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object
 from tai42_skeleton.operations.states import (
     apply_state_record as _apply_state_record_op,
 )
@@ -117,20 +118,6 @@ from tai42_skeleton.operations.states_outbox import (
 # -- request-edge readers -----------------------------------------------------
 
 
-async def _json_body(request: Request) -> Any:
-    try:
-        return await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-
-
-async def _json_object(request: Request) -> dict[str, Any]:
-    body = await _json_body(request)
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object")
-    return body
-
-
 def _require_object(body: dict[str, Any], field: str) -> dict[str, Any]:
     value = body.get(field)
     if not isinstance(value, dict):
@@ -170,15 +157,15 @@ def _query_bool(request: Request, field: str) -> bool:
 
 
 async def _extract_declaration(request: Request) -> dict[str, Any]:
-    return {"declaration": await _json_object(request)}
+    return {"declaration": await read_json_object(request)}
 
 
 async def _extract_attach(request: Request) -> dict[str, Any]:
-    return {"body": await _json_object(request)}
+    return {"body": await read_json_object(request)}
 
 
 async def _extract_attach_declarations(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     ctx: dict[str, Any] = {"declarations": _require_object(body, "declarations")}
     if "options" in body:
         ctx["options"] = _require_object(body, "options")
@@ -194,7 +181,7 @@ async def _extract_subjects_query(request: Request) -> dict[str, Any]:
 
 
 async def _extract_search(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     filters = body.get("filters", {})
     if not isinstance(filters, dict):
         raise BadRequestError("'filters' must be a JSON object")
@@ -208,15 +195,15 @@ async def _extract_search(request: Request) -> dict[str, Any]:
 
 
 async def _extract_record_body(request: Request) -> dict[str, Any]:
-    return {"data": await _json_object(request)}
+    return {"data": await read_json_object(request)}
 
 
 async def _extract_record_patch(request: Request) -> dict[str, Any]:
-    return {"patch": await _json_object(request)}
+    return {"patch": await read_json_object(request)}
 
 
 async def _extract_apply(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     op_id = body.get("op_id")
     if op_id is not None and not isinstance(op_id, str):
         raise BadRequestError("'op_id' must be a string")
@@ -244,7 +231,7 @@ async def _extract_template_jq_body(request: Request) -> dict[str, Any]:
     ``input`` (any JSON, the program's ``.input``, absent → null) and an optional string
     ``op_id`` idempotency key.
     """
-    body = await _json_object(request)
+    body = await read_json_object(request)
     op_id = body.get("op_id")
     if op_id is not None and not isinstance(op_id, str):
         raise BadRequestError("'op_id' must be a string")
@@ -252,7 +239,7 @@ async def _extract_template_jq_body(request: Request) -> dict[str, Any]:
 
 
 async def _extract_fold(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     return {"into": _require_object(body, "into"), "mode": _require_str(body, "mode")}
 
 
@@ -261,7 +248,7 @@ async def _extract_writes_query(request: Request) -> dict[str, Any]:
 
 
 async def _extract_template_document(request: Request) -> dict[str, Any]:
-    return {"document": await _json_object(request), "replace": _query_bool(request, "replace")}
+    return {"document": await read_json_object(request), "replace": _query_bool(request, "replace")}
 
 
 async def _extract_pending_saves_query(request: Request) -> dict[str, Any]:

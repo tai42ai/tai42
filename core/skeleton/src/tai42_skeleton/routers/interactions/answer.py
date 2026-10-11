@@ -41,7 +41,6 @@ async def _extract_answer(request: Request) -> dict:
         raw = await read_bounded_body(request, settings.callback_max_body_bytes)
     except RequestBodyTooLargeError as exc:
         raise PayloadTooLargeError("payload too large") from exc
-    request._body = raw
     try:
         body = json.loads(raw)
     except JSON_PARSE_ERRORS as exc:
@@ -72,7 +71,6 @@ async def _extract_react(request: Request) -> dict:
         raw = await read_bounded_body(request, settings.callback_max_body_bytes)
     except RequestBodyTooLargeError as exc:
         raise PayloadTooLargeError("payload too large") from exc
-    request._body = raw
     try:
         body = json.loads(raw)
     except JSON_PARSE_ERRORS as exc:

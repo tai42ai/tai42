@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from .base import _Facet
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from typing import Any
 
     from pydantic import BaseModel
@@ -50,6 +50,7 @@ class HttpFacet(_Facet):
         declared: DeclaredRouteMetadata | None = None,
         no_body_reason: str | None = None,
         enveloped: bool = True,
+        success_media_types: Mapping[str, tuple[str, ...]] | None = None,
     ) -> Callable[[Callable[[Request], Awaitable[Response]]], Callable[[Request], Awaitable[Response]]]:
         """Register a custom HTTP route with its schema, auth, and OpenAPI metadata."""
         return self._app._http_surface.custom_route(
@@ -71,6 +72,7 @@ class HttpFacet(_Facet):
             declared=declared,
             no_body_reason=no_body_reason,
             enveloped=enveloped,
+            success_media_types=success_media_types,
         )
 
     def use_raw_path_key(self, path_prefix: str) -> None:

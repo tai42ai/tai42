@@ -1,12 +1,10 @@
-"""Derive a route's read/write action-class and its success media types from the handler + methods.
+"""Derive a route's read/write action-class from its declaration + methods.
 
 The authoritative source of a route's authorization character.
 """
 
 from __future__ import annotations
 
-import inspect
-import re
 from collections.abc import Awaitable, Callable
 from typing import Literal
 
@@ -73,79 +71,8 @@ def derive_route_action(methods: tuple[str, ...]) -> Literal["read", "write"]:
     return "write" if any(method_to_action(method) == "write" for method in methods) else "read"
 
 
-# Success content types, derived from markers in the handler source. The default
-# JSON surface answers the ``{"data": ...}`` envelope; a streaming, CSV, HTML, or
-# asset-serving route answers its own media type instead, which the emitter must
-# document faithfully (no ``{"data": ...}`` wrapper). Each marker is a token whose
-# presence in the (method-scoped) handler source — its own body or the name of a
-# shared responder it calls — contributes that media type. A method that matches
-# several markers documents several content types (the runs export serves CSV or a
-# JSON download from one method); a method that matches none answers JSON.
-_JSON_MEDIA_TYPE = "application/json"
-_MEDIA_TYPE_MARKERS = (
-    ("text/event-stream", "text/event-stream"),
-    ("text/csv", "text/csv"),
-    ("_csv_response", "text/csv"),
-    ("asset_content_type", "application/octet-stream"),
-    ("HTML_CONTENT_TYPE", "text/html"),
-    # The interactions callback door delegates its GET branch to ``_callback_get``,
-    # which serves the browser confirm page; the delegated responder's name marks
-    # the HTML surface (the derivation follows the responder the handler calls, not
-    # only its own inline responses).
-    ("_callback_get", "text/html"),
-    # A downloadable attachment (the backup export, and the runs export's JSON
-    # format) — a file, not the enveloped JSON surface.
-    ("Content-Disposition", "application/octet-stream"),
-)
-
-# Marks the branch of a multi-method handler that dispatches on the request method,
-# so each method's success media type is derived from only the code that serves it.
-_METHOD_GUARD = re.compile(r"""request\.method\s*==\s*['"]([A-Za-z]+)['"]""")
-
-
-def _handler_source(func: Callable[..., object]) -> str:
-    return inspect.getsource(func)
-
-
-def _method_scoped_source(source: str, method: str) -> str:
-    """The handler source as ``method`` sees it.
-
-    Shared lines plus the block guarded by ``if request.method == "<method>"``, dropping the
-    blocks that guard a DIFFERENT method. A handler that never dispatches on ``request.method``
-    (the common case) yields its whole source unchanged, so single-method routes and multi-method
-    routes that share one code path are untouched.
-    """
-    kept: list[str] = []
-    foreign_indent: int | None = None
-    for line in source.splitlines(keepends=True):
-        stripped = line.lstrip()
-        indent = len(line) - len(stripped)
-        if foreign_indent is not None:
-            if stripped and indent <= foreign_indent:
-                foreign_indent = None  # the block guarding another method has closed
-            else:
-                continue  # still inside a block that serves a different method
-        guard = _METHOD_GUARD.search(line) if stripped.startswith(("if ", "elif ")) else None
-        if guard is not None and guard.group(1).upper() != method.upper():
-            foreign_indent = indent
-            continue
-        kept.append(line)
-    return "".join(kept)
-
-
-def _method_media_types(source: str) -> tuple[str, ...]:
-    matched = tuple(dict.fromkeys(media for token, media in _MEDIA_TYPE_MARKERS if token in source))
-    return matched or (_JSON_MEDIA_TYPE,)
-
-
-def _success_media_types(source: str, methods: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
-    """Map each method to the content type(s) its success response serves.
-
-    Derived from the method-scoped handler source so a route whose methods answer different media
-    types (the callback door: GET serves HTML, POST serves the JSON envelope) documents each
-    method faithfully.
-    """
-    return {method: _method_media_types(_method_scoped_source(source, method)) for method in methods}
+# The media type a success body is published under when a route declares none for the method.
+JSON_MEDIA_TYPE = "application/json"
 
 
 def _resolve_route_action(action: RouteAction | None, methods: tuple[str, ...], path: str, authed: bool) -> RouteAction:

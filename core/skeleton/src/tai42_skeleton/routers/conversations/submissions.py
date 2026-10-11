@@ -18,7 +18,6 @@ from tai42_contract.conversations import (
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.conversations.caps import AddressRateLimitedError
-from tai42_skeleton.conversations.settings import conversations_settings
 from tai42_skeleton.conversations.turn import (
     ApiSubmitResult,
     ConversationRouteResolutionError,
@@ -30,7 +29,7 @@ from tai42_skeleton.operations.errors import NotSupportedError
 # This submodule's OWN package object (the one it was imported as part of), captured at
 # import time from ``sys.modules`` — NOT ``from tai42_skeleton.routers import conversations``,
 # whose parent-attribute read is stale mid-reload. The seam symbols
-# (``get_current_user_id``/``reload_gate``) are read through it at call time, so a test's
+# (``get_current_user_id``) are read through it at call time, so a test's
 # patch on this package alias is the single point the submission doors read.
 _pkg = sys.modules["tai42_skeleton.routers.conversations"]
 
@@ -152,7 +151,7 @@ async def send_conversation_message(request: Request) -> Response:
     execution key, not the caller. Default answer is ``202 {message_id, thread_id}``; the
     answer is then delivered later by signed callback when the route declares a
     ``callback_url``, and otherwise read back from the poll door
-    (``GET .../messages/{message_id}``). With a ``wait_seconds`` body field (clamped here to
+    (``GET .../messages/{message_id}``). With a ``wait_seconds`` body field (clamped to
     ``sync_wait_max_seconds``) a turn finishing in time answers ``200`` inline — an
     answered/error turn with the answer, a silent turn with the silent marker (status
     ``silent``, no answer text) — and any callback (which otherwise carries
@@ -162,8 +161,6 @@ async def send_conversation_message(request: Request) -> Response:
     answer by the route's signed callback (or its terminal poll record), never a write to a
     closed socket.
     """
-    if _pkg.reload_gate.locked:
-        return _pkg.reload_gate.reject_response()
     route_name = request.path_params["route_name"]
     try:
         body = await request.json()
@@ -180,8 +177,7 @@ async def send_conversation_message(request: Request) -> Response:
         detail = "; ".join(error["msg"] for error in exc.errors())
         return _error(f"invalid conversation message: {detail}", 400)
 
-    cap = conversations_settings().sync_wait_max_seconds
-    wait_seconds = 0 if message.wait_seconds is None else min(message.wait_seconds, cap)
+    wait_seconds = 0 if message.wait_seconds is None else message.wait_seconds
 
     from tai42_skeleton.conversations import submit_api_message
 
@@ -245,8 +241,6 @@ async def send_conversation_event(request: Request) -> Response:
     of the route by ``thread_id`` (a channel participant's included), so a deployment grants its
     write action to service principals, not to low-trust API keys.
     """
-    if _pkg.reload_gate.locked:
-        return _pkg.reload_gate.reject_response()
     route_name = request.path_params["route_name"]
     try:
         body = await request.json()

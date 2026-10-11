@@ -33,10 +33,10 @@ it is declared by ``reload_gated`` alone and the emitter owns its response. A ro
 declaring ``503`` therefore says it answers a PLAIN ``503`` too, and one declaring
 both publishes a ``503`` admitting either body.
 
-The per-method success CONTENT TYPE is derived from each handler's source: the
-default JSON surface answers the ``{"data": ...}`` envelope, while a streaming,
-CSV, HTML, or asset-serving route answers its own media type, which the emitter
-documents faithfully.
+The per-method success CONTENT TYPE is the route's own ``success_media_types``
+declaration: the default JSON surface answers the ``{"data": ...}`` envelope, while
+a streaming, CSV, HTML, plain-text, or asset-serving route declares its own media
+type, which the emitter publishes as declared.
 """
 
 from __future__ import annotations

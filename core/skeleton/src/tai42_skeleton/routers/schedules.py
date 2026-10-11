@@ -22,12 +22,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import ValidationError
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.states import StateBinding
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object, validate_body
 from tai42_skeleton.operations.schedules import ScheduleCreate
 from tai42_skeleton.operations.schedules import create_schedule as _create_schedule_op
 from tai42_skeleton.operations.schedules import delete_schedule as _delete_schedule_op
@@ -44,12 +44,7 @@ async def _extract_create(request: Request) -> dict[str, Any]:
     door-contract jqs included — reaches the operation. The returned kwargs are the model's own fields
     read as their live values, so a nested binding or jq is forwarded parsed, never lowered to a dict.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object")
+    body = await read_json_object(request)
 
     tool_name = body.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name:
@@ -60,15 +55,8 @@ async def _extract_create(request: Request) -> dict[str, Any]:
         raise BadRequestError("'schedule_kwargs' must be a JSON object")
     raw_binding = body.get("state_binding")
     if raw_binding is not None:
-        try:
-            StateBinding.model_validate(raw_binding)
-        except ValidationError as exc:
-            raise BadRequestError(f"invalid 'state_binding': {exc.errors(include_url=False)}") from exc
-
-    try:
-        model = ScheduleCreate.model_validate(body)
-    except ValidationError as exc:
-        raise BadRequestError(f"invalid schedule create params: {exc.errors(include_url=False)}") from exc
+        validate_body(StateBinding, raw_binding, "'state_binding'")
+    model = validate_body(ScheduleCreate, body, "schedule create params")
     return {name: getattr(model, name) for name in ScheduleCreate.model_fields}
 
 

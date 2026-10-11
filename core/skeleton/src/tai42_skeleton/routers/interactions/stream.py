@@ -257,6 +257,7 @@ async def _stream_events(request: Request, store: InteractionStore, cursor: str)
     tags=["interactions"],
     response_model=None,
     no_body_reason="Interactions inbox live tail: SSE StreamingResponse",
+    success_media_types={"GET": ("text/event-stream",)},
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=False,

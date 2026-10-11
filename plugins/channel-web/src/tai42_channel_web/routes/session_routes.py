@@ -5,11 +5,12 @@ from __future__ import annotations
 from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import Response
-from tai42_contract.app import tai42_app
+from tai42_contract.app import DeclaredRouteMetadata, tai42_app
 
 from tai42_channel_web.routes.dtos import RotateBody, SessionRotatedResponse
 from tai42_channel_web.routes.entry_admission import _ENTRY_REFUSED_CODE, _ENTRY_REFUSED_MESSAGE, _entry_gate_outcome
 from tai42_channel_web.routes.envelope import _body_refusal, _error, _json_body, _ok
+from tai42_channel_web.routes.limits import CHAT_RATE_LIMIT_BUDGET, CHAT_RATE_LIMIT_FAMILY
 from tai42_channel_web.routes.session_access import (
     _CROSS_ORIGIN,
     _CROSS_ORIGIN_CODE,
@@ -28,6 +29,14 @@ from tai42_channel_web.store.registrations import drop_session
     summary="Start a fresh web chat visitor session",
     tags=["channels"],
     response_model=SessionRotatedResponse,
+    declared=DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=True,
+        error_statuses=(400, 403, 413, 422, 501),
+        success_status=200,
+        rate_limit_family=CHAT_RATE_LIMIT_FAMILY,
+        rate_limit_budget=CHAT_RATE_LIMIT_BUDGET,
+    ),
 )
 async def web_session_rotate(request: Request) -> Response:
     """Mint a fresh session for one web route and set it as the visitor's cookie.

@@ -1,13 +1,13 @@
 """The redis-backend guard shared by every routing operation.
 
-Also holds the read guards (route existence, person route set, uniform thread-not-found).
+Also holds the read guards (route existence, uniform thread-not-found).
 """
 
 from __future__ import annotations
 
 import sys
 
-from tai42_contract.conversations import ConversationRoute, Person
+from tai42_contract.conversations import ConversationRoute
 
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
 from tai42_skeleton.operations import NotFoundError
@@ -32,14 +32,6 @@ def _require_backend() -> BaseConversationsManager:
     if not manager.durable:
         raise NotSupportedError(_NO_BACKEND)
     return manager
-
-
-def _person_routes(person: Person) -> set[str]:
-    """Every route name the person has written under, straight off its address rows.
-
-    The routes whose indexes the aggregated transcript spans and the authz check reads.
-    """
-    return {route for address in person.addresses for route in address.routes}
 
 
 async def _require_route(manager: BaseConversationsManager, route_name: str) -> ConversationRoute:

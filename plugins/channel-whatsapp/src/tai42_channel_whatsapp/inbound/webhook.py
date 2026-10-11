@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
     tags=["channels"],
     response_model=None,
     no_body_reason="Meta/WhatsApp webhook: GET hub-challenge echo, POST vendor ack",
+    success_media_types={"GET": ("text/plain",)},
 )
 async def whatsapp_inbound(request: Request) -> Response:
     """Meta's single webhook endpoint: GET verification, POST message/status events.

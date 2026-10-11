@@ -41,6 +41,7 @@ from starlette.requests import Request
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object
 from tai42_skeleton.operations.presets import (
     create_preset as _create_preset_op,
 )
@@ -88,16 +89,6 @@ from tai42_skeleton.operations.presets import (
 # -- request-body readers (HTTP-edge parsing; raise the byte-stable 400) ------
 
 
-async def _json_object(request: Request) -> dict[str, Any]:
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object") from None
-    return body
-
-
 def _require_str(body: dict[str, Any], field: str) -> str:
     value = body.get(field)
     if not isinstance(value, str) or not value:
@@ -123,7 +114,7 @@ def _optional_dict(body: dict[str, Any], field: str) -> dict[str, Any]:
 
 
 async def _extract_create(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     return {
         "name": _require_str(body, "name"),
         "base_tool": _require_str(body, "base_tool"),
@@ -137,7 +128,7 @@ async def _extract_create(request: Request) -> dict[str, Any]:
 
 
 async def _extract_save_version(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     if not any(
         field in body
         for field in ("fixed_kwargs", "extensions", "output_schema", "input_schema", "description", "state_binding")
@@ -189,7 +180,7 @@ async def _extract_save_version(request: Request) -> dict[str, Any]:
 
 
 async def _extract_rollback(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     version = body.get("version")
     if not isinstance(version, int) or isinstance(version, bool):
         raise BadRequestError("body must contain an integer 'version'")
@@ -197,12 +188,12 @@ async def _extract_rollback(request: Request) -> dict[str, Any]:
 
 
 async def _extract_rename(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     return {"new_name": _require_str(body, "new_name")}
 
 
 async def _extract_validate(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     name = _require_str(body, "name")
     base_tool_present = "base_tool" in body and body.get("base_tool") is not None
     description_present = "description" in body and body.get("description") is not None
@@ -224,7 +215,7 @@ async def _extract_validate(request: Request) -> dict[str, Any]:
 
 
 async def _extract_version_tags(request: Request) -> dict[str, Any]:
-    body = await _json_object(request)
+    body = await read_json_object(request)
     tags = body.get("tags")
     if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
         raise BadRequestError("body must contain a 'tags' list of strings")

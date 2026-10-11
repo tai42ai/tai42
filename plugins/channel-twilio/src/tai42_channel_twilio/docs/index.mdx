@@ -36,6 +36,10 @@ never mutates your Twilio account):
 - **Inbound message** (HTTP POST) → `{public base URL}/api/channels/twilio/inbound`
 - **Delivery status callback** (HTTP POST) → `{public base URL}/api/channels/twilio/status`
 
+Configure the inbound webhook URL with `#rp=5xx` (and `#rc=` of at least 1) so a message
+refused while the server reloads is delivered again: Twilio retries only on the failures its
+retry policy names, and a reload answers a retriable `503`.
+
 The status callback surfaces a **late** delivery outcome. For a **bridge**
 message Twilio accepts the send, then posts a `failed`/`undelivered` status,
 which flips the answer record to `failed` (this is how the WhatsApp 24-hour

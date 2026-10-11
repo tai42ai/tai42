@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
@@ -19,6 +19,14 @@ if TYPE_CHECKING:
 #: :meth:`AppHttp.custom_route` as ``action`` (``None`` lets the surface derive
 #: the grantable class from the HTTP methods).
 RouteAction = Literal["read", "write", "fenced", "secret"]
+
+
+@dataclass(frozen=True)
+class RateLimitBudget:
+    """A route family's default flood-control budget: requests per 60 s window and per 10 s burst window."""
+
+    limit: int
+    burst: int
 
 
 @dataclass(frozen=True)
@@ -51,6 +59,10 @@ class DeclaredRouteMetadata:
     #: (an upload door sized separately from a message door) names its own family here, so its counter
     #: and budget stay disjoint from theirs.
     rate_limit_family: str | None = None
+    #: The default flood-control budget of the route's rate-limit family. ``None`` = the app-wide
+    #: default applies. Every public route of one family declares the same budget; an operator's
+    #: per-family setting overrides it field by field.
+    rate_limit_budget: RateLimitBudget | None = None
 
 
 @runtime_checkable
@@ -82,6 +94,7 @@ class AppHttp(Protocol):
         declared: DeclaredRouteMetadata | None = None,
         no_body_reason: str | None = None,
         enveloped: bool = True,
+        success_media_types: Mapping[str, tuple[str, ...]] | None = None,
     ) -> Callable[[Callable[[Request], Awaitable[Response]]], Callable[[Request], Awaitable[Response]]]:
         """Register a Starlette handler AND its self-describing route metadata.
 
@@ -108,6 +121,11 @@ class AppHttp(Protocol):
           raw non-enveloped body the envelope emitter cannot describe). Passing it
           alongside a ``response_model``, or omitting it when ``response_model`` is
           ``None``, is a registration error.
+        * ``success_media_types`` — the media types each method's success body is
+          published under, keyed by the route's upper-cased methods; each value is a
+          non-empty tuple. A method left out (or ``None``, the default) publishes
+          ``application/json``. A key outside the route's methods, an empty tuple, or
+          a non-JSON type on an ``enveloped=False`` route is a registration error.
         * ``request_model`` — the pydantic model of the request body; required for
           any route that reads a body, omitted (``None``) otherwise.
         * ``query_model`` — the pydantic model whose fields are published as ``in:
@@ -150,12 +168,14 @@ class AppHttp(Protocol):
           defaults for a route outside the spec surface, whose behavioral metadata
           is never emitted. A route MAY also declare its own ``max_body_bytes`` (a
           per-route request body cap the app's request-body limit honours; default
-          ``None`` defers to the app cap) and its own ``rate_limit_family`` (the
+          ``None`` defers to the app cap), its own ``rate_limit_family`` (the
           rate-limit family the door charges; default ``None`` defers to the
-          path-derived family).
+          path-derived family) and its family's ``rate_limit_budget`` (a
+          :class:`RateLimitBudget`; default ``None`` defers to the app-wide default).
+          A ``reload_gated`` route answers the retriable reload ``503`` while a config
+          reload holds the gate; the surface enforces it around the handler.
 
-        The handler's narrative docstring becomes the operation description, and
-        the reload-gate ``503`` response is derived from the handler body.
+        The handler's narrative docstring becomes the operation description.
         """
         ...
 

@@ -50,6 +50,7 @@ from tai42_contract.plugins.item import PluginItem
 # ``ROUTE_BASE_SEGMENT_RE`` is part of the plugins attribute surface (the marketplace
 # route mount reuses the base-segment rule) though not in the ``*`` export; the
 # explicit-alias re-export keeps it importable from this package.
+from tai42_contract.plugins.routes import PATH_SEGMENT_SLUG_RE as PATH_SEGMENT_SLUG_RE
 from tai42_contract.plugins.routes import ROUTE_BASE_SEGMENT_RE as ROUTE_BASE_SEGMENT_RE
 from tai42_contract.plugins.routes import RouteDecl, RouteMethod, RoutesDecl
 from tai42_contract.plugins.spec import PluginPermissions, PluginSpec

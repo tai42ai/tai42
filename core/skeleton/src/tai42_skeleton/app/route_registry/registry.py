@@ -6,10 +6,11 @@ Records and matches routes, stages the shape index, rolls back an owner, and aud
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from dataclasses import replace
 
 from pydantic import BaseModel
-from tai42_contract.app import DeclaredRouteMetadata
+from tai42_contract.app import DeclaredRouteMetadata, RateLimitBudget
 from tai42_kit.registry import StagedGeneration
 
 from tai42_skeleton.access_control.path_canon import canonicalize_path
@@ -22,13 +23,11 @@ from tai42_skeleton.app.route_registry.metadata import (
     _ShapeEntry,
 )
 from tai42_skeleton.app.route_registry.route_action import (
-    _JSON_MEDIA_TYPE,
+    JSON_MEDIA_TYPE,
     Handler,
     RouteAction,
-    _handler_source,
     _resolve_route_action,
     _shape_specificity,
-    _success_media_types,
     derive_route_action,
 )
 from tai42_skeleton.app.route_shapes import collision, is_fallback_shape, overlap, parse_concrete, parse_shape
@@ -72,11 +71,12 @@ class RouteRegistry:
 
     @property
     def version(self) -> int:
-        """The registry version, bumped by every :meth:`record`.
+        """The registry version, bumped by every :meth:`record` and every committed generation flip.
 
-        A consumer that derives a table from the registry (the rate limiter's public-door coverage) can
-        memoize against it and rebuild when a reload re-records the surface. A re-import that records the
-        SAME metadata still bumps it — a rebuild is idempotent, a stale table is not.
+        A consumer that derives a table from the registry (the rate limiter's public-door coverage and its
+        family budgets) can memoize against it and rebuild when a reload re-records the surface or commits a
+        new generation. A re-import that records the SAME metadata still bumps it — a rebuild is idempotent,
+        a stale table is not.
         """
         return self._version
 
@@ -103,6 +103,7 @@ class RouteRegistry:
         public: bool = False,
         no_body_reason: str | None = None,
         enveloped: bool = True,
+        success_media_types: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         """Record one route's metadata.
 
@@ -111,9 +112,10 @@ class RouteRegistry:
         passes its own — so its behavioral properties come from a declaration,
         never a divination. A handler that declares nothing (a route outside the
         spec surface) records trivial defaults, since its behavioral metadata is
-        never emitted. The per-method success media type is always derived from
-        the handler source. Raises loudly on a missing minimum-bar field so a
-        route that fails to self-describe is caught at import, not in the gate.
+        never emitted. The per-method success media types are the route's own
+        ``success_media_types`` declaration; a method it leaves out answers JSON.
+        Raises loudly on a missing minimum-bar field so a route that fails to
+        self-describe is caught at import, not in the gate.
         """
         if not summary:
             raise ValueError(f"route {'/'.join(methods)} {path} is missing a non-empty summary")
@@ -135,18 +137,9 @@ class RouteRegistry:
                 f"route {'/'.join(methods)} {path} passes both a response_model and a no_body_reason — "
                 "a route has a typed body OR is declared no-body, never both"
             )
-        source = _handler_source(handler)
         method_key = tuple(sorted(m.upper() for m in methods))
         resolved_action = _resolve_route_action(action, method_key, path, authed)
-        success_media_types: dict[str, tuple[str, ...]]
-        if enveloped:
-            success_media_types = _success_media_types(source, method_key)
-        else:
-            # An unwrapped route serves a RAW JSON body (its response_model) — the wire
-            # Content-Type is application/json for every method. A download disposition a
-            # JSON-file door sets (the source-derived octet-stream marker) is a delivery
-            # concern, not a second body shape, so the declared JSON body wins over it.
-            success_media_types = dict.fromkeys(method_key, (_JSON_MEDIA_TYPE,))
+        resolved_media_types = _resolve_success_media_types(path, method_key, success_media_types, enveloped=enveloped)
         if declared is None:
             reload_gated = False
             reads_body = False
@@ -155,6 +148,7 @@ class RouteRegistry:
             additional_success_statuses: tuple[int, ...] = ()
             max_body_bytes: int | None = None
             rate_limit_family: str | None = None
+            rate_limit_budget: RateLimitBudget | None = None
         else:
             reload_gated = declared.reload_gated
             reads_body = declared.reads_body
@@ -163,6 +157,9 @@ class RouteRegistry:
             additional_success_statuses = declared.additional_success_statuses
             max_body_bytes = declared.max_body_bytes
             rate_limit_family = declared.rate_limit_family
+            rate_limit_budget = declared.rate_limit_budget
+            if rate_limit_budget is not None:
+                _check_rate_limit_budget(path, rate_limit_budget)
         meta = RouteMetadata(
             path=path,
             methods=method_key,
@@ -179,7 +176,7 @@ class RouteRegistry:
             error_statuses=error_statuses,
             success_status=success_status,
             additional_success_statuses=additional_success_statuses,
-            success_media_types=success_media_types,
+            success_media_types=resolved_media_types,
             action=resolved_action,
             destructive=destructive,
             self_service=self_service,
@@ -191,6 +188,7 @@ class RouteRegistry:
             enveloped=enveloped,
             max_body_bytes=max_body_bytes,
             rate_limit_family=rate_limit_family,
+            rate_limit_budget=rate_limit_budget,
         )
         self._record_shape(meta, method_key)
         self._routes[path, method_key] = meta
@@ -344,6 +342,19 @@ class RouteRegistry:
         """
         return list(self._shapes.committed())
 
+    def live_routes(self) -> list[RouteMetadata]:
+        """The routes the committed generation serves: the shape index's metadata, in path then method order."""
+        return self._generation_routes(self._shapes.committed())
+
+    def pending_routes(self) -> list[RouteMetadata]:
+        """The routes of the generation being built: the staged one during an epoch build, else the committed one."""
+        return self._generation_routes(self._shape_target())
+
+    @staticmethod
+    def _generation_routes(entries: list[_ShapeEntry]) -> list[RouteMetadata]:
+        """One metadata row per indexed route of ``entries``, in path then method order."""
+        return [entry.meta for entry in sorted(entries, key=lambda e: (e.meta.path, e.meta.methods))]
+
     def match(self, path: str, method: str) -> RouteMetadata | None:
         """The registered handler route that OWNS the concrete request ``(path, method)``, or ``None``.
 
@@ -376,8 +387,12 @@ class RouteRegistry:
         self._shapes.begin()
 
     def commit_shape_staging(self) -> None:
-        """Promote the staged shape generation to committed — one reference flip in the build's no-await swap."""
+        """Promote the staged shape generation to committed — one reference flip in the build's no-await swap.
+
+        Bumps :attr:`version`: the committed generation changes here, so a table memoized on the version rebuilds.
+        """
         self._shapes.commit()
+        self._version += 1
 
     def abort_shape_staging(self) -> None:
         """Drop the staged shape generation on a failed build; the committed live one is untouched."""
@@ -462,6 +477,45 @@ class RouteRegistry:
                 f"{dropped} — their route-registering module did not re-register on reload; refusing to "
                 "commit a route-dropping epoch (the previous epoch keeps serving)"
             )
+
+
+def _check_rate_limit_budget(path: str, budget: RateLimitBudget) -> None:
+    """Refuse a non-positive budget, and a budget on a route that owns no shape to be read from."""
+    if budget.limit <= 0 or budget.burst <= 0:
+        raise ValueError(f"route {path}: rate_limit_budget limit and burst must be positive")
+    if is_fallback_shape(parse_shape(path)):
+        raise ValueError(
+            f"route {path}: a bare rest-converter fallback route cannot declare rate_limit_budget — it owns no shape"
+        )
+
+
+def _resolve_success_media_types(
+    path: str,
+    method_key: tuple[str, ...],
+    declared: Mapping[str, tuple[str, ...]] | None,
+    *,
+    enveloped: bool,
+) -> dict[str, tuple[str, ...]]:
+    """Each method's success media types: the route's declaration, ``application/json`` for one it leaves out.
+
+    Keys are the route's upper-cased methods. A key outside them, an empty tuple, and a non-JSON
+    type on a raw (``enveloped=False``) JSON body are registration errors.
+    """
+    declared = declared or {}
+    for key, media_types in declared.items():
+        if key not in method_key:
+            raise ValueError(
+                f"route {path}: success_media_types names method {key!r}, which the route does not serve "
+                f"(methods: {', '.join(method_key)})"
+            )
+        if not media_types:
+            raise ValueError(f"route {path}: success_media_types for {key!r} must name at least one media type")
+        if not enveloped and any(media != JSON_MEDIA_TYPE for media in media_types):
+            raise ValueError(
+                f"route {path}: success_media_types for {key!r} names a non-JSON type on an enveloped=False route "
+                "— a raw body described by its response_model is JSON"
+            )
+    return {method: tuple(declared.get(method, (JSON_MEDIA_TYPE,))) for method in method_key}
 
 
 # The one process-wide registry. ``HttpSurface.custom_route`` records into it;

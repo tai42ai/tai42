@@ -9,10 +9,12 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
+from tai42_skeleton.conversations.person_thread import person_routes
+from tai42_skeleton.conversations.thread_ids import PERSON_THREAD_PREFIX, PersonThreadId, ThreadIdError, parse_thread_id
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._authority import Caller, require_admin
+from tai42_skeleton.operations._paging import next_page, page_bounds
 from tai42_skeleton.operations.errors import ForbiddenError, NotSupportedError
 from tai42_skeleton.operations.response_models_group_a import (
     FailedConversationsEnvelope,
@@ -21,7 +23,7 @@ from tai42_skeleton.operations.response_models_group_a import (
     TranscriptEnvelope,
 )
 
-from .backend import _person_routes, _require_backend, _require_route, _thread_not_found
+from .backend import _require_backend, _require_route, _thread_not_found
 from .models import (
     MAX_THREAD_PAGE,
     MAX_THREAD_PAGE_SIZE,
@@ -39,29 +41,6 @@ from .routes import _validate_route_name
 # package-alias test-double seam for ``get_conversations_manager``/``resolve_caller``/
 # ``assert_execution_key_bindable``.
 _pkg = sys.modules["tai42_skeleton.operations.conversations"]
-
-
-def _page_bounds(page: int, page_size: int) -> tuple[int, int]:
-    """Return the ``(offset, limit)`` a page/page_size pair names.
-
-    Both must be at least 1 and ``page`` at most :data:`MAX_THREAD_PAGE`; a page size above
-    the cap is capped, never refused.
-    """
-    if page < 1 or page_size < 1:
-        raise BadRequestError(f"page and page_size must be >= 1, got page={page} page_size={page_size}")
-    if page > MAX_THREAD_PAGE:
-        raise BadRequestError(f"page must be <= {MAX_THREAD_PAGE}, got page={page}")
-    limit = min(page_size, MAX_THREAD_PAGE_SIZE)
-    return (page - 1) * limit, limit
-
-
-def _next_page(page: int, limit: int, total: int) -> int | None:
-    """Return the next page number, or ``None`` on the last page.
-
-    Read from the INDEXED total, not the returned count: a page shortened by rows that
-    expired under it is not the end.
-    """
-    return page + 1 if page * limit < total else None
 
 
 def _parse_status_filter(status: str | None):
@@ -136,7 +115,7 @@ async def list_conversation_threads(
     manager = _require_backend()
     require_admin(await _pkg.resolve_caller())
     await _require_route(manager, route_name)
-    offset, limit = _page_bounds(page, page_size)
+    offset, limit = page_bounds(page, page_size, max_page=MAX_THREAD_PAGE, max_page_size=MAX_THREAD_PAGE_SIZE)
     status_filter = _parse_status_filter(status)
     address_filter = _parse_address_filter(address)
     listed, unreadable = await manager.records.list_route_threads(
@@ -157,7 +136,7 @@ async def list_conversation_threads(
         "total": listed.total,
         "page": page,
         "page_size": limit,
-        "next_page": _next_page(page, limit, listed.total),
+        "next_page": next_page(page, limit, listed.total),
         "truncated": listed.truncated,
         "unreadable": unreadable,
     }
@@ -197,22 +176,41 @@ async def get_conversation_thread(
     pass reclaims the members and the thread becomes unknown.
 
     Returns ``{"items", "total", "page", "page_size", "next_page", "order", "truncated",
-    "unreadable"}``, where ``total`` counts the thread's indexed records for an unfiltered read,
-    or the matches a bounded ``q`` scan found, and ``unreadable`` counts the members whose row
-    was gone or unparseable.
+    "unreadable", "person_id"}``, where ``total`` counts the thread's indexed records for an
+    unfiltered read, or the matches a bounded ``q`` scan found, ``unreadable`` counts the members
+    whose row was gone or unparseable, and ``person_id`` names the linked person of a person
+    thread (``None`` for a route-keyed thread).
     """
     _validate_route_name(route_name)
     if not thread_id.strip():
         raise BadRequestError("thread_id must be a non-blank thread identifier")
     if order not in TRANSCRIPT_ORDERS:
         raise BadRequestError(f"order must be one of {list(TRANSCRIPT_ORDERS)}, got {order!r}")
-    offset, limit = _page_bounds(page, page_size)
+    offset, limit = page_bounds(page, page_size, max_page=MAX_THREAD_PAGE, max_page_size=MAX_THREAD_PAGE_SIZE)
     needle = q if (q is not None and q.strip()) else None
     manager = _require_backend()
     caller = await _pkg.resolve_caller()
-    if thread_id.startswith(PERSON_THREAD_PREFIX):
+    try:
+        parsed = parse_thread_id(thread_id)
+    except ThreadIdError:
+        # A person-form id naming no person is the uniform not-found; any other id outside the
+        # grammar reads as a route-keyed thread the index does not hold.
+        if thread_id.startswith(PERSON_THREAD_PREFIX):
+            await _require_route(manager, route_name)
+            raise _thread_not_found(thread_id) from None
+        parsed = None
+    if isinstance(parsed, PersonThreadId):
         return await _read_person_thread(
-            manager, route_name, thread_id, caller, page=page, offset=offset, limit=limit, order=order, q=needle
+            manager,
+            route_name,
+            thread_id,
+            parsed.person_id,
+            caller,
+            page=page,
+            offset=offset,
+            limit=limit,
+            order=order,
+            q=needle,
         )
     await _require_route(manager, route_name)
     transcript, unreadable = await manager.records.list_thread_records(
@@ -223,16 +221,19 @@ async def get_conversation_thread(
     # that found nothing in a thread that exists returns an empty page.
     if needle is None and transcript.total == 0:
         raise _thread_not_found(thread_id)
-    return _transcript_response(transcript, caller, page=page, limit=limit, order=order, unreadable=unreadable)
+    return _transcript_response(
+        transcript, caller, page=page, limit=limit, order=order, unreadable=unreadable, person_id=None
+    )
 
 
 def _transcript_response(
-    transcript, caller: Caller, *, page: int, limit: int, order: str, unreadable: int
+    transcript, caller: Caller, *, page: int, limit: int, order: str, unreadable: int, person_id: str | None
 ) -> dict[str, Any]:
     """Build the shared transcript page shape both the route-keyed and aggregated-person reads return.
 
     An admin reads whole records, a non-admin the caller-safe projection. ``unreadable`` counts
-    the members whose row was gone or unparseable, omitted from the page.
+    the members whose row was gone or unparseable, omitted from the page. ``person_id`` is the
+    linked person a person thread aggregates, ``None`` for a route-keyed thread.
     """
     view = (lambda record: record.view()) if caller.is_admin else (lambda record: record.caller_view())
     return {
@@ -240,10 +241,11 @@ def _transcript_response(
         "total": transcript.total,
         "page": page,
         "page_size": limit,
-        "next_page": _next_page(page, limit, transcript.total),
+        "next_page": next_page(page, limit, transcript.total),
         "order": order,
         "truncated": transcript.truncated,
         "unreadable": unreadable,
+        "person_id": person_id,
     }
 
 
@@ -251,6 +253,7 @@ async def _read_person_thread(
     manager: BaseConversationsManager,
     route_name: str,
     thread_id: str,
+    person_id: str,
     caller: Caller,
     *,
     page: int,
@@ -269,21 +272,22 @@ async def _read_person_thread(
     is an empty page (the person is real, the search simply matched nothing). An admin reads
     whole records; a non-admin the caller-safe projection.
     """
-    person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
     route = await _require_route(manager, route_name)
     person = await manager.persons.get_by_id(person_id)
     if (
         person is None
         or (route.target_kind, route.target_name) != (person.target_kind, person.target_name)
-        or route_name not in _person_routes(person)
+        or route_name not in person_routes(person)
     ):
         raise _thread_not_found(thread_id)
     transcript, unreadable = await manager.records.list_person_thread_records(
-        sorted(_person_routes(person)), thread_id, offset=offset, limit=limit, newest_first=order == "desc", q=q
+        sorted(person_routes(person)), thread_id, offset=offset, limit=limit, newest_first=order == "desc", q=q
     )
     if q is None and transcript.total == 0:
         raise _thread_not_found(thread_id)
-    return _transcript_response(transcript, caller, page=page, limit=limit, order=order, unreadable=unreadable)
+    return _transcript_response(
+        transcript, caller, page=page, limit=limit, order=order, unreadable=unreadable, person_id=person_id
+    )
 
 
 @operation(
@@ -316,14 +320,14 @@ async def search_conversation_messages(route_name: str, q: str, page: int = 1, p
     manager = _require_backend()
     require_admin(await _pkg.resolve_caller())
     await _require_route(manager, route_name)
-    offset, limit = _page_bounds(page, page_size)
+    offset, limit = page_bounds(page, page_size, max_page=MAX_THREAD_PAGE, max_page_size=MAX_THREAD_PAGE_SIZE)
     found, unreadable = await manager.records.search_route_messages(route_name, offset=offset, limit=limit, q=q)
     return {
         "items": [record.view() for record in found.records],
         "total": found.total,
         "page": page,
         "page_size": limit,
-        "next_page": _next_page(page, limit, found.total),
+        "next_page": next_page(page, limit, found.total),
         "truncated": found.truncated,
         "unreadable": unreadable,
     }

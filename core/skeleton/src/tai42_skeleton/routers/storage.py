@@ -122,6 +122,7 @@ delete_dir = register_operation_route(
     tags=["storage"],
     response_model=None,
     no_body_reason="Storage resource download: raw bytes",
+    success_media_types={"GET": ("application/octet-stream",)},
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=False,
