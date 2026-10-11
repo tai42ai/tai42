@@ -489,6 +489,23 @@ def test_tools_runs_get(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "succeeded" in result.output
 
 
+def test_tools_runs_get_prints_a_failed_terminal_s_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return data_response(
+            {
+                "run_id": "r1",
+                "status": "failed",
+                "error": "tool run failed",
+                "outcome": {"error": "the run's own reason", "error_kind": "bad_input"},
+            }
+        )
+
+    result = run_cli(monkeypatch, handler, ["tools", "runs", "get", "r1"])
+    assert result.exit_code == 0, result.output
+    assert "tool run failed" in result.output
+    assert "the run's own reason" in result.output
+
+
 def _capture_run_tool(seen: dict):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/run-tool"

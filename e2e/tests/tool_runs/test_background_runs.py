@@ -28,3 +28,24 @@ async def test_tool_run_started_on_a_polls_terminal_on_b(replicas_stack: TaiStac
         return view["status"] == "succeeded"
 
     await wait_for_async(terminal_on_b, deadline=10.0, message="tool run never reached succeeded on B")
+
+
+async def test_a_failed_terminal_records_the_plain_message_and_its_outcome(
+    replicas_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    api_a = replicas_stack.api(port=replicas_stack.port_a)
+    api_b = replicas_stack.api(port=replicas_stack.port_b)
+    reason = uniq("reason")
+    submitted = await api_a.post(
+        "/api/tool-runs", json={"tool_name": "e2e_failed_terminal", "arguments": {"reason": reason}}, expect=202
+    )
+    run_id = submitted["run_id"]
+
+    async def terminal_on_b() -> dict | None:
+        view = await api_b.get(f"/api/tool-runs/{run_id}")
+        return view if view["status"] != "running" else None
+
+    view = await wait_for_async(terminal_on_b, deadline=10.0, message="the failed run never reached a terminal on B")
+    assert view["status"] == "failed", view
+    assert view["error"] == "tool run failed", view
+    assert view["outcome"] == {"reason": reason}, view

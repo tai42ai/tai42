@@ -64,3 +64,36 @@ async def test_hook_fired_run_is_recorded_and_listable(replicas_stack: TaiStack,
     )
     assert view["tool_name"] == "e2e_record"
     assert view["run_id"]
+
+
+async def test_a_hook_fired_failed_terminal_records_the_plain_message_and_its_outcome(
+    replicas_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    topic = uniq("topic").replace("_", "-")
+    reason = uniq("reason")
+    api_a = replicas_stack.api(port=replicas_stack.port_a)
+    api_b = replicas_stack.api(port=replicas_stack.port_b)
+    await api_a.post(
+        "/api/hooks",
+        json={
+            "name": uniq("hook"),
+            "topic": topic,
+            "tool": "e2e_failed_terminal",
+            "tool_kwargs": {"reason": reason},
+            "execution_key": uniq("exec"),
+        },
+    )
+    await api_b.request_raw("POST", f"/universal_webhook/{topic}", json={"any": "payload"})
+
+    async def recorded_failure() -> dict | None:
+        listed = await api_a.get("/api/tool-runs?tool_name=e2e_failed_terminal")
+        for entry in listed:
+            view = await api_a.get(f"/api/tool-runs/{entry['run_id']}")
+            if view["status"] == "failed" and view.get("outcome") == {"reason": reason}:
+                return view
+        return None
+
+    view = await wait_for_async(
+        recorded_failure, deadline=10.0, message="the hook-fired failed terminal never recorded its outcome"
+    )
+    assert view["error"] == "tool run failed", view

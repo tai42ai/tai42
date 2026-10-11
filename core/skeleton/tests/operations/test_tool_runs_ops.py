@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import AnswerFormat, InteractionRequest, SuspendedInteraction
+from tai42_contract.interactions import AnswerFormat, InteractionRequest, RunTerminalFailed, SuspendedInteraction
 from tai42_contract.secrets import SecretValue
 from tai42_contract.states import StateContext, StateSubject, SubjectCandidates
 from tai42_kit.utils.state_context import state_context
@@ -327,6 +327,29 @@ async def test_hook_run_recorded_of_a_user_parking_tool_records_the_suspended_se
     }
 
 
+async def test_hook_run_recorded_of_a_failed_terminal_records_the_outcome_and_re_raises(wired):
+    # The inline hook/trigger path records the failed terminal's outcome whole on the record, then
+    # re-raises the ORIGINAL failure to its caller (``propagate_failure``). ``get_run`` (the operation the
+    # HTTP route and the projected ``get_run`` tool serve) reads the outcome back.
+    tools = wired.install()
+    failure = RunTerminalFailed({"reason": "stopped", "items": [1, 2]})
+
+    async def _raise(key, arguments, *, offload_sync=False, extras=None):
+        raise failure
+
+    tools.run_tool = _raise
+    with pytest.raises(RunTerminalFailed) as raised:
+        await ops.run_recorded("alpha", {})
+    assert raised.value is failure
+
+    entries = await ops.list_tool_runs("alpha")
+    assert [entry["status"] for entry in entries] == ["failed"]
+    view = await ops.get_run(entries[0]["run_id"])
+    assert view["status"] == "failed"
+    assert view["error"] == "tool run failed"
+    assert view["outcome"] == {"reason": "stopped", "items": [1, 2]}
+
+
 async def test_crash_resume_re_drive_records_caller_asks_under_the_fires_own_subject(wired):
     # The crash-resume re-drive replays the recorded fire under the SAME subject the fire ran under
     # (its persisted ``state_context``), never the reader door's ambient one: a re-driven caller-
@@ -364,6 +387,28 @@ async def test_crash_resume_re_drive_records_caller_asks_under_the_fires_own_sub
     assert answer["asks"][0]["to"] == "caller"
     # The deposited context is the FIRE's hook door, never the reader door's ambient one.
     assert seen["door"] == "hook"
+
+
+async def test_crash_resume_re_drive_of_a_failed_terminal_records_the_outcome(wired):
+    # The re-drive enters the same terminal-record shaping as the fire it replays: a run that reaches a
+    # failed terminal records the plain message and the outcome whole, and the raise reaches the caller.
+    from tai42_skeleton.operations.tool_runs import reconcile
+
+    tools = wired.install()
+
+    async def _raise(key, arguments, *, offload_sync=False, extras=None):
+        raise RunTerminalFailed({"reason": "aborted"})
+
+    tools.run_tool = _raise
+    record = {"tool_name": "alpha", "arguments": "{}", "extras": "{}"}
+    with pytest.raises(RunTerminalFailed):
+        await reconcile._crash_resume("r-x", record)
+
+    entries = await ops.list_tool_runs("alpha")
+    assert [entry["status"] for entry in entries] == ["failed"]
+    view = await ops.get_run(entries[0]["run_id"])
+    assert view["error"] == "tool run failed"
+    assert view["outcome"] == {"reason": "aborted"}
 
 
 async def test_crash_resume_re_drive_records_the_suspended_sentinel_for_a_user_park(wired):
