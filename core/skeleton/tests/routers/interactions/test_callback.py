@@ -914,20 +914,17 @@ async def test_callback_post_oversized_query_413_when_off(wired):
 
 
 async def test_post_reads_the_body_once(wired, monkeypatch):
-    # The size guard's bounded read is the one read of the body: the claim takes those bytes.
-    import importlib
-
-    # The package re-exports the door handler under the module's name; patch the module itself.
-    callback_module = importlib.import_module("tai42_skeleton.routers.interactions.callback")
-
+    # The size guard's bounded read is the one read of the body: the claim takes those bytes. The
+    # read is counted in the namespace the served door resolves its globals from.
+    door_globals = router.callback.__globals__
     reads = []
-    real_read = callback_module.read_bounded_body
+    real_read = door_globals["read_bounded_body"]
 
     async def _counting_read(request, cap):
         reads.append(cap)
         return await real_read(request, cap)
 
-    monkeypatch.setattr(callback_module, "read_bounded_body", _counting_read)
+    monkeypatch.setitem(door_globals, "read_bounded_body", _counting_read)
     task = asyncio.create_task(ask("Sign?", answer_format="external", link="{callback_url}", timeout=5))
     await await_add_event(wired.fake, wired.store)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"signed":true}'))
