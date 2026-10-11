@@ -6,7 +6,7 @@ import sys
 from collections.abc import Awaitable, Callable
 
 from fastapi import Request
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from starlette.responses import JSONResponse, Response
 from tai42_contract.conversations import (
     ConversationAnswer,
@@ -24,7 +24,8 @@ from tai42_skeleton.conversations.turn import (
     EventTargetNotToolError,
     ThreadNotFoundError,
 )
-from tai42_skeleton.operations.errors import NotSupportedError
+from tai42_skeleton.operations.adapter import read_json_object, validate_body
+from tai42_skeleton.operations.errors import BadRequestError, NotSupportedError
 
 # This submodule's OWN package object (the one it was imported as part of), captured at
 # import time from ``sys.modules`` — NOT ``from tai42_skeleton.routers import conversations``,
@@ -163,19 +164,9 @@ async def send_conversation_message(request: Request) -> Response:
     """
     route_name = request.path_params["route_name"]
     try:
-        body = await request.json()
-    except ValueError:
-        return _error("invalid JSON body", 400)
-    if not isinstance(body, dict):
-        return _error("body must be a JSON object", 400)
-    try:
-        message = ConversationMessage.model_validate(body)
-    except ValidationError as exc:
-        # VALUE-FREE: a params failure's pydantic error dict embeds ``input_value``, so the
-        # body renders each error's ``msg`` only (which names the violated bound, never the
-        # value) — never ``str(exc)`` or the error dicts, both of which reflect the input.
-        detail = "; ".join(error["msg"] for error in exc.errors())
-        return _error(f"invalid conversation message: {detail}", 400)
+        message = validate_body(ConversationMessage, await read_json_object(request), "conversation message")
+    except BadRequestError as exc:
+        return _error(exc.message, 400)
 
     wait_seconds = 0 if message.wait_seconds is None else message.wait_seconds
 
@@ -243,18 +234,9 @@ async def send_conversation_event(request: Request) -> Response:
     """
     route_name = request.path_params["route_name"]
     try:
-        body = await request.json()
-    except ValueError:
-        return _error("invalid JSON body", 400)
-    if not isinstance(body, dict):
-        return _error("body must be a JSON object", 400)
-    try:
-        submission = ConversationEventSubmission.model_validate(body)
-    except ValidationError as exc:
-        # VALUE-FREE: render each error's ``msg`` (which names the violated bound, never the
-        # value), never ``str(exc)`` or the error dicts — both reflect the opaque input.
-        detail = "; ".join(error["msg"] for error in exc.errors())
-        return _error(f"invalid conversation event: {detail}", 400)
+        submission = validate_body(ConversationEventSubmission, await read_json_object(request), "conversation event")
+    except BadRequestError as exc:
+        return _error(exc.message, 400)
 
     from tai42_skeleton.conversations import submit_event
 

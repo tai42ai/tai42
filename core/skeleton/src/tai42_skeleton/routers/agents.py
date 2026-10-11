@@ -72,8 +72,10 @@ from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.operations import agents as agent_ops
 from tai42_skeleton.operations import operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object
 from tai42_skeleton.operations.agents import list_agents as _list_agents_op
 from tai42_skeleton.operations.agents import list_spec_runnable_agents as _list_spec_runnable_agents_op
+from tai42_skeleton.operations.errors import BadRequestError
 from tai42_skeleton.routers.paths import AGENT_RUNS_TEMPLATE
 from tai42_skeleton.tools.turn_budget import drive_live_caller_astream
 
@@ -186,11 +188,9 @@ async def _build_run_kwargs(
     """
     baked = baked or {}
     try:
-        body = await request.json()
-    except ValueError:
-        return _error("invalid JSON body", 400)
-    if not isinstance(body, dict):
-        return _error("body must be a JSON object of agent input", 400)
+        body = await read_json_object(request)
+    except BadRequestError as exc:
+        return _error(exc.message, 400)
     # Reject a body key that is not a ``ToolInput`` field: pydantic's default
     # ``extra="ignore"`` would silently drop a typo'd field and run with its default,
     # so a loud 400 names the offending key(s) instead.

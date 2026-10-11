@@ -26,6 +26,7 @@ from starlette.requests import Request
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object
 from tai42_skeleton.operations.backend import backend_info as _backend_info_op
 from tai42_skeleton.operations.backend import fleet_reload_config as _fleet_reload_config_op
 from tai42_skeleton.operations.backend import list_workers as _list_workers_op
@@ -53,12 +54,7 @@ async def _reload_targets(request: Request) -> dict[str, Any]:
     Rejects a malformed body / non-string-list targets with a loud 400 before the operation
     runs.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object") from None
+    body = await read_json_object(request)
     targets = body.get("targets")
     if targets is not None and (not isinstance(targets, list) or not all(isinstance(t, str) for t in targets)):
         raise BadRequestError("'targets' must be a list of worker names") from None
