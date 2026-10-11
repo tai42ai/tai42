@@ -169,7 +169,7 @@ dashboard registration and no inbound webhook. Set the vars and run.
 | Service (`TAI_E2E_REAL=`) | Template vars |
 |---|---|
 | `llm` | `REAL_E2E_LLM_PROVIDER` (default openai), the selected provider's key (e.g. `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`), optional `REAL_E2E_LLM_MODEL` |
-| `embeddings` | `REAL_E2E_EMBEDDING_PROVIDER` (default openai; openai/mistral/google/huggingface), that provider's key, optional `REAL_E2E_EMBEDDING_MODEL` (toggles independently of `llm`) |
+| `embeddings` | `REAL_E2E_EMBEDDING_PROVIDER` (default openai; openai/mistral/google), that provider's key, optional `REAL_E2E_EMBEDDING_MODEL` (toggles independently of `llm`) |
 | `langfuse` | `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` |
 | `storage-s3` | `STORAGE_S3_BUCKET`, `_REGION`, `_ACCESS_KEY`, `_SECRET_KEY`, `_ENDPOINT`, `_ADDRESSING_STYLE`, `_REQUEST_CHECKSUM_CALCULATION` — **also set `TAI_E2E_STORAGE=s3-real`** |
 | `storage-github` | `STORAGE_GITHUB_USERNAME`, `_REPO`, `_BRANCH`, `_TOKEN` — **also set `TAI_E2E_STORAGE=github-real`** |
