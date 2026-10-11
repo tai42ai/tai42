@@ -47,17 +47,20 @@ surfaces as itself.
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import OpaqueJson
 from tai42_contract.interactions import RunTerminalFailed
+from tai42_contract.monitoring import RunAttribution
 from tai42_contract.secrets import unwrap_secrets
 from tai42_contract.states import StateSubject
 from tai42_contract.states.errors import StatePendingSaveFailedError, StatePendingSaveTimeoutError
 from tai42_contract.tools import UndeclaredPauseError
 
+from tai42_skeleton.access_control import user as access_control_user
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.interactions.terminal_failure import FAILED_TERMINAL_MESSAGE, failed_outcome_detail
 from tai42_skeleton.operations import (
@@ -79,6 +82,8 @@ from tai42_skeleton.operations.response_models_group_b import (
     ToolsSchemaMap,
     ToolTagListResponse,
 )
+from tai42_skeleton.states import api_context
+from tai42_skeleton.tools.attribution import run_attribution
 from tai42_skeleton.tools.binding import ToolResultEncodingError, UnknownToolError, find_lone_surrogate
 
 if TYPE_CHECKING:
@@ -259,20 +264,11 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
     # live-grants rebuild the crash-resume re-drive and the background submit use; a
     # caller whose key carries no authority binds nothing and behaves exactly as
     # before. An already-bound identity (an inline fire reaching this op) is never
-    # clobbered. Function-local imports keep the operations→authz edge lazy,
-    # matching the repo's guarded authz-edge idiom.
-    from contextlib import nullcontext
-
-    from tai42_contract.monitoring import RunAttribution
-
-    from tai42_skeleton.access_control.user import request_identity
-    from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
-    from tai42_skeleton.tools.attribution import run_attribution
-
+    # clobbered.
     # The caller's own principal, resolved once: it both attributes the run and (when no
     # execution identity is bound yet) is the key the dispatch's identity is rebuilt from.
-    caller_key, _restricted = request_identity()
-    async with caller_execution_identity(caller_key):
+    caller_key, _restricted = access_control_user.request_identity()
+    async with api_context.caller_execution_identity(caller_key):
         try:
             # Deposit the caller's identity as this run's attribution so a runs-index row the
             # dispatch registers (a preset target) is born with a ``user_id`` rather than NULL;
@@ -285,7 +281,7 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
             # runs through ``submit_run``/``_supervise``, never this line), so a wrapped
             # secret in the result is revealed here for the one door that hands the caller
             # the real value; every recorder masks its own copy instead.
-            with attribution, api_state_context(subject, caller_key):
+            with attribution, api_context.api_state_context(subject, caller_key):
                 outcome = await tai42_app.interactions.visit(
                     target_name=tool_name,
                     cancel=[],

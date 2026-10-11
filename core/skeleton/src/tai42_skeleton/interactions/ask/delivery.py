@@ -14,6 +14,8 @@ from tai42_contract.channels import Channel, ChannelDelivery, ChannelDeliveryErr
 from tai42_contract.interactions import AnswerFormat, FormData, FormPage, FormReactions, MediaItem
 
 from tai42_skeleton.channels.send_span import send_span
+from tai42_skeleton.hooks import cache as hooks_cache
+from tai42_skeleton.interactions import helper
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore, PruneResult
 from tai42_skeleton.tools.turn_budget import mark_parked_question
@@ -47,8 +49,6 @@ async def prune(store: InteractionStore, interaction_id: str, group_id: str) -> 
     """
     from tai42_kit.clients.impl.redis import RedisClient
 
-    from tai42_skeleton.interactions import helper
-
     async with helper.client_ctx(RedisClient, helper.interactions_settings().redis) as conn:
         return await store.prune_pending(conn, interaction_id, group_id)
 
@@ -64,12 +64,6 @@ async def emit_delivery_failed(*, channel: str, interaction_id: str, recipient: 
     hooks-manager failure is logged and swallowed so the event can never turn a loud
     delivery failure into a different error — the raise path stays exactly as it was.
     """
-    # Local import: reach the hooks-manager accessor only when emitting, mirroring the
-    # inbound ladder's pattern (keeps a module-load import edge out of this module and
-    # avoids an import cycle across packages).
-    from tai42_skeleton.hooks.cache import get_hooks_manager
-    from tai42_skeleton.interactions import helper
-
     payload = {
         "channel": channel,
         "interaction_id": interaction_id,
@@ -77,7 +71,7 @@ async def emit_delivery_failed(*, channel: str, interaction_id: str, recipient: 
         "error": error,
     }
     try:
-        await get_hooks_manager().on_event(topic=helper.DELIVERY_FAILED_EVENT_TOPIC, payload=payload)
+        await hooks_cache.get_hooks_manager().on_event(topic=helper.DELIVERY_FAILED_EVENT_TOPIC, payload=payload)
     except Exception:
         logger.warning(
             "ask: failed to emit %r for the abandoned delivery on channel %r interaction %s",
@@ -178,8 +172,6 @@ async def deliver_with_retry(
     The retry policy is read from the interactions settings at each decision, never kept across
     an await.
     """
-    from tai42_skeleton.interactions import helper
-
     loop = asyncio.get_running_loop()
     attempt = 0
     retry_in: float | None = None

@@ -28,7 +28,9 @@ from tai42_contract.states.errors import StatesError
 from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG
 
 from tai42_skeleton.backup.registry import _empty_report, current_import_mode
+from tai42_skeleton.backup.webhooks_section import _export_webhooks, _import_webhooks
 from tai42_skeleton.schedules import check_schedule_definition
+from tai42_skeleton.states.backup import register_states_backup_section
 from tai42_skeleton.tools.state_binding import is_binding_refusal
 
 logger = logging.getLogger(__name__)
@@ -411,11 +413,6 @@ def register_core_sections(registry: Any) -> None:
     never re-registers. Registration order IS an import's replay order: a section
     deciding its records against live state another section restores is registered AFTER it.
     """
-    # Imported here (not at module top): ``webhooks_section``'s imports reach
-    # ``tai42_skeleton.app.serving_core``, which imports this package.
-    from tai42_skeleton.backup.webhooks_section import _export_webhooks, _import_webhooks
-    from tai42_skeleton.states.backup import register_states_backup_section
-
     registry.register_section("manifest", _export_manifest, _import_manifest)
     registry.register_section("env", _export_env, _import_env, secret=True)
     registry.register_section("access_control", _export_access_control, _import_access_control, secret=True)

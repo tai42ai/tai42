@@ -8,6 +8,7 @@ from tai42_skeleton.app import lifecycle as _lifecycle
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.mount_map import bind_module
+from tai42_skeleton.operations import reregister_operations
 from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.tools import mcp_health
 
@@ -48,11 +49,6 @@ class ComponentImportMixin(LifecycleState):
         # each route re-attaches its template + method to the metadata record already IN
         # the registry (the record the projection reads and the tool-edge authorization
         # synthesizes its concrete path from).
-        #
-        # Imported here rather than at module scope: the app import chain pulls the
-        # operations package in, so a module-level import of it would be circular.
-        from tai42_skeleton.operations import reregister_operations
-
         reregister_operations()
 
         # Build the module → mount-binding map BEFORE any manifest module imports, so

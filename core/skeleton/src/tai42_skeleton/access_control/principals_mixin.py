@@ -7,27 +7,38 @@ source-size budget. :class:`PrincipalsStoreMixin` is mixed into
 same component pool — the ``disabled`` writer touches both tables in one transaction
 through the policy half's cursor-level writers.
 
-The Postgres transport seam is resolved through the ``store`` module
-(``_store.client_ctx``) at call time, so a test that patches the policy store's transport
-covers the principal surface too — there is one patch point for the whole store.
+The mixin reaches Postgres only through the host store's :meth:`PrincipalsStoreMixin._pool`,
+which the store resolves through its own module's ``client_ctx`` at call time, so a test that
+patches the policy store's transport covers the principal surface too — there is one patch
+point for the whole store. Policy rows are read and written through
+:mod:`tai42_skeleton.access_control.policy_rows`, which the store uses too, so this module
+never imports the store it is mixed into.
 """
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any
 
+from psycopg import AsyncConnection
 from psycopg.errors import UniqueViolation
+from psycopg.rows import TupleRow
+from psycopg_pool import AsyncConnectionPool
 from tai42_contract.access_control import DISABLED_CLAIM
 from tai42_contract.access_control.models import AccessPolicy
 from tai42_contract.accounts.errors import LastAdminError
-from tai42_kit.clients.impl.postgres import Json, PostgresClient, read_connection
-from tai42_kit.db import component_store_settings
+from tai42_kit.clients.impl.postgres import Json, read_connection
 
-from tai42_skeleton.access_control import store as _store
+from tai42_skeleton.access_control.policy_rows import (
+    policy_body_from_row,
+    refuse_empty_policy_edit,
+    resolve_policy_restore,
+    resolve_policy_update,
+    write_policy_body,
+)
 from tai42_skeleton.access_control.user import is_admin_policy
-from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.db.lock_keys import FIRST_PRINCIPAL_LOCK_KEY
 
 # The refusal every guarded door raises when a change would leave no enabled admin principal.
@@ -80,7 +91,7 @@ async def _count_other_enabled_admins_on_cursor(cur: Any, user_id: str) -> int:
         (user_id,),
     )
     rows = await cur.fetchall()
-    return sum(1 for row in rows if _holds_admin_standing(_store.policy_body_from_row(row)))
+    return sum(1 for row in rows if _holds_admin_standing(policy_body_from_row(row)))
 
 
 async def _target_is_enabled_admin_on_cursor(cur: Any, user_id: str) -> bool:
@@ -98,7 +109,7 @@ async def _target_is_enabled_admin_on_cursor(cur: Any, user_id: str) -> bool:
     row = await cur.fetchone()
     if row is None:
         return False
-    return _holds_admin_standing(_store.policy_body_from_row(row))
+    return _holds_admin_standing(policy_body_from_row(row))
 
 
 async def _apply_disabled_on_cursor(cur: Any, user_id: str, disabled: bool) -> dict[str, Any]:
@@ -126,14 +137,14 @@ async def _apply_disabled_on_cursor(cur: Any, user_id: str, disabled: bool) -> d
     row = await cur.fetchone()
     if row is None:
         raise KeyError(f"principal {user_id!r} has no policy row to project 'disabled' onto")
-    body = _store.policy_body_from_row(row)
+    body = policy_body_from_row(row)
     policy_data = dict(body["policy_data"])
     if disabled:
         policy_data[DISABLED_CLAIM] = True
     else:
         policy_data.pop(DISABLED_CLAIM, None)
     body["policy_data"] = policy_data
-    await _store.write_policy_body(cur, user_id, body)
+    await write_policy_body(cur, user_id, body)
     return body
 
 
@@ -206,7 +217,7 @@ class _PrincipalGuard:
             (user_id,),
         )
         row = await self._cur.fetchone()
-        return _store.policy_body_from_row(row) if row is not None else None
+        return policy_body_from_row(row) if row is not None else None
 
     async def write_policy(self, user_id: str, body: dict[str, Any]) -> None:
         """Write ``body`` as the target's policy under the guard, creating the row when absent.
@@ -216,7 +227,7 @@ class _PrincipalGuard:
         """
         if body["scopes"]:
             await self._store._lock_and_validate_scopes(self._cur, body["scopes"])
-        await _store.write_policy_body(self._cur, user_id, body)
+        await write_policy_body(self._cur, user_id, body)
         if self._cur.rowcount == 0:
             await self._cur.execute(
                 "INSERT INTO access_control_policies (user_id, scopes, policy_data, condition) VALUES (%s, %s, %s, %s)",
@@ -230,12 +241,12 @@ class _PrincipalGuard:
         scope nor a condition, worded for a principal. Returns the committed body, or ``None``
         when the target has no policy row.
         """
-        body = await _store.resolve_policy_update(self._store, self._cur, user_id, updates)
+        body = await resolve_policy_update(self._store, self._cur, user_id, updates)
         if body is None:
             return None
         await self.refuse_if_last_admin(user_id, body)
-        _store.refuse_empty_policy_edit(updates, body, principal=True)
-        await _store.write_policy_body(self._cur, user_id, body)
+        refuse_empty_policy_edit(updates, body, principal=True)
+        await write_policy_body(self._cur, user_id, body)
         return body
 
     async def restore_policy_body(self, user_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
@@ -243,11 +254,11 @@ class _PrincipalGuard:
 
         Returns the restored body, or ``None`` when the target has no policy row.
         """
-        resolved = await _store.resolve_policy_restore(self._cur, user_id, body)
+        resolved = await resolve_policy_restore(self._cur, user_id, body)
         if resolved is None:
             return None
         await self.refuse_if_last_admin(user_id, resolved)
-        await _store.write_policy_body(self._cur, user_id, resolved)
+        await write_policy_body(self._cur, user_id, resolved)
         return resolved
 
     async def set_disabled(self, user_id: str, disabled: bool) -> dict[str, Any]:
@@ -267,8 +278,12 @@ class _PrincipalGuard:
         return policy_existed, principal_existed
 
 
-class PrincipalsStoreMixin:
+class PrincipalsStoreMixin(ABC):
     """The principal CRUD methods of the access-control store."""
+
+    @abstractmethod
+    def _pool(self) -> AbstractAsyncContextManager[AsyncConnectionPool[AsyncConnection[TupleRow]]]:
+        """The host store's app-pooled Postgres client, as an async context manager yielding its pool."""
 
     async def create_principal(
         self, user_id: str, kind: str, display_name: str, created_by: str | None
@@ -280,7 +295,7 @@ class PrincipalsStoreMixin:
         than a silent second row.
         """
         async with (
-            _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            self._pool() as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -305,7 +320,7 @@ class PrincipalsStoreMixin:
         owner has no creator, so ``created_by`` is ``NULL``.
         """
         async with (
-            _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            self._pool() as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -337,7 +352,7 @@ class PrincipalsStoreMixin:
         written.
         """
         async with (
-            _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            self._pool() as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -354,7 +369,7 @@ class PrincipalsStoreMixin:
         if not user_ids:
             return {}
         async with (
-            _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            self._pool() as pool,
             read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
@@ -364,12 +379,12 @@ class PrincipalsStoreMixin:
                 (list(user_ids),),
             )
             rows = await cur.fetchall()
-        return {row[0]: _store.policy_body_from_row(row[1:]) for row in rows}
+        return {row[0]: policy_body_from_row(row[1:]) for row in rows}
 
     async def get_principal(self, user_id: str) -> dict[str, Any] | None:
         """The principal row for ``user_id``, or ``None`` when none exists."""
         async with (
-            _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            self._pool() as pool,
             read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
@@ -384,7 +399,7 @@ class PrincipalsStoreMixin:
     async def list_principals(self) -> list[dict[str, Any]]:
         """Every principal row, ordered by ``created_at`` then ``user_id``."""
         async with (
-            _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            self._pool() as pool,
             read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
@@ -398,7 +413,7 @@ class PrincipalsStoreMixin:
     async def any_principal_exists(self) -> bool:
         """Whether ANY principal row exists — the ``needs_setup`` / setup-door 409 predicate."""
         async with (
-            _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            self._pool() as pool,
             read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
@@ -408,7 +423,7 @@ class PrincipalsStoreMixin:
     async def update_principal_display_name(self, user_id: str, display_name: str) -> dict[str, Any] | None:
         """Update a principal's display name and return the row, or ``None`` when it is absent."""
         async with (
-            _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            self._pool() as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -431,7 +446,7 @@ class PrincipalsStoreMixin:
         policy row is absent (an invariant breach, never a silent no-op).
         """
         async with (
-            _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            self._pool() as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -447,7 +462,7 @@ class PrincipalsStoreMixin:
         is :meth:`_PrincipalGuard.delete`.
         """
         async with (
-            _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            self._pool() as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):

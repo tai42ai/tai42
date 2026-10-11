@@ -31,6 +31,8 @@ from fastmcp.server.elicitation import (
     parse_elicit_response_type,
 )
 
+from tai42_skeleton.interactions import helper
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,13 +42,7 @@ async def answer_elicit_via_ask(message: str, schema: dict[str, Any]) -> dict[st
     Schema fidelity is the point: the schema is carried through intact so the caller gets exactly the shape
     it asked for. A timeout / no-answer raises out of ``ask`` (accept-or-raise); nothing is swallowed.
     """
-    # Deferred: this module is reached through the app's tool wiring
-    # (context_bridge) while ``tai42_skeleton.interactions`` is still
-    # initializing, so a module-level import of ``ask`` from its helper
-    # closes a circular import. Import at call time — the only use site.
-    from tai42_skeleton.interactions.helper import ask
-
-    return await ask(message, answer_format="form", schema=schema)
+    return await helper.ask(message, answer_format="form", schema=schema)
 
 
 async def resolve_elicit(

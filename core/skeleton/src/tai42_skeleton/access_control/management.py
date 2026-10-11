@@ -46,9 +46,10 @@ from tai42_kit.access_control.registry import get_identity_provider_factory
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
+from tai42_skeleton.access_control.policy_rows import refuse_disabled_claim_at_mint
 from tai42_skeleton.access_control.policy_version_scope import remember_policy_version
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
-from tai42_skeleton.access_control.store import access_control_store, refuse_disabled_claim_at_mint
+from tai42_skeleton.access_control.store import access_control_store
 from tai42_skeleton.utils.redis_typing import awaited
 
 logger = logging.getLogger(__name__)

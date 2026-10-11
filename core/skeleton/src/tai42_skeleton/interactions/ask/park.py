@@ -27,7 +27,10 @@ from tai42_contract.interactions import (
 from tai42_contract.states import StateBinding, StateContext
 from tai42_contract.tools import get_run_delivery, get_run_delivery_id
 
+from tai42_skeleton.authz import execution_identity
+from tai42_skeleton.interactions.continuation import _current_state_context_for_park
 from tai42_skeleton.runs.chokepoint import get_resume_lineage
+from tai42_skeleton.tools.state_binding import current_deferred_binding
 
 logger = logging.getLogger(__name__)
 
@@ -93,12 +96,7 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
     continuation_tool = get_resume_continuation_tool()
     if continuation_tool is None:
         raise RuntimeError("async ask requires a resuming driver (no resume_continuation_tool is bound)")
-    # Function-local: a module-level edge from here into ``authz`` closes an
-    # import cycle (authz → access_control.backend) that crashes any process
-    # importing ``access_control`` first.
-    from tai42_skeleton.authz.execution_identity import get_execution_identity
-
-    identity = get_execution_identity()
+    identity = execution_identity.get_execution_identity()
     if identity is None or identity.user_id is None:
         raise RuntimeError("async ask requires a bound execution identity to rebind the continuation as")
     # Stashed alongside the identity so the answer/expiry path rebinds the continuation
@@ -106,10 +104,7 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
     # fingerprint, recorded as "" (the bind ignores it there).
     continuation_fingerprint = identity.execution_key_fingerprint or ""
     # The parking turn's ambient state context, captured here inside that turn so the
-    # resume re-deposits the original door's subject + write provenance. Function-local
-    # import: continuation → store → this module would close a cycle.
-    from tai42_skeleton.interactions.continuation import _current_state_context_for_park
-
+    # resume re-deposits the original door's subject + write provenance.
     continuation_state_context = _current_state_context_for_park()
     if to == "caller" and continuation_state_context is None:
         # A caller ask's outcome is handed back through the parking run's subject, read
@@ -133,12 +128,8 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
         else None
     )
     # The merged door binding the outermost dispatch deposited (after its injections ran), so the
-    # deferred UPDATES apply once at the run's real terminal. Function-local import mirrors the
-    # others above: an edge from interactions into the tools dispatch layer at module load would
-    # couple two peer packages at import time. A copy of the run input is taken so a later mutation
-    # of the live arguments never reaches the stored snapshot.
-    from tai42_skeleton.tools.state_binding import current_deferred_binding
-
+    # deferred UPDATES apply once at the run's real terminal. A copy of the run input is taken so a
+    # later mutation of the live arguments never reaches the stored snapshot.
     deferred = current_deferred_binding()
     return AsyncParkBinding(
         chain_keys=park_chain_keys(),
@@ -212,8 +203,8 @@ def bound_park_thread_id() -> str | None:
         candidate = completion_ctx.get(_PARK_COMPLETION_THREAD_KEY)
         if isinstance(candidate, str) and candidate:
             return candidate
-    # Function-local, mirroring the ``get_execution_identity`` import above: a module-level
-    # edge from interactions into conversations would couple two peer packages at import time.
+    # Function-local: importing this module loads no ``tai42_skeleton.conversations`` module, and a
+    # module-level import here would load that package with every interactions import.
     from tai42_skeleton.conversations.turn_context import current_bridge_turn
 
     bridge = current_bridge_turn()
