@@ -458,7 +458,7 @@ def _run_once_response(outcome: Any) -> Any:
     if outcome.kind == "result":
         return outcome.result
     if outcome.kind == "asks":
-        return [ask.model_dump(mode="json", exclude_none=True) for ask in outcome.asks]
+        return [ask.model_dump(mode="json") for ask in outcome.asks]
     if outcome.kind == "parked":
         return {"parked": outcome.suspended.interaction_ids if outcome.suspended is not None else []}
     return None
