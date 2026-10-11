@@ -26,19 +26,60 @@ from tai42_skeleton.config.file_manager import FileConfigManager
 
 # --- cross-process lock helpers (module level so ``spawn`` can import them) --
 #
-# Both variants exercise the real ``write_env`` / ``mutate_manifest`` bodies. The locked
-# variants widen the read-merge-write window by a small sleep, so a second writer always
-# tries the lock while the first holds it. The ``_Unlocked*`` variants neuter the flock and
-# make both writers meet after their read: each merges against the base it read before
-# either wrote, so an update is lost on every round, whatever the host's scheduling.
+# Both variants exercise the real ``write_env`` / ``mutate_manifest`` bodies, and both force
+# the overlap on events, whatever the host's scheduling. The locked variants hold their read
+# until the other writer is waiting on the lock (or has finished), so on every run a second
+# writer contends for the lock inside the first one's read-merge-write. The ``_Unlocked*``
+# variants neuter the flock and make both writers meet after their read: each merges against
+# the base it read before either wrote, so an update is lost on every round.
 
-_LOCK_RACE_DELAY = 0.05
+
+class _LockTraffic:
+    """Both writers' lock arrivals, completions and finish, shared across the two processes."""
+
+    def __init__(self, counts, me: int) -> None:
+        self._counts = counts
+        self._me = me
+
+    def _bump(self, writer: int, field: int) -> None:
+        with self._counts.get_lock():
+            self._counts[3 * writer + field] += 1
+
+    def arrived(self) -> None:
+        self._bump(self._me, 0)
+
+    def completed(self) -> None:
+        self._bump(self._me, 1)
+
+    def finished(self) -> None:
+        self._bump(self._me, 2)
+
+    def wait_until_the_other_contends(self) -> None:
+        """Return once the other writer waits on the lock (arrived, not completed) or has finished."""
+        other = 1 - self._me
+        while True:
+            with self._counts.get_lock():
+                arrivals, completions, finished = self._counts[3 * other : 3 * other + 3]
+            if arrivals > completions or finished:
+                return
+            time.sleep(0.001)
 
 
-class _SlowEnvManager(FileConfigManager):
+class _ContendedEnvManager(FileConfigManager):
+    def __init__(self, config_dir: str, traffic: _LockTraffic) -> None:
+        super().__init__(config_dir)
+        self._traffic = traffic
+
+    @contextmanager
+    def _file_lock(self, path: str) -> Iterator[None]:
+        self._traffic.arrived()
+        with super()._file_lock(path):
+            yield
+        self._traffic.completed()
+
     def read_env(self) -> dict[str, str]:
         result = super().read_env()
-        time.sleep(_LOCK_RACE_DELAY)
+        self._traffic.wait_until_the_other_contends()
         return result
 
 
@@ -57,18 +98,33 @@ class _UnlockedRendezvousEnvManager(FileConfigManager):
         yield
 
 
-def _env_writer(config_dir: str, prefix: str, count: int, use_lock: bool, barrier, ready) -> None:
-    mgr = _SlowEnvManager(config_dir) if use_lock else _UnlockedRendezvousEnvManager(config_dir, barrier)
+def _env_writer(
+    config_dir: str, prefix: str, count: int, use_lock: bool, barrier, traffic: _LockTraffic, ready
+) -> None:
+    mgr = _ContendedEnvManager(config_dir, traffic) if use_lock else _UnlockedRendezvousEnvManager(config_dir, barrier)
     _report_ready(ready)
     barrier.wait()
     for i in range(count):
         mgr.write_env({f"{prefix}{i}": str(i)})
+    traffic.finished()
 
 
-class _SlowPreservedManager(FileConfigManager):
+class _ContendedPreservedManager(FileConfigManager):
+    def __init__(self, config_dir: str, traffic: _LockTraffic) -> None:
+        super().__init__(config_dir)
+        self._traffic = traffic
+
+    @contextmanager
+    def _file_lock(self, path: str) -> Iterator[None]:
+        self._traffic.arrived()
+        with super()._file_lock(path):
+            yield
+        self._traffic.completed()
+
     def _load_yaml_preserved(self, path: str):
         result = super()._load_yaml_preserved(path)
-        time.sleep(_LOCK_RACE_DELAY)
+        if path == self.manifest_path:
+            self._traffic.wait_until_the_other_contends()
         return result
 
 
@@ -88,11 +144,16 @@ class _UnlockedRendezvousPreservedManager(FileConfigManager):
         yield
 
 
-def _mutate_writer(config_dir: str, key: str, use_lock: bool, barrier, ready) -> None:
-    mgr = _SlowPreservedManager(config_dir) if use_lock else _UnlockedRendezvousPreservedManager(config_dir, barrier)
+def _mutate_writer(config_dir: str, key: str, use_lock: bool, barrier, traffic: _LockTraffic, ready) -> None:
+    mgr = (
+        _ContendedPreservedManager(config_dir, traffic)
+        if use_lock
+        else _UnlockedRendezvousPreservedManager(config_dir, barrier)
+    )
     _report_ready(ready)
     barrier.wait()
     mgr.mutate_manifest(lambda doc: doc.__setitem__(key, key))
+    traffic.finished()
 
 
 def _single_env_write(config_dir: str, key: str, value: str, ready) -> None:
@@ -104,15 +165,18 @@ def _single_env_write(config_dir: str, key: str, value: str, ready) -> None:
 # --- spawned-child start-up and exit ------------------------------------------
 #
 # A spawned child spends its start-up in a fresh interpreter importing this module, which takes
-# host time only (measured from 2 s on an idle host to 21 s at load 276, and past 85 s in a
-# full suite at load 250-300). So the start-up is awaited on events, never on a clock: each
-# child reports ready on a pipe just before its locked work, and a child that exits before
-# reporting fails the test at once with its exit code. Only the work after the ready report
-# runs under a bound.
+# host time only. So the start-up is awaited on events: each child reports ready on a pipe just
+# before its locked work, and a child that exits before reporting fails the test at once with
+# its exit code. A child that stays alive and never reports fails at the start-up bound.
+
+# The start-up bound: twice the slowest measured start-up (2 s on an idle host, 21 s at load
+# 276, 87.8 s for a two-writer test in a full suite at load 250-300), rounded up to the next
+# 10 s.
+_START_UP_BOUND_S = 180.0
 
 # The work a child does after it reports ready: at most two writers' serialized
-# read-merge-write rounds, each widened by ``_LOCK_RACE_DELAY`` (ten rounds, 0.5 s of sleep).
-# Measured at most 0.90 s with sixteen writers racing at load 276.
+# read-merge-write rounds (ten rounds). Measured at most 0.90 s with sixteen writers racing at
+# load 276.
 _LOCKED_PHASE_BOUND_S = 10.0
 
 
@@ -134,10 +198,14 @@ def _spawn_reporting(ctx: SpawnContext, target: Callable[..., None], args: tuple
 
 
 def _await_ready(*started: tuple[str, BaseProcess, Connection]) -> None:
-    """Wait until every child reported ready; fail at once when one exits first."""
+    """Wait until every child reported ready; fail at once when one exits first, at the bound when one never reports."""
     pending = {reader: (name, proc) for name, proc, reader in started}
+    deadline = time.monotonic() + _START_UP_BOUND_S
     while pending:
-        woke = multiprocessing.connection.wait(list(pending))
+        woke = multiprocessing.connection.wait(list(pending), timeout=max(0.0, deadline - time.monotonic()))
+        if not woke:
+            names = ", ".join(name for name, _proc in pending.values())
+            pytest.fail(f"{names} did not report ready within {_START_UP_BOUND_S} s of starting")
         for reader in [r for r in pending if r in woke]:
             name, proc = pending.pop(reader)
             try:
@@ -170,8 +238,9 @@ def _run_two_writers(target, args_a: tuple, args_b: tuple) -> None:
     """Run ``target`` in two spawned processes, released together by a barrier once both started."""
     ctx = multiprocessing.get_context("spawn")
     barrier = ctx.Barrier(2)
-    proc_a, ready_a = _spawn_reporting(ctx, target, (*args_a, barrier))
-    proc_b, ready_b = _spawn_reporting(ctx, target, (*args_b, barrier))
+    counts = ctx.Array("i", 6)
+    proc_a, ready_a = _spawn_reporting(ctx, target, (*args_a, barrier, _LockTraffic(counts, 0)))
+    proc_b, ready_b = _spawn_reporting(ctx, target, (*args_b, barrier, _LockTraffic(counts, 1)))
     try:
         _await_ready(("writer A", proc_a, ready_a), ("writer B", proc_b, ready_b))
         _join_after_ready(("writer A", proc_a), ("writer B", proc_b))
@@ -765,7 +834,8 @@ def test_replace_manifest_preserves_comments_from_round_trip_document(tmp_path) 
 
 def test_write_env_concurrent_processes_keep_every_key_with_lock(tmp_path) -> None:
     """Two spawned processes each ``write_env`` disjoint key batches against the same
-    dir. Under the flock the RMWs serialize, so every key from both survives."""
+    dir, the second contending for the flock inside the first one's read-merge-write. The
+    flock serializes the rounds, so every key from both survives."""
     (tmp_path / ".env").write_text("", encoding="utf-8")  # exists so read_env re-reads
     _run_two_writers(_env_writer, (str(tmp_path), "a", 5, True), (str(tmp_path), "b", 5, True))
     result = FileConfigManager(config_dir_path=str(tmp_path)).read_env()
@@ -774,8 +844,8 @@ def test_write_env_concurrent_processes_keep_every_key_with_lock(tmp_path) -> No
 
 
 def test_write_env_concurrent_processes_lose_update_without_lock(tmp_path) -> None:
-    """The SAME race without the flock loses at least one update — proving the race is
-    real and the lock in the companion test is what saves it."""
+    """Without the flock, two writers whose reads both land before either write merge
+    against the same base, so one round's update is lost: what the flock prevents."""
     (tmp_path / ".env").write_text("", encoding="utf-8")
     _run_two_writers(_env_writer, (str(tmp_path), "a", 5, False), (str(tmp_path), "b", 5, False))
     result = FileConfigManager(config_dir_path=str(tmp_path)).read_env()
@@ -784,8 +854,9 @@ def test_write_env_concurrent_processes_lose_update_without_lock(tmp_path) -> No
 
 
 def test_mutate_manifest_concurrent_processes_keep_both_edits_with_lock(tmp_path) -> None:
-    """Two spawned processes each ``mutate_manifest`` a disjoint key. The widened
-    transaction lock spans each read → mutate → write, so both edits land."""
+    """Two spawned processes each ``mutate_manifest`` a disjoint key, the second contending
+    for the transaction lock inside the first one's read → mutate → write. The lock spans the
+    whole span, so both edits land."""
     (tmp_path / "manifest.yml").write_text("seed: 0\n", encoding="utf-8")
     _run_two_writers(_mutate_writer, (str(tmp_path), "alpha", True), (str(tmp_path), "beta", True))
     result = FileConfigManager(config_dir_path=str(tmp_path)).read_manifest()
@@ -794,8 +865,8 @@ def test_mutate_manifest_concurrent_processes_keep_both_edits_with_lock(tmp_path
 
 
 def test_mutate_manifest_concurrent_processes_lose_update_without_lock(tmp_path) -> None:
-    """The SAME mutate race without the lock loses one edit — proving the widened
-    transaction span is what fixes the lost update the seam exists to close."""
+    """Without the lock, two mutations whose reads both land before either write merge
+    against the same base, so one edit is lost: the lost update the transaction lock closes."""
     (tmp_path / "manifest.yml").write_text("seed: 0\n", encoding="utf-8")
     _run_two_writers(_mutate_writer, (str(tmp_path), "alpha", False), (str(tmp_path), "beta", False))
     result = FileConfigManager(config_dir_path=str(tmp_path)).read_manifest()
