@@ -97,3 +97,75 @@ async def test_a_model_refusal_names_the_rule_and_never_the_value(extract, what:
     assert message.startswith(f"invalid {what}: ")
     assert "s3cr3t-v4lue" not in message
     assert "12345678" not in message
+
+
+# -- the doors that read their bounded body bytes ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("extract", "raw", "message"),
+    [
+        ("_extract_answer", b"{not json", "invalid JSON body"),
+        ("_extract_answer", b"[1, 2]", "body must be a JSON object"),
+        ("_extract_answer", b"{}", "body must contain 'answer'"),
+        ("_extract_react", b"[1, 2]", "body must be a JSON object"),
+        ("_extract_react", b'{"event": {}}', "body must contain 'event' and 'values'"),
+    ],
+)
+async def test_the_in_app_answer_and_react_doors_answer_the_shared_texts(
+    extract: str, raw: bytes, message: str
+) -> None:
+    from tai42_skeleton.routers.interactions import answer
+
+    with pytest.raises(BadRequestError) as excinfo:
+        await getattr(answer, extract)(_request(raw))
+    assert excinfo.value.message == message
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (b"{not json", "invalid JSON body"),
+        (b"[1, 2]", "body must be a JSON object"),
+        (b'{"event": {}}', "body must contain 'event' and 'values'"),
+    ],
+)
+def test_the_callback_react_body_answers_the_shared_texts(raw: bytes, message: str) -> None:
+    from tai42_skeleton.routers.interactions.callback import _parse_react_body
+
+    result = _parse_react_body(raw)
+    assert isinstance(result, Response)
+    assert _error_of(result) == message
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"), [(b"{not json", "invalid JSON body"), (b"[1]", "body must be a JSON object")]
+)
+def test_the_callback_typed_answer_body_answers_the_shared_texts(raw: bytes, message: str) -> None:
+    from tai42_contract.interactions import AnswerFormat
+
+    from tai42_skeleton.routers.interactions.callback import _parse_typed_answer
+
+    result = _parse_typed_answer(raw, AnswerFormat.TEXT)
+    assert isinstance(result, Response)
+    assert _error_of(result) == message
+
+
+def test_the_tool_call_subject_refusal_names_the_rule_and_never_the_value() -> None:
+    from tai42_skeleton.routers._tool_call import ToolCallRequestError, _read_subject
+
+    with pytest.raises(ToolCallRequestError) as excinfo:
+        _read_subject({"target_kind": "bogus-kind-value", "target_name": "n", "kind": "thread", "key": "k"})
+    message = str(excinfo.value)
+    assert message.startswith("invalid 'subject': ")
+    assert "bogus-kind-value" not in message
+    assert "pydantic.dev" not in message
+
+
+async def test_a_deeply_nested_body_is_the_invalid_json_400() -> None:
+    from tai42_skeleton.operations.adapter import read_json_object
+
+    nested = b"[" * 100_000 + b"]" * 100_000
+    with pytest.raises(BadRequestError) as excinfo:
+        await read_json_object(_request(nested))
+    assert excinfo.value.message == "invalid JSON body"
