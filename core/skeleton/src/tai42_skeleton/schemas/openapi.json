@@ -10336,6 +10336,10 @@
             "type": "string"
           },
           "kind": {
+            "enum": [
+              "human",
+              "service"
+            ],
             "title": "Kind",
             "type": "string"
           },
