@@ -27,9 +27,9 @@ from tai42_e2e.waiting import wait_for_async
 
 from ._bridge_support import TWILIO_INBOUND_PATH, BridgeHarness, post_inbound, wait_probe_record, wait_twilio_send
 
-# One awaited fan-out reload on this harness's hosts completes in 13.6-25.9 s under load and a
-# legitimate reload has been measured at up to 150 s; every bound below is a liveness bound on a
-# hang, at least twice the slowest measured completion.
+# One fan-out reload has been measured at 13.6-25.9 s under load. The bound on one awaited fan-out
+# reload is the derived 150 s (the 30 s bus apply timeout plus a 120 s boot-scale build), more than
+# twice the slowest measured completion; it bounds a hang, it is not a throughput budget.
 _RELOAD_BOUND_SECONDS = 150.0
 # The env write's response waits for the fleet's acks, which B gives only after the test
 # releases its held request: a client read timeout above the hold's 300 s cap plus margin.
@@ -62,9 +62,10 @@ async def _cancel_and_join(task: asyncio.Task) -> None:
         await task
 
 
-# The module fixture's boot (<= 120 s) plus one awaited fan-out reload (<= 150 s) plus the
-# bounded waits: 300 s, the reload suites' own per-test ceiling.
-@pytest.mark.timeout(300)
+# The module fixture's boot (<= 120 s) plus one awaited fan-out reload (<= 150 s, the lock wait runs
+# inside it) plus the test's own bounded waits (hold start 30 + probe record 12 + twilio send 12 +
+# answered 20 = 74 s): 344 s, rounded up to 360 s.
+@pytest.mark.timeout(360)
 async def test_a_channel_inbound_during_a_reload_is_refused_and_its_redelivery_runs_once(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
