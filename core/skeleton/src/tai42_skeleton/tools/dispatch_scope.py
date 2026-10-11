@@ -328,7 +328,7 @@ class DispatchScopeMiddleware(Middleware):
         from tai42_contract.states.errors import StatePendingSaveFailedError, StatePendingSaveTimeoutError
 
         from tai42_skeleton.access_control.user import request_identity
-        from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
+        from tai42_skeleton.interactions.terminal_failure import FAILED_TERMINAL_MESSAGE, failed_outcome_detail
         from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
         from tai42_skeleton.tools.binding import ToolResultEncodingError, find_lone_surrogate
         from tai42_skeleton.tools.binding.result import _tool_result_value
@@ -416,8 +416,8 @@ class DispatchScopeMiddleware(Middleware):
                     # The SERVER-SIDE record keeps the capped detail; only the caller delivery is whole.
                     logger.exception("MCP tools/call %r failed on a terminal: %s", name, failed_outcome_detail(outcome))
                     return ToolResult(
-                        content=[TextContent(type="text", text="tool run failed")],
-                        structured_content={"error": "tool run failed", "outcome": outcome},
+                        content=[TextContent(type="text", text=FAILED_TERMINAL_MESSAGE)],
+                        structured_content={"error": FAILED_TERMINAL_MESSAGE, "outcome": outcome},
                         is_error=True,
                     )
                 except (StatePendingSaveFailedError, StatePendingSaveTimeoutError) as exc:

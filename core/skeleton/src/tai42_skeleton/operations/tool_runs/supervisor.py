@@ -23,6 +23,7 @@ from tai42_contract.access_control import (
     set_request_secret_capability,
 )
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import RunTerminalFailed
 from tai42_contract.secrets import mask_secrets
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
@@ -35,10 +36,12 @@ from tai42_skeleton.authz.execution_identity import (
     set_execution_identity,
 )
 from tai42_skeleton.interactions.origin import reset_interaction_origin, set_interaction_origin
+from tai42_skeleton.interactions.terminal_failure import FAILED_TERMINAL_MESSAGE, failed_outcome_detail
 from tai42_skeleton.routers.tool_runs_settings import tool_runs_store_configured
 from tai42_skeleton.runs.chokepoint import collect_resumed_interactions
 from tai42_skeleton.states.context import current_state_context
 from tai42_skeleton.tools.attribution import get_run_attribution, reset_run_attribution, set_run_attribution
+from tai42_skeleton.tools.binding import ToolResultEncodingError, find_lone_surrogate
 
 from .models import _DEFAULT_CANCEL_REASON, _FAILED, _PARKED, _SUCCEEDED
 from .store import ToolRunStore
@@ -46,6 +49,7 @@ from .store import ToolRunStore
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterator, Mapping
 
+    from tai42_contract.interactions import VisitOutcome
     from tai42_contract.monitoring import RunAttribution
     from tai42_contract.states import StateSubject
 
@@ -261,6 +265,45 @@ async def _refresh_liveness_loop(r: Any, store: ToolRunStore, run_id: str, liven
         await asyncio.sleep(cadence)
 
 
+def _visit_terminal_fields(outcome: VisitOutcome, resumed: list[str]) -> dict[str, str]:
+    """The terminal record of a run whose visit returned: ``succeeded`` with its result, else ``parked``.
+
+    Both carry their value with wrapped secrets masked to the placeholder (a background run has no
+    live-caller door to reveal them to).
+    """
+    if outcome.kind in ("result", "none"):
+        status, value = _SUCCEEDED, outcome.result
+    else:
+        status, value = _PARKED, tai42_app.interactions.park_answer(outcome)
+    return {
+        "status": status,
+        "finished_at": _pkg._now().isoformat(),
+        "result": json.dumps(mask_secrets(value)),
+        "resumed_interactions": json.dumps(resumed),
+    }
+
+
+def _failed_terminal_fields(tool_name: str, outcome: object, resumed: list[str]) -> dict[str, str]:
+    """The terminal record of a run that raised ``RunTerminalFailed`` carrying ``outcome``.
+
+    ``status: failed``, the plain :data:`FAILED_TERMINAL_MESSAGE` under ``error`` and ``outcome`` stored
+    whole as JSON. An outcome holding a lone UTF-16 surrogate (the one residual a JSON encode rejects)
+    records the named ``ToolResultEncodingError`` text under ``error`` and no ``outcome``.
+    """
+    fields = {
+        "status": _FAILED,
+        "finished_at": _pkg._now().isoformat(),
+        "resumed_interactions": json.dumps(resumed),
+    }
+    offending_path = find_lone_surrogate(outcome)
+    if offending_path is not None:
+        fields["error"] = str(ToolResultEncodingError(tool_name, offending_path))
+    else:
+        fields["error"] = FAILED_TERMINAL_MESSAGE
+        fields["outcome"] = json.dumps(outcome)
+    return fields
+
+
 async def _supervise(
     run_id: str,
     tool_name: str,
@@ -378,6 +421,19 @@ async def _supervise(
                                 tool_name,
                             )
                         raise
+                    except RunTerminalFailed as exc:
+                        # A driver's FAILED terminal: the record is the requester's copy of the
+                        # failure, so the outcome is stored WHOLE as data under ``outcome`` (no key
+                        # read out of it) beside the plain message under ``error``, and the log keeps
+                        # the capped detail — the delivery the sync run-tool door makes.
+                        logger.exception(
+                            "tool-run %s (%s) failed on a terminal: %s",
+                            run_id,
+                            tool_name,
+                            failed_outcome_detail(exc.outcome),
+                        )
+                        tool_error = exc
+                        fields = _failed_terminal_fields(tool_name, exc.outcome, resumed)
                     except Exception as exc:
                         # Persist the raised error as record data so the requester reads it; logged
                         # too, never dropped. An inline caller additionally re-raises it below.
@@ -398,20 +454,7 @@ async def _supervise(
                         # PARKED carrying the shared park answer — the caller ask entries or the
                         # suspended sentinel, the SAME shape a poller reads off the sync door, so a
                         # caller-ask park is answerable through ``resume_parked``.
-                        if outcome.kind in ("result", "none"):
-                            fields = {
-                                "status": _SUCCEEDED,
-                                "finished_at": _pkg._now().isoformat(),
-                                "result": json.dumps(mask_secrets(outcome.result)),
-                                "resumed_interactions": json.dumps(resumed),
-                            }
-                        else:
-                            fields = {
-                                "status": _PARKED,
-                                "finished_at": _pkg._now().isoformat(),
-                                "result": json.dumps(mask_secrets(tai42_app.interactions.park_answer(outcome))),
-                                "resumed_interactions": json.dumps(resumed),
-                            }
+                        fields = _visit_terminal_fields(outcome, resumed)
                     # Gate the terminal write on the record still being ``running`` so it
                     # can never overwrite a ``lost`` a reader already wrote (one-way lost).
                     persisted = await store.mark_terminal_if_running(

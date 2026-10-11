@@ -59,7 +59,7 @@ from tai42_contract.states.errors import StatePendingSaveFailedError, StatePendi
 from tai42_contract.tools import UndeclaredPauseError
 
 from tai42_skeleton.app.bus import FleetResult
-from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
+from tai42_skeleton.interactions.terminal_failure import FAILED_TERMINAL_MESSAGE, failed_outcome_detail
 from tai42_skeleton.operations import (
     BadRequestError,
     ConflictError,
@@ -373,7 +373,7 @@ def _terminal_failure(tool_name: str, exc: RunTerminalFailed) -> OperationError:
             offending_path,
         )
         return _unencodable_output(ToolResultEncodingError(tool_name, offending_path))
-    return OperationFailedError("tool run failed", extra={"outcome": exc.outcome})
+    return OperationFailedError(FAILED_TERMINAL_MESSAGE, extra={"outcome": exc.outcome})
 
 
 def _unencodable_output(exc: ToolResultEncodingError) -> UpstreamError:

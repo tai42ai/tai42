@@ -395,6 +395,11 @@ class ToolRunView(BaseModel):
     terminal status, so they are optional; ``result`` is the tool's arbitrary output;
     ``resumed_interactions`` is the parked interaction ids the run resumed or took while it executed
     (``[]`` when it resumed nothing).
+
+    ``outcome`` is present only on a ``failed`` record whose run reached a failed terminal (a run that
+    raises the contract's ``RunTerminalFailed``): the driver's outcome, whole, as the sync run-tool door
+    delivers it under the same name; ``error`` is then the plain ``tool run failed``. A plain raise records
+    its message under ``error`` and no ``outcome``.
     """
 
     run_id: str
@@ -404,6 +409,7 @@ class ToolRunView(BaseModel):
     finished_at: str | None = None
     result: JsonValue | None = None
     error: str | None = None
+    outcome: JsonValue | None = None
     resumed_interactions: list[str] | None = None
 
 
