@@ -156,7 +156,11 @@ class _ToolsFacet:
             raise RuntimeError(f"unknown tools: {unknown}")
         return [client_tool(name, self.runners[name], description=f"The {name} tool.") for name in selected]
 
-    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
+    async def run_tool(
+        self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False, continues_chain: Any = None
+    ) -> Any:
+        # ``continues_chain`` mirrors the real facet's keyword: a resumed run's terminal fire along
+        # its captured chain routing passes the ancestor chain it continues.
         if key not in self.runners:
             raise RuntimeError(f"unknown tool: {key}")
         result = self.runners[key](**arguments)
