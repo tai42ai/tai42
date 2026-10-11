@@ -5,7 +5,8 @@ A vendor binding declares its runtimes and implements
 drains, and recycles. Everything host-shaped around that (subcommand dispatch,
 boot-readiness gating, off-loop running, composed warm/cold shutdown wiring,
 drain-on-cancellation, pool turnover after a registry-mutating fleet op) lives
-here, in :class:`~tai42_kit.backend.base.ManagedBackend`.
+here, in :class:`~tai42_kit.backend.base.ManagedBackend`. The contract's scheduling
+protocol (names and models) is re-exported here beside the kit's dispatch helpers.
 
 It lives in kit and not in the skeleton because a backend plugin may not import
 the skeleton, and not in the contract because the contract carries no logic.
@@ -17,6 +18,28 @@ That stays inside the leaf rule (the contract is kit's only tai dependency and
 the handle is dependency-free), and ``tai42_kit`` re-exports nothing, so
 ``import tai42_kit`` still pulls nothing new.
 """
+
+from tai42_contract.backend.scheduling import (
+    SCHEDULE_BRANCH_SUFFIX,
+    SCHEDULE_CADENCE_KEY,
+    SCHEDULE_DELETE_TOOL,
+    SCHEDULE_EXPORT_TOOL,
+    SCHEDULE_EXTENSION,
+    SCHEDULE_IMPORT_TOOL,
+    SCHEDULE_LIST_TOOL,
+    SCHEDULE_MARKER_TOOLS,
+    SCHEDULE_NAME_KEY,
+    CrontabCadence,
+    IntervalCadence,
+    ScheduleCadence,
+    ScheduleCreate,
+    ScheduleImportError,
+    ScheduleImportMode,
+    ScheduleImportReport,
+    ScheduleListRow,
+    ScheduleRecord,
+    ScheduleRowError,
+)
 
 from tai42_kit.backend.base import (
     DEFAULT_DRAIN_TIMEOUT_SECONDS,
@@ -36,9 +59,28 @@ from tai42_kit.backend.settings import BackendDispatchSettings
 __all__ = [
     "DEFAULT_DRAIN_TIMEOUT_SECONDS",
     "DEFAULT_READY_TIMEOUT_SECONDS",
+    "SCHEDULE_BRANCH_SUFFIX",
+    "SCHEDULE_CADENCE_KEY",
+    "SCHEDULE_DELETE_TOOL",
+    "SCHEDULE_EXPORT_TOOL",
+    "SCHEDULE_EXTENSION",
+    "SCHEDULE_IMPORT_TOOL",
+    "SCHEDULE_LIST_TOOL",
+    "SCHEDULE_MARKER_TOOLS",
+    "SCHEDULE_NAME_KEY",
     "BackendDispatchSettings",
     "CallbackSchema",
+    "CrontabCadence",
+    "IntervalCadence",
     "ManagedBackend",
+    "ScheduleCadence",
+    "ScheduleCreate",
+    "ScheduleImportError",
+    "ScheduleImportMode",
+    "ScheduleImportReport",
+    "ScheduleListRow",
+    "ScheduleRecord",
+    "ScheduleRowError",
     "backend_fire",
     "callback_execution",
     "carry_forwarded_fire",

@@ -14,8 +14,8 @@ rows:
 * **schedules** — every schedule carrying a subject (stamped at creation under the kit's
   ``backend_schedule_subject`` arg) whose ``kind`` is one of the declared kinds. Read
   through ``backend_export_schedules`` (the same canonical ``ScheduleRecord`` source the
-  tool-rename schedule referee reads): the friendly ``list_schedules`` rows carry only
-  name/cadence, never the fired tool's arguments, so the subject a schedule targets is
+  tool-rename schedule referee reads): the ``list_schedules`` rows (``ScheduleListRow``)
+  carry no fired-tool arguments, so the subject a schedule targets is
   legible ONLY on the export surface. With no scheduling backend installed the lister
   emits ONE muted ``unavailable`` row — surfaced, never swallowed.
 * **agents** — every registered agent whose statically-declared tool set names a
@@ -35,9 +35,9 @@ pattern.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
 
 from tai42_contract.agent import Agent
+from tai42_contract.backend import ScheduleRecord
 from tai42_contract.hooks import HookParams
 from tai42_contract.presets import PresetBody
 from tai42_contract.states.models import ConsumerLink, ConsumerRow
@@ -94,7 +94,7 @@ def hook_consumer_rows(hooks: Iterable[HookParams], subject_kinds: set[str]) -> 
     return rows
 
 
-def schedule_consumer_rows(records: Iterable[dict[str, Any]], subject_kinds: set[str]) -> list[ConsumerRow]:
+def schedule_consumer_rows(records: Iterable[ScheduleRecord], subject_kinds: set[str]) -> list[ConsumerRow]:
     """The schedule rows for a state: one per exported ``ScheduleRecord`` whose stamped subject's ``kind`` is declared.
 
     A malformed stamped subject raises loudly inside :func:`pop_schedule_subject` — a schedule that could never
@@ -104,12 +104,12 @@ def schedule_consumer_rows(records: Iterable[dict[str, Any]], subject_kinds: set
 
     rows: list[ConsumerRow] = []
     for record in records:
-        subject = pop_schedule_subject(dict(record.get("kwargs") or {}))
+        subject = pop_schedule_subject(dict(record.kwargs))
         if subject is not None and subject.kind in subject_kinds:
             rows.append(
                 ConsumerRow(
                     kind=_SCHEDULE_KIND,
-                    name=record.get("name"),
+                    name=record.name,
                     detail=f"carries subject kind {subject.kind}",
                     link=ConsumerLink(token=_SCHEDULING_TOKEN),
                 )
@@ -212,11 +212,6 @@ async def schedules_lister(state: str) -> Sequence[ConsumerRow]:
         # No scheduling backend is installed — the family cannot be listed. Surface the
         # muted row instead of a silent empty (never swallowed).
         return [ConsumerRow(kind=_SCHEDULE_KIND, unavailable=_NO_SCHEDULING_BACKEND)]
-    if not isinstance(records, list):
-        raise TypeError(
-            f"schedules consumer lister: export_schedules_raw() returned a {type(records).__name__}, "
-            "expected a list of ScheduleRecord rows"
-        )
     return schedule_consumer_rows(records, kinds)
 
 

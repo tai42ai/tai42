@@ -81,8 +81,8 @@ def _probe_tools_entry(
         # Branch e2e_record into e2e_record_schedule_task: a recurring schedule that runs
         # e2e_record each firing, so the scheduling spec reads periodicity off the channel.
         extensions["e2e_record"] = [["schedule_task"]]
-        # Branch run_tool into run_tool_schedule_task: the scheduling analog of
-        # run_tool_sync_task — schedules any tool by name (the sweep-schedulable leg).
+        # Branch run_tool into run_tool_schedule_task: the schedule vehicle a create on the
+        # run_tool base tool dispatches — schedules any tool by name (the sweep-schedulable leg).
         extensions["run_tool"] = [*extensions.get("run_tool", []), ["schedule_task"]]
     if with_monitor_branch:
         # Trace a standalone e2e_echo call as one TOOL span, giving the observability read

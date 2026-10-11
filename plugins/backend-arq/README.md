@@ -70,7 +70,7 @@ Start a worker through the host's backend CLI; everything after `worker` is
 this backend's own option surface (see `tai42_backend_arq.worker.main`):
 
 ```bash
-tai backend worker --max-jobs 10 --job-timeout 300
+tai backend worker --max-jobs 10
 ```
 
 ## Configuration
@@ -83,7 +83,7 @@ Settings are read from the `ARQ_` environment group (see `ArqSettings`):
 | `ARQ_REDIS_MAX_CONNECTIONS` | — | Optional cap on the pool's connections |
 | `ARQ_CALLBACK_TIMEOUT` | `5` | Seconds a callback job waits for its predecessor to complete |
 | `ARQ_MANIFEST_KEY` | `MANIFEST_KEY` | Name of the env var the host exports the manifest under for worker processes |
-| `ARQ_TASK_TIMEOUT` | `300` | Seconds a synchronous branch tool waits for its queued job's result |
+| `ARQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the longest a job may run on the worker (the `--job-timeout` default), and how long a synchronous branch tool waits for its queued job's result |
 | `ARQ_TOOL_NAME_ARG` | `backend_tool_name` | kwargs key carrying the target tool name into a queued execution |
 
 `ARQ_MANIFEST_KEY`, `ARQ_TASK_TIMEOUT`, and `ARQ_TOOL_NAME_ARG` mirror the
@@ -94,10 +94,13 @@ lockstep with the host.
 Worker CLI options (after the `worker` subcommand): `--redis-url` (defaults to
 `ARQ_REDIS_URL`), `--burst`, `--keep-result` (default `3600`; `0` disables
 result retention), `--queue-name`, `--max-jobs` (default `10`),
-`--job-timeout` (default `300`), `--poll-delay` (default `0.5`), `--max-tries`
-(default `5`), `--health-check-interval` (default `60`). The worker runs with
-arq's `allow_abort_jobs` enabled — task cancellation and schedule
-replace/delete rely on abort processing.
+`--job-timeout` (defaults to `ARQ_TASK_TIMEOUT`), `--poll-delay` (default `0.5`),
+`--max-tries` (default `5`), `--health-check-interval` (default `60`). The worker
+runs with arq's `allow_abort_jobs` enabled — task cancellation and schedule
+replace/delete rely on abort processing. A dispatched tool runs once: the backend
+never retries a tool body (a tool that wants retries declares a `ToolRetryPolicy`).
+arq itself re-runs a job cut by a cold stop (`CancelledError`), bounded by
+`--max-tries` — arq's own delivery semantics.
 
 ## Fleet ops
 
@@ -112,17 +115,31 @@ concept: https://tai42.ai/concepts/worker-bus
 Recurring runs live in per-schedule Redis hashes (`arq:schedule:{name}`)
 driven by a self-rescheduling `task_scheduler` job; a startup watchdog
 restarts schedules whose pending job was lost. The schedule tools
-(`backend_list_schedules` — canonical row keys `name` / `enabled` /
-`next_run_at_ts` / `next_run_at_iso` plus the `schedule` / `target` / `args` /
-`kwargs` extras —, `backend_get_schedule`, `backend_delete_schedule`,
+(`backend_list_schedules` — the contract's `ScheduleListRow`: `name` / `tool` /
+`cadence` / `enabled` / `next_run_at_ts` / `next_run_at_iso` / `error`, never the
+stored arguments —, `backend_get_schedule`, `backend_delete_schedule`,
 `backend_enable_schedule`, `backend_disable_schedule`,
 `backend_run_schedule_now`, `backend_schedule_exists`,
 `backend_update_schedule`) operate on those hashes, and
-`backend_export_schedules` / `backend_import_schedules` round-trip portable
-schedule records for backup (per-row import errors surfaced as
-`{"index", "name", "error"}`, never swallowed). Schedules accept an interval
-(seconds or an `{"type": "interval", ...}` mapping) or a 5-field crontab
-(string or mapping).
+`backend_export_schedules` / `backend_import_schedules` round-trip the
+contract's `ScheduleRecord` rows for backup (per-row import errors surfaced as
+`{"index", "name", "error"}`, never swallowed). A schedule's cadence is the
+contract's typed `ScheduleCadence` (`tai42_contract.backend.scheduling`); the hash
+stores its JSON dump in the `schedule` field. arq cannot honour a relative
+interval, so `relative: true` is refused on create, update and import.
+
+### Upgrading: reset the schedule store
+
+The `schedule` field's stored format is the typed cadence. A hash written in the
+earlier format makes the schedule tools (list, export, get, update) raise
+`ScheduleStoreFormatError` naming the schedule; arq keeps firing such a hash from
+its `cron_or_interval` field. Reset the store and re-create the schedules:
+
+```bash
+redis-cli --scan --pattern 'arq:schedule:*' | xargs redis-cli del
+```
+
+The pattern is `ArqSettings.arq_schedule_pattern` (`arq:schedule:*`).
 
 ## Task execution
 

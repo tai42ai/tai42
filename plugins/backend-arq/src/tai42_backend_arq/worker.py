@@ -91,7 +91,9 @@ class ArqWorkerRuntime(BackendRuntime):
             burst=options["burst"],
             keep_result=options["keep_result"],
             max_jobs=options["max_jobs"],
-            job_timeout=options["job_timeout"],
+            # An unset ``--job-timeout`` falls to the dispatch job budget (``ARQ_TASK_TIMEOUT``),
+            # the one limit every backend reads; an explicit flag still wins.
+            job_timeout=options["job_timeout"] or settings.task_timeout,
             poll_delay=options["poll_delay"],
             max_tries=options["max_tries"],
             health_check_interval=options["health_check_interval"],
@@ -181,7 +183,7 @@ async def _run_standalone(options: Mapping[str, Any]) -> None:
 @click.option("--keep-result", type=int, default=3600, help="Keep result seconds")
 @click.option("--queue-name", default=None, help="Queue name (defaults to ARQ_QUEUE_NAME)")
 @click.option("--max-jobs", type=int, default=10, help="Max concurrent jobs")
-@click.option("--job-timeout", type=int, default=300, help="Job timeout seconds")
+@click.option("--job-timeout", type=int, default=None, help="Job timeout seconds (defaults to ARQ_TASK_TIMEOUT)")
 @click.option("--poll-delay", type=float, default=0.5, help="Poll delay seconds")
 @click.option("--max-tries", type=int, default=5, help="Max tries")
 @click.option("--health-check-interval", type=int, default=60, help="Health check interval seconds")

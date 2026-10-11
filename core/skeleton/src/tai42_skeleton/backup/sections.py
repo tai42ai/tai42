@@ -21,8 +21,16 @@ import logging
 from collections.abc import Iterable
 from typing import Any
 
+from pydantic import TypeAdapter, ValidationError
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import FanoutSummary
+from tai42_contract.backend import (
+    SCHEDULE_EXPORT_TOOL,
+    SCHEDULE_IMPORT_TOOL,
+    ScheduleImportError,
+    ScheduleImportReport,
+    ScheduleRecord,
+)
 from tai42_contract.backup import BackupSectionReport
 from tai42_contract.states import StateBinding
 from tai42_contract.states.errors import StatesError
@@ -34,6 +42,8 @@ from tai42_skeleton.schedules import check_schedule_definition
 from tai42_skeleton.tools.state_binding import is_binding_refusal
 
 logger = logging.getLogger(__name__)
+
+_SCHEDULE_RECORDS: TypeAdapter[list[ScheduleRecord]] = TypeAdapter(list[ScheduleRecord])
 
 
 def _empty_report() -> BackupSectionReport:
@@ -436,20 +446,25 @@ async def _import_templates(payload: dict[str, str]) -> BackupSectionReport:
 # -- schedules ---------------------------------------------------------------
 
 
-async def _export_schedules() -> Any:
-    # Opaque: the backend owns the document shape. An unbound backend has no export
-    # tool, so run_tool raises the unknown-tool error and the router records it per-section.
-    return await tai42_app.tools.run_tool("backend_export_schedules", {})
+async def _export_schedules() -> list[dict[str, Any]]:
+    """The backend's export validated as ``list[ScheduleRecord]``, dumped.
+
+    An unbound backend has no export tool, so ``run_tool`` raises the unknown-tool error and the
+    router records it per-section; an export of another shape raises loudly the same way.
+    """
+    raw = await tai42_app.tools.run_tool(SCHEDULE_EXPORT_TOOL, {})
+    records = _SCHEDULE_RECORDS.validate_python(raw)
+    return [record.model_dump(mode="json") for record in records]
 
 
 async def _check_schedule_rows(payload: Any) -> tuple[Any, list[int], list[dict[str, Any]]]:
     """Run the schedule definition check over every row carrying a door binding.
 
     Returns the rows to forward to the backend, each forwarded row's index in ``payload``, and
-    one ``{"index", "name", "error"}`` record per refused row. A row reads as ``{"name",
-    "kwargs"}`` with its binding under the reserved kwargs key, the shape every scheduling
-    backend exports; a row of any other shape carries no binding the platform can read and is
-    forwarded untouched for the backend to judge. A refusal (a malformed binding, a binding the
+    one ``{"index", "name", "error"}`` record per refused row. A ``ScheduleRecord`` row carries
+    its binding under the reserved key of its ``kwargs``; a row of any other shape carries no
+    binding the platform can read and is forwarded untouched for the backend to judge (it
+    refuses a row that is not a ``ScheduleRecord`` as a per-row error). A refusal (a malformed binding, a binding the
     states store refuses) keeps the row from the backend; any other error fails the section.
     """
     if not isinstance(payload, list):
@@ -477,14 +492,10 @@ async def _check_schedule_rows(payload: Any) -> tuple[Any, list[int], list[dict[
 
 
 async def _import_schedules(payload: Any) -> BackupSectionReport:
-    # The document is opaque, but the mode is forwarded explicitly across the tool
-    # boundary (a backend cannot read this process's import-mode context). A backend
-    # whose import tool predates ``mode`` rejects it — a loud per-section error, not a
-    # silent mode mismatch.
+    # The mode is forwarded explicitly across the tool boundary (a backend cannot read this
+    # process's import-mode context); the backend validates each row as a ``ScheduleRecord``.
     forwarded, positions, refused = await _check_schedule_rows(payload)
-    raw = await tai42_app.tools.run_tool(
-        "backend_import_schedules", {"schedules": forwarded, "mode": current_import_mode()}
-    )
+    raw = await tai42_app.tools.run_tool(SCHEDULE_IMPORT_TOOL, {"schedules": forwarded, "mode": current_import_mode()})
     report = _schedules_report(raw, positions)
     report.errors = [_schedule_error_text(entry) for entry in refused] + report.errors
     report.skipped += len(refused)
@@ -494,53 +505,41 @@ async def _import_schedules(payload: Any) -> BackupSectionReport:
 def _schedules_report(raw: Any, positions: list[int]) -> BackupSectionReport:
     """Map the scheduling backend's import result into the typed section report.
 
-    The ``backend_import_schedules`` result is the schedules section's own round-trip
-    convention with any task backend: its counts fill the typed fields, its per-row
-    error records (each rendered as a string) fill ``errors``, and every other count it
-    carries (a backend's ``skipped_existing`` tally, say) rides ``details``. A result
-    that is not a mapping is refused loudly rather than mis-reported as an empty restore.
-    ``positions`` maps the backend's row index (over the rows it was handed) back to the
-    row's index in the restored document.
+    The result must be a ``ScheduleImportReport``: its counts fill the typed fields, its per-row
+    errors (each rendered as a string) fill ``errors``, and ``skipped_existing`` rides ``details``.
+    Any other shape raises ``TypeError`` naming the violation, so the section errors loudly rather
+    than mis-reporting a restore. ``positions`` maps the backend's row index (over the rows it was
+    handed) back to the row's index in the restored document.
     """
-    if not isinstance(raw, dict):
-        raise TypeError(f"schedules backend returned a non-mapping import report: {type(raw).__name__}")
-    typed_keys = ("created", "updated", "skipped", "errors")
-    errors = [_schedule_error_text(_document_row(entry, positions)) for entry in raw.get("errors") or []]
-    details = {key: value for key, value in raw.items() if key not in typed_keys}
+    try:
+        report = ScheduleImportReport.model_validate(raw)
+    except ValidationError as exc:
+        raise TypeError(
+            f"the scheduling backend's {SCHEDULE_IMPORT_TOOL} returned a report that is not ScheduleImportReport: {exc}"
+        ) from exc
     return BackupSectionReport(
-        created=int(raw.get("created", 0)),
-        updated=int(raw.get("updated", 0)),
-        skipped=int(raw.get("skipped", 0)),
-        errors=errors,
-        details=details,
+        created=report.created,
+        updated=report.updated,
+        skipped=report.skipped,
+        errors=[_schedule_error_text(_document_row(entry, positions)) for entry in report.errors],
+        details={"skipped_existing": report.skipped_existing},
     )
 
 
-def _document_row(entry: Any, positions: list[int]) -> Any:
+def _document_row(entry: ScheduleImportError, positions: list[int]) -> dict[str, Any]:
     """A backend error record re-indexed from the backend's row to the document's row.
 
-    Only a record carrying an in-range integer ``index`` is re-indexed; any other shape is kept
-    as the backend reported it.
+    An out-of-range ``index`` is kept as the backend reported it.
     """
-    if isinstance(entry, dict):
-        index = entry.get("index")
-        if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(positions):
-            return {**entry, "index": positions[index]}
-    return entry
+    row = entry.model_dump()
+    if 0 <= entry.index < len(positions):
+        row["index"] = positions[entry.index]
+    return row
 
 
-def _schedule_error_text(entry: Any) -> str:
-    """Render one backend error record as a string for the typed report.
-
-    A backend reports a per-row error as ``{"index", "name", "error"}``; a plain string
-    is kept as-is, so a backend reporting either shape is carried without loss.
-    """
-    if isinstance(entry, str):
-        return entry
-    if isinstance(entry, dict):
-        name, index, message = entry.get("name"), entry.get("index"), entry.get("error")
-        return f"schedule {name!r} (row {index}): {message}"
-    return str(entry)
+def _schedule_error_text(entry: dict[str, Any]) -> str:
+    """Render one ``{"index", "name", "error"}`` error record as a string for the typed report."""
+    return f"schedule {entry['name']!r} (row {entry['index']}): {entry['error']}"
 
 
 # -- connector_categories / connector_connections ----------------------------

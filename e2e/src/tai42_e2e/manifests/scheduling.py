@@ -32,7 +32,7 @@ def build_schedule_stack(res: StackResources, variants: Variants) -> StackConfig
     manifest = {
         "default_routers": "none",
         # The checkpoints router projects sweep_checkpoints as a tool so the
-        # schedulable-sweep leg has a real tool to schedule via run_tool_schedule_task.
+        # schedulable-sweep leg has a real tool to schedule through run_tool's vehicle.
         "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.checkpoints"],
         "extensions_modules": _EXTENSION_MODULES,
         "backend_module": variants.backend.module,

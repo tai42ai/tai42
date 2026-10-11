@@ -12,21 +12,32 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any
 
 import orjson
 from arq.constants import in_progress_key_prefix
 from arq.jobs import Job, JobStatus, ResultNotFound
 from arq.utils import timestamp_ms
 from tai42_contract.app import tai42_app
+from tai42_contract.backend import (
+    CrontabCadence,
+    IntervalCadence,
+    ScheduleImportError,
+    ScheduleImportMode,
+    ScheduleImportReport,
+    ScheduleListRow,
+    ScheduleRecord,
+    ScheduleRowError,
+)
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 
 from tai42_backend_arq.pool import RedisPoolManager
 from tai42_backend_arq.records import (
-    ScheduleRecord,
     derive_cron_or_interval,
     next_run_after,
     parse_cron_or_interval,
+    read_stored_cadence,
+    refuse_relative,
 )
 from tai42_backend_arq.scheduler import (
     abort_job,
@@ -43,6 +54,29 @@ logger = logging.getLogger(__name__)
 def _decode_optional(value: bytes | None) -> str | None:
     """Decode an optional schedule-hash field, ``None`` when the field is absent."""
     return value.decode() if value else None
+
+
+def _stored_cadence(name: str, data: dict[bytes, bytes]) -> IntervalCadence | CrontabCadence:
+    """The cadence a schedule hash stores; an un-reset hash raises ``ScheduleStoreFormatError``."""
+    return read_stored_cadence(name, data.get(b"schedule"), arq_settings().arq_schedule_pattern)
+
+
+def _split_tool(name: str, kwargs: dict[str, Any]) -> str:
+    """Pop and return the fired tool's name from a schedule's stored ``kwargs``; a hash without it raises."""
+    tool_name_arg = arq_settings().tool_name_arg
+    if tool_name_arg not in kwargs:
+        raise ValueError(
+            f"schedule {name!r} carries no {tool_name_arg!r}; it was not created through this backend's schedule door"
+        )
+    return kwargs.pop(tool_name_arg)
+
+
+def _row_error(data: dict[bytes, bytes]) -> ScheduleRowError | None:
+    """The startup watchdog's terminal recovery failure recorded on a schedule hash, if any."""
+    message = _decode_optional(data.get(b"recovery_error"))
+    if message is None:
+        return None
+    return ScheduleRowError(message=message, at_iso=_decode_optional(data.get(b"recovery_failed_at")))
 
 
 def _failure_detail(result: Any) -> str:
@@ -234,15 +268,14 @@ async def backend_list_failed_tasks() -> list[dict[str, Any]]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_list_schedules() -> list[dict[str, Any]]:
-    """List all custom schedules.
+    """List all custom schedules as ``ScheduleListRow`` dumps.
 
-    Each row carries the canonical keys ``name``, ``enabled``,
-    ``next_run_at_ts`` and ``next_run_at_iso`` (the pending job's due time,
-    read from the schedule hash; null when none is recorded yet), plus the
-    backend-specific extras ``schedule`` (the canonical schedule dict),
-    ``target``, ``args``, and ``kwargs``. ``recovery_error`` and
-    ``recovery_failed_at`` name the terminal error state a schedule the startup
-    watchdog cannot recover carries (both null on a healthy schedule).
+    Each row carries ``name``, the fired ``tool``, the ``cadence``, ``enabled``,
+    ``next_run_at_ts`` and ``next_run_at_iso`` (the pending job's due time, read from the
+    schedule hash; null when none is recorded yet) — never the stored arguments.
+    ``error`` carries the terminal recovery failure the startup watchdog records on a
+    schedule it cannot recover (null on a healthy schedule). A hash in a format this
+    backend no longer reads raises ``ScheduleStoreFormatError``.
     """
     arq_redis: Any = await RedisPoolManager.get()
     settings = arq_settings()
@@ -258,18 +291,15 @@ async def backend_list_schedules() -> list[dict[str, Any]]:
         next_run_raw = data.get(b"last_scheduled_ts")
         next_run_ts = float(next_run_raw) if next_run_raw else None
         schedules.append(
-            {
-                "name": name,
-                "enabled": data.get(b"enabled", b"true").decode() == "true",
-                "next_run_at_ts": next_run_ts,
-                "next_run_at_iso": (datetime.fromtimestamp(next_run_ts, tz=UTC).isoformat() if next_run_ts else None),
-                "schedule": orjson.loads(data.get(b"schedule", b"{}")),
-                "target": data.get(b"target", b"").decode(),
-                "args": orjson.loads(data.get(b"args", b"[]")),
-                "kwargs": orjson.loads(data.get(b"kwargs", b"{}")),
-                "recovery_error": _decode_optional(data.get(b"recovery_error")),
-                "recovery_failed_at": _decode_optional(data.get(b"recovery_failed_at")),
-            }
+            ScheduleListRow(
+                name=name,
+                tool=_split_tool(name, orjson.loads(data.get(b"kwargs", b"{}"))),
+                cadence=_stored_cadence(name, data),
+                enabled=data.get(b"enabled", b"true").decode() == "true",
+                next_run_at_ts=next_run_ts,
+                next_run_at_iso=(datetime.fromtimestamp(next_run_ts, tz=UTC).isoformat() if next_run_ts else None),
+                error=_row_error(data),
+            ).model_dump(mode="json")
         )
     return schedules
 
@@ -278,14 +308,14 @@ async def backend_list_schedules() -> list[dict[str, Any]]:
 async def backend_export_schedules() -> list[dict[str, Any]]:
     """Export every custom schedule as a list of portable, JSON-serializable records.
 
-    Each record captures only the durable definition of a schedule -- its name,
-    positional args, keyword args (which carry the tool name verbatim), the
-    canonical interval-or-crontab schedule dict, and whether it is enabled.
+    Each ``ScheduleRecord`` captures only the durable definition of a schedule -- its
+    name, the fired ``tool`` (split out of the stored kwargs' tool-name key), positional
+    args, the remaining keyword args, the cadence, and whether it is enabled.
     Runtime-only fields (job_id, last_scheduled_ts, aborted, cron_or_interval)
     are omitted because they are derivable from the schedule at import time. The
     returned list round-trips through ``backend_import_schedules``. A schedule
-    hash with a missing or malformed stored schedule dict raises loudly — an
-    export must never emit a record that cannot recreate its schedule.
+    hash with a missing or unreadable stored cadence raises ``ScheduleStoreFormatError``
+    — an export must never emit a record that cannot recreate its schedule.
     """
     arq_redis: Any = await RedisPoolManager.get()
     settings = arq_settings()
@@ -298,29 +328,29 @@ async def backend_export_schedules() -> list[dict[str, Any]]:
         if not data:
             # Empty hash: the schedule was deleted between the scan and this read.
             continue
-        raw_schedule = data.get(b"schedule")
-        if raw_schedule is None:
-            raise ValueError(f"schedule '{name}' has no stored schedule definition; cannot export it")
+        kwargs = orjson.loads(data.get(b"kwargs", b"{}"))
         record = ScheduleRecord(
             name=name,
+            tool=_split_tool(name, kwargs),
             args=orjson.loads(data.get(b"args", b"[]")),
-            kwargs=orjson.loads(data.get(b"kwargs", b"{}")),
-            schedule=orjson.loads(raw_schedule),
+            kwargs=kwargs,
+            cadence=_stored_cadence(name, data),
             enabled=data.get(b"enabled", b"true").decode() == "true",
         )
         records.append(record)
-    return [record.model_dump() for record in records]
+    return [record.model_dump(mode="json") for record in records]
 
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_import_schedules(
-    schedules: list[dict[str, Any]], mode: Literal["skip", "overwrite"] = "skip"
+    schedules: list[dict[str, Any]], mode: ScheduleImportMode = "skip"
 ) -> dict[str, Any]:
     """Import schedules previously produced by ``backend_export_schedules``.
 
-    Each entry is parsed as a ``ScheduleRecord`` and written through the same
-    low-level schedule-hash mapping the create path uses: target is set to
-    ``tool_execution`` and the args, kwargs, canonical schedule, derived
+    Each entry is parsed as a ``ScheduleRecord`` (a relative interval is refused as a
+    per-row error) and written through the same low-level schedule-hash mapping the
+    create path uses: target is set to ``tool_execution`` and the args, the kwargs (the
+    record's ``tool`` injected back under the tool-name key), the cadence dump, derived
     cron_or_interval and enabled flag are stored under ``arq:schedule:{name}``.
     The next run is recomputed from the schedule (never taken from a stale
     exported value).
@@ -333,8 +363,8 @@ async def backend_import_schedules(
     tool boundary, honored here as every backend honors it.
 
     A malformed entry or a failed write is recorded in ``errors`` -- never silently
-    dropped. Returns ``{"created", "updated", "skipped", "skipped_existing",
-    "errors"}``; each error row is ``{"index", "name", "error"}``. ``skipped`` is
+    dropped. Returns a ``ScheduleImportReport`` dump; each error row is
+    ``{"index", "name", "error"}``. ``skipped`` is
     always 0 -- this backend has no per-row skip case (every valid record can be
     stored, enabled or disabled).
     """
@@ -345,11 +375,12 @@ async def backend_import_schedules(
     updated = 0
     skipped = 0
     skipped_existing = 0
-    errors: list[dict[str, Any]] = []
+    errors: list[ScheduleImportError] = []
 
     for index, entry in enumerate(schedules):
         try:
             record = ScheduleRecord.model_validate(entry)
+            refuse_relative(record.cadence)
 
             key = settings.arq_schedule_key(record.name)
             exists = bool(await arq_redis.exists(key))
@@ -359,15 +390,14 @@ async def backend_import_schedules(
                 skipped_existing += 1
                 continue
 
-            norm = normalize_schedule(record.schedule)
-            cron_or_interval = derive_cron_or_interval(norm)
+            cron_or_interval = derive_cron_or_interval(record.cadence)
             defer_by, last_scheduled_ts = next_run_after(cron_or_interval, datetime.now(UTC))
 
             mapping_updates = {
                 "target": "tool_execution",
                 "args": orjson.dumps(record.args),
-                "kwargs": orjson.dumps(record.kwargs),
-                "schedule": orjson.dumps(norm),
+                "kwargs": orjson.dumps({**record.kwargs, settings.tool_name_arg: record.tool}),
+                "schedule": record.cadence.model_dump_json(),
                 "cron_or_interval": str(cron_or_interval),
                 "enabled": "true" if record.enabled else "false",
             }
@@ -386,31 +416,29 @@ async def backend_import_schedules(
             else:
                 created += 1
         except Exception as exc:
-            name = entry.get("name") if isinstance(entry, dict) else None
-            errors.append({"index": index, "name": name, "error": repr(exc)})
+            raw_name = entry.get("name") if isinstance(entry, dict) else None
+            name = raw_name if isinstance(raw_name, str) else None
+            errors.append(ScheduleImportError(index=index, name=name, error=repr(exc)))
 
-    return {
-        "created": created,
-        "updated": updated,
-        "skipped": skipped,
-        "skipped_existing": skipped_existing,
-        "errors": errors,
-    }
+    return ScheduleImportReport(
+        created=created, updated=updated, skipped=skipped, skipped_existing=skipped_existing, errors=errors
+    ).model_dump()
 
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_get_schedule(name: str) -> dict[str, Any]:
-    """Get details of a custom schedule."""
+    """Get details of a custom schedule (its stored cadence validated; an un-reset hash raises)."""
     arq_redis: Any = await RedisPoolManager.get()
     settings = arq_settings()
     key = settings.arq_schedule_key(name)
     data = await arq_redis.hgetall(key)
     if not data:
         # Empty hash means no schedule.
-        return {"status": "not_found"}
+        return {"status": "not_found", "name": name}
     return {
+        "name": name,
         "enabled": data.get(b"enabled", b"true").decode() == "true",
-        "schedule": orjson.loads(data.get(b"schedule", b"{}")),
+        "schedule": _stored_cadence(name, data).model_dump(mode="json"),
         "target": data.get(b"target", b"").decode(),
         "args": orjson.loads(data.get(b"args", b"[]")),
         "kwargs": orjson.loads(data.get(b"kwargs", b"{}")),
@@ -514,7 +542,8 @@ async def backend_update_schedule(
 ) -> dict[str, Any]:
     """Update an existing custom schedule entry.
 
-    - `new_schedule` (optional): int/float (seconds interval), str (5-field crontab), or dict.
+    - `new_schedule` (optional): int/float (seconds interval), str (5-field crontab), or a
+      friendly/``kind``-tagged dict, parsed into a cadence (a relative interval is refused).
       If omitted, the schedule is left unchanged.
     - `next_run_in_ms` (optional): delay in milliseconds from *now* (UTC). For initial enqueue.
     - `next_run_at_ts` (optional): absolute UNIX timestamp (UTC). Ignored if `next_run_in_ms` is provided.
@@ -534,7 +563,7 @@ async def backend_update_schedule(
         }
 
     data = await arq_redis.hgetall(key)
-    prev_schedule = orjson.loads(data.get(b"schedule", b"{}"))
+    prev_schedule = _stored_cadence(name, data).model_dump(mode="json")
     prev_cron_or_interval = parse_cron_or_interval(data.get(b"cron_or_interval", b"").decode("utf-8"))
 
     updated = False
@@ -542,9 +571,10 @@ async def backend_update_schedule(
     mapping_updates: dict[str, Any] = {}
 
     if new_schedule is not None:
-        norm = normalize_schedule(new_schedule)
-        cron_or_interval = derive_cron_or_interval(norm)
-        mapping_updates["schedule"] = orjson.dumps(norm)
+        cadence = normalize_schedule(new_schedule)
+        refuse_relative(cadence)
+        cron_or_interval = derive_cron_or_interval(cadence)
+        mapping_updates["schedule"] = cadence.model_dump_json()
         mapping_updates["cron_or_interval"] = str(cron_or_interval)
         updated = True
 
@@ -588,7 +618,7 @@ async def backend_update_schedule(
         }
 
     new_data = await arq_redis.hgetall(key)
-    stored_schedule = orjson.loads(new_data.get(b"schedule", b"{}"))
+    stored_schedule = _stored_cadence(name, new_data).model_dump(mode="json")
 
     return {
         "status": "updated",

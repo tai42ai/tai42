@@ -21,14 +21,16 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import ValidationError
+from tai42_contract.backend import ScheduleImportMode
 from tai42_contract.backup import BackupSectionInfo, BackupSectionReport
 
 # Per keyed record: ``skip`` leaves an existing record untouched, ``overwrite``
-# upserts it; new records are created under both.
-BackupMode = Literal["skip", "overwrite"]
+# upserts it; new records are created under both. One mode set for every section,
+# the scheduling protocol's import mode included.
+BackupMode = ScheduleImportMode
 
 _import_mode: ContextVar[BackupMode] = ContextVar("tai42_backup_import_mode", default="skip")
 

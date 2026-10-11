@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, RootModel
 from tai42_contract.app.responses import FanoutSummary
+from tai42_contract.backend import ScheduleListRow
 from tai42_contract.connectors.models import StartConnectNoAuthResponse, StartConnectResponse
 from tai42_contract.hooks import HookParams
 from tai42_contract.manifest import ExtensionElement
@@ -314,16 +315,23 @@ class ToolTagRow(BaseModel):
     """One tool's declared tags, visibility, and capability badges.
 
     ``hidden`` and ``badges`` are the tool's OWN declaration (before the tool_meta overlay's override).
+    ``schedulable`` is whether the tool's schedule vehicle is registered (the scheduling backend's
+    ``schedule_task`` extension is attached to it).
     """
 
     name: str
     tags: list[str]
     hidden: bool
     badges: list[str]
+    schedulable: bool
 
 
 class ToolTagListResponse(RootModel[list[ToolTagRow]]):
     """The bare array of per-tool tag rows."""
+
+
+class ScheduleListResponse(RootModel[list[ScheduleListRow]]):
+    """The bare array of the scheduling backend's typed schedule rows."""
 
 
 class ToolSchemaView(BaseModel):

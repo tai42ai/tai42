@@ -35,7 +35,7 @@ from typing import Any, Self
 
 import click
 from redis import Redis
-from rq import Queue, SimpleWorker, Worker
+from rq import SimpleWorker, Worker
 from rq.exceptions import StopRequested
 from rq.timeouts import HorseMonitorTimeoutException, TimerDeathPenalty, UnixSignalDeathPenalty
 from rq.worker import WorkerStatus
@@ -43,6 +43,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
 from tai42_kit.fork_gate import fork_gate
 
+from tai42_backend_rq.queue import TaskBudgetQueue
 from tai42_backend_rq.settings import rq_settings
 
 logger = logging.getLogger(__name__)
@@ -415,7 +416,7 @@ def _build_worker(
         prepare_forking_worker()
 
     redis_conn = Redis.from_url(url)
-    queue = Queue(rq_settings().queue_name, connection=redis_conn)
+    queue = TaskBudgetQueue(rq_settings().queue_name, connection=redis_conn)
     worker = worker_class([queue], name=name, connection=redis_conn, default_result_ttl=results_ttl)
     return worker, redis_conn
 

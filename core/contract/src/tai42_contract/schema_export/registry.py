@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from tai42_contract.access_control.models import AccessPolicy, RoleDefinition
 from tai42_contract.backend.callback import CallbackSchema
+from tai42_contract.backend.scheduling import ScheduleCreate, ScheduleListRow, ScheduleRecord
 from tai42_contract.channels import ChannelTemplate
 from tai42_contract.conversations import (
     ConversationRoute,
@@ -56,6 +57,9 @@ SERVED_DOCUMENTS: dict[str, type[BaseModel]] = {
     "StateAttach": StateAttach,
     "StateBinding": StateBinding,
     "CallbackSchema": CallbackSchema,
+    "ScheduleCreate": ScheduleCreate,
+    "ScheduleListRow": ScheduleListRow,
+    "ScheduleRecord": ScheduleRecord,
     "FormReactionEvent": FormReactionEventBody,
 }
 

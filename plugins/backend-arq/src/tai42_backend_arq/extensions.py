@@ -16,20 +16,31 @@ from typing import Any
 
 import orjson
 from makefun import create_function
+from pydantic import TypeAdapter
 from pydantic_core import to_jsonable_python
 from tai42_contract.app import tai42_app
+from tai42_contract.backend import (
+    SCHEDULE_BRANCH_SUFFIX,
+    SCHEDULE_CADENCE_KEY,
+    SCHEDULE_EXTENSION,
+    SCHEDULE_NAME_KEY,
+    CrontabCadence,
+    IntervalCadence,
+    ScheduleCadence,
+)
 from tai42_contract.extensions import ExtensionKind
 from tai42_kit.backend import prepare_backend_kwargs
 from tai42_kit.utils.data import makefun_func_name
-from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 from tai42_kit.utils.schedule_subject import SCHEDULE_STAMPED_DOOR_OPTS
 
 from tai42_backend_arq.pool import RedisPoolManager
-from tai42_backend_arq.records import derive_cron_or_interval, next_run_after
+from tai42_backend_arq.records import derive_cron_or_interval, next_run_after, refuse_relative
 from tai42_backend_arq.scheduler import safe_schedule_transition, wait_job_result
 from tai42_backend_arq.settings import arq_settings
 from tai42_backend_arq.signatures import add_signature_params
 from tai42_backend_arq.tasks import ARQ_SCHEDULE_OPTS, ARQ_TASK_OPTS, enqueue_task
+
+_CADENCE: TypeAdapter[IntervalCadence | CrontabCadence] = TypeAdapter(ScheduleCadence)
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND)
@@ -69,13 +80,13 @@ def sync_task(func: Callable[..., Any], name: str, description: str) -> Callable
     return branch
 
 
-@tai42_app.extensions.extension(kind=ExtensionKind.BACKEND)
+@tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name=SCHEDULE_EXTENSION)
 def schedule_task(func: Callable[..., Any], name: str, description: str) -> Callable[..., Any]:
     """Branch ``func`` into a ``<name>_schedule_task`` variant that registers a recurring schedule.
 
-    The schedule (interval or crontab) queues the tool.
+    The schedule (an interval or crontab cadence) queues the tool; a relative interval is refused.
     """
-    raw_name = f"{name}_schedule_task"
+    raw_name = f"{name}{SCHEDULE_BRANCH_SUFFIX}"
     safe_name = makefun_func_name(raw_name)
     new_description = f"Scheduled version of '{name}'. Schedules the task to run later via a background queue."
     new_description += f"\n\nOriginal Doc:\n{description}" if description else ""
@@ -88,22 +99,20 @@ def schedule_task(func: Callable[..., Any], name: str, description: str) -> Call
         kwargs = await prepare_backend_kwargs(func, arq_settings().tool_name_arg, name, kwargs, scheduled=True)
 
         arq_redis = await RedisPoolManager.get()
-        schedule_name = kwargs.pop("backend_schedule_name", None)
-        schedule_in = kwargs.pop("backend_schedule", None)
+        schedule_name = kwargs.pop(SCHEDULE_NAME_KEY, None)
         if not schedule_name:
-            raise ValueError("backend_schedule_name is required")
-        if schedule_in is None:
-            raise ValueError("backend_schedule is required")
+            raise ValueError(f"{SCHEDULE_NAME_KEY} is required")
+        cadence = _CADENCE.validate_python(kwargs.pop(SCHEDULE_CADENCE_KEY))
+        refuse_relative(cadence)
 
-        norm = normalize_schedule(schedule_in)
-        cron_or_interval = derive_cron_or_interval(norm)
+        cron_or_interval = derive_cron_or_interval(cadence)
         defer_by, last_scheduled_ts = next_run_after(cron_or_interval, datetime.now(UTC))
 
         mapping_updates = {
             "target": "tool_execution",
             "args": orjson.dumps(to_jsonable_python(list(args))),
             "kwargs": orjson.dumps(to_jsonable_python(kwargs)),
-            "schedule": orjson.dumps(norm),
+            "schedule": cadence.model_dump_json(),
             "cron_or_interval": str(cron_or_interval),
             "enabled": "true",
         }
