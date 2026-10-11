@@ -218,3 +218,59 @@ def test_the_awaiting_verdict_is_logged_once_naming_every_worker(caplog: pytest.
         "nothing in this operation respawns them: backend-2 (BACKEND_MANIFEST_KEY), serve-1 (BACKEND_MANIFEST_KEY) — "
         "restart each through the deployment's supervisor (bare: restart the server)"
     ]
+
+
+def _fork_child_bus(monkeypatch: pytest.MonkeyPatch) -> FakeBus:
+    """A forked job child's bus: a non-member acting for its member parent ``backend-1``."""
+    from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
+
+    bus = FakeBus(origin="backend-1/fork-7", remotes=["backend-1"])
+    bus._identity = WorkerIdentity(name="backend-1/fork-7", kind=WorkerKind.backend, pid=7, generation=0, member=False)
+    bus._member = WorkerIdentity(name="backend-1", kind=WorkerKind.backend, pid=1, generation=3)
+    return _install(monkeypatch, bus)
+
+
+async def test_a_non_member_publisher_applies_nothing_locally_and_its_member_converges_as_a_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A fork child is never a fleet target: it has no serving surface of its own, so the
+    # whole-fleet op runs no local apply there and publishes with no self entry; the member
+    # parent applies it as a sibling.
+    bus = _fork_child_bus(monkeypatch)
+    applied: list[str] = []
+
+    async def apply() -> str:
+        applied.append("local")
+        return "applied"
+
+    body = await broadcast({"op": "reload_tool"}, None, apply)
+
+    assert applied == []
+    assert [call[2] for call in bus.publish_calls] == [None]
+    assert [row["name"] for row in body["results"]] == ["backend-1"]
+
+
+def test_the_writer_exit_of_a_non_member_aims_at_the_member_it_acts_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.app.graceful_exit import request_graceful_exit
+    from tai42_skeleton.operations._broadcast import writer_exit_response
+
+    _fork_child_bus(monkeypatch)
+
+    response = writer_exit_response({"status": "ok"}, armed=True)
+
+    assert response.background is not None
+    assert response.background.func is request_graceful_exit
+    assert response.background.args == (1,)
+
+
+def test_the_writer_exit_of_a_member_aims_at_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.app.graceful_exit import request_graceful_exit
+    from tai42_skeleton.operations._broadcast import writer_exit_response
+
+    bus = _install(monkeypatch, FakeBus(origin="serve-a"))
+
+    response = writer_exit_response({"status": "ok"}, armed=True)
+
+    assert response.background is not None
+    assert response.background.func is request_graceful_exit
+    assert response.background.args == (bus.identity.pid,)

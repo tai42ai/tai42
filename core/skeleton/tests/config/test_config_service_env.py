@@ -20,8 +20,8 @@ import pytest
 # Imported for its registration side effect: the env doors classify a change by the live
 # registry, and the backend group's ``BACKEND_MANIFEST_KEY`` is recycle-class.
 import tai42_skeleton.backend.settings  # noqa: F401
-from tai42_skeleton.app.bus import WorkerKind
-from tai42_skeleton.app.recycle import TIMED_OUT, RecycleError, RecycleReport, RecycleRow, RecycleStop
+from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
+from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, RecycleError, RecycleReport, RecycleRow, RecycleStop
 from tai42_skeleton.config.service import OrphanEnvWriteError
 
 from .._fakes.bus import FakeBus
@@ -330,6 +330,59 @@ async def test_a_hot_change_names_a_sibling_whose_env_moved_out_of_band(
     assert seen == {}
     assert [(w.name, w.keys) for w in result.awaiting_respawn] == [("serve-b", ["BACKEND_MANIFEST_KEY"])]
     assert len([r for r in caplog.records if "awaiting a respawn" in r.getMessage()]) == 1
+
+
+class _ForkChildBus(_MovedBus):
+    """A forked job child's bus: a non-member acting for its member parent ``backend-1``.
+
+    The census carries the member parent and a serve sibling, never the child; the parent
+    answers the published reload as a sibling, stating the moved key as every reload does.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(origin="backend-1/fork-7", remotes=["backend-1", "serve-1"])
+        self._identity = WorkerIdentity(
+            name="backend-1/fork-7", kind=WorkerKind.backend, pid=7, generation=0, member=False
+        )
+        self._member = WorkerIdentity(name="backend-1", kind=WorkerKind.backend, pid=1, generation=3)
+
+    async def census(self) -> list[Any]:
+        rows = await super().census()
+        backend = rows[1].model_copy(update={"kind": WorkerKind.backend, "generation": 3})
+        return [backend, rows[2]]
+
+
+async def test_an_env_change_in_a_forked_job_child_applies_nothing_locally_and_acts_for_its_member(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A tool door run inside a forked backend job (a schedule fire, a background submit) writes
+    # the env from a non-member child. The child has no serving surface to converge and the bus
+    # takes no self entry from it: it reloads nothing, publishes with no local result, and the
+    # member parent converges as a sibling. The writer is that member: excluded from the roll at
+    # its own generation, reported self-deferred, and never left awaiting a respawn.
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
+    orch, seen = _orchestrate_spy(
+        RecycleReport(rows=[RecycleRow(name="serve-1", kind="serve", generation_before=1, status=RECYCLED)])
+    )
+    bus = _ForkChildBus()
+    service, admin, _bus = _service(store, admin=_moved_admin(), bus=bus, orchestrate=orch)
+
+    with caplog.at_level(logging.ERROR):
+        result = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
+
+    assert store.env == {"BACKEND_MANIFEST_KEY": "NEW"}
+    assert admin.calls == 0
+    assert [call[2] for call in bus.publish_calls] == [None]
+    assert seen["excluded_name"] == "backend-1"
+    assert seen["applier_generation"] == 3
+    assert seen["expected"] == {"serve-1": (WorkerKind.serve, 1)}
+    assert result.self_identity == bus.member_identity
+    assert result.self_exit_armed is True
+    assert result.local == {"status": "ok", "env_keys": 1}
+    assert {row.name for row in result.fleet.results} == {"backend-1", "serve-1"}
+    assert result.awaiting_respawn == []
+    assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
 
 
 class _CountingMovedBus(_MovedBus):

@@ -29,13 +29,15 @@ import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.binaries import tai_bin
+from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import build_recycle_stack
+from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.topology import StackConfig, StackResources
 from tai42_e2e.waiting import wait_for
@@ -240,11 +242,11 @@ def _build_compose_marked_recycle_stack(res: StackResources, variants: Variants)
 @pytest.mark.timeout(300)
 @pytest.mark.needs("mutable", "store:redis", "process", "topology:supervised")
 async def test_declared_pinned_key_refuses_a_profile_changing_it(
-    fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
+    fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str], llm_stub: LlmStub
 ) -> None:
     """On a ``compose``-marked deployment the keys it declares in ``TAI_SUPERVISED_PINNED_KEYS``
     are refused upfront at the API, naming the key: a container respawn would re-inject them."""
-    stack = fresh_stack(_build_compose_marked_recycle_stack)
+    stack = fresh_stack(_build_compose_marked_recycle_stack, resource_kwargs={"llm_base_url": llm_stub.base_url})
     api = stack.api()
     name = uniq("pinned")
     await _profile_from_stored(stack, {_PINNED_SAMPLE: uniq("value")}, name)
@@ -449,3 +451,161 @@ async def test_a_backup_env_restore_of_a_recycle_class_key_rolls_the_fleet_and_s
     assert section["errors"] == [], section
     assert section["awaiting_respawn"] == [], section
     await _assert_roll_converged_and_writer_respawns(recycle_stack, section["recycle"], before_backend, before_serve)
+
+
+# The lines a converged env write never logs, on any worker: the operation's verdict naming a
+# worker nothing respawns, a fleet reload a worker did not confirm, and a writer exit that failed.
+_FORBIDDEN_LINES = (
+    "worker(s) awaiting a respawn",
+    "did not fully converge",
+    "post-reply task failed",
+)
+
+
+def _log_offsets(stack: TaiStack) -> dict[str, int]:
+    """The current length of the serve and backend logs, so a leg reads only what it caused."""
+    return {name: len(_read_log(stack, name)) for name in ("serve", "backend")}
+
+
+def _read_log(stack: TaiStack, name: str) -> str:
+    return stack.process(name).log_path.read_text(encoding="utf-8", errors="replace")
+
+
+def _assert_no_forbidden_lines(stack: TaiStack, offsets: dict[str, int]) -> None:
+    for name, offset in offsets.items():
+        text = _read_log(stack, name)
+        written = text[offset:] if len(text) >= offset else text
+        for line in written.splitlines():
+            assert not any(marker in line for marker in _FORBIDDEN_LINES), f"{name} logged: {line}"
+
+
+def _tool_map(result: Any) -> dict[str, Any]:
+    """The map a tool call returned, from the deserialized ``data`` or the ``{"result": …}`` envelope."""
+    if isinstance(result.data, dict):
+        return result.data
+    content = result.structured_content
+    if isinstance(content, dict) and isinstance(content.get("result"), dict):
+        return content["result"]
+    if isinstance(content, dict):
+        return content
+    raise AssertionError(f"the tool call returned no map: {result!r}")
+
+
+@pytest.mark.timeout(480)
+@pytest.mark.needs(*_SUPERVISED_RECYCLE_NEEDS, "probe-tools", "setting:extension:async_task")
+async def test_an_env_write_run_as_a_backend_job_recycles_the_backend_worker_that_ran_it(
+    recycle_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """``write_env`` queued as a backend job (``run_tool_async_task``, the queue a schedule fires
+    through) is written by the backend worker that ran the job: the roll recycles the serve
+    fleet, the job's result reports that backend worker ``self-deferred`` and nobody awaiting a
+    respawn, and the backend worker finishes the job, exits, and its supervisor respawns it."""
+    before_backend = _lives(recycle_stack, "backend")
+    before_serve = _lives(recycle_stack, "serve")
+    offsets = _log_offsets(recycle_stack)
+
+    async with recycle_stack.mcp(auth=recycle_stack.auth_token) as mcp:
+        queued = _tool_map(
+            await mcp.call_tool(
+                "run_tool_async_task",
+                {"tool_name": "write_env", "arguments": {"env": {_RECYCLE_VAR: uniq("mkey").upper()}}},
+                retry_on_reloading=True,
+            )
+        )
+    task_id = queued["task_id"]
+
+    # The roll recycles the serve worker; the respawned serve reads the job's recorded result.
+    recycle_stack.wait_generation_bump("serve", before_serve, deadline=150.0)
+    async with recycle_stack.mcp(auth=recycle_stack.auth_token) as mcp:
+        written = _tool_map(
+            await mcp.call_tool(
+                "backend_task_result",
+                {"task_id": task_id, "timeout": 120},
+                retry_on_reloading=True,
+                ready_deadline=60.0,
+            )
+        )
+
+    assert written["awaiting_respawn"] == [], written
+    roll = written["recycle"]
+    assert roll["recycle_stopped"] is None, f"the recycle roll stopped: {roll}"
+    serve_rows = [e for e in roll["recycle"] if e["kind"] == "serve"]
+    assert serve_rows, f"serve not recycled: {roll}"
+    for e in serve_rows:
+        assert e["status"] == "recycled", f"a serve row did not converge: {e} in {roll}"
+        assert e["generation_before"] == before_serve[e["name"]], f"not the pre-write life: {e} vs {before_serve}"
+    writer = [e for e in roll["recycle"] if e["status"] == "self-deferred"]
+    assert len(writer) == 1, f"expected exactly one self-deferred writer row: {roll}"
+    assert writer[0]["kind"] == "backend", writer
+    assert writer[0]["name"] in before_backend, (
+        f"the writer named an unknown backend slot: {writer} vs {before_backend}"
+    )
+    assert writer[0]["generation_before"] == before_backend[writer[0]["name"]], writer
+
+    # The backend worker that ran the job exits after it and comes back at its next life.
+    recycle_stack.wait_generation_bump(writer[0]["name"], before_backend[writer[0]["name"]], deadline=150.0)
+
+    async def serves_again() -> bool:
+        resp = await recycle_stack.api().request_raw("GET", "/health")
+        return resp.status_code == 200
+
+    await wait_for_async(serves_again, deadline=60.0, message="the respawned serve never served /health again")
+    _assert_no_forbidden_lines(recycle_stack, offsets)
+
+
+@pytest.mark.timeout(480)
+@pytest.mark.skipif(
+    HarnessSettings().is_real("llm"),
+    reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
+)
+@pytest.mark.needs(*_SUPERVISED_RECYCLE_NEEDS, "helper:llm", "setting:agent:tools_agent", "kind:tool_runs")
+async def test_an_env_write_by_an_agent_rolls_the_fleet_and_the_writer_recycles_itself_after_the_run(
+    recycle_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
+) -> None:
+    """An agent run whose tool call is ``write_env`` of a recycle-class key rolls the backend, the
+    tool result the model reads carries the serve writer ``self-deferred`` and nobody awaiting a
+    respawn, the run ends ``succeeded`` with the model's final answer, and the serve worker then
+    exits and its supervisor respawns it."""
+    before_backend = _lives(recycle_stack, "backend")
+    before_serve = _lives(recycle_stack, "serve")
+    offsets = _log_offsets(recycle_stack)
+    final = f"written {uniq('run')}"
+    llm_stub.reset()
+    llm_stub.script(
+        [
+            {"tool_call": {"name": "write_env", "arguments": {"env": {_RECYCLE_VAR: uniq("mkey").upper()}}}},
+            {"content": final},
+        ]
+    )
+
+    api = recycle_stack.api()
+    submitted = await api.post(
+        "/api/tool-runs",
+        json={
+            "tool_name": "tools_agent",
+            "arguments": {"user_message": {"content": "write the setting"}, "tool_names": ["write_env"]},
+        },
+        expect=202,
+        retry_on_reloading=True,
+    )
+    run_id = submitted["run_id"]
+
+    # The serve worker exits once the run it drains has ended, and comes back at its next life.
+    recycle_stack.wait_generation_bump("serve", before_serve, deadline=200.0)
+
+    async def _terminal() -> dict[str, Any] | None:
+        view = await recycle_stack.api().get(f"/api/tool-runs/{run_id}", retry_on_reloading=True)
+        return view if view["status"] not in ("pending", "running") else None
+
+    view = await wait_for_async(_terminal, deadline=60.0, message=f"agent run {run_id} never ended")
+    assert view["status"] == "succeeded", f"the agent run did not complete: {view}"
+    assert final in json.dumps(view["result"]), f"the run did not return the model's final answer: {view}"
+
+    requests = llm_stub.requests
+    assert len(requests) == 2, f"expected 2 LLM round-trips, saw {len(requests)}"
+    tool_messages = [m for m in requests[1]["messages"] if m.get("role") == "tool"]
+    assert len(tool_messages) == 1, f"the second completion carried no single tool result: {requests[1]['messages']}"
+    written = json.loads(tool_messages[0]["content"])
+    assert written["awaiting_respawn"] == [], written
+    await _assert_roll_converged_and_writer_respawns(recycle_stack, written["recycle"], before_backend, before_serve)
+    _assert_no_forbidden_lines(recycle_stack, offsets)

@@ -11,7 +11,6 @@ status mapping (502/404/409/500 and the retriable 503s).
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -528,14 +527,14 @@ def _with_bus(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(instance.app, "_bus", FakeBus(origin="serve-1"))
     exits: list[str] = []
-    monkeypatch.setattr(graceful_exit, "_deliver_self_sigterm", lambda: exits.append("sigterm"))
+    monkeypatch.setattr(graceful_exit.os, "kill", lambda pid, sig: exits.append("sigterm"))
     return exits
 
 
 async def test_an_install_whose_env_recycle_converged_arms_the_writer_self_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tai42_skeleton.app.graceful_exit import request_serve_graceful_exit
+    from tai42_skeleton.app.graceful_exit import request_graceful_exit
 
     _with_bus(monkeypatch)
 
@@ -549,7 +548,7 @@ async def test_an_install_whose_env_recycle_converged_arms_the_writer_self_exit(
     assert [entry["status"] for entry in reload["recycle"]["recycle"]] == ["recycled", "self-deferred"]
     assert reload["awaiting_respawn"] == []
     assert resp.background is not None
-    assert resp.background.func is request_serve_graceful_exit
+    assert resp.background.func is request_graceful_exit
 
 
 async def test_an_install_whose_env_recycle_stopped_names_the_workers_awaiting_and_arms_nothing(
@@ -604,7 +603,6 @@ async def test_a_projected_install_whose_env_recycle_converged_runs_the_writer_s
 
     assert [entry["status"] for entry in reply["reload"]["recycle"]["recycle"]] == ["recycled", "self-deferred"]
     assert reply["reload"]["awaiting_respawn"] == []
-    await _the_post_reply_tasks_finished()
     assert exits == ["sigterm"]
 
 
@@ -846,11 +844,3 @@ async def test_upgrade_all_off_refuses_not_configured(monkeypatch: pytest.Monkey
     with pytest.raises(NotSupportedError) as exc_info:
         await mkt_ops.marketplace_upgrade_all()
     assert exc_info.value.extra["code"] == "marketplace-not-configured"
-
-
-async def _the_post_reply_tasks_finished() -> None:
-    """Let the projection start the post-reply tasks the call armed, then wait for them to finish."""
-    from tai42_skeleton.operations import projection
-
-    await asyncio.sleep(0)
-    await asyncio.gather(*projection._AFTER_REPLY_TASKS)

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -482,8 +483,8 @@ async def test_dead_perpetual_task_marks_and_exits_for_every_registration(
     process's graceful exit. Parametrized over all six task names so no registration is
     uncovered."""
     m = _Mixin()
-    exits: list[WorkerKind] = []
-    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: exits.append(kind))
+    exits: list[int] = []
+    monkeypatch.setattr(lifespan, "request_graceful_exit", exits.append)
 
     async def boom():
         raise RuntimeError("perpetual task died")
@@ -495,7 +496,7 @@ async def test_dead_perpetual_task_marks_and_exits_for_every_registration(
     await asyncio.sleep(0)  # let the done-callback run
 
     assert m._dead_perpetual_task == (task_name, "RuntimeError")
-    assert exits == [m._worker_kind]
+    assert exits == [os.getpid()]
 
 
 async def test_a_reconnect_resync_names_its_own_keys_awaiting_a_respawn(

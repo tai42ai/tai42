@@ -878,3 +878,56 @@ async def test_a_stopped_profile_roll_leaves_the_unreached_awaiting(
         {"name": "serve-c", "keys": ["TAI_BUS_NAMESPACE"]},
     ]
     assert len([r for r in caplog.records if "awaiting a respawn" in r.getMessage()]) == 1
+
+
+class _ForkChildBus(_MovedBus):
+    """A forked job child's bus: a non-member acting for its member parent ``backend-1``."""
+
+    def __init__(self) -> None:
+        super().__init__(origin="backend-1/fork-7", remotes=["backend-1", "serve-1"])
+        self._identity = WorkerIdentity(
+            name="backend-1/fork-7", kind=WorkerKind.backend, pid=7, generation=0, member=False
+        )
+        self._member = WorkerIdentity(name="backend-1", kind=WorkerKind.backend, pid=1, generation=3)
+
+    async def census(self) -> list[WorkerRow]:
+        rows = await super().census()
+        return [rows[1].model_copy(update={"kind": WorkerKind.backend, "generation": 3}), rows[2]]
+
+
+async def test_a_profile_apply_in_a_forked_job_child_swaps_nothing_and_acts_for_its_member(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A non-member job child has no serving surface: it builds and swaps nothing, persists the
+    # profile, publishes with no local result, and the member parent converges as a sibling.
+    # The applier is that member: excluded from the roll at its generation, reported
+    # self-deferred, never left awaiting a respawn.
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+    store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
+    spy, swapped = _swap_spy()
+    orch, seen = _orchestrate_spy(
+        RecycleReport(rows=[RecycleRow(name="serve-1", kind="serve", generation_before=1, status=RECYCLED)])
+    )
+    bus = _ForkChildBus()
+    with caplog.at_level(logging.ERROR):
+        outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
+            {"TAI_BUS_NAMESPACE": "new"}, save_previous=_PrevSpy(), build_and_swap=spy
+        )
+    assert swapped == {}
+    assert store.env == {"TAI_BUS_NAMESPACE": "new"}
+    assert [call[2] for call in bus.publish_calls] == [None]
+    assert seen["excluded_name"] == "backend-1"
+    assert seen["applier_generation"] == 3
+    assert seen["expected"] == {"serve-1": (WorkerKind.serve, 1)}
+    assert outcome.self_identity == bus.member_identity
+    assert outcome.self_exit_armed is True
+    assert outcome.awaiting_respawn == []
+    deferred = profile_apply_response(outcome)["recycle"][-1]
+    assert deferred == {
+        "name": "backend-1",
+        "kind": "backend",
+        "status": SELF_DEFERRED,
+        "generation_before": 3,
+        "detail": None,
+    }
+    assert [r for r in caplog.records if r.levelno == logging.ERROR] == []

@@ -8,7 +8,6 @@ reload publishes anyway and re-raises with the report. The projection carries
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -251,7 +250,7 @@ async def test_write_env_arms_the_writer_self_exit_when_its_recycle_converged(mo
 
     assert isinstance(response, OperationResponse)
     assert response.background is not None
-    assert response.background.func is graceful_exit.request_serve_graceful_exit
+    assert response.background.func is graceful_exit.request_graceful_exit
     roll = response.payload["recycle"]
     assert [entry["status"] for entry in roll["recycle"]] == ["recycled", "self-deferred"]
     assert roll["recycle"][-1] == {
@@ -291,7 +290,7 @@ async def test_set_mcp_secret_env_arms_the_writer_self_exit_when_its_recycle_con
 
     assert isinstance(response, OperationResponse)
     assert response.background is not None
-    assert response.background.func is graceful_exit.request_serve_graceful_exit
+    assert response.background.func is graceful_exit.request_graceful_exit
 
 
 # -- the bare reload doors judge the rows they collected ------------------------
@@ -372,16 +371,8 @@ def _project(op: Any) -> Any:
 
 def _record_exits(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     exits: list[str] = []
-    monkeypatch.setattr(graceful_exit, "_deliver_self_sigterm", lambda: exits.append("sigterm"))
+    monkeypatch.setattr(graceful_exit.os, "kill", lambda pid, sig: exits.append("sigterm"))
     return exits
-
-
-async def _let_the_post_reply_task_run() -> None:
-    """Let the projection start the post-reply tasks the call armed, then wait for them to finish."""
-    from tai42_skeleton.operations import projection
-
-    await asyncio.sleep(0)
-    await asyncio.gather(*projection._AFTER_REPLY_TASKS)
 
 
 async def test_a_projected_env_write_runs_the_writer_self_exit_after_its_reply(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -396,8 +387,8 @@ async def test_a_projected_env_write_runs_the_writer_self_exit_after_its_reply(m
 
     assert [entry["status"] for entry in reply["recycle"]["recycle"]] == ["recycled", "self-deferred"]
     assert reply["awaiting_respawn"] == []
-    assert exits == []  # nothing runs before the reply is handed back
-    await _let_the_post_reply_task_run()
+    # The exit was delivered by the time the call returned; the worker's graceful drain is what
+    # lets the reply leave before the process stops.
     assert exits == ["sigterm"]
 
 
@@ -407,7 +398,6 @@ async def test_a_projected_env_write_whose_roll_stopped_runs_no_exit(monkeypatch
     exits = _record_exits(monkeypatch)
 
     await _project(config_ops.write_env)(env={"BACKEND_MANIFEST_KEY": "NEW"})
-    await _let_the_post_reply_task_run()
 
     assert exits == []
 
@@ -449,5 +439,4 @@ async def test_a_projected_profile_apply_runs_the_applier_self_exit_after_its_re
 
     assert [entry["status"] for entry in reply["recycle"]] == ["recycled", "self-deferred"]
     assert reply["awaiting_respawn"] == []
-    await _let_the_post_reply_task_run()
     assert exits == ["sigterm"]

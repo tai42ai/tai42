@@ -295,8 +295,9 @@ def replicas_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> It
 
 
 @pytest.fixture(scope="module")
-def recycle_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
-    yield from _boot(infra, tmp_path_factory.mktemp("recycle"), build_recycle_stack)
+def recycle_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub) -> Iterator[TaiStack]:
+    resource_kwargs = {"llm_base_url": llm_stub.base_url}
+    yield from _boot(infra, tmp_path_factory.mktemp("recycle"), build_recycle_stack, resource_kwargs=resource_kwargs)
 
 
 @pytest.fixture(scope="module")

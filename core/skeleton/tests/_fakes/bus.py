@@ -59,6 +59,8 @@ class FakeBus:
         self.ttl = 15.0
         fresh = int(self.ttl * 1000)
         self._identity = WorkerIdentity(name=origin, kind=WorkerKind.serve, pid=1, generation=1)
+        # Set by a test standing in for a forked job child: the member the child acts for.
+        self._member: WorkerIdentity | None = None
         self._self_row = _row(origin, WorkerKind.serve, pid=1, generation=1, pttl_ms=fresh)
         self._remote_rows = [_row(o, WorkerKind.serve, pid=2, generation=1, pttl_ms=fresh) for o in (remotes or [])]
         self.publish_calls: list[tuple[dict[str, Any], list[str] | None, LocalApplyResult | None]] = []
@@ -71,6 +73,11 @@ class FakeBus:
     @property
     def identity(self) -> WorkerIdentity:
         return self._identity
+
+    @property
+    def member_identity(self) -> WorkerIdentity:
+        """The bus member this process acts for: itself, or the ``member`` a fork-child fake names."""
+        return self._member if self._member is not None else self._identity
 
     @property
     def heartbeat_ttl(self) -> float:
@@ -117,6 +124,9 @@ class FakeBus:
     ) -> FleetResult:
         self.publish_calls.append((op, targets, local))
         self.expected_at_start_calls.append(expected_at_start)
+        if local is not None and not self._identity.member:
+            # The real bus's contract: a non-member is never a target, so it carries no self entry.
+            raise ValueError("publish: a local result was supplied but targets exclude the publisher")
         results: list[WorkerResult] = []
         if local is not None:
             results.append(

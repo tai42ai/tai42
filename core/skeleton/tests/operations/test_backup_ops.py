@@ -4,7 +4,6 @@ document)."""
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -190,14 +189,14 @@ def _roll(*statuses: str) -> RecycleRoll:
 async def test_an_env_restore_whose_recycle_converged_arms_the_writer_self_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tai42_skeleton.app.graceful_exit import request_serve_graceful_exit
+    from tai42_skeleton.app.graceful_exit import request_graceful_exit
 
     _env_backup(monkeypatch, BackupSectionReport(updated=1, recycle=_roll("recycled", "self-deferred")))
 
     response = await import_backup({"version": 1, "sections": {"env": {"BACKEND_MANIFEST_KEY": "NEW"}}}, ["env"])
 
     assert response.background is not None
-    assert response.background.func is request_serve_graceful_exit
+    assert response.background.func is request_graceful_exit
     assert response.payload.sections["env"].recycle is not None
 
 
@@ -294,7 +293,7 @@ async def test_a_projected_env_restore_whose_recycle_converged_runs_the_writer_s
 
     _env_backup(monkeypatch, BackupSectionReport(updated=1, recycle=_roll("recycled", "self-deferred")))
     exits: list[str] = []
-    monkeypatch.setattr(graceful_exit, "_deliver_self_sigterm", lambda: exits.append("sigterm"))
+    monkeypatch.setattr(graceful_exit.os, "kill", lambda pid, sig: exits.append("sigterm"))
     reg = OperationRegistry()
     reg.register(operation_metadata_of(import_backup))
     registered: dict[str, object] = {}
@@ -317,13 +316,4 @@ async def test_a_projected_env_restore_whose_recycle_converged_runs_the_writer_s
     )
 
     assert reply.sections["env"].recycle.recycle[-1].status == "self-deferred"
-    await _the_post_reply_tasks_finished()
     assert exits == ["sigterm"]
-
-
-async def _the_post_reply_tasks_finished() -> None:
-    """Let the projection start the post-reply tasks the call armed, then wait for them to finish."""
-    from tai42_skeleton.operations import projection
-
-    await asyncio.sleep(0)
-    await asyncio.gather(*projection._AFTER_REPLY_TASKS)

@@ -123,6 +123,7 @@ class RecordingBus:
         census_error: Exception | None = None,
     ) -> None:
         self.identity = WorkerIdentity(name="serve-test", kind=WorkerKind.serve, pid=1, generation=1)
+        self.member_identity = self.identity
         self._remotes = remotes or []
         self._remote_outcome = remote_outcome
         self._reachable = reachable

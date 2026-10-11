@@ -400,9 +400,9 @@ async def test_apply_arms_self_exit_when_serve_affecting(
     response = await config_ops.apply_profile("p")
     assert isinstance(response, OperationResponse)
     # A serve-affecting recycle arms the applier's OWN deferred self-exit as a post-flush
-    # BackgroundTask wrapping ``request_serve_graceful_exit`` — never an inline create_task.
+    # BackgroundTask wrapping ``request_graceful_exit`` — never an inline create_task.
     assert response.background is not None
-    assert response.background.func is graceful_exit.request_serve_graceful_exit
+    assert response.background.func is graceful_exit.request_graceful_exit
     assert response.payload["refused"] == []
     assert response.payload["hot"] == ["A"]
     # The profile's active env is what the pipeline was handed.
