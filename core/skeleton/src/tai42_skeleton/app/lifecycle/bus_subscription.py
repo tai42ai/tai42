@@ -101,9 +101,10 @@ class BusSubscriptionMixin(LifecycleState):
                 # config was JUST built by ``start()``, so a swap would be pure
                 # redundant work (and would retire the just-built epoch) — skip it and
                 # only latch boot-ready below.
-                await self._apply_bus_op(
+                result = await self._apply_bus_op(
                     {"op": "reload_config"}, deadline=time.monotonic() + bus_settings().apply_timeout
                 )
+                self._judge_resync(result)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -114,6 +115,25 @@ class BusSubscriptionMixin(LifecycleState):
             )
         else:
             self._mark_boot_ready()
+
+    def _judge_resync(self, result: Any) -> None:
+        """Judge this worker's own resync reload: nothing in a resync respawns it.
+
+        The resyncing worker is the operation that started the reload, so the recycle-class
+        keys its reload states as moved off their bound value (a roll it missed while away, a stopped
+        roll that never reached it) are its own verdict, logged loudly.
+        """
+        from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerResult
+        from tai42_skeleton.operations._broadcast import awaiting_respawn_after, log_awaiting_respawn
+
+        bus = self._bus
+        if bus is None:
+            raise RuntimeError("bus resync ran before the bus was built")
+        report = FleetResult(
+            op="reload_config",
+            results=[WorkerResult(name=bus.identity.name, outcome=OpOutcome.applied, payload=result)],
+        )
+        log_awaiting_respawn(awaiting_respawn_after(report, None, None, self_exit_armed=False))
 
     def _mark_boot_ready(self) -> None:
         """Latch the boot-ready signal on the FIRST successful self-resync.

@@ -158,7 +158,7 @@ class _UpdateFlow(_InstallerBase):
             "package": new_spec.package,
             "advisories": resolve.require_list(resolved, "advisories"),
             "notes": notes.install_notes(new_spec),
-            "reload": manifest_apply.reload_report(apply_result),
+            "reload": apply_result,
             "pip_output": pip_output,
             "routes": routes_mod.mounted_rows(resolved_route_list),
         }

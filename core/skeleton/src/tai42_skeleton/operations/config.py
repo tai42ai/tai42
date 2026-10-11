@@ -24,7 +24,6 @@ import os
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
-from starlette.background import BackgroundTask
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import ApplyResponse, ProfileApplyResponse
 from tai42_contract.settings_profiles import SettingsProfileBody
@@ -38,7 +37,6 @@ from tai42_kit.settings import present_env_value, registered_settings
 
 from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.app.bus import FleetResult
-from tai42_skeleton.app.graceful_exit import request_serve_graceful_exit
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config import config_mode
 from tai42_skeleton.config.boundary import reload_class_by_env_var
@@ -47,7 +45,14 @@ from tai42_skeleton.config.recycle_policy import capability_report
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, OperationResponse, operation
-from tai42_skeleton.operations._broadcast import apply_response, broadcast, profile_apply_response
+from tai42_skeleton.operations._broadcast import (
+    apply_response,
+    awaiting_respawn_after,
+    broadcast,
+    log_awaiting_respawn,
+    profile_apply_response,
+    writer_exit_response,
+)
 from tai42_skeleton.operations.response_models_group_b import (
     ConfigModeView,
     EnvView,
@@ -205,7 +210,7 @@ async def read_settings_schema() -> dict:
 
 
 @operation(
-    summary="Merge env overrides and hot-reload the process config",
+    summary="Merge env overrides and reload the fleet",
     tags=["config"],
     destructive=True,
     reload_gated=True,
@@ -213,8 +218,17 @@ async def read_settings_schema() -> dict:
     request_model=EnvUpdate,
     response_model=ApplyResponse,
 )
-async def write_env(env: dict[str, str], secret_keys: list[str] | None = None) -> dict:
-    """Merge env overrides into the stored config and hot-reload this worker and the fleet.
+async def write_env(env: dict[str, str], secret_keys: list[str] | None = None) -> OperationResponse:
+    """Merge env overrides into the stored config and reload this worker and the fleet.
+
+    A hot-class key is re-read in place. A recycle-class key rolls a worker recycle across the
+    fleet on a supervised deployment: the response's ``recycle`` carries the roll's rows (``null``
+    when the change carried no recycle-class key), and when the roll converged this worker
+    recycles itself after replying — on the HTTP edge and on every projected tool door alike (a
+    post-reply graceful self-exit its supervisor respawns).
+    A change the deployment cannot carry is refused with a 400 before anything is written, naming
+    the key: a recycle-class key on a bare (unsupervised) deployment, and the bus URL or a key the
+    deployment pins on every shape.
 
     ``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;
     the marks variable itself is never accepted as an ``env`` key.
@@ -237,7 +251,7 @@ async def write_env(env: dict[str, str], secret_keys: list[str] | None = None) -
             result = await ConfigService.from_app().apply_env_change(env, secret_keys)
         except ValueError as exc:
             raise BadRequestError(str(exc)) from exc
-    return apply_response(result)
+    return writer_exit_response(apply_response(result), armed=result.self_exit_armed)
 
 
 @operation(
@@ -264,15 +278,26 @@ async def reload_config(targets: list[str] | None = None) -> Any:
     generation it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an
     SSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave
     that worker out, nothing reloads there and the session keeps working.
+
+    Each worker's payload is ``{status, env_keys, awaiting_respawn}``: ``awaiting_respawn`` names the
+    recycle-class keys whose value now differs from the one that worker bound (at boot, or when the
+    plugin that declares them was loaded) — the soft
+    restart carries every hot key in place, and those keys take effect only when the worker is
+    respawned through the deployment's supervisor (on a bare deployment, a server restart). This
+    operation ERROR-logs one line naming every such worker and its keys.
     """
     # Run the heavy sync reload on a worker thread through the gate so this call (on
     # the serving loop) does not freeze it.
-    return await broadcast(
+    report = await broadcast(
         {"op": "reload_config"},
         targets,
         lambda: reload_gate.run(tai42_app.admin.reload_config, reimports=True),
         publish_on_local_failure=True,
     )
+    # This operation starts the reload and rolls nothing, so every row stating a moved
+    # recycle-class env is a worker awaiting a respawn: one loud line naming them.
+    log_awaiting_respawn(awaiting_respawn_after(FleetResult.model_validate(report), None, None, self_exit_armed=False))
+    return report
 
 
 # -- settings profiles -------------------------------------------------------
@@ -286,7 +311,7 @@ async def reload_config(targets: list[str] | None = None) -> Any:
 # ``apply_profile`` replaces the WHOLE stored env with the profile's env, builds+swaps a
 # fresh serving epoch under it (env-write-LAST), broadcasts the reload, recycles the fleet
 # for recycle-class diffs, and — for a serve-affecting recycle — arms the applier's own
-# deferred graceful self-exit as a post-response BackgroundTask.
+# deferred graceful self-exit as a post-reply background task.
 
 # The 501 an OFF-store profile door carries: the versioned-document store is absent,
 # so a profile write/read is a capability the deployment lacks (not a transient 503).
@@ -612,7 +637,8 @@ async def apply_profile(name: str) -> OperationResponse:
 
     The response is the dedicated ``profileApplyResponse`` ``{hot, recycle:[{name, kind, status,
     generation_before, detail}], fresh:[{name, kind, generation}], refused:[],
-    recycle_stopped:{kind, name, detail} | null, fanout}`` — key names + worker identities only,
+    recycle_stopped:{kind, name, detail} | null, awaiting_respawn:[{name, keys}], fanout}`` — key names
+    + worker identities only,
     never env values. ``recycle`` is one line per sibling the roll reached (plus the applier's
     own deferred self-exit line when it is armed). A ``recycled`` line is confirmed on reality;
     the roll stops at the first line that is not: ``timed-out`` (its old life did not go, fresh
@@ -626,9 +652,12 @@ async def apply_profile(name: str) -> OperationResponse:
     snapshot, capacity evidence never claimed as any target's successor. ``refused`` is ``[]``:
     a refusal (X-band key, dangling ``!ENV``, a recycle-class diff the deployment shape cannot
     carry) aborts upfront with a loud 400 naming the key, before anything is snapshotted, built,
-    or persisted. When the diff carries serve-affecting recycle keys and the roll converged, the
-    applier's OWN recycle is armed as a post-response graceful self-exit (a Starlette
-    ``BackgroundTask``) — its supervisor respawns it on the new env. 404 for an absent name.
+    or persisted. ``awaiting_respawn`` names the workers (name + keys) still awaiting a respawn
+    after the roll — empty when it converged. When the diff carries serve-affecting recycle keys
+    and the roll converged, the applier's OWN recycle is armed as a post-reply graceful self-exit
+    — after the HTTP body flushes, or once a projected tool call (MCP, ``tai tools run``, an
+    agent, a preset, a schedule, a hook) returned — and its supervisor respawns it on the new
+    env. 404 for an absent name.
 
     Called over MCP, the reload answers on the session that called it and then retires that session with
     the generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,
@@ -646,9 +675,7 @@ async def apply_profile(name: str) -> OperationResponse:
             )
         except ValueError as exc:
             raise BadRequestError(str(exc)) from exc
-    # Arm the applier's own deferred self-exit as a POST-FLUSH BackgroundTask iff the diff
+    # Arm the applier's own deferred self-exit as a post-reply background task iff the diff
     # carries serve-affecting recycle keys and the roll converged (never a bare shape —
-    # refused upfront). An inline ``create_task`` is FORBIDDEN: it would race the response
-    # body flush and sever the transport before the report ships.
-    background = BackgroundTask(request_serve_graceful_exit) if outcome.self_exit_armed else None
-    return OperationResponse(profile_apply_response(outcome), background)
+    # refused upfront). The edge runs it after its reply (``OperationResponse``).
+    return writer_exit_response(profile_apply_response(outcome), armed=outcome.self_exit_armed)

@@ -28,7 +28,7 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, LastOp, WorkerKind, WorkerState, presence_fresh
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.operations import BadRequestError, operation
-from tai42_skeleton.operations._broadcast import broadcast
+from tai42_skeleton.operations._broadcast import awaiting_respawn_after, broadcast, log_awaiting_respawn
 from tai42_skeleton.operations.response_models_group_c import BackendInfo
 
 
@@ -123,6 +123,13 @@ async def fleet_reload_config(targets: list[str] | None) -> FleetResult:
     generation it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an
     SSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave
     that worker out, nothing reloads there and the session keeps working.
+
+    Each worker's payload is ``{status, env_keys, awaiting_respawn}``: ``awaiting_respawn`` names the
+    recycle-class keys whose value now differs from the one that worker bound (at boot, or when the
+    plugin that declares them was loaded) — the soft
+    restart carries every hot key in place, and those keys take effect only when the worker is
+    respawned through the deployment's supervisor (on a bare deployment, a server restart). This
+    operation ERROR-logs one line naming every such worker and its keys.
     """
     # ``targets`` is validated at the HTTP edge (the route's ``_reload_targets``
     # extractor raises ``BadRequestError`` for a malformed body / non-string-list
@@ -134,7 +141,7 @@ async def fleet_reload_config(targets: list[str] | None) -> FleetResult:
     # but a failed local apply must not abort the broadcast — the recovery door
     # exists to heal the exact stale siblings a failed local reload would strand —
     # so it publishes anyway and re-raises with the fleet report attached.
-    return FleetResult.model_validate(
+    report = FleetResult.model_validate(
         await broadcast(
             {"op": "reload_config"},
             targets,
@@ -142,3 +149,7 @@ async def fleet_reload_config(targets: list[str] | None) -> FleetResult:
             publish_on_local_failure=True,
         )
     )
+    # This operation starts the reload and rolls nothing, so every row stating a moved
+    # recycle-class env is a worker awaiting a respawn: one loud line naming them.
+    log_awaiting_respawn(awaiting_respawn_after(report, None, None, self_exit_armed=False))
+    return report

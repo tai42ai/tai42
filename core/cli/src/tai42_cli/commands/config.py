@@ -87,7 +87,13 @@ def set_env(
         ),
     ] = False,
 ) -> None:
-    """Merge KEY=VALUE env overrides and hot-reload the process config.
+    """Merge KEY=VALUE env overrides and reload the fleet.
+
+    A hot-class key is re-read in place. A recycle-class key rolls a worker
+    recycle across the fleet on a supervised deployment (the response carries the
+    recycle rows; the worker that took the write recycles itself after replying),
+    and is refused on a bare deployment, naming the key. The bus URL and a key the
+    deployment pins are refused on every shape.
 
     Values may come from command-line KEY=VALUE arguments, ``--env-file``, and
     ``--stdin`` combined; at least one assignment is required. The same key from
@@ -135,6 +141,11 @@ def reload_config(
     Refreshes env, resets settings caches, and re-initializes from the manifest
     in-process (no pod restart), then propagates to the fleet; ``--target`` restricts
     the fan-out to named workers.
+
+    Each worker's row names the recycle-class keys awaiting a respawn
+    (``awaiting_respawn``): the soft restart carries every hot key in place, and
+    those keys take effect only when that worker is respawned through the
+    deployment's supervisor (on a bare deployment, a server restart).
 
     Example: ``tai config reload``
     """

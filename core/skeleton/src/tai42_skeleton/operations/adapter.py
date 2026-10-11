@@ -44,14 +44,16 @@ _PATH_PARAM = re.compile(r"\{([^}:]+)(?::[^}]+)?\}")
 
 @dataclass(frozen=True)
 class OperationResponse:
-    """An operation result that carries a Starlette ``BackgroundTask`` to run after the response body flushes.
+    """An operation result that carries a Starlette ``BackgroundTask`` to run after the reply.
 
-    The profile-apply door returns this to arm its self-exit (``request_serve_graceful_exit``)
-    as a post-flush background task — never an inline ``create_task`` that could race the
-    body flush and sever the transport before the response ships. The HTTP adapter unwraps
-    it: ``payload`` is enveloped as usual and ``background`` is attached to the response.
-    Every other surface (the MCP projection) treats it as its ``payload`` alone — a
-    background self-exit is meaningless off the HTTP edge.
+    The env-change doors return this to arm the writer's own post-reply graceful self-exit after
+    a recycle roll that converged. On the HTTP edge the adapter envelopes ``payload`` and attaches
+    ``background`` to the response, so it runs after the body flushes — never an inline
+    ``create_task`` that could race the flush and sever the transport before the reply ships.
+    The projected tool edge (every tool door: MCP ``tools/call``, ``tai tools run``, an agent, a
+    preset, a schedule, a hook) answers with ``payload`` and runs ``background`` once the call
+    returned; the exit is graceful, so the in-flight reply drains before the worker stops and its
+    supervisor respawns it. One reply, true on every edge.
     """
 
     payload: Any
@@ -202,7 +204,7 @@ def _build_handler(
         except _ParseError as parse:
             return JSONResponse(parse.body, status_code=parse.status)
 
-        # Unwrap a post-flush ``BackgroundTask`` (the profile-apply self-exit) from the
+        # Unwrap a post-flush ``BackgroundTask`` (the env-change writer's self-exit) from the
         # payload; a bare payload's background stays ``None``. ``response_headers`` ride
         # the SUCCESS response only (a caching directive the route's read carries); an
         # error response is uncached and unadorned. ``success_status`` is the operation's

@@ -56,36 +56,29 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import logging
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from tai42_kit.fork_gate import fork_gate
 from tai42_kit.llm import release_loop_bound_resources
 
-from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
-from tai42_skeleton.app.recycle import RecycleError, RecycleReport, RecycleStop, orchestrate_recycle
+from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
 from tai42_skeleton.app.reload_gate import FORK_QUIESCE_SECONDS, reload_gate
-from tai42_skeleton.config.boundary import reload_class_by_env_var
-from tai42_skeleton.config.recycle_policy import (
-    CENSUS_TARGET_KINDS,
-    _recycle_step_timeout,
-    _refuse_unrecyclable,
-    _replace_diff_keys,
-    capability_report,
-)
+from tai42_skeleton.config.boundary import refuse_unrecyclable_env_change
 from tai42_skeleton.config.secret_seal import _leaving_connector_secrets
 from tai42_skeleton.config.service.broadcast import _BroadcastMixin
 from tai42_skeleton.config.service.resolution import _ResolutionMixin
 from tai42_skeleton.config.service.results import ApplyResult, OrphanEnvWriteError, ProfileApplyOutcome
 from tai42_skeleton.config.service.validation import _ValidationMixin
-from tai42_skeleton.operations._broadcast import snapshot_membership
+from tai42_skeleton.operations._broadcast import awaiting_respawn_after, log_awaiting_respawn, snapshot_membership
 from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, format_secret_marks, parse_secret_marks
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    from tai42_skeleton.app.bus import WorkerBus, WorkerRow
+    from tai42_skeleton.app.bus import WorkerBus
     from tai42_skeleton.config.service.results import _FleetPublisher, _ManifestStore, _ReloadAdmin
 
 logger = logging.getLogger(__name__)
@@ -111,11 +104,23 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
     _env_write_lock: ClassVar[asyncio.Lock | None] = None
     _env_write_loop: ClassVar[asyncio.AbstractEventLoop | None] = None
 
-    def __init__(self, config_manager: _ManifestStore, admin: _ReloadAdmin, bus: _FleetPublisher) -> None:
-        """Bind the config manager, the admin reload seam, and the worker bus the pipeline drives."""
+    def __init__(
+        self,
+        config_manager: _ManifestStore,
+        admin: _ReloadAdmin,
+        bus: _FleetPublisher,
+        *,
+        orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
+    ) -> None:
+        """Bind the config manager, the admin reload seam, the worker bus, and the recycle roll the pipeline drives.
+
+        ``orchestrate`` is the fleet recycle roll an env change carrying a recycle-class key runs; it
+        defaults to the running primitive and is injectable so the roll is exercised in isolation.
+        """
         self._config_manager = config_manager
         self._admin = admin
         self._bus = bus
+        self._orchestrate = orchestrate
 
     @classmethod
     def _env_lock(cls) -> asyncio.Lock:
@@ -182,7 +187,13 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         persisted = self._config_manager.mutate_manifest(guarded)
         return await self._reload_and_broadcast(document=persisted)
 
-    async def apply_replace(self, document: dict[str, Any]) -> ApplyResult:
+    async def apply_replace(
+        self,
+        document: dict[str, Any],
+        *,
+        continues: ApplyResult | None = None,
+        recycle_keys: Sequence[str] = (),
+    ) -> ApplyResult:
         """Replace the whole manifest, then reload locally and broadcast to the fleet.
 
         VALIDATEs the resolved projection of ``document`` BEFORE it is persisted (a replace has no mutator to
@@ -200,9 +211,16 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         ``update()``, so the whole-document replace still DELETES omitted sections — never
         a merge) — persisting the marks union and the replace atomically. When nothing
         leaves, the plain replace runs unchanged.
+
+        ``continues`` / ``recycle_keys`` (exclusive) make the replace the continuation of an
+        earlier change: ``continues`` carries that change's already-run roll (no pin, no second
+        roll, one verdict), ``recycle_keys`` its recycle-class keys whose roll never ran (this
+        reload rolls them). Neither applies to a replace that drops an oauth connector.
         """
         preserved = self._read_preserved_manifest()
         if _leaving_connector_secrets(preserved, document):
+            if continues is not None or recycle_keys:
+                raise ValueError("a replace that continues a change drops no oauth connector")
 
             def replace_mutator(doc: dict[str, Any]) -> None:
                 doc.clear()
@@ -212,7 +230,7 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         self._validate_manifest(document)
         self._seal_secrets(document, preserved)
         persisted = self._config_manager.replace_manifest(document)
-        return await self._reload_and_broadcast(document=persisted)
+        return await self._reload_and_broadcast(document=persisted, recycle_keys=recycle_keys, continues=continues)
 
     async def _apply_change_with_leaving(self, mutator: Callable[[dict[str, Any]], None]) -> ApplyResult:
         """Persist a manifest mutation that drops an oauth connector through the combined env+manifest seam.
@@ -246,9 +264,9 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         """
         if secret_keys is not None:
             changes = {**changes, SECRET_MARKS_ENV_VAR: format_secret_marks(dict.fromkeys(secret_keys))}
-        self._validate_env(changes)
+        recycle_keys = self._validate_env(changes)
         self._config_manager.write_env(changes)
-        return await self._reload_and_broadcast(document=None)
+        return await self._reload_and_broadcast(document=None, recycle_keys=recycle_keys)
 
     async def apply_env_and_change(
         self,
@@ -318,7 +336,7 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
             # union (stored union caller marks union leaving; written only when it grows the stored
             # set) BEFORE the env write, so the value stays masked after the connector goes.
             self._fold_leaving_secret_marks(changes, stored, preserved, candidate)
-            self._validate_env_and_manifest(changes, candidate)
+            recycle_keys = self._validate_env_and_manifest(changes, candidate)
 
             # STEP 2 — env-write-FIRST. Env-first (not manifest-first) guarantees there is
             # never a persisted ``!ENV`` marker referencing an env key not yet stored.
@@ -361,7 +379,7 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
                 ) from exc
 
         # STEP 4 — lock RELEASED; reload + broadcast (acquires reload_gate) runs outside it.
-        return await self._reload_and_broadcast(document=persisted)
+        return await self._reload_and_broadcast(document=persisted, recycle_keys=recycle_keys)
 
     @staticmethod
     def _fold_leaving_secret_marks(
@@ -399,7 +417,6 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         *,
         save_previous: Callable[[dict[str, str]], Awaitable[None]],
         build_and_swap: Callable[..., Awaitable[Epoch]] = build_and_swap_epoch,
-        orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
         release_llm_pools: Callable[[], Awaitable[None]] = release_loop_bound_resources,
     ) -> ProfileApplyOutcome:
         """Apply a settings profile: the env-write-LAST reload pipeline.
@@ -422,10 +439,13 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
            recycle is a deferred self-exit, armed only when the roll converged). A
            roll that stops — on a target, or because the bus could not be read — is
            logged at ERROR and returned as the outcome's partial recycle report, never
-           raised: the env is persisted and the fleet reloaded.
+           raised: the env is persisted and the fleet reloaded. The outcome carries the
+           operation's verdict — the workers still awaiting a respawn after the roll — and a
+           non-empty verdict is ERROR-logged once.
 
-        ``build_and_swap`` / ``orchestrate`` default to the running primitives and are
-        injectable so the ordering / drain / recycle contract is exercised in isolation.
+        ``build_and_swap`` defaults to the running primitive and is injectable (the recycle roll
+        through the service's ``orchestrate``) so the ordering / drain / recycle contract is
+        exercised in isolation.
         """
         # STEP 1 — validate the whole-env replace (payload-scoped X-band refusal, dangling
         # !ENV, backend-needs-bus). A failure raises before anything is snapshotted/built.
@@ -433,16 +453,10 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
 
         # STEP 2 — diff the proposed env vs the current stored env; classify each diff key
         # by its live-registry reload_class (names only — never values).
-        stored = self._read_stored_env()
-        diff_keys = _replace_diff_keys(stored, profile_env)
-        reload_classes = reload_class_by_env_var()
-        hot = sorted(key for key in diff_keys if reload_classes.get(key, "hot") == "hot")
-        recycle_diff_keys = sorted(key for key in diff_keys if reload_classes.get(key) == "recycle")
-
         # STEP 1b — refuse a recycle-class diff this deployment shape cannot carry, upfront
         # and naming the key, so an unappliable profile never reaches the build.
-        report = capability_report()
-        _refuse_unrecyclable(diff_keys, recycle_diff_keys, report)
+        stored = self._read_stored_env()
+        hot, recycle_diff_keys = refuse_unrecyclable_env_change(stored, profile_env, change="this settings profile")
 
         # "Serve-affecting" is UNDEFINED in code (design seam 2): the CONSERVATIVE default
         # is that ANY recycle-class diff on a recycle-supported shape affects the serve
@@ -463,7 +477,7 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         # whose slot was lost and is re-minting) would otherwise never be expected by the
         # reload nor targeted by the roll, and either would report converged without it.
         at_start = await snapshot_membership(self._bus, "reload_config")
-        pinned_targets = _pinned_recycle_targets(await bus.census(), self_identity.name) if recycle_diff_keys else {}
+        pinned_targets = await self._pin_recycle_targets(self_identity) if recycle_diff_keys else {}
 
         # STEP 2 (persist reserved snapshot) — save the CURRENT stored env as @previous
         # BEFORE the swap. A later failed build leaves it harmlessly reflecting the
@@ -504,59 +518,18 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         fleet = await self._broadcast_profile_reload(at_start)
         recycle_report: RecycleReport | None = None
         if recycle_diff_keys:
-            try:
-                recycle_report = await orchestrate(
-                    bus,
-                    excluded_name=self_identity.name,
-                    applier_generation=self_identity.generation,
-                    target_kinds=CENSUS_TARGET_KINDS,
-                    applier_self_deferred=serve_affecting,
-                    step_timeout=_recycle_step_timeout(),
-                    expected=pinned_targets,
-                )
-            except RecycleError as exc:
-                # A raise with no recorded stop is a bus contract violation, not an
-                # outcome of the roll: it is not reported as one.
-                stopped = exc.report.stopped
-                if stopped is None:
-                    raise
-                recycle_report = exc.report
-                _log_stopped_roll(exc.report, stopped, pinned_targets)
+            recycle_report = await self._roll_recycle(
+                self_identity, pinned_targets, serve_affecting=serve_affecting, change="the profile apply"
+            )
 
-        return ProfileApplyOutcome(
+        outcome = ProfileApplyOutcome(
             hot=hot,
             recycle=recycle_report,
             self_identity=self_identity,
             serve_affecting=serve_affecting,
             fleet=fleet,
         )
-
-
-def _log_stopped_roll(
-    report: RecycleReport, stopped: RecycleStop, pinned: Mapping[str, tuple[WorkerKind, int]]
-) -> None:
-    """ERROR-log a recycle roll that stopped, naming where (the target, or no target in hand) and why."""
-    row = next((row for row in report.rows if row.name == stopped.name), None)
-    reached = {row.name for row in report.rows}
-    logger.error(
-        "recycle for the profile apply did not converge — stopped in the %s roll at %s (%s): %s; "
-        "%d pinned target(s) not reached; the applier's own recycle is not armed",
-        stopped.kind,
-        repr(stopped.name) if stopped.name is not None else "no target in hand",
-        row.status if row is not None else "no row",
-        stopped.detail,
-        len(set(pinned) - reached),
-    )
-
-
-def _pinned_recycle_targets(rows: list[WorkerRow], self_name: str) -> dict[str, tuple[WorkerKind, int]]:
-    """The recycle targets pinned at the apply's start, ``name -> (kind, generation)``.
-
-    Every census row of a recycle target kind except the applier, gap rows included:
-    the roll waits a target that is not ready back to ready before recycling it.
-    """
-    return {
-        row.name: (row.kind, row.generation)
-        for row in rows
-        if row.kind in CENSUS_TARGET_KINDS and row.name != self_name
-    }
+        # The verdict belongs to this operation, which knows what its roll carried.
+        verdict = awaiting_respawn_after(fleet, recycle_report, self_identity, self_exit_armed=outcome.self_exit_armed)
+        log_awaiting_respawn(verdict)
+        return dataclasses.replace(outcome, awaiting_respawn=verdict)

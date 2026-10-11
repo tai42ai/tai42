@@ -19,20 +19,8 @@ from pydantic import ValidationError
 from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.config.service import ApplyResult, ConfigService
 from tai42_skeleton.marketplace.errors import ManifestComposeError
-from tai42_skeleton.operations._broadcast import fleet_fanout
 
 logger = logging.getLogger(__name__)
-
-
-def reload_report(result: ApplyResult) -> dict[str, Any]:
-    """The manifest apply's local reload result with the fleet fan-out summary folded in under ``fanout``.
-
-    The ``reload`` field every install/uninstall/update response carries. Reuses the shared
-    :func:`~tai42_skeleton.operations._broadcast.fleet_fanout` shaper so the key AND the
-    value shape match every other fleet-report-embedding writer (backup, the
-    operations ``apply_response``).
-    """
-    return {**result.local, "fanout": fleet_fanout(result.fleet)}
 
 
 def composed_manifest_invalid(detail: str) -> ManifestComposeError:
@@ -87,11 +75,13 @@ async def remount_reload(
     re-reads the store — and MUST NOT unwind a good install. The failure is logged; the
     forward reload's ``prior`` result stands in for the receipt. ``read_manifest`` is the
     caller's persisted-manifest read, kept a callable so the best-effort read still
-    happens inside the guarded body. Returns the remount's result on success, else
-    ``prior``.
+    happens inside the guarded body. The remount is the same change continued: it hands the
+    pipeline ``prior`` — the change's already-run roll — so the remount pins and rolls nothing
+    and judges its reload with that roll (one verdict). Returns the remount's result on
+    success, else ``prior``.
     """
     try:
-        return await svc.apply_replace(read_manifest())
+        return await svc.apply_replace(read_manifest(), continues=prior)
     except Exception:
         logger.warning(
             "marketplace: post-record remount reload failed; persisted route mounts will take effect "

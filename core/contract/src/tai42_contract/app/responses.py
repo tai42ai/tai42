@@ -11,7 +11,7 @@ reshapes a wire body.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, JsonValue, RootModel
+from pydantic import BaseModel, Field, JsonValue, RootModel
 
 
 class FanoutWorkerResult(BaseModel):
@@ -48,17 +48,6 @@ class FanoutSummary(BaseModel):
     local_only: bool | None = None
     results: list[FanoutWorkerResult] | None = None
     error: str | None = None
-
-
-class ApplyResponse(BaseModel):
-    """The standard mutation-op response: this worker's local reload result merged with the fleet fan-out summary.
-
-    ``env_keys`` is the count of env keys the reload loaded.
-    """
-
-    status: str
-    env_keys: int
-    fanout: FanoutSummary
 
 
 class RecycleEntry(BaseModel):
@@ -98,14 +87,57 @@ class FreshLife(BaseModel):
     generation: int
 
 
+class RecycleRoll(BaseModel):
+    """The report of a fleet recycle roll an env change carrying a recycle-class key ran.
+
+    ``recycle`` the worker lines of the roll (the writer's own ``self-deferred`` line when its
+    post-response self-exit is armed); ``fresh`` the new ready lives seen since the change began;
+    ``recycle_stopped`` is ``null`` when the roll ran to its end, otherwise where it stopped and
+    why. Names only — never env values.
+    """
+
+    recycle: list[RecycleEntry]
+    fresh: list[FreshLife]
+    recycle_stopped: RecycleStop | None = None
+
+
+class AwaitingWorker(BaseModel):
+    """One worker an operation names as still awaiting a respawn.
+
+    Its recycle-class ``keys`` changed in the stored env since its process bound them (at boot, or
+    when the plugin that declares them was loaded), and nothing in the operation respawns it.
+    """
+
+    name: str
+    keys: list[str]
+
+
+class ApplyResponse(BaseModel):
+    """The standard mutation-op response: this worker's local reload result merged with the fleet fan-out summary.
+
+    ``env_keys`` is the count of env keys the reload loaded. ``recycle`` is the fleet recycle
+    roll the change ran — ``null`` when it carried no recycle-class key. ``awaiting_respawn`` is
+    the operation's verdict: the workers still awaiting a respawn after it (name + keys) — empty
+    when the change rolled a recycle that converged and this worker recycles itself; a worker the
+    roll did not reach, and every listed worker of a change that rolls nothing, keep their keys.
+    """
+
+    status: str
+    env_keys: int
+    awaiting_respawn: list[AwaitingWorker] = Field(default_factory=list[AwaitingWorker])
+    fanout: FanoutSummary
+    recycle: RecycleRoll | None = None
+
+
 class ProfileApplyResponse(BaseModel):
     """The dedicated profile-apply response.
 
     ``hot`` are the hot-class diff key names; ``recycle`` the worker lines of the recycle roll;
     ``fresh`` the new ready lives seen since the pre-apply snapshot; ``refused`` is empty on success
     (any refusal aborts the pipeline before a response is built); ``recycle_stopped`` is ``null``
-    when the roll ran to its end, otherwise where it stopped and why; ``fanout`` the reload
-    broadcast's fleet summary. Names only — never env values.
+    when the roll ran to its end, otherwise where it stopped and why; ``awaiting_respawn`` the
+    workers still awaiting a respawn after the apply (name + keys; empty when the roll converged);
+    ``fanout`` the reload broadcast's fleet summary. Names only — never env values.
     """
 
     hot: list[str]
@@ -113,6 +145,7 @@ class ProfileApplyResponse(BaseModel):
     fresh: list[FreshLife]
     refused: list[str]
     recycle_stopped: RecycleStop | None = None
+    awaiting_respawn: list[AwaitingWorker] = Field(default_factory=list[AwaitingWorker])
     fanout: FanoutSummary
 
 

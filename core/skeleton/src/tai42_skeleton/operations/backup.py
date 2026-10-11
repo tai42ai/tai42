@@ -29,8 +29,13 @@ from tai42_contract.backup import BackupSectionReport
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.backup.registry import BackupMode, import_mode
-from tai42_skeleton.operations import BadRequestError, operation
-from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
+from tai42_skeleton.operations import BadRequestError, OperationResponse, operation
+from tai42_skeleton.operations._broadcast import (
+    broadcast,
+    fleet_fanout,
+    writer_exit_response,
+    writer_self_exit_armed,
+)
 from tai42_skeleton.operations.response_models_group_c import BackupImportResult, BackupSectionListing
 
 logger = logging.getLogger(__name__)
@@ -94,12 +99,14 @@ async def list_sections() -> list:
     request_model=BackupImport,
     response_model=BackupImportResult,
 )
-async def import_backup(document: dict[str, Any], sections: list[str], mode: BackupMode = "skip") -> BackupImportResult:
+async def import_backup(document: dict[str, Any], sections: list[str], mode: BackupMode = "skip") -> OperationResponse:
     """Import each SELECTED section of ``document`` in registration order and return a per-section report.
 
     ``mode`` is the per-record policy (``skip`` or ``overwrite``). A ``version`` other than 1
     raises ``BadRequestError``; an unknown, absent, or failing section carries its error in
-    the report and makes ``ok`` false.
+    the report and makes ``ok`` false. A section whose restore rolled a worker recycle (an env
+    section changing a recycle-class key on a supervised deployment) carries the roll in its
+    ``recycle``; when that roll converged, this worker recycles itself after replying.
     """
     # The envelope shape is validated at the HTTP edge; the document CONTENT (version,
     # its sections map) is the operation's own validation, raising ``BadRequestError``.
@@ -147,7 +154,11 @@ async def import_backup(document: dict[str, Any], sections: list[str], mode: Bac
             if report.errors:
                 ok = False
 
-    return BackupImportResult(ok=ok, sections=reports)
+    # A section whose env change rolled a recycle that converged carries the writer's own
+    # ``self-deferred`` line (the typed signal its exit is armed): this worker recycles itself
+    # after replying, on every edge, as every env door does.
+    armed = any(writer_self_exit_armed(report.recycle.model_dump()) for report in reports.values() if report.recycle)
+    return writer_exit_response(BackupImportResult(ok=ok, sections=reports), armed=armed)
 
 
 async def _evict_templates_fleetwide() -> FanoutSummary:

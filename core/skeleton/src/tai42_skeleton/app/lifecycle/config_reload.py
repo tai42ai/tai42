@@ -7,6 +7,21 @@ from tai42_skeleton.app import lifecycle as _lifecycle
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 
 
+def awaiting_respawn() -> list[str]:
+    """The recycle-class env keys whose effective value differs from the value this process bound them under.
+
+    A key is bound at boot, or when the plugin that declares it was loaded; a pooled resource of
+    this process was built under the bound value, so the key takes effect only when the process is
+    respawned. Classified by the live settings registry. Names only, sorted.
+    """
+    from tai42_kit.settings import respawn_class_env_drift
+
+    from tai42_skeleton.config.boundary import reload_class_by_env_var
+
+    classes = reload_class_by_env_var()
+    return sorted(key for key in respawn_class_env_drift() if classes.get(key) == "recycle")
+
+
 class ConfigReloadMixin(LifecycleState):
     """The soft config-reload lifecycle step: build and swap a fresh serving epoch in place."""
 
@@ -24,6 +39,13 @@ class ConfigReloadMixin(LifecycleState):
         and blocks that loop for the rebuild's length: health and readiness probes, MCP
         keepalives, in-flight streams and the generation's timers pause until the swap
         returns. The worker-bus heartbeat runs on its own thread and does not pause.
+
+        The result ``{"status", "env_keys", "awaiting_respawn"}`` states, as a fact, the
+        recycle-class keys whose value now differs from the one this process bound them under —
+        at boot, or when the plugin that declares them was loaded (:func:`awaiting_respawn`): the
+        soft restart carries every hot key in place, and a pooled resource of this process still
+        runs on the bound value of those keys. The operation that started the reload judges the
+        fact — it alone knows whether a respawn follows.
         """
         env = self._config_manager.read_env()
 
@@ -35,7 +57,7 @@ class ConfigReloadMixin(LifecycleState):
             # holding live resources on a running loop.
             await _lifecycle.release_loop_bound_resources()
             await build_and_swap_epoch(env)
-            return {"status": "ok", "env_keys": len(env)}
+            return {"status": "ok", "env_keys": len(env), "awaiting_respawn": awaiting_respawn()}
 
         loop = self._serving_loop
         if loop is not None and loop.is_running():

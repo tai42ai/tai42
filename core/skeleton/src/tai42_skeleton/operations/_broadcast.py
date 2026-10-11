@@ -34,16 +34,20 @@ changed nothing, while a mid-mutation failure still publishes.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Protocol
 
+from tai42_contract.app.responses import AwaitingWorker
+
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, UnknownFleetTargetsError
-from tai42_skeleton.app.recycle import SELF_DEFERRED
+from tai42_skeleton.app.recycle import RECYCLED, SELF_DEFERRED
 from tai42_skeleton.operations.errors import BadRequestError, OperationFailedError
 
 if TYPE_CHECKING:
+    from tai42_skeleton.app.bus import WorkerIdentity
+    from tai42_skeleton.app.recycle import RecycleReport
     from tai42_skeleton.config.service import ApplyResult, ProfileApplyOutcome
 
 logger = logging.getLogger(__name__)
@@ -90,23 +94,166 @@ def fleet_fanout(fleet: FleetResult) -> dict[str, Any]:
 
 
 def apply_response(result: ApplyResult) -> dict[str, Any]:
-    """The standard mutation-op response: the local reload result merged with the fan-out summary.
+    """The standard mutation-op response: this worker's reload result, the fan-out summary, the roll, the verdict.
 
     The one shape every ConfigService writer returns from an
-    :class:`~tai42_skeleton.config.service.ApplyResult`.
+    :class:`~tai42_skeleton.config.service.ApplyResult`: this worker's local reload result
+    (``status``, ``env_keys``), ``fanout``, ``recycle`` — the fleet recycle roll the change ran
+    (:func:`recycle_roll`, ``None`` when it carried no recycle-class key) — and
+    ``awaiting_respawn``, the operation's verdict (``result.awaiting_respawn``, computed by the
+    pipeline with :func:`awaiting_respawn_after`). The local reload's own ``awaiting_respawn``
+    is a fact the verdict judges; it never reaches the top level. One reply on every edge: the
+    writer's post-reply self-exit runs on the HTTP and the projected tool edge alike.
     """
-    return {**result.local, "fanout": result.fanout}
+    local = {key: value for key, value in result.local.items() if key != "awaiting_respawn"}
+    return {
+        **local,
+        "fanout": result.fanout,
+        "recycle": result_recycle_roll(result),
+        "awaiting_respawn": [worker.model_dump() for worker in result.awaiting_respawn],
+    }
+
+
+def result_recycle_roll(result: ApplyResult) -> dict[str, Any] | None:
+    """The fleet recycle roll a pipeline run carried (:func:`recycle_roll`), or ``None`` when it rolled none."""
+    if result.recycle is None or result.self_identity is None:
+        return None
+    return recycle_roll(result.recycle, result.self_identity, self_exit_armed=result.self_exit_armed)
+
+
+def awaiting_respawn_after(
+    fleet: FleetResult,
+    recycle: RecycleReport | None,
+    writer: WorkerIdentity | None,
+    *,
+    self_exit_armed: bool,
+) -> list[AwaitingWorker]:
+    """The workers still awaiting a respawn after an operation, sorted by name.
+
+    Each reload row's payload states a fact — the recycle-class keys whose value differs from the
+    one that worker bound them under, at boot or when the plugin that declares them was loaded
+    (``awaiting_respawn``). This judges it for the operation that
+    started the reload, the one that knows whether a respawn follows: one ``{name, keys}`` per row
+    that names keys, EXCLUDING a worker the roll confirmed ``recycled`` (its old life is gone) and
+    the writer when its own post-response exit is armed. A ``timed-out`` / ``failed`` row, a
+    target the roll never reached, and every row of a reload that rolls nothing stay listed.
+    """
+    recycled = set() if recycle is None else {row.name for row in recycle.rows if row.status == RECYCLED}
+    exiting = writer.name if writer is not None and self_exit_armed else None
+    verdict: list[AwaitingWorker] = []
+    for row in fleet.results:
+        keys = _awaiting_keys(row.payload)
+        if keys and row.name not in recycled and row.name != exiting:
+            verdict.append(AwaitingWorker(name=row.name, keys=keys))
+    return sorted(verdict, key=lambda worker: worker.name)
+
+
+def _awaiting_keys(payload: Any) -> list[str]:
+    """The recycle-class keys a reload payload states as moved off their bound value (none for any other payload)."""
+    if not isinstance(payload, Mapping):
+        return []
+    keys = payload.get("awaiting_respawn")
+    return list(keys) if isinstance(keys, list) else []
+
+
+def log_awaiting_respawn(verdict: list[AwaitingWorker]) -> None:
+    """Loudly ERROR-log an operation's workers still awaiting a respawn, in one line, naming each and its keys.
+
+    Nothing in the operation respawns them, so their recycle-class keys take effect only when the
+    deployment's supervisor restarts them. A no-op for an empty verdict. Shared by every operation
+    that starts a reload — the pipeline after its roll, the bare reload doors, the reconnect resync —
+    beside :func:`log_non_convergence`, so the message stays identical.
+    """
+    if not verdict:
+        return
+    named = ", ".join(f"{worker.name} ({', '.join(worker.keys)})" for worker in verdict)
+    logger.error(
+        "worker(s) awaiting a respawn — recycle-class key(s) changed in the stored env since they were bound and "
+        "nothing in this operation respawns them: %s — restart each through the deployment's supervisor "
+        "(bare: restart the server)",
+        named,
+    )
+
+
+def writer_exit_response(payload: Any, *, armed: bool) -> Any:
+    """Wrap an env-change door's ``payload``, arming the writer's own post-reply graceful self-exit when ``armed``.
+
+    ``armed`` is the operation's ``self_exit_armed`` (a serve-affecting change whose roll
+    converged). Returns an ``OperationResponse`` whose background task is this worker's graceful
+    exit; the HTTP edge runs it after the body flushes and the projected tool edge after the call
+    returned, so the reply's ``self-deferred`` line holds on every edge.
+    """
+    from starlette.background import BackgroundTask
+
+    from tai42_skeleton.app.graceful_exit import graceful_exit_for
+    from tai42_skeleton.operations.adapter import OperationResponse
+
+    if not armed:
+        return OperationResponse(payload)
+    return OperationResponse(payload, BackgroundTask(graceful_exit_for(instance.app.bus.identity.kind)))
+
+
+def recycle_roll(recycle: RecycleReport, writer: WorkerIdentity, *, self_exit_armed: bool) -> dict[str, Any]:
+    """The report of one fleet recycle roll: ``{recycle, fresh, recycle_stopped}``.
+
+    ``recycle`` is one ``{name, kind, status, generation_before, detail}`` line per target
+    the roll reached — ``recycled``, or, for the target the roll stopped at, ``timed-out``
+    or ``failed`` with the ``detail`` naming why — plus, when the writer's own self-exit
+    is armed (a serve-affecting change whose roll converged), the writer's own deferred line
+    ``{name: <self>, kind: <self kind>, status: SELF_DEFERRED, generation_before: <self
+    generation>, detail: None}`` (the one shared ``"self-deferred"`` literal). ``fresh`` is
+    the per-kind list of NEW READY lives observed since the change began (``{name, kind,
+    generation}``) — capacity evidence, never a claimed successor and never a post-recycle
+    generation. ``recycle_stopped`` is ``None`` when the roll ran to its end, else where it
+    stopped and why ``{kind, name, detail}`` — ``name`` is ``None`` when the bus could not
+    be read with no target in hand, so a body whose rows all read ``recycled`` never reads
+    as a complete roll it was not. NAMES-ONLY: key names + worker identities, never env VALUES.
+    """
+    entries: list[dict[str, Any]] = [
+        {
+            "name": row.name,
+            "kind": row.kind,
+            "status": row.status,
+            "generation_before": row.generation_before,
+            "detail": row.detail,
+        }
+        for row in recycle.rows
+    ]
+    if self_exit_armed:
+        # The writer's own recycle is a post-reply self-exit it cannot confirm — the writer
+        # carrying its own kind and current generation, reported deferred with the one shared
+        # literal.
+        entries.append(
+            {
+                "name": writer.name,
+                "kind": writer.kind.value,
+                "status": SELF_DEFERRED,
+                "generation_before": writer.generation,
+                "detail": None,
+            }
+        )
+    return {
+        "recycle": entries,
+        "fresh": [{"name": life.name, "kind": life.kind, "generation": life.generation} for life in recycle.fresh],
+        "recycle_stopped": None if recycle.stopped is None else recycle.stopped.model_dump(),
+    }
+
+
+def writer_self_exit_armed(roll: Mapping[str, Any] | None) -> bool:
+    """Whether a roll report (:func:`recycle_roll`) carries the writer's own deferred line — its self-exit is armed."""
+    return roll is not None and any(entry["status"] == SELF_DEFERRED for entry in roll["recycle"])
 
 
 def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
     """The DEDICATED profile-apply response — NOT :func:`apply_response`.
 
-    ``{hot, recycle, fresh, refused, recycle_stopped, fanout}``: ``hot`` are the hot-class diff key NAMES;
+    ``{hot, recycle, fresh, refused, recycle_stopped, awaiting_respawn, fanout}``: ``hot`` are the
+    hot-class diff key NAMES;
     ``recycle`` is one ``{name, kind, status, generation_before, detail}`` line per target
     the roll reached — ``recycled``, or, for the target the roll stopped at, ``timed-out``
     or ``failed`` with the ``detail`` naming why — plus, when the applier's own self-exit
     is armed (a serve-affecting diff whose roll converged), the applier's own deferred line
-    ``{name: <self>, kind: "serve", status: SELF_DEFERRED, generation_before: <self
+    ``{name: <self>, kind: <self kind>, status: SELF_DEFERRED, generation_before: <self
     generation>, detail: None}`` (the one shared ``"self-deferred"`` literal).
     ``fresh`` is the per-kind list of NEW READY lives observed since the pre-apply
     snapshot (``{name, kind, generation}``) — capacity evidence, never a claimed
@@ -115,44 +262,23 @@ def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
     built. ``recycle_stopped`` is ``None`` when the roll ran to its end, else where it
     stopped and why ``{kind, name, detail}`` — ``name`` is ``None`` when the bus could not
     be read with no target in hand, so a body whose rows all read ``recycled`` never
-    reads as a complete roll it was not. ``fanout`` is the reload broadcast's fleet-fanout summary. NAMES-ONLY: the
+    reads as a complete roll it was not. ``awaiting_respawn`` is the operation's verdict
+    (``outcome.awaiting_respawn``).
+    ``fanout`` is the reload broadcast's fleet-fanout summary. NAMES-ONLY: the
     report enumerates key names + worker identities, never env VALUES.
     """
-    entries: list[dict[str, Any]] = []
-    fresh: list[dict[str, Any]] = []
-    recycle = outcome.recycle
-    if recycle is not None:
-        entries.extend(
-            {
-                "name": row.name,
-                "kind": row.kind,
-                "status": row.status,
-                "generation_before": row.generation_before,
-                "detail": row.detail,
-            }
-            for row in recycle.rows
-        )
-        fresh = [{"name": life.name, "kind": life.kind, "generation": life.generation} for life in recycle.fresh]
-    if outcome.self_exit_armed:
-        # The applier's own recycle is a post-response self-exit it cannot confirm — a
-        # serve worker carrying its own current generation, reported deferred with the
-        # one shared literal.
-        entries.append(
-            {
-                "name": outcome.self_identity.name,
-                "kind": "serve",
-                "status": SELF_DEFERRED,
-                "generation_before": outcome.self_identity.generation,
-                "detail": None,
-            }
-        )
-    stopped = None if recycle is None or recycle.stopped is None else recycle.stopped.model_dump()
+    roll = (
+        recycle_roll(outcome.recycle, outcome.self_identity, self_exit_armed=outcome.self_exit_armed)
+        if outcome.recycle is not None
+        else {"recycle": [], "fresh": [], "recycle_stopped": None}
+    )
     return {
         "hot": list(outcome.hot),
-        "recycle": entries,
-        "fresh": fresh,
+        "recycle": roll["recycle"],
+        "fresh": roll["fresh"],
         "refused": [],
-        "recycle_stopped": stopped,
+        "recycle_stopped": roll["recycle_stopped"],
+        "awaiting_respawn": [worker.model_dump() for worker in outcome.awaiting_respawn],
         "fanout": fleet_fanout(outcome.fleet),
     }
 
@@ -163,12 +289,17 @@ class FleetBroadcastError(RuntimeError):
     The local reload raised, the fleet broadcast raised, or both. The fleet report is
     attached (``reachable=False`` when the broadcast itself raised) so the caller can
     surface it and knows the change already landed on disk; the specific failure is the
-    ``cause`` and the report's ``error``.
+    ``cause`` and the report's ``error``. ``unrolled_recycle_keys`` are the recycle-class keys the
+    persisted change carried whose roll never ran (the failure came before it), so a caller that
+    recovers can hand them to the reload that continues the change.
     """
 
-    def __init__(self, op_name: str, report: FleetResult, cause: BaseException) -> None:
+    def __init__(
+        self, op_name: str, report: FleetResult, cause: BaseException, *, unrolled_recycle_keys: tuple[str, ...] = ()
+    ) -> None:
         super().__init__(f"{op_name}: change persisted but fleet propagation failed — {cause}")
         self.report = report
+        self.unrolled_recycle_keys = unrolled_recycle_keys
 
 
 def log_non_convergence(report: FleetResult) -> None:

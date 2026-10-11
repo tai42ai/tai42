@@ -13,8 +13,8 @@ from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
 from tai42_skeleton.config.file_manager import ENV_KEY_RE
 from tai42_skeleton.config.service import ConfigService
-from tai42_skeleton.operations import BadRequestError, operation
-from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write
+from tai42_skeleton.operations import BadRequestError, OperationResponse, operation
+from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write, writer_exit_response
 from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, merge_secret_marks
 from tai42_skeleton.settings.owned_settings import register_owned_settings_groups
 
@@ -163,7 +163,7 @@ def _pointer_index(node: list[Any], segment: str, segments: list[str]) -> int:
 )
 async def set_mcp_secret_env(
     value: str, manifest_pointer: str, key: str | None = None, key_hint: str | None = None
-) -> dict:
+) -> OperationResponse:
     """Store a pasted secret as an env value and reference it from the manifest by a marker.
 
     The env KEY is EITHER an explicit ``key`` OR generated from ``key_hint`` — exactly one
@@ -178,7 +178,9 @@ async def set_mcp_secret_env(
     ``env_var``. The pointer's HEAD segment MUST be ``mcp`` (loud 400 otherwise). The response
     is the ``reloadConfigResult`` shape; the resolved key is NEVER returned. A dangling
     ``!ENV`` / X-band refusal surfaces as a loud 400 naming the key (the shared boundary
-    validator, same as ``POST /api/mcp-config``).
+    validator, same as ``POST /api/mcp-config``). An explicit ``key`` that is a recycle-class
+    setting rolls a worker recycle as every env write does (the response's ``recycle``; this
+    worker recycles itself after replying when the roll converged).
     """
     segments = _parse_manifest_pointer(manifest_pointer)  # loud 400 on a non-mcp head
 
@@ -217,4 +219,4 @@ async def set_mcp_secret_env(
             # way. A manifest-persist failure after the env write is the OrphanEnvWriteError
             # the surrounding context manager maps to a loud 500.
             raise BadRequestError(str(exc)) from exc
-        return apply_response(result)
+        return writer_exit_response(apply_response(result), armed=result.self_exit_armed)

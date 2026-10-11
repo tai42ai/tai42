@@ -32,7 +32,11 @@ from tai42_kit.settings.owned_prefix import (
 from tai42_kit.settings.registry import (
     SettingsClassInfo,
     SettingsFieldInfo,
+    bind_respawn_class_env,
+    changes_only_by_respawn,
     registered_settings,
+    respawn_class_env_drift,
+    unbind_respawn_class_env,
 )
 from tai42_kit.settings.require import (
     not_configured_message,
@@ -53,6 +57,8 @@ __all__ = [
     "StaleHolder",
     "TaiBaseSettings",
     "UnknownOwnedSettingError",
+    "bind_respawn_class_env",
+    "changes_only_by_respawn",
     "env_file_identity",
     "is_kubernetes_service_link",
     "keyed_settings_cache",
@@ -66,9 +72,11 @@ __all__ = [
     "require",
     "require_secret",
     "reset_all_settings",
+    "respawn_class_env_drift",
     "restamp_settings_born_after",
     "settings_birth_mark",
     "settings_cache",
     "sweep_stale_settings",
+    "unbind_respawn_class_env",
     "unknown_owned_env_keys",
 ]

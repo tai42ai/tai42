@@ -38,8 +38,11 @@ class BootManifestMixin(LifecycleState):
         OVERRIDES container env, and any setting cached before this call is
         re-resolved under the bridged env. An absent store (no ``.env`` / no Secret —
         the managers' shared ``FileNotFoundError``) is an empty store, not a fault:
-        zero keys applied. Only a genuinely unreadable store raises.
+        zero keys applied. Only a genuinely unreadable store raises. Every registered
+        respawn-class setting is then bound to the resulting effective env.
         """
+        from tai42_kit.settings import bind_respawn_class_env
+
         from tai42_skeleton.app.epoch import apply_env_and_reset_settings
 
         try:
@@ -47,6 +50,10 @@ class BootManifestMixin(LifecycleState):
         except FileNotFoundError:
             stored = {}
         apply_env_and_reset_settings(stored)
+        # The env just applied is the env every registered setting's resource is built under; a
+        # group that registers later binds its own values at its registration. A later reload
+        # names the recycle-class keys whose value has moved off the bound one.
+        bind_respawn_class_env()
         logger.info("boot env bridge: applied %d stored-env key(s) into the process environment", len(stored))
 
     def _warn_dangling_boot_env_markers(self) -> None:

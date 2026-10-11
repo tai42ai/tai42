@@ -94,11 +94,12 @@ from tai42_skeleton.operations import (
     NotSupportedError,
     OperationError,
     OperationFailedError,
+    OperationResponse,
     UnavailableError,
     UpstreamError,
     operation,
 )
-from tai42_skeleton.operations._broadcast import translate_orphan_env_write
+from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write, writer_exit_response
 from tai42_skeleton.operations.response_models_group_a import (
     AdvisorySnapshot,
     InstalledInventory,
@@ -552,6 +553,19 @@ async def marketplace_advisories() -> dict[str, Any]:
     return {"advisories": state.advisories, "fetched_at": state.fetched_at.isoformat()}
 
 
+def render_receipt(receipt: dict[str, Any]) -> OperationResponse:
+    """Render an installer receipt: its ``reload`` (the change's ``ApplyResult``) in the shared reply shape.
+
+    The installer hands the structured outcome up; the op renders it with :func:`apply_response`
+    (``None`` — an uninstall that ran no apply — stays ``None``) and arms this worker's post-reply
+    self-exit from the change's ``self_exit_armed``, as every env door does.
+    """
+    result = receipt["reload"]
+    if result is None:
+        return writer_exit_response(receipt, armed=False)
+    return writer_exit_response({**receipt, "reload": apply_response(result)}, armed=result.self_exit_armed)
+
+
 @operation(
     summary="Install a marketplace plugin",
     tags=["marketplace"],
@@ -577,7 +591,7 @@ async def marketplace_install(
     secret_keys: list[str] | None = None,
     route_mounts: dict[str, str] | None = None,
     accept_public_routes: bool = False,
-) -> dict[str, Any]:
+) -> OperationResponse:
     """Resolve, pip install, patch the manifest, reload, and record attribution.
 
     Nothing is pip-installed for a descriptor-only plugin; aborts and unwinds on any
@@ -585,7 +599,9 @@ async def marketplace_install(
     ``env`` / ``secret_keys`` satisfy the required ``!ENV`` markers or connector-env in
     the same combined transaction. ``route_mounts`` remaps declared route bases;
     ``accept_public_routes`` acknowledges public routes. The result's ``routes`` lists
-    every route the install mounted.
+    every route the install mounted. An install-time env change carrying a recycle-class key
+    rolls a worker recycle (the receipt's ``reload.recycle``); when it converged this worker
+    recycles itself after replying.
     """
     # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store the
     # install cannot record, so it refuses with a named, machine-readable reason.
@@ -597,7 +613,7 @@ async def marketplace_install(
     # install/uninstall/update never 500s untyped at the boundary.
     with translate_orphan_env_write():
         try:
-            return await Installer().install(
+            receipt = await Installer().install(
                 ref,
                 version,
                 env=env,
@@ -607,6 +623,7 @@ async def marketplace_install(
             )
         except MarketplaceError as exc:
             raise _to_operation_error(exc) from exc
+    return render_receipt(receipt)
 
 
 @operation(
@@ -648,7 +665,7 @@ async def marketplace_install_preview(
     request_model=MarketplaceUninstall,
     response_model=UninstallResult,
 )
-async def marketplace_uninstall(ref: str) -> dict[str, Any]:
+async def marketplace_uninstall(ref: str) -> OperationResponse:
     """Unpatch the manifest, reload, pip uninstall, and drop attribution.
 
     Convergent and registry-free (see :meth:`Installer.uninstall`).
@@ -659,9 +676,10 @@ async def marketplace_uninstall(ref: str) -> dict[str, Any]:
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
     with translate_orphan_env_write():
         try:
-            return await Installer().uninstall(ref)
+            receipt = await Installer().uninstall(ref)
         except MarketplaceError as exc:
             raise _to_operation_error(exc) from exc
+    return render_receipt(receipt)
 
 
 @operation(
@@ -689,7 +707,7 @@ async def marketplace_update(
     secret_keys: list[str] | None = None,
     route_mounts: dict[str, str] | None = None,
     accept_public_routes: bool = False,
-) -> dict[str, Any]:
+) -> OperationResponse:
     """Resolve the target, pip upgrade, re-patch the manifest, reload, and upsert attribution.
 
     Nothing is pip-upgraded for a descriptor-only plugin; the same pre-flights apply
@@ -697,7 +715,9 @@ async def marketplace_update(
     version's required ``!ENV`` markers or connector-env. ``route_mounts`` remaps
     declared route bases (surviving items keep their stored base);
     ``accept_public_routes`` acknowledges public routes not already approved. The
-    result's ``routes`` lists every route the update mounted.
+    result's ``routes`` lists every route the update mounted. An update-time env change
+    carrying a recycle-class key rolls a worker recycle (the receipt's ``reload.recycle``);
+    when it converged this worker recycles itself after replying.
     """
     # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store the
     # update cannot upsert, so it refuses with a named reason.
@@ -705,7 +725,7 @@ async def marketplace_update(
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
     with translate_orphan_env_write():
         try:
-            return await Installer().update(
+            receipt = await Installer().update(
                 ref,
                 version,
                 env=env,
@@ -715,6 +735,7 @@ async def marketplace_update(
             )
         except MarketplaceError as exc:
             raise _to_operation_error(exc) from exc
+    return render_receipt(receipt)
 
 
 @operation(

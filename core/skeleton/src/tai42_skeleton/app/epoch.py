@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from tai42_kit.clients import advance_client_epoch, current_client_epoch
-from tai42_kit.settings import reset_all_settings
+from tai42_kit.settings import reset_all_settings, unbind_respawn_class_env
 from tai42_kit.settings.cache_registry import restamp_settings_born_after, settings_birth_mark
 
 from tai42_skeleton.app.admission import EpochAdmissionApp
@@ -442,6 +442,7 @@ async def clear_epoch() -> None:
     _serving_slot = None
     _serving_app_builder = _default_streamable_http_app
     _loaded_env_keys = set()
+    unbind_respawn_class_env()
     detach_retired_generations()
 
 

@@ -3,10 +3,12 @@
 ``reset_all_settings`` drops every cached settings singleton at once (the
 live-reload soft restart re-reads env then resets here).
 
-Each constructed ``BaseSettings`` instance is stamped with the epoch it was born
-under and recorded in a weakref roster, so ``sweep_stale_settings`` can find any
-instance of a retired epoch that a holder is still keeping alive past a reset — a
-stale-config leak, reported loudly and never dropped.
+Each constructed ``BaseSettings`` instance whose values can change within the process
+is stamped with the epoch it was born under and recorded in a weakref roster, so
+``sweep_stale_settings`` can find any instance of a retired epoch that a holder is
+still keeping alive past a reset — a stale-config leak, reported loudly and never
+dropped. An instance whose values change only by a process respawn or restart can
+never hold stale config, so it is never rostered.
 """
 
 import contextlib
@@ -27,6 +29,7 @@ from pydantic_settings import BaseSettings
 
 from tai42_kit.settings.base import TaiBaseSettings
 from tai42_kit.settings.env_file import EnvFileIdentity, env_file_identity
+from tai42_kit.settings.registry import changes_only_by_respawn
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +101,13 @@ def _stamp_settings(value: object) -> None:
     str``) that support neither ``object.__setattr__`` nor ``weakref``, and a
     captured primitive is an immutable stale VALUE the sweep could never reach; so
     those are skipped. They are few, core-owned, and recycle/excluded-class, so
-    the miss is acceptable.
+    the miss is acceptable. An instance whose every value changes only by a process
+    respawn or restart (:func:`~tai42_kit.settings.registry.changes_only_by_respawn`)
+    can never be stale within the process, so it is not a candidate and is neither
+    stamped nor rostered.
     """
     global _last_birth
-    if not isinstance(value, BaseSettings):
+    if not isinstance(value, BaseSettings) or changes_only_by_respawn(type(value)):
         return
     object.__setattr__(value, _EPOCH_STAMP_ATTR, _current_epoch())
     with _roster_lock:
@@ -338,7 +344,8 @@ def _retired_instances(retired_epoch: int) -> list["weakref.ref[BaseSettings]"]:
 def sweep_stale_settings(retired_epoch: int) -> list[StaleHolder]:
     """Report every settings instance stamped with ``retired_epoch`` that something still holds.
 
-    Walks the roster for instances whose stamp is the retired epoch and are still
+    The roster holds only settings whose values can change within the process, so
+    the sweep judges only those. Walks the roster for instances whose stamp is the retired epoch and are still
     alive. When any is found, cyclic garbage is collected first, so an instance
     that only unreachable objects keep (the finished frame of a cancelled task
     awaiting collection) is freed rather than reported. Each instance still alive

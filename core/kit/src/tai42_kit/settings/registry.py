@@ -5,11 +5,17 @@ A UI can list the env-configurable groups from this data without importing live 
 A subclass self-registers through ``TaiBaseSettings.__pydantic_init_subclass__``
 (base.py). This module holds the storage and the extraction that turns a model's
 ``model_fields`` into JSON-safe field metadata.
+
+It also keeps the env a respawn-class value (``recycle`` / ``excluded``) is bound under: while
+a lifespan has bound it (:func:`bind_respawn_class_env`), each such env var holds the value it
+had when its group first registered in this lifespan, or at the bind for a group registered
+before it; nothing but a bind or the process end re-binds it.
 """
 
 import enum
 import inspect
 import json
+import os
 import types
 from collections.abc import Callable, Mapping
 from typing import Any, Union, cast, get_args, get_origin
@@ -18,7 +24,7 @@ from pydantic import AliasChoices, BaseModel, SecretBytes, SecretStr, TypeAdapte
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings
 
-from tai42_kit.settings.base import ReloadClass
+from tai42_kit.settings.base import ReloadClass, present_env_value
 from tai42_kit.settings.default_namespace import TAI_DEFAULT_ENV_PREFIX
 
 
@@ -66,6 +72,11 @@ class SettingsClassInfo(BaseModel):
 # replaces its registration instead of duplicating the group — the same keying
 # rationale as ``cache_registry.py``.
 _REGISTRY: dict[str, SettingsClassInfo] = {}
+
+# The value each respawn-class env var of a registered group is bound under in this lifespan
+# (``None`` for a var the settings layer reads as absent), keyed by env var; ``None`` while no
+# lifespan has bound it.
+_BOUND_ENV: dict[str, str | None] | None = None
 
 
 def _qualname(cls: type) -> str:
@@ -407,13 +418,25 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
 
 
 def _register(cls: type[BaseSettings]) -> None:
-    """Register (or replace) a settings class in the registry by qualified name."""
-    _REGISTRY[_qualname(cls)] = _extract(cls)
+    """Register (or replace) a settings class in the registry by qualified name.
+
+    While the respawn-class env is bound, each respawn-class env var of ``cls`` not yet bound is
+    bound to the value the settings layer reads for it now; a var already bound (a re-import's
+    re-registration, a second class naming the same var) keeps its first value.
+    """
+    info = _extract(cls)
+    _REGISTRY[_qualname(cls)] = info
+    if _BOUND_ENV is not None:
+        for var in _respawn_env_vars(info):
+            if var not in _BOUND_ENV:
+                _BOUND_ENV[var] = present_env_value(os.environ, var)
 
 
 def _clear_registry() -> None:
-    """Drop every registration — for tests only."""
+    """Drop every registration and the bound respawn-class env — for tests only."""
+    global _BOUND_ENV
     _REGISTRY.clear()
+    _BOUND_ENV = None
 
 
 def _registered_infos() -> list[SettingsClassInfo]:
@@ -427,3 +450,74 @@ def registered_settings() -> list[SettingsClassInfo]:
     Returns model copies so callers cannot mutate the registry's internals.
     """
     return [info.model_copy(deep=True) for info in _REGISTRY.values()]
+
+
+_RESPAWN_CLASSES: frozenset[ReloadClass] = frozenset({"recycle", "excluded"})
+
+
+def _changes_only_by_respawn(cls: type[BaseSettings], seen: frozenset[str]) -> bool:
+    key = _qualname(cls)
+    info = _REGISTRY.get(key)
+    if info is None or key in seen:
+        return False
+    for field in info.fields:
+        if field.nested_group is None:
+            if field.reload_class not in _RESPAWN_CLASSES:
+                return False
+            continue
+        field_info = cls.model_fields.get(field.name)
+        nested = None if field_info is None else _settings_member(field_info.annotation)
+        if nested is None or not _changes_only_by_respawn(nested, seen | {key}):
+            return False
+    return True
+
+
+def changes_only_by_respawn(cls: type[BaseSettings]) -> bool:
+    """Whether every value of the registered settings group ``cls`` changes only by a process respawn or restart.
+
+    True when ``cls`` is registered and every field's reload class is ``recycle`` or
+    ``excluded``; a field that references a nested group is judged by that group's own
+    registered fields, recursively. False for an unregistered class (a plain
+    ``BaseSettings``, a ``registry_exclude`` base, a class with no fields), for a nested
+    group that is unregistered or references back into the groups being judged, and
+    for any ``hot`` field.
+    """
+    return _changes_only_by_respawn(cls, frozenset())
+
+
+def _respawn_env_vars(info: SettingsClassInfo) -> list[str]:
+    """The env vars of ``info``'s respawn-class fields (a nested-group reference carries none)."""
+    return [
+        field.env_var
+        for field in info.fields
+        if field.nested_group is None and field.env_var and field.reload_class in _RESPAWN_CLASSES
+    ]
+
+
+def bind_respawn_class_env() -> None:
+    """Bind every registered respawn-class env var to the value the settings layer reads for it now.
+
+    Called once a lifespan applied its env, before it builds the resources behind those values:
+    a group registered later binds its own vars at its registration. Overwrites every value an
+    earlier bind recorded.
+    """
+    global _BOUND_ENV
+    _BOUND_ENV = {
+        var: present_env_value(os.environ, var) for info in _REGISTRY.values() for var in _respawn_env_vars(info)
+    }
+
+
+def unbind_respawn_class_env() -> None:
+    """Drop the bound respawn-class env (a lifespan's end); nothing is bound until the next bind."""
+    global _BOUND_ENV
+    _BOUND_ENV = None
+
+
+def respawn_class_env_drift() -> frozenset[str]:
+    """The bound respawn-class env vars whose value the settings layer reads now differs from the bound one.
+
+    Such a value takes effect only in a respawned process. Empty while nothing is bound.
+    """
+    if _BOUND_ENV is None:
+        return frozenset()
+    return frozenset(var for var, bound in _BOUND_ENV.items() if present_env_value(os.environ, var) != bound)
