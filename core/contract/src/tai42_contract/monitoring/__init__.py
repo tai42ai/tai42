@@ -21,9 +21,11 @@ from tai42_contract.monitoring.models import (
     PAYLOAD_REF_KEY,
     PROMOTED_METADATA_KEYS,
     RESERVED_KEY_PREFIX,
+    SPAN_ID_PATTERN,
     STEP_ROLE_METADATA_KEY,
     TIMING_ABSENT,
     TIMING_METADATA_KEY,
+    TRACE_ID_PATTERN,
     UNRECORDED_KEY,
     Dimension,
     ListCapability,
@@ -48,6 +50,8 @@ from tai42_contract.monitoring.models import (
     StepRole,
     TokenUsage,
     TraceContext,
+    is_span_id,
+    is_trace_id,
 )
 from tai42_contract.monitoring.monitoring import Monitoring
 from tai42_contract.monitoring.reader import MonitoringReader
@@ -76,9 +80,11 @@ __all__ = [
     "RESERVED_KEY_PREFIX",
     "RUN_ATTRIBUTION_TRACE_NAME",
     "RUN_VERSION_METADATA_KEY",
+    "SPAN_ID_PATTERN",
     "STEP_ROLE_METADATA_KEY",
     "TIMING_ABSENT",
     "TIMING_METADATA_KEY",
+    "TRACE_ID_PATTERN",
     "UNRECORDED_KEY",
     "Dimension",
     "ListCapability",
@@ -114,6 +120,8 @@ __all__ = [
     "ambient_trace_context",
     "attribute_run",
     "get_ambient_trace_context",
+    "is_span_id",
+    "is_trace_id",
     "reset_ambient_trace_context",
     "set_ambient_trace_context",
 ]

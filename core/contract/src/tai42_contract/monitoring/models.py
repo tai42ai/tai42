@@ -7,6 +7,7 @@ pure-tracing backend (no LLM-observability extension) still fits.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -196,6 +197,27 @@ class RecordId(BaseModel):
 
     trace_id: str
     span_id: str
+
+
+TRACE_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
+"""The form of a trace id: 32 lower-hex characters (it also must not be all zeros, :func:`is_trace_id`)."""
+
+SPAN_ID_PATTERN = re.compile(r"[0-9a-f]{16}")
+"""The form of a span id: 16 lower-hex characters (it also must not be all zeros, :func:`is_span_id`)."""
+
+
+def _is_id(value: object, pattern: re.Pattern[str]) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None and value.strip("0") != ""
+
+
+def is_trace_id(value: object) -> bool:
+    """Whether ``value`` is a trace id a writer can record under: a ``str`` of 32 lower-hex, not all zeros."""
+    return _is_id(value, TRACE_ID_PATTERN)
+
+
+def is_span_id(value: object) -> bool:
+    """Whether ``value`` is a span id a record can name as its parent: a ``str`` of 16 lower-hex, not all zeros."""
+    return _is_id(value, SPAN_ID_PATTERN)
 
 
 # THE RESERVED MARKER NAMESPACE. A JSON object whose FIRST key starts with this prefix
