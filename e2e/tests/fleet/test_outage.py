@@ -72,9 +72,9 @@ _UNREACHABLE = {"url": "http://127.0.0.1:1/mcp"}
 
 # Liveness bounds (a bound on a hang, not a performance limit), each twice the slowest
 # legitimate completion measured with the race under host load 100-330 on 20 cores:
-# one connect request answered in at most 134.1s (server-side: the persist plus the reload
+# one connect request answered in at most 145.0s (server-side: the persist plus the reload
 # and its MCP probes), and the whole test, stack boot included, finished in at most 413.3s.
-_CONNECT_READ_TIMEOUT = 270.0
+_CONNECT_READ_TIMEOUT = 290.0
 _CONCURRENT_CONNECTS_TIMEOUT = 830
 
 
@@ -156,6 +156,10 @@ def build_d2_stack(res: StackResources, variants: Variants) -> StackConfig:
     return replace(cfg, name="d2-comments", raw_manifest=_D2_SEED, run_backend=False, run_metrics=False)
 
 
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured under host load 260-330 on 20 cores (156.2s), rounded up
+# to the next 10s.
+@pytest.mark.timeout(320)
 @pytest.mark.needs("mutable", "process", "files", "setting:raw-manifest")
 async def test_comment_preservation(fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]) -> None:
     """A UI-path config edit (``POST /api/mcp-config`` — the comment-preserving
@@ -228,6 +232,10 @@ def _real_bus_url(infra: Infra, stack: TaiStack) -> str:
     return f"redis://{host}:{port}/{stack.resources.redis_idx}"
 
 
+# A liveness bound: twice the slowest legitimate run, stack boot included, measured under host
+# load 260-330 on 20 cores (419.5s: the relayed fleet's boot and convergence, the outage held
+# past the TTL, the restore and re-convergence), rounded up to the next 10s.
+@pytest.mark.timeout(840)
 @pytest.mark.needs(
     "probe-tools",
     "process",
@@ -279,6 +287,11 @@ async def test_bus_outage_isolates_feature_stores_and_expires_presence(
     await wait_for_async(keys_expired, deadline=20.0, message="bus presence keys never expired during the outage")
 
 
+# A liveness bound: twice the slowest legitimate run, stack boot included, measured under host
+# load up to ~315 on 20 cores (566.3s: the relayed fleet's boot and convergence, the mutation
+# during the outage, the restore, the re-mint wait and the fleet reload), rounded up to the
+# next 10s.
+@pytest.mark.timeout(1140)
 @pytest.mark.needs(
     "probe-tools",
     "mutable",
@@ -414,6 +427,10 @@ async def _replicas_converged(stack: TaiStack, *, deadline: float = 60.0, differ
     return await wait_for_async(attempt, deadline=deadline, message=f"the two replicas never reached: {goal}")
 
 
+# A liveness bound: twice the slowest legitimate run, stack boot included, measured under host
+# load 190-320 on 20 cores (465.7s: the two replicas' boot and convergence, the mutation cut to
+# its apply deadline, the resume and the converging fleet reload), rounded up to the next 10s.
+@pytest.mark.timeout(940)
 @pytest.mark.needs(
     "probe-tools",
     "mutable",
