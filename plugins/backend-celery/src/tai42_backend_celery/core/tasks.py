@@ -2,9 +2,10 @@
 
 Both are :class:`AsyncTask` subclasses, each owning one long-lived private event
 loop so pooled per-loop clients are reused across invocations (closed by
-``close_loop`` at worker-child shutdown). ``tool_execution`` retries on transient
-transport errors with jittered backoff, never on ``ValueError``, and runs the
-target tool inside :func:`prevent_celery_stream_capture`.
+``close_loop`` at worker-child shutdown). ``tool_execution`` runs the target tool
+inside :func:`prevent_celery_stream_capture`. A dispatched tool runs once; retries
+are declared per tool with a ``ToolRetryPolicy`` and applied by the platform's
+dispatch seam, never by Celery.
 """
 
 from __future__ import annotations
@@ -16,8 +17,8 @@ from contextlib import contextmanager
 from typing import Any
 
 from celery import Task
-from celery.exceptions import TimeoutError as CeleryTimeoutError
 from tai42_contract.app import tai42_app
+from tai42_contract.backend import SCHEDULE_CADENCE_KEY, SCHEDULE_NAME_KEY
 from tai42_kit.backend import CallbackSchema, backend_fire, callback_execution
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
@@ -39,8 +40,8 @@ CELERY_TASK_OPTS: dict[str, Any] = {
 }
 
 CELERY_SCHEDULE_OPTS: dict[str, Any] = {
-    "backend_schedule_name": str,
-    "backend_schedule": int | float | str | dict[str, Any],
+    SCHEDULE_NAME_KEY: str,
+    SCHEDULE_CADENCE_KEY: dict[str, Any],
 }
 
 
@@ -115,13 +116,7 @@ async def run_tool(**kwargs: Any) -> Any:
         reset_detached_run(detached_token)
 
 
-@celery_app.task(
-    name="celery.callback_task",
-    base=AsyncTask,
-    bind=True,
-    dont_autoretry_for=(ValueError,),
-    autoretry_for=(ConnectionError, TimeoutError, CeleryTimeoutError),
-)
+@celery_app.task(name="celery.callback_task", base=AsyncTask, bind=True)
 def callback_task(self: AsyncTask, result: Any, callback: CallbackSchema) -> Any:
     """Run a :class:`CallbackSchema` over the parent task's result.
 
@@ -131,17 +126,7 @@ def callback_task(self: AsyncTask, result: Any, callback: CallbackSchema) -> Any
     return self.run_async(callback_execution(result, callback))
 
 
-@celery_app.task(
-    name="celery.tool_execution",
-    base=AsyncTask,
-    bind=True,
-    autoretry_for=(ConnectionError, TimeoutError, CeleryTimeoutError),
-    dont_autoretry_for=(ValueError,),
-    retry_backoff=True,
-    retry_backoff_max=600,
-    retry_jitter=True,
-    max_retries=5,
-)
+@celery_app.task(name="celery.tool_execution", base=AsyncTask, bind=True)
 def tool_execution(self: AsyncTask, *args: Any, **kwargs: Any) -> Any:
     """Execute one app tool on the worker (the body of every dispatched task)."""
     with prevent_celery_stream_capture():

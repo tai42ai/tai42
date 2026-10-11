@@ -15,19 +15,25 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import AbstractAsyncContextManager
-from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from datetime import UTC, datetime
+from typing import Any
 
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from celery.result import AsyncResult
-from celery.schedules import crontab, schedule
 from redbeat import RedBeatSchedulerEntry
 from tai42_contract.app import tai42_app
+from tai42_contract.backend import (
+    ScheduleImportError,
+    ScheduleImportMode,
+    ScheduleImportReport,
+    ScheduleListRow,
+    ScheduleRecord,
+)
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 
 from tai42_backend_celery.core.app import celery_app
-from tai42_backend_celery.core.schedule import ScheduleRecord
+from tai42_backend_celery.core.redbeat_mapping import from_redbeat, to_celery_schedule, to_redbeat
 from tai42_backend_celery.core.settings import celery_settings
 
 
@@ -42,6 +48,20 @@ def _redbeat_redis() -> AbstractAsyncContextManager[Any]:
 def _text(value: Any) -> Any:
     """Decode Redis bytes to text (the pooled client may return either)."""
     return value.decode() if isinstance(value, bytes | bytearray) else value
+
+
+def _fired_tool(name: str, kwargs: dict[str, Any]) -> str:
+    """Pop and return the fired tool's name from a stored entry's ``kwargs``.
+
+    A stored entry without the tool-name key was not created through this backend's schedule
+    door; it raises rather than being reported without a tool.
+    """
+    tool_name_arg = celery_settings().tool_name_arg
+    if tool_name_arg not in kwargs:
+        raise ValueError(
+            f"schedule {name!r} carries no {tool_name_arg!r}; it was not created through this backend's schedule door"
+        )
+    return kwargs.pop(tool_name_arg)
 
 
 async def _read_definition_and_membership(r: Any, schedule_key: str, entry_key: str) -> tuple[Any, Any]:
@@ -191,11 +211,12 @@ async def backend_delete_schedule(name: str) -> dict[str, Any]:
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_list_schedules() -> list[dict[str, Any]]:
-    """List all RedBeat schedule entries.
+    """List all RedBeat schedule entries as ``ScheduleListRow`` dumps.
 
-    Each row carries the canonical keys ``name``, ``enabled`` (read from the
-    entry's ``definition`` hash), ``next_run_at_ts`` and ``next_run_at_iso``
-    (the zset score). The listing iterates the schedule zset, so a disabled
+    Each row carries ``name``, the fired ``tool`` and the ``cadence`` (read from the
+    entry's ``definition`` hash and mapped from RedBeat's shape), ``enabled``,
+    ``next_run_at_ts`` and ``next_run_at_iso`` (the zset score) — never the stored
+    arguments. The listing iterates the schedule zset, so a disabled
     entry removed from the zset does not appear. Zset members are entry keys
     (``redbeat:{name}``); the reported ``name`` is the bare schedule name,
     matching what the other schedule tools accept and what
@@ -221,13 +242,16 @@ async def backend_list_schedules() -> list[dict[str, Any]]:
                 raise KeyError(f"Schedule zset lists {member_name!r} but hash {key!r} has no 'definition'")
             def_obj = json.loads(_text(definition))
             ts = float(score)
+            name = member_name.removeprefix(settings.redbeat_key_prefix)
             out.append(
-                {
-                    "name": member_name.removeprefix(settings.redbeat_key_prefix),
-                    "enabled": bool(def_obj.get("enabled", True)),
-                    "next_run_at_ts": ts,
-                    "next_run_at_iso": datetime.fromtimestamp(ts, tz=UTC).isoformat() if ts > 0 else None,
-                }
+                ScheduleListRow(
+                    name=name,
+                    tool=_fired_tool(name, dict(def_obj.get("kwargs") or {})),
+                    cadence=from_redbeat(def_obj["schedule"]),
+                    enabled=bool(def_obj.get("enabled", True)),
+                    next_run_at_ts=ts,
+                    next_run_at_iso=datetime.fromtimestamp(ts, tz=UTC).isoformat() if ts > 0 else None,
+                ).model_dump(mode="json")
             )
         return out
 
@@ -343,13 +367,14 @@ async def backend_update_schedule(
 ) -> dict[str, Any]:
     """Update an existing RedBeat entry.
 
-    - `new_schedule` (optional): int/float (seconds interval), str (5-field crontab), or dict.
-      If omitted, the schedule is left unchanged.
+    - `new_schedule` (optional): int/float (seconds interval), str (5-field crontab), or a
+      friendly/``kind``-tagged dict, parsed into a cadence. If omitted, the schedule is left unchanged.
     - `next_run_in_ms` (optional): delay in milliseconds from *now* (UTC).
     - `next_run_at_ts` (optional): absolute UNIX timestamp (UTC). Ignored if `next_run_in_ms` is provided.
     - If neither `new_schedule` nor `next_run_*` is given → returns {"status": "skipped"}.
 
-    Returns: dict with status, previous_schedule, new_schedule, next_run_at_ts/iso, redis_key.
+    Returns: dict with status, previous_schedule and new_schedule (each a cadence dump),
+    next_run_at_ts/iso, redis_key.
     """
     settings = celery_settings()
     async with _redbeat_redis() as r:
@@ -368,16 +393,13 @@ async def backend_update_schedule(
         except json.JSONDecodeError:
             return {"status": "skipped", "name": name, "message": "Existing definition is not valid JSON."}
 
-        prev_schedule = defn.get("schedule")
+        prev_schedule = from_redbeat(defn["schedule"]).model_dump(mode="json")
+        new_cadence = None
         updated = False
 
         if new_schedule is not None:
-            norm = normalize_schedule(new_schedule)
-
-            if norm["__type__"] == "interval":
-                norm["every"] = float(norm["every"])
-
-            defn["schedule"] = norm
+            new_cadence = normalize_schedule(new_schedule)
+            defn["schedule"] = to_redbeat(new_cadence)
             await r.hset(key, "definition", json.dumps(defn))
             updated = True
 
@@ -397,7 +419,7 @@ async def backend_update_schedule(
             "status": "updated",
             "name": name,
             "previous_schedule": prev_schedule,
-            "new_schedule": defn.get("schedule"),
+            "new_schedule": new_cadence.model_dump(mode="json") if new_cadence is not None else prev_schedule,
             "next_run_at_ts": ts,
             "next_run_at_iso": (datetime.fromtimestamp(ts, tz=UTC).isoformat() if ts is not None else None),
             "redis_key": key,
@@ -406,12 +428,13 @@ async def backend_update_schedule(
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_export_schedules() -> list[dict[str, Any]]:
-    """Export every RedBeat schedule as a portable list of ScheduleRecord dicts.
+    """Export every RedBeat schedule as a portable list of ``ScheduleRecord`` dumps.
 
     Unions the schedule zset members with every entry hash found by the
     ``redbeat:*`` key pattern, reads each entry's full 'definition', and captures
-    its name, args, kwargs (tool name verbatim), the normalized schedule dict, and
-    enabled flag. The zset holds only ENABLED entries, so a schedule disabled with
+    its name, the fired ``tool`` (split out of the stored kwargs' tool-name key; an
+    entry without it raises), args, the remaining kwargs, the cadence (mapped from
+    RedBeat's shape), and enabled flag. The zset holds only ENABLED entries, so a schedule disabled with
     the default ``remove_from_queue=True`` keeps its ``redbeat:{name}`` hash but
     leaves the zset; the pattern scan re-includes it (it is re-enable-able, a live
     schedule) where a zset-only walk would silently drop it. Runtime-only next-run
@@ -452,28 +475,30 @@ async def backend_export_schedules() -> list[dict[str, Any]]:
                 raise KeyError(f"Schedule zset lists {key!r} but hash {key!r} has no 'definition'")
 
             def_obj = json.loads(_text(definition))
-
+            kwargs = dict(def_obj.get("kwargs") or {})
+            tool = _fired_tool(def_obj["name"], kwargs)
             record = ScheduleRecord(
                 name=def_obj["name"],
+                tool=tool,
                 args=def_obj.get("args") or [],
-                kwargs=def_obj.get("kwargs") or {},
-                schedule=normalize_schedule(def_obj["schedule"]),
+                kwargs=kwargs,
+                cadence=from_redbeat(def_obj["schedule"]),
                 enabled=bool(def_obj["enabled"]),
             )
-            records.append(record.model_dump())
+            records.append(record.model_dump(mode="json"))
         return records
 
 
 @tai42_app.tools.tool(tags={"backend"})
 async def backend_import_schedules(
-    schedules: list[dict[str, Any]], mode: Literal["skip", "overwrite"] = "skip"
+    schedules: list[dict[str, Any]], mode: ScheduleImportMode = "skip"
 ) -> dict[str, Any]:
     """Recreate schedules produced by ``backend_export_schedules`` as RedBeat entries.
 
-    Each row is validated as a ScheduleRecord and saved via a
-    ``RedBeatSchedulerEntry`` exactly as the create extension does. A new name is
-    created (counted 'created'); scheduling is recomputed on save, so no stale
-    next-run time is persisted.
+    Each row is validated as a ``ScheduleRecord``, its ``tool`` injected back under the
+    tool-name key, and saved via a ``RedBeatSchedulerEntry`` exactly as the create
+    extension does. A new name is created (counted 'created'); scheduling is recomputed
+    on save, so no stale next-run time is persisted.
 
     ``mode`` keys an existing ``redbeat:{name}`` entry: under ``skip`` (the default)
     an existing name is left untouched, never re-applied, and counted in
@@ -481,22 +506,22 @@ async def backend_import_schedules(
     (counted 'updated'). This is the per-record import mode the backup restore
     forwards across the tool boundary, honored here as every backend honors it.
 
-    Returns ``{"created", "updated", "skipped", "skipped_existing", "errors"}`` to
-    match the shared section-report contract; each error row is
-    ``{"index", "name", "error"}``. A row that fails to validate or save is reported
-    there loudly, never silently dropped. ``skipped`` is always 0 — this backend has
-    no per-row skip case (a disabled record persists as a disabled RedBeat entry).
+    Returns a ``ScheduleImportReport`` dump; each error row is ``{"index", "name",
+    "error"}``. A row that fails to validate or save is reported there loudly, never
+    silently dropped. ``skipped`` is always 0 — this backend has no per-row skip case
+    (a disabled record persists as a disabled RedBeat entry).
     """
     settings = celery_settings()
     created = 0
     updated = 0
     skipped = 0
     skipped_existing = 0
-    errors: list[dict[str, Any]] = []
+    errors: list[ScheduleImportError] = []
 
     async with _redbeat_redis() as r:
         for index, entry in enumerate(schedules):
-            entry_name = entry.get("name") if isinstance(entry, dict) else None
+            raw_name = entry.get("name") if isinstance(entry, dict) else None
+            entry_name = raw_name if isinstance(raw_name, str) else None
             try:
                 record = ScheduleRecord.model_validate(entry)
                 key = settings.redbeat_task_key(record.name)
@@ -507,29 +532,12 @@ async def backend_import_schedules(
                     skipped_existing += 1
                     continue
 
-                norm = normalize_schedule(record.schedule)
-                if norm["__type__"] == "interval":
-                    rb_schedule = schedule(
-                        run_every=timedelta(seconds=float(norm["every"])),
-                        relative=norm.get("relative", False),
-                    )
-                elif norm["__type__"] == "crontab":
-                    rb_schedule = crontab(
-                        minute=norm["minute"],
-                        hour=norm["hour"],
-                        day_of_month=norm["day_of_month"],
-                        month_of_year=norm["month_of_year"],
-                        day_of_week=norm["day_of_week"],
-                    )
-                else:
-                    raise ValueError(f"Unsupported schedule type: {norm['__type__']}")  # noqa: TRY301 recorded per-row
-
                 rb_entry = RedBeatSchedulerEntry(
                     name=record.name,
                     task="celery.tool_execution",
-                    schedule=rb_schedule,
+                    schedule=to_celery_schedule(record.cadence),
                     args=record.args,
-                    kwargs=record.kwargs,
+                    kwargs={**record.kwargs, settings.tool_name_arg: record.tool},
                     enabled=record.enabled,
                     app=celery_app,
                 )
@@ -540,12 +548,8 @@ async def backend_import_schedules(
                 else:
                     created += 1
             except Exception as e:
-                errors.append({"index": index, "name": entry_name, "error": repr(e)})
+                errors.append(ScheduleImportError(index=index, name=entry_name, error=repr(e)))
 
-    return {
-        "created": created,
-        "updated": updated,
-        "skipped": skipped,
-        "skipped_existing": skipped_existing,
-        "errors": errors,
-    }
+    return ScheduleImportReport(
+        created=created, updated=updated, skipped=skipped, skipped_existing=skipped_existing, errors=errors
+    ).model_dump()

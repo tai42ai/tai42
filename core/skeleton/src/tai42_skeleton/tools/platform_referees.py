@@ -30,18 +30,17 @@ if TYPE_CHECKING:
 
 
 async def _schedule_referee(old_name: str) -> list[str]:
-    # Read every schedule's actual dispatch target from the cross-backend export surface
-    # (``backend_export_schedules``), whose canonical ``ScheduleRecord`` rows carry the
-    # fired tool name in ``kwargs[tool_name_arg]`` — the literal key the worker pops and
-    # runs. This catches EVERY schedule that fires a tool, including operator-named ones,
-    # not only the platform's derived ``<tool>_<hex>`` name convention.
-    from tai42_skeleton.backend.settings import base_backend_settings
+    # Read every schedule's fired tool from the cross-backend export surface
+    # (``backend_export_schedules``), whose ``ScheduleRecord`` rows name it in ``tool`` — the
+    # backend splits its own tool-name key out of the stored job. This catches EVERY schedule
+    # that fires a tool, including operator-named ones, not only the platform's derived
+    # ``<tool>_<hex>`` name convention.
     from tai42_skeleton.operations import NotSupportedError
     from tai42_skeleton.operations.schedules import export_schedules_raw
     from tai42_skeleton.tools.binding import UnknownToolError
 
     try:
-        rows = await export_schedules_raw()
+        records = await export_schedules_raw()
     except NotSupportedError:
         # Feature-off: no scheduling backend is installed, so there are no holders.
         return []
@@ -53,48 +52,9 @@ async def _schedule_referee(old_name: str) -> list[str]:
             f"schedule referee: scheduling backend registers no {exc.tool_name!r}; schedule holders "
             "cannot be verified, rename blocked"
         ) from exc
-
-    # The host (``BACKEND_TOOL_NAME_ARG``) side of the dispatch contract every scheduling
-    # backend must inject its target tool name under too, through its own prefixed
-    # ``*_TOOL_NAME_ARG`` — two env keys for one conceptual key, default-equal and pinned
-    # equal by declaration (settings drift guard), the operator's to keep aligned at runtime.
-    tool_name_arg = base_backend_settings().tool_name_arg
-    # An unreadable/unexpected holder store must FAIL the rename, never silently drop every
-    # schedule holder and let a stranding rename through — any shape the referee cannot
-    # interpret raises loudly, including a record with no readable dispatch target.
-    if not isinstance(rows, list):
-        raise TypeError(
-            f"schedule referee: export_schedules_raw() returned a {type(rows).__name__}, expected a list of rows"
-        )
-    holders: list[str] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            raise TypeError(f"schedule referee: schedule record is a {type(row).__name__}, expected a dict")
-        name = row.get("name")
-        if not isinstance(name, str):
-            raise TypeError(f"schedule referee: schedule record carries no string 'name' (keys: {sorted(row)})")
-        kwargs = row.get("kwargs")
-        if not isinstance(kwargs, dict):
-            raise TypeError(f"schedule referee: schedule {name!r} carries no dict 'kwargs' (keys: {sorted(row)})")
-        target = kwargs.get(tool_name_arg)
-        if not isinstance(target, str):
-            # A backend configured with a ``*_TOOL_NAME_ARG`` that disagrees with the host's
-            # ``BACKEND_TOOL_NAME_ARG`` injects the target under a different key, which reads
-            # here as a missing target on the FIRST record and blocks EVERY rename until the
-            # two are realigned. The over-block is fail-safe (never a silent stranding), so it
-            # stays loud — but names the expected key and the dispatch contract, so the
-            # misconfiguration is diagnosable rather than a bare shape error.
-            raise TypeError(
-                f"schedule referee: schedule {name!r} kwargs carry no string {tool_name_arg!r} dispatch "
-                f"target (kwargs keys: {sorted(kwargs)}); {tool_name_arg!r} is the host "
-                "BACKEND_TOOL_NAME_ARG side of the tool_name_arg dispatch contract the scheduling backend "
-                "must inject its target under too, so realign a mismatched backend *_TOOL_NAME_ARG"
-            )
-        # A disabled (``enabled: false``) schedule is re-enable-able, so it is a live
-        # strandable reference and counts exactly like an enabled one.
-        if target == old_name:
-            holders.append(f"schedule {name!r}")
-    return holders
+    # A disabled (``enabled: false``) schedule is re-enable-able, so it is a live strandable
+    # reference and counts exactly like an enabled one.
+    return [f"schedule {record.name!r}" for record in records if record.tool == old_name]
 
 
 async def _hook_referee(old_name: str) -> list[str]:
@@ -257,9 +217,9 @@ async def _hook_detach_referee(state: str, template: str) -> list[str]:
 
 
 async def _schedule_detach_referee(state: str, template: str) -> list[str]:
-    # Read each schedule's exported ``kwargs['state_binding']`` — the JSON the recurring fire
-    # applies — from the same raw export surface the rename schedule referee reads. Feature-off
-    # holds none; an unreadable holder store fails loudly (never a silent stranding).
+    # Read each schedule's exported door binding — the JSON the recurring fire applies — from the
+    # same export surface the rename schedule referee reads. Feature-off holds none; an unreadable
+    # holder store fails loudly (never a silent stranding).
     from tai42_contract.states import StateBinding
     from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG
 
@@ -268,7 +228,7 @@ async def _schedule_detach_referee(state: str, template: str) -> list[str]:
     from tai42_skeleton.tools.binding import UnknownToolError
 
     try:
-        rows = await export_schedules_raw()
+        records = await export_schedules_raw()
     except NotSupportedError:
         return []
     except UnknownToolError as exc:
@@ -277,31 +237,17 @@ async def _schedule_detach_referee(state: str, template: str) -> list[str]:
             "cannot be verified, detach blocked"
         ) from exc
 
-    if not isinstance(rows, list):
-        raise TypeError(
-            f"schedule detach referee: export_schedules_raw() returned a {type(rows).__name__}, expected a list of rows"
-        )
     holders: list[str] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            raise TypeError(f"schedule detach referee: schedule record is a {type(row).__name__}, expected a dict")
-        name = row.get("name")
-        if not isinstance(name, str):
-            raise TypeError(f"schedule detach referee: schedule record carries no string 'name' (keys: {sorted(row)})")
-        kwargs = row.get("kwargs")
-        if not isinstance(kwargs, dict):
-            raise TypeError(
-                f"schedule detach referee: schedule {name!r} carries no dict 'kwargs' (keys: {sorted(row)})"
-            )
+    for record in records:
         # A stored schedule carries its door binding under the kit's reserved key — the create
         # door's ``state_binding`` is re-stamped to ``backend_schedule_state_binding`` and the
         # plain key popped, so that reserved key is where a live binding actually lives.
-        raw = kwargs.get(SCHEDULE_STATE_BINDING_ARG)
+        raw = record.kwargs.get(SCHEDULE_STATE_BINDING_ARG)
         if raw is None:
             continue
         binding = StateBinding.model_validate(raw)
         if _binding_names_template(binding, state, template):
-            holders.append(f"schedule {name!r}")
+            holders.append(f"schedule {record.name!r}")
     return holders
 
 

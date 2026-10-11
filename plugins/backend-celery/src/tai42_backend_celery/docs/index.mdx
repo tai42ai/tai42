@@ -29,7 +29,7 @@ operator on RabbitMQ sets `CELERY_BROKER_URL` explicitly.
 | `CELERY_REDBEAT_KEY_PREFIX` | `redbeat:` | Key prefix for the schedule store. |
 | `CELERY_BEAT_MAX_LOOP_INTERVAL` | `60` | Maximum seconds between beat ticks. |
 | `CELERY_WORKER_CONCURRENCY` | `1` | Prefork pool size. |
-| `CELERY_TASK_TIMEOUT` | `300` | Seconds a synchronous dispatch waits for a result. |
+| `CELERY_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the longest a task may run on the worker, and how long a synchronous dispatch waits for a result. |
 | `CELERY_MANIFEST_KEY` | `MANIFEST_KEY` | Env var the live manifest JSON is written into for prefork inheritance. |
 | `CELERY_TOOL_NAME_ARG` | `backend_tool_name` | Dispatch kwarg naming the target tool. |
 
@@ -81,6 +81,12 @@ processes, so that is deliberate.
   resolver deadlocks.
 - `backend_list_failed_tasks` is not implemented: Celery keeps no queryable
   failed-task index.
+- A dispatched tool runs once: the backend never retries a tool body. A tool that
+  wants retries declares a `ToolRetryPolicy`. `CELERY_TASK_TIMEOUT` is bound into
+  Celery's `task_time_limit` when the worker starts, so a change converges through
+  a process recycle.
+- Schedules use the contract's typed cadence; this backend honours an interval's
+  `relative` flag and stores schedules in RedBeat's own format.
 
 ## See also
 

@@ -24,15 +24,17 @@ namespace when unset; a set `ARQ_` value always wins.
 | `ARQ_REDIS_MAX_CONNECTIONS` | unset | Caps the arq connection pool; uncapped when unset. |
 | `ARQ_CALLBACK_TIMEOUT` | `5` | Seconds a callback job waits for its predecessor to complete. |
 | `ARQ_JOB_COMPLETION_WAIT` | `300` | Seconds a graceful SIGTERM lets in-flight jobs finish before the worker exits (the warm drain). |
-| `ARQ_TASK_TIMEOUT` | `300` | Seconds a synchronous dispatch waits for a job result. |
+| `ARQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the longest a job may run on the worker (the `--job-timeout` default), and how long a synchronous dispatch waits for a job result. |
 | `ARQ_MANIFEST_KEY` | `MANIFEST_KEY` | Env var the host exports the live manifest JSON under. |
 | `ARQ_TOOL_NAME_ARG` | `backend_tool_name` | Kwargs key carrying the target tool name into a queued job. |
 
 ## Run the worker
 
 ```bash
-tai backend worker --max-jobs 10 --job-timeout 300
+tai backend worker --max-jobs 10
 ```
+
+`--job-timeout` defaults to `ARQ_TASK_TIMEOUT`; an explicit flag wins.
 
 Queue name, burst mode, result retention, and poll delay are worker CLI flags,
 not env vars. `worker` is the only `tai backend` subcommand this backend accepts
@@ -58,10 +60,11 @@ severing in-flight jobs.
 On startup a watchdog restarts enabled schedules whose pending job was lost,
 never found, or completed without rescheduling. A schedule it cannot recover
 (its record throws every tick) is recorded as an operator-visible error state
-rather than only logged: its row from `backend_list_schedules` and
-`backend_get_schedule` carries `recovery_error` (the failure detail) and
-`recovery_failed_at` (an ISO-8601 timestamp). Both are null on a healthy
-schedule and are cleared on any later tick that finds the schedule healthy or restarts it.
+rather than only logged: its `backend_list_schedules` row carries `error`
+(`message`, the failure detail, and `at_iso`, an ISO-8601 timestamp), and
+`backend_get_schedule` carries `recovery_error` and `recovery_failed_at`. They are
+null on a healthy schedule and are cleared on any later tick that finds the schedule
+healthy or restarts it.
 
 ## Quirks
 
@@ -70,6 +73,13 @@ schedule and are cleared on any later tick that finds the schedule healthy or re
   server stop agreeing. `ARQ_MANIFEST_KEY` and `ARQ_TOOL_NAME_ARG` pin wiring
   built at boot, so a change to either converges through a process recycle
   rather than in place.
+- arq cannot honour a relative interval: a schedule with `relative: true` is
+  refused on create, update and import.
+- The schedule store holds the typed cadence; a hash in an earlier format raises
+  `ScheduleStoreFormatError` on list, export, get and update until the keys matching
+  `ArqSettings.arq_schedule_pattern` are deleted and the schedules re-created.
+- A dispatched tool runs once; arq re-runs a job cut by a cold stop, bounded by
+  `--max-tries`.
 - `ARQ_JOB_COMPLETION_WAIT` must cover the longest job, and the deployment's
   termination grace period must be at least as long, or a drain still severs
   running work. arq cancels running jobs on signal unless this is non-zero.

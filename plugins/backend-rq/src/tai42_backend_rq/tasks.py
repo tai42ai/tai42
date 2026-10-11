@@ -12,14 +12,15 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Any
 
-from rq import Queue
 from rq.job import Job
+from tai42_contract.backend import SCHEDULE_CADENCE_KEY, SCHEDULE_NAME_KEY
 from tai42_kit.backend import CallbackSchema, backend_fire, callback_execution, carry_forwarded_fire
 from tai42_kit.clients import client_ctx, shutdown_all_clients
 from tai42_kit.clients.impl.redis import SyncRedisClient
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
+from tai42_backend_rq.queue import TaskBudgetQueue
 from tai42_backend_rq.settings import rq_settings
 
 # Task options every backend extension appends to its branch tool's signature.
@@ -32,8 +33,8 @@ RQ_TASK_OPTS: dict[str, Any] = {
 
 # Schedule options the schedule_task extension appends.
 RQ_SCHEDULE_OPTS: dict[str, Any] = {
-    "backend_schedule_name": str,
-    "backend_schedule": int | float | str | dict[str, Any],
+    SCHEDULE_NAME_KEY: str,
+    SCHEDULE_CADENCE_KEY: dict[str, Any],
 }
 
 
@@ -104,7 +105,7 @@ async def enqueue_task(*args: Any, **kwargs: Any) -> Job:
     chains a ``callback_job`` dependent on the primary job. Returns the primary job.
     """
     async with client_ctx(SyncRedisClient, url=rq_settings().redis_url) as r:
-        queue = Queue(rq_settings().queue_name, connection=r)
+        queue = TaskBudgetQueue(rq_settings().queue_name, connection=r)
 
         task_kwargs = {k: kwargs.pop(k) for k in RQ_TASK_OPTS if k in kwargs}
         enqueue_opts = {k: v for k, v in task_kwargs.items() if v is not None}

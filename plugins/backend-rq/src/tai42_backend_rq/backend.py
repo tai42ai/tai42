@@ -18,6 +18,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
 from tai42_kit.backend import ManagedBackend
 
+from tai42_backend_rq.queue import TASK_BUDGET_QUEUE_PATH
 from tai42_backend_rq.settings import rq_settings
 from tai42_backend_rq.worker import RqWorkerRuntime
 
@@ -65,6 +66,10 @@ class RqBeatRuntime(_VendorCliRuntime):
 
     name = "beat"
     argv0 = "rq-scheduler"
+
+    def _publish_argv(self) -> None:
+        """Hand the options to ``rq-scheduler`` plus the queue class that bounds every moved job by ``task_timeout``."""
+        sys.argv = [self.argv0, *self._args, "--queue-class", TASK_BUDGET_QUEUE_PATH]
 
     def run_blocking(self) -> None:
         """Run the ``rq-scheduler`` process in the foreground."""

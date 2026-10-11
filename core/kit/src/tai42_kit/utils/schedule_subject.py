@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
+from tai42_contract.backend.scheduling import SCHEDULE_NAME_KEY
 from tai42_contract.interactions.door_contract import ParkableDoorMixin
 from tai42_contract.states import StateBinding, StateContext, StateSubject, SubjectCandidates
 
@@ -31,11 +32,6 @@ from tai42_kit.utils.state_context import state_context
 # one from a validated input and REFUSES any caller-supplied key in this namespace, so a caller can
 # never forge one; the ``backend_`` prefix also keeps them from colliding with a tool parameter.
 RESERVED_SCHEDULE_PREFIX = "backend_schedule_"
-
-# The one key inside the reserved namespace a caller DOES own: the cadence's name (its revocation
-# handle), which the backend ``schedule_task`` branch pops to register the schedule. It rides the
-# reserved prefix but is the caller's own input, so it is the single exemption to the refusal rule.
-SCHEDULE_NAME_KEY = "backend_schedule_name"
 
 # The reserved request-field key the door binding rides as a plain (unprefixed) job kwarg between the
 # create door and the ``schedule_task`` preparer. Like the prefixed namespace it is stamped by the
@@ -58,7 +54,8 @@ def assert_no_reserved_schedule_keys(kwargs: dict[str, Any]) -> None:
     Every reserved door kwarg — any :data:`RESERVED_SCHEDULE_PREFIX`-prefixed key, plus the plain
     :data:`SCHEDULE_STATE_BINDING_REQUEST_KEY` — is STAMPED by the platform from a validated field. A
     caller one could forge the fire's subject, identity, binding or contract, so it is refused. The
-    single exemption is :data:`SCHEDULE_NAME_KEY`, the caller's own cadence name; the exact
+    single exemption is the contract's ``SCHEDULE_NAME_KEY``, the caller's own schedule name (it rides
+    the reserved prefix but is the caller's input); the exact
     ``backend_schedule`` cadence key does not match the door prefix and so is never a reserved key.
 
     The one refusal rule for every door that enqueues a backend job: the create door calls it before

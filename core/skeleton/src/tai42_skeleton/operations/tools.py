@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
+from tai42_contract.backend import SCHEDULE_BRANCH_SUFFIX
 from tai42_contract.errors import OperationError, UnavailableError
 from tai42_contract.interactions import RunAnswer, RunResultAnswer, RunTerminalFailed
 from tai42_contract.secrets import unwrap_secrets
@@ -141,14 +142,15 @@ async def list_tools() -> list[str]:
 async def tool_tags() -> list[dict]:
     """The per-tool native-``tags`` map plus the plugin-declared visibility and capability badges.
 
-    One ``{name, tags, hidden, badges}`` entry per registered tool, ``tags`` and ``badges`` each
+    One ``{name, tags, hidden, badges, schedulable}`` entry per registered tool, ``tags`` and ``badges`` each
     sorted for a stable wire order. ``hidden`` is the tool's OWN declaration, read from the
     FastMCP ``meta`` under ``TOOL_META_HIDDEN`` (a tool that never declared it is
     not hidden); ``badges`` is likewise the tool's OWN declared INFORMATIONAL capability badges,
     read from ``meta`` under ``TOOL_META_BADGES`` (a tool that declared none carries an empty list).
     The tool_meta overlay's tri-state override and its own badge set are merged on top
-    client-side; this read exposes only the declaration. Additive to the flat names contract; a
-    tool with no tags carries an empty list.
+    client-side; this read exposes only the declaration. ``schedulable`` is whether the tool's
+    ``<name>_schedule_task`` vehicle is registered, so a client never spells the suffix. Additive to
+    the flat names contract; a tool with no tags carries an empty list.
     """
     tools = await tai42_app.tools.get_tools()
     return [
@@ -157,6 +159,7 @@ async def tool_tags() -> list[dict]:
             "tags": sorted(tool.tags),
             "hidden": (tool.meta or {}).get(TOOL_META_HIDDEN) is True,
             "badges": sorted((tool.meta or {}).get(TOOL_META_BADGES) or []),
+            "schedulable": f"{name}{SCHEDULE_BRANCH_SUFFIX}" in tools,
         }
         for name, tool in sorted(tools.items())
     ]

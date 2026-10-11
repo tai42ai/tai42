@@ -1,6 +1,10 @@
-"""Parse and normalize interval and crontab schedule specs into RedBeat-native JSON."""
+"""Parse friendly interval and crontab specs into the contract's ``ScheduleCadence``."""
 
+from collections.abc import Mapping
 from typing import Any
+
+from pydantic import TypeAdapter
+from tai42_contract.backend import CrontabCadence, IntervalCadence, ScheduleCadence
 
 _PERIODS = {
     "s": 1,
@@ -23,51 +27,33 @@ _PERIODS = {
     "days": 86400,
 }
 
+_CRONTAB_FIELDS = ("minute", "hour", "day_of_month", "month_of_year", "day_of_week")
 
-def parse_crontab_expr(expr: str) -> dict[str, Any]:
-    """Accepts standard 5-field cron: M H DOM MON DOW.
+_CADENCE: TypeAdapter[IntervalCadence | CrontabCadence] = TypeAdapter(ScheduleCadence)
 
-    If a 6-field expression (with seconds) is passed, ignores the first field.
+
+def parse_crontab_expr(expr: str) -> CrontabCadence:
+    """A standard 5-field cron expression (M H DOM MON DOW) as a :class:`CrontabCadence`.
+
+    A 6-field expression (with a leading seconds field) drops the seconds; any other count raises.
     """
-    parts = expr.split()
-    if len(parts) == 6:  # seconds minute hour dom mon dow
-        parts = parts[1:]
-    if len(parts) != 5:
-        raise ValueError(f"Invalid crontab expression (need 5 fields): {expr!r}")
-    minute, hour, day_of_month, month_of_year, day_of_week = parts
-    return {
-        "type": "crontab",
-        "minute": minute,
-        "hour": hour,
-        "day_of_month": day_of_month,
-        "month_of_year": month_of_year,
-        "day_of_week": day_of_week,
-    }
+    return CrontabCadence.model_validate({"expression": expr})
 
 
-def _interval_from_seconds(value: int | float) -> dict[str, Any]:
-    """A raw numeric seconds count as a RedBeat interval (raises on ``<= 0``)."""
+def _interval_from_seconds(value: float) -> IntervalCadence:
+    """A raw numeric seconds count as an interval (raises on ``<= 0``)."""
     if value <= 0:
         raise ValueError("interval 'every' must be > 0 seconds")
-    return {"__type__": "interval", "every": float(value), "relative": False}
+    return IntervalCadence(every=float(value))
 
 
-def _canonical_schedule(spec: dict[str, Any]) -> dict[str, Any]:
-    """An already-``__type__`` dict, float-coercing ``every`` and defaulting ``relative`` for an interval.
-
-    Raises on ``<= 0``.
-    """
-    out = dict(spec)
-    if out["__type__"] == "interval":
-        out["every"] = float(out["every"])
-        if out["every"] <= 0:
-            raise ValueError("interval 'every' must be > 0 seconds")
-        out.setdefault("relative", False)
-    return out
+def _canonical_schedule(spec: Mapping[str, Any]) -> IntervalCadence | CrontabCadence:
+    """A ``kind``-tagged mapping validated as a :data:`ScheduleCadence`."""
+    return _CADENCE.validate_python(dict(spec))
 
 
-def _interval_from_friendly(spec: dict[str, Any]) -> dict[str, Any]:
-    """A friendly interval schema as a RedBeat interval (``every``/``run_every`` times the ``period`` multiplier).
+def _interval_from_friendly(spec: Mapping[str, Any]) -> IntervalCadence:
+    """A friendly interval (``every``/``run_every`` times the ``period`` multiplier).
 
     Raises on missing/unsupported/``<= 0``.
     """
@@ -81,61 +67,42 @@ def _interval_from_friendly(spec: dict[str, Any]) -> dict[str, Any]:
     every_sec = float(every) * mult
     if every_sec <= 0:
         raise ValueError("interval 'every' must be > 0 seconds")
-    return {"__type__": "interval", "every": every_sec, "relative": bool(spec.get("relative", False))}
+    return IntervalCadence(every=every_sec, relative=bool(spec.get("relative", False)))
 
 
-def _crontab_from_friendly(spec: dict[str, Any]) -> dict[str, Any]:
-    """A friendly crontab schema as RedBeat crontab.
+def _crontab_from_friendly(spec: Mapping[str, Any]) -> CrontabCadence:
+    """A friendly crontab: an ``expression`` with per-field overrides, else the fields (each ``*`` by default)."""
+    base = parse_crontab_expr(spec["expression"]).model_dump() if "expression" in spec else {}
+    fields = {field: spec.get(field, base.get(field, "*")) for field in _CRONTAB_FIELDS}
+    return CrontabCadence(**fields)
 
-    An ``expression`` is parsed with per-field overrides, else the per-field values default to ``*``.
+
+def normalize_schedule(
+    s: int | float | str | Mapping[str, Any] | IntervalCadence | CrontabCadence,
+) -> IntervalCadence | CrontabCadence:
+    """Normalize a friendly schedule spec to the contract's typed cadence.
+
+    - a number → an interval of that many seconds;
+    - a string → a crontab from its expression;
+    - a cadence → itself;
+    - a mapping with ``kind`` → validated as a :data:`ScheduleCadence`;
+    - a mapping with ``type`` ``"interval"`` (``every``/``run_every`` times ``period``) or ``"crontab"``
+      (``expression`` plus per-field overrides, or the fields alone).
+
+    Anything else raises ``ValueError``.
     """
-    if "expression" in spec:
-        base = parse_crontab_expr(spec["expression"])
-        base["__type__"] = base.pop("type", "crontab")
-        # allow explicit field overrides
-        base["minute"] = spec.get("minute", base["minute"])
-        base["hour"] = spec.get("hour", base["hour"])
-        base["day_of_month"] = spec.get("day_of_month", base["day_of_month"])
-        base["month_of_year"] = spec.get("month_of_year", base["month_of_year"])
-        base["day_of_week"] = spec.get("day_of_week", base["day_of_week"])
-        return base
-    return {
-        "__type__": "crontab",
-        "minute": spec.get("minute", "*"),
-        "hour": spec.get("hour", "*"),
-        "day_of_month": spec.get("day_of_month", "*"),
-        "month_of_year": spec.get("month_of_year", "*"),
-        "day_of_week": spec.get("day_of_week", "*"),
-    }
-
-
-def normalize_schedule(s: int | float | str | dict[str, Any]) -> dict[str, Any]:
-    """Normalize to RedBeat-native JSON.
-
-    - interval: {"__type__":"interval","every":<seconds: float>,"relative":False|True}
-    - crontab : {"__type__":"crontab","minute":...,"hour":...,"day_of_month":...,
-                 "month_of_year":...,"day_of_week":...}.
-    """
-    # numeric => interval seconds
-    if isinstance(s, (int, float)):
+    if isinstance(s, IntervalCadence | CrontabCadence):
+        return s
+    if isinstance(s, int | float):
         return _interval_from_seconds(s)
-
-    # already-canonical dict
-    if isinstance(s, dict) and s.get("__type__") in {"interval", "crontab"}:
-        return _canonical_schedule(s)
-
-    # bare string => crontab expression
     if isinstance(s, str):
-        base = parse_crontab_expr(s)  # expects {"type":"crontab", ...}
-        base["__type__"] = base.pop("type", "crontab")
-        return base
-
-    # dict => translate friendly schema to RedBeat
-    if isinstance(s, dict):
-        t = s.get("type")
-        if t == "interval":
+        return parse_crontab_expr(s)
+    if isinstance(s, Mapping):
+        if "kind" in s:
+            return _canonical_schedule(s)
+        kind = s.get("type")
+        if kind == "interval":
             return _interval_from_friendly(s)
-        if t == "crontab":
+        if kind == "crontab":
             return _crontab_from_friendly(s)
-
-    raise ValueError(f"Unsupported schedule format: {s!r}")
+    raise ValueError(f"unsupported schedule spec: {type(s).__name__}")

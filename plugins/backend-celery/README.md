@@ -98,17 +98,23 @@ signal handlers off the main thread.
 ## Task execution
 
 The `sync_task` / `async_task` extension branches dispatch the wrapped tool to
-the queue via the `celery.tool_execution` task (autoretry on
-connection/timeout errors with jittered exponential backoff, never on
-`ValueError`; max 5 retries). Task options exposed on every branch: `queue`,
+the queue via the `celery.tool_execution` task. A dispatched tool runs once;
+retries are declared per tool with a `ToolRetryPolicy` and applied by the
+platform, never by Celery (Celery still retries publishing the task message on
+connection loss, the `retry` option below). Every task — dispatched or fired by
+beat — is bounded by the dispatch job budget `CELERY_TASK_TIMEOUT` (Celery's
+`task_time_limit`, enforced by the prefork pool). Task options exposed on every branch: `queue`,
 `countdown`, `priority`, `retry`, `routing_key`, `expires`, `eta`, and
 `callback_kwargs` — a callback schema chained via a Celery `link` that runs
 `celery.callback_task` on the result (jq condition gate, jq expression
 transform, optional follow-up tool).
 
-`schedule_task` persists a RedBeat entry (interval seconds or 5-field
-crontab). Beat must run with the RedBeat scheduler, which `launch("beat")`
-configures automatically.
+`schedule_task` persists a RedBeat entry from the contract's typed cadence
+(`tai42_contract.backend.scheduling`: an interval with `kind: "interval"`,
+`every` seconds and `relative`, which this backend honours, or a five-field
+crontab with `kind: "crontab"`). The backend maps the cadence to RedBeat's own
+stored shape, so RedBeat's entries are unchanged. Beat must run with the RedBeat
+scheduler, which `launch("beat")` configures automatically.
 
 Worker fork safety: each freshly forked pool child evicts the monitoring
 vendor client through the contract's fork-safe `writer.shutdown()` (logged,
@@ -128,14 +134,16 @@ to that worker's entries — so the keying is per worker.
 `backend_list_failed_tasks` raises `NotImplementedError` — Celery keeps no
 queryable failed-task index.
 
-Schedule tools (RedBeat): `backend_list_schedules` (canonical row keys `name`
-/ `enabled` / `next_run_at_ts` / `next_run_at_iso`), `backend_get_schedule`,
+Schedule tools (RedBeat): `backend_list_schedules` (the contract's
+`ScheduleListRow`: `name` / `tool` / `cadence` / `enabled` / `next_run_at_ts` /
+`next_run_at_iso`, never the stored arguments), `backend_get_schedule`,
 `backend_schedule_exists`, `backend_enable_schedule`,
 `backend_disable_schedule`, `backend_run_schedule_now`,
 `backend_update_schedule`, `backend_delete_schedule`, plus the backup round
-trip `backend_export_schedules` / `backend_import_schedules` (portable
-`ScheduleRecord` rows; skip/overwrite import mode keyed by name; per-row errors
-surfaced as `{"index", "name", "error"}`, never swallowed).
+trip `backend_export_schedules` / `backend_import_schedules` (the contract's
+`ScheduleRecord` rows, the fired `tool` split out of the stored kwargs; a
+`ScheduleImportReport` with skip/overwrite import mode keyed by name; per-row
+errors surfaced as `{"index", "name", "error"}`, never swallowed).
 
 ## Configuration
 
@@ -149,7 +157,7 @@ Settings are read from the `CELERY_` environment group (see `CelerySettings`):
 | `CELERY_REDBEAT_KEY_PREFIX` | `redbeat:` | RedBeat key prefix (schedule zset is `redbeat::schedule`) |
 | `CELERY_BEAT_MAX_LOOP_INTERVAL` | `60` | Maximum seconds between beat scheduler ticks |
 | `CELERY_TOOL_NAME_ARG` | `backend_tool_name` | Kwarg name the dispatch injects the target tool into |
-| `CELERY_TASK_TIMEOUT` | `300` | Seconds a `sync_task` branch waits for the result |
+| `CELERY_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the longest a task may run on the worker (`task_time_limit`), and how long a `sync_task` branch waits for the result |
 | `CELERY_MANIFEST_KEY` | `MANIFEST_KEY` | Env var carrying the live manifest JSON (prefork inheritance) |
 | `CELERY_WORKER_CONCURRENCY` | `1` | Prefork pool size — capped at one child by default (see below) |
 

@@ -1,9 +1,9 @@
-"""Schedule shapes: the portable ``ScheduleRecord`` and the writer of a canonical schedule into RQ.
+"""Writing a typed cadence into RQ: the scheduler factory and the one schedule writer.
 
-``ScheduleRecord`` is the backend-neutral, JSON-serializable backup form.
-``apply_normalized_schedule`` is shared by the create, update, and import paths
-so every schedule lands the same way, mirroring the interval seconds or cron
-string into the job ``meta`` for read-back.
+``apply_normalized_schedule`` is shared by the create, update, and import paths so every schedule
+lands the same way, mirroring the interval seconds or cron string into the job ``meta``
+for read-back. RQ cannot honour a relative interval, so every path refuses one loudly
+(:func:`refuse_relative`).
 """
 
 from __future__ import annotations
@@ -12,59 +12,36 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from rq_scheduler import Scheduler
+from tai42_contract.backend import CrontabCadence, IntervalCadence
+
+from tai42_backend_rq.queue import TaskBudgetQueue
+from tai42_backend_rq.settings import rq_settings
 
 
-class ScheduleRecord(BaseModel):
-    """One schedule in a backend-neutral, JSON-serializable form.
-
-    Carries ``name``, the scheduled call's ``args``/``kwargs``, the canonical interval-or-crontab
-    ``schedule`` dict, and the ``enabled`` flag. Round-trips through a backup document via
-    ``model_dump`` / ``model_validate``.
-    """
-
-    name: str
-    args: list[Any] = Field(default_factory=list)
-    kwargs: dict[str, Any] = Field(default_factory=dict)
-    schedule: dict[str, Any]
-    enabled: bool
-
-    @model_validator(mode="after")
-    def _check_schedule_kind(self) -> ScheduleRecord:
-        kind = self.schedule.get("__type__")
-        if kind not in {"interval", "crontab"}:
-            raise ValueError(f"schedule '__type__' must be 'interval' or 'crontab', got {kind!r}")
-        if kind == "interval":
-            every = self.schedule.get("every")
-            # bool is an int subclass; a boolean 'every' is not a valid period.
-            if not isinstance(every, int | float) or isinstance(every, bool):
-                raise ValueError(f"interval schedule requires numeric 'every', got {every!r}")
-            relative = self.schedule.get("relative")
-            if relative is not None and not isinstance(relative, bool):
-                raise ValueError(f"interval 'relative' must be a bool, got {relative!r}")
-        else:  # crontab
-            missing = [
-                field
-                for field in ("minute", "hour", "day_of_month", "month_of_year", "day_of_week")
-                if field not in self.schedule
-            ]
-            if missing:
-                raise ValueError(f"crontab schedule missing required field(s): {missing}")
-        return self
+def scheduler_for(connection: Any) -> Scheduler:
+    """The scheduler over the configured queue, moving due jobs onto a :class:`TaskBudgetQueue`."""
+    return Scheduler(queue_name=rq_settings().queue_name, connection=connection, queue_class=TaskBudgetQueue)
 
 
-def crontab_string(norm: dict[str, Any]) -> str:
-    """The 5-field cron expression of a canonical crontab dict."""
-    return f"{norm['minute']} {norm['hour']} {norm['day_of_month']} {norm['month_of_year']} {norm['day_of_week']}"
+def refuse_relative(cadence: IntervalCadence | CrontabCadence) -> None:
+    """Raise for a relative interval: the rq scheduler cannot honour ``relative=True``."""
+    if isinstance(cadence, IntervalCadence) and cadence.relative:
+        raise ValueError("the rq backend does not support relative interval schedules (relative=True)")
 
 
-def interval_seconds(norm: dict[str, Any]) -> int:
-    """The whole-second interval of a canonical interval dict.
+def crontab_string(cadence: CrontabCadence) -> str:
+    """The 5-field cron expression of a crontab cadence."""
+    return f"{cadence.minute} {cadence.hour} {cadence.day_of_month} {cadence.month_of_year} {cadence.day_of_week}"
+
+
+def interval_seconds(cadence: IntervalCadence) -> int:
+    """The whole-second interval of an interval cadence.
 
     The RQ scheduler re-arms an interval as ``int(interval)`` seconds, so a fractional or
     sub-second value is rejected loudly rather than silently truncated.
     """
-    every = float(norm["every"])
+    every = cadence.every
     seconds = int(every)
     if seconds != every or seconds < 1:
         raise ValueError(
@@ -75,19 +52,18 @@ def interval_seconds(norm: dict[str, Any]) -> int:
 
 async def apply_normalized_schedule(
     scheduler: Any,
-    norm: dict[str, Any],
+    cadence: IntervalCadence | CrontabCadence,
     func: Any,
     args: list[Any],
     kwargs: dict[str, Any],
     schedule_name: str,
 ) -> None:
-    """Create a scheduled job named ``schedule_name`` from a canonical schedule dict.
+    """Create a scheduled job named ``schedule_name`` from a typed cadence.
 
-    An interval schedule becomes a recurring ``scheduler.schedule`` call (whole
-    seconds), a crontab schedule a ``scheduler.cron`` call; the interval seconds
-    or cron string is mirrored into the job ``meta`` for read-back. Any other
-    ``__type__`` raises. The scheduler calls are blocking, so they run off the
-    event loop.
+    An interval becomes a recurring ``scheduler.schedule`` call (whole seconds), a crontab a
+    ``scheduler.cron`` call; the interval seconds or cron string is mirrored into the job
+    ``meta`` for read-back. A relative interval raises. The scheduler calls are blocking, so
+    they run off the event loop.
 
     An interval schedule's FIRST run is one interval out, not at creation: an
     interval fires on its cadence, never the instant it is registered. Firing at
@@ -98,10 +74,11 @@ async def apply_normalized_schedule(
     delete removes cleanly. A crontab schedule is already anchored to its next
     matching wall-clock time, so it never fires at creation.
     """
+    refuse_relative(cadence)
     meta_data: dict[str, Any] = {}
 
-    if norm["__type__"] == "interval":
-        interval_val = interval_seconds(norm)
+    if isinstance(cadence, IntervalCadence):
+        interval_val = interval_seconds(cadence)
         meta_data["interval"] = interval_val
 
         await asyncio.to_thread(
@@ -115,8 +92,8 @@ async def apply_normalized_schedule(
                 meta=meta_data,
             )
         )
-    elif norm["__type__"] == "crontab":
-        cron = crontab_string(norm)
+    else:
+        cron = crontab_string(cadence)
         meta_data["cron_string"] = cron
 
         await asyncio.to_thread(
@@ -129,5 +106,3 @@ async def apply_normalized_schedule(
                 meta=meta_data,
             )
         )
-    else:
-        raise ValueError(f"Unsupported schedule type: {norm['__type__']}")
