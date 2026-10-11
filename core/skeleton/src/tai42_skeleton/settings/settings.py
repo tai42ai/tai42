@@ -59,8 +59,9 @@ class CoreSettings(TaiBaseSettings):
     # blocking the probe for the full boot budget would stall every reload-gated
     # write and fleet-reload convergence. A server that overruns this shorter
     # budget is recorded unavailable (its tools bind a moment later via the
-    # lifespan re-probe task / the ``reload_failed_mcps`` door) rather than
-    # gating the whole reload — degraded-but-live, never a stalled fleet.
+    # lifespan re-probe task / the ``reload_failed_mcps`` door, which both probe
+    # off the gate on the cold-boot ``mcp_probe_timeout``) rather than gating the
+    # whole reload — degraded-but-live, never a stalled fleet.
     mcp_reload_probe_timeout: float = Field(default=3.0, gt=0)
     # The failed-MCP re-probe backoff bounds. The lifespan-owned re-probe task
     # sleeps ``initial`` seconds between passes, doubling up to ``max`` after a

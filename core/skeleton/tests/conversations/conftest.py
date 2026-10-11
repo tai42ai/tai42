@@ -753,8 +753,18 @@ def _store() -> ConversationRecordStore:
     return ConversationRecordStore(ConversationsSettings())
 
 
-async def _settle(timeout: float = 2.0) -> None:
-    """Let the spawned turn, delivery and grace tasks run to completion."""
+# How long ``_settle`` waits for the spawned tasks: the default settles measured up to 1.1 s
+# with the package run alone under heavy host load, and a whole parallel suite runs slower.
+# A settle returns as soon as the tasks are done, so the bound costs a passing test nothing.
+SETTLE_TIMEOUT_S = 10.0
+
+
+async def _settle(timeout: float = SETTLE_TIMEOUT_S) -> None:
+    """Let the spawned turn, delivery and grace tasks run to completion.
+
+    Raises when a task is still running at ``timeout``: the assertions that follow would
+    otherwise read a turn that has not run yet.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         tasks = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
@@ -767,6 +777,11 @@ async def _settle(timeout: float = 2.0) -> None:
             if not tasks:
                 return
         await asyncio.wait(tasks, timeout=0.05)
+    pending = [t for t in (*schedule_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
+    if pending:
+        raise AssertionError(
+            f"{len(pending)} turn/delivery task(s) still running after {timeout}s: {[t.get_name() for t in pending]}"
+        )
 
 
 def _wire(

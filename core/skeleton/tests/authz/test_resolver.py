@@ -182,7 +182,7 @@ def test_a_reload_gate_held_without_touching_the_operation_surface_does_not_refu
     reg = _reg_with_op("wipe")
 
     async def run() -> None:
-        async with reload_gate.lock:
+        async with reload_gate.synchronized():
             assert resolve_dispatch("toolbox_thing", {}, tool_registry=None, preset_manager=None, registry=reg) is None
             resolved = resolve_dispatch("wipe", {}, tool_registry=None, preset_manager=None, registry=reg)
             assert resolved is not None

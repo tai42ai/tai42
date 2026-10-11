@@ -48,6 +48,7 @@ from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.media_facet import MediaFacet
 from tai42_skeleton.app.serving_core import ServingCore, record_sse_surface, record_streamable_http_surface
 from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
+from tai42_skeleton.app.transport_stream import TransportStreamDrainExemptMiddleware, bind_sse_session_ender
 from tai42_skeleton.config import ConfigManagerFactory
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
@@ -422,7 +423,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
             raise RuntimeError("TaiMCP is not started — call start()/app_context first.")
         return self._manifest.live_manifest.model_dump(mode="json", exclude_none=True)
 
-    def _base_middleware(self, middleware: list[Middleware] | None) -> list[Middleware]:
+    def _base_middleware(self, middleware: list[Middleware] | None, *, stream_path: str) -> list[Middleware]:
         """The app's own base-app middleware, outermost first, ahead of whatever the launch surface's caller passes.
 
         FastMCP builds the base app's stack as ``[*auth middleware, *middleware]``, so
@@ -447,6 +448,10 @@ class TaiMCP(TaiMCPLifecycleMixin):
         entry here binds that capability TRUE for the request so a gate-off caller reaches
         an admin-fenced primitive exactly as ``resolve_caller`` admits it. Gate ON, the
         adapter's ResourceGuard owns the bind and this entry is absent.
+
+        ``stream_path`` is the route path the transport serves its server-to-client stream
+        on; that stream is exempt from its generation's retire drain
+        (:class:`~tai42_skeleton.app.transport_stream.TransportStreamDrainExemptMiddleware`).
         """
         # Local import mirrors ``_build_serving_core``: access_control -> ... -> app.server
         # is a cycle, so the adapter surface is reached lazily here too.
@@ -457,7 +462,13 @@ class TaiMCP(TaiMCPLifecycleMixin):
             [] if access_control_settings().enable else [Middleware(DisabledAccessControlSecretCapabilityMiddleware)]
         )
         audit = [Middleware(AuditLogMiddleware)] if audit_log_settings().enable else []
-        return [*gate_off_secret_capability, *audit, Middleware(BodyLimitMiddleware), *(middleware or [])]
+        return [
+            *gate_off_secret_capability,
+            *audit,
+            Middleware(BodyLimitMiddleware),
+            Middleware(TransportStreamDrainExemptMiddleware, stream_path=stream_path),
+            *(middleware or []),
+        ]
 
     def sse_app(
         self,
@@ -474,8 +485,10 @@ class TaiMCP(TaiMCPLifecycleMixin):
             sse_path=actual_path,
             message_path=actual_message_path,
             auth=self._fast_mcp.auth,
-            middleware=self._base_middleware(middleware),
+            middleware=self._base_middleware(middleware, stream_path=actual_path),
         )
+        # Its sessions end with the lifespan that owns it (its generation's close).
+        bind_sse_session_ender(base_app, actual_message_path)
         record_sse_surface(actual_path, actual_message_path)
 
         # Install the shared error-envelope handlers on the base app's own middleware
@@ -495,22 +508,28 @@ class TaiMCP(TaiMCPLifecycleMixin):
         transport: Literal["http", "streamable-http", "sse"] = "http",
     ) -> StarletteWithLifespan:
         """Build the streamable-HTTP (or SSE) ASGI app for this server, recording the served surface."""
+        # Resolve ``path`` exactly as fastmcp does (an omitted argument falls back to its
+        # process-wide setting), so the stream exemption and the registry name the transport
+        # path this deployment serves and no other.
+        if transport == "sse":
+            stream_path = path if path is not None else fastmcp.settings.sse_path
+        else:
+            stream_path = path if path is not None else fastmcp.settings.streamable_http_path
         base_app = self._fast_mcp.http_app(
             path=path,
-            middleware=self._base_middleware(middleware),
+            middleware=self._base_middleware(middleware, stream_path=stream_path),
             json_response=json_response,
             stateless_http=stateless_http,
             transport=transport,
         )
-        # Record what THIS build actually mounted, resolving ``path``/``stateless_http``
-        # exactly as fastmcp just did (an omitted argument falls back to its process-wide
-        # setting), so the registry names the transport paths this deployment serves and
-        # no other.
+        # Record what THIS build actually mounted, resolving ``stateless_http`` the same way.
         if transport == "sse":
-            record_sse_surface(path if path is not None else fastmcp.settings.sse_path, fastmcp.settings.message_path)
+            # Its sessions end with the lifespan that owns it (its generation's close).
+            bind_sse_session_ender(base_app, fastmcp.settings.message_path)
+            record_sse_surface(stream_path, fastmcp.settings.message_path)
         else:
             record_streamable_http_surface(
-                path if path is not None else fastmcp.settings.streamable_http_path,
+                stream_path,
                 stateless=stateless_http if stateless_http is not None else fastmcp.settings.stateless_http,
             )
 

@@ -11,6 +11,14 @@ post-call output-schema validation issuing a follow-up ``tools/list``. A real MC
 client handles this by RE-INITIALISING; :class:`McpClient` does the same
 internally, so a test calls it plainly and still gets the call's REAL result
 (``True``/``False``/error/dict) — no per-site retry wrap, and no assertion masked.
+
+Every request waits for its reply at most ``read_timeout`` seconds, a bound the stack
+derives from its own settings (:func:`mcp_read_timeout`): the longest legitimate call — a
+fleet reload, whose rebuild is boot-sized under load and whose fleet wait runs to the bus
+apply timeout — fits inside it, and a reply the server never delivers fails as the SDK's
+named request timeout ("Timed out while waiting for response to …") instead of hanging.
+A test whose call may run to this bound carries a per-test timeout above it
+(``@pytest.mark.timeout``), so the bound is what fires.
 """
 
 from __future__ import annotations
@@ -47,6 +55,26 @@ _SESSION_TERMINATED_MARKER = "Session terminated"
 _SESSION_REINIT_DEADLINE = 15.0
 
 
+def platform_apply_timeout() -> float:
+    """The worker bus apply timeout a server runs with when ``TAI_BUS_APPLY_TIMEOUT`` is unset."""
+    from tai42_skeleton.app.bus_settings import BusSettings
+
+    default = BusSettings.model_fields["apply_timeout"].default
+    return float(default)
+
+
+def mcp_read_timeout(env: dict[str, str], boot_timeout: float) -> float:
+    """The read bound for every MCP call against a server running with ``env``.
+
+    The fleet apply timeout the server runs with (``TAI_BUS_APPLY_TIMEOUT`` in ``env``,
+    else the platform default) plus the harness's boot bound, which bounds the reload's
+    own rebuild.
+    """
+    configured = env.get("TAI_BUS_APPLY_TIMEOUT")
+    apply_timeout = float(configured) if configured is not None else platform_apply_timeout()
+    return apply_timeout + boot_timeout
+
+
 def mcp_url(host: str, port: int, path: str = "/mcp") -> str:
     """The streamable-http MCP endpoint URL for a server (default ``/mcp``; sub-
     MCP apps mount under ``/app/<slug>``)."""
@@ -65,14 +93,17 @@ def _is_session_terminated(exc: BaseException) -> bool:
 
 class McpClient:
     """A short-lived fastmcp client bound to one MCP endpoint. Use as an async
-    context manager; each ``async with`` opens one streamable-http session.
+    context manager; each ``async with`` opens one session (streamable-http, or SSE
+    for an endpoint ending in ``/sse``). Every request waits for its reply at most
+    ``read_timeout`` seconds.
 
     Session termination from an epoch swap is handled transparently: the
     listing/tool-call surface re-initialises a fresh session and re-issues (bounded
     by :data:`_SESSION_REINIT_DEADLINE`), returning the call's real result."""
 
-    def __init__(self, url: str, *, auth: str | None = None) -> None:
+    def __init__(self, url: str, *, read_timeout: float, auth: str | None = None) -> None:
         self._url = url
+        self._read_timeout = read_timeout
         # ``auth`` is a raw bearer token (an ``sk-`` API key): fastmcp sends it as
         # ``Authorization: Bearer <token>`` on every request, so an access-controlled
         # ``/mcp`` endpoint authenticates the caller and the tool-edge authz check
@@ -82,7 +113,9 @@ class McpClient:
         self._client = self._new_client()
 
     def _new_client(self) -> Client:
-        return Client(self._url, auth=self._auth) if self._auth is not None else Client(self._url)
+        if self._auth is not None:
+            return Client(self._url, auth=self._auth, timeout=self._read_timeout)
+        return Client(self._url, timeout=self._read_timeout)
 
     @property
     def session_id(self) -> str | None:

@@ -6,8 +6,10 @@ import asyncio
 import json
 import logging
 import sys
+import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Protocol
 
 from tai42_kit.clients.impl.redis import RedisClient
@@ -72,6 +74,74 @@ return 0
 """
 
 
+class _HeartbeatThread:
+    """One subscription life's presence heartbeat, run on a daemon thread with its own event loop.
+
+    The subscription's loop can be blocked synchronously for longer than the claim
+    TTL (a config reload's rebuild runs on it), so the heartbeat never shares it. The
+    thread body runs ``main`` under :func:`asyncio.run`; its outcome lands on
+    :attr:`done` (an exception, or ``None`` for a clean return or a requested stop),
+    which the subscription supervises and awaits from its own loop. ``request_stop``
+    cancels the body on the thread's loop and is safe before the body has started and
+    after it has finished.
+    """
+
+    def __init__(self, name: str, main: Callable[[], Coroutine[Any, Any, None]]) -> None:
+        """Prepare (not start) the thread named ``name`` that will run ``main``."""
+        self._main = main
+        self._lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._stop_requested = False
+        # Set once the supervision has retrieved and logged the body's outcome, so the
+        # teardown's join does not log it a second time.
+        self.surfaced = False
+        self.done: Future[None] = Future()
+        self.thread = threading.Thread(target=self._run, name=name, daemon=True)
+
+    def start(self) -> None:
+        """Start the thread."""
+        self.thread.start()
+
+    def _run(self) -> None:
+        # RUNNING from the first instant, so a cancel of a future wrapped around
+        # ``done`` on the subscription's loop can never cancel the bridge itself.
+        self.done.set_running_or_notify_cancel()
+        try:
+            asyncio.run(self._body())
+        except asyncio.CancelledError:
+            # Only ``request_stop`` cancels the body: the stop the subscription asked for.
+            self.done.set_result(None)
+        except BaseException as exc:
+            # Nothing above this frame sees a thread's exception, so it is carried
+            # across the bridge to the subscription that supervises it.
+            self.done.set_exception(exc)
+        else:
+            self.done.set_result(None)
+
+    async def _body(self) -> None:
+        with self._lock:
+            if self._stop_requested:
+                return
+            self._loop = asyncio.get_running_loop()
+            self._task = asyncio.current_task()
+        try:
+            await self._main()
+        finally:
+            # Unpublish the loop before ``asyncio.run`` closes it, so a late
+            # ``request_stop`` never schedules onto a closed loop.
+            with self._lock:
+                self._loop = None
+                self._task = None
+
+    def request_stop(self) -> None:
+        """Ask the body to stop: cancel it on the thread's loop, or keep it from starting."""
+        with self._lock:
+            self._stop_requested = True
+            if self._loop is not None and self._task is not None:
+                self._loop.call_soon_threadsafe(self._task.cancel)
+
+
 class WorkerBusSubscribeMixin:
     """The subscriber surface of :class:`WorkerBus`: claim a slot and apply delivered ops.
 
@@ -92,6 +162,7 @@ class WorkerBusSubscribeMixin:
         _kind: WorkerKind
         _pid: int
         _post_reply_slot: Callable[[], None] | None
+        _heartbeat_thread: _HeartbeatThread | None
         _backoff_initial: float
         _backoff_max: float
         _backoff_factor: float
@@ -120,11 +191,14 @@ class WorkerBusSubscribeMixin:
 
         The claim is verified FIRST on every (re)connect: a held claim keeps the same
         name+generation across a reconnect; a lost claim (renew miss) re-mints a NEW
-        life. The heartbeat starts BEFORE the ``on_ready`` resync (the resync budget
-        exceeds the claim TTL, so an unrenewed claim would lapse mid-resync); presence
-        is written ``resyncing`` before the resync and ``ready`` after, both under the
-        renew-gated heartbeat path. The channel is subscribed before the resync, so an
-        op broadcast during it is buffered and applied by the message loop. Presence is
+        life. The heartbeat runs on a thread of its own with its own event loop and
+        connection, so a callback or resync that blocks this task's loop synchronously
+        (a config reload's rebuild) never lapses the claim or the presence row. It starts
+        BEFORE the ``on_ready`` resync (the resync budget exceeds the claim TTL, so an
+        unrenewed claim would lapse mid-resync); presence is written ``resyncing`` before
+        the resync and ``ready`` after, both under the renew-gated heartbeat path. The
+        channel is subscribed before the resync, so an op broadcast during it is
+        buffered and applied by the message loop. Presence is
         NOT force-deleted on a reconnect (its TTL carries the identity across a blip);
         only a deliberate stop deletes it, and only after the claim release succeeds.
         A lost slot is routed through a DEDICATED reconnect branch (never the
@@ -188,7 +262,6 @@ class WorkerBusSubscribeMixin:
             r: Any = conn
             pubsub = r.pubsub()
             await pubsub.subscribe(self._settings.channel)
-            heartbeat: asyncio.Task[None] | None = None
             exit_kind = "transport"
             presence_key: str | None = None
             try:
@@ -208,12 +281,10 @@ class WorkerBusSubscribeMixin:
                     state=WorkerState.resyncing,
                     last_op=None,
                 )
-                # Heartbeat FIRST (renew-gated), BEFORE on_ready: the resync budget
-                # exceeds the claim TTL, so an unrenewed claim would lapse mid-resync.
-                heartbeat = asyncio.create_task(
-                    self._heartbeat_loop(r, presence_key),
-                    name=f"tai-worker-bus-heartbeat-{identity.name}",
-                )
+                # Heartbeat FIRST (renew-gated, its own thread), BEFORE on_ready: the
+                # resync budget exceeds the claim TTL and the resync's rebuild blocks
+                # this loop, so the claim is renewed from off this loop throughout.
+                heartbeat = self._start_heartbeat_thread(identity.name, presence_key)
                 # Advertise ``resyncing`` before the resync, then ``ready`` after — both
                 # renew-gated (skipped on a miss; the heartbeat's own miss raises
                 # SlotLostError to route the re-mint). Presence is written BEFORE the
@@ -227,18 +298,15 @@ class WorkerBusSubscribeMixin:
                 await self._write_presence(r, presence_key, self._presence)
                 logger.info("worker bus: subscription live as %s", identity.name)
                 while True:
-                    if heartbeat.done():
+                    if heartbeat.done.done():
                         # The heartbeat ended on its own — a presence refresh raised on
-                        # a pooled command connection while this held pub/sub connection
-                        # stayed healthy (an asymmetric transport failure), OR a renew
-                        # miss raised SlotLostError (the slot was lost). Surface it and
-                        # force the whole subscription down so the outer loop reconnects
-                        # (transport) or re-mints (slot lost).
-                        failure = self._heartbeat_failure(heartbeat, identity.name)
-                        # Its exception is already retrieved and logged; drop the
-                        # reference so teardown does not re-await and re-log it.
-                        heartbeat = None
-                        raise failure
+                        # its own connection while this held pub/sub connection stayed
+                        # healthy (an asymmetric transport failure), OR a renew miss
+                        # raised SlotLostError (the slot was lost). Surface it and force
+                        # the whole subscription down so the outer loop reconnects
+                        # (transport) or re-mints (slot lost). Teardown still joins the
+                        # finished thread; its exception is retrieved and logged here once.
+                        raise self._heartbeat_failure(heartbeat, identity.name)
                     msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=_POLL_TIMEOUT)
                     if msg is not None:
                         await self._handle_op(r, callback, msg)
@@ -252,7 +320,9 @@ class WorkerBusSubscribeMixin:
                 exit_kind = "transport"
                 raise
             finally:
-                await self._stop_heartbeat(heartbeat)
+                # Stop and join the heartbeat BEFORE the teardown's claim release, so no
+                # beat can re-extend a released claim.
+                await self._stop_heartbeat()
                 await self._teardown(r, pubsub, presence_key, exit_kind)
 
     async def _establish_identity(self, r: Any) -> None:
@@ -304,18 +374,34 @@ class WorkerBusSubscribeMixin:
         result = await eval_script(r, _RELEASE_LUA, 1, self._settings.slot_key(name), self._claim_token)
         return bool(result)
 
+    def _start_heartbeat_thread(self, name: str, presence_key: str) -> _HeartbeatThread:
+        """Start this life's heartbeat thread and record it as the bus's one live heartbeat."""
+        heartbeat = _HeartbeatThread(f"tai-worker-bus-heartbeat-{name}", lambda: self._heartbeat_main(presence_key))
+        self._heartbeat_thread = heartbeat
+        heartbeat.start()
+        return heartbeat
+
+    async def _heartbeat_main(self, presence_key: str) -> None:
+        """The heartbeat thread's body: the beat loop over a connection of the thread's own.
+
+        redis-py's asyncio connections belong to the loop that opened them, so the
+        thread opens its own; ``fresh=True`` keeps it outside the epoch client pool,
+        so an epoch retire's drain never closes it (the subscription's own connection
+        is fresh for the same reason).
+        """
+        async with _pkg.client_ctx(RedisClient, self._settings.redis, fresh=True) as conn:
+            await self._heartbeat_loop(conn, presence_key)
+
     async def _heartbeat_loop(self, r: Any, presence_key: str) -> None:
-        """Renew the claim then refresh presence at ``ttl/3`` on a task of its own.
+        """Renew the claim then refresh presence at ``ttl/3``, on the heartbeat thread's own loop.
 
         The compare-token renew runs FIRST on every beat; the presence write follows
         ONLY on a successful renew, so a life that cannot prove its claim never writes
         presence under that name. A renew miss RAISES :class:`SlotLostError`, which the
-        message loop surfaces to force the re-mint. Liveness is decoupled from op apply
-        on purpose: were the refresh folded into the single message loop, a callback
-        that reloads for longer than the presence TTL would park the loop and let this
-        worker's key EXPIRE while it is alive and applying — the census would drop the
-        live worker. The callback's own awaits yield control, so this task renews and
-        refreshes throughout a long apply.
+        message loop surfaces to force the re-mint. Liveness is the process's, not the
+        subscription loop's: a callback or resync can block that loop synchronously for
+        longer than the presence TTL (a config reload's rebuild runs on it), and the
+        beat runs on its own thread so the census keeps the live worker throughout.
         """
         interval = self._settings.heartbeat_ttl / 3
         while True:
@@ -351,8 +437,8 @@ class WorkerBusSubscribeMixin:
         pipe.sadd(self._settings.presence_index, self.identity.name)
         await pipe.execute()
 
-    def _heartbeat_failure(self, heartbeat: asyncio.Task[None], name: str) -> BaseException:
-        """Turn a self-terminated heartbeat task into the failure that ends this subscription.
+    def _heartbeat_failure(self, heartbeat: _HeartbeatThread, name: str) -> BaseException:
+        """Turn a self-terminated heartbeat thread into the failure that ends this subscription.
 
         Logged at ERROR immediately.
 
@@ -361,28 +447,49 @@ class WorkerBusSubscribeMixin:
         the dedicated re-mint branch. A heartbeat that returned without raising — it
         never should, its loop is unbounded — becomes a loud ``RuntimeError``.
         """
-        exc = heartbeat.exception()
+        heartbeat.surfaced = True
+        exc = heartbeat.done.exception()
         if exc is None:
             exc = RuntimeError("worker bus: presence heartbeat returned without an error")
         logger.error("worker bus: presence heartbeat for %s stopped", name, exc_info=exc)
         return exc
 
-    async def _stop_heartbeat(self, heartbeat: asyncio.Task[None] | None) -> None:
-        """Cancel and await the presence-heartbeat task during teardown, so it never leaks past the subscription.
+    async def _stop_heartbeat(self) -> None:
+        """Stop and join this life's heartbeat thread during teardown, so it never outlives the subscription.
 
-        A heartbeat that already died of a transport error (the dropped connection the
-        subscription is reconnecting from) is logged loudly and swallowed so teardown still
-        completes.
+        The wait is bounded by one claim TTL: a thread that has not stopped by then is
+        logged at ERROR and left to its daemon status, so teardown still runs. A heartbeat
+        that ended on its own was already surfaced by the supervision; one that died while
+        the stop was pending (the dropped connection the subscription is leaving) is
+        logged at ERROR here so teardown still completes.
         """
+        heartbeat = self._heartbeat_thread
         if heartbeat is None:
             return
-        heartbeat.cancel()
-        try:
-            await heartbeat
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.error("worker bus: presence heartbeat task terminated abnormally", exc_info=True)
+        self._heartbeat_thread = None
+        heartbeat.request_stop()
+        timeout = self._settings.heartbeat_ttl
+        outcome = asyncio.wrap_future(heartbeat.done)
+        outcome.add_done_callback(lambda fut: self._log_heartbeat_outcome(heartbeat, fut))
+        finished, _ = await asyncio.wait({outcome}, timeout=timeout)
+        if not finished:
+            logger.error(
+                "worker bus: presence heartbeat thread %s did not stop within %.2fs; leaving it to its daemon status",
+                heartbeat.thread.name,
+                timeout,
+            )
+            return
+        # The bridge resolves as the thread's last act, so this join returns at once.
+        heartbeat.thread.join(timeout)
+
+    @staticmethod
+    def _log_heartbeat_outcome(heartbeat: _HeartbeatThread, outcome: asyncio.Future[None]) -> None:
+        """Log a stopped heartbeat's exception at ERROR unless the supervision already surfaced it."""
+        exc = outcome.exception()
+        if exc is not None and not heartbeat.surfaced:
+            logger.error(
+                "worker bus: presence heartbeat thread %s terminated abnormally", heartbeat.thread.name, exc_info=exc
+            )
 
     async def _handle_op(
         self,

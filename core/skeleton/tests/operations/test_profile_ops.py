@@ -366,9 +366,8 @@ def _stub_apply_service(monkeypatch: pytest.MonkeyPatch, outcome: ProfileApplyOu
     seen: dict[str, Any] = {}
 
     class _Svc:
-        async def apply_replace_env(self, env, *, driven, save_previous):  # type: ignore[no-untyped-def]
+        async def apply_replace_env(self, env, *, save_previous):  # type: ignore[no-untyped-def]
             seen["env"] = env
-            seen["driven"] = driven
             seen["save_previous"] = save_previous
             return outcome
 
@@ -503,7 +502,7 @@ async def test_apply_maps_refusal_to_400(monkeypatch: pytest.MonkeyPatch, view: 
     await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
 
     class _Svc:
-        async def apply_replace_env(self, env, *, driven, save_previous):  # type: ignore[no-untyped-def]
+        async def apply_replace_env(self, env, *, save_previous):  # type: ignore[no-untyped-def]
             raise ValueError("Refusing to apply: SUB_MCP_REDIS_URL is deployment-pinned.")
 
     monkeypatch.setattr(config_ops.ConfigService, "from_app", classmethod(lambda cls: _Svc()))

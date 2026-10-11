@@ -1556,7 +1556,7 @@ def test_rename_rejected_while_reload_locked(pg, emit):
     async def run():
         async with instance.app.app_context(_manifest()):
             await _create_versioned("old", fixed_kwargs={"units": "v"})
-            async with reload_gate.lock:
+            async with reload_gate.synchronized():
                 resp = await router.rename_preset(
                     _request("POST", "/api/presets/old/rename", name="old", body={"new_name": "new"})
                 )

@@ -397,7 +397,6 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         self,
         profile_env: dict[str, str],
         *,
-        driven: bool,
         save_previous: Callable[[dict[str, str]], Awaitable[None]],
         build_and_swap: Callable[..., Awaitable[Epoch]] = build_and_swap_epoch,
         orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
@@ -413,10 +412,10 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
            class diff the deployment shape cannot carry; read the applier's own identity
            and the fleet membership the step-5 report is judged against.
         2. Snapshot the current stored env as the reserved ``@previous`` version.
-        3. ``build_and_swap_epoch(profile_env, drain_tolerate_driver=driven)`` holding the
-           reload gate — ``driven`` excuses THIS door's own still-admitted request from
-           the retire drain (else it self-deadlocks); a build failure re-raises and
-           this method returns nothing persisted.
+        3. ``build_and_swap_epoch(profile_env)`` holding the reload gate as its driver
+           (:meth:`ReloadGate.driving`), so the retire waits for THIS door's own request
+           to answer apart from the drain budget; a build failure re-raises and this
+           method returns nothing persisted.
         4. ``replace_env`` — the LAST env write, reached only after a successful build.
         5. Broadcast the reload to the fleet, then roll a recycle across it for the
            recycle-class diff over the targets pinned in step 1 (the applier's own
@@ -474,9 +473,9 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         # STEP 3 — build a fresh epoch under the proposed env and swap it in atomically.
         # HOLD the reload gate across the swap: the op is reload_gated (which only rejects
         # a CONCURRENT reload at the route edge), but a direct build_and_swap needs the
-        # serving-loop-owned lock HELD. ``drain_tolerate_driver=driven`` excuses this
-        # door's own admitted request from the retire's in-flight drain; a
-        # build failure re-raises here (env restored, store untouched) — STEP 4 never runs.
+        # serving-loop-owned lock HELD, entered through ``driving()`` so this door's own
+        # request (or supervised run) is recorded as the swap's driver; a build failure
+        # re-raises here (env restored, store untouched) — STEP 4 never runs.
         #
         # HOLD THE FORK GATE TOO. This door drives ``build_and_swap`` directly rather than
         # through ``reload_gate.run``, so it does not inherit that path's fork exclusion —
@@ -485,7 +484,7 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         # inherited ``importlib`` per-module lock. The async façade holds the gate on a
         # dedicated thread so ownership stays single-threaded and this loop is never
         # blocked while job spans drain.
-        async with reload_gate.lock, fork_gate.exclusive_async(timeout=FORK_QUIESCE_SECONDS):
+        async with reload_gate.driving(), fork_gate.exclusive_async(timeout=FORK_QUIESCE_SECONDS):
             # Release the loop-bound kit resources BEFORE the build's settings reset drops
             # their per-loop registries: build_and_swap_epoch opens with
             # ``reset_all_settings()``, whose resource-registry reset REFUSES to drop a
@@ -493,7 +492,7 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
             # leaves a cached checkpoint saver behind). AppLifecycle._reload_config makes
             # the same release before its own build_and_swap_epoch.
             await release_llm_pools()
-            await build_and_swap(profile_env, drain_tolerate_driver=driven)
+            await build_and_swap(profile_env)
 
         # STEP 4 — env-write-LAST: persist the proposed env as the WHOLE stored map only
         # after the build succeeded. A failed build never reaches this line.

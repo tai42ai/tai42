@@ -133,7 +133,7 @@ def test_projected_tool_reload_gate_raises_toolerror():
 
     async def run():
         reload_gate.bind_to_running_loop()
-        async with reload_gate.lock:
+        async with reload_gate.synchronized():
             with pytest.raises(ToolError):
                 await wrapper()
 

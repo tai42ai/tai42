@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -28,8 +29,14 @@ from tai42_skeleton.app.bus import (
     WorkerState,
     _PresenceValue,
 )
+from tai42_skeleton.app.bus.subscribe import _HeartbeatThread
 
 from .conftest import _noop_op, _RecordingRedis, _spawn_subscriber, _stop, _until, make_bus
+
+
+def _live_heartbeat_threads() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t.name.startswith("tai-worker-bus-heartbeat-")]
+
 
 # -- slot claim / generation / ownership (compare-token) ----------------------
 
@@ -163,6 +170,17 @@ def test_fork_child_derives_a_nonmember_identity() -> None:
     assert child.kind == WorkerKind.backend
 
 
+def test_fork_child_drops_the_inherited_heartbeat_thread() -> None:
+    # A fork child inherits only the forking thread: the parent's heartbeat thread does
+    # not exist there, so the child drops the inherited handle and never stops or joins it.
+    bus = make_bus()
+    bus._identity = WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=1)
+    key = bus._settings.presence_key("serve-1")
+    bus._heartbeat_thread = _HeartbeatThread("tai-worker-bus-heartbeat-serve-1", lambda: bus._heartbeat_main(key))
+    bus._fork_child_nonmember()
+    assert bus._heartbeat_thread is None
+
+
 def test_fork_derive_from_a_local_bus_succeeds() -> None:
     # A local bus always holds {kind}-1 from construction, so a fork-derive succeeds.
     bus = WorkerBus.local(WorkerKind.serve)
@@ -272,10 +290,12 @@ async def test_heartbeat_death_forces_reconnect(
     worker = make_bus(heartbeat_ttl=5.0)
     readies: list[str] = []
     heartbeats = {"n": 0}
+    beat_threads: list[threading.Thread] = []
     real_heartbeat = worker._heartbeat_loop
 
     async def flaky_heartbeat(r: object, presence_key: str) -> None:
         heartbeats["n"] += 1
+        beat_threads.append(threading.current_thread())
         if heartbeats["n"] == 1:
             await asyncio.sleep(0.05)
             raise RedisConnectionError("presence refresh lost its pooled connection")
@@ -294,6 +314,10 @@ async def test_heartbeat_death_forces_reconnect(
         await asyncio.wait_for(_until(lambda: len(readies) >= 1), timeout=10.0)
         await asyncio.wait_for(_until(lambda: len(readies) >= 2), timeout=10.0)
         await asyncio.wait_for(_until(lambda: heartbeats["n"] >= 2), timeout=10.0)
+        # The failure raised on the heartbeat thread; the reconnect started a NEW thread.
+        assert beat_threads[0] is not beat_threads[1]
+        assert threading.main_thread() not in beat_threads
+        assert not beat_threads[0].is_alive()
 
         census_names = {row.name for row in await publisher.census()}
         assert worker.identity.name in census_names
@@ -303,6 +327,169 @@ async def test_heartbeat_death_forces_reconnect(
         assert by_name[worker.identity.name].outcome == OpOutcome.applied
     finally:
         await _stop(task)
+    assert _live_heartbeat_threads() == []
+
+
+# -- the heartbeat lives off the subscription loop ------------------------------
+
+
+async def test_claim_survives_a_subscription_loop_stall(
+    wire_bus_client: None, server: fakeredis.FakeServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An op callback that blocks the subscription loop's thread synchronously for longer
+    # than the claim TTL (a config reload's rebuild) keeps the claim and the presence row:
+    # the heartbeat renews from its own thread, so the worker keeps its life and resyncs once.
+    ttl = 0.6
+    worker = make_bus(heartbeat_ttl=ttl)
+    publisher = make_bus(heartbeat_ttl=ttl, apply_timeout=5.0)
+    readies: list[str] = []
+
+    async def stall(_op: dict, *, deadline: float) -> None:
+        time.sleep(ttl * 2.5)
+
+    async def on_ready() -> None:
+        readies.append("ready")
+
+    task = asyncio.create_task(worker.subscribe(stall, on_ready))
+    probe: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+    try:
+        with caplog.at_level(logging.WARNING):
+            await asyncio.wait_for(_until(lambda: len(readies) >= 1), timeout=3.0)
+            first = worker.identity
+            assert (first.name, first.generation) == ("serve-1", 1)
+            result = await publisher.publish({"op": "reload_config"}, targets=[first.name], local=None)
+            # The next beat after the stall must still find the claim held.
+            await asyncio.sleep(ttl)
+
+        assert [(r.name, r.outcome) for r in result.results] == [(first.name, OpOutcome.applied)]
+        assert (worker.identity.name, worker.identity.generation) == ("serve-1", 1)
+        assert readies == ["ready"]
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("presence heartbeat for" in m or "re-minting" in m for m in messages), messages
+        assert not any(r.exc_info and isinstance(r.exc_info[1], bus_module.SlotLostError) for r in caplog.records)
+        assert await probe.get(worker._settings.slot_key("serve-1")) == worker._claim_token
+        assert await probe.pttl(worker._settings.slot_key("serve-1")) > 0
+        presence_pttl = await probe.pttl(worker._settings.presence_key("serve-1"))
+        assert bus_module.presence_fresh(presence_pttl, ttl), presence_pttl
+    finally:
+        await probe.aclose()
+        await _stop(task)
+
+
+async def test_heartbeat_beats_off_the_subscription_loop(
+    server: fakeredis.FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The heartbeat runs on a dedicated named thread with its own event loop and its own
+    # fresh (non-pooled) connection, never on the loop the subscription serves from.
+    opened: list[tuple[str, bool]] = []
+
+    @asynccontextmanager
+    async def spy(client_cls, settings=None, *, fresh: bool = False, **kw) -> AsyncIterator[aioredis.FakeRedis]:
+        opened.append((threading.current_thread().name, fresh))
+        client = aioredis.FakeRedis(server=server, decode_responses=True)
+        try:
+            yield client
+        finally:
+            await client.aclose()
+
+    monkeypatch.setattr(bus_module, "client_ctx", spy)
+    worker = make_bus(heartbeat_ttl=0.3)
+    beats: list[tuple[asyncio.AbstractEventLoop, str]] = []
+    real_heartbeat = worker._heartbeat_loop
+
+    async def recording_heartbeat(r: object, presence_key: str) -> None:
+        beats.append((asyncio.get_running_loop(), threading.current_thread().name))
+        await real_heartbeat(r, presence_key)
+
+    monkeypatch.setattr(worker, "_heartbeat_loop", recording_heartbeat)
+    task = asyncio.create_task(worker.subscribe(_noop_op))
+    try:
+        await asyncio.wait_for(_until(lambda: bool(beats)), timeout=3.0)
+        loop, thread_name = beats[0]
+        assert loop is not asyncio.get_running_loop()
+        assert thread_name == "tai-worker-bus-heartbeat-serve-1"
+        assert (thread_name, True) in opened, opened
+    finally:
+        await _stop(task)
+
+
+async def test_a_heartbeat_stopped_before_its_body_starts_never_runs_it() -> None:
+    ran: list[str] = []
+
+    async def main() -> None:
+        ran.append("body")
+
+    heartbeat = _HeartbeatThread("tai-worker-bus-heartbeat-test", main)
+    heartbeat.request_stop()
+    heartbeat.start()
+    await asyncio.wait_for(asyncio.wrap_future(heartbeat.done), timeout=2.0)
+    heartbeat.thread.join(2.0)
+    assert ran == []
+    assert heartbeat.done.exception() is None
+
+
+async def test_a_heartbeat_that_returns_cleanly_is_a_loud_failure(caplog: pytest.LogCaptureFixture) -> None:
+    # The beat loop is unbounded, so a clean return is never an expected end: the
+    # supervision turns it into a RuntimeError logged at ERROR.
+    bus = make_bus()
+
+    async def main() -> None:
+        return None
+
+    heartbeat = _HeartbeatThread("tai-worker-bus-heartbeat-test", main)
+    heartbeat.start()
+    await asyncio.wait_for(asyncio.wrap_future(heartbeat.done), timeout=2.0)
+    with caplog.at_level(logging.ERROR):
+        failure = bus._heartbeat_failure(heartbeat, "serve-1")
+    assert isinstance(failure, RuntimeError)
+    assert "returned without an error" in str(failure)
+    assert any("presence heartbeat for serve-1 stopped" in r.getMessage() for r in caplog.records)
+    heartbeat.thread.join(2.0)
+
+
+async def test_a_heartbeat_failing_while_its_stop_is_pending_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    # A heartbeat that dies on its own after the supervision last looked is not lost:
+    # the teardown's join logs its exception at ERROR.
+    bus = make_bus()
+
+    async def main() -> None:
+        raise RedisConnectionError("heartbeat connection dropped")
+
+    heartbeat = _HeartbeatThread("tai-worker-bus-heartbeat-test", main)
+    bus._heartbeat_thread = heartbeat
+    heartbeat.start()
+    await asyncio.wait_for(_until(heartbeat.done.done), timeout=2.0)
+    with caplog.at_level(logging.ERROR):
+        await bus._stop_heartbeat()
+    assert not heartbeat.thread.is_alive()
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "terminated abnormally" in errors[0].getMessage()
+    assert isinstance(errors[0].exc_info and errors[0].exc_info[1], RedisConnectionError)
+
+
+async def test_a_heartbeat_thread_that_overruns_its_stop_is_logged_and_left(caplog: pytest.LogCaptureFixture) -> None:
+    # The join is bounded by one claim TTL: a body that cannot be cancelled (it blocks its
+    # own thread) is reported at ERROR and left to its daemon status so teardown runs.
+    bus = make_bus(heartbeat_ttl=0.1)
+    release = threading.Event()
+
+    async def main() -> None:
+        release.wait(5.0)
+
+    heartbeat = _HeartbeatThread("tai-worker-bus-heartbeat-test", main)
+    bus._heartbeat_thread = heartbeat
+    heartbeat.start()
+    await asyncio.wait_for(_until(lambda: heartbeat._task is not None), timeout=2.0)
+    try:
+        with caplog.at_level(logging.ERROR):
+            await bus._stop_heartbeat()
+        assert any("did not stop within 0.10s" in r.getMessage() for r in caplog.records)
+        assert bus._heartbeat_thread is None
+        assert heartbeat.thread.is_alive()
+    finally:
+        release.set()
+        heartbeat.thread.join(5.0)
 
 
 # -- lost slot: SlotLostError re-mints a new life -----------------------------
@@ -342,6 +529,7 @@ async def test_lost_slot_remints_a_new_life(
         assert not any("subscription transport error" in r.getMessage() for r in caplog.records)
     finally:
         await _stop(task)
+    assert _live_heartbeat_threads() == []
 
 
 # -- teardown split: deliberate releases the claim, transport/lost leave keys to TTL --
@@ -769,9 +957,9 @@ async def test_empty_targets_list_reaches_nobody(wire_bus_client: None) -> None:
 async def test_subscription_uses_a_fresh_epoch_immune_connection(
     monkeypatch: pytest.MonkeyPatch, server: fakeredis.FakeServer
 ) -> None:
-    """The process-lifetime subscription must acquire its connection with ``fresh=True``
-    so it lives OUTSIDE the epoch client pool. Guards the exact ``fresh=`` argument at
-    the subscription call site."""
+    """The process-lifetime subscription and its heartbeat thread must acquire their
+    connections with ``fresh=True`` so they live OUTSIDE the epoch client pool. Guards
+    the exact ``fresh=`` argument at both call sites."""
     fresh_flags: list[bool] = []
 
     @asynccontextmanager
@@ -798,9 +986,9 @@ async def test_subscription_uses_a_fresh_epoch_immune_connection(
     try:
         await asyncio.wait_for(ready.wait(), timeout=2.0)
         await asyncio.sleep(0.05)
-        # The subscription (and its shared-connection heartbeat + claim) is the only
-        # connection a bare subscribe opens, and it must be fresh.
-        assert fresh_flags == [True], f"the subscription connection was not fresh=True: {fresh_flags}"
+        # A bare subscribe opens two connections — the subscription's (pub/sub, claim and
+        # loop-side presence writes) and its heartbeat thread's — and both must be fresh.
+        assert fresh_flags == [True, True], f"a bus connection was not fresh=True: {fresh_flags}"
     finally:
         await _stop(task)
 
@@ -833,17 +1021,30 @@ async def test_set_presence_writes_key_and_index_member_in_one_pipeline(server) 
     await inner.aclose()
 
 
-async def test_deliberate_stop_removes_the_index_member_and_presence_key(wire_bus_client: None, server) -> None:
+async def test_deliberate_stop_removes_the_index_member_and_presence_key(
+    wire_bus_client: None, server, monkeypatch: pytest.MonkeyPatch
+) -> None:
     bus = make_bus(kind=WorkerKind.serve)
     task, ident = await _spawn_subscriber(bus, _noop_op)
+    heartbeat_alive_at_release: list[bool] = []
+    real_release = bus._release_claim
 
+    async def recording_release(r: Any, name: str) -> bool:
+        heartbeat_alive_at_release.append(bool(_live_heartbeat_threads()))
+        return await real_release(r, name)
+
+    monkeypatch.setattr(bus, "_release_claim", recording_release)
     client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
     assert ident.name in await client.smembers(bus._settings.presence_index)
+    assert len(_live_heartbeat_threads()) == 1
 
     await _stop(task)
 
-    # A deliberate stop releases the claim then removes BOTH the presence key and its
-    # index member (the teardown mirror of the atomic write).
+    # A deliberate stop joins the heartbeat thread, then releases the claim, then removes
+    # BOTH the presence key and its index member (the teardown mirror of the atomic write).
+    assert heartbeat_alive_at_release == [False]
+    assert _live_heartbeat_threads() == []
+    assert bus._heartbeat_thread is None
     assert ident.name not in await client.smembers(bus._settings.presence_index)
     assert await client.get(bus._settings.presence_key(ident.name)) is None
     await client.aclose()

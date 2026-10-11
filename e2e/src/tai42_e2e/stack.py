@@ -32,7 +32,7 @@ import yaml
 
 from tai42_e2e import child_env, ports, readiness, spawning
 from tai42_e2e.httpapi import ApiClient
-from tai42_e2e.mcp import McpClient
+from tai42_e2e.mcp import McpClient, mcp_read_timeout
 from tai42_e2e.metrics import Scrape, scrape
 from tai42_e2e.topology import Infra, StackConfig, StackResources, Topology, _ProcSpec
 from tai42_e2e.waiting import wait_for
@@ -424,8 +424,13 @@ class TaiStack:
         """The URL the tai app is served at on an app port: its origin plus the stack's path prefix."""
         return f"{self.origin(port)}{self.config.path_prefix}"
 
-    def mcp(self, port: int | None = None, path: str = "/mcp", *, auth: str | None = None) -> McpClient:
-        return McpClient(f"{self.base_url(port)}{path}", auth=auth)
+    def mcp(self, port: int | None = None, path: str | None = None, *, auth: str | None = None) -> McpClient:
+        """A client for the MCP endpoint at ``path``, by default the one the stack's transport serves
+        (``/sse`` under ``tai serve --transport sse``, else ``/mcp``)."""
+        if path is None:
+            path = "/sse" if self.config.transport == "sse" else "/mcp"
+        read_timeout = mcp_read_timeout(self.config.env, self.infra.settings.boot_timeout)
+        return McpClient(f"{self.base_url(port)}{path}", auth=auth, read_timeout=read_timeout)
 
     def api(self, port: int | None = None) -> ApiClient:
         return ApiClient(self.base_url(port), auth_token=self.auth_token)

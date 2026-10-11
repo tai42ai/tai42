@@ -30,6 +30,7 @@ from tai42_contract.storage import Storage
 from tai42_skeleton.app import server as server_module
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.server import TaiMCP
+from tai42_skeleton.app.transport_stream import TransportStreamDrainExemptMiddleware
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
@@ -203,9 +204,14 @@ def test_finalize_app_setup_mounts_router_and_applies_middleware():
 def test_sse_app_builds_and_finalizes():
     a = _fresh()
     sentinel = MagicMock()
-    with patch.object(server_module, "create_sse_app", return_value=sentinel) as mk:
+    with (
+        patch.object(server_module, "create_sse_app", return_value=sentinel) as mk,
+        patch.object(server_module, "bind_sse_session_ender") as bind,
+    ):
         result = a.sse_app()
     mk.assert_called_once()
+    # The built app's sessions are ended through its message endpoint when its lifespan closes.
+    bind.assert_called_once_with(sentinel, "/messages")
     # The SSE app must carry the server's auth so /sse + /messages are gated when
     # access control is on (mirrors http_app); an unauthenticated SSE surface
     # would bypass it.
@@ -214,7 +220,13 @@ def test_sse_app_builds_and_finalizes():
     # the audit trail then the body-size cap: the cap must be in that list so an
     # over-cap escape becomes a 413 before any error handler can commit a 500, and
     # the audit line wraps it so an over-cap 413 is audited like any other outcome.
-    assert [m.cls for m in mk.call_args.kwargs["middleware"]] == [AuditLogMiddleware, BodyLimitMiddleware]
+    assert [m.cls for m in mk.call_args.kwargs["middleware"]] == [
+        AuditLogMiddleware,
+        BodyLimitMiddleware,
+        TransportStreamDrainExemptMiddleware,
+    ]
+    # The transport's stream (``GET /sse``) is the one exempted from the retire drain.
+    assert mk.call_args.kwargs["middleware"][2].kwargs == {"stream_path": "/sse"}
     # finalize mounts the sub-app router on the base, then wraps only the always-on
     # outer RateLimitMiddleware around it.
     sentinel.mount.assert_called_once()
@@ -234,7 +246,9 @@ def test_http_app_builds_and_finalizes():
     assert [m.cls for m in mcp.http_app.call_args.kwargs["middleware"]] == [
         AuditLogMiddleware,
         BodyLimitMiddleware,
+        TransportStreamDrainExemptMiddleware,
     ]
+    assert mcp.http_app.call_args.kwargs["middleware"][2].kwargs == {"stream_path": "/mcp"}
     sentinel.mount.assert_called_once()
     # finalize wraps only the always-on outer RateLimitMiddleware around the base.
     assert isinstance(result, RateLimitMiddleware)
@@ -257,7 +271,10 @@ def test_sse_app_registers_error_handlers():
     # 500, the {"error": "not found"} 404, and a reload plugin boot-abort reaches the caller.
     a = _fresh()
     sentinel = MagicMock()
-    with patch.object(server_module, "create_sse_app", return_value=sentinel):
+    with (
+        patch.object(server_module, "create_sse_app", return_value=sentinel),
+        patch.object(server_module, "bind_sse_session_ender"),
+    ):
         a.sse_app()
     _assert_error_handlers_installed(sentinel)
 

@@ -21,6 +21,12 @@ from tai42_contract.sub_mcp import RouteConfig
 from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 
 from tai42_skeleton.access_control.path_canon import under_prefix
+from tai42_skeleton.app.transport_stream import (
+    SessionCallAdmissionMiddleware,
+    TransportStreamDrainExemptMiddleware,
+    bind_sse_session_ender,
+    transport_session_ender,
+)
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.settings.audit_log import audit_log_settings
@@ -134,6 +140,9 @@ class SubAppLifespan:
     def __init__(self, sub_app: ASGIApp) -> None:
         """Hold ``sub_app`` and the events/state its dedicated lifespan task coordinates on."""
         self._sub_app = sub_app
+        # How ``sub_app``'s transport ends the sessions it serves outside its lifespan (an
+        # SSE app's, recorded when it was assembled); ``None`` for every other app.
+        self._end_sessions = transport_session_ender(sub_app)
         self._started = asyncio.Event()
         self._stop = asyncio.Event()
         # Holds an enter failure (raised by start) OR a teardown failure (raised by
@@ -184,18 +193,26 @@ class SubAppLifespan:
             raise
 
     async def aclose(self) -> None:
-        """Signal the lifespan task to exit and await it, re-raising any teardown failure.
+        """End the app's transport sessions, then exit the lifespan task and await it, re-raising a teardown failure.
 
-        Idempotent — a second call just re-observes the finished task.
+        An SSE app's sessions run inside their own streams, outside the lifespan, so they are
+        ended first (:func:`~tai42_skeleton.app.transport_stream.bind_sse_session_ender`); the
+        lifespan exits even when ending them fails. Idempotent — a second call just
+        re-observes the finished task.
         """
         if self._task is None:
             return
-        self._stop.set()
-        # Await the run task so the lifespan's ``__aexit__`` (its ContextVar reset)
-        # runs to completion in the task/context that entered it. A teardown failure
-        # re-raises here (the run task carries it), preserving the "a failed teardown
-        # is never reported as clean" contract the callers rely on.
-        await self._task
+        end_sessions = None if self._stop.is_set() else self._end_sessions
+        try:
+            if end_sessions is not None:
+                await end_sessions()
+        finally:
+            self._stop.set()
+            # Await the run task so the lifespan's ``__aexit__`` (its ContextVar reset)
+            # runs to completion in the task/context that entered it. A teardown failure
+            # re-raises here (the run task carries it), preserving the "a failed teardown
+            # is never reported as clean" contract the callers rely on.
+            await self._task
 
 
 class SubMcpAppRouter:
@@ -252,6 +269,9 @@ class SubMcpAppRouter:
         # reset from a throwaway loop, or the sub-app's task group is torn down
         # cross-loop.
         self._owner_loop: asyncio.AbstractEventLoop | None = None
+        # How many lifespans hold the router open (one per serving generation whose
+        # FastMCP lifespan is entered); see :meth:`lifespan`.
+        self._lifespan_holders = 0
 
     @property
     def root_prefix(self):
@@ -350,17 +370,26 @@ class SubMcpAppRouter:
             await stack.aclose()
 
     def reset(self) -> None:
-        """Drop all routes + cached sub-apps and tear down their lifespans.
+        """Drop all routes + cached sub-apps and hand their lifespans to the generation they served.
 
-        Called on every start()/reload so a re-init stops serving sub-apps from
-        the previous generation. Each stale sub-app's lifespan is closed on the
-        loop it was entered on, and reset never block-waits a running loop: when a
-        loop is live the close is SCHEDULED onto it — via ``create_task`` when that
+        Called on every start()/reload so a re-init stops serving sub-apps from the
+        previous generation. While a serving generation is live (a rebuild runs under it)
+        each stale sub-app's lifespan is ADOPTED by that generation
+        (:meth:`~tai42_skeleton.app.epoch.Epoch.adopt_transport`): its sessions are that
+        generation's, and a tool call on one may be the very request driving the rebuild,
+        so the generation's retire closes them together with its own session manager,
+        after its drivers have answered.
+
+        With no live generation (a cold start, a bare test) the lifespans are closed here,
+        each on the loop it was entered on, and reset never block-waits a running loop:
+        when a loop is live the close is SCHEDULED onto it — via ``create_task`` when that
         is reset's own loop, via ``run_coroutine_threadsafe`` when it is a different
-        running loop — with a logged completion callback, so a teardown failure
-        still surfaces rather than being lost. Only when no loop is live at all is
-        the close driven inline on a one-shot loop.
+        running loop — with a logged completion callback, so a teardown failure still
+        surfaces rather than being lost. Only when no loop is live at all is the close
+        driven inline on a one-shot loop.
         """
+        from tai42_skeleton.app.epoch import current_epoch_or_none
+
         with self._state_lock:
             self._routes.clear()
             self._server_cache.clear()
@@ -370,6 +399,12 @@ class SubMcpAppRouter:
             self._route_generations.clear()
             stacks = list(self._app_exit_stacks.items())
             self._app_exit_stacks.clear()
+
+        live = current_epoch_or_none()
+        if live is not None:
+            for _slug, stack in stacks:
+                live.adopt_transport(stack)
+            return
 
         owner = self._owner_loop
         try:
@@ -433,6 +468,9 @@ class SubMcpAppRouter:
         failure that task has already unwound it and ``start()`` re-raises.
         """
         mcp = FastMCP(f"{slug}-MCP")
+        # A call of an SSE session on this mount is counted against the drain on its own,
+        # outermost so every call is counted, refused or not (as on the main server).
+        mcp.add_middleware(SessionCallAdmissionMiddleware())
 
         # Load tools
         for name in config.tools:
@@ -478,23 +516,33 @@ class SubMcpAppRouter:
         # ``/app/<unmatched>`` line. The outer gate has already bound the caller id, so
         # this inner line names the resolved principal. Off means ABSENT here, never a
         # registered no-op.
-        sub_middleware = [
-            *([Middleware(AuditLogMiddleware)] if audit_log_settings().enable else []),
-            Middleware(BodyLimitMiddleware),
-        ]
+        #
+        # The sub-app's transport stream is exempt from the retire drain inside its own
+        # stack too, matched on the stream path the sub-app serves.
+        def sub_middleware(stream_path: str) -> list[Middleware]:
+            return [
+                *([Middleware(AuditLogMiddleware)] if audit_log_settings().enable else []),
+                Middleware(BodyLimitMiddleware),
+                Middleware(TransportStreamDrainExemptMiddleware, stream_path=stream_path),
+            ]
+
         if config.transport == "sse":
             clean_root = self.root_prefix.rstrip("/")
             base_path = f"{clean_root}/{slug}"
+            sse_path = f"{base_path}/sse"
+            message_path = f"{base_path}/messages"
             sub_app = create_sse_app(
-                mcp, message_path=f"{base_path}/messages", sse_path=f"{base_path}/sse", middleware=sub_middleware
+                mcp, message_path=message_path, sse_path=sse_path, middleware=sub_middleware(sse_path)
             )
+            # The mount's sessions end with the lifespan that owns it (its generation's close).
+            bind_sse_session_ender(sub_app, message_path)
         else:
             # Serve the streamable-HTTP endpoint at the sub-app ROOT. The
             # dispatcher rewrites an ``/app/{slug}`` request to sub-app scope path
             # ``/`` (see ``__call__``), so the endpoint must live at ``/`` — the
             # FastMCP default of ``/mcp`` would leave the rewritten ``/`` request
             # 404ing against the sub-app.
-            sub_app = mcp.http_app(path="/", middleware=sub_middleware)
+            sub_app = mcp.http_app(path="/", middleware=sub_middleware("/"))
 
         app_lifespan = SubAppLifespan(sub_app)
         # start() enters the lifespan in its dedicated task and blocks until it is
@@ -595,28 +643,40 @@ class SubMcpAppRouter:
 
     @asynccontextmanager
     async def lifespan(self, app: Starlette) -> AsyncIterator[None]:
-        """Own the loop for lazily-built sub-app lifespans and close every one at shutdown."""
+        """Own the loop for lazily-built sub-app lifespans and close every one when the last holder exits.
+
+        Every serving generation's FastMCP lifespan enters this one process router's
+        lifespan, and the generations overlap while a retiring one closes after its
+        successor started serving. Only the exit of the last holder closes the sub-apps
+        still registered (and drops the owner loop): an earlier exit is a retiring
+        generation's, whose own sub-app lifespans it closes itself
+        (:meth:`~tai42_skeleton.app.epoch.Epoch.close_transports`), while the sub-apps
+        registered now serve the generation that is still live.
+        """
         # Record the loop that owns every lazily-built sub-app lifespan so a
         # reload driven from a throwaway loop closes them here instead.
         self._owner_loop = asyncio.get_running_loop()
+        self._lifespan_holders += 1
         try:
             yield
         finally:
-            self._owner_loop = None
-            # Close every sub-app still registered at shutdown, collecting
-            # failures instead of letting the first one mask the rest. Grab the
-            # stacks under the state lock; close them off-lock on this (owner) loop.
-            with self._state_lock:
-                stacks = list(self._app_exit_stacks.items())
-                self._app_exit_stacks.clear()
-            errors: list[Exception] = []
-            for _slug, stack in stacks:
-                try:
-                    await stack.aclose()
-                except Exception as e:
-                    errors.append(e)
-            if errors:
-                raise ExceptionGroup("sub-MCP app shutdown failures", errors)
+            self._lifespan_holders -= 1
+            if self._lifespan_holders == 0:
+                self._owner_loop = None
+                # Close every sub-app still registered at shutdown, collecting
+                # failures instead of letting the first one mask the rest. Grab the
+                # stacks under the state lock; close them off-lock on this (owner) loop.
+                with self._state_lock:
+                    stacks = list(self._app_exit_stacks.items())
+                    self._app_exit_stacks.clear()
+                errors: list[Exception] = []
+                for _slug, stack in stacks:
+                    try:
+                        await stack.aclose()
+                    except Exception as e:
+                        errors.append(e)
+                if errors:
+                    raise ExceptionGroup("sub-MCP app shutdown failures", errors)
 
     async def __call__(self, scope, receive, send):
         """Dispatch an ASGI request to the sub-app for its ``/app/{slug}`` path."""

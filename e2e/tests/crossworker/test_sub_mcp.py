@@ -42,6 +42,11 @@ async def _delete_sub_mcp(api: ApiClient, slug: str) -> None:
     await wait_for_async(_attempt, deadline=10.0, message=f"sub-MCP {slug} delete never left the reloading gate")
 
 
+# The module's only test boots its stack (120) + the register (10 gate poll + 60) + B's serve
+# poll (5) and call (15) + A's whole-fleet reload (60) + A's serve read (15) + B's serve poll (5)
+# + the delete poll (10) + the two listings (2 x 15) + A's second reload (60) + its poll (5).
+# Each reload over REST measured 20-42 s under load.
+@pytest.mark.timeout(400)
 async def test_sub_mcp_registered_on_a_serves_on_b(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     slug = uniq("submcp").replace("_", "-")
     api_a = replicas_stack.api(port=replicas_stack.port_a)

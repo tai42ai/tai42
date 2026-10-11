@@ -509,7 +509,7 @@ async def test_install_reload_gate_locked_is_503_reloading(monkeypatch: pytest.M
         raise AssertionError("the operation must not run while the gate is locked")
 
     _use_installer(monkeypatch, install=_never)
-    async with reload_gate.lock:
+    async with reload_gate.synchronized():
         resp = await router.marketplace_install(_post({"ref": "tai42/toolbox"}))
     assert resp.status_code == 503
     body = _data(resp)
@@ -670,7 +670,7 @@ async def test_upgrade_all_reload_gate_locked_is_503_reloading(monkeypatch: pyte
         raise AssertionError("the operation must not run while the gate is locked")
 
     _use_installer(monkeypatch, install=_never)
-    async with reload_gate.lock:
+    async with reload_gate.synchronized():
         resp = await router.marketplace_upgrade_all(_post({}))
     assert resp.status_code == 503
     assert _data(resp)["reloading"] is True

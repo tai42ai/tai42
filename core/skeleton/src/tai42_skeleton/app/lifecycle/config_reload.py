@@ -20,26 +20,21 @@ class ConfigReloadMixin(LifecycleState):
         untouched.
 
         The build's fresh FastMCP lifespan is loop-affine, so the swap runs ON the
-        serving loop even though this body is driven from a reload-gate worker thread.
+        serving loop even though this body is driven from a reload-gate worker thread,
+        and blocks that loop for the rebuild's length: health and readiness probes, MCP
+        keepalives, in-flight streams and the generation's timers pause until the swap
+        returns. The worker-bus heartbeat runs on its own thread and does not pause.
         """
         env = self._config_manager.read_env()
 
-        from tai42_skeleton.app.epoch import _reload_driven_by_request, build_and_swap_epoch
-
-        # Read in THIS context (the reload-gate worker thread, into which
-        # ``asyncio.to_thread`` copied the driving request's context): true when a
-        # door request drove this reload, so the retire excuses that still-admitted
-        # request instead of self-waiting the full drain budget on it. Captured here
-        # and passed explicitly — ``_swap`` runs on the serving loop via
-        # ``run_coroutine_threadsafe`` and does not inherit this thread's context.
-        driven_by_request = _reload_driven_by_request.get()
+        from tai42_skeleton.app.epoch import build_and_swap_epoch
 
         async def _swap() -> dict[str, Any]:
             # Release the loop-bound kit resources before the build's settings reset
             # drops their per-loop registries — it refuses to drop a registry still
             # holding live resources on a running loop.
             await _lifecycle.release_loop_bound_resources()
-            await build_and_swap_epoch(env, drain_tolerate_driver=driven_by_request)
+            await build_and_swap_epoch(env)
             return {"status": "ok", "env_keys": len(env)}
 
         loop = self._serving_loop

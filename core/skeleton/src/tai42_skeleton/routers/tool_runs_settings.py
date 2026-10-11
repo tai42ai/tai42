@@ -71,7 +71,9 @@ class ToolRunsSettings(TaiBaseSettings):
     # How long the shutdown handler waits for cancelled supervisors to write their
     # terminal records before teardown proceeds to close pooled clients. A run that
     # does not finish its terminal write in this window reconciles to ``lost``
-    # later. Must be positive.
+    # later. Also the drain budget of a config reload's retire of the previous
+    # serving generation: how long its in-flight requests and runs may take to
+    # finish (the reload's own request is waited for apart from it). Must be positive.
     shutdown_drain_seconds: float = Field(default=10, gt=0)
 
 

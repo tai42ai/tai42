@@ -38,7 +38,6 @@ from tai42_kit.settings import present_env_value, registered_settings
 
 from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.app.bus import FleetResult
-from tai42_skeleton.app.epoch import _reload_driven_by_request
 from tai42_skeleton.app.graceful_exit import request_serve_graceful_exit
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config import config_mode
@@ -219,6 +218,10 @@ async def write_env(env: dict[str, str], secret_keys: list[str] | None = None) -
 
     ``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;
     the marks variable itself is never accepted as an ``env`` key.
+
+    Called over MCP, the reload answers on the session that called it and then retires that session with
+    the generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,
+    and an SSE session's stream closes), so the client starts a new session to go on.
     """
     if SECRET_MARKS_ENV_VAR in env:
         raise BadRequestError("set secret marks through the 'secret_keys' field, not as an env key")
@@ -255,6 +258,12 @@ async def reload_config(targets: list[str] | None = None) -> Any:
     Heavy (a full re-init); meant for env/config saves, not tool edits. A convergence
     op: its whole purpose is aligning siblings to persisted state, so a failed local
     reload still broadcasts and then re-raises with the fleet report attached.
+
+    Called over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that
+    worker), the reload answers on the session that called it and then retires that session with the
+    generation it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an
+    SSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave
+    that worker out, nothing reloads there and the session keeps working.
     """
     # Run the heavy sync reload on a worker thread through the gate so this call (on
     # the serving loop) does not freeze it.
@@ -620,21 +629,20 @@ async def apply_profile(name: str) -> OperationResponse:
     or persisted. When the diff carries serve-affecting recycle keys and the roll converged, the
     applier's OWN recycle is armed as a post-response graceful self-exit (a Starlette
     ``BackgroundTask``) — its supervisor respawns it on the new env. 404 for an absent name.
+
+    Called over MCP, the reload answers on the session that called it and then retires that session with
+    the generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,
+    and an SSE session's stream closes), so the client starts a new session to go on.
     """
     _require_profile_store()
     try:
         body = await _profile_store().get_active_body(name)
     except SettingsProfileNotFoundError as exc:
         raise NotFoundError(f"settings profile {name!r} not found") from exc
-    # Read the reload-driving flag in THIS request context (``EpochAdmissionApp`` set it
-    # True for the admitted request): a door-driven apply MUST pass it so the retire
-    # excuses this still-admitted request from its in-flight drain rather than self-waiting
-    # the full drain budget on it.
-    driven = _reload_driven_by_request.get()
     with translate_backend_needs_bus(BadRequestError):
         try:
             outcome = await ConfigService.from_app().apply_replace_env(
-                _profile_env(body), driven=driven, save_previous=_save_previous_version
+                _profile_env(body), save_previous=_save_previous_version
             )
         except ValueError as exc:
             raise BadRequestError(str(exc)) from exc

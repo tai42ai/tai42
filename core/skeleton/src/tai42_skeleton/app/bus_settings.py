@@ -81,8 +81,10 @@ class BusSettings(TaiBaseSettings):
     # departed, alive ⇒ timed_out.
     apply_timeout: float = Field(default=30.0, gt=0)
 
-    # Presence-key TTL; a subscriber refreshes it at a third of this, so a frozen or
-    # killed worker leaves the census within one TTL instead of blocking every op.
+    # Presence-key TTL; a subscriber's heartbeat thread refreshes it at a third of this,
+    # so a killed or stopped process, or one whose heartbeat thread died, leaves the
+    # census within one TTL instead of blocking every op. A config reload's rebuild
+    # blocks the serving loop, not the heartbeat thread, so it never lapses the row.
     heartbeat_ttl: float = Field(default=15.0, gt=0)
 
     @property

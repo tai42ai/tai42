@@ -9,6 +9,7 @@ from tai42_e2e.manifests.auth import _SETUP_TOKEN
 from tai42_e2e.manifests.channels import _web_channel_env
 from tai42_e2e.manifests.connectors import (
     _FIXTURE_IDP_BASE_FALLBACK,
+    MANAGED_SERVER_RELOAD_PROBE_ENV,
     _fixture_connector_descriptors,
 )
 from tai42_e2e.manifests.feature_env import _base_env, _memory_agent_state_env
@@ -99,7 +100,8 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
         "api_tools": _PROJECTED_API_TOOLS,
         "user_tools": ["ask", "notify_user", "reload_config"],
     }
-    env = _base_env(res, variants)
+    # The fixture connector providers launch the managed stdio server.
+    env = {**_base_env(res, variants), **MANAGED_SERVER_RELOAD_PROBE_ENV}
     # The web channel's own transcript store + limiter windows, so the widget's chat page
     # mints a session and its stream/answer doors work under the browser origin.
     env.update(_web_channel_env(res))

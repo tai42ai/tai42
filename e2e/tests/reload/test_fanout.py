@@ -18,12 +18,20 @@ from tai42_e2e.variants import short_presence_ttl_env
 pytestmark = pytest.mark.needs("store:redis", "setting:api_tools")
 
 
+# The MCP reload call may run to the harness read bound (150 s), so the per-test bound sits
+# above it: the stack boot inside the first test's timer (120) + the seeding env reload over
+# REST (60) + the reload call's read bound (150) + a session re-init (15) + the marker wait (5).
+@pytest.mark.timeout(360)
 @pytest.mark.needs("topology:replicas")
 async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     marker = uniq("E2E_MARKER").upper()
     api_a = replicas_stack.api(port=replicas_stack.port_a)
     # Seed a config change (polling past the boot-time reload gate), then fan the reload.
     await api_a.post("/api/config/env", json={"env": {marker: "1"}}, retry_on_reloading=True)
+
+    # Every worker's life (slot name -> generation) before the reload: a rebuild blocks a
+    # worker's serving loop, never its bus heartbeat, so no worker loses its slot to it.
+    lives_before = {worker.name: worker.generation for worker in replicas_stack.census()}
 
     async with replicas_stack.mcp(port=replicas_stack.port_a) as mcp:
         # Prime the SDK's per-session tool-output-schema cache so the post-call result
@@ -41,6 +49,8 @@ async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: 
     census = {worker.name for worker in replicas_stack.census()}
     assert census <= outcomes.keys(), f"not every census worker was in the report: census={census} report={outcomes}"
     assert all(outcomes[name] == "applied" for name in census), f"a worker did not apply: {data}"
+    lives_after = {worker.name: worker.generation for worker in replicas_stack.census()}
+    assert lives_after == lives_before, f"a worker lost its bus slot across the reload: {lives_before} -> {lives_after}"
 
     # B's subscription applied the op too (asynchronous via the admin route).
     async def b_has_marker() -> bool:
@@ -50,15 +60,18 @@ async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: 
     await wait_for_async(b_has_marker, deadline=5.0, message="B never observed the reloaded config marker")
 
 
+# Each MCP reload call may run to the harness read bound (125 s under the pinned 5 s apply
+# timeout), so the per-test bound sits above the sum: the stack boot inside the test (120) +
+# two reload calls (2 x 125) with a session re-init each (2 x 15) + the census wait (35) +
+# the two survivors' apply waits (2 x 120).
+@pytest.mark.timeout(720)
 @pytest.mark.needs("process", "kind:backend", "probe-tools")
 async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], infra: Infra) -> None:
     # Presence and its TTL live on the app-owned bus, so the dead-worker window is tunable
     # for every backend. Two knobs are pinned here:
     #  * a bounded ``TAI_BUS_APPLY_TIMEOUT`` so a reload's wait for the DEAD backend's apply
-    #    is cut short (naming it non-applied) instead of running to the 30s default — on
-    #    celery that long wait holds the driver's own streamable-http response until it
-    #    races the epoch-swap teardown and never arrives (an unbounded client hang); arq/rq
-    #    deliver fast, which is why only celery hung. Mirrors ``test_backend_fleet``.
+    #    is cut short (naming it non-applied) instead of running to the 30s default, which
+    #    keeps the test's runtime down. Mirrors ``test_backend_fleet``.
     #  * a generous heartbeat TTL so the corpse stays on the census long enough that a
     #    re-opened session (after a swap that dropped a prior attempt) still finds it there
     #    to name — the dead-worker naming is what this test asserts.
@@ -77,11 +90,9 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
 
     # Kill the backend, then dispatch the reload while the corpse still sits on the census
     # (the generous TTL keeps it there across any session-swap re-open). The reload names
-    # the dead worker non-applied. The pinned ``TAI_BUS_APPLY_TIMEOUT`` keeps the reload's
-    # wait for the dead backend's apply UNDER the server's deferred session-close budget, so
-    # the driving call's own streamable-http response is delivered before the swap retires
-    # its session; ``McpClient`` re-initialises transparently for any genuine mid-call
-    # termination. The prime skips the post-call ``tools/list`` on the retired session.
+    # the dead worker non-applied once the pinned apply timeout cuts its wait; the call's
+    # reply is delivered on its session before the swap retires it. The prime skips the
+    # post-call ``tools/list`` on the retired session.
     stack.kill("backend")
     async with stack.mcp(port=stack.port_a) as mcp:
         await mcp.list_tools()

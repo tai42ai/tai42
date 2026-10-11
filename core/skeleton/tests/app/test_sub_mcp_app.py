@@ -27,6 +27,7 @@ from starlette.applications import Starlette
 from starlette.types import ASGIApp
 from tai42_contract.sub_mcp import RouteConfig
 
+from tai42_skeleton.app import admission as admission_mod
 from tai42_skeleton.app import sub_mcp_app as sub_mcp_app_module
 from tai42_skeleton.app.sub_mcp_app import (
     ROOT_PREFIX,
@@ -184,7 +185,10 @@ async def test_unregister_reraises_exit_stack_error_after_cleanup():
     assert "svc" not in r._app_exit_stacks
 
 
-async def test_reset_clears_routes_cache_and_closes_stacks():
+async def test_reset_clears_routes_cache_and_closes_stacks(monkeypatch: pytest.MonkeyPatch):
+    from tai42_skeleton.app import epoch as epoch_mod
+
+    monkeypatch.setattr(epoch_mod, "_current", None)  # no live generation: a cold start
     r = _router()
     await r.register_sub_mcp_app("svc", [])
     r._server_cache["svc"] = cast(ASGIApp, _FakeSub())
@@ -205,6 +209,73 @@ async def test_reset_clears_routes_cache_and_closes_stacks():
     # The stale sub-app's lifespan teardown was scheduled on the running loop.
     await asyncio.sleep(0)
     assert closed["fired"] is True
+
+
+async def test_reset_hands_the_stale_lifespans_to_the_live_generation(monkeypatch: pytest.MonkeyPatch):
+    """While a generation serves (a rebuild runs under it) the dropped sub-apps' lifespans are
+    that generation's: reset leaves them open, and the generation closes them with its own
+    transports."""
+    from tai42_skeleton.app import epoch as epoch_mod
+
+    live = epoch_mod.Epoch(number=0)
+    monkeypatch.setattr(epoch_mod, "_current", live)
+    r = _router()
+    await r.register_sub_mcp_app("svc", [])
+    closed: list[str] = []
+
+    async def _on_close() -> None:
+        closed.append("svc")
+
+    r._app_exit_stacks["svc"] = _FakeLifespan(on_close=_on_close)
+
+    r.reset()
+
+    assert (r.routes, r._server_cache, r._app_exit_stacks) == ({}, {}, {})
+    await asyncio.sleep(0)
+    assert closed == [], "reset closed a lifespan the live generation still serves"
+    await live.close_transports()
+    assert closed == ["svc"]
+
+
+async def test_a_mount_session_driving_a_reload_keeps_its_lifespan_until_it_answers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A tool call over ``/app/{slug}`` that drives a reload: the rebuild drops the cached
+    mount, and the mount's lifespan — the transport carrying the call's reply — closes only
+    after the call has answered, with the retired generation's other transports."""
+    from tai42_skeleton.app import epoch as epoch_mod
+    from tai42_skeleton.app import epoch_retire as epoch_retire_mod
+    from tai42_skeleton.app.reload_gate import reload_gate
+
+    boot = epoch_mod.Epoch(number=0)
+    monkeypatch.setattr(epoch_mod, "_current", boot)
+    monkeypatch.setattr(epoch_mod, "_serving_slot", {})
+    r = _router()
+    await r.register_sub_mcp_app("svc", ["reload_config"])
+    order: list[str] = []
+
+    async def _mount_closed() -> None:
+        order.append("mount closed")
+
+    r._app_exit_stacks["svc"] = _FakeLifespan(on_close=_mount_closed)
+
+    async def _build(_epoch: Any) -> Any:
+        return _FakeSub()
+
+    async def _driver() -> None:
+        async with reload_gate.driving():
+            # The rebuild resets the sub-MCP router, as ``start()`` does.
+            await epoch_mod.build_and_swap_epoch({}, rebuild=r.reset, build_serving_app=_build, drain_deadline=0.05)
+        await asyncio.sleep(0.2)  # the reload's fleet wait, past the drain budget
+        order.append("driver answered")
+
+    async def _app(scope: Any, receive: Any, send: Any) -> None:
+        await _driver()
+
+    await admission_mod.EpochAdmissionApp(_app, boot)({"type": "http"}, None, None)  # type: ignore[arg-type]
+    async with asyncio.timeout(5.0):
+        await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
+    assert order == ["driver answered", "mount closed"]
 
 
 async def test_start_resets_stale_sub_app_routes():
@@ -419,6 +490,28 @@ async def test_router_lifespan_enters_and_exits():
         assert closed["fired"] is False  # still open inside the context
     assert closed["fired"] is True  # exit closed the registered sub-app stack
     assert r._app_exit_stacks == {}
+
+
+async def test_a_retiring_generations_lifespan_exit_leaves_the_serving_generations_sub_apps_open():
+    """Every serving generation's FastMCP lifespan enters the one process router's lifespan,
+    and two generations overlap while the old one retires. The old generation's exit closes
+    nothing the router holds — a sub-app built for the generation that now serves keeps
+    serving, and the router keeps its owner loop; the last exit closes every sub-app."""
+    r = _router()
+    closed: list[str] = []
+
+    async def _on_close() -> None:
+        closed.append("slug-a")
+
+    old_generation = r.lifespan(cast("Starlette", _FakeApp()))
+    await old_generation.__aenter__()
+    async with r.lifespan(cast("Starlette", _FakeApp())):  # the generation swapped in
+        r._app_exit_stacks["slug-a"] = _FakeLifespan(on_close=_on_close)  # built after the swap
+        await old_generation.__aexit__(None, None, None)  # the old generation retires
+        assert closed == [], "the retiring generation closed a sub-app the serving one built"
+        assert r._owner_loop is asyncio.get_running_loop()
+    assert closed == ["slug-a"]
+    assert r._owner_loop is None
 
 
 async def test_real_build_http_sse_stdio_and_cache():

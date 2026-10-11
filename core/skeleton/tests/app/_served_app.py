@@ -54,6 +54,14 @@ TOOL_NAME = "greet"
 # Every test request runs under this bound: a guard that is missing lets a GET open a
 # stream that never ends, which must fail the test instead of hanging it.
 REQUEST_TIMEOUT_S = 10.0
+# How long a test waits for a reload to swap the generation: an in-process rebuild of the
+# served app, measured at 1.5-5.5 s with eight served tests in parallel at load ~95 on 20
+# cores and past 10 s inside the whole parallel suite at load ~110.
+RELOAD_SWAP_BOUND_S = 60.0
+# How long a served MCP call may wait for its answer: a call can drive a reload (its answer
+# comes after the rebuild and the swap) or wait for one. Set as the client session's own read
+# timeout, so a late answer fails the call with the SDK's named timeout error.
+MCP_CALL_TIMEOUT_S = RELOAD_SWAP_BOUND_S + REQUEST_TIMEOUT_S
 
 
 def _identity(raw_key: str, key_id: str, owner_id: str) -> tuple[str, dict[str, str]]:

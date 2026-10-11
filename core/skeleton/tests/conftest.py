@@ -50,6 +50,7 @@ from collections.abc import Iterator
 from contextlib import asynccontextmanager
 
 import pytest
+from tai42_kit.clients.base import advance_client_epoch
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.access_control.store as access_control_store
@@ -143,6 +144,21 @@ def _preserve_generation_globals() -> Iterator[None]:
     state and one made after it is undone with the test."""
     with preserved_staged_generations():
         yield
+
+
+@pytest.fixture(autouse=True)
+def _generation_number_of_its_own() -> None:
+    """Start every test under a client epoch no earlier test on the worker used.
+
+    The process-wide client epoch numbers the serving generations and stamps every settings
+    instance; a retire sweeps the settings stamped with the number it retires. The process
+    app keeps the settings of the last generation a test served (its access-control chain
+    and identity provider hold them), stamped with that test's number. Advancing at the
+    start of each test leaves those settings under a number no generation of this test is
+    given, so a retire here sweeps and reports only this test's own settings, whichever
+    test ran before it.
+    """
+    advance_client_epoch()
 
 
 @pytest.fixture

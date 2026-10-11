@@ -58,7 +58,7 @@ async def test_provider_missing_during_reload_returns_retriable_reloading():
     backend = _backend(_ProviderMissingVerifier())
     conn = _conn({"Authorization": "Bearer sk-whatever"})
 
-    async with reload_gate.lock:
+    async with reload_gate.synchronized():
         with pytest.raises(ReloadInProgressError) as excinfo:
             await backend.authenticate(conn)
 
@@ -102,7 +102,7 @@ async def test_invalid_key_during_reload_still_401():
     backend = _backend(_RejectingVerifier())
     conn = _conn({"Authorization": "Bearer sk-bad"})
 
-    async with reload_gate.lock:
+    async with reload_gate.synchronized():
         with pytest.raises(AuthenticationError) as excinfo:
             await backend.authenticate(conn)
 
@@ -127,7 +127,7 @@ async def test_real_adapter_empty_registry_during_reload_is_retriable(bound_app)
     backend = AccessControlAuthBackend(adapter._internal_verifier, settings)
     conn = _conn({"X-Api-Key": "sk-x"})
 
-    async with reload_gate.lock:
+    async with reload_gate.synchronized():
         with pytest.raises(ReloadInProgressError):
             await backend.authenticate(conn)
 

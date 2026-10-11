@@ -26,8 +26,10 @@ from tai42_kit.fork_gate import fork_gate
 # ``bus_settings`` is imported for its registration side effect — the apply's recycle
 # classification reflects only IMPORTED settings classes, and TAI_BUS_* are recycle-class.
 import tai42_skeleton.app.bus_settings  # noqa: F401
+from tai42_skeleton.app import admission as admission_mod
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app import instance
+from tai42_skeleton.app.admission import RequestAdmission
 from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind, WorkerRow, WorkerState
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.recycle import (
@@ -71,9 +73,8 @@ def _swap_spy() -> tuple[Callable[..., Awaitable[Epoch]], dict[str, Any]]:
     """A ``build_and_swap`` seam that records its call and swaps nothing."""
     calls: dict[str, Any] = {}
 
-    async def spy(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+    async def spy(env: dict[str, str]) -> Epoch:
         calls["env"] = dict(env)
-        calls["driven"] = drain_tolerate_driver
         return Epoch(number=0)
 
     return spy, calls
@@ -151,7 +152,7 @@ async def test_failed_build_leaves_store_untouched_and_restores_env(monkeypatch:
     async def _noop() -> None:
         return None
 
-    async def real_build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+    async def real_build(env: dict[str, str]) -> Epoch:
         # Drive the REAL primitive with a failing build_serving_app seam so its
         # os.environ restore-on-failure + staged-abort actually run.
         return await build_and_swap_epoch(
@@ -159,13 +160,11 @@ async def test_failed_build_leaves_store_untouched_and_restores_env(monkeypatch:
             rebuild=lambda: None,
             build_serving_app=_fail_serve,
             establish_background_loops=_noop,
-            drain_tolerate_driver=drain_tolerate_driver,
         )
 
     with pytest.raises(_BuildBoomError):
         await _service(store).apply_replace_env(
             {"APP_KEY": "proposed", "NEW_KEY": "x"},
-            driven=True,
             save_previous=prev,
             build_and_swap=real_build,
         )
@@ -214,19 +213,17 @@ async def test_profile_apply_changing_the_default_database_retargets_the_states_
     async def _noop() -> None:
         return None
 
-    async def real_build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+    async def real_build(env: dict[str, str]) -> Epoch:
         return await build_and_swap_epoch(
             env,
             rebuild=_read_during_build,
             build_serving_app=_fail_serve,
             establish_background_loops=_noop,
-            drain_tolerate_driver=drain_tolerate_driver,
         )
 
     with pytest.raises(_BuildBoomError):
         await _service(store).apply_replace_env(
             {**stored, "TAI_DATABASE_DEFAULT_PG_DB": "second"},
-            driven=True,
             save_previous=_PrevSpy(),
             build_and_swap=real_build,
         )
@@ -245,16 +242,28 @@ async def test_profile_apply_changing_the_default_database_retargets_the_states_
 # ---------------------------------------------------------------------------
 
 
-async def test_apply_passes_drain_tolerate_driver_from_context(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_apply_records_its_own_request_as_the_swaps_driver(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TAI_SUPERVISED", raising=False)  # bare — a hot-only diff is fine on bare
     store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
-    spy, calls = _swap_spy()
-    outcome = await _service(store).apply_replace_env(
-        {"MY_APP_FLAG": "new"}, driven=True, save_previous=_PrevSpy(), build_and_swap=spy
-    )
-    # A door-driven apply MUST excuse its own admitted request from the retire drain.
-    assert calls["driven"] is True
-    assert calls["env"] == {"MY_APP_FLAG": "new"}
+    serving = Epoch(number=0)
+    serving.admit()  # the apply's own request, admitted on the generation the swap retires
+    request = RequestAdmission(epoch=serving)
+    driving_at_swap: list[bool] = []
+
+    async def spy(env: dict[str, str]) -> Epoch:
+        # The retire reads the generation's own record: the apply's request drives it and
+        # has left the in-flight count, so the drain budget never waits on it.
+        driving_at_swap.append(request in serving.driving and serving.in_flight == 0)
+        return Epoch(number=0)
+
+    token = admission_mod._admission.set(request)
+    try:
+        outcome = await _service(store).apply_replace_env(
+            {"MY_APP_FLAG": "new"}, save_previous=_PrevSpy(), build_and_swap=spy
+        )
+    finally:
+        admission_mod._admission.reset(token)
+    assert driving_at_swap == [True]
     # env-write-LAST landed after a successful build.
     assert store.env == {"MY_APP_FLAG": "new"}
     # A hot-only diff neither recycles nor self-exits.
@@ -276,13 +285,12 @@ async def test_apply_releases_llm_pools_before_the_build(monkeypatch: pytest.Mon
     async def _release() -> None:
         order.append("release")
 
-    async def _build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+    async def _build(env: dict[str, str]) -> Epoch:
         order.append("build")
         return Epoch(number=0)
 
     await _service(store).apply_replace_env(
         {"MY_APP_FLAG": "new"},
-        driven=True,
         save_previous=_PrevSpy(),
         build_and_swap=_build,
         release_llm_pools=_release,
@@ -325,15 +333,13 @@ async def test_apply_closes_the_store_when_the_checkpoint_close_fails(monkeypatc
     await store_registry()._get_or_init_resource("k", _store_resource)
     built: list[bool] = []
 
-    async def _build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+    async def _build(env: dict[str, str]) -> Epoch:
         built.append(True)
         return Epoch(number=0)
 
     store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
     with pytest.raises(ExceptionGroup, match="errors releasing loop-bound kit resources"):
-        await _service(store).apply_replace_env(
-            {"MY_APP_FLAG": "new"}, driven=True, save_previous=_PrevSpy(), build_and_swap=_build
-        )
+        await _service(store).apply_replace_env({"MY_APP_FLAG": "new"}, save_previous=_PrevSpy(), build_and_swap=_build)
     assert sorted(closed) == ["checkpoint", "store"]
     assert built == []
     assert store.env == {"MY_APP_FLAG": "old"}
@@ -348,15 +354,13 @@ async def test_apply_holds_the_fork_gate_across_the_build(monkeypatch: pytest.Mo
     store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
     seen: dict[str, Any] = {}
 
-    async def _build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+    async def _build(env: dict[str, str]) -> Epoch:
         seen["blocked"] = fork_gate.blocked
         seen["owner"] = fork_gate._owner
         return Epoch(number=0)
 
     assert not fork_gate.blocked
-    await _service(store).apply_replace_env(
-        {"MY_APP_FLAG": "new"}, driven=True, save_previous=_PrevSpy(), build_and_swap=_build
-    )
+    await _service(store).apply_replace_env({"MY_APP_FLAG": "new"}, save_previous=_PrevSpy(), build_and_swap=_build)
     assert seen["blocked"] is True
     # Ownership sits on the façade's dedicated holder thread, never the serving loop's.
     assert seen["owner"] is not None
@@ -370,13 +374,11 @@ async def test_apply_releases_the_fork_gate_when_the_build_raises(monkeypatch: p
     monkeypatch.delenv("TAI_SUPERVISED", raising=False)
     store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
 
-    async def _build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+    async def _build(env: dict[str, str]) -> Epoch:
         raise _BuildBoomError("deliberate build failure")
 
     with pytest.raises(_BuildBoomError):
-        await _service(store).apply_replace_env(
-            {"MY_APP_FLAG": "new"}, driven=True, save_previous=_PrevSpy(), build_and_swap=_build
-        )
+        await _service(store).apply_replace_env({"MY_APP_FLAG": "new"}, save_previous=_PrevSpy(), build_and_swap=_build)
     assert not fork_gate.blocked
     assert not reload_gate.locked
 
@@ -394,7 +396,6 @@ async def test_recycle_class_diff_orchestrates_and_flags_serve_affecting(monkeyp
     orch, seen = _orchestrate_spy()
     outcome = await _service(store, bus).apply_replace_env(
         {"TAI_BUS_NAMESPACE": "new"},
-        driven=True,
         save_previous=_PrevSpy(),
         build_and_swap=spy,
         orchestrate=orch,
@@ -433,9 +434,7 @@ async def test_apply_refuses_pinned_key_upfront(monkeypatch: pytest.MonkeyPatch,
     spy, calls = _swap_spy()
     prev = _PrevSpy()
     with pytest.raises(ValueError, match=key):
-        await _service(store).apply_replace_env(
-            {key: "some-value"}, driven=True, save_previous=prev, build_and_swap=spy
-        )
+        await _service(store).apply_replace_env({key: "some-value"}, save_previous=prev, build_and_swap=spy)
     # Aborted BEFORE the census / @previous snapshot / build / persist.
     assert store.env_writes == []
     assert prev.saved is None
@@ -448,7 +447,7 @@ async def test_apply_refuses_recycle_class_diff_on_bare_shape(monkeypatch: pytes
     spy, calls = _swap_spy()
     with pytest.raises(ValueError, match="TAI_BUS_NAMESPACE"):
         await _service(store).apply_replace_env(
-            {"TAI_BUS_NAMESPACE": "new"}, driven=True, save_previous=_PrevSpy(), build_and_swap=spy
+            {"TAI_BUS_NAMESPACE": "new"}, save_previous=_PrevSpy(), build_and_swap=spy
         )
     assert store.env_writes == []
     assert "env" not in calls
@@ -469,7 +468,7 @@ async def test_apply_report_carries_names_never_values(monkeypatch: pytest.Monke
     monkeypatch.setattr(instance.app, "_bus", bus)
     spy, _ = _swap_spy()
     outcome = await _service(store, bus).apply_replace_env(
-        {"APP_SECRET": sentinel}, driven=True, save_previous=_PrevSpy(), build_and_swap=spy
+        {"APP_SECRET": sentinel}, save_previous=_PrevSpy(), build_and_swap=spy
     )
     response = profile_apply_response(outcome)
     blob = json.dumps(response)
@@ -654,14 +653,13 @@ async def test_expected_membership_is_censused_before_the_swap(monkeypatch: pyte
     bus = FakeBus(origin="serve-applier", remotes=["serve-b"])
     sibling = next(row for row in bus.rows if row.name == "serve-b")
 
-    async def fading_swap(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+    async def fading_swap(env: dict[str, str]) -> Epoch:
         sibling.pttl_ms = 0
         return Epoch(number=0)
 
     orch, _seen = _orchestrate_spy()
     await _service(store, bus).apply_replace_env(
         {"TAI_BUS_NAMESPACE": "new"},
-        driven=True,
         save_previous=_PrevSpy(),
         build_and_swap=fading_swap,
         orchestrate=orch,
@@ -719,7 +717,6 @@ async def test_a_roll_that_stops_returns_the_partial_report(
     with caplog.at_level(logging.ERROR):
         outcome = await _service(store, bus).apply_replace_env(
             {"TAI_BUS_NAMESPACE": "new"},
-            driven=True,
             save_previous=_PrevSpy(),
             build_and_swap=spy,
             orchestrate=orch,
@@ -748,7 +745,6 @@ async def test_a_stop_without_a_row_for_the_target_escapes(monkeypatch: pytest.M
     with pytest.raises(RecycleError, match="no reply from the target"):
         await _service(store, FakeBus(origin="serve-applier")).apply_replace_env(
             {"TAI_BUS_NAMESPACE": "new"},
-            driven=True,
             save_previous=_PrevSpy(),
             build_and_swap=spy,
             orchestrate=orch,
@@ -808,14 +804,13 @@ async def test_the_recycle_targets_are_pinned_before_the_swap(monkeypatch: pytes
     events: list[str] = []
     bus = _OrderedBus(events)
 
-    async def swap(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+    async def swap(env: dict[str, str]) -> Epoch:
         events.append("swap")
         return Epoch(number=0)
 
     orch, seen = _orchestrate_spy()
     await _service(store, bus).apply_replace_env(
         {"TAI_BUS_NAMESPACE": "new"},
-        driven=True,
         save_previous=_PrevSpy(),
         build_and_swap=swap,
         orchestrate=orch,
@@ -842,7 +837,6 @@ async def test_a_stop_with_no_target_in_hand_is_reported_not_re_raised(
     with caplog.at_level(logging.ERROR):
         outcome = await _service(store, FakeBus(origin="serve-applier")).apply_replace_env(
             {"TAI_BUS_NAMESPACE": "new"},
-            driven=True,
             save_previous=_PrevSpy(),
             build_and_swap=spy,
             orchestrate=orch,

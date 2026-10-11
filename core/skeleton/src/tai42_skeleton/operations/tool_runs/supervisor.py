@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -43,7 +44,7 @@ from .models import _DEFAULT_CANCEL_REASON, _FAILED, _PARKED, _SUCCEEDED
 from .store import ToolRunStore
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Collection, Iterator, Mapping
 
     from tai42_contract.monitoring import RunAttribution
     from tai42_contract.states import StateSubject
@@ -66,6 +67,11 @@ logger = logging.getLogger(__name__)
 # that generation's in-flight runs and never a run admitted on the fresh epoch.
 _SUPERVISORS: set[asyncio.Task[None]] = set()
 _SUPERVISOR_EPOCH: dict[asyncio.Task[None], int] = {}
+
+# The enrolled supervisor whose run the current code belongs to. Set in the supervisor
+# task's own context at enrollment, so every task the run spawns (an agent's tool node
+# runs each tool call in a child task) carries it too.
+_running_supervisor: ContextVar[asyncio.Task[None] | None] = ContextVar("running_supervisor", default=None)
 
 
 def reserve_active_slot(limit: int) -> bool:
@@ -97,14 +103,32 @@ def _enroll_supervisor(task: asyncio.Task[None]) -> None:
 
     A whole-server drain cancels-and-awaits it and an epoch retire drains
     exactly this generation's runs — sequencing its terminal write ahead of the pooled
-    clients' close. A ``None`` epoch (a loop-less unit context) tags nothing.
+    clients' close. A ``None`` epoch (a loop-less unit context) tags nothing. ``task`` is
+    enrolled before its first step, so its context is not yet entered and the run's own
+    supervisor is set in it.
     """
     from tai42_skeleton.app.epoch import current_epoch_or_none
 
+    task.get_context().run(_running_supervisor.set, task)
     _SUPERVISORS.add(task)
     epoch = current_epoch_or_none()
     if epoch is not None:
         _SUPERVISOR_EPOCH[task] = epoch.number
+
+
+def running_supervisor() -> tuple[asyncio.Task[Any], int] | None:
+    """The enrolled supervisor whose run this code belongs to and the epoch number that admitted the run.
+
+    Found in the supervisor's task and in every task its run spawned. ``None`` outside a
+    run, once the run has finished (a task that outlived it acts for no run), or for a run
+    no epoch tagged. The reload gate reads it to record a supervised run that drives a
+    reload, so that generation's retire leaves it running.
+    """
+    task = _running_supervisor.get()
+    if task is None or task.done() or task not in _SUPERVISORS:
+        return None
+    epoch = _SUPERVISOR_EPOCH.get(task)
+    return None if epoch is None else (task, epoch)
 
 
 def _discard_supervisor(task: asyncio.Task[None]) -> None:
@@ -514,6 +538,7 @@ async def drain_supervisors(
     *,
     epoch: int | None = None,
     reason: str = _DEFAULT_CANCEL_REASON,
+    exclude: Collection[asyncio.Task[Any]] = (),
 ) -> None:
     """Cancel in-flight supervisors and wait, bounded, for each to write its terminal ``failed`` record.
 
@@ -528,9 +553,15 @@ async def drain_supervisors(
     ``reason`` is passed as the cancel message so each cancelled run records the actual
     cause. ``deadline`` is a drain budget in SECONDS — a relative duration, not an
     absolute time (mirrors the kit's ``drain_epoch`` vocabulary); defaults to
-    ``shutdown_drain_seconds``.
+    ``shutdown_drain_seconds``. ``exclude`` names supervisors left running: an epoch retire
+    passes the runs that drive or wait on the reload gate, which includes the run driving
+    that very retire.
     """
-    tasks = [t for t in _SUPERVISORS if not t.done() and (epoch is None or _SUPERVISOR_EPOCH.get(t) == epoch)]
+    tasks = [
+        t
+        for t in _SUPERVISORS
+        if not t.done() and t not in exclude and (epoch is None or _SUPERVISOR_EPOCH.get(t) == epoch)
+    ]
     if not tasks:
         return
     budget = deadline if deadline is not None else _pkg.tool_runs_settings().shutdown_drain_seconds

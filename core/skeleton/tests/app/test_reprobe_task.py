@@ -33,7 +33,7 @@ from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.settings.cache import mcp_reload_probe_timeout
+from tai42_skeleton.settings.cache import mcp_probe_timeout, mcp_reload_probe_timeout
 
 
 def _row(category: str = "error", message: str = "", http_status: int | None = None) -> dict:
@@ -244,7 +244,7 @@ async def test_reprobe_snapshots_failed_set_under_the_gate_lock(monkeypatch, cap
     m._reprobe_sleep = fake_sleep  # type: ignore[method-assign]
 
     # Hold the gate exactly as a concurrent reload would while it mutates the set.
-    async with reload_gate.lock:
+    async with reload_gate.synchronized():
         task = asyncio.create_task(m._reprobe_failed_mcps_loop())
         await asyncio.sleep(0)  # let the pass reach the gate and block on it
         assert not reload_ran.is_set()  # blocked before snapshotting — no read yet
@@ -340,18 +340,19 @@ async def test_in_flight_probe_does_not_block_gated_writes(monkeypatch):
     try:
         await asyncio.wait_for(probing.wait(), timeout=5)  # the pass is mid-probe
 
-        # A reload-gated write takes reload_gate.lock; with the probe off the gate it
+        # A reload-gated write takes the reload gate; with the probe off the gate it
         # acquires promptly. Under the old under-gate probe the lock is held for the
         # whole (here, parked) probe, so this acquire would block and time out.
         async def gated_write() -> str:
-            async with reload_gate.lock:
+            async with reload_gate.synchronized():
                 return "ok"
 
         assert await asyncio.wait_for(gated_write(), timeout=1) == "ok"
         assert not reload_gate.locked  # nothing holds the gate during the probe
-        # Parity with _load_mcps: the reprobe path probes on the short reload budget,
-        # never the generous cold-boot timeout the under-gate bug used.
-        assert seen["timeout"] == mcp_reload_probe_timeout()
+        # The probe holds nothing, so it runs on the cold-boot bound: a server whose start
+        # outlasts the short reload budget still binds through the re-probe.
+        assert seen["timeout"] == mcp_probe_timeout()
+        assert seen["timeout"] != mcp_reload_probe_timeout()
     finally:
         release.set()
         await asyncio.sleep(0)  # let the pass finish and release the gate
