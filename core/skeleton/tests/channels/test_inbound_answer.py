@@ -538,6 +538,48 @@ async def test_callback_host_match_forwards(wired, monkeypatch):
     assert store.released == ["k"]
 
 
+@pytest.mark.parametrize(
+    "callback_url",
+    [
+        "https://host.example/admin",
+        "https://host.example/api/interactions/callback/../../admin",
+        "https://host.example/api/interactions/callback/tkt?x=1",
+        "https://u:p@host.example/api/interactions/callback/tkt",
+        "https://host.example/api/interactions/callback/tkt/extra",
+    ],
+)
+async def test_callback_on_the_right_host_but_not_the_minted_path_is_discarded(wired, monkeypatch, callback_url):
+    # Same host, another route or shape: the pin refuses it (path_mismatch), nothing is forwarded.
+    _pin_public_base(monkeypatch, "https://host.example")
+    store = FakeStore(_entry(callback_url=callback_url))
+    forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
+
+    result = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="yes", store=store, bridge=_bridge()
+    )
+
+    assert result.outcome is InboundAnswerOutcome.NO_CORRELATION
+    assert forward_calls == []
+    assert store.released == ["k"]
+    assert len(wired.events) == 1
+    assert wired.events[0].payload["reason"] == "path_mismatch"
+
+
+async def test_callback_with_an_explicit_default_port_forwards(wired, monkeypatch):
+    # ``:443`` is the same origin as the portless public base: the minted shape, accepted.
+    _pin_public_base(monkeypatch, "https://host.example")
+    explicit = "https://host.example:443/api/interactions/callback/tkt"
+    store = FakeStore(_entry(callback_url=explicit))
+    forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
+
+    result = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="yes", store=store, bridge=_bridge()
+    )
+
+    assert result.outcome is InboundAnswerOutcome.FORWARDED
+    assert forward_calls == [SimpleNamespace(callback_url=explicit, answer="yes", params=None)]
+
+
 async def test_callback_pin_fails_closed_when_public_base_unset(wired, monkeypatch):
     # No configured public base -> FAIL-CLOSED (never forward to an unpinnable host):
     # release, discard, and treat as no correlation; the discarded event names the reason.

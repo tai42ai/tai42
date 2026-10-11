@@ -315,6 +315,7 @@ def test_app_interactions_exposes_ask_typed_by_the_contract_protocol():
         "assert_resume_authorized",
         "assert_delivery_authorized",
         "redelivery_horizon_seconds",
+        "callback_url_prefix",
     }
     # ``ask`` is a read property typed as the already-carried Ask Protocol.
     prop = inspect.getattr_static(AppInteractions, "ask")
@@ -333,7 +334,7 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
     import inspect
 
     from tai42_contract.app import AppInteractions
-    from tai42_contract.interactions import AnswerMismatchPolicy, Ask
+    from tai42_contract.interactions import AnswerMismatchPolicy, Ask, FormReactionEvent
 
     # The kwargs a facet double threads must be part of the CONTRACT's own Ask
     # surface — not merely accepted by some impl double — so a caller reaches them
@@ -373,7 +374,7 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
             return None
 
         async def react(
-            self, interaction_id: str, event: dict[str, object], partial_values: dict[str, object]
+            self, interaction_id: str, event: FormReactionEvent, partial_values: dict[str, object]
         ) -> dict[str, object]:
             return {}
 
@@ -413,6 +414,9 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
 
         def redelivery_horizon_seconds(self) -> int:
             return 0
+
+        def callback_url_prefix(self) -> str | None:
+            return None
 
     facet = _InteractionsDouble()
     assert isinstance(facet, AppInteractions)

@@ -73,12 +73,16 @@ def test_extensions_non_dict_raises():
 def test_extensions_dict_element_in_flat_combo_binds_config():
     # A flat combo may mix a bare name and a {"name", "config"} mapping; the
     # mapping is wrapped into the single combo unchanged.
-    cfg = _tools_cfg(extensions={"sign": [{"name": "ask_external", "config": {"verifier": {"name": "gh"}}}, "monitor"]})
-    assert cfg.extensions == {"sign": [[{"name": "ask_external", "config": {"verifier": {"name": "gh"}}}, "monitor"]]}
+    cfg = _tools_cfg(
+        extensions={"sign": [{"name": "ask_external", "config": {"verifier": {"verifier": "gh"}}}, "monitor"]}
+    )
+    assert cfg.extensions == {
+        "sign": [[{"name": "ask_external", "config": {"verifier": {"verifier": "gh"}}}, "monitor"]]
+    }
 
 
 def test_extensions_dict_element_in_list_of_combos():
-    combos = [[{"name": "ask_external", "config": {"verifier": {"name": "gh"}}}], ["monitor"]]
+    combos = [[{"name": "ask_external", "config": {"verifier": {"verifier": "gh"}}}], ["monitor"]]
     cfg = _tools_cfg(extensions={"sign": combos})
     assert cfg.extensions == {"sign": combos}
 

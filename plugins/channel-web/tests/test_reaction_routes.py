@@ -13,8 +13,10 @@ from typing import Any
 
 import pytest
 from starlette.requests import Request
+from tai42_kit.interactions import CallbackUrlRefusedError
 
 import tai42_channel_web.routes  # noqa: F401  (route registration side-effect)
+from tai42_channel_web.routes.callback_pin import CallbackPrefixUnsetError
 from tai42_channel_web.routes.reaction_routes import ReactionForwardError
 
 from .conftest import (
@@ -258,3 +260,24 @@ def test_web_channel_advertises_form_reaction():
     from tai42_channel_web.channel import WebChannel
 
     assert WebChannel.supports_form_reaction is True
+
+
+async def test_a_reaction_to_a_stored_callback_outside_the_platform_prefix_is_refused(
+    web_env, stub_app, registered_session: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The STORED value is pinned (never the derived /react URL): a poisoned record is refused
+    # before anything is forwarded, and the raise answers 500.
+    await _seed_question(callback_url="https://evil.example/api/interactions/callback/ticket-1")
+    with pytest.raises(CallbackUrlRefusedError):
+        await _handler(stub_app, _REACT)(_react_request())
+    assert fake_httpx.calls == []
+
+
+async def test_a_reaction_with_no_platform_callback_prefix_is_refused(
+    web_env, stub_app, registered_session: FakeRedis, fake_httpx: FakeHttpx
+):
+    stub_app.interactions.prefix = None
+    await _seed_question()
+    with pytest.raises(CallbackPrefixUnsetError):
+        await _handler(stub_app, _REACT)(_react_request())
+    assert fake_httpx.calls == []

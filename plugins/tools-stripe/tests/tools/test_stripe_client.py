@@ -1,4 +1,4 @@
-"""Tests for the shared Stripe client module: livemode prefixes, the exact-origin SSRF
+"""Tests for the shared Stripe client module: livemode prefixes, the platform callback
 pin, and the pinned ``Stripe-Version`` header on both REST calls.
 
 The Stripe calls run through tai42-kit's real curl client against a loopback stub (an httpx-level
@@ -12,13 +12,12 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from tai42_kit.interactions import CallbackPinReason, CallbackUrlRefusedError
 
 import tai42_tools_stripe._internal.tools.stripe_client as stripe_client
 from tai42_tools_stripe._internal.tools.stripe_client import (
     STRIPE_API_VERSION,
-    CallbackTargetRefusedError,
     StripeLivemodeMismatchError,
-    _assert_callback_target,
     _assert_livemode,
     _expected_livemode,
     create_checkout_session,
@@ -26,6 +25,7 @@ from tai42_tools_stripe._internal.tools.stripe_client import (
     expire_checkout_session,
     list_checkout_sessions,
     list_webhook_endpoints,
+    post_answer,
 )
 
 # --- livemode -------------------------------------------------------------------------------
@@ -87,51 +87,34 @@ def test_assert_livemode_requires_boolean(stripe_env: Callable[..., None], obj: 
         _assert_livemode(obj)
 
 
-# --- SSRF pin -------------------------------------------------------------------------------
+# --- callback pin -------------------------------------------------------------------------
+# The pin's full shape table is the kit's (``tai42_kit.interactions.pin_callback_url``); here the
+# answer POST is shown to run it against the platform's prefix before anything is sent.
 
 _BASE = "https://pay.acme.com"
-_OK = "https://pay.acme.com/api/interactions/callback/tkt"
 
 
 @pytest.mark.parametrize(
-    "callback_url",
+    ("callback_url", "reason"),
     [
-        "https://evil.tld/api/interactions/callback/t",  # foreign host
-        "http://pay.acme.com/api/interactions/callback/t",  # different scheme
-        "https://pay.acme.com:8443/api/interactions/callback/t",  # different port
-        "https://pay.acme.com/admin",  # path outside the callback prefix
-        "https://pay.acme.com.evil.tld/api/interactions/callback/t",  # suffix-extended host
-        "https://pay.acme.com@evil.tld/api/interactions/callback/t",  # userinfo: real host is evil.tld
-        "https://pay.acme.com/api/interactions/callback/../../admin",  # path traversal
+        ("https://evil.tld/api/interactions/callback/t", CallbackPinReason.HOST_MISMATCH),
+        ("https://pay.acme.com/api/interactions/callback/%2e%2e/admin", CallbackPinReason.PATH_MISMATCH),
+        ("https://pay.acme.com/api/interactions/callback/t?x=1", CallbackPinReason.PATH_MISMATCH),
     ],
 )
-def test_ssrf_pin_refuses(stripe_env: Callable[..., None], callback_url: str) -> None:
+def test_post_answer_refuses_a_callback_outside_the_platform_prefix(
+    stripe_env: Callable[..., None], callback_url: str, reason: CallbackPinReason
+) -> None:
     stripe_env(public_base=_BASE)
-    with pytest.raises(CallbackTargetRefusedError):
-        _assert_callback_target(callback_url)
+    with pytest.raises(CallbackUrlRefusedError) as caught:
+        asyncio.run(post_answer(callback_url, {"status": "paid"}))
+    assert caught.value.reason is reason
 
 
-def test_ssrf_pin_accepts_exact_origin(stripe_env: Callable[..., None]) -> None:
-    stripe_env(public_base=_BASE)
-    _assert_callback_target(_OK)
-
-
-def test_ssrf_pin_accepts_explicit_default_port(stripe_env: Callable[..., None]) -> None:
-    stripe_env(public_base=_BASE)
-    _assert_callback_target("https://pay.acme.com:443/api/interactions/callback/tkt")
-
-
-def test_ssrf_pin_derives_prefix_from_path_bearing_base(stripe_env: Callable[..., None]) -> None:
-    stripe_env(public_base="https://pay.acme.com/tai")
-    _assert_callback_target("https://pay.acme.com/tai/api/interactions/callback/tkt")
-    with pytest.raises(CallbackTargetRefusedError):
-        _assert_callback_target("https://pay.acme.com/api/interactions/callback/tkt")
-
-
-def test_ssrf_pin_raises_on_missing_base(stripe_env: Callable[..., None]) -> None:
+def test_post_answer_with_no_platform_public_base_names_the_var(stripe_env: Callable[..., None]) -> None:
     stripe_env(public_base="")
     with pytest.raises(ValueError, match="INTERACTIONS_PUBLIC_BASE_URL"):
-        _assert_callback_target(_OK)
+        asyncio.run(post_answer(f"{_BASE}/api/interactions/callback/tkt", {"status": "paid"}))
 
 
 # --- Stripe-Version on both calls, and redirects off --------------------------------------

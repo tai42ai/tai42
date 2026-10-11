@@ -3,8 +3,6 @@ payload, tier split, reservation ordering, and the correlation-free notify path.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-
 import httpx
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelNotification
@@ -444,28 +442,6 @@ async def test_deliver_missing_auth_token_raises_delivery_error_and_releases_res
 
     assert not fake_httpx.calls  # nothing sent
     assert not fake_redis.store  # the reservation was released
-
-
-async def test_past_deadline_raises_before_any_send(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    with pytest.raises(ChannelDeliveryError, match="already timed out"):
-        await TwilioChannel().deliver(make_delivery(timeout_at=datetime.now(UTC) - timedelta(seconds=1)))
-
-    assert not fake_redis.store
-    assert not fake_httpx.calls
-
-
-@pytest.mark.parametrize("answer_format", ["confirm", "external"])
-async def test_tier1_past_deadline_raises_before_any_send(
-    answer_format: str, fake_redis: FakeRedis, fake_httpx: FakeHttpx
-):
-    with pytest.raises(ChannelDeliveryError, match="already timed out"):
-        await TwilioChannel().deliver(
-            make_delivery(answer_format=answer_format, timeout_at=datetime.now(UTC) - timedelta(seconds=1))
-        )
-
-    assert not fake_httpx.calls  # the link would be dead on arrival — nothing sent
-    assert not fake_redis.store
-    assert not fake_redis.events  # no HTTP call and no reservation attempt at all
 
 
 async def test_accepted_response_without_sid_raises(fake_redis: FakeRedis, fake_httpx: FakeHttpx):

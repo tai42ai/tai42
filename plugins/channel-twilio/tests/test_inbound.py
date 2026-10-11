@@ -1098,3 +1098,36 @@ async def test_status_missing_status_is_400(status_handler, stub_app):
 
     assert result.status_code == 400
     assert stub_app.conversations.status_calls == []
+
+
+async def test_an_over_bound_params_set_bridges_without_params_and_is_counted(
+    stub_app, fake_redis: FakeRedis, monkeypatch, caplog
+):
+    # Twilio redelivers a 5xx: an over-bound set is DROPPED (one WARNING naming the door, one
+    # count) and the participant's caption still bridges, without params.
+    from prometheus_client import REGISTRY
+
+    from tai42_channel_twilio import inbound as inbound_module
+
+    def _dropped() -> float:
+        return REGISTRY.get_sample_value("tai_entry_params_dropped_total", {"door": "twilio", "unit": "set"}) or 0.0
+
+    monkeypatch.setattr(inbound_module, "build_inbound_media_params", lambda **_: {f"k{i}": "v" for i in range(17)})
+    before = _dropped()
+    with caplog.at_level("WARNING"):
+        await inbound_module._reject_media_item(
+            our_identity=_TWILIO,
+            client_address=_HUMAN,
+            kind=InboundMediaKind.IMAGE,
+            reason=InboundRejectionReason.TOO_LARGE,
+            caption="see this",
+            declared_mime="image/png",
+            message_sid="SM-over-bound",
+            index=0,
+        )
+
+    (accept,) = stub_app.conversations.accept_calls
+    assert accept["text"] == "see this"
+    assert accept["params"] is None
+    assert _dropped() == before + 1
+    assert [r for r in caplog.records if "twilio entry params dropped" in r.getMessage()]

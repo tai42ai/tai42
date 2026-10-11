@@ -436,7 +436,9 @@ async def test_channel_forbids_link_external(wired, fake_channel):
 async def test_channel_forbids_verifier(wired, fake_channel):
     # A channel's forward is unsigned — a bound verifier would 401 every reply.
     with pytest.raises(ValueError, match="verifier is forbidden when a channel is set"):
-        await ask("q", answer_format="external", channel="fake", verifier={"name": "github", "config": {}}, timeout=5)
+        await ask(
+            "q", answer_format="external", channel="fake", verifier={"verifier": "github", "config": {}}, timeout=5
+        )
     assert _empty(wired.fake)
 
 

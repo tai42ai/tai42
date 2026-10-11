@@ -138,10 +138,14 @@ def stub_server() -> Iterator[_Stub]:
 
 
 @pytest.fixture
-def stripe_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., None]]:
+def stripe_env(monkeypatch: pytest.MonkeyPatch, interactions_facet: Any) -> Iterator[Callable[..., None]]:
     """Configure the Stripe settings through real env parsing (so empty-string cases exercise the
     same path production does) and clear the settings cache. Any ``STRIPE_*`` and the two unprefixed
-    names are removed first so the ambient environment cannot leak in."""
+    names are removed first so the ambient environment cannot leak in.
+
+    ``public_base`` is the platform's public base: the fake interactions facet serves the callback
+    prefix the platform would mint under it (``""`` leaves the platform with no public base).
+    """
     import os
 
     for key in list(os.environ):
@@ -163,11 +167,13 @@ def stripe_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., None]]
         if bridge_secret is not None:
             monkeypatch.setenv("TAI_BRIDGE_CALLBACK_SECRET", bridge_secret)
         if public_base is not None:
-            monkeypatch.setenv("INTERACTIONS_PUBLIC_BASE_URL", public_base)
+            interactions_facet.prefix = f"{public_base.rstrip('/')}/api/interactions/callback/" if public_base else None
         if interval is not None:
             monkeypatch.setenv("STRIPE_RECONCILE_ANSWER_INTERVAL_SECONDS", str(interval))
         reset_all_settings()
 
+    interactions_facet.prefix = None
     reset_all_settings()
     yield configure
+    interactions_facet.prefix = None
     reset_all_settings()

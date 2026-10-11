@@ -4,7 +4,7 @@ expiry/collision handling, topic-verifier bindings, and the in-memory seam."""
 from __future__ import annotations
 
 import pytest
-from tai42_contract.hooks import HookParams
+from tai42_contract.hooks import HookParams, TopicVerifierBinding
 
 from tai42_skeleton.backup import webhooks_section
 from tai42_skeleton.backup.registry import import_mode
@@ -363,10 +363,9 @@ async def test_verifier_binding_round_trips_so_a_verified_topic_stays_verified(s
     report = await webhooks_section._import_webhooks(doc)
     assert report.errors == []
     assert report.created == 2  # the binding + the hook
-    assert await store.manager.get_topic_verifier("notifications") == {
-        "verifier": "github",
-        "config": {"secret_env": "GH_SECRET"},
-    }
+    assert await store.manager.get_topic_verifier("notifications") == TopicVerifierBinding(
+        verifier="github", config={"secret_env": "GH_SECRET"}
+    )
 
 
 async def test_replacing_a_live_binding_counts_updated(store) -> None:
@@ -382,7 +381,9 @@ async def test_replacing_a_live_binding_counts_updated(store) -> None:
         report = await webhooks_section._import_webhooks(doc)
     assert report.errors == []
     assert (report.updated, report.created) == (1, 0)
-    assert (await store.manager.get_topic_verifier("notifications"))["verifier"] == "hmac"
+    binding = await store.manager.get_topic_verifier("notifications")
+    assert binding is not None
+    assert binding.verifier == "hmac"
 
 
 async def test_skip_leaves_a_live_binding_untouched(store) -> None:
@@ -398,7 +399,9 @@ async def test_skip_leaves_a_live_binding_untouched(store) -> None:
     report = await webhooks_section._import_webhooks(doc)
     assert report.errors == []
     assert (report.updated, report.created, report.details["skipped_existing"]) == (0, 0, 1)
-    assert (await store.manager.get_topic_verifier("notifications"))["verifier"] == "github"
+    binding = await store.manager.get_topic_verifier("notifications")
+    assert binding is not None
+    assert binding.verifier == "github"
 
 
 @pytest.mark.parametrize("binding", [{"config": {}}, {"verifier": "", "config": {}}, "hmac", {"verifier": 1}])
@@ -519,7 +522,9 @@ async def test_binding_naming_an_unregistered_verifier_is_restored_not_dropped(s
     report = await webhooks_section._import_webhooks(doc)
     assert report.errors == []
     assert report.created == 1
-    assert (await store.manager.get_topic_verifier("notifications"))["verifier"] == "not-installed-here"
+    binding = await store.manager.get_topic_verifier("notifications")
+    assert binding is not None
+    assert binding.verifier == "not-installed-here"
 
 
 # -- restore into a now-verified topic (fire-time enforcement) -------------

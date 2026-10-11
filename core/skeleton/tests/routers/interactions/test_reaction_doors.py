@@ -117,6 +117,17 @@ async def test_callback_react_handler_error_is_502(wired, fake_client_ctx):
     assert resp.status_code == 502
 
 
+async def test_callback_react_an_event_outside_the_contract_vocabulary_is_400(wired, fake_client_ctx):
+    _wire_reaction(wired, fake_client_ctx)
+    await wired.store.add(wired.fake, _reacting_req(wired.store), idle_ttl=86400, ticket="TKT", ticket_ttl=60)
+    for event in ({"kind": "wiggled"}, {"kind": "field_changed", "field": "name", "extra": 1}):
+        resp = await router.callback_react(
+            make_request("POST", path_params={"ticket": "TKT"}, body=_body(event, {"name": "x"}))
+        )
+        assert resp.status_code == 400
+        assert "invalid reaction event" in _json(resp)["error"]
+
+
 # === the authenticated in-app reaction operation ============================
 
 

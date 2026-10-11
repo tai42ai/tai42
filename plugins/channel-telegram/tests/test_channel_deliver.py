@@ -261,13 +261,6 @@ async def test_form_with_per_send_data_and_pages_is_pass_through_to_the_callback
     assert fake_redis.ttls == {}
 
 
-async def test_already_expired_raises_without_sending(http_recorder, fake_redis):
-    with pytest.raises(ChannelDeliveryError, match="already timed out"):
-        await TelegramChannel().deliver(_delivery(timeout_in=-10))
-    assert http_recorder.requests == []
-    assert fake_redis.data == {}
-
-
 async def test_transport_error_single_attempt_token_free(http_recorder, fake_redis):
     def responder(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("boom")

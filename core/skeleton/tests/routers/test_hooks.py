@@ -13,7 +13,7 @@ import pytest
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
-from tai42_contract.hooks import HookParams
+from tai42_contract.hooks import HookParams, TopicVerifierBinding
 
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
@@ -82,8 +82,8 @@ class _FakeManager:
     async def on_event(self, topic: str, payload: dict) -> None:
         self.events.append((topic, payload))
 
-    async def get_topic_verifier(self, topic: str) -> dict | None:
-        return self._binding
+    async def get_topic_verifier(self, topic: str) -> TopicVerifierBinding | None:
+        return None if self._binding is None else TopicVerifierBinding.model_validate(self._binding)
 
     async def claim_webhook_delivery(self, topic: str, replay_key: str, ttl_seconds: int) -> bool:
         self.claims.append((topic, replay_key, ttl_seconds))
@@ -169,8 +169,8 @@ class _MgmtManager:
         self.unregistered.append(name)
         return name in self._hooks
 
-    async def all_topic_verifiers(self) -> dict[str, dict]:
-        return dict(self._verifiers)
+    async def all_topic_verifiers(self) -> dict[str, TopicVerifierBinding]:
+        return {topic: TopicVerifierBinding.model_validate(binding) for topic, binding in self._verifiers.items()}
 
     async def set_topic_verifier(self, topic: str, binding: dict) -> None:
         self._verifiers[topic] = binding
