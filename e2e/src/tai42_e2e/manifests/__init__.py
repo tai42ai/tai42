@@ -119,6 +119,8 @@ from tai42_e2e.manifests.projection import build_projection_authz_stack, build_p
 from tai42_e2e.manifests.routers import build_api_router_stack, build_default_router_stack, build_router_merge_stack
 from tai42_e2e.manifests.sandbox import (
     _DEEP_AGENT_ENTRY,
+    _SANDBOX_FAKE_MODULE,
+    _STUB_SESSION_IMAGE,
     build_claude_agent_stack,
     build_deep_agent_durable_stack,
     build_sandbox_local_claude_stack,
@@ -192,8 +194,10 @@ __all__ = [
     "_DEEP_AGENT_ENTRY",
     "_EXTENSION_MODULES",
     "_PROJECTED_API_TOOLS",
+    "_SANDBOX_FAKE_MODULE",
     "_SETUP_TOKEN",
     "_STRIPE_TEST_SECRET_KEY",
+    "_STUB_SESSION_IMAGE",
     "_base_env",
     "_builtin_entries",
     "_llm_env",
