@@ -8,6 +8,7 @@ never-rolled-back dedup map still holds the dropped row.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -65,7 +66,7 @@ def _record(
 
 
 @pytest.fixture
-def registry(monkeypatch: pytest.MonkeyPatch) -> RouteRegistry:
+def registry(monkeypatch: pytest.MonkeyPatch) -> Iterator[RouteRegistry]:
     """A fresh registry the limiter reads in place of the process one, from a cold memo."""
     fresh = RouteRegistry()
     monkeypatch.setattr(rate_limit, "route_registry", fresh)
