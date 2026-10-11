@@ -11,6 +11,7 @@ from typing import Any
 
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
 from tai42_skeleton.conversations.person_thread import person_routes
+from tai42_skeleton.conversations.record_pages import TRANSCRIPT_ORDERS
 from tai42_skeleton.conversations.thread_ids import PERSON_THREAD_PREFIX, PersonThreadId, ThreadIdError, parse_thread_id
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._authority import Caller, require_admin
@@ -27,7 +28,6 @@ from .backend import _require_backend, _require_route, _thread_not_found
 from .models import (
     MAX_THREAD_PAGE,
     MAX_THREAD_PAGE_SIZE,
-    TRANSCRIPT_ORDERS,
     MessageSearchQuery,
     ThreadListQuery,
     TranscriptQuery,

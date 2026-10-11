@@ -28,7 +28,7 @@ from tai42_skeleton.marketplace import (
     unwind,
 )
 from tai42_skeleton.marketplace import routes as routes_mod
-from tai42_skeleton.marketplace.compat import running_contract_version, update_targets
+from tai42_skeleton.marketplace.compat import UpgradeOutcome, running_contract_version, update_targets
 from tai42_skeleton.marketplace.errors import InstallStateError, InstallUnwindError, ManifestCollisionError
 from tai42_skeleton.marketplace.installer_base import _InstallerBase
 from tai42_skeleton.marketplace.manifest_patch import apply_provides, collisions, remove_provides
@@ -37,6 +37,11 @@ from tai42_skeleton.marketplace.store import InstallRecord
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
 logger = logging.getLogger(__name__)
+
+
+def _upgrade_row(ref: str, outcome: UpgradeOutcome, detail: str) -> dict[str, Any]:
+    """One ref's upgrade-all report entry."""
+    return {"ref": ref, "outcome": outcome, "detail": detail}
 
 
 class _UpdateFlow(_InstallerBase):
@@ -359,17 +364,13 @@ class _UpdateFlow(_InstallerBase):
             if targets.latest_compatible is None:
                 detail = f"no published version supports tai42-contract {contract}{blocked}"
                 logger.error("upgrade-all: %s has no compatible version — %s", row.ref, detail)
-                return {"ref": row.ref, "outcome": "no-compatible-version", "detail": detail}
+                return _upgrade_row(row.ref, "no-compatible-version", detail)
             if not targets.update_available:
-                return {
-                    "ref": row.ref,
-                    "outcome": "up-to-date",
-                    "detail": f"{row.version} is the latest compatible version{blocked}",
-                }
+                return _upgrade_row(row.ref, "up-to-date", f"{row.version} is the latest compatible version{blocked}")
             result = await self._update_locked(row.ref, targets.latest_compatible, None, None, None, False)
-            return {"ref": row.ref, "outcome": "upgraded", "detail": f"{row.version} -> {result['version']}"}
+            return _upgrade_row(row.ref, "upgraded", f"{row.version} -> {result['version']}")
         except Exception as exc:
             # The explicit per-ref recovery path: logged with the traceback and
             # reported, so one broken ref never hides the rest of the batch.
             logger.exception("upgrade-all: upgrading %s failed", row.ref)
-            return {"ref": row.ref, "outcome": "failed", "detail": str(exc)}
+            return _upgrade_row(row.ref, "failed", str(exc))

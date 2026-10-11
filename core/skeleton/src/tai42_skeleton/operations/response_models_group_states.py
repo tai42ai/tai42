@@ -30,6 +30,8 @@ from tai42_contract.states import (
     StateTemplateDocument,
 )
 
+from tai42_skeleton.states.service.records import FoldMode
+
 # --------------------------------------------------------------------------- #
 # Declarations                                                                 #
 # --------------------------------------------------------------------------- #
@@ -240,7 +242,7 @@ class FoldReport(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    mode: str
+    mode: FoldMode
     from_: FoldSubjectRef = Field(alias="from")
     into: FoldSubjectRef
     already: bool

@@ -19,6 +19,7 @@ forgets to regenerate reds the build.
 from __future__ import annotations
 
 from tai42_contract.schema_export.registry import (
+    SERVED_CONSTANTS,
     SERVED_DOCUMENTS,
     build_document_schemas,
     bundle_json,
@@ -26,6 +27,7 @@ from tai42_contract.schema_export.registry import (
 )
 
 __all__ = [
+    "SERVED_CONSTANTS",
     "SERVED_DOCUMENTS",
     "build_document_schemas",
     "bundle_json",

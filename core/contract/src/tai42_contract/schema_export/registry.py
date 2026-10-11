@@ -5,17 +5,18 @@ rather than "every model in the contract", so an internal or private model can n
 leak into the public artifact. :func:`build_document_schemas` turns it into the
 versioned bundle; :func:`bundle_json` is the canonical serialization the exporter
 writes; :func:`bundle_drift` judges freshness on the parsed structure — the documents
-and the shared ``$defs`` — with the ``contract_version`` envelope field checked
+the shared ``$defs``, the constants and the vectors — with the ``contract_version`` envelope field checked
 separately, so a version-only bump never reports as a shape change.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from importlib.metadata import version
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from pydantic import BaseModel
 
@@ -35,10 +36,11 @@ from tai42_contract.conversations import (
 )
 from tai42_contract.hooks.models import HookParams, HookRegister, HookSubject
 from tai42_contract.interactions.models import FormReactionEventBody
+from tai42_contract.interactions.models.media import MEDIA_ID_RE, MEDIA_ROUTE_PREFIX
 from tai42_contract.presets.models import PresetBody, PresetSeed
 from tai42_contract.settings_profiles.names import PreviousProfileName, SettingsProfileName
 from tai42_contract.states.binding import StateAttach, StateBinding, StateInjection, StateUpdate
-from tai42_contract.states.models import StateDeclaration, StateTemplateDocument
+from tai42_contract.states.models import PERSON_KIND, StateDeclaration, StateTemplateDocument
 
 #: The published served documents: an explicit, ordered ``published name -> contract
 #: model`` mapping for exactly the documents the operator surface serves and an editor
@@ -71,6 +73,15 @@ SERVED_DOCUMENTS: dict[str, type[BaseModel]] = {
     "PreviousProfileName": PreviousProfileName,
 }
 
+#: The served constants a consumer reads instead of re-spelling: the reserved person subject kind,
+#: the same-origin served-media route prefix, and the stored-media id grammar (a regular expression
+#: matched against the whole id).
+SERVED_CONSTANTS: Final[Mapping[str, str]] = {
+    "PERSON_KIND": PERSON_KIND,
+    "MEDIA_ROUTE_PREFIX": MEDIA_ROUTE_PREFIX,
+    "MEDIA_ID_PATTERN": MEDIA_ID_RE.pattern,
+}
+
 #: The bundle's committed location relative to the package root, and the JSON-schema
 #: ``$ref`` target every shared definition resolves against.
 BUNDLE_RESOURCE = ("schemas", "contract-schema.json")
@@ -88,8 +99,8 @@ def build_document_schemas() -> dict[str, Any]:
     one document's shape under another's reference.
 
     The envelope carries the exact ``contract_version`` it was cut from, so a consumer
-    pins the shape to a released contract, and the ``vectors`` conformance tables a
-    consumer mirroring a served rule checks itself against.
+    pins the shape to a released contract, the ``vectors`` conformance tables a
+    consumer mirroring a served rule checks itself against, and the served ``constants``.
     """
     defs: dict[str, Any] = {}
     documents: dict[str, Any] = {}
@@ -108,6 +119,7 @@ def build_document_schemas() -> dict[str, Any]:
         "contract_version": version("tai42-contract"),
         "$defs": defs,
         "documents": documents,
+        "constants": dict(SERVED_CONSTANTS),
         "vectors": {
             "path_coverage": [dict(row) for row in PATH_COVERAGE_VECTORS],
             "pattern_open_prefix": [dict(row) for row in PATTERN_OPEN_PREFIX_VECTORS],
@@ -129,7 +141,7 @@ def bundle_drift(fresh: dict[str, Any], committed: dict[str, Any]) -> list[str]:
     """The loud, distinct reasons the committed bundle is stale against a fresh rebuild, or empty when it is fresh.
 
     Freshness is judged on the parsed STRUCTURE, never on bytes: each served document,
-    the shared ``$defs`` block and the ``vectors`` tables of the committed bundle must
+    the shared ``$defs`` block, the ``constants`` and the ``vectors`` tables of the committed bundle must
     equal the fresh build's. The
     ``contract_version`` envelope is a SEPARATE equality — the committed field must match
     the version the fresh build was cut from (the running package version) — so a
@@ -156,6 +168,8 @@ def bundle_drift(fresh: dict[str, Any], committed: dict[str, Any]) -> list[str]:
             lines.append(f"document {name!r} changed shape")
     if fresh.get("$defs") != committed.get("$defs"):
         lines.append("the shared $defs block changed")
+    if fresh.get("constants") != committed.get("constants"):
+        lines.append("the published constants changed")
     if fresh.get("vectors") != committed.get("vectors"):
         lines.append("the published vectors changed")
     return lines

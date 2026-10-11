@@ -64,6 +64,14 @@ class CorePluginBootError(RuntimeError):
     """
 
 
+#: A dist's compatibility verdict against the running contract.
+CompatState = Literal["compatible", "incompatible", "unknown"]
+
+#: One ref's upgrade-all outcome: moved to the latest compatible version, already on it, no published
+#: version supports the running contract, or the move failed.
+UpgradeOutcome = Literal["upgraded", "up-to-date", "no-compatible-version", "failed"]
+
+
 @dataclass(frozen=True)
 class CompatVerdict:
     """One dist's (or module's) verdict against the running contract.
@@ -72,7 +80,7 @@ class CompatVerdict:
     operator-facing boot-abort text, for ``unknown`` the note to log.
     """
 
-    status: Literal["compatible", "incompatible", "unknown"]
+    status: CompatState
     reason: str | None = None
 
     def as_payload(self) -> dict[str, str | None]:

@@ -89,7 +89,7 @@ async def test_fold_delegates_to_the_store(svc: StatesService) -> None:
 async def test_fold_refuses_an_unknown_mode(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     with pytest.raises(SubjectFoldError, match="unknown fold mode"):
-        await svc.fold("alerts", _subject(key="old"), _subject(key="new"), "bogus", origin=_ORIGIN)
+        await svc.fold("alerts", _subject(key="old"), _subject(key="new"), "bogus", origin=_ORIGIN)  # pyright: ignore[reportArgumentType]
 
 
 async def test_list_subjects_pages_with_a_next_cursor(svc: StatesService) -> None:

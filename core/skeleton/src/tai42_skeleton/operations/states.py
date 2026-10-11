@@ -84,6 +84,7 @@ from tai42_skeleton.operations.response_models_group_states import (
     StateSubjectsPage,
     StateTemplateCatalog,
 )
+from tai42_skeleton.states.service.records import FoldMode
 
 # The machine-readable code the states OFF refusal carries; the message is the store's own.
 _NOT_CONFIGURED_CODE = "states-not-configured"
@@ -556,7 +557,7 @@ async def fold_state_record(
     kind: str,
     key: str,
     into: dict[str, Any],
-    mode: str,
+    mode: FoldMode,
 ) -> dict[str, Any]:
     """Fold this subject's record into the ``into`` subject under ``mode`` (an alias the reads resolve through).
 

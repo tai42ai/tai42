@@ -23,6 +23,10 @@ from tai42_contract.plugins.item import PluginItem
 from tai42_contract.plugins.routes import route_shape, shapes_overlap
 from tai42_contract.plugins.versions import VERSION_RE, check_specifier_clause
 
+#: How a plugin is delivered: ``"package"`` installs a distribution, ``"descriptor"`` is an all-data,
+#: install-nothing listing.
+PluginDelivery = Literal["package", "descriptor"]
+
 
 class PluginPermissions(BaseModel):
     """Capabilities a plugin declares — informational: surfaced in listings, not enforced by a sandbox.
@@ -100,7 +104,7 @@ class PluginSpec(BaseModel):
         return f"{self.namespace}/{self.name}"
 
     @property
-    def delivery(self) -> Literal["package", "descriptor"]:
+    def delivery(self) -> PluginDelivery:
         """How the plugin is delivered: ``"descriptor"`` when it ships no package, else ``"package"``.
 
         A descriptor is an all-data, install-nothing listing.
