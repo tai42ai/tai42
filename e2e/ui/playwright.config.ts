@@ -8,6 +8,7 @@ import {
   MP_ADMIN_TOKEN,
   MP_PORT,
   MP_WEB_PORT,
+  OAUTH_MCP_PORT,
   SETUP_PORT,
   UI_PORT,
 } from "./tests/helpers";
@@ -158,6 +159,7 @@ export default defineConfig({
           TAI_E2E_UI_PORT: String(UI_PORT),
           TAI_E2E_UI_LLM_PORT: String(LLM_PORT),
           TAI_E2E_UI_IDP_PORT: String(IDP_PORT),
+          TAI_E2E_UI_OAUTH_MCP_PORT: String(OAUTH_MCP_PORT),
           TAI_E2E_UI_API_KEY: API_KEY,
           // The opt-in marketplace gate + its pinned coordinates. When unset the
           // runner boots nothing marketplace-flavored and the specs skip; the pnpm

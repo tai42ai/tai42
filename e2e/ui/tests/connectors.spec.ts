@@ -11,12 +11,24 @@
  * The loud negative scripts the stub IdP to DENY consent (`/_deny`): the popup
  * comes back with an OAuth error, the UI surfaces the failed sign-in, and no
  * connection is created.
+ *
+ * The stack also runs an OAuth-protected MCP server fixture that is its own sign-in
+ * service (registering apps by itself, sending `iss` on its redirect). An MCP server is
+ * added from the UI by that fixture's address, connected through the popup, then
+ * disconnected and removed.
  */
 import { expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
-import { apiHeaders, awaitMutation, IDP_CONTROL_URL, seedCredential, uniq } from './helpers';
+import {
+  apiHeaders,
+  awaitMutation,
+  IDP_CONTROL_URL,
+  OAUTH_MCP_URL,
+  seedCredential,
+  uniq,
+} from './helpers';
 import { needs, test } from './needs';
 
-needs('kind:connectors', 'mutable', 'helper:idp', 'setting:fixture-connector');
+needs('kind:connectors', 'mutable', 'helper:idp', 'helper:oauth-mcp', 'setting:fixture-connector');
 
 const PROVIDER = 'E2E Stub IdP';
 
@@ -55,9 +67,15 @@ async function openConnectDialog(page: Page, alias: string): Promise<Locator> {
  *  what the next test drives. */
 const connectedAliases = new Set<string>();
 
+/** Providers a test added by address. The afterEach removes whatever a failing test left
+ *  behind (after its connections, which a provider removal refuses while they live). */
+const addedProviders = new Set<string>();
+
 test.afterEach(async ({ request }) => {
   const aliases = new Set(connectedAliases);
   connectedAliases.clear();
+  const providers = new Set(addedProviders);
+  addedProviders.clear();
 
   // The denial knob is stack-global and outlives the test that flipped it, so restore
   // the granting default here rather than inside a test body — a test that ends early
@@ -78,6 +96,13 @@ test.afterEach(async ({ request }) => {
       });
       expect(deleted.status(), await deleted.text()).toBe(200);
     }
+  }
+
+  for (const id of providers) {
+    const removed = await request.delete(`/api/connectors/providers/${id}`, {
+      headers: apiHeaders(),
+    });
+    expect(removed.status(), await removed.text()).toBe(200);
   }
 
   expect(allow.status()).toBe(200);
@@ -189,4 +214,99 @@ test('a denied authorization surfaces a loud failure and creates no connection',
 
   // API: no connection was created for the denied alias.
   expect(await connectionAliases(request)).not.toContain(alias);
+});
+
+test('add a server by address, connect through the popup, remove it', async ({ page, request }) => {
+  const id = uniq('srv');
+  const name = `Fixture server ${id}`;
+  const alias = uniq('mcp');
+  addedProviders.add(id);
+  connectedAliases.add(alias);
+
+  await seedCredential(page);
+  await page.goto('/connectors');
+
+  // Add MCP server → the fixture's address → Look up.
+  await page
+    .getByRole('region', { name: 'Providers' })
+    .getByRole('button', { name: 'Add MCP server' })
+    .first()
+    .click();
+  const add = page.getByRole('dialog', { name: 'Add MCP server' });
+  await add.getByRole('textbox', { name: 'Server address' }).fill(OAUTH_MCP_URL);
+  await add.getByRole('button', { name: 'Look up' }).click();
+
+  // The review: the fixture registers apps by itself, so no client credentials are needed.
+  await expect(add.getByText('Automatic')).toBeVisible();
+  await add.getByRole('textbox', { name: 'Name' }).fill(name);
+  await add.getByRole('textbox', { name: 'Identifier' }).fill(id);
+  const added = awaitMutation(
+    page,
+    (r) => new URL(r.url()).pathname === '/api/connectors/providers' && r.request().method() === 'POST',
+  );
+  await add.getByRole('button', { name: 'Add server' }).click();
+  const addition = await added;
+  expect(addition.status(), await addition.text()).toBe(200);
+
+  // The connect dialog opens for the new provider; the popup drives the fixture's sign-in
+  // (it registers the app, answers with a code and its `iss`) and closes.
+  const connect = page.getByRole('dialog', { name: `Connect ${name}` });
+  await connect.getByRole('textbox', { name: 'Alias' }).fill(alias);
+  const completed = awaitMutation(
+    page,
+    (r) => r.url().includes('/api/connectors/oauth/complete') && r.request().method() === 'POST',
+  );
+  const popupPromise = page.waitForEvent('popup');
+  await connect.getByRole('button', { name: 'Connect' }).click();
+  const popup = await popupPromise;
+  await popup.waitForEvent('close');
+  const completion = await completed;
+  expect(completion.status(), await completion.text()).toBe(200);
+  expect(((await completion.json()) as { data: { kind: string } }).data.kind).toBe('success');
+
+  // The connection is listed (UI and API).
+  await expect(page.getByRole('link', { name: alias })).toBeVisible();
+  await expect.poll(async () => await connectionAliases(request)).toContain(alias);
+
+  // Disconnect it from its detail view.
+  await page.getByRole('link', { name: alias }).click();
+  await expect(page.getByRole('heading', { name: alias })).toBeVisible();
+  await page.getByRole('button', { name: 'Disconnect' }).click();
+  const disconnected = awaitMutation(
+    page,
+    (r) =>
+      /\/api\/connectors\/connections\/[^/]+$/.test(new URL(r.url()).pathname) &&
+      r.request().method() === 'DELETE',
+  );
+  await page
+    .getByRole('dialog', { name: 'Disconnect this connection?' })
+    .getByRole('button', { name: 'Disconnect' })
+    .click();
+  expect((await disconnected).status()).toBe(200);
+  connectedAliases.delete(alias);
+  await expect(page.getByRole('link', { name: alias })).toHaveCount(0);
+
+  // Remove the provider; it is gone from the catalog.
+  const card = page
+    .getByRole('region', { name: 'Providers' })
+    .locator('.tai-card')
+    .filter({ hasText: name });
+  await card.getByRole('button', { name: 'Remove' }).click();
+  const removed = awaitMutation(
+    page,
+    (r) =>
+      new URL(r.url()).pathname === `/api/connectors/providers/${id}` &&
+      r.request().method() === 'DELETE',
+  );
+  await page
+    .getByRole('dialog', { name: 'Remove this server?' })
+    .getByRole('button', { name: 'Remove' })
+    .click();
+  const removal = await removed;
+  expect(removal.status(), await removal.text()).toBe(200);
+  addedProviders.delete(id);
+  await expect(card).toHaveCount(0);
+  const catalog = await request.get('/api/connectors/providers', { headers: apiHeaders() });
+  const body = (await catalog.json()) as { data: { providers: Array<{ id: string }> } };
+  expect(body.data.providers.map((p) => p.id)).not.toContain(id);
 });
