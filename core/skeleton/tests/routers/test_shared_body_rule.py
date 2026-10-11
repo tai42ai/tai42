@@ -169,3 +169,13 @@ async def test_a_deeply_nested_body_is_the_invalid_json_400() -> None:
     with pytest.raises(BadRequestError) as excinfo:
         await read_json_object(_request(nested))
     assert excinfo.value.message == "invalid JSON body"
+
+
+@pytest.mark.parametrize("subject", ["x", [], 7])
+def test_a_subject_that_is_not_an_object_is_refused_by_the_model_rule(subject: object) -> None:
+    from tai42_skeleton.routers._tool_call import ToolCallRequestError, _read_subject
+
+    with pytest.raises(ToolCallRequestError) as excinfo:
+        _read_subject(subject)
+    assert excinfo.value.status_code == 400
+    assert str(excinfo.value).startswith("invalid 'subject': Input should be a valid dictionary")

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -113,8 +113,11 @@ def parse_json_object(raw: bytes) -> dict[str, Any]:
     return _json_object(body)
 
 
-def validate_body[M: BaseModel](model: type[M], body: Mapping[str, Any], what: str) -> M:
+def validate_body[M: BaseModel](model: type[M], body: object, what: str) -> M:
     """``body`` validated as ``model``; ``BadRequestError("invalid <what>: …")`` naming each violated rule.
+
+    ``body`` is any decoded JSON value: a value that is not an object is refused by the model's own
+    rule ("Input should be a valid dictionary or instance of …").
 
     Value-free: each pydantic error's ``msg`` names the bound it violates, never the input, so the
     refusal never echoes what was sent.
