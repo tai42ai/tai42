@@ -227,7 +227,7 @@ def test_post_only_empty_body_query_answer_denied_unauthenticated(boundary_clien
                 boundary_client.interactions_fake,
                 boundary_client.interactions_settings,
                 "TKT",
-                {"name": "prov", "config": {}},
+                {"verifier": "prov", "config": {}},
             )
         )
         resp = boundary_client.post("/api/interactions/callback/TKT?approved=true", content=b"")
