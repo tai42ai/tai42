@@ -17,6 +17,7 @@ Env knobs (``TAI_E2E_`` space, all with test-only defaults):
   ``TAI_E2E_UI_PORT``          the pinned Studio app port / browser origin (8770)
   ``TAI_E2E_UI_SETUP_PORT``    the pinned unseeded setup-stack app port (8780)
   ``TAI_E2E_UI_LLM_PORT``      the pinned scripted-LLM control port (8771)
+  ``TAI_E2E_UI_OAUTH_MCP_PORT`` the pinned port of the OAuth-protected MCP server fixture (8773)
   ``TAI_E2E_UI_API_KEY``       the seeded root key Playwright pastes at /login
   ``TAI_E2E_STUDIO_DIST_PATH`` the built Studio dist (defaults to the sibling
                                ``tai-studio/apps/studio/dist`` checkout)
@@ -71,6 +72,7 @@ from tai42_e2e.marketplace import (
     registry_supports_declared_routes,
 )
 from tai42_e2e.oauth_idp import OAuthIdp
+from tai42_e2e_fixtures.oauth_mcp_server import OAuthMcpServer
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.procs import ProcessHandle
 from tai42_e2e.seeding import seed_studio_auth, seed_studio_routes
@@ -92,6 +94,10 @@ class StudioRunnerSettings(BaseSettings):
     # The pinned stub-IdP port: the connectors spec flips its denial knob over
     # HTTP at this known origin (the OAuth connect flow reaches it server-side).
     ui_idp_port: int = 8772
+    # The pinned port of the OAuth-protected MCP server fixture: the connectors spec adds a
+    # server by this known address (the platform reaches it server-side, the browser's popup
+    # signs in at it).
+    ui_oauth_mcp_port: int = 8773
     # An obviously test-only key. NOT for production: the stack seeds it with a
     # wildcard scope, which a real deployment never does.
     ui_api_key: str = "sk-e2e-ui-DO-NOT-USE-IN-PRODUCTION-000"
@@ -470,15 +476,27 @@ def _start_marketplace(infra: Infra, root: Path, runner: StudioRunnerSettings) -
         raise
 
 
-def _start_ancillary(runner: StudioRunnerSettings) -> tuple[LlmStub, OAuthIdp]:
+@dataclass
+class _Ancillary:
+    """The services the studio stack points at, started before it and stopped after it."""
+
+    stub: LlmStub
+    idp: OAuthIdp
+    oauth_mcp: OAuthMcpServer
+
+
+def _start_ancillary(runner: StudioRunnerSettings) -> _Ancillary:
     """Start the ancillary services the studio stack points at: the scripted LLM
-    stub and the pinned stub OAuth IdP (pinned so a Playwright spec can flip its
-    denial knob over HTTP, and reachable server-side by the connect flow)."""
+    stub, the pinned stub OAuth IdP (pinned so a Playwright spec can flip its
+    denial knob over HTTP, and reachable server-side by the connect flow), and the
+    pinned OAuth-protected MCP server fixture a spec adds a server by."""
     stub = LlmStub(port=runner.ui_llm_port)
     stub.start()
     idp = OAuthIdp(port=runner.ui_idp_port)
     idp.start()
-    return stub, idp
+    oauth_mcp = OAuthMcpServer(port=runner.ui_oauth_mcp_port)
+    oauth_mcp.start()
+    return _Ancillary(stub=stub, idp=idp, oauth_mcp=oauth_mcp)
 
 
 def _boot_studio_stack(
@@ -587,14 +605,19 @@ def _start_setup_stack(runner: StudioRunnerSettings, infra: Infra, dist: Path, r
     return stack
 
 
-def _teardown_ancillary(mp_bundle: _MarketplaceBundle | None, idp: OAuthIdp, stub: LlmStub, infra: Infra) -> None:
+def _teardown_ancillary(mp_bundle: _MarketplaceBundle | None, ancillary: _Ancillary, infra: Infra) -> None:
     """Tear down every ancillary surface even if one raises, aggregating the
     failures so none is hidden. The marketplace bundle goes first (the stack is
     already down, so its poll no longer targets the registry)."""
     teardowns: list[tuple[str, Callable[[], object]]] = []
     if mp_bundle is not None:
         teardowns.append(("marketplace", mp_bundle.teardown))
-    teardowns += [("idp", idp.stop), ("llm stub", stub.stop), ("redis", infra.redis.close)]
+    teardowns += [
+        ("oauth mcp server", ancillary.oauth_mcp.stop),
+        ("idp", ancillary.idp.stop),
+        ("llm stub", ancillary.stub.stop),
+        ("redis", infra.redis.close),
+    ]
     errors: list[str] = []
     for label, fn in teardowns:
         try:
@@ -619,7 +642,7 @@ def main() -> None:
     # can leave a session-leader bound on the exact ports this stack claims. Under the
     # marketplace gate the registry + public-site ports are pinned too, so reap them the same;
     # the login (setup) stack's own port is reaped when it rides along.
-    pinned_ports = [runner.ui_port, runner.ui_llm_port, runner.ui_idp_port]
+    pinned_ports = [runner.ui_port, runner.ui_llm_port, runner.ui_idp_port, runner.ui_oauth_mcp_port]
     if with_setup_stack:
         pinned_ports.append(runner.ui_setup_port)
     if settings.marketplace:
@@ -627,7 +650,7 @@ def main() -> None:
     _free_pinned_ports(pinned_ports)
 
     infra = connect_infra(settings)
-    stub, idp = _start_ancillary(runner)
+    ancillary = _start_ancillary(runner)
     # Root the stack dir inside the repo so a CI failure run (TAI_E2E_KEEP_STACKS)
     # keeps the per-process logs where the ``tai-e2e/**/tai-e2e-studio-*/`` upload
     # glob can find them; a system-tmp dir would fall outside the workspace.
@@ -652,11 +675,11 @@ def main() -> None:
         # Boots the seeded stack, installs the signal handler, and BLOCKS until shutdown, then
         # tears the seeded stack down; the setup stack is torn down in the finally after it
         # returns.
-        _boot_studio_stack(runner, infra, stub, idp, dist, build_stack, root, mp_bundle)
+        _boot_studio_stack(runner, infra, ancillary.stub, ancillary.idp, dist, build_stack, root, mp_bundle)
     finally:
         if setup_stack is not None:
             setup_stack.teardown()
-        _teardown_ancillary(mp_bundle, idp, stub, infra)
+        _teardown_ancillary(mp_bundle, ancillary, infra)
 
 
 if __name__ == "__main__":
