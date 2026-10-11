@@ -186,15 +186,13 @@ async def _drive_keyless_door_refusal(stack: TaiStack, uniq: Callable[[str], str
     await api.post(
         "/api/schedules",
         json={
-            "tool_name": "run_tool_schedule_task",
+            "tool_name": "run_tool",
             "tool_kwargs": {
                 "tool_name": "e2e_call_conversation_door",
                 "arguments": {"door": door, "route_name": route_name, "record_key": record_key},
             },
-            "schedule_kwargs": {
-                "backend_schedule_name": schedule_name,
-                "backend_schedule": _KEYLESS_SCHEDULE_INTERVAL_SECONDS,
-            },
+            "cadence": {"kind": "interval", "every": _KEYLESS_SCHEDULE_INTERVAL_SECONDS},
+            "schedule_name": schedule_name,
         },
         expect=200,
         retry_on_reloading=True,

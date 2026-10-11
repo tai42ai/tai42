@@ -49,13 +49,21 @@ def test_each_side_keeps_its_own_env_prefix(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_boot_pinned_fields_are_recycle_class() -> None:
-    # A forked child reads the env key it was given and a queued job carries the
-    # kwarg name the producer used, so neither converges in-process.
+    # A forked child reads the env key it was given, a queued job carries the kwarg
+    # name the producer used, and a worker binds its job budget when it starts, so
+    # none converges in-process.
     fields = _fields("_HostSettings")
     assert fields["manifest_key"].reload_class == "recycle"  # pyright: ignore[reportAttributeAccessIssue]
     assert fields["tool_name_arg"].reload_class == "recycle"  # pyright: ignore[reportAttributeAccessIssue]
-    # The dispatch result timeout is read per call, so it flips live.
-    assert fields["task_timeout"].reload_class == "hot"  # pyright: ignore[reportAttributeAccessIssue]
+    assert fields["task_timeout"].reload_class == "recycle"  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_the_job_budget_is_positive_and_described() -> None:
+    with pytest.raises(ValueError, match="greater than 0"):
+        _HostSettings(task_timeout=0)
+    description = BackendDispatchSettings.model_fields["task_timeout"].description
+    assert description is not None
+    assert "job budget" in description
 
 
 def test_the_mixin_itself_never_registers() -> None:

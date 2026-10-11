@@ -44,11 +44,11 @@ def test_boot_pinned_dispatch_fields_are_recycle_class():
     """Inheriting the shared group brings the truthful reload classes with it: a
     forked work-horse reads the manifest env key it was GIVEN and a queued job
     carries the kwarg name its producer used, so neither converges in-process.
-    The dispatch result timeout is read per call, so it stays hot."""
+    A worker binds its job budget when it starts, so it converges through a recycle too."""
     fields = {field.name: field for field in _rq_group().fields}
     assert fields["manifest_key"].reload_class == "recycle"
     assert fields["tool_name_arg"].reload_class == "recycle"
-    assert fields["task_timeout"].reload_class == "hot"
+    assert fields["task_timeout"].reload_class == "recycle"
 
 
 def test_broker_defaults():

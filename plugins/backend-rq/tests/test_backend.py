@@ -73,7 +73,8 @@ async def test_launch_beat_runs_the_scheduler_cli(backend, monkeypatch):
     monkeypatch.setattr(rqscheduler_script, "main", lambda: seen_argv.append(list(sys.argv)))
 
     await backend.launch(["beat", "--interval", "5"])
-    assert seen_argv == [["rq-scheduler", "--interval", "5"]]
+    # The beat moves due jobs onto the queue class that bounds every job by ``task_timeout``.
+    assert seen_argv == [["rq-scheduler", "--interval", "5", "--queue-class", "tai42_backend_rq.queue.TaskBudgetQueue"]]
 
 
 async def test_launch_dashboard_runs_the_dashboard_cli(backend, monkeypatch):

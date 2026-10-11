@@ -50,7 +50,7 @@ def _seed(redis: Any, name: str, **overrides: bytes) -> str:
         b"target": b"tool_execution",
         b"args": orjson.dumps(["a"]),
         b"kwargs": orjson.dumps({"backend_tool_name": "t"}),
-        b"schedule": orjson.dumps({"__type__": "interval", "every": 60.0, "relative": False}),
+        b"schedule": orjson.dumps({"kind": "interval", "every": 60.0, "relative": False}),
         b"cron_or_interval": b"60",
         b"enabled": b"true",
         b"job_id": b"pending-1",
@@ -274,7 +274,7 @@ async def test_transition_with_full_definition_creates_missing_schedule(fake_red
         "target": "tool_execution",
         "args": orjson.dumps([]),
         "kwargs": orjson.dumps({"backend_tool_name": "t"}),
-        "schedule": orjson.dumps({"__type__": "interval", "every": 60.0, "relative": False}),
+        "schedule": orjson.dumps({"kind": "interval", "every": 60.0, "relative": False}),
         "cron_or_interval": "60",
         "enabled": "true",
     }
@@ -576,12 +576,13 @@ async def test_watchdog_records_unrecoverable_schedule(fake_redis, monkeypatch, 
     await scheduler.recover_stalled_schedules({"redis": fake_redis})
 
     rows = {row["name"]: row for row in await tools.backend_list_schedules()}
-    assert rows["a_broken"]["recovery_error"] is not None
-    assert "probe failed" in rows["a_broken"]["recovery_error"]
-    assert rows["a_broken"]["recovery_failed_at"] is not None
+    error = rows["a_broken"]["error"]
+    assert error is not None
+    assert "probe failed" in error["message"]
+    assert error["at_iso"] is not None
     # The broken schedule stays unrecovered; recovery of the other still proceeds.
     assert fake_redis._store[broken][b"job_id"] == b"boom"
-    assert rows["z_lost"]["recovery_error"] is None
+    assert rows["z_lost"]["error"] is None
 
 
 async def test_watchdog_clears_error_on_recovery(fake_redis, monkeypatch, bind_pool) -> None:
@@ -598,8 +599,7 @@ async def test_watchdog_clears_error_on_recovery(fake_redis, monkeypatch, bind_p
     await scheduler.recover_stalled_schedules({"redis": fake_redis})
 
     (row,) = await tools.backend_list_schedules()
-    assert row["recovery_error"] is None
-    assert row["recovery_failed_at"] is None
+    assert row["error"] is None
     assert b"recovery_error" not in fake_redis._store[key]
     assert b"recovery_failed_at" not in fake_redis._store[key]
 

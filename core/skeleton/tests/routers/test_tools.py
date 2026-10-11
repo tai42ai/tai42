@@ -133,8 +133,8 @@ async def test_tool_tags_map(install):
     # declares no visibility meta is not hidden.
     assert _json(resp) == {
         "data": [
-            {"name": "alpha", "tags": [], "hidden": False, "badges": []},
-            {"name": "beta", "tags": ["a", "z"], "hidden": False, "badges": []},
+            {"name": "alpha", "tags": [], "hidden": False, "badges": [], "schedulable": False},
+            {"name": "beta", "tags": ["a", "z"], "hidden": False, "badges": [], "schedulable": False},
         ]
     }
 
@@ -170,6 +170,21 @@ async def test_tool_tags_exposes_plugin_declared_hidden(install):
     resp = await router.tool_tags(_req())
     by_name = {entry["name"]: entry["hidden"] for entry in _json(resp)["data"]}
     assert by_name == {"secret": True, "shown": False}
+
+
+async def test_tool_tags_marks_a_tool_schedulable_when_its_vehicle_is_registered(install):
+    install(
+        _FakeTools(
+            {
+                "report": _tool("report"),
+                "report_schedule_task": _tool("report_schedule_task"),
+                "plain": _tool("plain"),
+            }
+        )
+    )
+    resp = await router.tool_tags(_req())
+    by_name = {entry["name"]: entry["schedulable"] for entry in _json(resp)["data"]}
+    assert by_name == {"plain": False, "report": True, "report_schedule_task": False}
 
 
 async def test_tool_tags_empty(install):

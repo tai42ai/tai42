@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 from unittest.mock import AsyncMock, patch
@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, patch
 import orjson
 import pytest
 from arq.jobs import JobStatus
-from pydantic import ValidationError
 
 from tai42_backend_arq import scheduler, tools
 
@@ -64,17 +63,44 @@ async def _redis_bound(redis: Any, job_cls: type = _FakeJob) -> AsyncIterator[No
         yield
 
 
-INTERVAL_SCHEDULE = {"__type__": "interval", "every": 60.0, "relative": False}
-CRONTAB_SCHEDULE = {
-    "__type__": "crontab",
+# The backend's own tool-name key in these tests is NOT the platform default, so the round trip
+# proves the backend splits and injects it itself.
+_TOOL_ARG = "custom_target"
+
+INTERVAL_CADENCE = {"kind": "interval", "every": 60.0, "relative": False}
+CRONTAB_CADENCE = {
+    "kind": "crontab",
     "minute": "0",
     "hour": "9",
     "day_of_month": "*",
     "month_of_year": "*",
     "day_of_week": "1",
 }
-INTERVAL_KWARGS = {"backend_tool_name": "send_report"}
-CRONTAB_KWARGS = {"backend_tool_name": "nightly_sync"}
+INTERVAL_KWARGS = {_TOOL_ARG: "send_report", "payload": "x"}
+CRONTAB_KWARGS = {_TOOL_ARG: "nightly_sync"}
+
+
+@pytest.fixture(autouse=True)
+def _custom_tool_name_arg(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("ARQ_TOOL_NAME_ARG", _TOOL_ARG)
+    reset_all_settings()
+    yield
+    monkeypatch.delenv("ARQ_TOOL_NAME_ARG", raising=False)
+    reset_all_settings()
+
+
+def _record(name: str, tool: str = "send_report", **overrides: Any) -> dict[str, Any]:
+    return {
+        "name": name,
+        "tool": tool,
+        "args": [],
+        "kwargs": {"payload": "x"},
+        "cadence": INTERVAL_CADENCE,
+        "enabled": True,
+        **overrides,
+    }
 
 
 async def _export(redis: Any) -> list[dict[str, Any]]:
@@ -97,24 +123,25 @@ def _read_hash(redis: Any, name: str) -> dict[bytes, bytes]:
 
 async def test_interval_schedule_round_trips(fake_redis) -> None:
     src = fake_redis
-    _seed_schedule(src, name="interval_one", schedule=INTERVAL_SCHEDULE, kwargs=INTERVAL_KWARGS, enabled=True)
+    _seed_schedule(src, name="interval_one", schedule=INTERVAL_CADENCE, kwargs=INTERVAL_KWARGS, enabled=True)
 
     exported = await _export(src)
     assert len(exported) == 1
     record = exported[0]
     assert record["name"] == "interval_one"
-    assert record["schedule"] == INTERVAL_SCHEDULE
-    assert record["kwargs"] == INTERVAL_KWARGS
+    assert record["tool"] == "send_report"
+    assert record["cadence"] == INTERVAL_CADENCE
+    assert record["kwargs"] == {"payload": "x"}
     assert record["enabled"] is True
     # Runtime-only fields must not leak into the portable record.
-    assert set(record) == {"name", "args", "kwargs", "schedule", "enabled"}
+    assert set(record) == {"name", "tool", "args", "kwargs", "cadence", "enabled"}
 
     dst = type(src)()
     result = await _import(dst, exported)
     assert result == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
 
     stored = _read_hash(dst, "interval_one")
-    assert orjson.loads(stored[b"schedule"]) == INTERVAL_SCHEDULE
+    assert orjson.loads(stored[b"schedule"]) == INTERVAL_CADENCE
     assert orjson.loads(stored[b"kwargs"]) == INTERVAL_KWARGS
     assert stored[b"enabled"] == b"true"
     assert stored[b"target"] == b"tool_execution"
@@ -128,12 +155,13 @@ async def test_interval_schedule_round_trips(fake_redis) -> None:
 
 async def test_crontab_schedule_round_trips(fake_redis) -> None:
     src = fake_redis
-    _seed_schedule(src, name="cron_one", schedule=CRONTAB_SCHEDULE, kwargs=CRONTAB_KWARGS, enabled=False)
+    _seed_schedule(src, name="cron_one", schedule=CRONTAB_CADENCE, kwargs=CRONTAB_KWARGS, enabled=False)
 
     exported = await _export(src)
     record = exported[0]
-    assert record["schedule"] == CRONTAB_SCHEDULE
-    assert record["kwargs"] == CRONTAB_KWARGS
+    assert record["cadence"] == CRONTAB_CADENCE
+    assert record["tool"] == "nightly_sync"
+    assert record["kwargs"] == {}
     assert record["enabled"] is False
 
     dst = type(src)()
@@ -150,13 +178,22 @@ async def test_crontab_schedule_round_trips(fake_redis) -> None:
 
 
 async def test_export_missing_schedule_field_raises(fake_redis) -> None:
-    """A schedule hash with no stored schedule dict must fail the export loudly
-    -- an exported record without its schedule could never be re-imported."""
+    """A schedule hash with no stored cadence must fail the export loudly
+    -- an exported record without its cadence could never be re-imported."""
+    from tai42_backend_arq.records import ScheduleStoreFormatError
+
     src = fake_redis
-    _seed_schedule(src, name="broken", schedule=INTERVAL_SCHEDULE, kwargs=INTERVAL_KWARGS, enabled=True)
+    _seed_schedule(src, name="broken", schedule=INTERVAL_CADENCE, kwargs=INTERVAL_KWARGS, enabled=True)
     del src._store["arq:schedule:broken"][b"schedule"]
 
-    with pytest.raises(ValueError, match="no stored schedule definition"):
+    with pytest.raises(ScheduleStoreFormatError, match="schedule 'broken' is stored in a format"):
+        await _export(src)
+
+
+async def test_export_a_hash_without_the_tool_key_raises(fake_redis) -> None:
+    src = fake_redis
+    _seed_schedule(src, name="orphan", schedule=INTERVAL_CADENCE, kwargs={"payload": "x"}, enabled=True)
+    with pytest.raises(ValueError, match="schedule 'orphan' carries no 'custom_target'"):
         await _export(src)
 
 
@@ -166,7 +203,7 @@ async def test_export_and_list_skip_schedule_deleted_mid_scan(fake_redis, bind_p
     export must not fail on it and the listing must not emit a phantom row."""
     src = fake_redis
     bind_pool(src)
-    _seed_schedule(src, name="alive", schedule=INTERVAL_SCHEDULE, kwargs=INTERVAL_KWARGS, enabled=True)
+    _seed_schedule(src, name="alive", schedule=INTERVAL_CADENCE, kwargs=INTERVAL_KWARGS, enabled=True)
     src._store["arq:schedule:vanished"] = {}
 
     exported = await _export(src)
@@ -176,35 +213,32 @@ async def test_export_and_list_skip_schedule_deleted_mid_scan(fake_redis, bind_p
     assert [row["name"] for row in listed] == ["alive"]
 
 
-async def test_export_corrupt_schedule_dict_raises(fake_redis) -> None:
-    """A stored schedule dict that fails record validation (here: empty) must
-    fail the export loudly instead of exporting a hollow record."""
-    src = fake_redis
-    _seed_schedule(src, name="corrupt", schedule={}, kwargs=INTERVAL_KWARGS, enabled=True)
+async def test_export_an_old_format_hash_raises_the_store_format_error(fake_redis) -> None:
+    """A hash still holding RedBeat-shaped ``__type__`` JSON (the store was not reset) fails
+    the export loudly, naming the keys to delete."""
+    from tai42_backend_arq.records import ScheduleStoreFormatError
 
-    with pytest.raises(ValidationError):
+    src = fake_redis
+    old = {"__type__": "interval", "every": 60.0, "relative": False}
+    _seed_schedule(src, name="corrupt", schedule=old, kwargs=INTERVAL_KWARGS, enabled=True)
+
+    with pytest.raises(ScheduleStoreFormatError, match="re-create the schedules"):
         await _export(src)
 
 
 async def test_import_upsert_overwrites_existing_name(fake_redis) -> None:
     dst = fake_redis
-    record = {
-        "name": "dup",
-        "args": [],
-        "kwargs": INTERVAL_KWARGS,
-        "schedule": INTERVAL_SCHEDULE,
-        "enabled": True,
-    }
+    record = _record("dup")
 
     first = await _import(dst, [record])
     assert first == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
 
-    changed = dict(record, kwargs={"backend_tool_name": "changed"})
+    changed = dict(record, tool="changed")
     second = await _import(dst, [changed], mode="overwrite")
     assert second == {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": []}
 
     stored = _read_hash(dst, "dup")
-    assert orjson.loads(stored[b"kwargs"]) == {"backend_tool_name": "changed"}
+    assert orjson.loads(stored[b"kwargs"]) == {"payload": "x", _TOOL_ARG: "changed"}
 
 
 async def test_import_skip_leaves_existing_untouched(fake_redis) -> None:
@@ -213,19 +247,13 @@ async def test_import_skip_leaves_existing_untouched(fake_redis) -> None:
     is the mode the backup restore passes across the tool boundary, so the tool must
     accept and honor it on this backend exactly as every backend does."""
     dst = fake_redis
-    record = {
-        "name": "dup",
-        "args": [],
-        "kwargs": INTERVAL_KWARGS,
-        "schedule": INTERVAL_SCHEDULE,
-        "enabled": True,
-    }
+    record = _record("dup")
 
     first = await _import(dst, [record], mode="skip")
     assert first == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
     original_job_id = _read_hash(dst, "dup")[b"job_id"]
 
-    changed = dict(record, kwargs={"backend_tool_name": "changed"})
+    changed = dict(record, tool="changed")
     second = await _import(dst, [changed], mode="skip")
     assert second == {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 1, "errors": []}
 
@@ -237,14 +265,8 @@ async def test_import_skip_leaves_existing_untouched(fake_redis) -> None:
 
 async def test_malformed_record_reported_not_silently_dropped(fake_redis) -> None:
     dst = fake_redis
-    good = {
-        "name": "good",
-        "args": [],
-        "kwargs": INTERVAL_KWARGS,
-        "schedule": INTERVAL_SCHEDULE,
-        "enabled": True,
-    }
-    bad = {"name": "bad"}  # missing required schedule/enabled
+    good = _record("good")
+    bad = {"name": "bad", "kwargs": INTERVAL_KWARGS, "schedule": {"__type__": "interval", "every": 60.0}}
 
     result = await _import(dst, [good, bad])
     assert result["created"] == 1
@@ -263,16 +285,10 @@ async def test_failed_abort_of_replaced_job_surfaces_not_swallowed(fake_redis) -
     replacement must not be enqueued, and the old job id must stay untouched --
     otherwise the old job would run on alongside a duplicate replacement."""
     dst = fake_redis
-    _seed_schedule(dst, name="dup", schedule=INTERVAL_SCHEDULE, kwargs=INTERVAL_KWARGS, enabled=True)
+    _seed_schedule(dst, name="dup", schedule=INTERVAL_CADENCE, kwargs=INTERVAL_KWARGS, enabled=True)
     old_job_id = dst._store["arq:schedule:dup"][b"job_id"]
 
-    record = {
-        "name": "dup",
-        "args": [],
-        "kwargs": INTERVAL_KWARGS,
-        "schedule": INTERVAL_SCHEDULE,
-        "enabled": True,
-    }
+    record = _record("dup")
 
     async with _redis_bound(dst, job_cls=_FailingAbortJob):
         result = await tools.backend_import_schedules([record], "overwrite")
@@ -291,18 +307,23 @@ async def test_pending_abort_confirmation_does_not_block_import(fake_redis) -> N
     at pick-up) is the expected asynchronous outcome: the import proceeds and
     the schedule is overwritten."""
     dst = fake_redis
-    _seed_schedule(dst, name="dup", schedule=INTERVAL_SCHEDULE, kwargs=INTERVAL_KWARGS, enabled=True)
+    _seed_schedule(dst, name="dup", schedule=INTERVAL_CADENCE, kwargs=INTERVAL_KWARGS, enabled=True)
 
-    record = {
-        "name": "dup",
-        "args": [],
-        "kwargs": INTERVAL_KWARGS,
-        "schedule": INTERVAL_SCHEDULE,
-        "enabled": True,
-    }
+    record = _record("dup")
 
     async with _redis_bound(dst, job_cls=_PendingAbortJob):
         result = await tools.backend_import_schedules([record], "overwrite")
 
     assert result == {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": []}
     assert _read_hash(dst, "dup")[b"job_id"] != b"seed-job"
+
+
+async def test_import_refuses_a_relative_interval_per_row(fake_redis) -> None:
+    dst = fake_redis
+    relative = _record("rel", cadence={"kind": "interval", "every": 60.0, "relative": True})
+    result = await _import(dst, [_record("good"), relative])
+    assert result["created"] == 1
+    (error,) = result["errors"]
+    assert error["name"] == "rel"
+    assert "does not support relative interval schedules" in error["error"]
+    assert "arq:schedule:rel" not in dst._store
