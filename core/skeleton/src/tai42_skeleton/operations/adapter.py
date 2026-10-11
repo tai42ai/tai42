@@ -16,7 +16,7 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
 from fastmcp.utilities.types import Audio, File, Image
 from pydantic import BaseModel, ValidationError
@@ -111,18 +111,39 @@ def parse_json_object(raw: bytes) -> dict[str, Any]:
 
 
 def validate_body[M: BaseModel](model: type[M], body: object, what: str) -> M:
-    """``body`` validated as ``model``; ``BadRequestError("invalid <what>: …")`` naming each violated rule.
+    """``body`` validated as ``model``; ``BadRequestError("invalid <what>: <field>: <rule>; …")``.
 
     ``body`` is any decoded JSON value: a value that is not an object is refused by the model's own
-    rule ("Input should be a valid dictionary or instance of …").
-
-    Value-free: each pydantic error's ``msg`` names the bound it violates, never the input, so the
-    refusal never echoes what was sent.
+    rule ("Input should be a valid dictionary or instance of …"). Value-free: each refusal names the
+    declared field path and the bound it violates (pydantic's ``msg``), never the input — a path
+    stops at the first part that is not a declared field (a mapping key or a list index the caller
+    chose).
     """
     try:
         return model.model_validate(body)
     except ValidationError as exc:
-        raise BadRequestError(f"invalid {what}: " + "; ".join(error["msg"] for error in exc.errors())) from exc
+        refusals = (_refusal(model, error["loc"], error["msg"]) for error in exc.errors())
+        raise BadRequestError(f"invalid {what}: " + "; ".join(refusals)) from exc
+
+
+def _refusal(model: type[BaseModel], loc: tuple[int | str, ...], msg: str) -> str:
+    """``<declared field path>: <rule>``, or the rule alone when the path names no declared field."""
+    path: list[str] = []
+    current: type[BaseModel] | None = model
+    for part in loc:
+        if current is None or not isinstance(part, str) or part not in current.model_fields:
+            break
+        path.append(part)
+        current = _model_of(current.model_fields[part].annotation)
+    return f"{'.'.join(path)}: {msg}" if path else msg
+
+
+def _model_of(annotation: Any) -> type[BaseModel] | None:
+    """The one pydantic model an annotation holds (``M`` or ``M | None``), else ``None``."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    models = [arg for arg in get_args(annotation) if isinstance(arg, type) and issubclass(arg, BaseModel)]
+    return models[0] if len(models) == 1 else None
 
 
 def request_with_body(request: Request, body: bytes) -> Request:
