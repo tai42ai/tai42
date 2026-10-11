@@ -13,6 +13,7 @@ rows carry a settable PTTL, so an apply that fades a row is exactly what these d
 from __future__ import annotations
 
 import logging
+import signal
 
 import pytest
 
@@ -250,27 +251,61 @@ async def test_a_non_member_publisher_applies_nothing_locally_and_its_member_con
     assert [row["name"] for row in body["results"]] == ["backend-1"]
 
 
-def test_the_writer_exit_of_a_non_member_aims_at_the_member_it_acts_for(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tai42_skeleton.app.graceful_exit import request_graceful_exit
+async def test_the_writer_exit_of_a_non_member_aims_at_the_member_it_acts_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tai42_skeleton.app import graceful_exit
     from tai42_skeleton.operations._broadcast import writer_exit_response
 
     _fork_child_bus(monkeypatch)
+    kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(graceful_exit.os, "kill", lambda pid, sig: kills.append((pid, sig)))
 
     response = writer_exit_response({"status": "ok"}, armed=True)
-
     assert response.background is not None
-    assert response.background.func is request_graceful_exit
-    assert response.background.args == (1,)
+    await response.background()
+
+    assert kills == [(1, signal.SIGTERM)]
 
 
-def test_the_writer_exit_of_a_member_aims_at_itself(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tai42_skeleton.app.graceful_exit import request_graceful_exit
+async def test_the_writer_exit_of_a_member_aims_at_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.app import graceful_exit
     from tai42_skeleton.operations._broadcast import writer_exit_response
 
     bus = _install(monkeypatch, FakeBus(origin="serve-a"))
+    kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(graceful_exit.os, "kill", lambda pid, sig: kills.append((pid, sig)))
 
     response = writer_exit_response({"status": "ok"}, armed=True)
-
     assert response.background is not None
-    assert response.background.func is request_graceful_exit
-    assert response.background.args == (bus.identity.pid,)
+    await response.background()
+
+    assert kills == [(bus.identity.pid, signal.SIGTERM)]
+
+
+async def test_a_preset_fan_out_from_a_non_member_carries_no_self_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A preset write run inside a forked job child: the child is never a fleet target, so its
+    # reload and removal fan-outs publish no self entry and the member parent loads the change as
+    # a sibling.
+    from tai42_skeleton.operations.presets import fanout
+
+    bus = _fork_child_bus(monkeypatch)
+
+    reloaded = await fanout._fanout_reload("p1", None)
+    removed = await fanout._fanout_remove("p1", None)
+
+    assert [call[2] for call in bus.publish_calls] == [None, None]
+    assert [row.name for row in reloaded.results] == ["backend-1"]
+    assert [row.name for row in removed.results] == ["backend-1"]
+
+
+async def test_a_preset_fan_out_from_a_member_carries_its_applied_self_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.operations.presets import fanout
+
+    bus = _install(monkeypatch, FakeBus(origin="serve-a", remotes=["serve-b"]))
+
+    await fanout._fanout_reload("p1", None)
+
+    local = bus.publish_calls[0][2]
+    assert local is not None
+    assert local.outcome == OpOutcome.applied
