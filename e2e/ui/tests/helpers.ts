@@ -36,6 +36,12 @@ export const LLM_CONTROL_URL = `http://127.0.0.1:${String(LLM_PORT)}`;
 /** The stub OAuth IdP control origin the connectors spec flips its denial knob on. */
 export const IDP_CONTROL_URL = `http://127.0.0.1:${String(IDP_PORT)}`;
 
+/** The pinned port of the OAuth-protected MCP server fixture (its own sign-in service). */
+export const OAUTH_MCP_PORT = Number(process.env.TAI_E2E_UI_OAUTH_MCP_PORT ?? 8773);
+
+/** The fixture's MCP endpoint: the address the connectors spec adds a server by. */
+export const OAUTH_MCP_URL = `http://127.0.0.1:${String(OAUTH_MCP_PORT)}/mcp`;
+
 /**
  * The pinned marketplace coordinates, forwarded to the runner by
  * `playwright.config.ts` and addressed directly by the marketplace specs. The
