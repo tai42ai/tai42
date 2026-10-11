@@ -67,8 +67,9 @@ def test_validate_body_names_each_rule_and_never_the_value() -> None:
         validate_body(_Probe, {"name": "s3", "count": "secret-value"}, "probe params")
     message = excinfo.value.message
     assert message.startswith("invalid probe params: ")
-    assert "at least 3 characters" in message
-    assert "valid integer" in message
+    # Each refusal names the field it is about (a path, never a value) beside the rule.
+    assert "name: String should have at least 3 characters" in message
+    assert "count: Input should be a valid integer" in message
     assert "secret-value" not in message
     assert "s3" not in message
 
