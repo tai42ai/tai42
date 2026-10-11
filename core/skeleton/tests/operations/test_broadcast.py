@@ -107,6 +107,29 @@ async def test_op_start_census_failure_is_loud_but_never_aborts_the_op(
     assert "op-start census" in warnings[0].getMessage()
 
 
+async def test_a_bus_broadcast_that_reached_no_sibling_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A broadcast that went over a configured bus but found no other worker on the
+    # census (every sibling's presence gone by publish time) reads as exactly that,
+    # never as a deployment with no bus.
+    _install(monkeypatch, FakeBus(origin="serve-a", remotes=[]))
+    over_the_bus = FleetResult(op="reload", results=[WorkerResult(name="serve-a", outcome=OpOutcome.applied)])
+    assert fleet_fanout(over_the_bus) == {
+        "mode": "local-only",
+        "note": "no other worker is on the worker bus; only this worker reloaded",
+    }
+
+
+async def test_a_busless_broadcast_says_no_bus_is_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, FakeBus(origin="serve-a", remotes=[]))
+    busless = FleetResult(
+        op="reload", local_only=True, results=[WorkerResult(name="serve-a", outcome=OpOutcome.applied)]
+    )
+    assert fleet_fanout(busless) == {
+        "mode": "local-only",
+        "note": "no worker bus configured; only this worker reloaded",
+    }
+
+
 async def test_fanout_body_carries_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     # Every serialized fanout body carries convergence: the ``ok`` computed field
     # rides through the ``fleet`` and ``unreachable`` branches; the ``local-only``

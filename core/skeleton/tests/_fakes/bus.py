@@ -16,6 +16,10 @@ fresh/decayed rows through the real :func:`~tai42_skeleton.app.bus.presence_fres
 predicate; the fake carries a ``ttl`` alongside the rows rather than mimicking the
 freshness bound itself. Only these census/rows consumers honor freshness: ``publish``
 returns every configured remote unconditionally, never consulting ``pttl_ms``/state.
+
+``remotes`` left out models a busless worker: ``publish`` returns the ``local_only``
+result the real no-op bus (:meth:`~tai42_skeleton.app.bus.WorkerBus.local`) returns. An
+explicit list — empty included — models a configured bus with those siblings on it.
 """
 
 from __future__ import annotations
@@ -63,6 +67,7 @@ class FakeBus:
         self._member: WorkerIdentity | None = None
         self._self_row = _row(origin, WorkerKind.serve, pid=1, generation=1, pttl_ms=fresh)
         self._remote_rows = [_row(o, WorkerKind.serve, pid=2, generation=1, pttl_ms=fresh) for o in (remotes or [])]
+        self._busless = remotes is None
         self.publish_calls: list[tuple[dict[str, Any], list[str] | None, LocalApplyResult | None]] = []
         self.validate_calls: list[list[str] | None] = []
         # The pre-apply expected-membership snapshot each publish carried, recorded
@@ -139,4 +144,4 @@ class FakeBus:
         )
         for name in reached:
             results.append(WorkerResult(name=name, outcome=OpOutcome.applied))
-        return FleetResult(op=op["op"], results=results)
+        return FleetResult(op=op["op"], local_only=self._busless, results=results)
