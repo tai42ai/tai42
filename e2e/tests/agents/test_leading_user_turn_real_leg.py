@@ -5,9 +5,9 @@ request whose first non-system message is an assistant turn. No provider package
 sending, so the provider's own answer is the proof: on the real ``llm`` leg
 (``REAL_E2E_LLM_PROVIDER`` / ``REAL_E2E_LLM_MODEL``) this sends that history BARE and checks the
 outcome matches the recorded value, and sends the same history led by ``lead_with_user`` and checks
-the provider accepts it. A mismatch is a red: the recorded value is then corrected. For a
-self-served provider (ollama, huggingface) only the led request is checked — the served model's
-chat template decides, not the provider. Skipped on the mock leg; it never runs in CI.
+the provider accepts it. A mismatch is a red: the recorded value is then corrected. The harness
+selects only hosted providers (``tai42_e2e.settings.LLM_PROVIDERS``). Skipped on the mock leg; it
+never runs in CI.
 """
 
 from __future__ import annotations
@@ -47,8 +47,6 @@ pytestmark = [
     ),
 ]
 
-_SELF_SERVED = frozenset({"ollama", "huggingface"})
-
 _ASSISTANT_FIRST: list[AnyMessage] = [SystemMessage("s"), AIMessage("opener"), HumanMessage("hi")]
 
 
@@ -79,8 +77,6 @@ async def test_the_led_history_is_accepted() -> None:
 
 async def test_the_bare_assistant_first_history_matches_the_recorded_value() -> None:
     provider, llm = _model()
-    if provider in _SELF_SERVED:
-        pytest.skip(f"{provider} serves the model's own chat template; the led request is the check")
     if requires_leading_user_turn(provider):
         # Recorded True: the provider refuses the bare history as an invalid request. Accepted here
         # means record False; any other failure (auth, network, a client-side error) is not a refusal.
