@@ -168,7 +168,8 @@ def test_schedules_add_sends_the_door_contract_flags(monkeypatch: pytest.MonkeyP
         assert body["cancel_expr"] == {"content": "$parked[].id"}
         assert body["resume_expr"] == {"content": "$parked[0].id"}
         assert body["extras_expr"] == {"content": "{warm: .seed}"}
-        assert body["state_binding"] == _BINDING
+        assert body["state_binding"]["states"][0]["state"] == "status"
+        assert body["state_binding"]["states"][0]["templates"] == ["t1"]
         return data_response({"name": "report"})
 
     result = run_cli(

@@ -101,7 +101,9 @@ async def test_a_typed_crontab_dispatches_the_vehicle_with_the_cadence_key():
     assert captured[0]["kwargs"] == {"payload": "x"}
     assert result == {"scheduled": captured[0]["name"]}
     assert calls == []
-    assert [(row.name, row.tool, row.cadence) for row in rows] == [(captured[0]["name"], "demo_report", _CRON)]
+    assert [(row["name"], row["tool"], row["cadence"]) for row in rows] == [
+        (captured[0]["name"], "demo_report", _CRON.model_dump(mode="json"))
+    ]
 
 
 async def test_a_typed_interval_dispatches_the_vehicle():
@@ -198,7 +200,7 @@ async def test_the_backup_section_round_trips_through_the_fake_backend():
     assert exported[0]["tool"] == "demo_report"
     assert (report.created, report.updated, report.skipped) == (1, 0, 0)
     assert again.details == {"skipped_existing": 1}
-    assert [row.name for row in listed] == ["m"]
+    assert [row["name"] for row in listed] == ["m"]
 
 
 async def test_a_tool_is_schedulable_when_its_vehicle_is_registered():
