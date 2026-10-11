@@ -99,6 +99,7 @@ def test_the_callback_prefix_is_the_start_of_every_minted_callback_url(base: str
     ticket = mint_callback_ticket(settings, window, "sync", force=True)
     assert ticket is not None
     prefix = callback_url_prefix(settings)
+    assert prefix is not None
     assert prefix == f"{base.rstrip('/')}/api/interactions/callback/"
     assert ticket.callback_url == f"{prefix}{ticket.ticket}"
     # Every URL the platform mints passes the pin against its own prefix.

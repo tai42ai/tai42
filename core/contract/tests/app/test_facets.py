@@ -317,11 +317,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 153 (sub-protocol, member) pairs over 149 distinct names — ``store`` is exposed
+    # 154 (sub-protocol, member) pairs over 150 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 149, f"union={len(union)}"
-    assert total == 153 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 150, f"union={len(union)}"
+    assert total == 154 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_five_namespaces():
