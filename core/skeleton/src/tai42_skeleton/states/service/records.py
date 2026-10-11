@@ -291,7 +291,7 @@ class _RecordMixin(_StatesServiceBase):
         await drained(self, lambda: self._store.erase_subject(state, subject, origin=completed))
 
     async def fold(
-        self, state: str, subject: StateSubject, into: StateSubject, mode: FoldMode, *, origin: WriteOrigin
+        self, state: str, subject: StateSubject, into: StateSubject, mode: str, *, origin: WriteOrigin
     ) -> dict[str, Any]:
         """Fold ``subject`` into ``into`` (``switch`` drops, ``merge`` combines; survivor wins), return the report."""
         self._ensure_available()
