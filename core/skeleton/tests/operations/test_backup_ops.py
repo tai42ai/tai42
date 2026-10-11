@@ -4,6 +4,7 @@ document)."""
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -284,7 +285,6 @@ async def test_the_env_section_restore_reports_the_workers_still_awaiting_a_resp
 async def test_a_projected_env_restore_whose_recycle_converged_runs_the_writer_self_exit_after_its_reply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import asyncio
 
     from tai42_contract.manifest import ApiToolsConfig
 
@@ -317,6 +317,13 @@ async def test_a_projected_env_restore_whose_recycle_converged_runs_the_writer_s
     )
 
     assert reply.sections["env"].recycle.recycle[-1].status == "self-deferred"
-    for _ in range(3):
-        await asyncio.sleep(0)
+    await _the_post_reply_tasks_finished()
     assert exits == ["sigterm"]
+
+
+async def _the_post_reply_tasks_finished() -> None:
+    """Let the projection start the post-reply tasks the call armed, then wait for them to finish."""
+    from tai42_skeleton.operations import projection
+
+    await asyncio.sleep(0)
+    await asyncio.gather(*projection._AFTER_REPLY_TASKS)

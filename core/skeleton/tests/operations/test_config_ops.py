@@ -377,8 +377,11 @@ def _record_exits(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 async def _let_the_post_reply_task_run() -> None:
-    for _ in range(3):
-        await asyncio.sleep(0)
+    """Let the projection start the post-reply tasks the call armed, then wait for them to finish."""
+    from tai42_skeleton.operations import projection
+
+    await asyncio.sleep(0)
+    await asyncio.gather(*projection._AFTER_REPLY_TASKS)
 
 
 async def test_a_projected_env_write_runs_the_writer_self_exit_after_its_reply(monkeypatch: pytest.MonkeyPatch) -> None:

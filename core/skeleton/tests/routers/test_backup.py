@@ -71,7 +71,8 @@ def _report(*, created: int = 0, updated: int = 0, skipped: int = 0, skipped_exi
     """The section report's wire shape, defaulting every count to zero — the router tests
     assert exact reports, so this keeps them terse and one place to evolve. The platform
     reads the typed counts; ``skipped_existing`` rides the open ``details`` map, and
-    ``fanout`` and ``recycle`` are ``null`` for a section whose restore broadcasts nothing."""
+    ``fanout`` and ``recycle`` are ``null`` and ``awaiting_respawn`` is empty for a section whose
+    restore broadcasts nothing."""
     return {
         "created": created,
         "updated": updated,
@@ -80,6 +81,7 @@ def _report(*, created: int = 0, updated: int = 0, skipped: int = 0, skipped_exi
         "details": {"skipped_existing": skipped_existing},
         "fanout": None,
         "recycle": None,
+        "awaiting_respawn": [],
     }
 
 
@@ -990,6 +992,7 @@ async def test_plugin_section_round_trips_through_both_doors(monkeypatch):
         "details": {},
         "fanout": None,
         "recycle": None,
+        "awaiting_respawn": [],
     }
     assert store == {"value": "seeded"}
 

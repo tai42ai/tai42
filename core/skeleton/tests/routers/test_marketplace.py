@@ -11,6 +11,7 @@ status mapping (502/404/409/500 and the retriable 503s).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -569,7 +570,6 @@ async def test_an_install_whose_env_recycle_stopped_names_the_workers_awaiting_a
 async def test_a_projected_install_whose_env_recycle_converged_runs_the_writer_self_exit_after_its_reply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import asyncio
 
     from tai42_contract.manifest import ApiToolsConfig
 
@@ -604,8 +604,7 @@ async def test_a_projected_install_whose_env_recycle_converged_runs_the_writer_s
 
     assert [entry["status"] for entry in reply["reload"]["recycle"]["recycle"]] == ["recycled", "self-deferred"]
     assert reply["reload"]["awaiting_respawn"] == []
-    for _ in range(3):
-        await asyncio.sleep(0)
+    await _the_post_reply_tasks_finished()
     assert exits == ["sigterm"]
 
 
@@ -847,3 +846,11 @@ async def test_upgrade_all_off_refuses_not_configured(monkeypatch: pytest.Monkey
     with pytest.raises(NotSupportedError) as exc_info:
         await mkt_ops.marketplace_upgrade_all()
     assert exc_info.value.extra["code"] == "marketplace-not-configured"
+
+
+async def _the_post_reply_tasks_finished() -> None:
+    """Let the projection start the post-reply tasks the call armed, then wait for them to finish."""
+    from tai42_skeleton.operations import projection
+
+    await asyncio.sleep(0)
+    await asyncio.gather(*projection._AFTER_REPLY_TASKS)
