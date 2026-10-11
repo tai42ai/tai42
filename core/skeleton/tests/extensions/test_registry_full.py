@@ -106,9 +106,9 @@ def test_validate_passes_for_single_backend():
 def test_element_helpers_extract_name_and_config():
     assert extension_name("monitor") == "monitor"
     assert extension_config("monitor") == {}
-    element = {"name": "ask_external", "config": {"verifier": {"name": "github"}}}
+    element = {"name": "ask_external", "config": {"verifier": {"verifier": "github"}}}
     assert extension_name(element) == "ask_external"
-    assert extension_config(element) == {"verifier": {"name": "github"}}
+    assert extension_config(element) == {"verifier": {"verifier": "github"}}
 
 
 def test_registry_lookups_key_on_dict_element_name():
@@ -117,7 +117,7 @@ def test_registry_lookups_key_on_dict_element_name():
     # the bare name.
     reg = ExtensionRegistry(requested_extensions=frozenset())
     reg.register_extension(_noop, ExtensionKind.TRANSFORMER, "ask_external")
-    element = {"name": "ask_external", "config": {"verifier": {"name": "github"}}}
+    element = {"name": "ask_external", "config": {"verifier": {"verifier": "github"}}}
     reg.validate([element])  # no raise
     assert reg.get_extension(element) is _noop
     assert reg.get_kind(element) is ExtensionKind.TRANSFORMER

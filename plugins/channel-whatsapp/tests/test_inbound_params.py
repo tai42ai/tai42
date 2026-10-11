@@ -9,6 +9,7 @@ pending question surfaces none.
 from __future__ import annotations
 
 import pytest
+from prometheus_client import REGISTRY
 from tai42_contract.channels import InboundAnswerOutcome
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (route registration side-effect)
@@ -170,6 +171,36 @@ async def test_referral_and_context_merge_with_reply_id_on_a_tap(
     assert call["params"] == {"reply_id": "int-1:0", "context_message_id": "wamid.QUOTED"}
 
 
+def _dropped(unit: str) -> float:
+    return REGISTRY.get_sample_value("tai_entry_params_dropped_total", {"door": "whatsapp", "unit": unit}) or 0.0
+
+
+async def test_an_over_bound_params_set_bridges_without_params_and_is_counted(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    # Each value is within its cap but the set as a whole is over the total-bytes bound: the
+    # door DROPS the set (Meta redelivers a 5xx forever), logs one WARNING and counts it, and
+    # the participant's message still bridges.
+    message = {
+        "id": _WAMID,
+        "from": WA_ID,
+        "type": "text",
+        "text": {"body": "hi"},
+        "referral": dict.fromkeys(("source_url", "source_id", "source_type", "headline", "body"), "y" * 500),
+        "context": {"id": "z" * 500},
+    }
+    before = _dropped("set")
+    with caplog.at_level("WARNING"):
+        result = await handler(signed_request(_params_envelope(message)))
+
+    assert result.status_code == 200
+    (call,) = stub_app.conversations.accept_calls
+    assert call["text"] == "hi"
+    assert call["params"] is None
+    assert _dropped("set") == before + 1
+    assert [r for r in caplog.records if "whatsapp entry params dropped" in r.getMessage()]
+
+
 async def test_oversized_param_value_is_dropped_not_5xx(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
@@ -182,8 +213,16 @@ async def test_oversized_param_value_is_dropped_not_5xx(
         "text": {"body": "hi"},
         "referral": {"source_id": "ad-1", "headline": "x" * 600},
     }
-    result = await handler(signed_request(_params_envelope(message)))
+    before = _dropped("value")
+    with caplog.at_level("WARNING"):
+        result = await handler(signed_request(_params_envelope(message)))
 
     assert result.status_code == 200
     (call,) = stub_app.conversations.accept_calls
     assert call["params"] == {"referral_source_id": "ad-1"}  # the 600-char headline dropped
+    # The per-value drop is a WARNING naming the door and the key, never the value, and is counted.
+    drops = [r for r in caplog.records if r.levelname == "WARNING" and "referral_headline" in r.getMessage()]
+    assert len(drops) == 1
+    assert "whatsapp" in drops[0].getMessage()
+    assert "x" * 600 not in drops[0].getMessage()
+    assert _dropped("value") == before + 1

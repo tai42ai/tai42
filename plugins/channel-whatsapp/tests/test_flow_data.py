@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from starlette.responses import Response
+from tai42_contract.interactions import FieldChangedEvent
 from tai42_kit.settings import reset_all_settings
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (registers the /flow-data route on the bound stub app)
@@ -147,7 +148,7 @@ async def test_field_changed_routes_to_react_and_applies_the_update(
 
     call = stub.react_calls[-1]
     assert call["interaction_id"] == _TOKEN
-    assert call["event"] == {"kind": "field_changed", "field": "tier"}
+    assert call["event"] == FieldChangedEvent(field="tier")
     # The number field was coerced; the markers were stripped from the partial values.
     assert call["partial_values"] == {"tier": "g", "qty": 5}
     out = _decrypt_response(response, aes_key, iv)

@@ -1318,3 +1318,49 @@ async def test_unmappable_content_notifies_rejection_and_makes_no_turn(http_reco
     assert rejected.sender_identity == "123456"
     assert rejected.kind == "poll"
     assert rejected.reason is InboundRejectionReason.UNSUPPORTED_TYPE
+
+
+def _dropped(unit: str) -> float:
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value("tai_entry_params_dropped_total", {"door": "telegram", "unit": unit}) or 0.0
+
+
+async def test_an_over_cap_reply_param_value_is_dropped_with_a_warning_and_counted(
+    http_recorder, fake_redis, channels, conversations, caplog
+):
+    # An authored description over the per-value cap is DROPPED (never truncated): one WARNING
+    # names the door and the key (never the value), the drop is counted, and the id still rides.
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    long_description = "d" * 600
+    _seed_option_records(
+        fake_redis,
+        [{"callback_data": "yes-1", "text": "Yes", "id": "yes-1", "description": long_description}],
+    )
+    before = _dropped("value")
+    with caplog.at_level("WARNING"):
+        await inbound(make_inbound_request(_callback_update(data="yes-1"), headers=_VALID_HEADERS))
+
+    assert conversations.accept_calls[0].params == {"reply_id": "yes-1"}
+    assert _dropped("value") == before + 1
+    drops = [r for r in caplog.records if r.levelname == "WARNING" and "reply_description" in r.getMessage()]
+    assert len(drops) == 1
+    assert "telegram" in drops[0].getMessage()
+    assert long_description not in drops[0].getMessage()
+
+
+async def test_an_over_bound_params_set_bridges_without_params_and_is_counted(fake_redis, conversations, caplog):
+    # Telegram redelivers a 5xx forever: an over-bound set is DROPPED and the turn proceeds.
+    from tai42_channel_telegram.inbound_bridge import _bridge
+    from tai42_channel_telegram.settings import telegram_settings
+
+    before = _dropped("set")
+    over_bound = {f"k{i}": "v" for i in range(17)}
+    with caplog.at_level("WARNING"):
+        await _bridge(telegram_settings(), 777, "hello", {"update_id": 9001}, params=over_bound)
+
+    (call,) = conversations.accept_calls
+    assert call.params is None
+    assert call.text == "hello"
+    assert _dropped("set") == before + 1
+    assert [r for r in caplog.records if "telegram entry params dropped" in r.getMessage()]

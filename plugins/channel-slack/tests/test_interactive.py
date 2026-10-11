@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 import httpx
 import pytest
 from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
+from tai42_contract.interactions import FieldChangedEvent, SubmittedEvent
 
 from tai42_channel_slack.blocks import REPLY_ACTION_PREFIX, SELECT_ACTION_PREFIX, encode_reply_value
 from tai42_channel_slack.correlation import store_correlation, store_form_record
@@ -656,7 +657,7 @@ async def test_field_change_runs_reaction_and_applies_the_update(fake_redis, htt
     assert body_json(response) == {"status": "updated"}
     (call,) = interactions.react_calls
     assert call.interaction_id == _INTERACTION_ID
-    assert call.event == {"kind": "field_changed", "field": "qty"}
+    assert call.event == FieldChangedEvent(field="qty")
     assert call.partial_values == {"qty": 1}  # the values filled so far, before the update
     view = json.loads(http_script.requests[0].content)["view"]
     by_id = {b["block_id"]: b for b in view["blocks"] if b["type"] == "input"}
@@ -748,7 +749,7 @@ async def test_view_submission_submitted_reaction_errors_keep_the_modal_open(fak
 
     assert body_json(response) == {"response_action": "errors", "errors": {"full_name": "not allowed"}}
     (call,) = interactions.react_calls
-    assert call.event == {"kind": "submitted"}
+    assert call.event == SubmittedEvent()
     assert channels.inbound_calls == []  # the answer was NOT forwarded — the consumer refused it
 
 
@@ -761,7 +762,7 @@ async def test_view_submission_submitted_reaction_clean_forwards_the_answer(fake
 
     assert body_json(response) == {}  # forwarded closes the modal
     (call,) = interactions.react_calls
-    assert call.event == {"kind": "submitted"}
+    assert call.event == SubmittedEvent()
     assert call.partial_values == {"full_name": "Alice", "count": 3}
     (forwarded,) = channels.inbound_calls
     assert forwarded.answer == {"full_name": "Alice", "count": 3}

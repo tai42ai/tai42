@@ -62,7 +62,7 @@ async def test_link_forbidden_without_external():
 
 async def test_verifier_forbidden_without_external():
     with pytest.raises(ValueError, match="verifier is only valid with answer_format 'external'"):
-        await ask("q", verifier={"name": "github", "config": {}})
+        await ask("q", verifier={"verifier": "github", "config": {}})
 
 
 async def test_external_rejects_options(monkeypatch, fake_redis, fake_client_ctx):

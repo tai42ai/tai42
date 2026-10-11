@@ -251,7 +251,7 @@ def test_livemode_mismatch_lands_in_failed_not_rejected(stripe_env: Callable[...
 
 
 @pytest.mark.usefixtures("curl_app")
-def test_ssrf_refusal_lands_in_failed(stripe_env: Callable[..., None], stub_server: Any) -> None:
+def test_a_callback_pin_refusal_lands_in_failed(stripe_env: Callable[..., None], stub_server: Any) -> None:
     stripe_env(
         secret_key="sk_test_abc",
         api_base=stub_server.base_url,
@@ -265,8 +265,10 @@ def test_ssrf_refusal_lands_in_failed(stripe_env: Callable[..., None], stub_serv
     ]
     stub_server.set_responder(_router([_list_page(sessions)], _door_by_ticket({"fresh": _ANSWERED})))
 
-    with pytest.raises(ValueError, match="failed"):
+    with pytest.raises(ValueError, match="failed") as caught:
         asyncio.run(reconcile_stripe_payments())
+    # The kit's CallbackUrlRefusedError is collected into ``failed``; its text names the host only.
+    assert "callback URL refused (host_mismatch); target host 'evil.tld'" in str(caught.value)
 
 
 @pytest.mark.usefixtures("curl_app")

@@ -21,6 +21,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome, InboundAnswerResult
+from tai42_contract.interactions import FormReactionEvent
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -267,7 +268,9 @@ class _StubInteractions:
         self.react_result: dict[str, Any] = {}
         self.react_error: BaseException | None = None
 
-    async def react(self, interaction_id: str, event: dict[str, Any], partial_values: dict[str, Any]) -> dict[str, Any]:
+    async def react(
+        self, interaction_id: str, event: FormReactionEvent, partial_values: dict[str, Any]
+    ) -> dict[str, Any]:
         self.react_calls.append({"interaction_id": interaction_id, "event": event, "partial_values": partial_values})
         if self.react_error is not None:
             raise self.react_error

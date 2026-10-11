@@ -228,3 +228,28 @@ async def test_bot_user_id_unset_does_not_block_ask_path(fake_redis, channels, s
     assert body_json(response) == {"status": "forwarded"}
     assert stub_conversations.accept_calls == []
     assert channels.inbound_calls[0].bridge.our_identity == ""  # unset id degrades to empty
+
+
+async def test_an_over_bound_params_set_bridges_without_params_and_is_counted(fake_redis, stub_conversations, caplog):
+    # Slack redelivers a 5xx forever, so the door DROPS an over-bound set: the participant's
+    # message still bridges (without params), one WARNING names the door, and the drop is counted.
+    from prometheus_client import REGISTRY
+
+    from tai42_channel_slack.inbound.routing import _bridge
+
+    def _dropped() -> float:
+        return REGISTRY.get_sample_value("tai_entry_params_dropped_total", {"door": "slack", "unit": "set"}) or 0.0
+
+    before = _dropped()
+    over_bound = {f"k{i}": "v" for i in range(17)}
+    with caplog.at_level("WARNING"):
+        response = await _bridge("U-BOT", "C-1", "hello", "Ev-1", params=over_bound)
+
+    assert body_json(response) == {"status": "accepted"}
+    (call,) = stub_conversations.accept_calls
+    assert call.params is None
+    assert call.text == "hello"
+    assert _dropped() == before + 1
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "entry params dropped" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "slack" in warnings[0].getMessage()

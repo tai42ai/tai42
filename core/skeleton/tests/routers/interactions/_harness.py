@@ -416,7 +416,7 @@ class _FakeVerifier:
         return FreshnessWindow()
 
 
-_BINDING = {"name": "prov", "config": {"secret_env": "WH"}}
+_BINDING = {"verifier": "prov", "config": {"secret_env": "WH"}}
 
 
 async def _answer_bound(wired, *, answer=None, ticket="TKT", iid="i1", gid="g1") -> None:

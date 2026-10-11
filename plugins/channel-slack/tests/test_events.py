@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
-from tai42_contract.conversations import InboundMediaKind, InboundRejectionReason
+from tai42_contract.conversations import InboundRejectionReason
 from tai42_contract.interactions import (
     MediaSourceReadError,
     MediaStoreUnavailableError,
@@ -22,7 +22,7 @@ from tai42_contract.interactions.models import MediaKind
 from tai42_kit.net import MediaFetchError
 from tai42_kit.settings import reset_all_settings
 
-from tai42_channel_slack.inbound.events import _media_kind, slack_inbound
+from tai42_channel_slack.inbound.events import slack_inbound
 
 from .conftest import (
     TEST_ALLOWED_RECIPIENT,
@@ -374,23 +374,6 @@ async def test_thread_broadcast_without_pending_question_bridges(fake_redis, stu
     (call,) = stub_conversations.accept_calls
     assert call.text == "yes, deploy it"
     assert call.client_address == TEST_DEFAULT_RECIPIENT
-
-
-@pytest.mark.parametrize(
-    ("mimetype", "kind"),
-    [
-        ("image/png", InboundMediaKind.IMAGE),
-        ("video/mp4", InboundMediaKind.VIDEO),
-        ("audio/mpeg", InboundMediaKind.AUDIO),
-        ("application/pdf", InboundMediaKind.DOCUMENT),
-        ("text/plain", InboundMediaKind.DOCUMENT),
-        ("model/gltf-binary", InboundMediaKind.FILE),
-        (None, InboundMediaKind.FILE),
-        ("", InboundMediaKind.FILE),
-    ],
-)
-def test_media_kind_maps_by_major_type(mimetype, kind):
-    assert _media_kind(mimetype) is kind
 
 
 _OPEN_ATTR = "tai42_channel_slack.inbound.events.open_media_stream"

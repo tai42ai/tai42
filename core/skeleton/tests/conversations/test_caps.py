@@ -8,13 +8,14 @@ import asyncio
 import logging
 
 import pytest
+from tai42_contract.conversations import ThreadQueueOverflowError
 from tai42_kit.clients.base import advance_client_epoch, current_client_epoch
 from tai42_kit.settings import reset_all_settings, sweep_stale_settings
 
 from tai42_skeleton.app.retired_generations import certify_retired_generation
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import thread_lease as thread_lease_module
-from tai42_skeleton.conversations.caps import AddressAdmission, ThreadBusyError, ThreadQueueOverflowError, TurnCaps
+from tai42_skeleton.conversations.caps import AddressAdmission, ThreadBusyError, TurnCaps
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
 from .conftest import fixed_settings

@@ -110,6 +110,10 @@ class _InteractionsFacet:
         # The platform redelivery horizon the resolution-record TTL derives from (2x); 24h default.
         return 24 * 60 * 60
 
+    def callback_url_prefix(self) -> str | None:
+        # No public base in the local test app: the platform mints no callback URL.
+        return None
+
     async def assert_resume_authorized(self, interaction_id: str) -> None:
         # Permissive in the local test app: the driver faces call it, and the real platform gates.
         return None

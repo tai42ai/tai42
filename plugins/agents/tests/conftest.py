@@ -362,6 +362,10 @@ class RecordingInteractions:
     def redelivery_horizon_seconds(self) -> int:
         return self.redelivery_horizon
 
+    def callback_url_prefix(self) -> str | None:
+        # No public base in the agents tests: the platform mints no callback URL.
+        return None
+
     async def assert_resume_authorized(self, interaction_id: str) -> None:
         self.resume_auth_calls.append(interaction_id)
         if not self.resume_authorized:

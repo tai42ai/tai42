@@ -13,10 +13,10 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.routing import Route
 from starlette.testclient import TestClient
-from tai42_contract.conversations import ConversationAnswer
+from tai42_contract.conversations import ConversationAnswer, ThreadQueueOverflowError
 
 import tai42_skeleton.conversations as conversations_package
-from tai42_skeleton.conversations.caps import AddressRateLimitedError, ThreadQueueOverflowError
+from tai42_skeleton.conversations.caps import AddressRateLimitedError
 from tai42_skeleton.conversations.turn import (
     ApiSubmitResult,
     ConversationRouteResolutionError,

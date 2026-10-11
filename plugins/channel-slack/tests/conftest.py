@@ -28,6 +28,7 @@ import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome, InboundAnswerResult
+from tai42_contract.interactions import FormReactionEvent
 from tai42_contract.interactions.models import (
     MEDIA_ROUTE_PREFIX,
     IngestedMedia,
@@ -146,7 +147,9 @@ class _StubInteractions:
         self.react_result = {}
         self.react_error = None
 
-    async def react(self, interaction_id: str, event: dict[str, Any], partial_values: dict[str, Any]) -> dict[str, Any]:
+    async def react(
+        self, interaction_id: str, event: FormReactionEvent, partial_values: dict[str, Any]
+    ) -> dict[str, Any]:
         self.react_calls.append(
             SimpleNamespace(interaction_id=interaction_id, event=event, partial_values=partial_values)
         )

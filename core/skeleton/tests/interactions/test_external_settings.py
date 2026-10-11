@@ -80,3 +80,43 @@ def test_public_base_url_http_non_localhost_rejected():
 @pytest.mark.parametrize("base", ["https://host.example", "http://localhost:8080", "http://127.0.0.1"])
 def test_public_base_url_accepted(base: str):
     assert InteractionsSettings(public_base_url=base).public_base_url == base
+
+
+@pytest.mark.parametrize("base", ["https://host.example", "https://host.example/", "https://host.example/base"])
+def test_the_callback_prefix_is_the_start_of_every_minted_callback_url(base: str):
+    from datetime import UTC, datetime, timedelta
+
+    from tai42_kit.interactions import pin_callback_url
+
+    from tai42_skeleton.interactions.ask.timing import DeadlineWindow, mint_callback_ticket
+    from tai42_skeleton.interactions.settings import callback_url_prefix
+
+    settings = InteractionsSettings(public_base_url=base)
+    now = datetime.now(UTC)
+    window = DeadlineWindow(
+        budget=60.0, created_at=now, timeout_at=now + timedelta(minutes=1), deadline=0.0, park_ttl_margin_seconds=0
+    )
+    ticket = mint_callback_ticket(settings, window, "sync", force=True)
+    assert ticket is not None
+    prefix = callback_url_prefix(settings)
+    assert prefix == f"{base.rstrip('/')}/api/interactions/callback/"
+    assert ticket.callback_url == f"{prefix}{ticket.ticket}"
+    # Every URL the platform mints passes the pin against its own prefix.
+    pin_callback_url(ticket.callback_url, prefix=prefix)
+
+
+def test_there_is_no_callback_prefix_without_a_public_base():
+    from tai42_skeleton.interactions.settings import callback_url_prefix
+
+    assert callback_url_prefix(InteractionsSettings()) is None
+
+
+def test_the_interactions_facet_serves_the_callback_prefix(monkeypatch: pytest.MonkeyPatch):
+    from tai42_skeleton.app.facets.interactions import InteractionsFacet
+    from tai42_skeleton.interactions import settings as settings_module
+
+    monkeypatch.setattr(
+        settings_module, "interactions_settings", lambda: InteractionsSettings(public_base_url="https://h.example")
+    )
+    facet = InteractionsFacet.__new__(InteractionsFacet)
+    assert facet.callback_url_prefix() == "https://h.example/api/interactions/callback/"
