@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, get_args
 
 from fastmcp.utilities.types import Audio, File, Image
 from pydantic import BaseModel, ValidationError
+from pydantic_core import ErrorDetails
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -125,7 +126,7 @@ def validate_body[M: BaseModel](model: type[M], body: object, what: str) -> M:
     try:
         return model.model_validate(body)
     except ValidationError as exc:
-        refusals = (_refusal(model, error["loc"], error["msg"]) for error in exc.errors())
+        refusals = (_refusal(model, error["loc"], _rule_text(error)) for error in exc.errors())
         raise BadRequestError(f"invalid {what}: " + "; ".join(refusals)) from exc
 
 
@@ -147,6 +148,18 @@ def _model_of(annotation: Any) -> type[BaseModel] | None:
         return annotation
     models = [arg for arg in get_args(annotation) if isinstance(arg, type) and issubclass(arg, BaseModel)]
     return models[0] if len(models) == 1 else None
+
+
+def _rule_text(error: ErrorDetails) -> str:
+    """The violated rule of one pydantic error, without the input.
+
+    A discriminated union's unknown-tag message quotes the sent tag, so it is rendered from the
+    error's context: the discriminator and the expected tags.
+    """
+    if error["type"] == "union_tag_invalid":
+        ctx = error.get("ctx") or {}
+        return f"{ctx['discriminator']} must be one of the expected tags: {ctx['expected_tags']}"
+    return error["msg"]
 
 
 def request_with_body(request: Request, body: bytes) -> Request:
