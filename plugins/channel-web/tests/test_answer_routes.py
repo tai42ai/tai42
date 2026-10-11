@@ -9,10 +9,12 @@ import json
 
 import httpx
 import pytest
+from tai42_kit.interactions import CallbackUrlRefusedError
 from tai42_kit.settings import reset_all_settings
 
 import tai42_channel_web.routes  # noqa: F401  (route registration side-effect)
 from tai42_channel_web.routes.answer_routes import AnswerForwardError
+from tai42_channel_web.routes.callback_pin import CallbackPrefixUnsetError
 from tai42_channel_web.store.transcript import transcript_order
 
 from .conftest import (
@@ -419,3 +421,38 @@ async def test_answer_transport_failure_restores_and_raises(
     with pytest.raises(httpx.HTTPError):
         await _handler(stub_app, _ANSWER)(_answer_request(answer="x"))
     assert "channel:web:question:int-1" in registered_session.store
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        "https://evil.example/api/interactions/callback/ticket-1",
+        "https://app.example/admin",
+        "https://app.example/api/interactions/callback/ticket-1?x=1",
+    ],
+)
+async def test_a_stored_callback_outside_the_platform_prefix_is_refused_and_never_posted(
+    web_env, stub_app, registered_session: FakeRedis, fake_httpx: FakeHttpx, caplog, stored
+):
+    # The record is claimed, pinned and refused: nothing is POSTed, the poisoned record is NOT
+    # restored, the raise answers 500, and the ERROR log names the host — never the ticket.
+    await _seed_question(callback_url=stored)
+    with caplog.at_level("ERROR"), pytest.raises(CallbackUrlRefusedError):
+        await _handler(stub_app, _ANSWER)(_answer_request(answer="x"))
+    assert fake_httpx.calls == []
+    assert "channel:web:question:int-1" not in registered_session.store
+    refusal = [r for r in caplog.records if "refused" in r.getMessage()]
+    assert refusal
+    assert "int-1" in refusal[0].getMessage()
+    assert "ticket-1" not in refusal[0].getMessage()
+
+
+async def test_an_answer_with_no_platform_callback_prefix_is_refused(
+    web_env, stub_app, registered_session: FakeRedis, fake_httpx: FakeHttpx, caplog
+):
+    stub_app.interactions.prefix = None
+    await _seed_question()
+    with caplog.at_level("ERROR"), pytest.raises(CallbackPrefixUnsetError):
+        await _handler(stub_app, _ANSWER)(_answer_request(answer="x"))
+    assert fake_httpx.calls == []
+    assert any("public_base_unset" in r.getMessage() for r in caplog.records)

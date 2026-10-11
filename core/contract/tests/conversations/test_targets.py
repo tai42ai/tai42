@@ -84,3 +84,29 @@ def test_target_config_refuses_an_unknown_target_kind():
 
     with pytest.raises(ValidationError):
         TargetConversationConfig(target_kind="robot", target_name="c")  # type: ignore[arg-type]
+
+
+def test_the_pair_code_pattern_matches_a_code_minted_from_the_constants():
+    import secrets
+
+    from tai42_contract.conversations import (
+        PAIR_CODE_ALPHABET,
+        PAIR_CODE_BODY_LENGTH,
+        PAIR_CODE_PATTERN,
+        PAIR_CODE_PREFIX,
+    )
+
+    code = PAIR_CODE_PREFIX + "".join(secrets.choice(PAIR_CODE_ALPHABET) for _ in range(PAIR_CODE_BODY_LENGTH))
+    match = PAIR_CODE_PATTERN.search(f"my code is {code}, thanks")
+    assert match is not None
+    assert match.group(0) == code
+
+
+def test_the_pair_code_pattern_matches_only_a_whole_token():
+    from tai42_contract.conversations import PAIR_CODE_PATTERN
+
+    assert PAIR_CODE_PATTERN.search("LINK-ABCD1234") is not None
+    assert PAIR_CODE_PATTERN.search("LINK-ABCD12345") is None
+    assert PAIR_CODE_PATTERN.search("XLINK-ABCD1234") is None
+    assert PAIR_CODE_PATTERN.search("LINK-abcd1234") is None
+    assert PAIR_CODE_PATTERN.search("LINK-ABC123") is None

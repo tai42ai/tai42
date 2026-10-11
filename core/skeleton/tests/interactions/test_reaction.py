@@ -146,6 +146,18 @@ async def test_event_naming_undeclared_trigger_is_a_request_error(wired, monkeyp
         await react("r1", {"kind": "field_changed", "field": "slot"}, {"name": "x"})
 
 
+async def test_a_typed_event_from_an_in_process_caller_reaches_the_handler_as_its_wire_dict(wired, monkeypatch):
+    # A neutral in-process caller passes the contract event model; the handler receives the same
+    # ``{kind, field}`` dict an HTTP door's body produces.
+    from tai42_contract.interactions import FieldChangedEvent
+
+    await wired.store.add(wired.fake, _reacting(wired.store, reactions={"field_changed": ["name"]}), idle_ttl=86400)
+    captured: dict = {}
+    _stub_handler(monkeypatch, captured=captured)
+    await react("r1", FieldChangedEvent(field="name"), {"name": "x"})
+    assert captured["event"] == {"kind": "field_changed", "field": "name"}
+
+
 async def test_partial_values_are_type_checked(wired, monkeypatch):
     await wired.store.add(wired.fake, _reacting(wired.store, reactions={"field_changed": ["name"]}), idle_ttl=86400)
     _stub_handler(monkeypatch)
@@ -171,11 +183,11 @@ async def test_handler_receives_stored_identity_and_normalized_event(wired, monk
     captured: dict = {}
     await wired.store.add(wired.fake, _reacting(wired.store, reactions={"field_changed": ["name"]}), idle_ttl=86400)
     _stub_handler(monkeypatch, returns={"values": {"name": "Al"}}, captured=captured)
-    update = await react("r1", {"kind": "field_changed", "field": "name", "extra": "dropped"}, {"name": "x"})
+    update = await react("r1", {"kind": "field_changed", "field": "name"}, {"name": "x"})
     assert update == {"values": {"name": "Al"}}
     assert captured["identity"] == "svc-key"  # the STORED continuation identity
     assert captured["reaction_tool"] == "react_tool"
-    assert captured["event"] == {"kind": "field_changed", "field": "name"}  # normalized, extra key dropped
+    assert captured["event"] == {"kind": "field_changed", "field": "name"}
     assert captured["values"] == {"name": "x"}
 
 
@@ -295,8 +307,15 @@ def test_types_only_schema_strips_enum_and_required():
 def test_normalize_event_rejects_unknown_kind():
     from tai42_contract.interactions import FormReactions
 
-    with pytest.raises(FormReactionRequestError, match="unknown reaction event kind"):
+    with pytest.raises(FormReactionRequestError, match="invalid reaction event"):
         _normalize_event({"kind": "wiggled"}, FormReactions(field_changed=["name"]))
+
+
+def test_normalize_event_rejects_an_extra_key():
+    from tai42_contract.interactions import FormReactions
+
+    with pytest.raises(FormReactionRequestError, match="invalid reaction event"):
+        _normalize_event({"kind": "field_changed", "field": "name", "page": "p"}, FormReactions(field_changed=["name"]))
 
 
 def test_validate_update_rejects_unknown_keys():
@@ -335,7 +354,7 @@ def test_normalize_event_page_and_submitted():
     assert _normalize_event({"kind": "submitted"}, reactions) == {"kind": "submitted"}
     with pytest.raises(FormReactionRequestError, match="not a declared page trigger"):
         _normalize_event({"kind": "page_advanced", "page": "Nope"}, reactions)
-    with pytest.raises(FormReactionRequestError, match="object with a 'kind'"):
+    with pytest.raises(FormReactionRequestError, match="invalid reaction event"):
         _normalize_event("nope", reactions)
 
 

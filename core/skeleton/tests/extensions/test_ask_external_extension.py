@@ -197,7 +197,7 @@ def test_binds_with_author_bound_config_at_apply_site():
                     "include": ["make_signature"],
                     "extensions": {
                         "make_signature": [
-                            [{"name": "ask_external", "config": {"verifier": {"name": "github", "config": {}}}}]
+                            [{"name": "ask_external", "config": {"verifier": {"verifier": "github", "config": {}}}}]
                         ]
                     },
                 }
@@ -323,7 +323,7 @@ async def test_author_bound_verifier_lands_in_format_payload(monkeypatch, fake_r
     async def make_url(*, callback_url: str) -> str:
         return f"https://ext.example/go?cb={callback_url}"
 
-    binding = {"name": "github", "config": {"secret_env": "GH"}}
+    binding = {"verifier": "github", "config": {"secret_env": "GH"}}
     # The verifier is closed over from author config — never a call-time param.
     composed = ask_external(make_url, "make_url", "desc", {"verifier": binding})
     assert "verifier" not in inspect.signature(composed).parameters
@@ -367,7 +367,18 @@ def test_unknown_config_key_rejected_loudly():
         return f"https://ext.example/go?cb={callback_url}"
 
     with pytest.raises(TaiValidationError, match="unknown key"):
-        ask_external(make_url, "make_url", "desc", {"verfier": {"name": "github"}})
+        ask_external(make_url, "make_url", "desc", {"verfier": {"verifier": "github"}})
+
+
+@pytest.mark.parametrize("raw", [{"name": "github", "config": {}}, {"verifier": ""}, "github", ["github"]])
+def test_a_verifier_of_another_shape_is_refused_at_wrap_time(raw):
+    # The author-bound verifier is a ``{"verifier", "config"}`` binding; any other shape fails the
+    # manifest load, never the first callback.
+    async def make_url(*, callback_url: str) -> str:
+        return f"https://ext.example/go?cb={callback_url}"
+
+    with pytest.raises(TaiValidationError, match="ask_external config 'verifier' must be"):
+        ask_external(make_url, "make_url", "desc", {"verifier": raw})
 
 
 async def test_verifier_rejected_at_ask_time_when_malformed_or_unknown(monkeypatch, fake_redis, fake_client_ctx):
@@ -386,10 +397,12 @@ async def test_verifier_rejected_at_ask_time_when_malformed_or_unknown(monkeypat
 
     monkeypatch.setattr(validate_module, "tai42_app", SimpleNamespace(webhook_verifiers=_Empty()))
 
-    with pytest.raises(ValueError, match="verifier must be a dict"):
+    with pytest.raises(ValueError, match="verifier must be a"):
         await ask("Sign?", answer_format="external", link="https://x/{callback_url}", verifier=cast(Any, "not-a-dict"))
-    with pytest.raises(ValueError, match="unknown webhook verifier"):
+    with pytest.raises(ValueError, match="verifier must be a"):
         await ask("Sign?", answer_format="external", link="https://x/{callback_url}", verifier={"name": "nope"})
+    with pytest.raises(ValueError, match="unknown webhook verifier"):
+        await ask("Sign?", answer_format="external", link="https://x/{callback_url}", verifier={"verifier": "nope"})
 
 
 # --------------------------------------------------------------------------- #

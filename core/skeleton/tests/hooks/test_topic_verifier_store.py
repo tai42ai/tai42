@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
+from tai42_contract.hooks import TopicVerifierBinding
 
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
 from tai42_skeleton.hooks.managers.redis_hooks_manager import RedisHooksManager
@@ -36,21 +37,24 @@ def manager(request, fake_redis, monkeypatch, make_ctx):
 async def test_set_get_round_trip(manager) -> None:
     assert await manager.get_topic_verifier("events") is None
     await manager.set_topic_verifier("events", _BINDING)
-    assert await manager.get_topic_verifier("events") == _BINDING
+    assert await manager.get_topic_verifier("events") == TopicVerifierBinding.model_validate(_BINDING)
 
 
 async def test_replace(manager) -> None:
     await manager.set_topic_verifier("events", _BINDING)
     replacement = {"verifier": "github", "config": {"secret_env": "GH"}}
     await manager.set_topic_verifier("events", replacement)
-    assert await manager.get_topic_verifier("events") == replacement
+    assert await manager.get_topic_verifier("events") == TopicVerifierBinding.model_validate(replacement)
 
 
 async def test_all_topic_verifiers(manager) -> None:
     await manager.set_topic_verifier("events", _BINDING)
     await manager.set_topic_verifier("alerts", {"verifier": "github", "config": {}})
     everything = await manager.all_topic_verifiers()
-    assert everything == {"events": _BINDING, "alerts": {"verifier": "github", "config": {}}}
+    assert everything == {
+        "events": TopicVerifierBinding.model_validate(_BINDING),
+        "alerts": TopicVerifierBinding(verifier="github"),
+    }
 
 
 async def test_delete(manager) -> None:

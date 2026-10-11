@@ -4,8 +4,6 @@ path, sender_identity, and the send-failure retry classification."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-
 import httpx
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, ChannelNotification
@@ -284,28 +282,6 @@ async def test_deliver_missing_access_token_raises_and_releases_reservation(
 
     assert not fake_httpx.calls  # checked before any network work — nothing sent
     assert not fake_redis.store  # the Tier-2 reservation was released, the pair is free
-
-
-async def test_past_deadline_raises_before_any_send(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    with pytest.raises(ChannelDeliveryError, match="already timed out"):
-        await WhatsAppChannel().deliver(make_delivery(timeout_at=datetime.now(UTC) - timedelta(seconds=1)))
-
-    assert not fake_redis.store
-    assert not fake_httpx.calls
-
-
-@pytest.mark.parametrize("answer_format", ["confirm", "external"])
-async def test_tier1_past_deadline_raises_before_any_send(
-    answer_format: str, fake_redis: FakeRedis, fake_httpx: FakeHttpx
-):
-    with pytest.raises(ChannelDeliveryError, match="already timed out"):
-        await WhatsAppChannel().deliver(
-            make_delivery(answer_format=answer_format, timeout_at=datetime.now(UTC) - timedelta(seconds=1))
-        )
-
-    assert not fake_httpx.calls  # the link would be dead on arrival — nothing sent
-    assert not fake_redis.store
-    assert not fake_redis.events  # no HTTP call and no reservation attempt at all
 
 
 async def test_accepted_response_without_id_raises(fake_redis: FakeRedis, fake_httpx: FakeHttpx):

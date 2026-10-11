@@ -449,9 +449,38 @@ async def test_callback_bound_verify_failure_401_ticket_unconsumed(wired, verifi
 
 async def test_callback_bound_missing_verifier_500(wired, verifier_registry):
     # Binding names a verifier that is not registered -> fail closed 500.
-    await _seed(wired, verifier={"name": "ghost", "config": {}})
+    await _seed(wired, verifier={"verifier": "ghost", "config": {}})
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b"x"))
     assert resp.status_code == 500
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"name": "prov", "config": {"secret_env": "WH"}},
+        {"verifier": "", "config": {}},
+        {"verifier": "prov", "config": "not-an-object"},
+        "prov",
+        None,
+    ],
+)
+async def test_callback_a_stored_binding_of_another_shape_fails_closed(wired, verifier_registry, stored):
+    # A present ``verifier`` value that is not a ``{"verifier", "config"}`` binding is NEVER read
+    # as an unbound ticket-only question: 500 with the constant body, nothing recorded, the
+    # ticket unconsumed — even with a passing verifier registered under the old shape's name.
+    verifier_registry.register("prov", _FakeVerifier())
+    request = _external_request(wired.store).model_copy(
+        update={"format_payload": {"url": "https://ext.example/resource", "verifier": stored}}
+    )
+    await wired.store.add(wired.fake, request, idle_ttl=86400, ticket="TKT", ticket_ttl=60)
+    iid = request.interaction_id
+    resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"approved":true}'))
+    assert resp.status_code == 500
+    assert _json(resp)["error"] == "webhook verification error"
+    state = await wired.store.get_state(wired.fake, iid)
+    assert state is not None
+    assert state.status == "pending"
+    assert await wired.store.resolve_ticket(wired.fake, "TKT") == iid
 
 
 async def test_callback_get_bound_question_no_confirm_page(wired, verifier_registry):
@@ -556,7 +585,7 @@ async def test_callback_post_bound_answered_missing_verifier_500(wired, verifier
     # A bound + answered POST whose verifier cannot be constructed (name
     # unregistered) 500s because verification runs before the answered check —
     # a door that cannot authenticate must not report state.
-    await _seed(wired, verifier={"name": "ghost", "config": {}})
+    await _seed(wired, verifier={"verifier": "ghost", "config": {}})
     await _answer_bound(wired)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b"x"))
     assert resp.status_code == 500
@@ -683,6 +712,8 @@ async def test_callback_rejects_invalid_params(wired):
         )
     )
     assert resp.status_code == 400
+    # The door REFUSES (never drops): the bound refusal text names the key, never a value.
+    assert _json(resp)["error"].startswith("invalid params: params key 'bad key' must match")
     state = await wired.store.get_state(wired.fake, "t1")
     assert state is not None
     assert state.status == "pending"

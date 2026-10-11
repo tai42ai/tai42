@@ -124,6 +124,7 @@ EXPECTED_FACADE = {
     "assert_resume_authorized",
     "assert_delivery_authorized",
     "redelivery_horizon_seconds",
+    "callback_url_prefix",
     # extensions (2)
     "extension",
     "available_extensions",

@@ -542,3 +542,20 @@ def test_media_orthogonal_to_every_answer_format(answer_format: AnswerFormat, fo
     assert req.sensitive is True
     assert req.channel == "telegram"
     assert req.audience == "user-1"
+
+
+@pytest.mark.parametrize(
+    ("candidate", "matches"),
+    [
+        ("A" * 43, True),
+        ("a-_" + "Z9" * 20, True),
+        ("A" * 42, False),
+        ("A" * 44, False),
+        ("A" * 43 + "\n", False),
+        ("A" * 42 + "=", False),
+    ],
+)
+def test_the_media_id_grammar_is_a_whole_43_char_urlsafe_token(candidate: str, matches: bool) -> None:
+    from tai42_contract.interactions import MEDIA_ID_RE
+
+    assert (MEDIA_ID_RE.fullmatch(candidate) is not None) is matches

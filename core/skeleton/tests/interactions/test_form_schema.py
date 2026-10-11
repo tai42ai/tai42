@@ -12,8 +12,6 @@ from tai42_skeleton.interactions.form_schema import (
     channel_form_fields,
     date_constraint_mismatch,
     effective_answer_schema,
-    evaluate_visible_when,
-    hidden_fields,
     validate_channel_form_schema,
 )
 
@@ -353,21 +351,3 @@ def test_date_constraint_mismatch_range_order_and_span():
     assert _field(date_constraint_mismatch(schema, {"start": "2024-01-05", "end": "2024-01-01"})) == "end"
     assert _field(date_constraint_mismatch(schema, {"start": "2024-01-01", "end": "2024-01-01"})) == "end"  # 1 day < 2
     assert _field(date_constraint_mismatch(schema, {"start": "2024-01-01", "end": "2024-01-10"})) == "end"  # 10 > 3
-
-
-# === visibleWhen evaluation + hidden fields =================================
-
-
-def test_evaluate_visible_when():
-    assert evaluate_visible_when({"field": "mode", "equals": "a"}, {"mode": "a"}) is True
-    assert evaluate_visible_when({"field": "mode", "equals": "a"}, {"mode": "b"}) is False
-    assert evaluate_visible_when({"field": "mode", "in": ["a", "b"]}, {"mode": "b"}) is True
-    assert evaluate_visible_when({"field": "mode", "notEmpty": True}, {"mode": ""}) is False
-    assert evaluate_visible_when({"field": "mode", "notEmpty": True}, {}) is False
-    assert evaluate_visible_when({"field": "mode", "notEmpty": True}, {"mode": "x"}) is True
-
-
-def test_hidden_fields():
-    schema = _vw_schema({"field": "mode", "equals": "a"})
-    assert hidden_fields(schema, {"mode": "a"}) == set()
-    assert hidden_fields(schema, {"mode": "b"}) == {"detail"}
