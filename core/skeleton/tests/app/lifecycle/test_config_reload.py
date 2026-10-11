@@ -26,7 +26,7 @@ def test_reload_config_refreshes_env_and_reinitializes(monkeypatch):
             # Driven off the serving loop, as production does (the reload-gate worker
             # thread): a fresh epoch is built under the refreshed env and swapped in.
             out = await reload_gate.run(app.admin.reload_config, reimports=True)
-            assert out == {"status": "ok", "env_keys": 2}
+            assert out == {"status": "ok", "env_keys": 2, "awaiting_respawn": []}
             # Env refreshed into the process environment.
             assert os.environ["NEW_KEY"] == "v1"
             assert os.environ["OTHER"] == "v2"

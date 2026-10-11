@@ -357,3 +357,32 @@ async def test_preview_update_narrows_new_public_rows() -> None:
     assert len(out["public_routes"]) == 2
     assert out["new_public_routes"] == [{"item": "relay", "full_path": "/api/relay/live", "methods": ["GET"]}]
     assert out["requires_public_acceptance"] is True
+
+
+async def test_the_remount_reload_continues_the_forward_apply_with_its_recycle_roll() -> None:
+    from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind
+    from tai42_skeleton.app.recycle import RECYCLED, RecycleReport, RecycleRow
+    from tai42_skeleton.config.service import ApplyResult
+    from tai42_skeleton.marketplace import manifest_apply
+
+    roll = RecycleReport(rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED)])
+    writer = WorkerIdentity(name="serve-writer", kind=WorkerKind.serve, pid=1, generation=2)
+    prior = ApplyResult(
+        fleet=FleetResult(op="reload_config", results=[]),
+        local={"status": "ok", "env_keys": 1},
+        recycle=roll,
+        self_identity=writer,
+        serve_affecting=True,
+    )
+    remounted = ApplyResult(fleet=FleetResult(op="reload_config", results=[]), local={"status": "ok", "env_keys": 2})
+    handed: list[ApplyResult | None] = []
+
+    class _Svc:
+        async def apply_replace(self, document: dict, *, continues: ApplyResult | None = None) -> ApplyResult:
+            handed.append(continues)
+            return remounted
+
+    result = await manifest_apply.remount_reload(_Svc(), dict, prior)  # type: ignore[arg-type]
+
+    assert handed == [prior]
+    assert result is remounted

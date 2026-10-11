@@ -400,6 +400,8 @@ async def test_write_env_happy(install):
             "status": "ok",
             "env_keys": 2,
             "fanout": {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"},
+            "recycle": None,
+            "awaiting_respawn": [],
         }
     }
     assert ctx.manager.written == [{"NEW": "val"}]

@@ -9,7 +9,10 @@ pre-recycle ``generation_before``, the recycled targets' old lives leave presenc
 response ``fresh`` list counts NEW READY capacity per kind. The applying serve worker's OWN
 recycle is a deferred post-response self-exit it reports as ``self-deferred``. On a BARE
 (unsupervised) shape the same apply is refused upfront at the API, naming the recycle-class
-key.
+key. The env-write door follows the same policy: on a supervised shape an env write of a
+recycle-class key rolls the same recycle and answers its rows under ``recycle`` (the writer
+self-defers), on a bare shape it is refused, and the bus URL is refused on every shape, each
+refusal naming the key with nothing written.
 
 Validated locally against the isolated infra: the harness ``supervised`` mode stamps
 ``TAI_SUPERVISED=harness`` and runs the respawn-on-exit supervisor, so a recycled/self-exited
@@ -20,13 +23,18 @@ worker actually comes back. ``BACKEND_MANIFEST_KEY`` is a recycle-class field (`
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
 from tai42_e2e import wait_for_async
+from tai42_e2e.binaries import tai_bin
 from tai42_e2e.manifests import build_recycle_stack
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.topology import StackConfig, StackResources
@@ -83,6 +91,7 @@ async def test_recycle_apply_rolls_the_fleet_and_self_defers_applier(
     applied = await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True, timeout=200.0)
     assert applied["refused"] == [], f"a recycle apply on a supervised shape refused a key: {applied}"
     assert applied["recycle_stopped"] is None, f"the recycle roll stopped: {applied}"
+    assert applied["awaiting_respawn"] == [], f"a converged apply named a worker awaiting a respawn: {applied}"
 
     # The recycle report: each recycled backend sibling row carries its pre-recycle
     # generation (never a post-recycle life), and the applying serve worker's own recycle is
@@ -251,3 +260,179 @@ async def test_bare_shape_refuses_recycle_class_apply(replicas_stack: TaiStack, 
     resp = await api.request_raw("POST", f"/api/config/profiles/{name}/apply")
     assert resp.status_code == 400, resp.text
     assert "bare" in resp.json()["error"].lower(), resp.json()
+
+
+@pytest.mark.needs("mutable", "setting:TAI_SUPERVISED=unset")
+async def test_bare_shape_refuses_a_recycle_class_env_write(
+    replicas_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """On a BARE shape the env-write door refuses a recycle-class key UPFRONT, naming it, and
+    stores nothing — never an ``applied`` reply while the running workers keep the boot value."""
+    api = replicas_stack.api(port=replicas_stack.port_a)
+    before = (await api.get("/api/config/env"))["env"]
+    resp = await api.request_raw("POST", "/api/config/env", json={"env": {_RECYCLE_VAR: uniq("mkey").upper()}})
+    assert resp.status_code == 400, resp.text
+    error = resp.json()["error"]
+    assert "bare" in error.lower(), error
+    assert _RECYCLE_VAR in error, error
+    assert (await api.get("/api/config/env"))["env"] == before, "a refused env write changed the stored env"
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.needs("mutable", "store:redis", "process", "topology:supervised", "setting:TAI_SUPERVISED=harness")
+async def test_supervised_shape_refuses_a_bus_url_env_write(recycle_stack: TaiStack) -> None:
+    """The bus URL reaches the worker bus itself, so no recycle can carry it: the env-write door
+    refuses it on a supervised shape too, naming the key, and stores nothing."""
+    api = recycle_stack.api()
+    before = (await api.get("/api/config/env"))["env"]
+    resp = await api.request_raw(
+        "POST", "/api/config/env", json={"env": {"TAI_BUS_REDIS_URL": "redis://127.0.0.1:1/0"}}
+    )
+    assert resp.status_code == 400, resp.text
+    error = resp.json()["error"]
+    assert "TAI_BUS_REDIS_URL" in error, error
+    assert (await api.get("/api/config/env"))["env"] == before, "a refused env write changed the stored env"
+
+
+async def _assert_roll_converged_and_writer_respawns(
+    stack: TaiStack, roll: dict, before_backend: dict[str, int], before_serve: dict[str, int]
+) -> None:
+    """The roll's rows: each backend sibling ``recycled`` from its pre-write life, exactly one
+    ``self-deferred`` serve writer row; then the old backend lives leave the census, the writer
+    respawns at a bumped generation and serves ``/health`` again."""
+    assert roll["recycle_stopped"] is None, f"the recycle roll stopped: {roll}"
+    backend_rows = [e for e in roll["recycle"] if e["kind"] == "backend"]
+    assert backend_rows, f"backend not recycled: {roll}"
+    for e in backend_rows:
+        assert e["status"] == "recycled", f"a backend row did not converge: {e} in {roll}"
+        assert e["generation_before"] == before_backend[e["name"]], f"not the pre-write life: {e} vs {before_backend}"
+    writer = [e for e in roll["recycle"] if e["status"] == "self-deferred"]
+    assert len(writer) == 1, f"expected exactly one self-deferred writer row: {roll}"
+    assert writer[0]["kind"] == "serve", writer
+    assert writer[0]["generation_before"] == before_serve[writer[0]["name"]], writer
+
+    recycled = {e["name"]: e["generation_before"] for e in backend_rows}
+
+    async def old_backend_lives_gone() -> bool:
+        live = _lives(stack, "backend")
+        return all(name not in live or live[name] > gen for name, gen in recycled.items())
+
+    await wait_for_async(old_backend_lives_gone, deadline=90.0, message="a recycled backend's old life never left")
+    stack.wait_generation_bump("serve", before_serve, deadline=150.0)
+
+    async def serves_again() -> bool:
+        resp = await stack.api().request_raw("GET", "/health")
+        return resp.status_code == 200
+
+    await wait_for_async(serves_again, deadline=60.0, message="the respawned writer never served /health again")
+
+
+@pytest.mark.timeout(420)
+@pytest.mark.needs(
+    "mutable",
+    "store:redis",
+    "process",
+    "cli",
+    "topology:supervised",
+    "setting:TAI_SUPERVISED=harness",
+    "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
+)
+async def test_an_env_write_of_a_recycle_class_key_rolls_the_fleet_and_self_defers_the_writer(
+    recycle_stack: TaiStack, uniq: Callable[[str], str], tmp_path: Path
+) -> None:
+    """``POST /api/config/env`` of a recycle-class key on a supervised shape rolls the same
+    recycle a profile apply rolls and answers its rows under ``recycle``; ``tai config env set``
+    over the CLI prints the rows of the next one."""
+    api = recycle_stack.api()
+    before_backend = _lives(recycle_stack, "backend")
+    before_serve = _lives(recycle_stack, "serve")
+
+    written = await api.post(
+        "/api/config/env", json={"env": {_RECYCLE_VAR: uniq("mkey").upper()}}, retry_on_reloading=True, timeout=200.0
+    )
+    assert written["fanout"]["mode"] in ("fleet", "local-only"), written
+    # The operation's verdict: a converged roll with the writer recycling itself leaves nobody.
+    assert written["awaiting_respawn"] == [], written
+    await _assert_roll_converged_and_writer_respawns(recycle_stack, written["recycle"], before_backend, before_serve)
+
+    before_backend = _lives(recycle_stack, "backend")
+    before_serve = _lives(recycle_stack, "serve")
+    env = {
+        "PATH": os.pathsep.join([str(Path(sys.executable).parent), "/usr/local/bin", "/usr/bin", "/bin"]),
+        "HOME": str(tmp_path),
+        "TAI_SERVER_URL": recycle_stack.origin(recycle_stack.port_a),
+        "TAI_API_KEY": "sk-e2e-cli-not-a-real-key",
+    }
+    proc = subprocess.run(
+        [tai_bin(), "--json", "config", "env", "set", f"{_RECYCLE_VAR}={uniq('mkey').upper()}"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=240,
+    )
+    assert proc.returncode == 0, f"tai config env set failed: {proc.stdout}\n{proc.stderr}"
+    printed = json.loads(proc.stdout)
+    assert printed["awaiting_respawn"] == [], printed
+    await _assert_roll_converged_and_writer_respawns(recycle_stack, printed["recycle"], before_backend, before_serve)
+
+
+_SUPERVISED_RECYCLE_NEEDS = (
+    "mutable",
+    "store:redis",
+    "process",
+    "topology:supervised",
+    "setting:TAI_SUPERVISED=harness",
+    "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
+)
+
+
+@pytest.mark.timeout(420)
+@pytest.mark.needs(*_SUPERVISED_RECYCLE_NEEDS)
+async def test_an_env_write_over_mcp_rolls_the_fleet_and_the_writer_recycles_itself_after_the_call(
+    recycle_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """The projected ``write_env`` tool (MCP ``tools/call``) of a recycle-class key rolls the same
+    recycle the HTTP door rolls, answers the writer's ``self-deferred`` row, and the writer then
+    exits gracefully once the call returned: its supervisor respawns it at a bumped generation."""
+    before_backend = _lives(recycle_stack, "backend")
+    before_serve = _lives(recycle_stack, "serve")
+
+    async with recycle_stack.mcp(auth=recycle_stack.auth_token) as mcp:
+        result = await mcp.call_tool(
+            "write_env", {"env": {_RECYCLE_VAR: uniq("mkey").upper()}}, retry_on_reloading=True, ready_deadline=30.0
+        )
+    written = result.data if isinstance(result.data, dict) else result.structured_content
+    assert isinstance(written, dict), f"write_env returned no result map: {result!r}"
+    assert written["awaiting_respawn"] == [], written
+    await _assert_roll_converged_and_writer_respawns(recycle_stack, written["recycle"], before_backend, before_serve)
+
+
+@pytest.mark.timeout(420)
+@pytest.mark.needs(*_SUPERVISED_RECYCLE_NEEDS)
+async def test_a_backup_env_restore_of_a_recycle_class_key_rolls_the_fleet_and_self_defers_the_writer(
+    recycle_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """``POST /api/backup/import`` of an ``env`` section carrying a recycle-class key is an env
+    write: the section's report carries the roll under ``recycle`` and an empty verdict, and the
+    writer recycles itself after replying."""
+    api = recycle_stack.api()
+    before_backend = _lives(recycle_stack, "backend")
+    before_serve = _lives(recycle_stack, "serve")
+
+    document = {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "sections": {"env": {_RECYCLE_VAR: uniq("mkey").upper()}},
+    }
+    imported = await api.post(
+        "/api/backup/import",
+        json={"document": document, "sections": ["env"], "mode": "overwrite"},
+        retry_on_reloading=True,
+        timeout=200.0,
+    )
+    assert imported["ok"] is True, imported
+    section = imported["sections"]["env"]
+    assert section["errors"] == [], section
+    assert section["awaiting_respawn"] == [], section
+    await _assert_roll_converged_and_writer_respawns(recycle_stack, section["recycle"], before_backend, before_serve)

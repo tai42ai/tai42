@@ -42,21 +42,29 @@ from tai42_skeleton.app.recycle import (
     RecycleRow,
     RecycleStop,
     RecycleTimeoutError,
+    orchestrate_recycle,
 )
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations._broadcast import SELF_DEFERRED, profile_apply_response
 
 from .._fakes.bus import FakeBus
-from .fake_pipeline import FakeConfigStore, FakeReloadAdmin
+from .fake_pipeline import FakeConfigStore, FakeReloadAdmin, _orchestrate_spy
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _service(store: FakeConfigStore, bus: FakeBus | None = None) -> ConfigService:
-    return ConfigService(config_manager=store, admin=FakeReloadAdmin(), bus=cast("Any", bus or FakeBus()))
+def _service(
+    store: FakeConfigStore,
+    bus: FakeBus | None = None,
+    *,
+    orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
+) -> ConfigService:
+    return ConfigService(
+        config_manager=store, admin=FakeReloadAdmin(), bus=cast("Any", bus or FakeBus()), orchestrate=orchestrate
+    )
 
 
 class _PrevSpy:
@@ -78,42 +86,6 @@ def _swap_spy() -> tuple[Callable[..., Awaitable[Epoch]], dict[str, Any]]:
         return Epoch(number=0)
 
     return spy, calls
-
-
-def _orchestrate_spy(
-    report: RecycleReport | None = None,
-    *,
-    raises: RecycleError | None = None,
-) -> tuple[Callable[..., Awaitable[RecycleReport]], dict[str, Any]]:
-    """An ``orchestrate`` seam that records its kwargs and returns a crafted report, or
-    raises ``raises`` (the roll stopping)."""
-    seen: dict[str, Any] = {}
-
-    async def spy(
-        bus: Any,
-        *,
-        excluded_name: str,
-        applier_generation: int,
-        target_kinds: Any,
-        applier_self_deferred: bool,
-        step_timeout: float,
-        expected: Any = None,
-    ) -> RecycleReport:
-        seen["expected"] = None if expected is None else dict(expected)
-        seen["excluded_name"] = excluded_name
-        seen["applier_generation"] = applier_generation
-        seen["target_kinds"] = list(target_kinds)
-        seen["applier_self_deferred"] = applier_self_deferred
-        seen["step_timeout"] = step_timeout
-        if raises is not None:
-            raise raises
-        out = report or RecycleReport(
-            rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=RECYCLED)],
-            fresh=[FreshLife(name="serve-b", kind="serve", generation=2)],
-        )
-        return out
-
-    return spy, seen
 
 
 # ---------------------------------------------------------------------------
@@ -394,11 +366,10 @@ async def test_recycle_class_diff_orchestrates_and_flags_serve_affecting(monkeyp
     bus = FakeBus(origin="serve-applier", remotes=["serve-b"])
     spy, _ = _swap_spy()
     orch, seen = _orchestrate_spy()
-    outcome = await _service(store, bus).apply_replace_env(
+    outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
         {"TAI_BUS_NAMESPACE": "new"},
         save_previous=_PrevSpy(),
         build_and_swap=spy,
-        orchestrate=orch,
     )
     # TAI_BUS_NAMESPACE is recycle-class → a recycle rolls, excluding the applier, and
     # the conservative default treats it as serve-affecting.
@@ -658,11 +629,10 @@ async def test_expected_membership_is_censused_before_the_swap(monkeypatch: pyte
         return Epoch(number=0)
 
     orch, _seen = _orchestrate_spy()
-    await _service(store, bus).apply_replace_env(
+    await _service(store, bus, orchestrate=orch).apply_replace_env(
         {"TAI_BUS_NAMESPACE": "new"},
         save_previous=_PrevSpy(),
         build_and_swap=fading_swap,
-        orchestrate=orch,
     )
 
     assert sibling.pttl_ms == 0
@@ -715,11 +685,10 @@ async def test_a_roll_that_stops_returns_the_partial_report(
     partial = _stopped(status, detail)
     orch, _seen = _orchestrate_spy(raises=make_error(partial))
     with caplog.at_level(logging.ERROR):
-        outcome = await _service(store, bus).apply_replace_env(
+        outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
             {"TAI_BUS_NAMESPACE": "new"},
             save_previous=_PrevSpy(),
             build_and_swap=spy,
-            orchestrate=orch,
         )
     assert outcome.recycle is partial
     assert outcome.serve_affecting is True
@@ -743,11 +712,10 @@ async def test_a_stop_without_a_row_for_the_target_escapes(monkeypatch: pytest.M
     )
     orch, _seen = _orchestrate_spy(raises=error)
     with pytest.raises(RecycleError, match="no reply from the target"):
-        await _service(store, FakeBus(origin="serve-applier")).apply_replace_env(
+        await _service(store, FakeBus(origin="serve-applier"), orchestrate=orch).apply_replace_env(
             {"TAI_BUS_NAMESPACE": "new"},
             save_previous=_PrevSpy(),
             build_and_swap=spy,
-            orchestrate=orch,
         )
 
 
@@ -809,11 +777,10 @@ async def test_the_recycle_targets_are_pinned_before_the_swap(monkeypatch: pytes
         return Epoch(number=0)
 
     orch, seen = _orchestrate_spy()
-    await _service(store, bus).apply_replace_env(
+    await _service(store, bus, orchestrate=orch).apply_replace_env(
         {"TAI_BUS_NAMESPACE": "new"},
         save_previous=_PrevSpy(),
         build_and_swap=swap,
-        orchestrate=orch,
     )
     # Every census row of a target kind except the applier — gap rows included.
     assert seen["expected"] == {
@@ -835,11 +802,10 @@ async def test_a_stop_with_no_target_in_hand_is_reported_not_re_raised(
     partial = RecycleReport(stopped=RecycleStop(kind="backend", name=None, detail=detail))
     orch, _seen = _orchestrate_spy(raises=RecycleError(f"recycle: {detail}", partial))
     with caplog.at_level(logging.ERROR):
-        outcome = await _service(store, FakeBus(origin="serve-applier")).apply_replace_env(
+        outcome = await _service(store, FakeBus(origin="serve-applier"), orchestrate=orch).apply_replace_env(
             {"TAI_BUS_NAMESPACE": "new"},
             save_previous=_PrevSpy(),
             build_and_swap=spy,
-            orchestrate=orch,
         )
     assert outcome.recycle is partial
     assert outcome.self_exit_armed is False
@@ -849,3 +815,66 @@ async def test_a_stop_with_no_target_in_hand_is_reported_not_re_raised(
     assert "backend" in errors[0]
     assert "no target in hand" in errors[0]
     assert "bus unreachable" in errors[0]
+
+
+# ---------------------------------------------------------------------------
+# The operation's verdict — workers still awaiting a respawn after the apply
+# ---------------------------------------------------------------------------
+
+_MOVED = {"status": "ok", "env_keys": 1, "awaiting_respawn": ["TAI_BUS_NAMESPACE"]}
+
+
+class _MovedBus(FakeBus):
+    """A fake bus whose every sibling answers the reload with the fact that its env moved."""
+
+    async def publish(self, op: dict[str, Any], targets: Any, local: Any, *, expected_at_start: Any = None) -> Any:
+        from tai42_skeleton.app.bus import OpOutcome, WorkerResult
+
+        report = await super().publish(op, targets, local, expected_at_start=expected_at_start)
+        rows = [
+            row
+            if row.name == self.identity.name
+            else WorkerResult(name=row.name, outcome=OpOutcome.applied, payload=_MOVED)
+            for row in report.results
+        ]
+        return FleetResult(op=report.op, results=rows)
+
+
+async def test_a_converged_profile_roll_leaves_nobody_awaiting_a_respawn(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+    store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
+    spy, _ = _swap_spy()
+    orch, _seen = _orchestrate_spy()
+    with caplog.at_level(logging.ERROR):
+        outcome = await _service(
+            store, _MovedBus(origin="serve-applier", remotes=["serve-b"]), orchestrate=orch
+        ).apply_replace_env({"TAI_BUS_NAMESPACE": "new"}, save_previous=_PrevSpy(), build_and_swap=spy)
+    assert outcome.awaiting_respawn == []
+    assert profile_apply_response(outcome)["awaiting_respawn"] == []
+    assert [r for r in caplog.records if "awaiting a respawn" in r.getMessage()] == []
+
+
+async def test_a_stopped_profile_roll_leaves_the_unreached_awaiting(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+    store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
+    spy, _ = _swap_spy()
+    partial = RecycleReport(
+        rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=TIMED_OUT, detail="slow")],
+        stopped=RecycleStop(kind="serve", name="serve-b", detail="slow"),
+    )
+    orch, _seen = _orchestrate_spy(raises=RecycleTimeoutError("serve-b", "slow", partial))
+    bus = _MovedBus(origin="serve-applier", remotes=["serve-b", "serve-c"])
+    with caplog.at_level(logging.ERROR):
+        outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
+            {"TAI_BUS_NAMESPACE": "new"}, save_previous=_PrevSpy(), build_and_swap=spy
+        )
+    assert [w.name for w in outcome.awaiting_respawn] == ["serve-b", "serve-c"]
+    assert profile_apply_response(outcome)["awaiting_respawn"] == [
+        {"name": "serve-b", "keys": ["TAI_BUS_NAMESPACE"]},
+        {"name": "serve-c", "keys": ["TAI_BUS_NAMESPACE"]},
+    ]
+    assert len([r for r in caplog.records if "awaiting a respawn" in r.getMessage()]) == 1

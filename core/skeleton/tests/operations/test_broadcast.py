@@ -132,3 +132,89 @@ async def test_fanout_body_carries_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     local_body = fleet_fanout(local)
     assert local_body["mode"] == "local-only"
     assert "ok" not in local_body
+
+
+# -- the operation's verdict: workers still awaiting a respawn ------------------
+
+
+def _row(name: str, keys: list[str] | None, outcome: str = "applied") -> WorkerResult:
+    payload = None if keys is None else {"status": "ok", "env_keys": 2, "awaiting_respawn": keys}
+    return WorkerResult(name=name, outcome=OpOutcome(outcome), payload=payload)
+
+
+def _report(*rows: WorkerResult) -> FleetResult:
+    return FleetResult(op="reload_config", results=list(rows))
+
+
+_KEY = "BACKEND_MANIFEST_KEY"
+
+
+def test_a_reload_that_rolls_nothing_leaves_every_listed_worker_awaiting() -> None:
+    from tai42_skeleton.operations._broadcast import awaiting_respawn_after
+
+    verdict = awaiting_respawn_after(
+        _report(_row("serve-1", [_KEY]), _row("backend-1", []), _row("backend-2", None)),
+        None,
+        None,
+        self_exit_armed=False,
+    )
+
+    assert [(w.name, w.keys) for w in verdict] == [("serve-1", [_KEY])]
+
+
+def test_a_converged_roll_with_the_writer_armed_leaves_nobody_awaiting() -> None:
+    from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
+    from tai42_skeleton.app.recycle import RECYCLED, RecycleReport, RecycleRow
+    from tai42_skeleton.operations._broadcast import awaiting_respawn_after
+
+    roll = RecycleReport(rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED)])
+    writer = WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=1)
+
+    verdict = awaiting_respawn_after(
+        _report(_row("serve-1", [_KEY]), _row("backend-1", [_KEY])), roll, writer, self_exit_armed=True
+    )
+
+    assert verdict == []
+
+
+def test_a_stopped_roll_leaves_its_unreached_and_stopped_targets_and_the_writer_awaiting() -> None:
+    from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
+    from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, RecycleReport, RecycleRow, RecycleStop
+    from tai42_skeleton.operations._broadcast import awaiting_respawn_after
+
+    roll = RecycleReport(
+        rows=[
+            RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED),
+            RecycleRow(name="backend-2", kind="backend", generation_before=1, status=TIMED_OUT, detail="slow"),
+        ],
+        stopped=RecycleStop(kind="backend", name="backend-2", detail="slow"),
+    )
+    writer = WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=1)
+    report = _report(
+        _row("serve-1", [_KEY]), _row("backend-1", [_KEY]), _row("backend-2", [_KEY]), _row("serve-2", [_KEY])
+    )
+
+    verdict = awaiting_respawn_after(report, roll, writer, self_exit_armed=False)
+
+    assert [w.name for w in verdict] == ["backend-2", "serve-1", "serve-2"]
+
+
+def test_the_awaiting_verdict_is_logged_once_naming_every_worker(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    from tai42_contract.app.responses import AwaitingWorker
+
+    from tai42_skeleton.operations._broadcast import log_awaiting_respawn
+
+    with caplog.at_level(logging.ERROR):
+        log_awaiting_respawn([])
+        log_awaiting_respawn(
+            [AwaitingWorker(name="backend-2", keys=[_KEY]), AwaitingWorker(name="serve-1", keys=[_KEY])]
+        )
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors == [
+        "worker(s) awaiting a respawn — recycle-class key(s) changed in the stored env since they were bound and "
+        "nothing in this operation respawns them: backend-2 (BACKEND_MANIFEST_KEY), serve-1 (BACKEND_MANIFEST_KEY) — "
+        "restart each through the deployment's supervisor (bare: restart the server)"
+    ]

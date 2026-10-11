@@ -51,7 +51,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 from tai42_kit.clients.base import advance_client_epoch
-from tai42_kit.settings import reset_all_settings
+from tai42_kit.settings import reset_all_settings, unbind_respawn_class_env
 
 import tai42_skeleton.access_control.store as access_control_store
 import tai42_skeleton.connectors.store.catalog_store as catalog_store
@@ -144,6 +144,18 @@ def _preserve_generation_globals() -> Iterator[None]:
     state and one made after it is undone with the test."""
     with preserved_staged_generations():
         yield
+
+
+@pytest.fixture(autouse=True)
+def _respawn_class_env_unbound() -> Iterator[None]:
+    """Leave the kit's bound respawn-class env unbound after each test.
+
+    A test that runs the boot env bridge binds every registered respawn-class setting to its
+    env; without a lifespan teardown that binding would outlive the test and judge the next
+    test's reloads against this test's env.
+    """
+    yield
+    unbind_respawn_class_env()
 
 
 @pytest.fixture(autouse=True)

@@ -481,12 +481,132 @@ async def test_advisories_serves_the_cache_shape(monkeypatch: pytest.MonkeyPatch
 
 async def test_install_happy_wraps_data(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _ok(ref, version):
-        return {"ref": ref, "version": "1.0.0", "uninstalled": False}
+        return {"ref": ref, "version": "1.0.0", "uninstalled": False, "reload": None}
 
     _use_installer(monkeypatch, install=_ok)
     resp = await router.marketplace_install(_post({"ref": "tai42/toolbox"}))
     assert resp.status_code == 200
     assert _data(resp)["data"]["ref"] == "tai42/toolbox"
+    assert resp.background is None
+
+
+def _install_result(*, stopped: bool) -> Any:
+    """An install-time env change's structured outcome: a converged roll (the writer armed) or a stopped one."""
+    from tai42_contract.app.responses import AwaitingWorker
+
+    from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind
+    from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, RecycleReport, RecycleRow, RecycleStop
+    from tai42_skeleton.config.service import ApplyResult
+
+    if stopped:
+        roll = RecycleReport(
+            rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=TIMED_OUT, detail="slow")],
+            stopped=RecycleStop(kind="backend", name="backend-1", detail="slow"),
+        )
+        verdict = [
+            AwaitingWorker(name="backend-1", keys=["BACKEND_MANIFEST_KEY"]),
+            AwaitingWorker(name="serve-1", keys=["BACKEND_MANIFEST_KEY"]),
+        ]
+    else:
+        roll = RecycleReport(rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED)])
+        verdict = []
+    return ApplyResult(
+        fleet=FleetResult(op="reload_config", results=[]),
+        local={"status": "ok", "env_keys": 2},
+        recycle=roll,
+        self_identity=WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=2),
+        serve_affecting=True,
+        awaiting_respawn=verdict,
+    )
+
+
+def _with_bus(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from tai42_skeleton.app import graceful_exit, instance
+
+    from .._fakes.bus import FakeBus
+
+    monkeypatch.setattr(instance.app, "_bus", FakeBus(origin="serve-1"))
+    exits: list[str] = []
+    monkeypatch.setattr(graceful_exit, "_deliver_self_sigterm", lambda: exits.append("sigterm"))
+    return exits
+
+
+async def test_an_install_whose_env_recycle_converged_arms_the_writer_self_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tai42_skeleton.app.graceful_exit import request_serve_graceful_exit
+
+    _with_bus(monkeypatch)
+
+    async def _ok(ref, version):
+        return {"ref": ref, "version": "1.0.0", "reload": _install_result(stopped=False)}
+
+    _use_installer(monkeypatch, install=_ok)
+    resp = await router.marketplace_install(_post({"ref": "tai42/toolbox"}))
+    assert resp.status_code == 200
+    reload = _data(resp)["data"]["reload"]
+    assert [entry["status"] for entry in reload["recycle"]["recycle"]] == ["recycled", "self-deferred"]
+    assert reload["awaiting_respawn"] == []
+    assert resp.background is not None
+    assert resp.background.func is request_serve_graceful_exit
+
+
+async def test_an_install_whose_env_recycle_stopped_names_the_workers_awaiting_and_arms_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_bus(monkeypatch)
+
+    async def _ok(ref, version):
+        return {"ref": ref, "version": "1.0.0", "reload": _install_result(stopped=True)}
+
+    _use_installer(monkeypatch, install=_ok)
+    resp = await router.marketplace_install(_post({"ref": "tai42/toolbox"}))
+    reload = _data(resp)["data"]["reload"]
+    assert [w["name"] for w in reload["awaiting_respawn"]] == ["backend-1", "serve-1"]
+    assert resp.background is None
+
+
+async def test_a_projected_install_whose_env_recycle_converged_runs_the_writer_self_exit_after_its_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from tai42_contract.manifest import ApiToolsConfig
+
+    from tai42_skeleton.operations import OperationRegistry, operation_metadata_of
+    from tai42_skeleton.operations.projection import project_operations
+
+    exits = _with_bus(monkeypatch)
+
+    async def _ok(ref, version):
+        return {"ref": ref, "version": "1.0.0", "reload": _install_result(stopped=False)}
+
+    _use_installer(monkeypatch, install=_ok)
+    monkeypatch.setattr(mkt_ops, "component_store_configured", lambda _component: True)
+    reg = OperationRegistry()
+    reg.register(operation_metadata_of(mkt_ops.marketplace_install))
+    registered: dict[str, Any] = {}
+
+    class _Tools:
+        def tool(self, *, force, name, tags, annotations):  # type: ignore[no-untyped-def]
+            def decorator(func):  # type: ignore[no-untyped-def]
+                registered[name] = func
+                return func
+
+            return decorator
+
+    project_operations(
+        SimpleNamespace(tools=_Tools()),
+        ApiToolsConfig(include=["marketplace_install"], expose_destructive=True),
+        registry=reg,
+    )
+    reply = await registered["marketplace_install"](ref="tai42/toolbox")
+
+    assert [entry["status"] for entry in reply["reload"]["recycle"]["recycle"]] == ["recycled", "self-deferred"]
+    assert reply["reload"]["awaiting_respawn"] == []
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert exits == ["sigterm"]
 
 
 async def test_install_malformed_body_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -618,7 +738,7 @@ async def test_install_public_not_accepted_carries_code_and_list(monkeypatch: py
 
 async def test_uninstall_and_update_wrap_data(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _ok(ref, version):
-        return {"ref": ref, "ok": True}
+        return {"ref": ref, "ok": True, "reload": None}
 
     _use_installer(monkeypatch, install=_ok)
     r1 = await router.marketplace_uninstall(_post({"ref": "tai42/toolbox"}))

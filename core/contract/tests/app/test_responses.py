@@ -44,3 +44,76 @@ def test_the_profile_apply_response_defaults_recycle_stopped_to_none() -> None:
     schema = ProfileApplyResponse.model_json_schema()
     assert "recycle_stopped" in schema["properties"]
     assert "recycle_stopped" not in schema["required"]
+
+
+def test_an_apply_response_carries_the_recycle_roll_and_the_keys_awaiting_a_respawn() -> None:
+    from tai42_contract.app.responses import ApplyResponse, RecycleRoll
+
+    body = ApplyResponse.model_validate(
+        {
+            "status": "ok",
+            "env_keys": 3,
+            "awaiting_respawn": [{"name": "backend-2", "keys": ["BACKEND_MANIFEST_KEY"]}],
+            "fanout": {"mode": "fleet"},
+            "recycle": {
+                "recycle": [{"name": "backend-1", "kind": "backend", "status": "recycled", "generation_before": 1}],
+                "fresh": [{"name": "backend-1", "kind": "backend", "generation": 2}],
+                "recycle_stopped": None,
+            },
+        }
+    )
+    assert isinstance(body.recycle, RecycleRoll)
+    assert body.recycle.recycle[0].status == "recycled"
+    assert body.awaiting_respawn[0].name == "backend-2"
+
+
+def test_an_apply_response_with_no_recycle_class_change_has_no_roll() -> None:
+    from tai42_contract.app.responses import ApplyResponse
+
+    body = ApplyResponse.model_validate({"status": "ok", "env_keys": 0, "fanout": {"mode": "local-only"}})
+    assert body.recycle is None
+    assert body.awaiting_respawn == []
+    schema = ApplyResponse.model_json_schema()
+    assert "recycle" not in schema["required"]
+    assert "awaiting_respawn" not in schema["required"]
+
+
+def test_a_backup_section_report_carries_the_recycle_roll() -> None:
+    from tai42_contract.app.responses import RecycleRoll
+    from tai42_contract.backup.models import BackupSectionReport
+
+    report = BackupSectionReport.model_validate({"recycle": {"recycle": [], "fresh": [], "recycle_stopped": None}})
+    assert isinstance(report.recycle, RecycleRoll)
+    assert report.recycle is not None
+    assert BackupSectionReport().recycle is None
+
+
+def test_the_awaiting_respawn_verdict_names_workers_and_keys() -> None:
+    from tai42_contract.app.responses import ApplyResponse, AwaitingWorker, ProfileApplyResponse
+
+    body = ApplyResponse.model_validate(
+        {
+            "status": "ok",
+            "env_keys": 1,
+            "awaiting_respawn": [{"name": "serve-2", "keys": ["BACKEND_MANIFEST_KEY"]}],
+            "fanout": {"mode": "fleet"},
+        }
+    )
+    assert body.awaiting_respawn == [AwaitingWorker(name="serve-2", keys=["BACKEND_MANIFEST_KEY"])]
+    profile = ProfileApplyResponse.model_validate(
+        {"hot": [], "recycle": [], "fresh": [], "refused": [], "fanout": {"mode": "fleet"}}
+    )
+    assert profile.awaiting_respawn == []
+    assert "awaiting_respawn" not in ProfileApplyResponse.model_json_schema()["required"]
+
+
+def test_a_backup_section_report_carries_the_workers_awaiting_a_respawn() -> None:
+    from tai42_contract.app.responses import AwaitingWorker
+    from tai42_contract.backup.models import BackupSectionReport
+
+    report = BackupSectionReport.model_validate(
+        {"awaiting_respawn": [{"name": "serve-2", "keys": ["BACKEND_MANIFEST_KEY"]}]}
+    )
+    assert report.awaiting_respawn == [AwaitingWorker(name="serve-2", keys=["BACKEND_MANIFEST_KEY"])]
+    assert BackupSectionReport().awaiting_respawn == []
+    assert "awaiting_respawn" not in BackupSectionReport.model_json_schema().get("required", [])

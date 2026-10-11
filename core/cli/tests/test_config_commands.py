@@ -478,3 +478,28 @@ def test_config_settings_schema_uses_groups_envelope(monkeypatch: pytest.MonkeyP
     result = run_cli(monkeypatch, handler, ["config", "settings-schema"])
     assert result.exit_code == 0, result.output
     assert "redis" in result.output
+
+
+def test_config_env_set_prints_the_recycle_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return data_response(
+            {
+                "status": "ok",
+                "env_keys": 2,
+                "awaiting_respawn": [],
+                "fanout": {"mode": "fleet", "op": "reload_config", "reachable": True, "results": []},
+                "recycle": {
+                    "recycle": [
+                        {"name": "backend-1", "kind": "backend", "status": "recycled", "generation_before": 1},
+                        {"name": "serve-1", "kind": "serve", "status": "self-deferred", "generation_before": 2},
+                    ],
+                    "fresh": [{"name": "backend-1", "kind": "backend", "generation": 2}],
+                    "recycle_stopped": None,
+                },
+            }
+        )
+
+    result = run_cli(monkeypatch, handler, ["config", "env", "set", "BACKEND_MANIFEST_KEY=NEW"])
+    assert result.exit_code == 0, result.output
+    assert "self-deferred" in result.output
+    assert "backend-1" in result.output

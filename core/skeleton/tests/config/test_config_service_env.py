@@ -12,18 +12,26 @@ lock serializing a concurrent secret-marks append; the stickiness tests assert a
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+# Imported for its registration side effect: the env doors classify a change by the live
+# registry, and the backend group's ``BACKEND_MANIFEST_KEY`` is recycle-class.
+import tai42_skeleton.backend.settings  # noqa: F401
+from tai42_skeleton.app.bus import WorkerKind
+from tai42_skeleton.app.recycle import TIMED_OUT, RecycleError, RecycleReport, RecycleRow, RecycleStop
 from tai42_skeleton.config.service import OrphanEnvWriteError
 
+from .._fakes.bus import FakeBus
 from .fake_pipeline import (
     FakeConfigStore,
     RetryingConfigStore,
     _no_bus,
     _none_descriptor,
     _oauth_descriptor,
+    _orchestrate_spy,
     _reset_settings_after,  # noqa: F401  — autouse fixture, active on import
     _service,
     _with_bus,
@@ -53,9 +61,418 @@ async def test_apply_env_change_writes_reloads_broadcasts(monkeypatch: pytest.Mo
     assert result.local == {"status": "ok", "env_keys": 0}
 
 
+async def test_apply_env_change_refuses_a_recycle_class_key_on_a_bare_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No supervisor can respawn a worker under the new value, so the env door refuses it
+    # upfront, naming the key, as the profile door does — never written and reported applied
+    # while the running bus keeps its boot value.
+    _with_bus(monkeypatch)
+    monkeypatch.delenv("TAI_SUPERVISED", raising=False)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"TAI_BUS_HEARTBEAT_TTL": "15"})
+    service, admin, bus = _service(store)
+
+    with pytest.raises(ValueError, match=r"bare.*TAI_BUS_HEARTBEAT_TTL") as refused:
+        await service.apply_env_change({"TAI_BUS_HEARTBEAT_TTL": "7"})
+
+    # The refusal names the way out that fits an env change, beside the supervised one.
+    assert "Set them in the deployment's environment (or the stored .env) and restart the server" in str(refused.value)
+    assert "or run under a supervised deployment, where a recycle carries them" in str(refused.value)
+    assert store.env_writes == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+async def test_apply_env_change_refuses_the_bus_url_on_every_deployment_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The bus URL reaches the worker bus itself: a recycle can never carry it, so it is
+    # refused on a supervised shape too, naming the key.
+    _with_bus(monkeypatch)
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+    store = FakeConfigStore(manifest={"mcp": []}, env={"TAI_BUS_REDIS_URL": "redis://localhost:6379/0"})
+    service, admin, bus = _service(store)
+
+    with pytest.raises(ValueError, match="TAI_BUS_REDIS_URL"):
+        await service.apply_env_change({"TAI_BUS_REDIS_URL": "redis://localhost:6379/5"})
+
+    assert store.env_writes == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+async def test_apply_env_change_refuses_removing_a_recycle_class_key_on_a_bare_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_bus(monkeypatch)
+    monkeypatch.delenv("TAI_SUPERVISED", raising=False)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"TAI_BUS_HEARTBEAT_TTL": "15"})
+    service, admin, _bus = _service(store)
+
+    with pytest.raises(ValueError, match=r"bare.*TAI_BUS_HEARTBEAT_TTL"):
+        await service.apply_env_change({"TAI_BUS_HEARTBEAT_TTL": ""})
+
+    assert store.env_writes == []
+    assert admin.calls == 0
+
+
+async def test_apply_env_change_carries_an_unchanged_recycle_class_key_on_a_bare_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A read-modify-write round-trip re-sends every stored key: an unchanged recycle-class
+    # value is no change, so the write beside it lands.
+    _with_bus(monkeypatch)
+    monkeypatch.delenv("TAI_SUPERVISED", raising=False)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"TAI_BUS_HEARTBEAT_TTL": "15"})
+    service, admin, _bus = _service(store)
+
+    await service.apply_env_change({"TAI_BUS_HEARTBEAT_TTL": "15", "NEW_KEY": "v"})
+
+    assert store.env == {"TAI_BUS_HEARTBEAT_TTL": "15", "NEW_KEY": "v"}
+    assert admin.calls == 1
+
+
+class _OrderedAdmin:
+    """A reload admin that records when the local reload ran, beside the bus's census reads."""
+
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+        self.calls = 0
+
+    def reload_config(self) -> dict[str, Any]:
+        self.calls += 1
+        self._events.append("reload")
+        return {"status": "ok", "env_keys": 1, "awaiting_respawn": []}
+
+
+class _OrderedBus(FakeBus):
+    """A fake bus that records each census read and carries one backend sibling."""
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(origin="serve-writer", remotes=["serve-b"])
+        self._events = events
+
+    async def census(self) -> list[Any]:
+        self._events.append("census")
+        rows = await super().census()
+        backend = rows[-1].model_copy(update={"name": "backend-1", "kind": WorkerKind.backend, "generation": 3})
+        return [*rows, backend]
+
+
+def _supervised(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_bus(monkeypatch)
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+
+
+async def test_apply_env_change_rolls_a_recycle_for_a_recycle_class_key_on_a_supervised_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _supervised(monkeypatch)
+    events: list[str] = []
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
+    orch, seen = _orchestrate_spy()
+    service, _admin, _bus = _service(store, admin=_OrderedAdmin(events), bus=_OrderedBus(events), orchestrate=orch)
+
+    result = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
+
+    assert store.env == {"BACKEND_MANIFEST_KEY": "NEW"}
+    assert seen["excluded_name"] == "serve-writer"
+    assert seen["applier_generation"] == 1
+    assert seen["applier_self_deferred"] is True
+    assert [kind.value for kind in seen["target_kinds"]] == ["backend", "serve"]
+    # The targets are pinned from a census read BEFORE the local reload.
+    assert seen["expected"] == {"serve-b": (WorkerKind.serve, 1), "backend-1": (WorkerKind.backend, 3)}
+    assert events.index("census") < events.index("reload")
+    assert result.recycle is not None
+    assert [row.name for row in result.recycle.rows] == ["serve-b"]
+    assert result.self_exit_armed is True
+
+
+async def test_apply_env_change_of_hot_keys_only_rolls_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
+    orch, seen = _orchestrate_spy()
+    service, _admin, _bus = _service(store, bus=FakeBus(origin="serve-writer"), orchestrate=orch)
+
+    result = await service.apply_env_change({"NEW_KEY": "v", "BACKEND_MANIFEST_KEY": "OLD"})
+
+    assert seen == {}
+    assert result.recycle is None
+    assert result.self_exit_armed is False
+
+
+async def test_apply_env_and_change_rolls_a_recycle_for_a_recycle_class_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
+    orch, seen = _orchestrate_spy()
+    service, _admin, _bus = _service(store, bus=FakeBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
+
+    result = await service.apply_env_and_change(
+        _prepare({"BACKEND_MANIFEST_KEY": "NEW", "GH": "s"}, _secret_marker_mutator("GH"))
+    )
+
+    assert seen["excluded_name"] == "serve-writer"
+    assert result.recycle is not None
+    assert result.self_exit_armed is True
+
+
+async def test_a_stopped_env_change_roll_returns_the_partial_report_and_arms_no_self_exit(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
+    detail = "old life still present after 30s"
+    partial = RecycleReport(
+        rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=TIMED_OUT, detail=detail)],
+        stopped=RecycleStop(kind="serve", name="serve-b", detail=detail),
+    )
+    orch, _seen = _orchestrate_spy(raises=RecycleError(f"recycle: {detail}", partial))
+    service, _admin, _bus = _service(store, bus=FakeBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
+
+    with caplog.at_level(logging.ERROR):
+        result = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
+
+    assert result.recycle is partial
+    assert result.self_exit_armed is False
+    assert "recycle for this env change did not converge" in caplog.text
+    assert store.env == {"BACKEND_MANIFEST_KEY": "NEW"}
+
+
+async def test_an_env_change_roll_raising_with_no_recorded_stop_escapes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
+    orch, _seen = _orchestrate_spy(raises=RecycleError("recycle: contract violation", RecycleReport()))
+    service, _admin, _bus = _service(store, bus=FakeBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
+
+    with pytest.raises(RecycleError, match="contract violation"):
+        await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
+
+
+_MOVED = {"status": "ok", "env_keys": 1, "awaiting_respawn": ["BACKEND_MANIFEST_KEY"]}
+
+
+class _MovedBus(FakeBus):
+    """A fake bus whose every sibling answers the reload with the fact that its env moved."""
+
+    async def publish(self, op: dict[str, Any], targets: Any, local: Any, *, expected_at_start: Any = None) -> Any:
+        from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerResult
+
+        report = await super().publish(op, targets, local, expected_at_start=expected_at_start)
+        rows = [
+            row
+            if row.name == self.identity.name
+            else WorkerResult(name=row.name, outcome=OpOutcome.applied, payload=_MOVED)
+            for row in report.results
+        ]
+        return FleetResult(op=report.op, results=rows)
+
+
+def _moved_admin() -> Any:
+    from .fake_pipeline import FakeReloadAdmin
+
+    return FakeReloadAdmin(result=dict(_MOVED))
+
+
+async def test_a_converged_env_change_roll_leaves_nobody_awaiting_a_respawn(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
+    orch, _seen = _orchestrate_spy()
+    service, _admin, _bus = _service(
+        store, admin=_moved_admin(), bus=_MovedBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch
+    )
+
+    with caplog.at_level(logging.ERROR):
+        result = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
+
+    assert result.awaiting_respawn == []
+    assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
+
+
+async def test_a_stopped_env_change_roll_leaves_the_unreached_and_the_writer_awaiting(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
+    partial = RecycleReport(
+        rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=TIMED_OUT, detail="slow")],
+        stopped=RecycleStop(kind="serve", name="serve-b", detail="slow"),
+    )
+    orch, _seen = _orchestrate_spy(raises=RecycleError("recycle: slow", partial))
+    bus = _MovedBus(origin="serve-writer", remotes=["serve-b", "serve-c"])
+    service, _admin, _bus = _service(store, admin=_moved_admin(), bus=bus, orchestrate=orch)
+
+    with caplog.at_level(logging.ERROR):
+        result = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
+
+    assert [(w.name, w.keys) for w in result.awaiting_respawn] == [
+        ("serve-b", ["BACKEND_MANIFEST_KEY"]),
+        ("serve-c", ["BACKEND_MANIFEST_KEY"]),
+        ("serve-writer", ["BACKEND_MANIFEST_KEY"]),
+    ]
+    awaiting_lines = [r.getMessage() for r in caplog.records if "awaiting a respawn" in r.getMessage()]
+    assert len(awaiting_lines) == 1
+    assert "serve-b (BACKEND_MANIFEST_KEY), serve-c (BACKEND_MANIFEST_KEY), serve-writer" in awaiting_lines[0]
+
+
+async def test_a_hot_change_names_a_sibling_whose_env_moved_out_of_band(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "NEW"})
+    orch, seen = _orchestrate_spy()
+    service, _admin, _bus = _service(store, bus=_MovedBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
+
+    with caplog.at_level(logging.ERROR):
+        result = await service.apply_env_change({"LOG_LEVEL": "debug"})
+
+    assert seen == {}
+    assert [(w.name, w.keys) for w in result.awaiting_respawn] == [("serve-b", ["BACKEND_MANIFEST_KEY"])]
+    assert len([r for r in caplog.records if "awaiting a respawn" in r.getMessage()]) == 1
+
+
+class _CountingMovedBus(_MovedBus):
+    """A moved-env bus that counts the census reads the recycle pin takes."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.census_reads = 0
+
+    async def census(self) -> list[Any]:
+        self.census_reads += 1
+        return await super().census()
+
+
+def _counting(
+    spy: Callable[..., Awaitable[RecycleReport]],
+) -> tuple[Callable[..., Awaitable[RecycleReport]], list[int]]:
+    calls: list[int] = []
+
+    async def counted(*args: Any, **kwargs: Any) -> RecycleReport:
+        calls.append(1)
+        return await spy(*args, **kwargs)
+
+    return counted, calls
+
+
+async def test_a_replace_that_continues_a_converged_change_carries_its_roll_and_rolls_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
+    spy, _seen = _orchestrate_spy()
+    orch, rolls = _counting(spy)
+    bus = _CountingMovedBus(origin="serve-writer", remotes=["serve-b"])
+    service, _admin, _bus = _service(store, admin=_moved_admin(), bus=bus, orchestrate=orch)
+    prior = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
+    census_after_change = bus.census_reads
+
+    with caplog.at_level(logging.ERROR):
+        result = await service.apply_replace({"mcp": []}, continues=prior)
+
+    assert rolls == [1]
+    assert bus.census_reads == census_after_change
+    assert result.recycle is prior.recycle
+    assert result.self_identity == prior.self_identity
+    assert result.self_exit_armed is True
+    assert result.awaiting_respawn == []
+    assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
+
+
+async def test_a_replace_that_continues_a_stopped_change_names_the_unreached_and_the_writer(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
+    partial = RecycleReport(
+        rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=TIMED_OUT, detail="slow")],
+        stopped=RecycleStop(kind="serve", name="serve-b", detail="slow"),
+    )
+    orch, _seen = _orchestrate_spy(raises=RecycleError("recycle: slow", partial))
+    bus = _MovedBus(origin="serve-writer", remotes=["serve-b", "serve-c"])
+    service, _admin, _bus = _service(store, admin=_moved_admin(), bus=bus, orchestrate=orch)
+    prior = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
+    caplog.clear()
+
+    with caplog.at_level(logging.ERROR):
+        result = await service.apply_replace({"mcp": []}, continues=prior)
+
+    assert result.recycle is partial
+    assert result.self_exit_armed is False
+    assert [w.name for w in result.awaiting_respawn] == ["serve-b", "serve-c", "serve-writer"]
+    assert len([r for r in caplog.records if "awaiting a respawn" in r.getMessage()]) == 1
+
+
+async def test_a_replace_given_both_a_continued_change_and_keys_of_its_own_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
+    orch, _seen = _orchestrate_spy()
+    service, _admin, _bus = _service(store, bus=FakeBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
+    prior = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
+
+    with pytest.raises(ValueError, match="rolls no recycle keys of its own"):
+        await service.apply_replace({"mcp": []}, continues=prior, recycle_keys=["BACKEND_MANIFEST_KEY"])
+
+
+async def test_a_local_reload_failure_carries_the_change_s_unrolled_recycle_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+
+    from .fake_pipeline import FakeReloadAdmin
+
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
+    orch, seen = _orchestrate_spy()
+    admin = FakeReloadAdmin(raise_reload=RuntimeError("boom"))
+    service, _admin, _bus = _service(
+        store, admin=admin, bus=FakeBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch
+    )
+
+    with pytest.raises(FleetBroadcastError) as raised:
+        await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
+
+    assert raised.value.unrolled_recycle_keys == ("BACKEND_MANIFEST_KEY",)
+    assert seen == {}
+
+
+async def test_a_replace_handed_a_change_s_unrolled_keys_rolls_their_recycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    _supervised(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "NEW"})
+    orch, seen = _orchestrate_spy()
+    service, _admin, _bus = _service(store, bus=FakeBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
+
+    result = await service.apply_replace({"mcp": []}, recycle_keys=["BACKEND_MANIFEST_KEY"])
+
+    assert seen["excluded_name"] == "serve-writer"
+    assert result.recycle is not None
+    assert result.self_exit_armed is True
+
+
 # ---------------------------------------------------------------------------
 # apply_env_and_change (combined env-write + manifest-mutate)
 # ---------------------------------------------------------------------------
+
+
+async def test_apply_env_and_change_refuses_the_bus_url_on_every_deployment_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_bus(monkeypatch)
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+    store = FakeConfigStore(manifest={"mcp": []}, env={"TAI_BUS_REDIS_URL": "redis://localhost:6379/0"})
+    service, admin, _bus = _service(store)
+
+    with pytest.raises(ValueError, match="TAI_BUS_REDIS_URL"):
+        await service.apply_env_and_change(
+            _prepare({"TAI_BUS_REDIS_URL": "redis://localhost:6379/5"}, _secret_marker_mutator("TAI_BUS_REDIS_URL"))
+        )
+
+    assert store.env_writes == []
+    assert store.persisted == []
+    assert admin.calls == 0
 
 
 def _secret_marker_mutator(var: str) -> Callable[[dict[str, Any]], None]:

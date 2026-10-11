@@ -37,6 +37,8 @@ from tai42_e2e.fixture_catalog import (
     KAPPA_REPOSITORY_URL,
     KAPPA_TAG,
     KAPPA_VERSION,
+    LAMBDA_PACKAGE,
+    LAMBDA_REF,
     THETA_PACKAGE,
     THETA_REF,
     ZETA_NARROW_CONTRACT_RANGE,
@@ -235,6 +237,18 @@ async def seed_theta_listing(mp: MarketplaceService, index: FixturePackageIndex,
     index.register(artifacts.theta_v1)
     await _admin_seed(mp, ((THETA_PACKAGE, artifacts.theta_v1.plugin_yml),))
     await _wait_published(mp, THETA_REF, "0.1.0")
+
+
+async def seed_lambda_listing(mp: MarketplaceService, index: FixturePackageIndex, artifacts: FixtureArtifacts) -> None:
+    """Stage lambda's ``0.1.0`` wheel and drive the real admin-seed + ingest pipeline
+    until it publishes.
+
+    Lambda is the late-loaded settings fixture the supervised marketplace spec installs:
+    its tool module defines a recycle-class settings group. Kept OUT of
+    :func:`seed_fixture_catalog` so it never pollutes the shared browse catalog."""
+    index.register(artifacts.lambda_v1)
+    await _admin_seed(mp, ((LAMBDA_PACKAGE, artifacts.lambda_v1.plugin_yml),))
+    await _wait_published(mp, LAMBDA_REF, "0.1.0")
 
 
 async def seed_eta_listing(mp: MarketplaceService, index: FixturePackageIndex, artifacts: FixtureArtifacts) -> None:

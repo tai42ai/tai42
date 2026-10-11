@@ -3,20 +3,30 @@ as a plain-data group. Extraction honors aliases, marks secrets, skips
 non-JSON-safe defaults, and references nested settings as their own group."""
 
 import enum
-from typing import Annotated, ClassVar
+from typing import Annotated, ClassVar, cast
 
 import pytest
 from pydantic import AliasChoices, AliasPath, Field, SecretStr
 from pydantic.fields import FieldInfo
-from pydantic_settings import SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tai42_kit.clients.settings import RedisConnectionSettings
-from tai42_kit.settings import KeyMaterial, ReloadClass, TaiBaseSettings, registered_settings
+from tai42_kit.settings import (
+    KeyMaterial,
+    ReloadClass,
+    TaiBaseSettings,
+    bind_respawn_class_env,
+    registered_settings,
+    registry,
+    respawn_class_env_drift,
+    unbind_respawn_class_env,
+)
 from tai42_kit.settings.registry import (
     _clear_registry,
     _factory_needs_validated_data,
     _register,
     _resolve_default,
+    changes_only_by_respawn,
 )
 
 
@@ -519,3 +529,317 @@ def test_reload_override_on_optional_field_is_honored():
     # a sibling nullable field with no override keeps the class disposition.
     assert _field("OptionalReloadSettings", "pinned").reload_class == "excluded"
     assert _field("OptionalReloadSettings", "rebuilt").reload_class == "recycle"
+
+
+@pytest.mark.parametrize("disposition", ["recycle", "excluded"])
+def test_a_group_of_one_respawn_class_changes_only_by_respawn(disposition):
+    class RespawnClassSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="RESPAWNCLASS_")
+        reload_class: ClassVar[ReloadClass] = cast(ReloadClass, disposition)
+
+        value: int = 1
+
+    assert changes_only_by_respawn(RespawnClassSettings) is True
+
+
+def test_a_hot_group_does_not_change_only_by_respawn():
+    class PlainHotSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="PLAINHOT_")
+
+        value: int = 1
+
+    assert changes_only_by_respawn(PlainHotSettings) is False
+
+
+def test_one_hot_field_on_a_recycle_group_means_it_does_not_change_only_by_respawn():
+    class OneHotFieldSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="ONEHOTFIELD_")
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        rebuilt: int = 1
+        live: int = Field(default=2, json_schema_extra={"reload": "hot"})
+
+    assert changes_only_by_respawn(OneHotFieldSettings) is False
+
+
+def test_every_field_overridden_to_a_respawn_class_on_a_hot_group_changes_only_by_respawn():
+    class EveryFieldOverriddenSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="EVERYFIELDOVERRIDDEN_")
+
+        rebuilt: int = Field(default=1, json_schema_extra={"reload": "recycle"})
+        pinned: Annotated[int, Field(json_schema_extra={"reload": "excluded"})] | None = None
+
+    assert changes_only_by_respawn(EveryFieldOverriddenSettings) is True
+
+
+def test_a_nested_group_is_judged_by_its_own_registered_fields():
+    class RecycleChildSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="RECYCLECHILD_")
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        url: str = ""
+
+    class HotChildSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="HOTCHILD_")
+
+        flag: bool = True
+
+    class RecycleOverRecycleSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="RECYCLEOVERRECYCLE_")
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        child: RecycleChildSettings = Field(default_factory=RecycleChildSettings)
+        namespace: str = "tai"
+
+    class RecycleOverHotSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="RECYCLEOVERHOT_")
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        child: HotChildSettings | None = None
+
+    assert changes_only_by_respawn(RecycleOverRecycleSettings) is True
+    # The reference row carries its owner's class; the nested group's own hot field decides.
+    assert changes_only_by_respawn(RecycleOverHotSettings) is False
+
+
+def test_a_nested_group_that_is_not_registered_means_it_does_not_change_only_by_respawn():
+    class UnregisteredChild(BaseSettings):
+        flag: bool = True
+
+    class RecycleOverUnregisteredSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="RECYCLEOVERUNREGISTERED_")
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        child: UnregisteredChild = Field(default_factory=UnregisteredChild)
+
+    assert changes_only_by_respawn(RecycleOverUnregisteredSettings) is False
+
+
+def test_an_unregistered_class_does_not_change_only_by_respawn():
+    class PlainSettings(BaseSettings):
+        value: int = 1
+
+    class ExcludedRecycleBase(TaiBaseSettings):
+        reload_class: ClassVar[ReloadClass] = "recycle"
+        registry_exclude: ClassVar[bool] = True
+
+        value: int = 1
+
+    class NoFieldRecycleSettings(TaiBaseSettings):
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+    assert changes_only_by_respawn(PlainSettings) is False
+    assert changes_only_by_respawn(ExcludedRecycleBase) is False
+    assert changes_only_by_respawn(NoFieldRecycleSettings) is False
+
+
+class SelfNestingRecycleSettings(TaiBaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SELFNESTINGRECYCLE_")
+    reload_class: ClassVar[ReloadClass] = "recycle"
+
+    url: str = ""
+    inner: "SelfNestingRecycleSettings | None" = None
+
+
+def test_a_group_that_nests_itself_does_not_change_only_by_respawn():
+    _register(SelfNestingRecycleSettings)
+
+    assert changes_only_by_respawn(SelfNestingRecycleSettings) is False
+
+
+# -- the env a respawn-class value is bound under -------------------------------------------------
+
+
+def _bound_group(prefix: str = "BOUNDPOOL_") -> type[TaiBaseSettings]:
+    """Define (or re-define under the same qualified name, as a module re-import does) a recycle-class group."""
+
+    class BoundPoolSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix=prefix)
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        url: str = ""
+
+    return BoundPoolSettings
+
+
+def test_a_group_registered_before_the_bind_is_bound_to_the_bind_s_value(monkeypatch):
+    monkeypatch.delenv("BOUNDPOOL_URL", raising=False)
+    _bound_group()
+    # A store-only value bridged after the group's class was imported.
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+
+    bind_respawn_class_env()
+
+    assert respawn_class_env_drift() == frozenset()
+
+
+def test_a_group_registered_after_the_bind_is_bound_to_the_value_in_place(monkeypatch):
+    monkeypatch.delenv("BOUNDPOOL_URL", raising=False)
+    bind_respawn_class_env()
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+
+    _bound_group()
+
+    assert respawn_class_env_drift() == frozenset()
+
+
+def test_a_value_changed_after_it_was_bound_is_in_the_drift(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    bind_respawn_class_env()
+
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+
+    assert respawn_class_env_drift() == frozenset({"BOUNDPOOL_URL"})
+
+
+def test_the_bind_not_a_later_equal_write_is_the_baseline(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    bind_respawn_class_env()
+
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+
+    assert respawn_class_env_drift() == frozenset({"BOUNDPOOL_URL"})
+
+
+def test_a_value_written_back_unchanged_is_not_in_the_drift(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    bind_respawn_class_env()
+
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+
+    assert respawn_class_env_drift() == frozenset()
+
+
+def test_a_removed_value_is_in_the_drift(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    bind_respawn_class_env()
+
+    monkeypatch.delenv("BOUNDPOOL_URL")
+
+    assert respawn_class_env_drift() == frozenset({"BOUNDPOOL_URL"})
+
+
+def test_an_empty_value_reads_as_the_absent_one_it_was_bound_as(monkeypatch):
+    monkeypatch.delenv("BOUNDPOOL_URL", raising=False)
+    _bound_group()
+    bind_respawn_class_env()
+
+    monkeypatch.setenv("BOUNDPOOL_URL", "")
+
+    assert respawn_class_env_drift() == frozenset()
+
+
+def test_nothing_is_in_the_drift_right_after_the_bind(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+
+    bind_respawn_class_env()
+
+    assert respawn_class_env_drift() == frozenset()
+
+
+def test_a_re_registration_keeps_the_first_bound_value(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    bind_respawn_class_env()
+    _bound_group()
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+
+    _bound_group()
+
+    assert respawn_class_env_drift() == frozenset({"BOUNDPOOL_URL"})
+
+
+def test_a_second_group_naming_the_same_var_does_not_re_bind_it(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    bind_respawn_class_env()
+    _bound_group()
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+
+    class SecondPoolSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="BOUNDPOOL_")
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        url: str = ""
+
+    assert respawn_class_env_drift() == frozenset({"BOUNDPOOL_URL"})
+
+
+def test_a_hot_field_is_never_bound(monkeypatch):
+    monkeypatch.setenv("BOUNDHOT_FLAG", "1")
+    bind_respawn_class_env()
+
+    class BoundHotSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="BOUNDHOT_")
+
+        flag: str = ""
+
+    monkeypatch.setenv("BOUNDHOT_FLAG", "2")
+
+    assert respawn_class_env_drift() == frozenset()
+    assert registry._BOUND_ENV == {}
+
+
+def test_a_field_overridden_excluded_on_a_hot_group_is_bound(monkeypatch):
+    monkeypatch.setenv("BOUNDPINNED_MODE", "a")
+    bind_respawn_class_env()
+
+    class BoundPinnedSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="BOUNDPINNED_")
+
+        mode: str = Field(default="", json_schema_extra={"reload": "excluded"})
+        live: str = ""
+
+    assert registry._BOUND_ENV == {"BOUNDPINNED_MODE": "a"}
+
+
+def test_a_nested_group_reference_binds_no_var_of_its_own(monkeypatch):
+    bind_respawn_class_env()
+
+    class BoundHotChildSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="BOUNDHOTCHILD_")
+
+        flag: str = ""
+
+    class BoundParentSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="BOUNDPARENT_")
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        child: BoundHotChildSettings | None = None
+
+    assert registry._BOUND_ENV == {}
+
+
+def test_while_unbound_the_drift_is_empty_and_a_registration_binds_nothing(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+
+    assert respawn_class_env_drift() == frozenset()
+    assert registry._BOUND_ENV is None
+
+
+def test_an_unbind_drops_the_bound_values(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    bind_respawn_class_env()
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+
+    unbind_respawn_class_env()
+
+    assert respawn_class_env_drift() == frozenset()
+
+
+def test_a_second_bind_overwrites_every_bound_value(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    bind_respawn_class_env()
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+
+    bind_respawn_class_env()
+
+    assert respawn_class_env_drift() == frozenset()

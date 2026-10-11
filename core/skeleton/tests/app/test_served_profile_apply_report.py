@@ -115,6 +115,18 @@ class _DroppingBus(FakeBus):
         return await super().census()
 
 
+async def _stopping_roll(*_args: Any, **_kwargs: Any) -> RecycleReport:
+    """A roll that stops at ``backend-1`` after recycling ``backend-0``, exactly as the orchestration raises."""
+    partial = RecycleReport(
+        rows=[
+            RecycleRow(name="backend-0", kind="backend", generation_before=1, status=RECYCLED),
+            RecycleRow(name="backend-1", kind="backend", generation_before=1, status=TIMED_OUT, detail=STOP_DETAIL),
+        ],
+        stopped=RecycleStop(kind="backend", name="backend-1", detail=STOP_DETAIL),
+    )
+    raise RecycleTimeoutError("backend-1", "old life still present", partial)
+
+
 class _Pipeline(ConfigService):
     """The real apply pipeline over fakes; the ``@previous`` snapshot and the build do
     nothing. The roll either stops at ``backend-1`` after recycling ``backend-0``, exactly
@@ -122,23 +134,10 @@ class _Pipeline(ConfigService):
     drops after the apply's pre-swap census read."""
 
     applied: list[ProfileApplyOutcome]
-    outage: bool
 
     async def apply_replace_env(self, profile_env: dict[str, str], **kwargs: Any) -> ProfileApplyOutcome:
         async def swap(env: dict[str, str]) -> Epoch:
             return Epoch(number=0)
-
-        async def stopping_roll(*_args: Any, **_kwargs: Any) -> RecycleReport:
-            partial = RecycleReport(
-                rows=[
-                    RecycleRow(name="backend-0", kind="backend", generation_before=1, status=RECYCLED),
-                    RecycleRow(
-                        name="backend-1", kind="backend", generation_before=1, status=TIMED_OUT, detail=STOP_DETAIL
-                    ),
-                ],
-                stopped=RecycleStop(kind="backend", name="backend-1", detail=STOP_DETAIL),
-            )
-            raise RecycleTimeoutError("backend-1", "old life still present", partial)
 
         async def save_previous(_stored: dict[str, str]) -> None:
             return None
@@ -147,7 +146,6 @@ class _Pipeline(ConfigService):
             profile_env,
             save_previous=save_previous,
             build_and_swap=swap,
-            orchestrate=orchestrate_recycle if self.outage else stopping_roll,
         )
         self.applied.append(outcome)
         return outcome
@@ -165,9 +163,13 @@ def _install_pipeline(
         store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
         stores.append(store)
         bus = _DroppingBus() if outage else FakeBus(origin="serve-applier")
-        pipeline = _Pipeline(config_manager=store, admin=FakeReloadAdmin(), bus=cast("Any", bus))
+        pipeline = _Pipeline(
+            config_manager=store,
+            admin=FakeReloadAdmin(),
+            bus=cast("Any", bus),
+            orchestrate=orchestrate_recycle if outage else _stopping_roll,
+        )
         pipeline.applied = applied
-        pipeline.outage = outage
         return pipeline
 
     monkeypatch.setattr(config_ops, "_require_profile_store", lambda: None)

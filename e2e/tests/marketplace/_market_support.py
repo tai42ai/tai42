@@ -147,7 +147,8 @@ class MarketInstaller:
         version: str | None = None,
         accept_public_routes: bool = False,
         timeout: float | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
+        """Install ``ref`` on ``stack``, ledgered for teardown, and return the install receipt."""
         body: dict[str, Any] = {"ref": ref}
         if version is not None:
             body["version"] = version
@@ -157,8 +158,9 @@ class MarketInstaller:
             # spec's own install helper use, or the routes-capable registry returns 400
             # PUBLIC_ROUTES_NOT_ACCEPTED.
             body["accept_public_routes"] = True
-        await stack.api().post("/api/marketplace/install", json=body, timeout=timeout)
+        receipt = await stack.api().post("/api/marketplace/install", json=body, timeout=timeout)
         self._installed.append((stack, ref, package))
+        return receipt
 
     async def acleanup(self) -> None:
         # Reverse order, best-effort: a teardown must never mask the body's own exception,

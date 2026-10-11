@@ -273,7 +273,7 @@ async def test_a_hook_binding_a_state_the_same_document_restores_restores_and_at
         },
     }
 
-    result = await import_backup(document, ["webhooks", "states"])
+    result = (await import_backup(document, ["webhooks", "states"])).payload
 
     assert result.sections["states"].errors == []
     assert result.sections["webhooks"].errors == []

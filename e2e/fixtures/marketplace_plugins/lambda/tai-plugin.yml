@@ -1,0 +1,21 @@
+spec_version: 1
+namespace: tai42
+name: e2e-lambda
+package: tai-e2e-market-lambda
+version: 0.0.0
+description: "Installable marketplace fixture plugin: a probe tool over a recycle-class settings group."
+license: Apache-2.0
+repository: https://github.com/tai42ai/tai-e2e
+contract: ">=0.3,<0.4"
+categories: [execution]
+tags: [probe, lambda]
+permissions:
+  network: false
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: tool
+    name: e2e_market_lambda_probe
+    module: tai_e2e_market_lambda.tools
+    description: "Return the pool URL the lambda fixture's recycle-class settings group reads."
+    tags: [probe]

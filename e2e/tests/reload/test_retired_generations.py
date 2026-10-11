@@ -15,9 +15,9 @@ first streaming response or a request that opened a connection. The stack's requ
 no outbound HTTP during the reloads: on uvloop a keep-alive connection an httpx-backed client
 opens holds the request that opened it until its client epoch's pool is drained at that
 epoch's retire, a hold this suite does not exercise. Every released
-generation is judged: no settings instance of it is still held, except the worker bus's
-boot-epoch bus settings, which the process-lifetime bus keeps by design. The stack sets
-both cache TTLs low so the wait for release stays short.
+generation is judged: no settings instance of it whose values can change within the
+process is still held. The stack sets both cache TTLs low so the wait for release stays
+short.
 """
 
 from __future__ import annotations
@@ -53,8 +53,6 @@ _CACHE_TTL_SECONDS = 2
 # How long the retired generations may take to be released once the stream closes: above
 # the cache TTL and the server's keep-alive, with room for a loaded host.
 _RELEASE_DEADLINE_SECONDS = 60.0
-# The process-lifetime worker bus keeps its boot-epoch bus settings by design.
-_WORKER_BUS_HOLD = ["tai42_skeleton.app.bus.WorkerBus"]
 
 
 def _build_short_ttl_auth_stack(res: StackResources, variants: Variants) -> StackConfig:
@@ -75,11 +73,6 @@ async def _snapshot(stack: TaiStack) -> dict[str, Any]:
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"e2e_settings_snapshot returned no result map: {result!r}"
     return data
-
-
-def _leaked(stale_holders: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The stale holders other than the worker bus's boot-epoch bus settings."""
-    return [holder for holder in stale_holders if holder["holders"] != _WORKER_BUS_HOLD]
 
 
 @pytest.mark.timeout(300)
@@ -105,7 +98,7 @@ async def test_reloads_with_access_control_on_release_every_retired_generation_a
         assert during["settings_epoch"] >= stream_epoch + 3, f"the reloads did not advance the epoch: {during}"
         # The generation serving the open stream stays reachable by design.
         assert stream_epoch in during["retired_generations_alive"], during["retired_generations_alive"]
-        assert not _leaked(during["stale_holders"]), f"a released generation left a settings instance held: {during}"
+        assert during["stale_holders"] == [], f"a released generation left a settings instance held: {during}"
         assert during["stale_pool_epochs"] == [], f"a retired client-pool epoch is still present: {during}"
 
     latest: dict[str, Any] = during
@@ -123,5 +116,5 @@ async def test_reloads_with_access_control_on_release_every_retired_generation_a
         raise AssertionError(
             f"a retired generation was not released once the stream closed: {latest['retired_generations_alive']}"
         ) from exc
-    assert not _leaked(after["stale_holders"]), f"a released generation left a settings instance held: {after}"
+    assert after["stale_holders"] == [], f"a released generation left a settings instance held: {after}"
     assert after["stale_pool_epochs"] == [], f"a retired client-pool epoch is still present: {after}"

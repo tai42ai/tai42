@@ -62,6 +62,22 @@ def build_marketplace_stack(res: StackResources, variants: Variants) -> StackCon
     )
 
 
+def build_marketplace_supervised_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The marketplace stack on a SUPERVISED shape with one backend runtime on the bus.
+
+    ``supervised=True`` stamps ``TAI_SUPERVISED=harness`` into every child and runs the
+    harness respawn-on-exit supervisor, so an env change of a recycle-class key an install
+    loaded rolls a real recycle (the backend sibling recycled, the serve writer's own exit
+    respawned). The recycle step budget is widened so a respawned worker's boot fits the
+    per-step census wait, as on the recycle stack."""
+    from dataclasses import replace
+
+    base = build_marketplace_stack(res, variants)
+    manifest = {**base.manifest, "backend_module": variants.backend.module}
+    env = {**base.env, "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "90"}
+    return replace(base, name="marketplace-supervised", manifest=manifest, env=env, run_backend=True, supervised=True)
+
+
 def build_marketplace_prefix_stack(res: StackResources, variants: Variants) -> StackConfig:
     """The marketplace stack with a persistent plugin prefix configured
     (``TAI_PLUGINS_PREFIX``) — the restart-survival home.

@@ -12,10 +12,11 @@ import pytest
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, WorkerIdentity, WorkerKind, WorkerResult
+from tai42_skeleton.app.recycle import RECYCLED, FreshLife, RecycleError, RecycleReport, RecycleRow, orchestrate_recycle
 from tai42_skeleton.config.service import ConfigService
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
 
 
 class FakeConfigStore:
@@ -162,12 +163,52 @@ class RecordingBus:
 
 
 def _service(
-    store: FakeConfigStore, *, admin: FakeReloadAdmin | None = None, bus: RecordingBus | None = None
-) -> tuple[ConfigService, FakeReloadAdmin, RecordingBus]:
+    store: FakeConfigStore,
+    *,
+    admin: Any = None,
+    bus: Any = None,
+    orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
+) -> tuple[ConfigService, Any, Any]:
     admin = admin or FakeReloadAdmin()
     bus = bus or RecordingBus()
-    service = ConfigService(config_manager=store, admin=admin, bus=cast("Any", bus))
+    service = ConfigService(config_manager=store, admin=admin, bus=cast("Any", bus), orchestrate=orchestrate)
     return service, admin, bus
+
+
+def _orchestrate_spy(
+    report: RecycleReport | None = None,
+    *,
+    raises: RecycleError | None = None,
+) -> tuple[Callable[..., Awaitable[RecycleReport]], dict[str, Any]]:
+    """An ``orchestrate`` seam that records its kwargs and returns a crafted report, or
+    raises ``raises`` (the roll stopping)."""
+    seen: dict[str, Any] = {}
+
+    async def spy(
+        bus: Any,
+        *,
+        excluded_name: str,
+        applier_generation: int,
+        target_kinds: Any,
+        applier_self_deferred: bool,
+        step_timeout: float,
+        expected: Any = None,
+    ) -> RecycleReport:
+        seen["expected"] = None if expected is None else dict(expected)
+        seen["excluded_name"] = excluded_name
+        seen["applier_generation"] = applier_generation
+        seen["target_kinds"] = list(target_kinds)
+        seen["applier_self_deferred"] = applier_self_deferred
+        seen["step_timeout"] = step_timeout
+        if raises is not None:
+            raise raises
+        out = report or RecycleReport(
+            rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=RECYCLED)],
+            fresh=[FreshLife(name="serve-b", kind="serve", generation=2)],
+        )
+        return out
+
+    return spy, seen
 
 
 @pytest.fixture(autouse=True)
