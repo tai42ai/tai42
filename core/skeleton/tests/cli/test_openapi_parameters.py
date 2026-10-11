@@ -339,3 +339,15 @@ def test_emission_refuses_a_route_whose_path_repeats_a_parameter() -> None:
     schemas, _ = schemas_for([meta])
     with pytest.raises(ValueError, match=r"declares parameter 'id' in path twice"):
         _emit_operation(meta, "GET", schemas)
+
+
+def test_a_path_converter_placeholder_publishes_its_converter(spec: dict) -> None:
+    stat = spec["paths"]["/api/storage/resources/{resource_id}/stat"]["get"]
+    (resource_id,) = [p for p in stat["parameters"] if p["in"] == "path"]
+    assert resource_id["x-tai42-converter"] == "path"
+
+
+def test_a_plain_placeholder_carries_no_converter(spec: dict) -> None:
+    threads = spec["paths"]["/api/conversations/{route_name}/threads"]["get"]
+    (route_name,) = [p for p in threads["parameters"] if p["in"] == "path"]
+    assert "x-tai42-converter" not in route_name
