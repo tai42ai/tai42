@@ -915,7 +915,10 @@ async def test_callback_post_oversized_query_413_when_off(wired):
 
 async def test_post_reads_the_body_once(wired, monkeypatch):
     # The size guard's bounded read is the one read of the body: the claim takes those bytes.
-    from tai42_skeleton.routers.interactions import callback as callback_module
+    import importlib
+
+    # The package re-exports the door handler under the module's name; patch the module itself.
+    callback_module = importlib.import_module("tai42_skeleton.routers.interactions.callback")
 
     reads = []
     real_read = callback_module.read_bounded_body
