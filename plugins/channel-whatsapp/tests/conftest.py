@@ -127,10 +127,20 @@ class _StubHttp:
         action: str | None = None,
         declared: Any = None,
         no_body_reason: str | None = None,
+        enveloped: bool = True,
+        success_media_types: Any = None,
     ) -> Callable[[Any], Any]:
         def decorator(fn: Any) -> Any:
             self.routes.append(
-                SimpleNamespace(path=path, methods=methods, authed=authed, summary=summary, tags=tags, handler=fn)
+                SimpleNamespace(
+                    path=path,
+                    methods=methods,
+                    authed=authed,
+                    summary=summary,
+                    tags=tags,
+                    success_media_types=success_media_types,
+                    handler=fn,
+                )
             )
             return fn
 

@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from tai42_contract.app import RateLimitBudget
 from tai42_contract.interactions import (
     IngestedMedia,
     MediaKind,
@@ -22,6 +23,7 @@ from tai42_contract.interactions import (
 from tai42_kit.interactions import media_ingest_cap_settings
 
 import tai42_channel_web.routes  # noqa: F401  (route registration side-effect)
+from tai42_channel_web.routes.limits import UPLOAD_RATE_LIMIT_BUDGET, UPLOAD_RATE_LIMIT_FAMILY
 from tai42_channel_web.routes.upload_routes import _UPLOAD_DECLARED, _UPLOAD_MULTIPART_OVERHEAD_BYTES
 
 from .conftest import (
@@ -372,11 +374,11 @@ async def test_image_over_image_cap_rejected_by_seam(web_env, stub_app, ingest_s
 
 
 def test_upload_route_classifies_into_uploads_family():
-    # The door declares its own rate-limit family, disjoint from the message door's
-    # path-derived ``channels_web``. RateLimitMiddleware honours a declared family over
-    # the path stem (skeleton-tested); the door's responsibility is the declaration.
-    assert _UPLOAD_DECLARED.rate_limit_family == "channels_web_uploads"
-    assert _UPLOAD_DECLARED.rate_limit_family != "channels_web"
+    # The door declares its own rate-limit family and budget, disjoint from the chat doors'
+    # ``channels_web``. RateLimitMiddleware charges a declared family and budget (skeleton-
+    # tested); the door's responsibility is the declaration.
+    assert _UPLOAD_DECLARED.rate_limit_family == UPLOAD_RATE_LIMIT_FAMILY == "channels_web_uploads"
+    assert _UPLOAD_DECLARED.rate_limit_budget == UPLOAD_RATE_LIMIT_BUDGET == RateLimitBudget(limit=20, burst=5)
 
 
 def test_upload_route_declares_body_bound(no_web_env):

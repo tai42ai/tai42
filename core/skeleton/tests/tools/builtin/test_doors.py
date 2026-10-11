@@ -370,3 +370,31 @@ def _message_door_handler():
         from tai42_skeleton.routers import conversations as router
 
     return router.send_conversation_message
+
+
+async def test_a_door_tool_run_while_reloading_fails_unavailable(
+    env,  # noqa: F811
+    ac,
+    bound_app,
+    door_routes_registered,
+    monkeypatch,
+):
+    # A door tool reached off the HTTP gate (a hook, a schedule, a detached run) meets the turn
+    # admission inside the door: the run fails loudly with the retriable kind, nothing written.
+    from types import SimpleNamespace
+
+    from tai42_contract.errors import ErrorKind, ServerReloadingError, error_kind
+
+    from tai42_skeleton.conversations.turn import admission
+
+    _wire(monkeypatch, FakeManager(_api_route()))
+    env.seed_route("chat")
+    ac.add_route("/api/conversations/chat/messages", "conv-x")
+    _seed_key(ac, "runner", ["conv-x"])
+    monkeypatch.setattr(admission, "reload_gate", SimpleNamespace(locked=True))
+
+    async with bind_execution_identity("runner", bound_fingerprint="fp-runner"):
+        with pytest.raises(ServerReloadingError) as excinfo:
+            await doors.send_conversation_message("chat", "u-7", "hello")
+    assert error_kind(excinfo.value) is ErrorKind.UNAVAILABLE
+    assert await _all_record_ids(_store()) == []

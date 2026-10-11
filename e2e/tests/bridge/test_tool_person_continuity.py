@@ -169,6 +169,8 @@ async def test_tool_state_keys_on_person_id_across_a_link_and_unlink(
     assert person_threads == [f"bridge:@person:{survivor}"], listing["items"]
     transcript = await bridge.api().get(_transcript_path(route_tw, f"bridge:@person:{survivor}"))
     assert marker_tw2 in [item["inbound_text"] for item in transcript["items"]], transcript["items"]
+    # The transcript serves the person it aggregates (the studio's erase button reads it).
+    assert transcript["person_id"] == survivor
 
     # (e) /unlink from whatsapp detaches it: its next message writes under a NEW key, while
     # twilio still writes under the survivor.

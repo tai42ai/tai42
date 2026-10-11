@@ -2,7 +2,7 @@
 registry (every ``authed=False`` route is throttled, a plugin's new public door
 included), groups doors into families with disjoint budgets, leaves authed routes —
 the mounted MCP transport surfaces among them — and unregistered paths untouched,
-honours the shipped/operator budget overrides, and trips both the burst and the
+honours the declared and operator budgets, and trips both the burst and the
 per-minute window."""
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
+from tai42_contract.app import RateLimitBudget
 
 from tai42_skeleton.app.route_registry import RouteMetadata
 from tai42_skeleton.middleware import rate_limit
@@ -105,6 +106,11 @@ def _registered_surface(monkeypatch):
     starts from a cold door table (the memoized one is keyed on the registry version,
     which a swapped-in surface does not move)."""
     monkeypatch.setattr(rate_limit, "load_all_routes", lambda: list(_SURFACE))
+    # The family budgets are read from the same swapped-in surface (it declares none, so every
+    # family is charged the settings' default unless a test declares otherwise).
+    monkeypatch.setattr(
+        rate_limit, "_live_family_budgets", lambda: rate_limit.family_budgets(rate_limit.load_all_routes())
+    )
     rate_limit._reset_door_table_cache()
     yield
     rate_limit._reset_door_table_cache()
@@ -161,10 +167,6 @@ def _build_client(
 ) -> TestClient:
     monkeypatch.setattr(rate_limit, "rate_limit_settings", lambda: settings)
     monkeypatch.setattr(rate_limit, "time", SimpleNamespace(time=lambda: 100.0))
-    # The shipped per-family budgets are stood down for the request-level tests: they
-    # tune the DEFAULT budget and assert the resolution around it, so a shipped 60/10
-    # would quietly supply the numbers instead. The shipped table has its own tests.
-    monkeypatch.setattr("tai42_skeleton.settings.rate_limit.SHIPPED_FAMILY_BUDGETS", {})
 
     @asynccontextmanager
     async def _ctx(cls, s=None, *, fresh=False, **kw):
@@ -480,29 +482,36 @@ def test_override_field_falls_through_to_the_default():
     settings = RateLimitSettings(
         default_limit=600, default_burst=120, families={"channels_newvendor": FamilyOverride(limit=5)}
     )
-    budget = settings.budget_for("channels_newvendor")
+    budget = settings.budget_for("channels_newvendor", declared=None)
     assert (budget.limit, budget.burst, budget.enabled) == (5, 120, True)
 
 
-def test_shipped_budget_applies_with_no_configuration():
-    # The doors that ship a tighter budget keep it with an empty env ...
+def test_declared_budget_applies_with_no_configuration():
+    # A family's declared budget holds with an empty env ...
     settings = RateLimitSettings()
-    assert settings.budget_for("trigger") == settings.budget_for("universal_webhook")
-    assert (settings.budget_for("trigger").limit, settings.budget_for("trigger").burst) == (60, 10)
-    assert (settings.budget_for("channels_web").limit, settings.budget_for("channels_web").burst) == (120, 30)
-    # ... and a family with no shipped entry gets the wide default backstop.
-    assert (settings.budget_for("channels_newvendor").limit, settings.budget_for("channels_newvendor").burst) == (
+    budget = settings.budget_for("trigger", declared=RateLimitBudget(limit=60, burst=10))
+    assert (budget.limit, budget.burst, budget.enabled) == (60, 10, True)
+    # ... and a family whose routes declare none gets the wide default backstop.
+    default = settings.budget_for("channels_newvendor", declared=None)
+    assert (default.limit, default.burst) == (600, 120)
+
+
+def test_budget_resolves_field_by_field_operator_then_declared_then_default():
+    declared = RateLimitBudget(limit=60, burst=10)
+    settings = RateLimitSettings(default_limit=600, default_burst=120, families={"fam": FamilyOverride(limit=9)})
+    budget = settings.budget_for("fam", declared=declared)
+    # The operator's limit wins; the declared burst fills the field the operator left unset.
+    assert (budget.limit, budget.burst) == (9, 10)
+    # An operator burst alone keeps the declared limit; with nothing declared the default fills in.
+    settings = RateLimitSettings(default_limit=600, default_burst=120, families={"fam": FamilyOverride(burst=3)})
+    assert (settings.budget_for("fam", declared=declared).limit, settings.budget_for("fam", declared=None).limit) == (
+        60,
         600,
-        120,
     )
-
-
-def test_shipped_budget_includes_web_uploads():
-    # The dedicated upload family ships a far tighter budget than the chat family — an upload's cost
-    # class is above a text message. A route charges it only by declaring it (below).
-    settings = RateLimitSettings()
-    budget = settings.budget_for("channels_web_uploads")
-    assert (budget.limit, budget.burst) == (20, 5)
+    # Switching a family off is the operator's alone: a declaration carries no switch.
+    off = RateLimitSettings(families={"fam": FamilyOverride(enabled=False)})
+    assert off.budget_for("fam", declared=declared).enabled is False
+    assert RateLimitSettings(default_enabled=False).budget_for("fam", declared=declared).enabled is False
 
 
 def test_declared_family_overrides_path_derivation(monkeypatch):
@@ -547,31 +556,33 @@ def test_declared_family_overrides_path_derivation(monkeypatch):
         rate_limit._reset_door_table_cache()
 
 
-def test_operator_override_beats_the_shipped_budget():
+def test_operator_override_beats_the_declared_budget():
     settings = RateLimitSettings(families={"trigger": FamilyOverride(limit=9)})
-    assert settings.budget_for("trigger").limit == 9
-    assert settings.budget_for("trigger").burst == 10  # the shipped burst survives
+    declared = RateLimitBudget(limit=60, burst=10)
+    assert settings.budget_for("trigger", declared=declared).limit == 9
+    assert settings.budget_for("trigger", declared=declared).burst == 10  # the declared burst survives
 
 
 def test_family_override_reads_from_env_json(monkeypatch):
     monkeypatch.setenv("TAI_RATE_LIMIT_FAMILIES", '{"trigger": {"limit": 7, "enabled": false}}')
     settings = RateLimitSettings()
-    assert settings.budget_for("trigger").limit == 7
-    assert settings.budget_for("trigger").enabled is False
+    assert settings.budget_for("trigger", declared=None).limit == 7
+    assert settings.budget_for("trigger", declared=None).enabled is False
 
 
 def test_family_override_reads_from_nested_env(monkeypatch):
     monkeypatch.setenv("TAI_RATE_LIMIT_FAMILIES__TRIGGER__LIMIT", "11")
     settings = RateLimitSettings()
-    assert settings.budget_for("trigger").limit == 11
-    assert settings.budget_for("trigger").burst == 10  # the shipped burst still applies
+    declared = RateLimitBudget(limit=60, burst=10)
+    assert settings.budget_for("trigger", declared=declared).limit == 11
+    assert settings.budget_for("trigger", declared=declared).burst == 10  # the declared burst still applies
 
 
 def test_family_override_key_case_is_folded(monkeypatch):
     # Env-set keys arrive in whatever case the operator typed; the derived family name is
     # always lower-case, so an upper-case override must still find its door.
     monkeypatch.setenv("TAI_RATE_LIMIT_FAMILIES", '{"TRIGGER": {"limit": 4}}')
-    assert RateLimitSettings().budget_for("trigger").limit == 4
+    assert RateLimitSettings().budget_for("trigger", declared=None).limit == 4
 
 
 def test_an_override_cannot_open_a_door_the_registry_never_declared(monkeypatch):

@@ -41,8 +41,8 @@ def access_control_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class _FakeRequest:
     """A structural stand-in for the ingress route: it reads ``path_params``,
-    ``url.query``, ``method``, ``headers``, streams a bounded body, and tolerates
-    the route caching ``_body`` on it."""
+    ``url.query``, ``method``, ``headers``, streams a bounded body, and carries the
+    ASGI ``scope`` the door builds its bounded-body request over."""
 
     def __init__(
         self,
@@ -59,6 +59,14 @@ class _FakeRequest:
         self.method = method
         self.headers = headers or {}
         self._chunks = [body] if body else []
+        self.scope = {
+            "type": "http",
+            "method": method,
+            "path": "/",
+            "query_string": query.encode(),
+            "headers": [(key.lower().encode(), value.encode()) for key, value in self.headers.items()],
+            "path_params": dict(self.path_params),
+        }
         # ``None`` means no ``user`` attribute at all — the shape a request has on an
         # access-control-DISABLED deployment, where no auth middleware ran.
         if authenticated is not None:

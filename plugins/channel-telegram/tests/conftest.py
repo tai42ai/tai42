@@ -109,6 +109,8 @@ class _StubHttp:
         action: str | None = None,
         declared: Any = None,
         no_body_reason: str | None = None,
+        enveloped: bool = True,
+        success_media_types: Any = None,
     ):
         def decorator(handler):
             self.routes.append(

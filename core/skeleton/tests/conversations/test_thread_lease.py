@@ -22,12 +22,12 @@ from redis.asyncio.client import PubSub
 from tai42_contract.conversations import ConversationRoute
 from tai42_kit.settings import UnknownOwnedSettingError
 
-from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations.caps import TurnCaps
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.thread_ids import PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations.thread_lease import ThreadLeaseLostError, ThreadTurnLease
 from tai42_skeleton.conversations.turn import operator_send
 from tai42_skeleton.operations import conversations as ops

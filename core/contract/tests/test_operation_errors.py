@@ -23,3 +23,15 @@ def test_unavailable_error_is_a_503_operation_error():
     assert isinstance(err, OperationError)
     assert err.status == 503
     assert error_kind(err) is ErrorKind.UNAVAILABLE
+
+
+def test_server_reloading_error_is_unavailable_and_not_swallowed_as_bad_input():
+    from tai42_contract import ServerReloadingError as TopLevel
+    from tai42_contract.errors import ServerReloadingError
+
+    err = ServerReloadingError("reloading")
+    assert TopLevel is ServerReloadingError
+    assert error_kind(err) is ErrorKind.UNAVAILABLE
+    # A channel acknowledges and drops ValueError / LookupError; the refusal must reach the sender.
+    assert not isinstance(err, ValueError | LookupError)
+    assert not isinstance(err, OperationError)
