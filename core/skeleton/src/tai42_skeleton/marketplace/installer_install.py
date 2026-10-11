@@ -363,7 +363,7 @@ class _InstallFlow(_InstallerBase):
             ensure_pip_available()
 
         cm = self._cm()
-        reload_result: dict[str, Any] | None
+        reload_result: ApplyResult | None
         changed = remove_provides(dict(cm.read_manifest_preserved()), spec)
         if changed or provides.has_manifest_provides(spec):
             # Converge the live registration to the stripped manifest BEFORE removing

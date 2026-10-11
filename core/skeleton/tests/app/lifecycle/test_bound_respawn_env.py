@@ -73,7 +73,7 @@ def test_a_key_first_registered_after_its_value_landed_awaits_no_respawn() -> No
     os.environ[_LATE_KEY] = "postgres://pool"
     # The reload imports the plugin: its group registers the key recycle-class and its pooled
     # resource is built under the value just landed.
-    assert _define_late_plugin_group()().pool_url == "postgres://pool"
+    assert _define_late_plugin_group()().model_dump() == {"pool_url": "postgres://pool"}
 
     assert awaiting_respawn() == []
 
