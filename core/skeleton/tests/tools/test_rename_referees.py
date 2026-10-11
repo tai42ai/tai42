@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from tai42_contract.backend import IntervalCadence, ScheduleRecord
 from tai42_contract.interactions import AnswerFormat, InteractionRequest
 from tai42_kit.settings import reset_all_settings
 
@@ -73,29 +74,29 @@ def test_registry_reset_clears() -> None:
 # -- platform referee: schedules ---------------------------------------------
 
 
-# The referee reads each schedule's dispatch target from the exported record's
-# ``kwargs[tool_name_arg]`` — the literal key the worker pops and fires — so an
+# The referee reads each schedule's fired tool from the exported ``ScheduleRecord.tool`` —
+# the backend splits it out of its own tool-name key, whatever that key is — so an
 # OPERATOR-NAMED schedule (a name outside the derived ``<tool>_<hex>`` convention) that
 # fires the renamed tool is caught, not silently missed.
-_TOOL_ARG = "backend_tool_name"
+_BACKEND_OWN_TOOL_KEY = "fake_backend_target"
 
 
-def _record(name: str, tool: str, *, enabled: bool = True) -> dict[str, object]:
-    return {
-        "name": name,
-        "args": [],
-        "kwargs": {_TOOL_ARG: tool},
-        "schedule": {"__type__": "interval", "every": 30.0, "relative": False},
-        "enabled": enabled,
-    }
+def _record(name: str, tool: str, *, enabled: bool = True) -> ScheduleRecord:
+    return ScheduleRecord(
+        name=name,
+        tool=tool,
+        kwargs={"to": "x"},
+        cadence=IntervalCadence(every=30.0),
+        enabled=enabled,
+    )
 
 
 async def test_schedule_referee_blocks_on_operator_named_schedule(monkeypatch) -> None:
-    """An operator-named schedule (name NOT following ``<tool>_<hex>``) whose kwargs
-    fire ``echo`` blocks a rename of ``echo``; a disabled such schedule counts too (it
-    is re-enable-able); a schedule firing a different tool does not."""
+    """An operator-named schedule (name NOT following ``<tool>_<hex>``) firing ``echo``
+    blocks a rename of ``echo``; a disabled such schedule counts too (it is re-enable-able);
+    a schedule firing a different tool does not."""
 
-    async def fake_export() -> list[dict[str, object]]:
+    async def fake_export() -> list[ScheduleRecord]:
         return [
             _record("nightly-cleanup", "echo"),  # operator-named, fires echo -> blocks
             _record("weekly-digest", "echo", enabled=False),  # disabled but re-enable-able -> blocks
@@ -110,8 +111,24 @@ async def test_schedule_referee_blocks_on_operator_named_schedule(monkeypatch) -
     assert holders == ["schedule 'nightly-cleanup'", "schedule 'weekly-digest'"]
 
 
+async def test_schedule_referee_reads_the_tool_field_whatever_the_backend_key(monkeypatch) -> None:
+    """The record's kwargs carry no tool-name key at all (the backend split its own,
+    non-default key out); the referee reads ``tool``."""
+
+    async def fake_export() -> list[ScheduleRecord]:
+        record = _record("nightly", "echo")
+        assert _BACKEND_OWN_TOOL_KEY not in record.kwargs
+        assert "backend_tool_name" not in record.kwargs
+        return [record]
+
+    import tai42_skeleton.operations.schedules as schedules_mod
+
+    monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
+    assert await platform_referees._schedule_referee("echo") == ["schedule 'nightly'"]
+
+
 async def test_schedule_referee_empty_when_no_match(monkeypatch) -> None:
-    async def fake_export() -> list[dict[str, object]]:
+    async def fake_export() -> list[ScheduleRecord]:
         return [_record("alerts-run", "alerts"), _record("echoes", "echoish")]
 
     import tai42_skeleton.operations.schedules as schedules_mod
@@ -123,7 +140,7 @@ async def test_schedule_referee_empty_when_no_match(monkeypatch) -> None:
 async def test_schedule_referee_feature_off_is_empty(monkeypatch) -> None:
     from tai42_skeleton.operations import NotSupportedError
 
-    async def fake_export() -> list[dict[str, object]]:
+    async def fake_export() -> list[ScheduleRecord]:
         raise NotSupportedError("schedules off")
 
     import tai42_skeleton.operations.schedules as schedules_mod
@@ -138,7 +155,7 @@ async def test_schedule_referee_raises_when_export_tool_absent_with_markers_pres
     rename is blocked LOUDLY — never a silent "no holders"."""
     from tai42_skeleton.tools.binding import UnknownToolError
 
-    async def fake_export() -> list[dict[str, object]]:
+    async def fake_export() -> list[ScheduleRecord]:
         raise UnknownToolError("backend_export_schedules")
 
     import tai42_skeleton.operations.schedules as schedules_mod
@@ -148,71 +165,19 @@ async def test_schedule_referee_raises_when_export_tool_absent_with_markers_pres
         await platform_referees._schedule_referee("echo")
 
 
-async def test_schedule_referee_raises_on_non_list_surface(monkeypatch) -> None:
-    """An unreadable holder store must FAIL the rename, never silently drop every
-    schedule holder: a non-list export shape raises."""
+async def test_schedule_referee_propagates_an_unreadable_export(monkeypatch) -> None:
+    """An export that is not ``list[ScheduleRecord]`` fails inside ``export_schedules_raw``;
+    the referee lets it propagate, so the rename is blocked loudly."""
+    from tai42_skeleton.operations import OperationFailedError
 
-    async def fake_export() -> object:
-        return {"schedules": []}  # a mapping, not the expected list of rows
+    async def fake_export() -> list[ScheduleRecord]:
+        raise OperationFailedError("records that are not ScheduleRecord")
 
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    with pytest.raises(TypeError, match="expected a list of rows"):
+    with pytest.raises(OperationFailedError):
         await platform_referees._schedule_referee("echo")
-
-
-async def test_schedule_referee_raises_on_uninterpretable_row(monkeypatch) -> None:
-    """A record the referee cannot interpret raises rather than being silently skipped —
-    a skipped holder is a stranded rename: a non-dict row, a nameless row, and a record
-    whose kwargs carry no dispatch target each raise."""
-
-    async def fake_non_dict_row() -> list[object]:
-        return ["echo"]
-
-    async def fake_nameless_row() -> list[dict[str, object]]:
-        return [{"schedule_id": 7}]
-
-    async def fake_no_target_row() -> list[dict[str, object]]:
-        # A record with a name but no ``tool_name_arg`` in kwargs is an unreadable holder.
-        return [{"name": "orphan", "kwargs": {}}]
-
-    import tai42_skeleton.operations.schedules as schedules_mod
-
-    monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_non_dict_row)
-    with pytest.raises(TypeError, match="expected a dict"):
-        await platform_referees._schedule_referee("echo")
-
-    monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_nameless_row)
-    with pytest.raises(TypeError, match="no string 'name'"):
-        await platform_referees._schedule_referee("echo")
-
-    monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_no_target_row)
-    with pytest.raises(TypeError, match=r"no string .* dispatch target"):
-        await platform_referees._schedule_referee("echo")
-
-
-async def test_schedule_referee_missing_target_error_names_the_dispatch_contract(monkeypatch) -> None:
-    """A backend whose ``*_TOOL_NAME_ARG`` disagrees with the host's ``BACKEND_TOOL_NAME_ARG``
-    injects the target under a different key, so the referee finds no target on the first
-    record and (fail-safe) over-blocks EVERY rename. The over-block stays loud, but the error
-    must be DIAGNOSABLE: it names the expected key and the dispatch contract both sides must
-    agree on, so a misconfiguration is fixable rather than a bare shape error."""
-
-    async def fake_mismatched_key() -> list[dict[str, object]]:
-        # The backend injected the target under a DIFFERENT key than the host reads.
-        return [{"name": "nightly-cleanup", "kwargs": {"other_tool_name": "echo"}}]
-
-    import tai42_skeleton.operations.schedules as schedules_mod
-
-    monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_mismatched_key)
-    with pytest.raises(TypeError) as excinfo:
-        await platform_referees._schedule_referee("echo")
-    message = str(excinfo.value)
-    # Names the expected key, the host env var, and the backend side to realign.
-    assert repr(_TOOL_ARG) in message
-    assert "BACKEND_TOOL_NAME_ARG" in message
-    assert "*_TOOL_NAME_ARG" in message
 
 
 # -- platform referee: hooks -------------------------------------------------

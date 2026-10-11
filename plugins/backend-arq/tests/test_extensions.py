@@ -8,6 +8,7 @@ from typing import Any
 
 import orjson
 import pytest
+from pydantic import ValidationError
 from tai42_kit.utils.schedule_subject import schedule_create_fire
 
 from tai42_backend_arq import extensions, scheduler
@@ -154,6 +155,9 @@ async def test_async_task_eta_wins_over_countdown(bind_pool) -> None:
     assert "_defer_by" not in kwargs
 
 
+_INTERVAL_60 = {"kind": "interval", "every": 60, "relative": False}
+
+
 async def test_schedule_task_writes_interval_schedule(fake_redis, monkeypatch, bind_pool) -> None:
     bind_pool(fake_redis)
 
@@ -174,13 +178,13 @@ async def test_schedule_task_writes_interval_schedule(fake_redis, monkeypatch, b
     # The create door wraps the branch dispatch in this marker; a ``schedule_task`` branch dispatched
     # outside it is refused, so a registration test drives it under the marker like the create door does.
     with schedule_create_fire():
-        await branch(text="hi", backend_schedule_name="every-min", backend_schedule=60)
+        await branch(text="hi", backend_schedule_name="every-min", backend_schedule=_INTERVAL_60)
 
     stored = fake_redis._store["arq:schedule:every-min"]
     assert stored[b"target"] == b"tool_execution"
     assert stored[b"cron_or_interval"] == b"60"
     assert stored[b"enabled"] == b"true"
-    assert orjson.loads(stored[b"schedule"]) == {"__type__": "interval", "every": 60.0, "relative": False}
+    assert orjson.loads(stored[b"schedule"]) == {"kind": "interval", "every": 60.0, "relative": False}
     # ``count`` appears with its default: the branch presents the tool's real
     # signature, so bound defaults materialize in the stored kwargs.
     assert orjson.loads(stored[b"kwargs"]) == {
@@ -223,7 +227,7 @@ async def test_schedule_task_carries_the_create_stamped_keys(fake_redis, monkeyp
         await branch(
             text="hi",
             backend_schedule_name="every-min",
-            backend_schedule=60,
+            backend_schedule=_INTERVAL_60,
             **{
                 SCHEDULE_EXECUTION_KEY_ARG: "svc-key",
                 SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
@@ -237,13 +241,30 @@ async def test_schedule_task_carries_the_create_stamped_keys(fake_redis, monkeyp
     assert stored[SCHEDULE_CONTRACT_ARG] == contract
 
 
-async def test_schedule_task_requires_name_and_schedule(fake_redis, bind_pool) -> None:
+async def test_schedule_task_requires_name_and_cadence(fake_redis, bind_pool) -> None:
     bind_pool(fake_redis)
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     with schedule_create_fire(), pytest.raises(ValueError, match="backend_schedule_name is required"):
-        await branch(text="hi", backend_schedule=60)
-    with schedule_create_fire(), pytest.raises(ValueError, match="backend_schedule is required"):
+        await branch(text="hi", backend_schedule=_INTERVAL_60)
+    with schedule_create_fire(), pytest.raises(ValidationError):
         await branch(text="hi", backend_schedule_name="every-min")
+    assert fake_redis._store == {}
+
+
+async def test_schedule_task_refuses_a_relative_interval(fake_redis, bind_pool) -> None:
+    bind_pool(fake_redis)
+    branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
+    with (
+        schedule_create_fire(),
+        pytest.raises(
+            ValueError, match=r"the arq backend does not support relative interval schedules \(relative=True\)"
+        ),
+    ):
+        await branch(
+            text="hi",
+            backend_schedule_name="every-min",
+            backend_schedule={"kind": "interval", "every": 60, "relative": True},
+        )
     assert fake_redis._store == {}
 
 
@@ -261,10 +282,14 @@ async def test_schedule_task_writes_crontab_schedule(fake_redis, monkeypatch, bi
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
 
     with schedule_create_fire():
-        await branch(text="hi", backend_schedule_name="mornings", backend_schedule="0 9 * * 1")
+        await branch(
+            text="hi",
+            backend_schedule_name="mornings",
+            backend_schedule={"kind": "crontab", "minute": "0", "hour": "9", "day_of_week": "1"},
+        )
 
     stored = fake_redis._store["arq:schedule:mornings"]
     assert stored[b"cron_or_interval"] == b"0 9 * * 1"
     schedule = orjson.loads(stored[b"schedule"])
-    assert schedule["__type__"] == "crontab"
+    assert schedule["kind"] == "crontab"
     assert schedule["hour"] == "9"

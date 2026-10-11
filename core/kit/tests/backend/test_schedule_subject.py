@@ -4,6 +4,7 @@ known), popped and re-established as the ``schedule`` state context at the fire.
 from __future__ import annotations
 
 import pytest
+from tai42_contract.backend import SCHEDULE_NAME_KEY
 from tai42_contract.states import StateBinding, StateSubject
 
 from tai42_kit.backend.callback import prepare_backend_kwargs
@@ -11,7 +12,6 @@ from tai42_kit.utils.schedule_subject import (
     SCHEDULE_CONTRACT_ARG,
     SCHEDULE_EXECUTION_FINGERPRINT_ARG,
     SCHEDULE_EXECUTION_KEY_ARG,
-    SCHEDULE_NAME_KEY,
     SCHEDULE_STAMPED_DOOR_OPTS,
     SCHEDULE_STATE_BINDING_ARG,
     SCHEDULE_STATE_BINDING_REQUEST_KEY,

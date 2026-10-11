@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
+from tai42_contract.backend import IntervalCadence, ScheduleRecord
 from tai42_contract.conversations import TargetConversationConfig
 from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG
 
@@ -139,11 +139,14 @@ async def test_schedule_referee_blocks_on_binding_schedule(monkeypatch) -> None:
     # A stored schedule row carries its door binding under the kit's reserved
     # ``backend_schedule_state_binding`` key (the create door's ``state_binding`` is re-stamped
     # there, never left as a plain ``state_binding`` tool kwarg), so the referee reads it there.
-    async def fake_export() -> list[dict[str, object]]:
+    def _record(name: str, kwargs: dict) -> ScheduleRecord:
+        return ScheduleRecord(name=name, tool="send", kwargs=kwargs, cadence=IntervalCadence(every=60), enabled=True)
+
+    async def fake_export() -> list[ScheduleRecord]:
         return [
-            {"name": "nightly", "kwargs": {SCHEDULE_STATE_BINDING_ARG: _BINDS_T1}},
-            {"name": "weekly", "kwargs": {SCHEDULE_STATE_BINDING_ARG: _BINDS_OTHER}},
-            {"name": "plain", "kwargs": {}},  # no binding -> no objection
+            _record("nightly", {SCHEDULE_STATE_BINDING_ARG: _BINDS_T1}),
+            _record("weekly", {SCHEDULE_STATE_BINDING_ARG: _BINDS_OTHER}),
+            _record("plain", {}),  # no binding -> no objection
         ]
 
     import tai42_skeleton.operations.schedules as schedules_mod
@@ -156,24 +159,13 @@ async def test_schedule_referee_blocks_on_binding_schedule(monkeypatch) -> None:
 async def test_schedule_referee_feature_off_is_empty(monkeypatch) -> None:
     from tai42_skeleton.operations import NotSupportedError
 
-    async def fake_export() -> list[dict[str, object]]:
+    async def fake_export() -> list[ScheduleRecord]:
         raise NotSupportedError("schedules off")
 
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
     assert await platform_referees._schedule_detach_referee("status", "t1") == []
-
-
-async def test_schedule_referee_raises_on_non_list_surface(monkeypatch) -> None:
-    async def fake_export() -> object:
-        return {"schedules": []}
-
-    import tai42_skeleton.operations.schedules as schedules_mod
-
-    monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    with pytest.raises(TypeError, match="expected a list of rows"):
-        await platform_referees._schedule_detach_referee("status", "t1")
 
 
 # -- registration ------------------------------------------------------------

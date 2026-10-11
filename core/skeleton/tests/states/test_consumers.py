@@ -11,6 +11,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from tai42_contract.backend import IntervalCadence, ScheduleRecord
 from tai42_contract.hooks import HookParams, HookSubject
 from tai42_contract.presets import PresetBody
 from tai42_contract.states.models import StateSubject
@@ -60,13 +61,13 @@ def test_hook_rows_are_empty_when_no_kind_matches() -> None:
     assert hook_consumer_rows([_hook("on-thread", subject_kind="thread")], {"person"}) == []
 
 
-def _schedule_record(name: str, subject: StateSubject | None) -> dict:
+def _schedule_record(name: str, subject: StateSubject | None) -> ScheduleRecord:
     from tai42_kit.utils.schedule_subject import SCHEDULE_SUBJECT_ARG
 
     kwargs: dict = {"to": "x"}
     if subject is not None:
         kwargs[SCHEDULE_SUBJECT_ARG] = subject.model_dump()
-    return {"name": name, "args": [], "kwargs": kwargs, "schedule": {}, "enabled": True}
+    return ScheduleRecord(name=name, tool="send", kwargs=kwargs, cadence=IntervalCadence(every=60), enabled=True)
 
 
 def test_schedule_rows_match_a_declared_subject_kind() -> None:
@@ -223,17 +224,6 @@ def test_schedules_lister_reads_the_export_surface(monkeypatch: pytest.MonkeyPat
 def test_schedules_lister_empty_for_undeclared_state(monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_app(monkeypatch, kinds=None)
     assert _run(consumers_mod.schedules_lister("alerts")) == []
-
-
-def test_schedules_lister_raises_on_a_non_list_export(monkeypatch: pytest.MonkeyPatch) -> None:
-    _fake_app(monkeypatch, kinds={"person"})
-
-    async def _export():
-        return {"not": "a list"}
-
-    monkeypatch.setattr("tai42_skeleton.operations.schedules.export_schedules_raw", _export)
-    with pytest.raises(TypeError, match="expected a list of ScheduleRecord"):
-        _run(consumers_mod.schedules_lister("alerts"))
 
 
 def test_agents_lister_matches_state_tool_binders(monkeypatch: pytest.MonkeyPatch) -> None:

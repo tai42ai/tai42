@@ -348,15 +348,38 @@ async def test_launch_rejects_an_unknown_worker_option(worker_env) -> None:
     assert worker_env.instances == []
 
 
-async def test_launch_worker_parses_its_options_and_runs_the_worker(worker_env) -> None:
-    await ArqBackend().launch(["worker", "--max-jobs", "7", "--burst"])
+async def test_launch_worker_parses_its_options_and_runs_the_worker(worker_env, monkeypatch) -> None:
+    from tai42_kit.settings import reset_all_settings
+
+    # An unset ``--job-timeout`` reads the dispatch job budget.
+    monkeypatch.setenv("ARQ_TASK_TIMEOUT", "77")
+    reset_all_settings()
+    try:
+        await ArqBackend().launch(["worker", "--max-jobs", "7", "--burst"])
+    finally:
+        monkeypatch.delenv("ARQ_TASK_TIMEOUT", raising=False)
+        reset_all_settings()
 
     built = worker_env.latest()
     assert built.kwargs["max_jobs"] == 7
     assert built.kwargs["burst"] is True
-    assert built.kwargs["job_timeout"] == 300
+    assert built.kwargs["job_timeout"] == 77
     assert built.ran is True
     assert built.closed is True
+
+
+async def test_an_explicit_job_timeout_flag_wins_over_the_setting(worker_env, monkeypatch) -> None:
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("ARQ_TASK_TIMEOUT", "77")
+    reset_all_settings()
+    try:
+        runtime = await _built("--job-timeout", "12")
+    finally:
+        monkeypatch.delenv("ARQ_TASK_TIMEOUT", raising=False)
+        reset_all_settings()
+    assert runtime is not None
+    assert worker_env.latest().kwargs["job_timeout"] == 12
 
 
 async def test_launch_does_not_consume_until_the_app_is_boot_ready(stub_app, worker_env) -> None:

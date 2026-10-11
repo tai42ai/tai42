@@ -56,10 +56,10 @@ class BackendVariant(abc.ABC):
 
     @abc.abstractmethod
     def task_timeout_env(self, seconds: int) -> dict[str, str]:
-        """Env that bounds a backend-execution (``sync_task``) result wait to
-        ~``seconds``. The worker-crash spec sets it low so a job orphaned by a
-        SIGKILLed worker surfaces a bounded, observable terminal instead of
-        blocking on the multi-minute production default."""
+        """Env that sets the dispatch job budget to ~``seconds``: it bounds a dispatched
+        job (the worker limit and the sync result wait). The worker-crash spec sets it
+        low so a job orphaned by a SIGKILLed worker surfaces a bounded, observable
+        terminal instead of blocking on the multi-minute production default."""
 
     # The tool-run status an in-flight job reaches when the ``tai backend worker`` process
     # group is SIGKILLed under it. The invariant is always a bounded, loud terminal, never

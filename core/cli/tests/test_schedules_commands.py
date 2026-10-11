@@ -19,14 +19,29 @@ def test_schedules_list_501_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "scheduling tools" in result.output
 
 
-def test_schedules_list_happy_renders(monkeypatch: pytest.MonkeyPatch) -> None:
+_ROW = {
+    "name": "nightly",
+    "tool": "report",
+    "cadence": {"kind": "interval", "every": 60.0, "relative": False},
+    "enabled": True,
+    "next_run_at_ts": None,
+    "next_run_at_iso": "2026-07-08T09:00:00+00:00",
+    "error": None,
+}
+
+
+def test_schedules_list_renders_the_typed_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/schedules"
-        return data_response({"schedules": [{"name": "report"}]})
+        return data_response([_ROW])
 
     result = run_cli(monkeypatch, handler, ["schedules", "list"])
     assert result.exit_code == 0, result.output
+    header = result.output.splitlines()[0].split()
+    assert header[:4] == ["name", "tool", "cadence", "enabled"]
+    assert "nightly" in result.output
     assert "report" in result.output
+    assert "2026-07-08T09:00:00+00:00" in result.output
 
 
 def test_schedules_server_datetime(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,22 +54,107 @@ def test_schedules_server_datetime(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "2026-07-08" in result.output
 
 
-def test_schedules_add_merges_tool_and_schedule_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+def _capture(bodies: list[dict]):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == "/api/schedules"
-        body = json.loads(request.content)
-        assert body["tool_name"] == "report"
-        assert body["tool_kwargs"] == {"n": 5}
-        assert body["schedule_kwargs"] == {"cron": "0 9 * * *"}
-        return data_response({"name": "report"})
+        bodies.append(json.loads(request.content))
+        return data_response({"scheduled": "report"})
 
+    return handler
+
+
+def test_schedules_add_sends_the_base_tool_and_a_cron_cadence(monkeypatch: pytest.MonkeyPatch) -> None:
+    bodies: list[dict] = []
     result = run_cli(
         monkeypatch,
-        handler,
-        ["schedules", "add", "report", "--tool-kw", "n=5", "--schedule-kw", "cron=0 9 * * *"],
+        _capture(bodies),
+        ["schedules", "add", "report", "--tool-kw", "n=5", "--cron", "0 9 * * *", "--schedule-name", "morning"],
     )
     assert result.exit_code == 0, result.output
+    assert bodies == [
+        {
+            "tool_name": "report",
+            "tool_kwargs": {"n": 5},
+            "cadence": {
+                "kind": "crontab",
+                "minute": "0",
+                "hour": "9",
+                "day_of_month": "*",
+                "month_of_year": "*",
+                "day_of_week": "*",
+            },
+            "schedule_name": "morning",
+        }
+    ]
+
+
+def test_schedules_add_accepts_a_six_field_cron(monkeypatch: pytest.MonkeyPatch) -> None:
+    bodies: list[dict] = []
+    result = run_cli(monkeypatch, _capture(bodies), ["schedules", "add", "report", "--cron", "30 0 9 * * 1"])
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["cadence"]["minute"] == "0"
+    assert bodies[0]["cadence"]["day_of_week"] == "1"
+
+
+def test_schedules_add_sends_an_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    bodies: list[dict] = []
+    result = run_cli(monkeypatch, _capture(bodies), ["schedules", "add", "report", "--every", "90"])
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["cadence"] == {"kind": "interval", "every": 90.0, "relative": False}
+
+
+def test_schedules_add_sends_a_json_cadence(monkeypatch: pytest.MonkeyPatch) -> None:
+    bodies: list[dict] = []
+    result = run_cli(
+        monkeypatch,
+        _capture(bodies),
+        ["schedules", "add", "report", "--cadence", '{"kind": "interval", "every": 5, "relative": true}'],
+    )
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["cadence"] == {"kind": "interval", "every": 5.0, "relative": True}
+
+
+def test_schedules_add_without_a_cadence_runs_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    bodies: list[dict] = []
+    result = run_cli(monkeypatch, _capture(bodies), ["schedules", "add", "report"])
+    assert result.exit_code == 0, result.output
+    assert bodies == [{"tool_name": "report", "tool_kwargs": {}}]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--every", "5", "--cron", "* * * * *"],
+        ["--cron", "* * * * *", "--cadence", '{"kind": "interval", "every": 5}'],
+        ["--every", "5", "--cadence", '{"kind": "interval", "every": 5}'],
+    ],
+)
+def test_schedules_add_cadence_options_are_mutually_exclusive(
+    monkeypatch: pytest.MonkeyPatch, options: list[str]
+) -> None:
+    bodies: list[dict] = []
+    result = run_cli(monkeypatch, _capture(bodies), ["schedules", "add", "report", *options])
+    assert result.exit_code != 0
+    assert "at most one cadence option" in result.output
+    assert bodies == []
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--cron", "* * * *"],
+        ["--every", "0"],
+        ["--schedule-name", "orphan"],
+        ["--cadence", '{"kind": "solar"}'],
+    ],
+)
+def test_schedules_add_an_invalid_body_is_a_bad_parameter(monkeypatch: pytest.MonkeyPatch, options: list[str]) -> None:
+    bodies: list[dict] = []
+    result = run_cli(monkeypatch, _capture(bodies), ["schedules", "add", "report", *options])
+    assert result.exit_code != 0
+    assert "Invalid value" in result.output
+    assert bodies == []
 
 
 def test_schedules_add_sends_the_door_contract_flags(monkeypatch: pytest.MonkeyPatch) -> None:
