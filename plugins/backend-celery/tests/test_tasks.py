@@ -173,11 +173,11 @@ def test_callback_task_runs_callback_execution(stub_app) -> None:
 
 
 @pytest.mark.parametrize("capability", [True, False])
-def test_callback_task_retried_after_a_transient_error_runs_with_the_carried_capability(
+def test_callback_task_with_a_transient_error_runs_once_with_the_carried_capability(
     stub_app, monkeypatch: pytest.MonkeyPatch, capability: bool
 ) -> None:
-    # celery's autoretry re-sends the task's own argument list, so the retry runs the SAME
-    # spec object the first attempt was handed.
+    # A callback's builtin ``ConnectionError`` is its failure: the task never re-fires it, and the
+    # one attempt runs under the capability the spec carried.
     from tai42_kit.backend import CallbackSchema
     from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
@@ -190,7 +190,7 @@ def test_callback_task_retried_after_a_transient_error_runs_with_the_carried_cap
         attempts.append(caller_may_read_secrets())
         if len(attempts) == 1:
             raise ConnectionError("transient broker error")
-        return await recorded_run_tool(key, arguments, **kwargs)
+        return await recorded_run_tool(key, arguments, **kwargs)  # pragma: no cover - never re-run
 
     monkeypatch.setattr(stub_app.tools, "run_tool", fails_once_then_runs)
     monkeypatch.setattr(stub_app.tools, "run_tool_result", {"ran": True})
@@ -205,6 +205,6 @@ def test_callback_task_retried_after_a_transient_error_runs_with_the_carried_cap
         if callback_task._loop is not None:
             callback_task._loop.close()
             callback_task._loop = None
-    assert outcome.state == "SUCCESS", outcome.result
-    assert outcome.result == {"ran": True}
-    assert attempts == [capability, capability]
+    assert outcome.state == "FAILURE", outcome.result
+    assert isinstance(outcome.result, ConnectionError)
+    assert attempts == [capability]

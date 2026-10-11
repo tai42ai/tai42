@@ -167,8 +167,8 @@ async def _scheduling_backend_present() -> bool:
     errors=[NotSupportedError, PermissionDeniedError, UnavailableError, OperationFailedError],
     response_model=ScheduleListResponse,
 )
-async def list_schedules() -> list[ScheduleListRow]:
-    """List the installed backend's schedules as typed rows; raises 501 when no scheduling backend is present.
+async def list_schedules() -> list[dict[str, Any]]:
+    """List the installed backend's schedules as ``ScheduleListRow`` dumps; 501 when no scheduling backend is present.
 
     The backend tool's output is validated as ``list[ScheduleListRow]``; any other shape is a 500 naming
     the first violation.
@@ -193,12 +193,13 @@ async def list_schedules() -> list[ScheduleListRow]:
         logger.exception("list-schedules %r raised during execution", SCHEDULE_LIST_TOOL)
         raise OperationFailedError(f"schedule listing failed ({type(exc).__name__})") from exc
     try:
-        return _SCHEDULE_ROWS.validate_python(raw)
+        rows = _SCHEDULE_ROWS.validate_python(raw)
     except ValidationError as exc:
         raise OperationFailedError(
             f"the scheduling backend's {SCHEDULE_LIST_TOOL} returned rows that are not ScheduleListRow: "
             f"{_first_error(exc)}"
         ) from exc
+    return [row.model_dump(mode="json") for row in rows]
 
 
 def _first_error(exc: ValidationError) -> str:

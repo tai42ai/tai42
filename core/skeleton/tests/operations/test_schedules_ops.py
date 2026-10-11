@@ -699,10 +699,12 @@ async def test_list_answers_the_backend_rows_typed(install) -> None:
     row = {"name": "n", "tool": "send", "cadence": {"kind": "interval", "every": 5}, "enabled": True}
     install(_FakeTools(_MARKERS, run_result=[row]))
     (listed,) = await schedules_ops.list_schedules()
-    assert listed.tool == "send"
-    assert listed.model_dump(mode="json", exclude_none=True) == {
+    assert listed == {
         **row,
-        "cadence": {**row["cadence"], "relative": False},
+        "cadence": {**row["cadence"], "every": 5.0, "relative": False},
+        "next_run_at_ts": None,
+        "next_run_at_iso": None,
+        "error": None,
     }
 
 
