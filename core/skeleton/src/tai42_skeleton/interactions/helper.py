@@ -22,7 +22,7 @@ from __future__ import annotations
 # re-exported here so this module and the mint reference one shared module object.
 import secrets
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, Literal
 
@@ -159,7 +159,7 @@ async def ask(
     group_id: str | None = None,
     timeout: float | None = None,
     link: str | Callable[[str], Awaitable[str]] | None = None,
-    verifier: TopicVerifierBinding | Mapping[str, Any] | None = None,
+    verifier: TopicVerifierBinding | None = None,
     channel: str | None = None,
     recipient: str | None = None,
     on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY,
