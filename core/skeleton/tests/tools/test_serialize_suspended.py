@@ -14,14 +14,9 @@ from typing import Any
 
 import pytest
 from fastmcp import Client
-from tai42_contract.interactions import (
-    RESUME_BUFFERED_MARKER_KEY,
-    ResumeBuffered,
-    SuspendedInteraction,
-    read_suspended_interaction_marker,
-    suspended_interaction_marker,
-)
+from tai42_contract.interactions import RESUME_BUFFERED_MARKER_KEY, ResumeBuffered, SuspendedInteraction
 from tai42_contract.tools import UndeclaredPauseError
+from tai42_kit.interactions.park_marker import read_suspended_interaction_marker, suspended_interaction_marker
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 from tai42_skeleton.app import instance

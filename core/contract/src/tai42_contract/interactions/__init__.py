@@ -7,7 +7,8 @@ models a question may carry; ``asker`` holds the ``Ask`` callable Protocol
 the engine-agnostic helper satisfies and the ``check_ask_timing`` guard;
 ``continuation`` holds the generic driver-continuation context an async ask reads, the
 :class:`DeliveryAddress` a run's deferred answer is delivered to, and the chained-park
-vocabulary a caller that parks on a nested CALL routes through;
+vocabulary a caller that parks on a nested CALL routes through; ``park_markers`` holds the
+park markers' reserved keys, their JSON Schemas and the malformed-marker error;
 ``door_contract`` holds the parkable-door jq mixin and the pure parsers that turn its
 cancel/resume jq results into ``visit`` arguments; ``visit`` holds the ``Visit`` Protocol
 every door drives a parkable run through, the ``VisitOutcome``/``ParkedEntry`` value types, and the
@@ -109,10 +110,6 @@ from tai42_contract.interactions.park_markers import (
     SUSPENDED_INTERACTION_MARKER_KEY,
     SUSPENDED_INTERACTION_MARKER_SCHEMA,
     MalformedParkMarkerError,
-    read_resume_buffered_marker,
-    read_suspended_interaction_marker,
-    resume_buffered_marker,
-    suspended_interaction_marker,
 )
 from tai42_contract.interactions.visit import (
     ParkableRunFailedError,
@@ -220,16 +217,12 @@ __all__ = [
     "get_resume_continuation_tool",
     "parse_cancel_result",
     "parse_resume_result",
-    "read_resume_buffered_marker",
-    "read_suspended_interaction_marker",
     "reset_chained_resume",
     "reset_park_completion",
     "reset_resume_continuation_tool",
-    "resume_buffered_marker",
     "served_media_id",
     "set_chained_resume",
     "set_park_completion",
     "set_resume_continuation_tool",
-    "suspended_interaction_marker",
     "validate_action_url",
 ]

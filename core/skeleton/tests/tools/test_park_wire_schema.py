@@ -25,11 +25,13 @@ from tai42_contract.interactions import (
     SUSPENDED_INTERACTION_MARKER_SCHEMA,
     ResumeBuffered,
     SuspendedInteraction,
+)
+from tai42_contract.tools import TOOL_META_PAUSES, UndeclaredPauseError
+from tai42_kit.interactions.park_marker import (
     read_resume_buffered_marker,
     read_suspended_interaction_marker,
     suspended_interaction_marker,
 )
-from tai42_contract.tools import TOOL_META_PAUSES, UndeclaredPauseError
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError, validate_against_json_schema
 
 from tai42_skeleton.app.instance import app
