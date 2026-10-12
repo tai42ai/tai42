@@ -54,7 +54,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from async_lru import alru_cache
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.authentication import AuthenticationError
 from tai42_contract.access_control import UNIVERSAL_SCOPE
 from tai42_contract.app import tai42_app
@@ -64,7 +64,7 @@ from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.coverage import is_public_only, scopes_cover
 from tai42_skeleton.access_control.path_canon import canonicalize_path
 from tai42_skeleton.access_control.policy import PolicyEnforcer, RenderedCondition, policy_enforcer, render_condition
-from tai42_skeleton.access_control.projection_pattern_sampling import _sample_path_for_pattern
+from tai42_skeleton.access_control.projection_pattern_sampling import _sample_path_for_pattern, pattern_open_prefix
 from tai42_skeleton.access_control.role_gate import declares_any_authenticated
 from tai42_skeleton.access_control.role_grants import role_level_decision
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
@@ -107,6 +107,9 @@ class PatternEntry(BaseModel):
 
     pattern: str
     scope_id: str
+    open_prefix: str | None = Field(
+        description="The literal every matching path starts with when the pattern is an open prefix, else null."
+    )
 
 
 class SubMcpEntry(BaseModel):
@@ -518,7 +521,7 @@ async def _project_route_patterns(
             continue
         if not await admits(representative, "GET"):
             continue
-        route_patterns.append(PatternEntry(pattern=regex, scope_id=scope_id))
+        route_patterns.append(PatternEntry(pattern=regex, scope_id=scope_id, open_prefix=pattern_open_prefix(regex)))
     return route_patterns
 
 

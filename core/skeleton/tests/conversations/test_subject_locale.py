@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 
-from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
+from tai42_contract.conversations import ChannelConversationRoute, ConversationRoute, Person, PersonAddress
 
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.turn.context import (
@@ -19,7 +19,7 @@ from tai42_skeleton.conversations.turn.context import (
 
 
 def _route(locale: str | None = None) -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name="r",
         door="channel",
         target_kind="tool",

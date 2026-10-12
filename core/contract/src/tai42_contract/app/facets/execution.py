@@ -189,6 +189,9 @@ class AppExtensions(Protocol):
         """
         ...
 
-    def available_extensions(self) -> list[dict[str, str]]:
-        """List registered extension modules as ``[{"name", "kind"}]``."""
+    def available_extensions(self) -> list[dict[str, str | bool]]:
+        """List registered extensions as ``[{"name", "kind", "multiple"}]``.
+
+        ``multiple`` says whether one tool may stack several extensions of that kind.
+        """
         ...

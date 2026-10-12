@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 from fakeredis import aioredis
-from tai42_contract.conversations import ConversationRoute, TargetConversationConfig
+from tai42_contract.conversations import ConversationRoute, ConversationRouteBody, TargetConversationConfig
 
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations import target_config as target_config_module
@@ -81,7 +81,7 @@ def _route(name: str = "chat", **over: Any) -> ConversationRoute:
         "callback_secret": "sec-1",
     }
     fields.update(over)
-    return ConversationRoute(**fields)
+    return ConversationRouteBody.model_validate(fields).root
 
 
 def _config(name: str = "assistant", **over: Any) -> TargetConversationConfig:
@@ -123,7 +123,9 @@ async def test_a_refused_door_flip_writes_nothing_and_sets_no_token(lua_redis):
     await lua_redis.zadd(_s().route_threads_key("chat"), {"t1": 1.0})
 
     with pytest.raises(base_module.DoorFlipRefusedError):
-        await manager.put_route(_route(door="channel", channel="web", our_identity="me", callback_url=None))
+        await manager.put_route(
+            _route(door="channel", channel="web", our_identity="me", callback_url=None, callback_secret=None)
+        )
 
     assert await lua_redis.get(_s().route_version_key) == token
 

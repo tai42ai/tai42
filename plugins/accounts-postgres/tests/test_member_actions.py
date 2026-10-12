@@ -82,6 +82,15 @@ def test_member_actions_declares_this_providers_actions(wire):
 # -- invite_user ----------------------------------------------------------------
 
 
+async def test_invite_link_follows_the_declared_hosted_ui(wire, hosted_ui):
+    hosted_ui(login_path="/signin", invite_query_key="join")
+    result = await _provider(wire).invoke_member_action(
+        INVITE_USER, target=None, payload=InviteUserInput(email="new@x.y", role="viewer")
+    )
+    assert isinstance(result, InviteLinkResult)
+    assert result.login_path == f"/signin?join={result.invite_token}"
+
+
 async def test_invite_user_mints_link_and_creates_principal(wire):
     result = await _provider(wire).invoke_member_action(
         INVITE_USER, target=None, payload=InviteUserInput(email="New@X.Y", role="viewer")

@@ -26,7 +26,7 @@ class LocationElement(BaseModel):
     map renders the coordinates (and any name/address) as text. Frozen.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     latitude: float
     longitude: float

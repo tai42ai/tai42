@@ -4,7 +4,7 @@ backed-up routing table cannot be per-process, restart-volatile state."""
 from __future__ import annotations
 
 import pytest
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ApiConversationRoute, ConversationRoute
 
 from tai42_skeleton.conversations.managers.in_memory_conversations_manager import InMemoryConversationsManager
 from tai42_skeleton.conversations.settings import ConversationsSettings
@@ -16,7 +16,7 @@ def _manager() -> InMemoryConversationsManager:
 
 
 def _route() -> ConversationRoute:
-    return ConversationRoute(
+    return ApiConversationRoute(
         route_name="r",
         door="api",
         target_kind="agent",

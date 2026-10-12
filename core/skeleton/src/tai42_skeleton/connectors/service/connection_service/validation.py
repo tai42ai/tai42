@@ -5,20 +5,21 @@ Return-URL shape, sub-service membership and transport support, and config-value
 
 from __future__ import annotations
 
-import re
-
 from tai42_contract.connectors.providers import ProviderDescriptor
 
 from tai42_skeleton.connectors.runtime.launch import SUPPORTED_MANAGED_TRANSPORTS, resolve_mcp_server
+from tai42_skeleton.plugins.settings import hosted_ui_settings, is_same_origin_path
 
-_RETURN_URL_RE = re.compile(r"^/[A-Za-z0-9_\-./?=&%]*\Z")
 
+def _validate_return_url(value: str | None) -> str:
+    """The same-origin path to land on after consent; ``None`` is the declared connectors page.
 
-def _validate_return_url(value: str) -> str:
-    # ``//evil.com`` is a protocol-relative URL the browser treats as absolute;
-    # the regex permits a leading ``/`` so reject the ``//`` prefix explicitly to
-    # close the open-redirect.
-    if value.startswith("//") or not _RETURN_URL_RE.match(value):
+    The declared page is judged by its own setting under the same rule, so only a caller-sent
+    value is judged here.
+    """
+    if value is None:
+        return hosted_ui_settings().connectors_path
+    if not is_same_origin_path(value):
         raise ValueError(f"return_url must be a same-origin path beginning with '/': {value!r}")
     return value
 

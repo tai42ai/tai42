@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
-from tai42_contract.manifest import ExtensionElement
+from tai42_contract.manifest import ExtensionElement, normalize_extension_element
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.template import TemplatedText
 
@@ -16,29 +16,14 @@ from tai42_skeleton.operations import BadRequestError
 
 
 def read_element(element: Any) -> ExtensionElement:
-    """One combo element, structurally validated.
+    """One combo element, structurally validated by the contract's normalizer; a malformed one is a loud 400.
 
-    A non-empty extension NAME (bare string), or a ``{"name": <non-empty str>, "config": <dict>}``
-    mapping binding author config (``config`` REQUIRED — a config-less selection is the bare-string
-    form, so a config-free dict is malformed) with no other keys. Anything else is a loud 400.
     Registration of the name is checked later against the live registry.
     """
-    if isinstance(element, str):
-        if not element:
-            raise BadRequestError("an extension name must be a non-empty string")
-        return element
-    if isinstance(element, dict):
-        name = element.get("name")
-        if not isinstance(name, str) or not name:
-            raise BadRequestError("an extension element must have a non-empty string 'name'")
-        config = element.get("config")
-        if not isinstance(config, dict):
-            raise BadRequestError(f"extension element {name!r} must carry a 'config' mapping")
-        extra = set(element) - {"name", "config"}
-        if extra:
-            raise BadRequestError(f"extension element {name!r} has unexpected keys: {sorted(extra)!r}")
-        return {"name": name, "config": dict(config)}
-    raise BadRequestError("each combo element must be an extension name or a {'name', 'config'} mapping")
+    try:
+        return normalize_extension_element(element)
+    except ValueError as exc:
+        raise BadRequestError(str(exc)) from exc
 
 
 def read_combos(extensions: Any) -> list[list[ExtensionElement]]:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import Request
-from tai42_contract.conversations import ConversationRouteCreate, TargetConversationConfig
+from tai42_contract.conversations import ConversationRouteCreateBody, TargetConversationConfig
 
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations.adapter import read_json_object, validate_body
@@ -52,7 +52,7 @@ async def _extract_route_create(request: Request) -> dict:
     if body_route_name is not None and body_route_name != path_route_name:
         raise BadRequestError("route_name in the body must match the route_name in the path") from None
     body = {**body, "route_name": path_route_name}
-    return validate_body(ConversationRouteCreate, body, "conversation route").model_dump()
+    return validate_body(ConversationRouteCreateBody, body, "conversation route").root.model_dump()
 
 
 async def _extract_page_window(request: Request) -> dict:

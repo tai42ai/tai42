@@ -74,29 +74,72 @@ def test_auth_whoami_error_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Unauthorized" in result.output
 
 
+def _methods_response(key: str) -> httpx.Response:
+    return data_response({"methods": [], "needs_setup": False, "setup_login": None, "claim_fragment_key": key})
+
+
 def test_auth_claim_sends_no_credential_and_extracts_token_from_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST"
-        assert request.url.path == "/api/login/claim"
-        # The public exchange carries NO credential header.
+        seen.append(f"{request.method} {request.url.path}")
+        # Both public calls carry NO credential header.
         assert "x-api-key" not in request.headers
         assert "authorization" not in request.headers
-        # A full pasted claim URL is reduced to its bare fragment token.
+        if request.url.path == "/api/login/methods":
+            return _methods_response("claim")
+        # A full pasted claim URL is reduced to its fragment token.
         assert json.loads(request.content) == {"token": "clm-abc123"}
         return data_response({"token": "sk-live", "user_id": "u1"})
 
     result = run_cli(monkeypatch, handler, ["auth", "claim", "https://host/login#claim=clm-abc123"])
     assert result.exit_code == 0, result.output
     assert "sk-live" in result.output
+    assert seen == ["GET /api/login/methods", "POST /api/login/claim"]
 
 
-def test_auth_claim_accepts_a_bare_token(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_claim_reads_the_token_under_the_served_fragment_key(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login/methods":
+            return _methods_response("token")
+        assert json.loads(request.content) == {"token": "clm-xyz"}
+        return data_response({"token": "sk-live", "user_id": "u1"})
+
+    result = run_cli(monkeypatch, handler, ["auth", "claim", "https://host/signin#claim=decoy&token=clm-xyz"])
+    assert result.exit_code == 0, result.output
+
+
+def test_auth_claim_refuses_a_link_without_the_served_fragment_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/login/methods", "no exchange may be attempted"
+        return _methods_response("token")
+
+    result = run_cli(monkeypatch, handler, ["auth", "claim", "https://host/login#claim=clm-xyz"])
+    assert result.exit_code != 0
+    assert "the pasted link carries no token= fragment" in " ".join(result.output.split())
+
+
+def test_auth_claim_refuses_a_link_carrying_the_fragment_key_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/login/methods", "no exchange may be attempted"
+        return _methods_response("claim")
+
+    result = run_cli(monkeypatch, handler, ["auth", "claim", "https://host/login#claim=a&claim=b"])
+    assert result.exit_code != 0
+    assert "the pasted link carries 2 claim= fragments; exactly one is expected" in " ".join(result.output.split())
+
+
+def test_auth_claim_accepts_a_bare_token_without_a_discovery_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
         assert json.loads(request.content) == {"token": "clm-bare"}
         return data_response({"token": "sk-live", "user_id": "u1"})
 
     result = run_cli(monkeypatch, handler, ["auth", "claim", "clm-bare"])
     assert result.exit_code == 0, result.output
+    assert seen == ["/api/login/claim"]
 
 
 def test_auth_claim_404_renders_uniform_message(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -125,6 +168,8 @@ def test_auth_claim_reads_url_from_stdin(monkeypatch: pytest.MonkeyPatch) -> Non
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/login/methods":
+            return _methods_response("claim")
         seen.update(json.loads(request.content))
         return data_response({"api_key": "sk-x"})
 

@@ -178,6 +178,28 @@ async def test_notify_user_route_maps_valueerror_to_400(monkeypatch) -> None:
     assert "channel" in json.loads(bytes(resp.body))["error"]
 
 
+async def test_notify_user_route_refuses_an_unknown_top_level_key_with_422(monkeypatch) -> None:
+    sent: list[str] = []
+
+    async def _helper(message, **_kwargs):  # pragma: no cover - never reached
+        sent.append(message)
+
+    monkeypatch.setattr(notifications_ops, "_notify_user", _helper)
+    resp = await router.notify_user(_post_request(b'{"message": "hi", "recipent": "+15550000000"}'))
+    assert resp.status_code == 422
+    assert json.loads(bytes(resp.body))["error"] == [{"loc": ["recipent"], "type": "extra_forbidden"}]
+    assert sent == []
+
+
+async def test_notify_user_route_refuses_an_unknown_key_inside_a_rich_field_with_422(monkeypatch) -> None:
+    monkeypatch.setattr(notifications_ops, "_notify_user", None)
+    resp = await router.notify_user(
+        _post_request(b'{"message": "hi", "location": {"latitude": 1, "longitude": 2, "lable": "x"}}')
+    )
+    assert resp.status_code == 422
+    assert json.loads(bytes(resp.body))["error"] == [{"loc": ["location", "lable"], "type": "extra_forbidden"}]
+
+
 # -- audience isolation on the read door -------------------------------------
 
 

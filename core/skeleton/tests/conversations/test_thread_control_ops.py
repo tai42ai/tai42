@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel, ValidationError
 from tai42_contract.channels import ChannelTemplate, OptionSection, ReplyOption
-from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
+from tai42_contract.conversations import ChannelConversationRoute, Person, PersonAddress
 from tai42_contract.interactions import LocationElement, MediaItem, MediaKind
 from tai42_contract.template import TemplatedText
 from tests.agent._memoryless import MemorylessTestAgent
@@ -36,7 +36,7 @@ _PERSON_THREAD = "bridge:@person:p1"
 
 
 def _channel_route(route_name: str = "chat", initial_mode: str = "agent", our_identity: str = "+15550001111"):
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="agent",

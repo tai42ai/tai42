@@ -14,9 +14,20 @@ independent of the active config mode.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Final
+
+CONFIG_MODE_ENV: Final = "TAI_CONFIG_MODE"
+"""The env name selecting the deployment's config provider."""
+
+FILE_CONFIG_MODE: Final = "file"
+"""The built-in provider: env and manifest read from local files (a local ``.env`` included)."""
+
+CONFIG_MODE_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]*")
+"""A mode name (fullmatch): any mode but ``file`` resolves to the module ``tai42_config_<mode>.manager``,
+so it must be a valid module-name segment; the pattern also fixes the canonical lowercase spelling."""
 
 
 class ConfigManager(ABC):

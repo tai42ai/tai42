@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 import pytest
 from pydantic import BaseModel
-from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
+from tai42_contract.conversations import ChannelConversationRoute, ConversationRoute, Person, PersonAddress
 from tai42_contract.template import TemplatedText
 from tests.agent._memoryless import MemorylessTestAgent
 
@@ -58,7 +58,7 @@ def _store() -> ConversationModeStore:
 
 
 def _route(initial_mode: str = "agent") -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name="line",
         door="channel",
         target_kind="agent",
@@ -72,7 +72,7 @@ def _route(initial_mode: str = "agent") -> ConversationRoute:
 
 
 def _route_named(route_name: str, initial_mode: str, our_identity: str) -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="agent",

@@ -11,7 +11,7 @@ import sys
 from collections.abc import Iterator
 
 import pytest
-from tai42_contract.config.manager import ConfigManager
+from tai42_contract.config.manager import CONFIG_MODE_ENV, FILE_CONFIG_MODE, ConfigManager
 
 from tai42_skeleton.config import (
     ConfigManagerFactory,
@@ -19,7 +19,7 @@ from tai42_skeleton.config import (
     build_config_manager,
 )
 from tai42_skeleton.config import factory as factory_mod
-from tai42_skeleton.config.config_mode import ConfigMode, config_mode
+from tai42_skeleton.config.config_mode import ConfigMode, ConfigModeSettings, config_mode
 
 
 @pytest.fixture(autouse=True)
@@ -95,3 +95,13 @@ def test_file_manager_satisfies_contract() -> None:
 def test_config_mode_default_is_file() -> None:
     """With ``TAI_CONFIG_MODE=file`` the accessor returns the ``file`` string value."""
     assert config_mode() == ConfigMode.file.value == "file"
+
+
+def test_the_mode_setting_reads_the_contract_env_name_and_law(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The server reads the mode from the contract's env name and refuses what the contract's pattern refuses."""
+    monkeypatch.setenv(CONFIG_MODE_ENV, "acme_v2")
+    assert ConfigModeSettings().config_mode == "acme_v2"
+    monkeypatch.setenv(CONFIG_MODE_ENV, "Acme")
+    with pytest.raises(ValueError, match=f"Invalid {CONFIG_MODE_ENV}='Acme'"):
+        ConfigModeSettings()
+    assert ConfigMode.file.value == FILE_CONFIG_MODE

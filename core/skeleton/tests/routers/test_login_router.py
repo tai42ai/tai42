@@ -162,7 +162,9 @@ async def test_methods_empty_registry():
     resp = await login_router.login_methods(_request())
 
     # No principal exists → needs_setup; no login-attaching provider → setup_login null.
-    assert json.loads(bytes(resp.body)) == {"data": {"methods": [], "needs_setup": True, "setup_login": None}}
+    assert json.loads(bytes(resp.body)) == {
+        "data": {"methods": [], "needs_setup": True, "setup_login": None, "claim_fragment_key": "claim"}
+    }
 
 
 async def test_methods_concatenated_and_needs_setup_from_principals():
@@ -226,6 +228,12 @@ async def test_methods_setup_login_is_null_for_a_provider_that_only_owns_login_r
     _register("a", _FakeLoginOwning())
     resp = await login_router.login_methods(_request())
     assert json.loads(bytes(resp.body))["data"]["setup_login"] is None
+
+
+async def test_methods_serve_the_declared_claim_fragment_key(monkeypatch):
+    monkeypatch.setenv("HOSTED_UI_CLAIM_FRAGMENT_KEY", "token")
+    resp = await login_router.login_methods(_request())
+    assert json.loads(bytes(resp.body))["data"]["claim_fragment_key"] == "token"
 
 
 async def test_methods_provider_error_propagates():
@@ -309,7 +317,9 @@ def test_public_methods_reachable_while_protected_still_401(monkeypatch):
     # Always-public: reachable with no credential (empty accounts registry).
     ok = client.get("/api/login/methods")
     assert ok.status_code == 200
-    assert ok.json() == {"data": {"methods": [], "needs_setup": True, "setup_login": None}}
+    assert ok.json() == {
+        "data": {"methods": [], "needs_setup": True, "setup_login": None, "claim_fragment_key": "claim"}
+    }
     # A reserved /api/auth route is still never public.
     assert client.get("/api/auth/scopes").status_code in (401, 403)
 

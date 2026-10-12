@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ConversationRoute, ConversationRouteBody
 
 from tai42_skeleton.conversations.managers import redis_conversations_manager as redis_module
 from tai42_skeleton.conversations.managers.redis_conversations_manager import RedisConversationsManager
@@ -31,7 +31,7 @@ def _api_route(name: str = "chat", **over) -> ConversationRoute:
         "callback_secret": "sec-1",
     }
     fields.update(over)
-    return ConversationRoute(**fields)
+    return ConversationRouteBody.model_validate(fields).root
 
 
 def _channel_route(name: str = "line", **over) -> ConversationRoute:
@@ -46,7 +46,7 @@ def _channel_route(name: str = "line", **over) -> ConversationRoute:
         "execution_key_fingerprint": "fp-1",
     }
     fields.update(over)
-    return ConversationRoute(**fields)
+    return ConversationRouteBody.model_validate(fields).root
 
 
 async def test_put_creates_then_replaces(monkeypatch):

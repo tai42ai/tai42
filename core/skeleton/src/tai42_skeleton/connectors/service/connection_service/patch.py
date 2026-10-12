@@ -44,7 +44,7 @@ async def patch_sub_services(
     *,
     connection_id: str,
     desired: list[str],
-    return_url: str,
+    return_url: str | None,
     redirect_uri: str,
     origin: str,
 ) -> PatchResult:
@@ -57,7 +57,7 @@ async def patch_sub_services(
     finalises. The connection's whole enabled set is reconciled, so an owned entry the run-time check
     refuses (it fell behind its descriptor) is rewritten; an unchanged set is accepted only to do that.
     """
-    _validate_return_url(return_url)
+    landing = _validate_return_url(return_url)
 
     # Mutate the record under the lock and BEFORE touching the manifest, so a
     # losing writer never tears manifest entries out against a record it failed
@@ -167,7 +167,7 @@ async def patch_sub_services(
         descriptor=descriptor,
         alias=record.alias,
         enabled_sub_services=consent_subs,
-        return_url=return_url,
+        return_url=landing,
         redirect_uri=redirect_uri,
         origin=origin,
         operation=state.FlowOperation.TOGGLE_SUBSERVICE_ON,

@@ -20,6 +20,7 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 import httpx
+from tai42_contract.access_control import API_KEY_HEADER
 
 # The read window must outlast the slowest documented fleet operation the CLI
 # fronts (a config write blocks on the full worker-reload broadcast, whose fanout
@@ -178,10 +179,10 @@ class ApiClient:
         Inject ``transport`` to serve responses from a fake in tests; ``read_timeout``
         tunes the read window for slow fleet operations.
         """
-        # No key → no ``x-api-key`` header at all, so a public route is never handed a
+        # No key → no api-key header at all, so a public route is never handed a
         # stale/wrong credential (which its always-public middleware would ignore, but a
         # protected route would 401 on).
-        headers = {"x-api-key": api_key} if api_key is not None else {}
+        headers = {API_KEY_HEADER: api_key} if api_key is not None else {}
         timeout = httpx.Timeout(
             connect=CONNECT_TIMEOUT_SECONDS,
             read=read_timeout,

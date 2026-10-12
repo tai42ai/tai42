@@ -23,6 +23,12 @@ from tai42_contract.settings_profiles.errors import (
     SettingsProfileVersionNotFoundError,
 )
 from tai42_contract.settings_profiles.models import SettingsProfileBody
+from tai42_contract.settings_profiles.names import (
+    PREVIOUS_PROFILE_NAME,
+    RESERVED_PROFILE_PREFIX,
+    PreviousProfileName,
+    SettingsProfileName,
+)
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 
 
@@ -99,9 +105,13 @@ class SettingsProfileStore(Protocol):
 
 
 __all__ = [
+    "PREVIOUS_PROFILE_NAME",
+    "RESERVED_PROFILE_PREFIX",
+    "PreviousProfileName",
     "SettingsProfileBody",
     "SettingsProfileError",
     "SettingsProfileExistsError",
+    "SettingsProfileName",
     "SettingsProfileNotFoundError",
     "SettingsProfileStore",
     "SettingsProfileVersionNotFoundError",

@@ -11,12 +11,16 @@ record models are imported, never redefined here.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, JsonValue, RootModel
+from pydantic import BaseModel, Field, JsonValue, RootModel
 from tai42_contract.access_control.models import RoleDefinition
 from tai42_contract.app.responses import ApplyResponse, FanoutSummary
-from tai42_contract.conversations import ConversationRouteCreate, TargetConversationConfig
+from tai42_contract.conversations import (
+    ApiConversationRouteCreate,
+    ChannelConversationRouteCreate,
+    TargetConversationConfig,
+)
 from tai42_contract.template import TemplatedText
 from tai42_contract.versioning.models import DocumentVersion
 
@@ -190,8 +194,8 @@ class PolicyRollbackResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class ConversationRouteView(ConversationRouteCreate):
-    """A stored conversation route as every read serves it.
+class ApiConversationRouteView(ApiConversationRouteCreate):
+    """A stored ``api`` conversation route as every read serves it.
 
     The client-supplied fields plus the server-derived ``execution_key_fingerprint``, with
     ``callback_secret`` OMITTED — reads always strip it, so the view never advertises a field the wire
@@ -199,6 +203,20 @@ class ConversationRouteView(ConversationRouteCreate):
     """
 
     execution_key_fingerprint: str
+
+
+class ChannelConversationRouteView(ChannelConversationRouteCreate):
+    """A stored ``channel`` conversation route as every read serves it, plus ``execution_key_fingerprint``."""
+
+    execution_key_fingerprint: str
+
+
+#: A stored conversation route as every read serves it, discriminated on ``door``.
+ConversationRouteView = Annotated[ApiConversationRouteView | ChannelConversationRouteView, Field(discriminator="door")]
+
+
+class ConversationRouteViewBody(RootModel[ConversationRouteView]):
+    """One stored conversation route as a read serves it (the door's view variant)."""
 
 
 class ConversationRouteListEnvelope(BaseModel):

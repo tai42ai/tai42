@@ -1,10 +1,8 @@
-"""A notification/interaction body model ignores an undeclared top-level key.
+"""A notification/interaction body model refuses an undeclared top-level key.
 
-The models the CLI, the HTTP API and the in-process send doors validate a caller's JSON
-body into do not set ``extra="forbid"``, so an unknown / mis-nested / typo'd top-level key
-is dropped by ``model_validate`` and the declared fields still validate — a notification
-body tolerates an unknown key the same way every other request body does. These tests
-assert that at the contract level, so the guarantee holds for every door at once.
+The CLI, the HTTP API, the builtin tools and the in-process send doors all validate a
+caller's body into these models, so an unknown / mis-nested / typo'd key is refused at
+every door at once instead of being dropped.
 """
 
 from __future__ import annotations
@@ -12,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from tai42_contract.channels import ChannelTemplate, LinkOption, OptionSection, ReplyOption
 from tai42_contract.interactions.models import (
@@ -47,11 +45,15 @@ def test_body_model_constructs_without_the_extra_key(model: type[BaseModel], kwa
 
 
 @pytest.mark.parametrize(("model", "kwargs"), _VALID_BODY, ids=lambda value: getattr(value, "__name__", ""))
-def test_body_model_ignores_an_undeclared_top_level_key(model: type[BaseModel], kwargs: dict[str, Any]):
-    # An undeclared top-level key is dropped, not refused: the model validates and carries only
-    # its declared fields, so every door that validates this body accepts an unknown key the same
-    # way every other request body does.
-    accepted = model.model_validate({**kwargs, "nope": "surprise"})
-    assert accepted.model_validate(kwargs) is not None
-    assert not hasattr(accepted, "nope")
-    assert accepted == model.model_validate(kwargs)
+def test_body_model_refuses_an_undeclared_top_level_key(model: type[BaseModel], kwargs: dict[str, Any]):
+    with pytest.raises(ValidationError) as caught:
+        model.model_validate({**kwargs, "nope": "surprise"})
+    assert [(error["type"], error["loc"]) for error in caught.value.errors()] == [("extra_forbidden", ("nope",))]
+
+
+@pytest.mark.parametrize(("model", "kwargs"), _VALID_BODY, ids=lambda value: getattr(value, "__name__", ""))
+def test_body_model_dump_round_trips(model: type[BaseModel], kwargs: dict[str, Any]):
+    # A stored dump reads back: the models carry no computed field, serializer or alias.
+    built = model.model_validate(kwargs)
+    assert model.model_validate(built.model_dump()) == built
+    assert model.model_validate(built.model_dump(mode="json")) == built

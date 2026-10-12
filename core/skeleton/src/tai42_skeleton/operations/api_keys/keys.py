@@ -286,7 +286,8 @@ async def create_claim_link(api_key: str, ttl_seconds: int | None) -> dict[str, 
 
     The submitted key is resolved through the gate's own verifier chain and the caller must own it
     (or be admin) per the module's ownership rule; the response returns the claim token ONCE plus a
-    fragment-carrier path (``/login#claim=<token>``) and an expiry.
+    fragment-carrier path on the declared hosted-UI login page (``/login#claim=<token>`` by default)
+    and an expiry.
 
     Accepted oracle (deliberate, not an oversight): an unresolvable key answers 400 and a
     valid-but-not-yours key answers 403, so an authenticated caller can tell a live key

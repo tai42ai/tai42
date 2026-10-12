@@ -24,7 +24,7 @@ class ChannelTemplate(BaseModel):
     ``parameters`` is a non-empty dict.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str
     language: str
