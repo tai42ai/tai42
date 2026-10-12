@@ -26,7 +26,7 @@ from tai42_contract.accounts.models import (
     MemberAction,
     MemberListing,
 )
-from tai42_contract.accounts.provider import AccountsProvider, LoginAttachingProvider
+from tai42_contract.accounts.provider import AccountsProvider, LoginAttachingProvider, LoginOwningProvider
 from tai42_kit.accounts import registry as accounts_registry
 
 import tai42_skeleton.routers.api_keys as api_keys_router
@@ -193,6 +193,39 @@ async def test_methods_setup_login_reports_a_login_attaching_provider():
     resp = await login_router.login_methods(_request())
     data = json.loads(bytes(resp.body))["data"]
     assert data["setup_login"] == {"kinds": ["password", "invite"]}
+
+
+class _FakeLoginOwning(LoginOwningProvider):
+    """An accounts provider that keeps login records but holds no credential it could attach."""
+
+    def login_methods(self) -> list[LoginMethod]:
+        return []
+
+    async def validate_token(self, token: str) -> AuthIdentity | None:  # pragma: no cover - unused
+        return None
+
+    async def list_members(self) -> MemberListing:  # pragma: no cover - unused
+        return MemberListing(members=[], invites=[])
+
+    def member_actions(self) -> list[MemberAction]:  # pragma: no cover - unused
+        return []
+
+    async def invoke_member_action(  # pragma: no cover - unused
+        self, action_id: str, *, target: str | None, payload: BaseModel
+    ) -> BaseModel:
+        raise ValueError(action_id)
+
+    async def revoke_session(self, token: str) -> bool:  # pragma: no cover - unused
+        return False
+
+    async def has_login(self, user_id: str) -> bool:  # pragma: no cover - unused
+        return False
+
+
+async def test_methods_setup_login_is_null_for_a_provider_that_only_owns_login_records():
+    _register("a", _FakeLoginOwning())
+    resp = await login_router.login_methods(_request())
+    assert json.loads(bytes(resp.body))["data"]["setup_login"] is None
 
 
 async def test_methods_provider_error_propagates():

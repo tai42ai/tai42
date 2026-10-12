@@ -32,6 +32,7 @@ from tai42_contract.accounts.provider import (
     AccountsProvider,
     AccountsProviderSettings,
     LoginAttachingProvider,
+    LoginOwningProvider,
 )
 from tai42_contract.errors import ErrorKind, error_kind
 
@@ -190,6 +191,51 @@ def test_full_subclass_instantiates_and_inherits_concrete_members():
         assert provider.readiness_targets() == ()
 
     asyncio.run(run())
+
+
+# -- LoginOwningProvider ABC -------------------------------------------------
+
+
+class _FakeLoginOwning(_FakeAccounts, LoginOwningProvider):
+    """A provider that keeps login records but holds no credential it could attach."""
+
+    def __init__(self, settings: object | None = None) -> None:
+        super().__init__(settings)
+        self.records: set[str] = {"rec-1"}
+
+    async def has_login(self, user_id: str) -> bool:
+        return user_id in self.records
+
+
+def test_login_owning_provider_is_an_accounts_provider_but_not_an_attaching_one():
+    provider = _FakeLoginOwning()
+    assert isinstance(provider, AccountsProvider)
+    assert isinstance(provider, LoginOwningProvider)
+    assert not isinstance(provider, LoginAttachingProvider)
+    assert not isinstance(_FakeAccounts(), LoginOwningProvider)
+
+
+def test_login_owning_provider_requires_only_has_login():
+    class _NoHasLogin(_FakeAccounts, LoginOwningProvider):
+        pass
+
+    assert LoginOwningProvider.__abstractmethods__ >= {"has_login"}
+    assert "attach_login" not in LoginOwningProvider.__abstractmethods__
+    with pytest.raises(TypeError):
+        _NoHasLogin()  # pyright: ignore[reportAbstractUsage]
+
+
+def test_login_owning_provider_answers_whether_it_keeps_a_record():
+    async def run() -> None:
+        provider = _FakeLoginOwning()
+        assert await provider.has_login("rec-1") is True
+        assert await provider.has_login("someone-else") is False
+
+    asyncio.run(run())
+
+
+def test_login_attaching_provider_owns_the_login_it_attaches():
+    assert issubclass(LoginAttachingProvider, LoginOwningProvider)
 
 
 # -- LoginAttachingProvider ABC ------------------------------------------------

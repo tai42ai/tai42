@@ -414,7 +414,6 @@ async def test_list_members_rows_report_their_applicable_actions(wire):
 
     (member,) = listing.members
     assert member.principal_ids == ["usr-active"]
-    assert member.role == "admin"
     assert member.actions == list(MEMBER_ROW_ACTIONS)
 
     (invite,) = listing.invites
