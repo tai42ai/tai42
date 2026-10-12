@@ -327,9 +327,9 @@ def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
     a backup ``env`` restore — an env write — rolls the same recycle.
 
     The tool doors of an env write beyond MCP ride here too: ``run_tool_async_task`` queues the
-    projected ``write_env`` as a backend job (the writer is then the backend worker that ran
-    it), and ``tools_agent`` on the scripted LLM stub (``res.llm_base_url``) calls it from an
-    agent run."""
+    projected ``write_env`` or ``apply_profile`` as a backend job (the writer is then the backend
+    worker that ran it), and ``tools_agent`` on the scripted LLM stub (``res.llm_base_url``) calls
+    ``write_env`` from an agent run."""
     manifest = {
         "default_routers": "none",
         "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.backup"],
@@ -341,7 +341,9 @@ def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
             *_builtin_entries(),
         ],
         "agents": [_TOOLS_AGENT_ENTRY],
-        "api_tools": _PROJECTED_API_TOOLS,
+        # ``apply_profile`` is authority-changing (off the default projected surface): named so a
+        # backend job can apply a profile.
+        "api_tools": {**_PROJECTED_API_TOOLS, "include": ["apply_profile"]},
         "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)

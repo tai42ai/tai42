@@ -504,52 +504,145 @@ async def test_an_env_write_run_as_a_backend_job_recycles_the_backend_worker_tha
     before_serve = _lives(recycle_stack, "serve")
     offsets = _log_offsets(recycle_stack)
 
-    async with recycle_stack.mcp(auth=recycle_stack.auth_token) as mcp:
-        queued = _tool_map(
-            await mcp.call_tool(
-                "run_tool_async_task",
-                {"tool_name": "write_env", "arguments": {"env": {_RECYCLE_VAR: uniq("mkey").upper()}}},
-                retry_on_reloading=True,
-            )
-        )
-    task_id = queued["task_id"]
+    task_id = await _queue_as_backend_job(recycle_stack, "write_env", {"env": {_RECYCLE_VAR: uniq("mkey").upper()}})
 
     # The roll recycles the serve worker; the respawned serve reads the job's recorded result.
     recycle_stack.wait_generation_bump("serve", before_serve, deadline=150.0)
-    async with recycle_stack.mcp(auth=recycle_stack.auth_token) as mcp:
-        written = _tool_map(
-            await mcp.call_tool(
-                "backend_task_result",
-                {"task_id": task_id, "timeout": 120},
-                retry_on_reloading=True,
-                ready_deadline=60.0,
-            )
-        )
+    written = _tool_map(await _backend_job_result(recycle_stack, task_id))
 
     assert written["awaiting_respawn"] == [], written
     roll = written["recycle"]
-    assert roll["recycle_stopped"] is None, f"the recycle roll stopped: {roll}"
-    serve_rows = [e for e in roll["recycle"] if e["kind"] == "serve"]
-    assert serve_rows, f"serve not recycled: {roll}"
+    await _assert_the_backend_worker_wrote_and_recycles(
+        recycle_stack, roll["recycle"], roll["recycle_stopped"], before_backend, before_serve, offsets
+    )
+
+
+async def _assert_the_backend_worker_wrote_and_recycles(
+    stack: TaiStack,
+    rows: list[dict[str, Any]],
+    stopped: Any,
+    before_backend: dict[str, int],
+    before_serve: dict[str, int],
+    offsets: dict[str, int],
+) -> None:
+    """A backend job's roll: the serve rows ``recycled`` from their pre-write lives, exactly one
+    ``self-deferred`` row naming the backend worker that ran the job; then that worker exits after
+    the job and comes back at its next life, the serve answers ``/health``, and no worker logged a
+    forbidden line."""
+    assert stopped is None, f"the recycle roll stopped: {stopped} in {rows}"
+    serve_rows = [e for e in rows if e["kind"] == "serve"]
+    assert serve_rows, f"serve not recycled: {rows}"
     for e in serve_rows:
-        assert e["status"] == "recycled", f"a serve row did not converge: {e} in {roll}"
+        assert e["status"] == "recycled", f"a serve row did not converge: {e} in {rows}"
         assert e["generation_before"] == before_serve[e["name"]], f"not the pre-write life: {e} vs {before_serve}"
-    writer = [e for e in roll["recycle"] if e["status"] == "self-deferred"]
-    assert len(writer) == 1, f"expected exactly one self-deferred writer row: {roll}"
+    writer = [e for e in rows if e["status"] == "self-deferred"]
+    assert len(writer) == 1, f"expected exactly one self-deferred writer row: {rows}"
     assert writer[0]["kind"] == "backend", writer
     assert writer[0]["name"] in before_backend, (
         f"the writer named an unknown backend slot: {writer} vs {before_backend}"
     )
     assert writer[0]["generation_before"] == before_backend[writer[0]["name"]], writer
 
-    # The backend worker that ran the job exits after it and comes back at its next life.
-    recycle_stack.wait_generation_bump(writer[0]["name"], before_backend[writer[0]["name"]], deadline=150.0)
+    stack.wait_generation_bump(writer[0]["name"], before_backend[writer[0]["name"]], deadline=150.0)
 
     async def serves_again() -> bool:
-        resp = await recycle_stack.api().request_raw("GET", "/health")
+        resp = await stack.api().request_raw("GET", "/health")
         return resp.status_code == 200
 
     await wait_for_async(serves_again, deadline=60.0, message="the respawned serve never served /health again")
+    _assert_no_forbidden_lines(stack, offsets)
+
+
+async def _queue_as_backend_job(stack: TaiStack, tool_name: str, arguments: dict[str, Any]) -> str:
+    """Queue ``tool_name`` as a backend job (``run_tool_async_task``) and return its task id."""
+    async with stack.mcp(auth=stack.auth_token) as mcp:
+        queued = _tool_map(
+            await mcp.call_tool(
+                "run_tool_async_task", {"tool_name": tool_name, "arguments": arguments}, retry_on_reloading=True
+            )
+        )
+    return str(queued["task_id"])
+
+
+async def _backend_job_result(stack: TaiStack, task_id: str) -> Any:
+    """The backend job's recorded outcome, waited for: its result map, or the error result it failed with."""
+    async with stack.mcp(auth=stack.auth_token) as mcp:
+        return await mcp.call_tool(
+            "backend_task_result",
+            {"task_id": task_id, "timeout": 120},
+            raise_on_error=False,
+            retry_on_reloading=True,
+            ready_deadline=60.0,
+        )
+
+
+@pytest.mark.timeout(480)
+@pytest.mark.needs(*_SUPERVISED_RECYCLE_NEEDS, "probe-tools", "setting:extension:async_task")
+async def test_a_profile_apply_run_as_a_backend_job_recycles_the_fleet_and_the_backend_worker_that_ran_it(
+    recycle_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """``apply_profile`` queued as a backend job: the job proves the profile builds, persists it,
+    the roll recycles the serve, the job's result names the backend worker that ran it
+    ``self-deferred`` with nobody awaiting a respawn, and that worker exits after the job."""
+    before_backend = _lives(recycle_stack, "backend")
+    before_serve = _lives(recycle_stack, "serve")
+    offsets = _log_offsets(recycle_stack)
+    name = uniq("jobprofile")
+    await _profile_from_stored(recycle_stack, {_RECYCLE_VAR: uniq("mkey").upper()}, name)
+
+    task_id = await _queue_as_backend_job(recycle_stack, "apply_profile", {"name": name})
+    recycle_stack.wait_generation_bump("serve", before_serve, deadline=150.0)
+    applied = _tool_map(await _backend_job_result(recycle_stack, task_id))
+
+    assert applied["refused"] == [], applied
+    assert applied["awaiting_respawn"] == [], applied
+    await _assert_the_backend_worker_wrote_and_recycles(
+        recycle_stack, applied["recycle"], applied["recycle_stopped"], before_backend, before_serve, offsets
+    )
+
+
+# A hot-class int settings field read at every build: a non-integer passes the save-time validator
+# and fails the build.
+_BUILD_POISON_VAR = "ACCESS_CONTROL_CACHE_SIZE"
+
+
+async def _settings_epoch(stack: TaiStack) -> int:
+    async with stack.mcp(auth=stack.auth_token) as mcp:
+        snapshot = _tool_map(await mcp.call_tool("e2e_settings_snapshot", {}, retry_on_reloading=True))
+    return int(snapshot["settings_epoch"])
+
+
+@pytest.mark.timeout(480)
+@pytest.mark.needs(*_SUPERVISED_RECYCLE_NEEDS, "probe-tools", "setting:extension:async_task")
+async def test_a_profile_whose_build_fails_applied_as_a_backend_job_persists_nothing(
+    recycle_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """A profile whose build fails, applied as a backend job: the job fails naming the settings
+    error, the stored env, the serving generation and every worker's life are unchanged, and no
+    worker logged a forbidden line."""
+    api = recycle_stack.api()
+    before_env = (await api.get("/api/config/env"))["env"]
+    before_epoch = await _settings_epoch(recycle_stack)
+    before_lives = {**_lives(recycle_stack, "backend"), **_lives(recycle_stack, "serve")}
+    offsets = _log_offsets(recycle_stack)
+    name = uniq("jobpoison")
+    await api.put(
+        f"/api/config/profiles/{name}",
+        json={"env": {**before_env, _BUILD_POISON_VAR: "not-an-integer"}},
+        retry_on_reloading=True,
+    )
+
+    task_id = await _queue_as_backend_job(recycle_stack, "apply_profile", {"name": name})
+    result = await _backend_job_result(recycle_stack, task_id)
+
+    text = " ".join(getattr(part, "text", "") for part in result.content)
+    assert result.is_error, f"a profile whose build fails was applied from a backend job: {result!r}"
+    assert "AccessControlSettings" in text, f"the job's failure does not name the settings error: {text}"
+    after_env = (await api.get("/api/config/env"))["env"]
+    assert after_env == before_env, f"a failed build persisted the profile: {before_env} -> {after_env}"
+    assert _BUILD_POISON_VAR not in after_env, after_env
+    assert await _settings_epoch(recycle_stack) == before_epoch
+    assert {**_lives(recycle_stack, "backend"), **_lives(recycle_stack, "serve")} == before_lives
     _assert_no_forbidden_lines(recycle_stack, offsets)
 
 

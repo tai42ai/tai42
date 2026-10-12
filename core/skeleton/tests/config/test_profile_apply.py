@@ -898,16 +898,18 @@ class _ForkChildBus(_MovedBus):
         return [rows[1].model_copy(update={"kind": WorkerKind.backend, "generation": 3}), rows[2]]
 
 
-async def test_a_profile_apply_in_a_forked_job_child_swaps_nothing_and_acts_for_its_member(
+async def test_a_profile_apply_in_a_forked_job_child_proves_the_build_swaps_nothing_and_acts_for_its_member(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # A non-member job child has no serving surface: it builds and swaps nothing, persists the
-    # profile, publishes with no local result, and the member parent converges as a sibling.
+    # A non-member job child has no serving surface: it builds the epoch and discards it (the
+    # proof the env builds), swaps nothing, persists the profile, publishes with no local
+    # result, and the member parent converges as a sibling.
     # The applier is that member: excluded from the roll at its generation, reported
     # self-deferred, never left awaiting a respawn.
     monkeypatch.setenv("TAI_SUPERVISED", "harness")
     store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
     spy, swapped = _swap_spy()
+    discard, discarded = _swap_spy()
     orch, seen = _orchestrate_spy(
         RecycleReport(rows=[RecycleRow(name="serve-1", kind="serve", generation_before=1, status=RECYCLED)])
     )
@@ -915,8 +917,10 @@ async def test_a_profile_apply_in_a_forked_job_child_swaps_nothing_and_acts_for_
     monkeypatch.setattr(instance.app, "_bus", bus)
     with caplog.at_level(logging.ERROR):
         outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
-            {"TAI_BUS_NAMESPACE": "new"}, save_previous=_PrevSpy(), build_and_swap=spy
+            {"TAI_BUS_NAMESPACE": "new"}, save_previous=_PrevSpy(), build_and_swap=spy, build_and_discard=discard
         )
+    # The child proves the env builds and discards the build; it swaps nothing.
+    assert discarded == {"env": {"TAI_BUS_NAMESPACE": "new"}}
     assert swapped == {}
     assert store.env == {"TAI_BUS_NAMESPACE": "new"}
     assert [call[2] for call in bus.publish_calls] == [None]
@@ -935,3 +939,44 @@ async def test_a_profile_apply_in_a_forked_job_child_swaps_nothing_and_acts_for_
         "detail": None,
     }
     assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
+
+
+async def test_a_failed_build_in_a_forked_job_child_leaves_the_store_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The env-write-LAST contract holds on the non-member path too: the child's proof build
+    # fails, so nothing is persisted, nothing is broadcast and nothing rolls.
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+    store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
+    built: list[dict[str, str]] = []
+
+    async def failing_discard(env: dict[str, str]) -> None:
+        built.append(dict(env))
+        raise _BuildBoomError("the proposed env does not build")
+
+    swap, swapped = _swap_spy()
+    orch, seen = _orchestrate_spy()
+    bus = _ForkChildBus()
+    prev = _PrevSpy()
+    with pytest.raises(_BuildBoomError):
+        await _service(store, bus, orchestrate=orch).apply_replace_env(
+            {"TAI_BUS_NAMESPACE": "new"}, save_previous=prev, build_and_swap=swap, build_and_discard=failing_discard
+        )
+    assert built == [{"TAI_BUS_NAMESPACE": "new"}]
+    assert swapped == {}
+    assert store.env == {"TAI_BUS_NAMESPACE": "old"}
+    assert store.env_writes == []
+    assert bus.publish_calls == []
+    assert seen == {}
+    assert prev.saved == {"TAI_BUS_NAMESPACE": "old"}
+
+
+async def test_a_member_builds_and_swaps_and_never_discards(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+    store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
+    swap, swapped = _swap_spy()
+    discard, discarded = _swap_spy()
+    orch, _seen = _orchestrate_spy()
+    await _service(store, FakeBus(origin="serve-applier"), orchestrate=orch).apply_replace_env(
+        {"TAI_BUS_NAMESPACE": "new"}, save_previous=_PrevSpy(), build_and_swap=swap, build_and_discard=discard
+    )
+    assert swapped == {"env": {"TAI_BUS_NAMESPACE": "new"}}
+    assert discarded == {}

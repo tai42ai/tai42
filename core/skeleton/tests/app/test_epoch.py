@@ -842,6 +842,71 @@ async def test_a_build_failing_after_its_lifespan_entered_closes_that_lifespan()
     assert app_state["app"].name == "boot-app"
 
 
+# -- the proof build a non-member gives a profile apply -------------------------
+
+
+async def test_a_proven_build_is_discarded_with_the_live_epoch_untouched(caplog: pytest.LogCaptureFixture) -> None:
+    from tai42_skeleton.app.epoch import build_and_discard_epoch
+
+    app_state = _install_boot("boot-app")
+    boot_epoch = current_epoch()
+    client_epoch = current_client_epoch()
+    os.environ["TAI_EPOCH_TEST_EXISTING"] = "old"
+    env_before = dict(os.environ)
+    loaded_before = set(epoch_mod._loaded_env_keys)
+    seen: list[str] = []
+    closed: list[str] = []
+
+    class _FakeSupervisor:
+        async def aclose(self) -> None:
+            closed.append("closed")
+
+    def _rebuild() -> None:
+        seen.append(os.environ["TAI_EPOCH_TEST_KEY"])
+
+    async def _build(epoch: Epoch) -> _Serving:
+        epoch.supervisor = _FakeSupervisor()  # type: ignore[assignment]
+        return _Serving("proven")
+
+    with caplog.at_level("ERROR"):
+        await build_and_discard_epoch({"TAI_EPOCH_TEST_KEY": "proposed"}, rebuild=_rebuild, build_serving_app=_build)
+
+    assert seen == ["proposed"]
+    assert app_state["app"].name == "boot-app"
+    assert current_epoch() is boot_epoch
+    assert current_client_epoch() == client_epoch
+    assert dict(os.environ) == env_before
+    assert epoch_mod._loaded_env_keys == loaded_before
+    assert epoch_mod._building_epoch is None
+    assert closed == ["closed"]
+    assert [r for r in caplog.records if r.levelname == "ERROR"] == []
+
+    del os.environ["TAI_EPOCH_TEST_EXISTING"]
+
+
+async def test_a_proof_build_that_fails_raises_and_discards_like_the_swap_form(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from tai42_skeleton.app.epoch import build_and_discard_epoch
+
+    app_state = _install_boot("boot-app")
+    boot_epoch = current_epoch()
+    env_before = dict(os.environ)
+
+    def _rebuild() -> None:
+        raise RuntimeError("deliberate proof failure")
+
+    with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="deliberate proof failure"):
+        await build_and_discard_epoch(
+            {"TAI_EPOCH_TEST_KEY": "proposed"}, rebuild=_rebuild, build_serving_app=_serve("x")
+        )
+
+    assert app_state["app"].name == "boot-app"
+    assert current_epoch() is boot_epoch
+    assert dict(os.environ) == env_before
+    assert any("epoch build failed under the proposed env" in r.getMessage() for r in caplog.records)
+
+
 # -- stale-settings sweep ------------------------------------------------------
 
 
