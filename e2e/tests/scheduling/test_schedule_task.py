@@ -68,11 +68,11 @@ async def _wait_quiescent(stack: TaiStack, key: str, *, quiet_for: float, deadli
     return int(state["count"])
 
 
-# The MCP reload call may run to the harness read bound (150 s), so the per-test bound sits
-# above it: the stack boot inside the first test's timer (120) + the reload call's read
-# bound (150) + a session re-init (15) + the two firing waits (2 x 40) + the dispatch's
-# reload-gate wait (10) + the quiescence wait (30).
-@pytest.mark.timeout(420)
+# The MCP reload call may run to the harness read bound (210 s: the 90 s default apply window +
+# the 120 s boot bound), so the per-test bound sits above it: the stack boot inside the first
+# test's timer (120) + the reload call's read bound (210) + a session re-init (15) + the two
+# firing waits (2 x 40) + the dispatch's reload-gate wait (10) + the quiescence wait (30).
+@pytest.mark.timeout(480)
 async def test_schedule_fires_across_reload_then_unschedules_cross_worker(
     schedule_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

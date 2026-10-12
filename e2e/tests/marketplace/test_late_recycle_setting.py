@@ -34,6 +34,7 @@ pytestmark = [
         "topology:supervised",
         "setting:TAI_SUPERVISED=harness",
         "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
+        "setting:TAI_BUS_APPLY_TIMEOUT=330",
     ),
 ]
 

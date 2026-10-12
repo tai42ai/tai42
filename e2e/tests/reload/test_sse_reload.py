@@ -23,11 +23,22 @@ from tai42_e2e.manifests import build_replicas_stack
 from tai42_e2e.topology import StackConfig, StackResources, Topology
 from tai42_e2e.variants import Variants
 
-pytestmark = pytest.mark.needs("process", "kind:backend", "setting:transport:sse", "setting:api_tools", "store:redis")
+pytestmark = pytest.mark.needs(
+    "process",
+    "kind:backend",
+    "setting:transport:sse",
+    "setting:api_tools",
+    "store:redis",
+    "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
+    "setting:TAI_BUS_APPLY_TIMEOUT=330",
+)
 
 # A drain budget far above a rebuild plus the fleet wait: a reload that waited it out on the
 # session's own stream answers only after it.
 _DRAIN_BUDGET_S = 90.0
+# The fleet apply window covers the retire's drain floor at that budget (3 x 90 s) plus the
+# reload's own 60 s, as the platform default does above three default drains.
+_APPLY_WINDOW_S = 330.0
 
 
 def _build_sse_stack(res: StackResources, variants: Variants) -> StackConfig:
@@ -55,13 +66,18 @@ def _reads_the_closed_connection(exc: BaseException) -> bool:
     return (isinstance(exc, McpError) and "Connection closed" in str(exc)) or isinstance(exc, anyio.ClosedResourceError)
 
 
-# The MCP reload call may run to the harness read bound (150 s), so the per-test bound sits
-# above it: the stack boot inside the test (120) + the reload call's read bound (150) + the
-# listings before it (2 x 15) + the old session's closed read (30) + a new session's listing (15).
-@pytest.mark.timeout(345)
+# The MCP reload call may run to the harness read bound (the stack's 330 s apply window + the
+# 120 s boot bound = 450 s), so the per-test bound sits above it: the stack boot inside the test
+# (120) + the reload call's read bound (450) + the listings before it (2 x 15) + the old
+# session's closed read (30) + a new session's listing (15).
+@pytest.mark.timeout(645)
 async def test_a_reload_over_the_sse_transport_answers_without_waiting_the_drain_budget(fresh_stack) -> None:
     stack = fresh_stack(
-        _build_sse_stack, env_overrides={"TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": str(int(_DRAIN_BUDGET_S))}
+        _build_sse_stack,
+        env_overrides={
+            "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": str(int(_DRAIN_BUDGET_S)),
+            "TAI_BUS_APPLY_TIMEOUT": str(int(_APPLY_WINDOW_S)),
+        },
     )
     async with stack.mcp() as before, stack.mcp() as mcp:
         # A second session, opened before the reload and idle through it.

@@ -69,12 +69,13 @@ def build_marketplace_supervised_stack(res: StackResources, variants: Variants) 
     harness respawn-on-exit supervisor, so an env change of a recycle-class key an install
     loaded rolls a real recycle (the backend sibling recycled, the serve writer's own exit
     respawned). The recycle step budget is widened so a respawned worker's boot fits the
-    per-step census wait, as on the recycle stack."""
+    per-step census wait, as on the recycle stack, and the fleet apply window covers the
+    retire's drain floor at that budget (3 x 90 s) plus the reload's own 60 s, as there."""
     from dataclasses import replace
 
     base = build_marketplace_stack(res, variants)
     manifest = {**base.manifest, "backend_module": variants.backend.module}
-    env = {**base.env, "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "90"}
+    env = {**base.env, "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "90", "TAI_BUS_APPLY_TIMEOUT": "330"}
     return replace(base, name="marketplace-supervised", manifest=manifest, env=env, run_backend=True, supervised=True)
 
 

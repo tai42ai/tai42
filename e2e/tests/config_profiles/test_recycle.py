@@ -75,6 +75,7 @@ async def _profile_from_stored(stack: TaiStack, changes: dict[str, str], name: s
     "topology:supervised",
     "setting:TAI_SUPERVISED=harness",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
+    "setting:TAI_BUS_APPLY_TIMEOUT=330",
 )
 async def test_recycle_apply_rolls_the_fleet_and_self_defers_applier(
     recycle_stack: TaiStack, uniq: Callable[[str], str]
@@ -348,6 +349,7 @@ async def _assert_roll_converged_and_writer_respawns(
     "topology:supervised",
     "setting:TAI_SUPERVISED=harness",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
+    "setting:TAI_BUS_APPLY_TIMEOUT=330",
 )
 async def test_an_env_write_of_a_recycle_class_key_rolls_the_fleet_and_self_defers_the_writer(
     recycle_stack: TaiStack, uniq: Callable[[str], str], tmp_path: Path
@@ -396,6 +398,7 @@ _SUPERVISED_RECYCLE_NEEDS = (
     "topology:supervised",
     "setting:TAI_SUPERVISED=harness",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
+    "setting:TAI_BUS_APPLY_TIMEOUT=330",
 )
 
 

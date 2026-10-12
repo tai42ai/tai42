@@ -18,10 +18,11 @@ from tai42_e2e.variants import short_presence_ttl_env
 pytestmark = pytest.mark.needs("store:redis", "setting:api_tools")
 
 
-# The MCP reload call may run to the harness read bound (150 s), so the per-test bound sits
-# above it: the stack boot inside the first test's timer (120) + the seeding env reload over
-# REST (60) + the reload call's read bound (150) + a session re-init (15) + the marker wait (5).
-@pytest.mark.timeout(360)
+# The MCP reload call may run to the harness read bound (210 s: the 90 s default apply window +
+# the 120 s boot bound), so the per-test bound sits above it: the stack boot inside the first
+# test's timer (120) + the seeding env reload over REST (60) + the reload call's read bound
+# (210) + a session re-init (15) + the marker wait (5).
+@pytest.mark.timeout(410)
 @pytest.mark.needs("topology:replicas")
 async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     marker = uniq("E2E_MARKER").upper()
@@ -65,18 +66,31 @@ async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: 
 # two reload calls (2 x 125) with a session re-init each (2 x 15) + the census wait (35) +
 # the two survivors' apply waits (2 x 120).
 @pytest.mark.timeout(720)
-@pytest.mark.needs("process", "kind:backend", "probe-tools")
+@pytest.mark.needs(
+    "process",
+    "kind:backend",
+    "probe-tools",
+    "setting:TAI_BUS_APPLY_TIMEOUT=5",
+    "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=1",
+)
 async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], infra: Infra) -> None:
     # Presence and its TTL live on the app-owned bus, so the dead-worker window is tunable
-    # for every backend. Two knobs are pinned here:
+    # for every backend. Three knobs are pinned here:
     #  * a bounded ``TAI_BUS_APPLY_TIMEOUT`` so a reload's wait for the DEAD backend's apply
-    #    is cut short (naming it non-applied) instead of running to the 30s default, which
+    #    is cut short (naming it non-applied) instead of running to the 90s default, which
     #    keeps the test's runtime down. Mirrors ``test_backend_fleet``.
+    #  * a one-second ``TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS``, so the short window still covers
+    #    the retire's drain floor (three drain budgets); no run is in flight to drain.
     #  * a generous heartbeat TTL so the corpse stays on the census long enough that a
     #    re-opened session (after a swap that dropped a prior attempt) still finds it there
     #    to name — the dead-worker naming is what this test asserts.
     stack = fresh_stack(
-        build_replicas_stack, env_overrides={**short_presence_ttl_env(25), "TAI_BUS_APPLY_TIMEOUT": "5"}
+        build_replicas_stack,
+        env_overrides={
+            **short_presence_ttl_env(25),
+            "TAI_BUS_APPLY_TIMEOUT": "5",
+            "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "1",
+        },
     )
 
     # Drain worker A's boot-time self-resync gate first, so the dispatch below is not
