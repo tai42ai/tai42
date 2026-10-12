@@ -121,7 +121,7 @@ class McpReprobeMixin(LifecycleState):
         is simply absent from its next snapshot. Returns the per-title results (empty when nothing was
         probed).
         """
-        async with reload_gate.lock:
+        async with reload_gate.synchronized():
             manifest = self._manifest
             mcp_map = (manifest.mcp_map if manifest else {}) or {}
             snapshot = {t: mcp_map[t] for t in titles if t in self._failed_mcps and t in mcp_map}
