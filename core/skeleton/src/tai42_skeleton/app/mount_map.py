@@ -27,14 +27,18 @@ from __future__ import annotations
 
 import contextlib
 import importlib.resources
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from tai42_contract.plugins import PluginItem, PluginItemKind, PluginSpec, RouteDecl
 from tai42_kit.plugins import PLUGIN_SPEC_FILENAME, parse_plugin_spec
 
 from tai42_skeleton.access_control.path_canon import canonicalize_path, under_prefix
+
+if TYPE_CHECKING:
+    from tai42_skeleton.app.route_registry import RouteMetadata
 
 # The item kinds whose module registers HTTP routes: a router always declares
 # routes, a channel optionally does. Every other kind never mounts a route.
@@ -219,6 +223,32 @@ def _packaged_spec_for_module(module: str) -> PluginSpec | None:
     if not resource.is_file():
         return None
     return parse_plugin_spec(resource.read_text(encoding="utf-8"), source=f"{top_level}/{PLUGIN_SPEC_FILENAME}")
+
+
+def package_mounts(package: str, routes: Iterable[RouteMetadata]) -> dict[str, str]:
+    """The route items of the plugin packaged as ``package`` and the absolute base each serves under in ``routes``.
+
+    ``{item: "/api/<base>"}`` over the rows ``routes`` holds for that plugin; ``{}`` when the package ships no
+    ``tai-plugin.yml``. An item missing from ``routes`` (a router not listed, a channel not loaded) has no entry.
+    Pass the committed generation (``RouteRegistry.live_routes``), never the dedup map, which keeps a remapped or
+    dropped item's old rows.
+    """
+    spec = _packaged_spec_for_module(package)
+    if spec is None:
+        return {}
+    bases: dict[str, set[str]] = {}
+    for meta in routes:
+        if meta.owner.owner_ref != spec.ref or meta.owner.item_name is None or meta.mount_base is None:
+            continue
+        bases.setdefault(meta.owner.item_name, set()).add(meta.mount_base)
+    mounts: dict[str, str] = {}
+    for item, item_bases in bases.items():
+        if len(item_bases) > 1:
+            raise RuntimeError(
+                f"route item {item!r} of {spec.ref} is served under two bases in one generation: {sorted(item_bases)}"
+            )
+        (mounts[item],) = item_bases
+    return mounts
 
 
 def _reject_reserved_public_routes(mapping: Mapping[str, MountBinding], reserved_prefixes: Sequence[str]) -> None:
