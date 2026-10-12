@@ -11,7 +11,7 @@ from fastmcp.utilities.types import get_cached_typeadapter
 from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
 from tai42_contract.tools import UndeclaredPauseError
 
-from tai42_skeleton.agent.binding import _UNSET
+from tai42_skeleton.agent.unset import _UNSET
 from tai42_skeleton.tools.binding.arguments import _validation_wrapper
 from tai42_skeleton.tools.binding.resolution import _ResolutionMixin
 from tai42_skeleton.tools.binding.result import (
