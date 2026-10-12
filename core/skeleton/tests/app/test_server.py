@@ -29,6 +29,7 @@ from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 from tai42_contract.storage import Storage
 from tests.agent._memoryless import MemorylessTestAgent
 
+from tai42_skeleton.app import error_envelope
 from tai42_skeleton.app import server as server_module
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.server import TaiMCP
@@ -269,10 +270,10 @@ def _assert_error_handlers_installed(sentinel: MagicMock) -> None:
     from tai42_skeleton.marketplace.compat import CorePluginBootError
     from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
-    sentinel.add_exception_handler.assert_any_call(Exception, server_module._internal_error_handler)
-    sentinel.add_exception_handler.assert_any_call(FleetBroadcastError, server_module._fleet_broadcast_error_handler)
-    sentinel.add_exception_handler.assert_any_call(CorePluginBootError, server_module._core_plugin_boot_error_handler)
-    sentinel.add_exception_handler.assert_any_call(404, server_module._not_found_handler)
+    sentinel.add_exception_handler.assert_any_call(Exception, error_envelope.internal_error_handler)
+    sentinel.add_exception_handler.assert_any_call(FleetBroadcastError, error_envelope.fleet_broadcast_error_handler)
+    sentinel.add_exception_handler.assert_any_call(CorePluginBootError, error_envelope.core_plugin_boot_error_handler)
+    sentinel.add_exception_handler.assert_any_call(404, error_envelope.not_found_handler)
 
 
 def test_sse_app_registers_error_handlers():
@@ -308,7 +309,7 @@ def test_internal_error_handler_mints_id_and_hides_detail():
 
     scope = {"type": "http", "method": "GET", "path": "/api/secret-path", "query_string": b"", "headers": []}
     exc = RuntimeError("host db://user:pw@internal boom")
-    resp = asyncio.run(server_module._internal_error_handler(Request(scope), exc))
+    resp = asyncio.run(error_envelope.internal_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert body["error"] == "Internal Server Error"
@@ -327,7 +328,7 @@ def test_core_plugin_boot_error_handler_surfaces_the_reason():
 
     scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
     exc = CorePluginBootError("tools plugin 'acme_tools' failed to import: No module named 'acme_tools'")
-    resp = asyncio.run(server_module._core_plugin_boot_error_handler(Request(scope), exc))
+    resp = asyncio.run(error_envelope.core_plugin_boot_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert body["error"] == "tools plugin 'acme_tools' failed to import: No module named 'acme_tools'"
@@ -349,7 +350,7 @@ def test_fleet_broadcast_error_surfaces_a_plugin_boot_cause():
     exc.__cause__ = cause  # the production raise sets this via ``from local_failure``
 
     scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
-    resp = asyncio.run(server_module._fleet_broadcast_error_handler(Request(scope), exc))
+    resp = asyncio.run(error_envelope.fleet_broadcast_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert body["error"] == "tools plugin 'acme_tools' failed to import: boom"
@@ -377,7 +378,7 @@ def test_fleet_broadcast_error_surfaces_a_route_collision_cause():
     exc.__cause__ = cause
 
     scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
-    resp = asyncio.run(server_module._fleet_broadcast_error_handler(Request(scope), exc))
+    resp = asyncio.run(error_envelope.fleet_broadcast_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert "remap the mount base to resolve" in body["error"]
@@ -400,7 +401,7 @@ def test_fleet_broadcast_error_masks_a_transport_cause():
     exc.__cause__ = cause
 
     scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
-    resp = asyncio.run(server_module._fleet_broadcast_error_handler(Request(scope), exc))
+    resp = asyncio.run(error_envelope.fleet_broadcast_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert body["error"] == "Internal Server Error"
@@ -423,7 +424,7 @@ def test_internal_error_handler_survives_unstampable_exception():
 
     scope = {"type": "http", "method": "GET", "path": "/api/x", "query_string": b"", "headers": []}
     exc = _UnstampableError("boom")
-    resp = asyncio.run(server_module._internal_error_handler(Request(scope), exc))
+    resp = asyncio.run(error_envelope.internal_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert body == {"error": "Internal Server Error", "error_id": body["error_id"]}

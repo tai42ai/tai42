@@ -1,20 +1,14 @@
-"""The concrete ``tai42_contract.app.TaiApp`` server (``TaiMCP``) and its error-envelope handlers."""
+"""The concrete ``tai42_contract.app.TaiApp`` server (``TaiMCP``)."""
 
-import contextlib
-import logging
 from typing import TYPE_CHECKING, Any, Literal, cast
-from uuid import uuid4
 
 import fastmcp
 from fastmcp import FastMCP
 from fastmcp.server.http import StarletteWithLifespan, create_sse_app
 from fastmcp.server.server import Transport
 from starlette.middleware import Middleware
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
 from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.connectors.store import ConnectorTokenStore
-from tai42_contract.errors import ServerReloadingError
 from tai42_contract.manifest import TaiMCPConfig
 from tai42_contract.storage import Storage
 from tai42_contract.template import TemplatedText
@@ -25,6 +19,7 @@ from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.app.channels_facet import ChannelsFacet
 from tai42_skeleton.app.clients import ClientsFacet
 from tai42_skeleton.app.conversations_facet import ConversationsFacet
+from tai42_skeleton.app.error_envelope import install_error_handlers
 from tai42_skeleton.app.facets import (
     AccountsFacet,
     AdminFacet,
@@ -50,7 +45,6 @@ from tai42_skeleton.app.facets import (
 )
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.media_facet import MediaFacet
-from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.serving_core import ServingCore, record_sse_surface, record_streamable_http_surface
 from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
 from tai42_skeleton.app.transport_stream import TransportStreamDrainExemptMiddleware, bind_sse_session_ender
@@ -75,104 +69,6 @@ if TYPE_CHECKING:
     from tai42_contract.tool_meta import ToolMetaStore
 
     from tai42_skeleton.versioning.store import PostgresVersionedStore
-
-logger = logging.getLogger(__name__)
-
-
-async def _internal_error_handler(request: Request, exc: Exception) -> Response:
-    """Uniform 500 for an unexpected application exception on any adapter route.
-
-    Registered as the base app's ``Exception`` handler so ``ServerErrorMiddleware``
-    invokes it on BOTH serving paths (``http_app`` / ``sse_app``). It mints a
-    correlation ``error_id``, logs the traceback under it, and returns the generic
-    envelope — internal exception text (hosts, paths, stack frames) never reaches the
-    client. The id is stamped on the exception so the embedding factory's dispatch
-    net, which sees the same exception re-raised by ``ServerErrorMiddleware``,
-    correlates its own log line and skips a duplicate response.
-    """
-    error_id = uuid4().hex
-    logger.error(
-        "unhandled application error [error_id=%s] on %s %s",
-        error_id,
-        request.method,
-        request.url.path,
-        exc_info=exc,
-    )
-    # Attach the id to the arbitrary raised exception so the embedding factory's
-    # dispatch net reads it off the re-raised instance. A slotted exception with no
-    # ``__dict__`` cannot accept the stamp; the id already rides the response body
-    # and the log line, so a failed stamp must never break this last-resort handler.
-    with contextlib.suppress(AttributeError):
-        exc.error_id = error_id  # pyright: ignore[reportAttributeAccessIssue]
-    return JSONResponse({"error": "Internal Server Error", "error_id": error_id}, status_code=500)
-
-
-async def _not_found_handler(request: Request, exc: Exception) -> Response:
-    """Render the router's native 404 as the shared JSON error envelope on any adapter route.
-
-    Registered for status ``404`` only, so a known route addressed with the wrong method keeps
-    its native ``405``. An unknown path (the SPA catch-all no longer matches an ``/api``/``/mcp``
-    one) reaches the router's not-found and is answered ``{"error": "not found"}`` uniformly for
-    every method — the same envelope ``_error`` and the operations adapter emit.
-    """
-    return JSONResponse({"error": "not found"}, status_code=404)
-
-
-async def _core_plugin_boot_error_handler(request: Request, exc: Exception) -> Response:
-    """Surface a manifest plugin that could not load during a live rebuild, verbatim.
-
-    A reload door drives an epoch rebuild; a manifest-declared module that is incompatible
-    or fails to import aborts THAT rebuild, the previous generation keeps serving, and the
-    failure must reach the caller instead of the generic masked 500. The message is
-    operator-facing by construction — it names the module, its kind, the versions in play,
-    and the remedy, with no host/path/stack detail — so it is surfaced as the shared
-    ``{"error": ...}`` envelope. The status is 500: the reload did not apply.
-    """
-    return JSONResponse({"error": str(exc)}, status_code=500)
-
-
-async def _fleet_broadcast_error_handler(request: Request, exc: Exception) -> Response:
-    """Surface a fleet-broadcast failure whose cause is an operator-facing plugin-load error; mask any other cause.
-
-    A reload that broadcasts to the fleet wraps a failed local rebuild as
-    ``FleetBroadcastError``. When the underlying cause is a plugin that could not load
-    (``CorePluginBootError``) or a route mount collision (``CrossOwnerRouteCollisionError``,
-    whose message names the remap remedy), that message plus the fleet report reach the
-    caller (the CLI prints it and exits non-zero). Any other cause — a bus transport error
-    naming internal hosts — keeps the generic masked 500, so internal detail never leaks.
-    """
-    from tai42_skeleton.app.route_registry import CrossOwnerRouteCollisionError
-    from tai42_skeleton.marketplace.compat import CorePluginBootError
-    from tai42_skeleton.operations._broadcast import FleetBroadcastError
-
-    cause = exc.__cause__
-    if isinstance(exc, FleetBroadcastError) and isinstance(cause, (CorePluginBootError, CrossOwnerRouteCollisionError)):
-        return JSONResponse({"error": str(cause), "report": exc.report.model_dump(mode="json")}, status_code=500)
-    return await _internal_error_handler(request, exc)
-
-
-async def _server_reloading_handler(request: Request, exc: Exception) -> Response:
-    """The reload gate's retriable 503 for work refused while a config reload holds the gate."""
-    return reload_gate.reject_response()
-
-
-def _install_error_handlers(base_app: Any) -> None:
-    """Install the shared error-envelope handlers on a freshly built base app.
-
-    ``FleetBroadcastError`` / ``CorePluginBootError`` render the operator-facing reload
-    failure; ``ServerReloadingError`` (a turn refused while a reload holds the gate, raised
-    from any door, a plugin's included) renders the reload gate's retriable 503; every other
-    unexpected exception falls back to the generic masked 500, and the router's native 404 is
-    rendered as the shared envelope.
-    """
-    from tai42_skeleton.marketplace.compat import CorePluginBootError
-    from tai42_skeleton.operations._broadcast import FleetBroadcastError
-
-    base_app.add_exception_handler(Exception, _internal_error_handler)
-    base_app.add_exception_handler(ServerReloadingError, _server_reloading_handler)
-    base_app.add_exception_handler(FleetBroadcastError, _fleet_broadcast_error_handler)
-    base_app.add_exception_handler(CorePluginBootError, _core_plugin_boot_error_handler)
-    base_app.add_exception_handler(404, _not_found_handler)
 
 
 class TaiMCP(TaiMCPLifecycleMixin):
@@ -504,7 +400,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         # so every adapter route answers the generic {"error", "error_id"} envelope
         # instead of a plain-text 500 with internal detail, and a reload plugin
         # boot-abort reaches the caller.
-        _install_error_handlers(base_app)
+        install_error_handlers(base_app)
 
         return self._http_surface.finalize(base_app)
 
@@ -546,7 +442,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         # so every adapter route answers the generic {"error", "error_id"} envelope
         # instead of a plain-text 500 with internal detail, and a reload plugin
         # boot-abort reaches the caller.
-        _install_error_handlers(base_app)
+        install_error_handlers(base_app)
 
         return self._http_surface.finalize(base_app)
 
