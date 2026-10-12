@@ -53,14 +53,10 @@ from typing import TYPE_CHECKING, Any
 from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from fastmcp.tools import Tool
 from fastmcp.tools.tool_transform import ArgTransform, forward, forward_raw
-from tai42_contract.interactions import (
-    ResumeBuffered,
-    SuspendedInteraction,
-    read_resume_buffered_marker,
-    read_suspended_interaction_marker,
-)
+from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
 from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue, unwrap_secrets
 from tai42_contract.template import TemplatedText
+from tai42_kit.interactions.park_marker import read_resume_buffered_marker, read_suspended_interaction_marker
 from tai42_kit.utils.data.json_schema_util import (
     JsonSchemaValidationError,
     validate_against_json_schema,

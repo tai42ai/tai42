@@ -20,9 +20,10 @@ durable resume path round-trips it. A resume name of ``None`` (the default) mean
 driver is bound, and an async ask raised there fails loudly.
 
 The rest is shared vocabulary: the chain routing a platform seam binds around a nested dispatch
-and the keys its fires carry, the completion statuses, the park marker's reserved key, and the
-signals and errors that cross the delivery seam. The logic over them — park adoption, the marker
-builder/reader, the kill handlers, the outcome text — lives in ``tai42_kit.interactions``.
+and the keys its fires carry, the completion statuses, and the signals and errors that cross the
+delivery seam (the park markers' vocabulary is :mod:`tai42_contract.interactions.park_markers`).
+The logic over them — park adoption, the marker builders/readers, the kill handlers, the outcome
+text — lives in ``tai42_kit.interactions``.
 """
 
 from __future__ import annotations

@@ -27,7 +27,6 @@ from tai42_contract.interactions import (
     SUSPENDED_INTERACTION_MARKER_SCHEMA,
     ResumeBuffered,
     SuspendedInteraction,
-    read_resume_buffered_marker,
 )
 from tai42_contract.monitoring import RunAttribution
 from tai42_contract.tools import (
@@ -37,7 +36,7 @@ from tai42_contract.tools import (
     set_current_tool_invocation,
     tool_call_frame,
 )
-from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
+from tai42_kit.interactions.park_marker import read_resume_buffered_marker, read_suspended_interaction_marker
 
 from tai42_skeleton.runs.chokepoint import RunRecord, record_outermost_preset_run
 from tai42_skeleton.states.outbox.drain import run_entry_drain

@@ -1,12 +1,13 @@
-"""The wire-form park marker a platform-produced async park returns in place of an answer.
+"""The wire-form park markers: each park signal's builder and strict reader where the object cannot travel.
 
 A resuming driver recognizes a park by the RESULT shape (never a tool name): the in-process
-client-tool seam stamps the marker onto the tool result when an async ``ask`` returns its
-``SuspendedInteraction`` sentinel, and a driver reads it back off the serialized tool output. The
-marker carries the parked interaction id, its deadline, the park's resume OWNER and the per-ask id
-lists — no driver or engine state. The reserved key and the malformed-marker error are contract
-vocabulary (:data:`~tai42_contract.interactions.SUSPENDED_INTERACTION_MARKER_KEY`,
-:class:`~tai42_contract.interactions.MalformedParkMarkerError`).
+client-tool seam stamps the suspended-interaction marker onto the tool result when an async ``ask``
+returns its ``SuspendedInteraction`` sentinel, and a driver reads it back off the serialized tool
+output. That marker carries the parked interaction id, its deadline, the park's resume OWNER and the
+per-ask id lists — no driver or engine state. A ``ResumeBuffered`` (a resume that left sibling asks
+open) travels as the resume-buffered marker carrying the still-open ids. The reserved keys, their
+JSON Schemas and the malformed-marker error are contract vocabulary
+(:mod:`tai42_contract.interactions.park_markers`).
 """
 
 from __future__ import annotations
@@ -15,9 +16,18 @@ import json
 from datetime import datetime
 from typing import Any, cast
 
-from tai42_contract.interactions import SUSPENDED_INTERACTION_MARKER_KEY, MalformedParkMarkerError
+from tai42_contract.interactions import (
+    RESUME_BUFFERED_MARKER_KEY,
+    SUSPENDED_INTERACTION_MARKER_KEY,
+    MalformedParkMarkerError,
+)
 
-__all__ = ["read_suspended_interaction_marker", "suspended_interaction_marker"]
+__all__ = [
+    "read_resume_buffered_marker",
+    "read_suspended_interaction_marker",
+    "resume_buffered_marker",
+    "suspended_interaction_marker",
+]
 
 
 def suspended_interaction_marker(
@@ -99,4 +109,38 @@ def read_suspended_interaction_marker(content: Any) -> dict[str, Any] | None:
             raise MalformedParkMarkerError(
                 f"park marker for interaction {interaction_id!r} lacks a valid {field!r} list"
             )
+    return payload
+
+
+def resume_buffered_marker(remaining_ids: list[str]) -> dict[str, Any]:
+    """Build the reserved marker dict a ``ResumeBuffered`` travels as on a serialized wire.
+
+    ``remaining_ids`` are the still-unanswered asks of the resumed super-step.
+    """
+    return {RESUME_BUFFERED_MARKER_KEY: {"remaining_ids": list(remaining_ids)}}
+
+
+def read_resume_buffered_marker(content: Any) -> dict[str, Any] | None:
+    """Read the reserved resume-buffered marker back off a tool result, or ``None`` when it is not one.
+
+    Like :func:`read_suspended_interaction_marker`, the live dict and its JSON string are both
+    recognized; a value without the reserved key, or whose payload is not a dict, yields ``None``.
+    The payload is UNTRUSTED, so a payload without a list-of-strings ``remaining_ids`` raises
+    :class:`~tai42_contract.interactions.MalformedParkMarkerError`. Returns the payload (``remaining_ids``).
+    """
+    value: Any = content
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return None
+    if not (isinstance(value, dict) and RESUME_BUFFERED_MARKER_KEY in value):
+        return None
+    marker = cast("object", value[RESUME_BUFFERED_MARKER_KEY])
+    if not isinstance(marker, dict):
+        return None
+    payload = cast("dict[str, Any]", marker)
+    ids = payload.get("remaining_ids")
+    if not isinstance(ids, list) or not all(isinstance(item, str) for item in cast("list[object]", ids)):
+        raise MalformedParkMarkerError("resume-buffered marker lacks a valid 'remaining_ids' list")
     return payload

@@ -36,7 +36,7 @@ import json
 from collections.abc import Callable
 
 import pytest
-from tai42_contract.interactions import read_suspended_interaction_marker
+from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.llmstub import LlmStub
