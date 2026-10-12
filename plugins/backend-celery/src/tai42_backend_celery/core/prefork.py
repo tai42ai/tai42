@@ -3,10 +3,14 @@
 A Celery prefork worker forks children that inherit the tool registry at fork
 time, so a bus op that mutates this process's registry has not truly applied
 until the pool re-forks. :func:`turnover_local_pool` re-forks the local pool and
-confirms it: it polls ``stats`` until every pre-restart child pid is gone and the
-pool is back to full size, and raises otherwise (a bare ``pool_restart`` returns
-once the restart is only armed). A raise turns this worker's bus reply into
-``failed``.
+confirms it: it polls ``stats`` and ``active`` until every idle pre-restart child
+is gone and the pool is back to full size, and raises otherwise (a bare
+``pool_restart`` returns once the restart is only armed). A pre-restart child busy
+with a job is not waited for: once the restart is armed a child checks it before
+taking each job, so a busy child finishes the job it holds, exits after it and
+takes no new one — including a job that published the very op this turnover
+applies, which waits on this worker's reply. A raise turns this worker's bus reply
+into ``failed``.
 
 The restart propagation itself is bounded: ``pool_restart`` can wedge inside
 billiard on the pool parent's ``_putlock``, so it runs under a watchdog and, past
@@ -287,16 +291,27 @@ def _kill_pool_children(hostname: str, pids: set[int]) -> None:
             logger.error("[%s] killed wedged pool child %s (SIGKILL); billiard re-forks it", hostname, pid)
 
 
-def _confirm_turnover(hostname: str, before: tuple[set[int], int], timeout: float) -> None:
-    """Poll ``stats`` until the pool has fully re-forked, or raise loudly at the deadline.
+def _busy_pids(active: Any, hostname: str) -> set[int]:
+    """The pids of this worker's pool children running a job, from an ``inspect().active()`` reply."""
+    tasks = active.get(hostname) if isinstance(active, dict) else None
+    if not isinstance(tasks, list):
+        return set()
+    return {task["worker_pid"] for task in tasks if isinstance(task, dict) and isinstance(task.get("worker_pid"), int)}
 
-    Full re-fork means every pre-restart child pid gone AND the pool back to full
-    size. This holds the bus reply until the re-fork completes, since
-    ``pool_restart`` returns once merely armed — a fast follow-up read could still
-    reach a pre-restart child.
+
+def _confirm_turnover(hostname: str, before: tuple[set[int], int], timeout: float) -> None:
+    """Poll ``stats`` and ``active`` until the pool has turned over, or raise loudly at the deadline.
+
+    Turned over means every IDLE pre-restart child gone AND the pool back to full size.
+    A pre-restart child running a job checks the armed restart before taking its next
+    one, so it finishes the job it holds and exits after it without taking new work on
+    the pre-op registry; it is not waited for (logged at INFO with its pid). This holds
+    the bus reply until no pre-restart child can take a new job, since ``pool_restart``
+    returns once merely armed — a fast follow-up dispatch could still reach an idle
+    pre-restart child.
     """
     old_pids, max_conc = before
-    surviving = old_pids
+    idle_survivors = old_pids
     size = 0
     deadline = time.monotonic() + timeout
     while True:
@@ -304,25 +319,34 @@ def _confirm_turnover(hostname: str, before: tuple[set[int], int], timeout: floa
         if remaining <= 0:
             break
         with _control_connection() as conn:
-            stats = (
-                celery_app.control.inspect(
-                    destination=[hostname], timeout=min(_POOL_CONTROL_TIMEOUT, remaining), limit=1, connection=conn
-                ).stats()
-                or {}
+            inspect = celery_app.control.inspect(
+                destination=[hostname], timeout=min(_POOL_CONTROL_TIMEOUT, remaining), limit=1, connection=conn
             )
-        cfg = stats.get(hostname)
+            stats = inspect.stats() or {}
+            cfg = stats.get(hostname)
+            active = inspect.active() if isinstance(cfg, dict) else None
         if isinstance(cfg, dict) and isinstance(cfg.get("pool"), dict):
             new_pids = _pool_pids(cfg["pool"])
             surviving = old_pids & new_pids
+            idle_survivors = surviving - _busy_pids(active or {}, hostname)
             size = len(new_pids)
-            if not surviving and size >= max_conc:
+            if not idle_survivors and size >= max_conc:
+                if surviving:
+                    logger.info(
+                        "[%s] prefork turnover: pre-restart child(ren) %s finish the job they hold and exit after it; "
+                        "no child takes new work on the pre-op registry",
+                        hostname,
+                        sorted(surviving),
+                    )
                 return
         nap = min(_POOL_RECYCLE_POLL_INTERVAL, max(0.0, deadline - time.monotonic()))
         if nap == 0.0:
             break
         time.sleep(nap)
-    if surviving:
-        detail = f"old children still present: {sorted(surviving)}; they may still serve stale tools"
+    if idle_survivors:
+        detail = (
+            f"idle pre-restart children still present: {sorted(idle_survivors)}; they would serve the pre-op registry"
+        )
     else:
         detail = f"pool came back short: {size}/{max_conc} children"
     raise RuntimeError(f"[{hostname}] prefork pool did not fully recycle within {timeout}s ({detail})")

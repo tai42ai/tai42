@@ -55,7 +55,9 @@ down.
 Celery is the one shipped backend whose workers PERSIST ACROSS JOBS, so it is the
 one that declares pool turnover: after a registry-mutating fleet op applies, the
 live manifest is re-exported into the env and the prefork pool is replaced and
-confirmed before the op reports `applied`. The turnover's budget is what is left of
+confirmed before the op reports `applied`: every idle pre-restart child is gone and
+the pool is back to size, while a child busy with a job finishes it, exits after it
+and takes no new one, so it is not waited for. The turnover's budget is what is left of
 the bus apply window (`TAI_BUS_APPLY_TIMEOUT`), measured from this worker's receipt
 of the op, less a margin, so a pool that will not come back reports a truthful
 `failed` rather than a guessed timeout.
@@ -71,11 +73,6 @@ processes, so that is deliberate.
   name its producer used — so a change to either converges through a process
   recycle rather than in place. A profile change touching one is refused on an
   unsupervised (`bare`) deployment shape, which has no way to recycle.
-- The concurrency cap of one is load-bearing. Celery's pool restart is advisory,
-  so a wider prefork pool can miss the turnover confirmation that follows a live
-  config change and turn a bus operation into a failure. Raise
-  `CELERY_WORKER_CONCURRENCY` only on a deployment that never live-reloads, or
-  move to a threads or gevent pool.
 - On macOS, prefer the `solo` or `threads` pool — forking around the system
   resolver deadlocks.
 - `backend_list_failed_tasks` is not implemented: Celery keeps no queryable
