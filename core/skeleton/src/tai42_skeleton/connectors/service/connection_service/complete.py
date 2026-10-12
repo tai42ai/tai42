@@ -19,6 +19,7 @@ from tai42_contract.connectors.models import AuthHealthState, ConnectionGrant, C
 from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.connectors.service import CompleteConnectResult
 
+from tai42_skeleton.app.bus.ops import ReprobeFailedMcps
 from tai42_skeleton.connectors.oauth import authorization, state
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.oauth.discovery import same_issuer
@@ -350,7 +351,7 @@ async def _complete_reconnect_or_toggle(
 
     titles = [manifest_writer.managed_title(descriptor.id, sub_service, record.alias) for sub_service in new_enabled]
     await _svc.broadcast(
-        {"op": "reprobe_failed_mcps", "titles": titles},
+        ReprobeFailedMcps(op="reprobe_failed_mcps", titles=titles),
         None,
         lambda: tai42_app.admin.reprobe_failed_mcps(titles),
         publish_on_local_failure=True,

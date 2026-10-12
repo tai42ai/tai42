@@ -23,6 +23,7 @@ from tai42_skeleton.app.bus.ops import (
     ReloadMcp,
     ReloadTool,
     RemoveTool,
+    ReprobeFailedMcps,
 )
 from tai42_skeleton.app.bus_settings import bus_settings
 from tai42_skeleton.app.graceful_exit import request_graceful_exit
@@ -198,8 +199,9 @@ class BusSubscriptionMixin(LifecycleState):
         The sibling-worker counterpart of a route-received admin call: it maps each op
         to the local admin primitive. The heavy sync ops run on a worker thread through
         the reload gate, identically to the HTTP path; the tool reload/remove ops
-        dispatch through the async per-kind reloader; ``list_failed_mcps`` is a plain
-        in-process read.
+        dispatch through the async per-kind reloader; ``reprobe_failed_mcps`` runs the
+        set-scoped re-probe on the serving loop, taking the reload gate only to snapshot and
+        bind; ``list_failed_mcps`` is a plain in-process read.
 
         After the op applies, ``on_fleet_op_applied`` handlers fire with the applied op — its
         declared effects and the seconds left before ``deadline`` (a ``time.monotonic()``
@@ -226,19 +228,30 @@ class BusSubscriptionMixin(LifecycleState):
                 return await tai42_app.admin.run_tool_reload(kind, "reload", name)
             case RemoveTool(kind=kind, name=name):
                 return await tai42_app.admin.run_tool_reload(kind, "remove", name)
-            case ReloadFailedMcps():
-                # Return the BARE list — the same shape the publisher's own self-apply
-                # (operations/manifest.py) rides on its self entry — so every origin's
-                # payload in one FleetResult is uniform (a consumer never special-cases
-                # self vs remote for this op).
-                return await reload_gate.run(tai42_app.admin.reload_failed_mcps, reimports=False)
-            case ListFailedMcps():
-                # Bare list, matching the self-apply shape — see reload_failed_mcps above.
-                return tai42_app.admin.list_failed_mcps()
+            case ReloadFailedMcps() | ReprobeFailedMcps() | ListFailedMcps():
+                return await self._apply_failed_mcps_op(op)
             case EvictTemplate() | ClearTemplateCache():
                 return self._apply_template_op(op)
             case Recycle():
                 return await self._apply_recycle()
+            case _:
+                assert_never(op)
+
+    async def _apply_failed_mcps_op(self, op: ReloadFailedMcps | ReprobeFailedMcps | ListFailedMcps) -> Any:
+        """Apply a failed-MCP fleet op on this worker and return the bare list its self-apply returns too.
+
+        Every origin's payload in one FleetResult is then uniform: a consumer never special-cases
+        self vs remote for these ops.
+        """
+        match op:
+            case ReloadFailedMcps():
+                return await reload_gate.run(tai42_app.admin.reload_failed_mcps, reimports=False)
+            case ReprobeFailedMcps(titles=titles):
+                # Runs on the serving loop: the pass takes the reload gate only to snapshot and to bind, never
+                # across its probe.
+                return await tai42_app.admin.reprobe_failed_mcps(titles)
+            case ListFailedMcps():
+                return tai42_app.admin.list_failed_mcps()
             case _:
                 assert_never(op)
 
