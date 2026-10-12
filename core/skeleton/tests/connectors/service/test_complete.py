@@ -248,7 +248,7 @@ async def test_fresh_connect_failure_revokes_grant(harness, monkeypatch):
     async def fake_exchange(**kwargs):
         return _token_response(refresh_token="fresh-rt")
 
-    async def fake_revoke(*, descriptor, token):
+    async def fake_revoke(*, descriptor, resolved, client, token):
         revoked.append(token)
         return oauth_client.RevokeOutcome(outcome="success", http_status=200)
 
@@ -285,7 +285,7 @@ async def test_reconnect_cas_miss_does_not_revoke(harness, monkeypatch):
 
     revoked: list[str] = []
 
-    async def fake_revoke(*, descriptor, token):
+    async def fake_revoke(*, descriptor, resolved, client, token):
         revoked.append(token)
         return oauth_client.RevokeOutcome(outcome="success")
 

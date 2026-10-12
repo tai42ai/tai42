@@ -66,3 +66,19 @@ def test_app_context_startup_handler_failure_raises(monkeypatch):
 
     with pytest.raises(RuntimeError, match=r"lifecycle handlers failed.*startup boom"):
         asyncio.run(run())
+
+
+def test_the_lifespan_binds_the_refresh_owner_to_its_serving_loop_and_closes_it_at_shutdown():
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.connectors.runtime import refresh_owner
+
+    seen: dict[str, bool] = {}
+
+    async def run():
+        async with instance.app.app_context(Manifest.model_validate({})):
+            seen["live"] = refresh_owner.is_live()
+            seen["serving_loop"] = refresh_owner._loop is asyncio.get_running_loop()
+        seen["live_after"] = refresh_owner.is_live()
+
+    asyncio.run(run())
+    assert seen == {"live": True, "serving_loop": True, "live_after": False}

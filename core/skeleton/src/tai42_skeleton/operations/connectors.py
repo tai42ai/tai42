@@ -146,6 +146,7 @@ def _connection_account(
         account_identity=record.account_identity,
         enabled_sub_services=record.enabled_sub_services,
         granted_scopes=record.granted_scopes,
+        scopes_wanted=record.scopes_wanted,
         auth_health_state=record.auth_health_state,
         unreachable_sub_services=unreachable_sub_services or [],
         created_at=record.created_at,

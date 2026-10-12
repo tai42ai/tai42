@@ -58,6 +58,11 @@ def validate_origin_allowed(origin: str) -> str:
     return origin
 
 
+def callback_uri(base: str) -> str:
+    """The deployment's OAuth callback address on origin ``base``: the one composition of it."""
+    return f"{base}{CALLBACK_PATH}"
+
+
 def compute_redirect_uri(request: Request) -> str:
     """Compose the absolute callback URL the operator must allow-list — the URL the provider redirects to.
 
@@ -69,4 +74,4 @@ def compute_redirect_uri(request: Request) -> str:
     """
     bridge = connector_engine_config().oauth_bridge_url
     base = bridge.strip().rstrip("/") if bridge else _resolve_origin(request)
-    return f"{base}{CALLBACK_PATH}"
+    return callback_uri(base)

@@ -88,6 +88,19 @@ class AuthHealthState(StrEnum):
     REFRESH_FAILING = "refresh_failing"
 
 
+class ConnectionGrant(BaseModel):
+    """Where an OAuth grant of a discovered provider was obtained, so it is refreshed and revoked the same way.
+
+    ``issuer`` is the authorization server that issued it, ``resource`` the protected-resource value
+    the grant is bound to, ``client_id`` the stored client it was issued to (``None``: the env client).
+    It holds no secret.
+    """
+
+    issuer: str
+    resource: str | None = None
+    client_id: str | None = None
+
+
 class ConnectionRecord(BaseModel):
     """Plaintext payload encrypted and persisted by a ConnectorTokenStore.
 
@@ -101,8 +114,9 @@ class ConnectionRecord(BaseModel):
     provider_id: str = Field(min_length=1, max_length=64)
     alias: str
 
-    # "oauth": OAuth-backed (tokens + identity + expiry present, no config_values).
-    # "none": no-auth (tokens/identity/expiry absent; client-filled config_values).
+    # "oauth": OAuth-backed (access token + identity present; refresh token and
+    # expiry optional; no config_values). "none": no-auth (tokens/identity/expiry
+    # absent; client-filled config_values).
     kind: Literal["oauth", "none"]
 
     # Display-only: from the OIDC id_token WITHOUT signature verification.
@@ -126,6 +140,12 @@ class ConnectionRecord(BaseModel):
     config_values: dict[str, SecretStr] = Field(default_factory=dict)
 
     auth_health_state: AuthHealthState = AuthHealthState.HEALTHY
+
+    # OAuth only. ``None``: the grant was obtained under a declared provider (refreshed with the
+    # env client, no ``resource``).
+    grant: ConnectionGrant | None = None
+    # OAuth only: scopes a server said the token lacks; the next reconnect asks for them too.
+    scopes_wanted: list[str] = Field(default_factory=list)
 
     created_at: datetime
 
@@ -166,12 +186,10 @@ class ConnectionRecord(BaseModel):
     @model_validator(mode="after")
     def _check_kind_invariants(self) -> ConnectionRecord:
         if self.kind == "oauth":
-            if not self.access_token or not self.refresh_token:
-                raise ValueError("oauth connection requires access + refresh tokens")
+            if not self.access_token:
+                raise ValueError("oauth connection requires an access token")
             if not self.account_identity:
                 raise ValueError("oauth connection requires account_identity")
-            if self.access_token_expires_at is None:
-                raise ValueError("oauth connection requires access_token_expires_at")
             if self.config_values:
                 raise ValueError("oauth connection must not carry config_values")
         else:  # kind == "none"
@@ -182,6 +200,10 @@ class ConnectionRecord(BaseModel):
                 or self.access_token_expires_at is not None
             ):
                 raise ValueError("no-auth connection must not carry tokens/identity/expiry")
+            if self.grant is not None:
+                raise ValueError("no-auth connection must not carry a grant")
+            if self.scopes_wanted:
+                raise ValueError("no-auth connection must not carry scopes_wanted")
         return self
 
     def is_healthy(self) -> bool:
@@ -269,6 +291,8 @@ class ConnectedAccountView(BaseModel):
     auth_health_state: AuthHealthState
     enabled_sub_services: list[str]
     granted_scopes: list[str]
+    # Scopes a server said the token lacks; the next reconnect asks for them.
+    scopes_wanted: list[str] = Field(default_factory=list)
     # Sub-services whose MCP server did not answer a live reachability probe.
     # Populated only on the single-connection GET (the list is probe-free, so it
     # is always empty there). Reachability is distinct from ``auth_health_state``:
@@ -283,7 +307,7 @@ class ProviderCatalogEntry(BaseModel):
     id: str
     display_name: str
     description: str = ""
-    icon_url: str
+    icon_url: str | None = None
     kind: Literal["oauth", "none"]
     # Mirrors ProviderDescriptor: who curated the provider, and the
     # connector_category id the UI groups it under.

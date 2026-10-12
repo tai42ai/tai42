@@ -15,6 +15,7 @@ from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.readiness_sentinel import remove_ready_sentinel
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.recycle_policy import require_supervision_declared
+from tai42_skeleton.connectors.runtime import refresh_owner
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.owned_settings import require_known_owned_settings
 
@@ -63,6 +64,9 @@ class LifespanMixin(LifecycleState):
             # checkpoint/store close) back onto the serving loop.
             self._serving_loop = asyncio.get_running_loop()
             reload_gate.bind_to_running_loop()
+            # The connectors' credential refreshes run as tasks owned by this loop, so a
+            # caller that stops waiting (a budget, a cancelled request) never cuts one.
+            refresh_owner.bind_to_running_loop()
             # Establish the boot generation's loop-affine background loops ON this
             # serving loop, registered with the boot epoch so they retire with it. Boot
             # raises loudly on a failed establisher (never a healthy-looking half-start).
@@ -104,6 +108,8 @@ class LifespanMixin(LifecycleState):
             await self._cancel_sandbox_reaper()
             await self._cancel_media_reaper()
             await self._cancel_monitoring_health_watch()
+            # Cancel the owned credential refreshes; a refresh mid write-back finishes first.
+            await refresh_owner.aclose()
             # Shutdown keeps swallow-and-log so teardown runs every handler.
             await self._run_handlers(list(self._shutdown_handlers.values()))
             await self._teardown_resources()

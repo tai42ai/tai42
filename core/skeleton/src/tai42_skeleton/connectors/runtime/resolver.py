@@ -29,24 +29,32 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final
 
+import anyio
 from pydantic import SecretStr
-from tai42_contract.connectors.errors import ConnectorError
+from tai42_contract.connectors.errors import ConnectorClientRequiredError, ConnectorError
 from tai42_contract.connectors.models import AuthHealthState, ConnectionRecord
 from tai42_contract.connectors.providers import ProviderDescriptor
 
+from tai42_skeleton.connectors.oauth import authorization, crypto
 from tai42_skeleton.connectors.oauth import client as oauth_client
-from tai42_skeleton.connectors.oauth import crypto
+from tai42_skeleton.connectors.oauth.discovery import OAuthDiscoveryError
 from tai42_skeleton.connectors.providers.registry import get_provider
+from tai42_skeleton.connectors.runtime import refresh_owner
 from tai42_skeleton.connectors.runtime.launch import resolve_mcp_server
 from tai42_skeleton.connectors.runtime.locks import (
+    claim_keep_alive,
     clear_refresh_cooldown,
     connection_lock,
     open_refresh_cooldown,
     refresh_cooldown_active,
 )
+from tai42_skeleton.connectors.settings import connector_engine_config
 from tai42_skeleton.connectors.store import token_store
 from tai42_skeleton.connectors.store.persistence import (
     ConnectionNotFoundError,
@@ -60,6 +68,13 @@ SAFETY_MARGIN_SECONDS = 60
 TRANSIENT_RETRY_BUDGET = 5
 TRANSIENT_BACKOFF_BASE_SECONDS = 1.0
 TRANSIENT_BACKOFF_FACTOR = 2.0
+
+
+class _Retry:
+    """A transient refresh failure inside the budget: back off and try again."""
+
+
+_RETRY: Final = _Retry()
 
 
 # -- ManagedAuth + errors -------------------------------------------------
@@ -130,20 +145,26 @@ def _now_utc() -> datetime:
     return datetime.now(UTC)
 
 
-def _seconds_until_expiry(record: ConnectionRecord) -> float:
+def _seconds_until_expiry(record: ConnectionRecord) -> float | None:
     expires_at = record.access_token_expires_at
     if expires_at is None:
-        # An oauth record without an expiry is corrupt — fail loudly, never
-        # guess a freshness answer.
-        raise ConnectorConnectionError(
-            f"oauth record {record.connection_id} has no access_token_expires_at",
-            connection_id=record.connection_id,
-        )
+        return None
     return (expires_at - _now_utc()).total_seconds()
 
 
 def _is_fresh(record: ConnectionRecord) -> bool:
-    return record.auth_health_state == AuthHealthState.HEALTHY and _seconds_until_expiry(record) > SAFETY_MARGIN_SECONDS
+    """Whether a HEALTHY record's access token may be served without a refresh.
+
+    No expiry: valid until the server says otherwise. With a refresh token, the safety margin keeps
+    a refresh ahead of the expiry; with none, nothing can renew it, so it is served to the expiry.
+    """
+    if record.auth_health_state != AuthHealthState.HEALTHY:
+        return False
+    remaining = _seconds_until_expiry(record)
+    if remaining is None:
+        return True
+    margin = SAFETY_MARGIN_SECONDS if record.refresh_token is not None else 0
+    return remaining > margin
 
 
 def _managed_auth(record: ConnectionRecord) -> ManagedAuth:
@@ -191,6 +212,66 @@ async def _load(connection_id: str) -> tuple[ConnectionRecord, bytes]:
         ) from exc
 
 
+# -- Keep-alive ------------------------------------------------------------
+
+# Monotonic time of this process's last write of each connection (a keep-alive put or a refresh
+# write-back). Read and written from more than one thread without a lock: a race costs one extra put.
+_last_written: dict[str, float] = {}
+
+KEEP_ALIVE_MAX_INTERVAL = timedelta(hours=24)
+
+
+def reset_keep_alive_stamps() -> None:
+    """Forget every in-process write stamp (tests)."""
+    _last_written.clear()
+
+
+def _keep_alive_interval() -> timedelta:
+    return min(KEEP_ALIVE_MAX_INTERVAL, connector_engine_config().max_session_ttl / 2)
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def _stamp_written(connection_id: str) -> None:
+    _last_written[connection_id] = _monotonic()
+
+
+async def _keep_alive(connection_id: str, record: ConnectionRecord, blob: bytes) -> None:
+    """Move the session expiry of a record served without a write, at most once per interval.
+
+    The store resets a record's session expiry only when it is written, so a record that is used but
+    never written would lapse however much it is used. This puts the SAME sealed blob back through
+    the compare-and-set (never a re-encryption: the stored ciphertext stays byte for byte, so every
+    other writer's compare-and-set still matches), unless this process wrote it within the interval
+    or another process claimed the interval's write through the Redis marker. A ``False`` put means
+    another writer changed the blob meanwhile and reset the expiry itself; a store error is logged
+    at WARNING and the credential is still served.
+    """
+    interval = _keep_alive_interval()
+    now = _monotonic()
+    last = _last_written.get(connection_id)
+    if last is not None and now - last < interval.total_seconds():
+        return
+    _last_written[connection_id] = now
+    if not await claim_keep_alive(connection_id, max(1, int(interval.total_seconds()))):
+        return
+    try:
+        await token_store().put(
+            connection_id,
+            blob,
+            expected_blob=blob,
+            session_expires_at=session_expires_at_for(record),
+        )
+    except Exception:
+        logger.warning(
+            "connectors: keep-alive write of %s failed; serving the credential",
+            connection_id,
+            exc_info=True,
+        )
+
+
 # -- Refresh (under the connection lock) ----------------------------------
 
 
@@ -227,6 +308,128 @@ def _serve_peer(peer: ConnectionRecord) -> ManagedAuth:
     )
 
 
+def _observe_section(task: asyncio.Task[Any]) -> None:
+    """Log the outcome of a section whose caller was cancelled while it ran."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is None:
+        return
+    if isinstance(exc, ConnectorError):
+        logger.warning("connectors: refresh section ended with %s after its caller left: %s", type(exc).__name__, exc)
+    else:
+        logger.error("connectors: refresh section failed after its caller left", exc_info=exc)
+
+
+async def _finish_section[T](section: Callable[[], Awaitable[T]]) -> T:
+    """Run ``section`` to completion whatever cancels the caller, then let the cancellation through.
+
+    A refresh request and its write-back are one section: cutting it between the token endpoint's
+    answer and the write-back loses a rotated refresh token. The section runs as a task awaited
+    through ``asyncio.shield``; on a cancellation the caller waits for it inside a shielded anyio
+    scope (an anyio cancel scope re-delivers its cancellation at every wake-up, so a plain re-await
+    would spin) and then re-raises the cancellation.
+    """
+    task = asyncio.ensure_future(section())
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with anyio.CancelScope(shield=True):
+            await asyncio.wait([task])
+        _observe_section(task)
+        raise
+
+
+def _descriptor_for(record: ConnectionRecord) -> ProviderDescriptor:
+    try:
+        return get_provider(record.provider_id)
+    except KeyError as exc:
+        # The provider plugin was removed since this connection was created — there
+        # is no descriptor to drive the refresh. Surface the typed connection error
+        # (matching resolve_managed_auth's no-auth branch) rather than a raw KeyError.
+        raise ConnectorConnectionError(
+            f"connection {record.connection_id} references unknown provider {record.provider_id!r}",
+            connection_id=record.connection_id,
+        ) from exc
+
+
+async def _reconnect_required(record: ConnectionRecord, started_blob: bytes, reason: str) -> ManagedAuth:
+    """Persist ``RECONNECT_REQUIRED`` (compare-and-set) and raise; a lost race serves the peer's record."""
+    connection_id = record.connection_id
+    record.auth_health_state = AuthHealthState.RECONNECT_REQUIRED
+    if not await _persist(record, expected_blob=started_blob):
+        return await _serve_rotated_peer(connection_id)
+    raise ConnectorReconnectRequiredError(
+        f"connection {connection_id} requires reconnect: {reason}",
+        connection_id=connection_id,
+    )
+
+
+async def _transient_failure(
+    record: ConnectionRecord, started_blob: bytes, attempt: int, cause: Exception
+) -> ManagedAuth | _Retry:
+    """Count a transient failure; past the budget, persist ``REFRESH_FAILING``, arm the cooldown and raise."""
+    connection_id = record.connection_id
+    if attempt < TRANSIENT_RETRY_BUDGET:
+        return _RETRY
+    record.auth_health_state = AuthHealthState.REFRESH_FAILING
+    if not await _persist(record, expected_blob=started_blob):
+        return await _serve_rotated_peer(connection_id)
+    # Arm the circuit breaker so the next tool calls fail fast for the
+    # cooldown window instead of each re-burning the full retry budget.
+    await open_refresh_cooldown(connection_id)
+    logger.warning(
+        "connectors: refresh transient budget exhausted for %s",
+        connection_id,
+    )
+    raise ConnectorRefreshFailingError(
+        f"transient refresh failures exhausted budget ({TRANSIENT_RETRY_BUDGET}) for {connection_id}",
+        connection_id=connection_id,
+    ) from cause
+
+
+async def _attempt(
+    *,
+    record: ConnectionRecord,
+    started_blob: bytes,
+    descriptor: ProviderDescriptor,
+    target: authorization.GrantAuthorization,
+    client: authorization.ResolvedClient,
+    refresh_token: str,
+    attempt: int,
+) -> ManagedAuth | _Retry:
+    """One refresh request and the write-back of its result: the section that must finish."""
+    connection_id = record.connection_id
+    try:
+        token_resp = await oauth_client.refresh(
+            descriptor=descriptor,
+            resolved=target.resolved,
+            client=client,
+            refresh_token=refresh_token,
+            resource=target.resource,
+        )
+    except oauth_client.TokenRefreshFailedError as exc:
+        if exc.reason in ("invalid_grant", "invalid_client"):
+            # The invalid_grant may be spurious: a peer rotated our refresh_token
+            # out from under us. Compare-and-set the terminal state so a lost race
+            # never clobbers the peer's healthy record.
+            return await _reconnect_required(record, started_blob, f"refresh failed with {exc.reason}")
+        return await _transient_failure(record, started_blob, attempt, exc)
+
+    # Success. Write the new access token and any rotated refresh token in
+    # the same record. The write is a compare-and-set: if a peer already
+    # rotated the record while ours was in flight, serve the peer's record
+    # rather than overwrite it with our (now superseded) tokens.
+    _apply_refreshed_tokens(record, token_resp)
+    if not await _persist(record, expected_blob=started_blob):
+        return await _serve_rotated_peer(connection_id)
+    _stamp_written(connection_id)
+    # Recovery: drop any breaker a prior failing run left so a fresh token
+    # already inside the safety margin is not fast-failed by a live cooldown.
+    await clear_refresh_cooldown(connection_id)
+    return _managed_auth(record)
+
+
 async def _refresh(record: ConnectionRecord, started_blob: bytes) -> ManagedAuth:
     """Drive the upstream OAuth refresh and persist the result.
 
@@ -235,8 +438,16 @@ async def _refresh(record: ConnectionRecord, started_blob: bytes) -> ManagedAuth
     Always refreshes — both callers have already decided a refresh is needed
     (the freshness gate lives in :func:`resolve_managed_auth` under the lock;
     :func:`force_refresh` is invoked after an upstream 401 told us the token is
-    dead despite the local clock). On transient failures it retries the upstream
-    call with exponential backoff up to :data:`TRANSIENT_RETRY_BUDGET`.
+    dead despite the local clock). On transient failures — the token endpoint's or
+    discovery's — it retries with exponential backoff up to :data:`TRANSIENT_RETRY_BUDGET`.
+
+    The grant is refreshed the way it was obtained (:func:`authorization.resolve_for_grant`); a
+    grant that belongs to another client or authorization server than the descriptor now names, a
+    record with no refresh token, and a grant with no client to refresh it with each take the
+    terminal ``RECONNECT_REQUIRED`` transition before anything is sent. The client is resolved at
+    each attempt, so an env secret rotated meanwhile is picked up by the next one. Each request and
+    its write-back run as one section that finishes even when the caller is cancelled; waiting for
+    discovery and the back-off sleep stay cancellable.
 
     ``started_blob`` is the ciphertext this refresh loaded from. Every write-back
     is a compare-and-set against it: if the stored blob has since rotated, a peer
@@ -244,100 +455,53 @@ async def _refresh(record: ConnectionRecord, started_blob: bytes) -> ManagedAuth
     record instead of clobbering it (see :func:`_serve_rotated_peer`).
     """
     connection_id = record.connection_id
-    descriptor, refresh_token = _refresh_prerequisites(record)
-    transient_attempts = 0
-    while True:
-        try:
-            token_resp = await oauth_client.refresh(
-                descriptor=descriptor,
-                refresh_token=refresh_token,
-            )
-        except oauth_client.TokenRefreshFailedError as exc:
-            if exc.reason == "invalid_grant":
-                # The invalid_grant may be spurious: a peer rotated our
-                # refresh_token out from under us. Compare-and-set the terminal
-                # state so a lost race never clobbers the peer's healthy record.
-                record.auth_health_state = AuthHealthState.RECONNECT_REQUIRED
-                if not await _persist(record, expected_blob=started_blob):
-                    return await _serve_rotated_peer(connection_id)
-                raise ConnectorReconnectRequiredError(
-                    f"refresh failed with invalid_grant for {connection_id}",
-                    connection_id=connection_id,
-                ) from exc
-
-            # Transient — apply the retry budget then exponential backoff. The
-            # local counter drives the retry loop only; it is not persisted.
-            transient_attempts += 1
-            if transient_attempts >= TRANSIENT_RETRY_BUDGET:
-                record.auth_health_state = AuthHealthState.REFRESH_FAILING
-                if not await _persist(record, expected_blob=started_blob):
-                    return await _serve_rotated_peer(connection_id)
-                # Arm the circuit breaker so the next tool calls fail fast for the
-                # cooldown window instead of each re-burning the full retry budget.
-                await open_refresh_cooldown(connection_id)
-                logger.warning(
-                    "connectors: refresh transient budget exhausted for %s",
-                    connection_id,
-                )
-                raise ConnectorRefreshFailingError(
-                    f"transient refresh failures exhausted budget ({TRANSIENT_RETRY_BUDGET}) for {connection_id}",
-                    connection_id=connection_id,
-                ) from exc
-            backoff = TRANSIENT_BACKOFF_BASE_SECONDS * (TRANSIENT_BACKOFF_FACTOR ** (transient_attempts - 1))
-            logger.info(
-                "connectors: refresh transient failure %d/%d for %s (retry in %.1fs)",
-                transient_attempts,
-                TRANSIENT_RETRY_BUDGET,
-                connection_id,
-                backoff,
-            )
-            await asyncio.sleep(backoff)
-            continue
-
-        # Success. Write the new access token and any rotated refresh token in
-        # the same record. The write is a compare-and-set: if a peer already
-        # rotated the record while ours was in flight, serve the peer's record
-        # rather than overwrite it with our (now superseded) tokens.
-        _apply_refreshed_tokens(record, token_resp)
-        if not await _persist(record, expected_blob=started_blob):
-            return await _serve_rotated_peer(connection_id)
-        # Recovery: drop any breaker a prior failing run left so a fresh token
-        # already inside the safety margin is not fast-failed by a live cooldown.
-        await clear_refresh_cooldown(connection_id)
-        return _managed_auth(record)
-
-
-def _refresh_prerequisites(record: ConnectionRecord) -> tuple[ProviderDescriptor, str]:
-    """Assert the record can be refreshed, returning the descriptor and refresh token.
-
-    A refresh token must be present and the provider descriptor must still resolve;
-    otherwise the typed :class:`ConnectorConnectionError` is raised.
-    """
-    connection_id = record.connection_id
+    descriptor = _descriptor_for(record)
     if record.refresh_token is None:
-        # An oauth record without a refresh token cannot be refreshed — corrupt
-        # state fails loudly instead of dispatching a bogus upstream call.
-        raise ConnectorConnectionError(
-            f"oauth record {connection_id} has no refresh_token",
-            connection_id=connection_id,
+        return await _finish_section(
+            lambda: _reconnect_required(record, started_blob, "the grant has no refresh token")
         )
-    try:
-        descriptor = get_provider(record.provider_id)
-    except KeyError as exc:
-        # The provider plugin was removed since this connection was created — there
-        # is no descriptor to drive the refresh. Surface the typed connection error
-        # (matching resolve_managed_auth's no-auth branch) rather than a raw KeyError.
-        raise ConnectorConnectionError(
-            f"connection {connection_id} references unknown provider {record.provider_id!r}",
-            connection_id=connection_id,
-        ) from exc
-    return descriptor, record.refresh_token.get_secret_value()
+    refresh_token = record.refresh_token.get_secret_value()
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            target = await authorization.resolve_for_grant(descriptor, record.grant)
+            client = await authorization.resolve_client(descriptor, target.resolved, client_id=target.client_id)
+        except (authorization.GrantUnservableError, ConnectorClientRequiredError) as exc:
+            logger.warning("connectors: connection %s cannot be refreshed: %s", connection_id, exc)
+            return await _finish_section(lambda exc=exc: _reconnect_required(record, started_blob, str(exc)))
+        except OAuthDiscoveryError as exc:
+            logger.warning("connectors: refresh of %s could not resolve its authorization: %s", connection_id, exc)
+            outcome = await _finish_section(lambda exc=exc, n=attempt: _transient_failure(record, started_blob, n, exc))
+        else:
+            outcome = await _finish_section(
+                lambda target=target, client=client, n=attempt: _attempt(
+                    record=record,
+                    started_blob=started_blob,
+                    descriptor=descriptor,
+                    target=target,
+                    client=client,
+                    refresh_token=refresh_token,
+                    attempt=n,
+                )
+            )
+        if not isinstance(outcome, _Retry):
+            return outcome
+        backoff = TRANSIENT_BACKOFF_BASE_SECONDS * (TRANSIENT_BACKOFF_FACTOR ** (attempt - 1))
+        logger.info(
+            "connectors: refresh transient failure %d/%d for %s (retry in %.1fs)",
+            attempt,
+            TRANSIENT_RETRY_BUDGET,
+            connection_id,
+            backoff,
+        )
+        await asyncio.sleep(backoff)
 
 
 def _apply_refreshed_tokens(record: ConnectionRecord, token_resp: oauth_client.TokenResponse) -> None:
     """Write the refresh result onto the record.
 
-    The refreshed access token, any rotated refresh token (rotation-style providers),
+    The refreshed access token and its expiry, any rotated refresh token (rotation-style providers),
     HEALTHY state, and any newly granted scopes are written onto the record.
     """
     record.access_token = SecretStr(token_resp.access_token)
@@ -361,55 +525,64 @@ async def resolve_managed_auth(
 ) -> ManagedAuth | None:
     """Return the :class:`ManagedAuth` for a managed connection, or None.
 
-    No-auth (kind="none"): short-circuits at the top — no lock, no freshness
-    gate, no refresh. Returns None when the connection has no client config
-    (inject nothing), else a credential carrying the config_values on the
-    sub-service's transport channel (env for stdio, headers for http).
+    No-auth (kind="none"): no lock, no freshness gate, no refresh. Returns None
+    when the connection has no client config (inject nothing), else a credential
+    carrying the config_values on the sub-service's transport channel (env for
+    stdio, headers for http).
 
     OAuth: hot path serves a healthy, still-fresh token without the lock;
-    otherwise the read-modify-write runs under :func:`connection_lock`, which
-    re-loads the record and refreshes only if still needed. ``provider_id`` /
-    ``sub_service`` come from the manifest ref; the OAuth body keys on
-    ``connection_id``.
+    otherwise the slow path runs through the refresh owner: under
+    :func:`connection_lock` it re-loads the record and refreshes only if still
+    needed. ``provider_id`` / ``sub_service`` come from the manifest ref; the
+    OAuth body keys on ``connection_id``.
+
+    A record served without a write (no-auth, or a fresh OAuth record) to a caller
+    that may refresh is kept alive (:func:`_keep_alive`).
 
     ``allow_refresh=False`` makes the OAuth resolution read-only for an
     idempotent caller (the single-connection reachability probe): serve a
     still-fresh token if one exists, else return None. It never takes the lock,
-    drives an upstream refresh, persists ``auth_health_state``, or opens the
-    refresh cooldown breaker — a read must not mutate connection health. No-auth
-    resolution is already side-effect-free, so the flag does not affect it.
+    drives an upstream refresh, persists anything, or opens the refresh cooldown
+    breaker — a read must not mutate the connection.
     """
-    record, _ = await _load(connection_id)
+    while True:
+        record, blob = await _load(connection_id)
 
-    # The manifest ref names the provider it expects; a record resolving to a
-    # different provider means the connection_id was misrouted. Fail loudly
-    # rather than inject this connection's token into another provider's config.
-    if record.provider_id != provider_id:
-        raise ConnectorConnectionError(
-            f"connection {connection_id} resolves to provider {record.provider_id!r} "
-            f"but the manifest ref names provider {provider_id!r}",
-            connection_id=connection_id,
-        )
+        # The manifest ref names the provider it expects; a record resolving to a
+        # different provider means the connection_id was misrouted. Fail loudly
+        # rather than inject this connection's token into another provider's config.
+        if record.provider_id != provider_id:
+            raise ConnectorConnectionError(
+                f"connection {connection_id} resolves to provider {record.provider_id!r} "
+                f"but the manifest ref names provider {provider_id!r}",
+                connection_id=connection_id,
+            )
 
-    if record.kind == "none":
-        return _resolve_no_auth(record, connection_id, sub_service)
+        if record.kind == "none":
+            auth = _resolve_no_auth(record, connection_id, sub_service)
+            if allow_refresh:
+                await _keep_alive(connection_id, record, blob)
+            return auth
 
-    if not allow_refresh:
-        # Read-only OAuth resolution: serve a still-fresh token or None. A stale /
-        # reconnect-required / refresh-failing record needs an upstream exchange
-        # with write side-effects, which this caller must not drive — reporting no
-        # usable credential lets it classify the sub-service unreachable instead.
-        return _managed_auth(record) if _is_fresh(record) else None
+        if not allow_refresh:
+            # Read-only OAuth resolution: serve a still-fresh token or None. A stale /
+            # reconnect-required / refresh-failing record needs an upstream exchange
+            # with write side-effects, which this caller must not drive — reporting no
+            # usable credential lets it classify the sub-service unreachable instead.
+            return _managed_auth(record) if _is_fresh(record) else None
 
-    if record.auth_health_state == AuthHealthState.RECONNECT_REQUIRED:
-        raise ConnectorReconnectRequiredError(
-            f"connection {connection_id} requires reconnect",
-            connection_id=connection_id,
-        )
-    if _is_fresh(record):
-        return _managed_auth(record)
+        if record.auth_health_state == AuthHealthState.RECONNECT_REQUIRED:
+            raise ConnectorReconnectRequiredError(
+                f"connection {connection_id} requires reconnect",
+                connection_id=connection_id,
+            )
+        if _is_fresh(record):
+            await _keep_alive(connection_id, record, blob)
+            return _managed_auth(record)
 
-    return await _resolve_oauth_refresh(connection_id)
+        result = await refresh_owner.run(connection_id, lambda: _resolve_oauth_refresh(connection_id))
+        if not isinstance(result, refresh_owner.ResolveAgain):
+            return result
 
 
 def _resolve_no_auth(record: ConnectionRecord, connection_id: str, sub_service: str) -> ManagedAuth | None:
@@ -477,7 +650,9 @@ async def force_refresh(
 
     Called by the MCP tool-call adapter when a managed server returns the
     ``token_expired`` sentinel — the cached token raced a cross-replica rotation
-    and the adapter needs a guaranteed-fresh token before its one retry.
+    and the adapter needs a guaranteed-fresh token before its one retry. Runs
+    through the refresh owner; a caller that joined a refresh in flight for the
+    connection comes through here once more and its fence sees the replaced token.
 
     Fences on the failing token: ``failed_access_token`` is the access token the
     401'd call used. Under the lock the record is re-loaded; if a peer already
@@ -489,6 +664,13 @@ async def force_refresh(
 
     A connection already in refresh cooldown fails fast without an upstream call.
     """
+    while True:
+        result = await refresh_owner.run(connection_id, lambda: _force_refresh_slow(connection_id, failed_access_token))
+        if not isinstance(result, refresh_owner.ResolveAgain):
+            return result
+
+
+async def _force_refresh_slow(connection_id: str, failed_access_token: str | None) -> ManagedAuth:
     async with connection_lock(connection_id):
         record, started_blob = await _load(connection_id)
         if record.kind == "none":

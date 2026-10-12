@@ -53,6 +53,7 @@ from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.oauth import state
+from tai42_skeleton.connectors.oauth.authorization import OAuthAuthorizationCancelledError, OAuthIssuerMismatchError
 from tai42_skeleton.connectors.oauth.redirect import compute_deployment_origin, compute_redirect_uri
 from tai42_skeleton.connectors.service import connection_service
 from tai42_skeleton.db import SKELETON_COMPONENT
@@ -75,12 +76,14 @@ class _BadRequestError(ValueError):
 class OAuthComplete(BaseModel):
     """The OAuth provider callback payload.
 
-    The signed ``state`` and the authorization ``code``, or a provider-reported ``error``.
+    The signed ``state`` and the authorization ``code``, or a provider-reported ``error``, with the
+    redirect's ``iss`` (the issuer that answered, RFC 9207) when it carried one.
     """
 
     state: str | None = None
     code: str | None = None
     error: str | None = None
+    iss: str | None = None
 
 
 class OAuthNotConfigured(BaseModel):
@@ -303,6 +306,43 @@ reencrypt_connector_tokens = register_operation_route(
 # -- OAuth completion (native: discriminated body + load-bearing status) ------
 
 
+def _cancelled() -> JSONResponse:
+    return JSONResponse({"data": {"kind": "cancelled", "message": "Sign-in cancelled."}})
+
+
+def _parse_completion(body: dict) -> tuple[str, str | None, str | None, str | None] | Response:
+    """Read ``(flow_id, code, iss, error)`` from the completion body, or the answer that ends the request.
+
+    A provider ``error`` whose ``state`` is missing or does not decode answers "cancelled": there is
+    no login to check its issuer against. Without an ``error``, a missing ``state`` or ``code`` is a
+    400 and a tampered ``state`` a discriminated ``StateInvalid`` failure.
+    """
+    provider_error = body.get("error")
+    state_param = body.get("state")
+    code = body.get("code")
+    iss = body.get("iss")
+    if iss is not None and not isinstance(iss, str):
+        return _error("iss must be a string", 400)
+    if not isinstance(state_param, str) or not state_param:
+        return _cancelled() if provider_error else _error("state is required", 400)
+    if not provider_error and (not isinstance(code, str) or not code):
+        return _error("code is required", 400)
+    # Recover the single-use flow_id from the HMAC-signed state. A tampered
+    # or forged envelope is a loud 400 with a discriminated body.
+    try:
+        decoded = state.decode(state_param)
+    except state.StateInvalidError:
+        if provider_error:
+            return _cancelled()
+        return JSONResponse({"data": {"kind": "failed", "reason": "StateInvalid"}}, status_code=400)
+    return (
+        decoded.flow_id,
+        code if isinstance(code, str) else None,
+        iss,
+        str(provider_error) if provider_error else None,
+    )
+
+
 @http_surface().custom_route(
     "/api/connectors/oauth/complete",
     methods=["POST"],
@@ -331,29 +371,19 @@ async def oauth_complete(request: Request) -> Response:
     except _BadRequestError as exc:
         return _error(str(exc), 400)
 
-    # A provider-reported error (user cancelled / denied) short-circuits.
-    if body.get("error"):
-        return JSONResponse({"data": {"kind": "cancelled", "message": "Sign-in cancelled."}})
-
-    state_param = body.get("state")
-    code = body.get("code")
-    if not isinstance(state_param, str) or not state_param:
-        return _error("state is required", 400)
-    if not isinstance(code, str) or not code:
-        return _error("code is required", 400)
-
-    # Recover the single-use flow_id from the HMAC-signed state. A tampered
-    # or forged envelope is a loud 400 with a discriminated body.
+    parsed = _parse_completion(body)
+    if isinstance(parsed, Response):
+        return parsed
+    flow_id, code, iss, provider_error = parsed
     try:
-        decoded = state.decode(state_param)
-    except state.StateInvalidError:
-        return JSONResponse({"data": {"kind": "failed", "reason": "StateInvalid"}}, status_code=400)
-
-    try:
-        result = await connection_service.complete_connect(
-            flow_id=decoded.flow_id,
-            code=code,
-        )
+        # The completion checks the redirect's issuer against the login before it
+        # acts on a provider error or the code.
+        result = await connection_service.complete_connect(flow_id=flow_id, code=code, iss=iss, error=provider_error)
+    except OAuthAuthorizationCancelledError:
+        return _cancelled()
+    except OAuthIssuerMismatchError:
+        # The provider's error fields are neither acted on nor shown.
+        return JSONResponse({"data": {"kind": "failed", "reason": "IssuerMismatch"}}, status_code=400)
     except (
         connection_service.AliasInUseError,
         connection_service.ConnectionNotFoundError,

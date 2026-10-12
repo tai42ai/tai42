@@ -6149,6 +6149,7 @@ name = "tai42-skeleton"
 version = "22.1.3"
 source = { editable = "core/skeleton" }
 dependencies = [
+    { name = "anyio" },
     { name = "async-lru" },
     { name = "babel" },
     { name = "cachetools" },
@@ -6235,6 +6236,7 @@ toolbox = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.14" },
     { name = "async-lru", specifier = ">=2.3" },
     { name = "babel", specifier = ">=2.18" },
     { name = "beautifulsoup4", marker = "extra == 'files'", specifier = ">=4.12" },

@@ -146,13 +146,16 @@ class ConnectionService(Protocol):
         self,
         *,
         flow_id: str,
-        code: str,
+        code: str | None,
+        iss: str | None = None,
+        error: str | None = None,
     ) -> CompleteConnectResult:
-        """Exchange code for tokens, persist the encrypted ConnectionRecord, and write manifest entries.
+        """Finish a login from its redirect: exchange the code, persist the record, write manifest entries.
 
-        The token-exchange ``redirect_uri`` is the one stored in the flow state at
-        authorize-start (byte-identical per RFC 6749), so completion needs no
-        ``redirect_uri`` argument.
+        ``iss`` and ``error`` are the redirect's parameters: the issuer is checked against the one
+        the login was started with before ``error`` or ``code`` is acted on. The token-exchange
+        ``redirect_uri`` is the one stored in the flow state at authorize-start (byte-identical per
+        RFC 6749), so completion needs no ``redirect_uri`` argument.
         """
         ...
 

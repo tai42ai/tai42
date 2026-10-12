@@ -240,3 +240,18 @@ async def test_descriptor_install_preview_reports_required_env_and_delivery() ->
     assert names == {"ACME_CLIENT_ID": False, "ACME_CLIENT_SECRET": True}
     # Neither var is present in the env store or process env -> both missing.
     assert set(preview["missing_env"]) == {"ACME_CLIENT_ID", "ACME_CLIENT_SECRET"}
+
+
+async def test_descriptor_install_preview_of_a_discovered_stored_client_connector_requires_no_env() -> None:
+    spec = make_spec(
+        namespace="tai42",
+        name="acme-connector",
+        package=None,
+        version="1.0.0",
+        provides=[connector_item("acme", discovered=True)],
+    )
+    h, _pip = _descriptor_harness()
+    h.registry.resolved = _spec_resolved(spec)
+    preview = await _installer(h).preview(spec.ref)
+    assert preview["required_env"] == []
+    assert preview["missing_env"] == []

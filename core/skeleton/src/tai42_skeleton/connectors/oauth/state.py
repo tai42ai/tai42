@@ -156,6 +156,13 @@ class OAuthFlowState(BaseModel):
     redirect_uri: str
     operation: FlowOperation
     reconnect_connection_id: str | None = None
+    # Discovered provider only: the issuer of the validated metadata the login was started with,
+    # the protected resource it asks for, the stored client it uses (``None``: the env client), and
+    # whether the server said it sends ``iss`` on the redirect.
+    issuer: str | None = None
+    resource: str | None = None
+    client_id: str | None = None
+    iss_required: bool = False
 
 
 def _key(flow_id: str) -> str:

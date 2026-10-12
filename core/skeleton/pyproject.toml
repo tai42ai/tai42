@@ -48,6 +48,9 @@ dependencies = [
     # serves one itself to start the loop's shutdown watch outside any request.
     "sse-starlette>=3.4.6,<4",
     "httpx>=0.28",
+    # Shielded cancel scopes: a credential refresh section and the connection lock's
+    # release finish under an anyio cancellation, which re-delivers at every wake-up.
+    "anyio>=4.14",
     "PyYAML>=6.0",
     "pyaml-env>=1.2",
     "ruamel.yaml>=0.18",

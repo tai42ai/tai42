@@ -41,7 +41,7 @@ async def test_disconnect_oauth_revokes(harness, monkeypatch):
     _, records, store, _, _events, _ = harness
     records[CID] = make_oauth_record(connection_id=CID)
 
-    async def fake_revoke(*, descriptor, token):
+    async def fake_revoke(*, descriptor, resolved, client, token):
         return oauth_client.RevokeOutcome(outcome="success", http_status=200)
 
     monkeypatch.setattr(oauth_client, "revoke", fake_revoke)
@@ -62,7 +62,7 @@ async def test_disconnect_with_failed_revoke_still_purges_locally(harness, monke
         descriptor=providers["acme"], enabled_sub_services=["mail"], alias="work", connection_id=CID
     )
 
-    async def fake_revoke(*, descriptor, token):
+    async def fake_revoke(*, descriptor, resolved, client, token):
         return oauth_client.RevokeOutcome(outcome="failed", http_status=500)
 
     monkeypatch.setattr(oauth_client, "revoke", fake_revoke)
@@ -90,7 +90,7 @@ async def test_disconnect_provider_gone_purges_locally(harness, monkeypatch):
 
     monkeypatch.setattr(cs_mod, "get_provider", _boom)
 
-    async def fake_revoke(*, descriptor, token):
+    async def fake_revoke(*, descriptor, resolved, client, token):
         raise AssertionError("must not revoke when the provider is gone")
 
     monkeypatch.setattr(oauth_client, "revoke", fake_revoke)
@@ -117,7 +117,7 @@ async def test_disconnect_purges_expired_connection(harness, monkeypatch):
     with pytest.raises(ConnectionNotFoundError):
         await cs_mod.load_record(CID)
 
-    async def fake_revoke(*, descriptor, token):
+    async def fake_revoke(*, descriptor, resolved, client, token):
         return oauth_client.RevokeOutcome(outcome="success", http_status=200)
 
     monkeypatch.setattr(oauth_client, "revoke", fake_revoke)
@@ -149,7 +149,7 @@ async def test_disconnect_under_lock_blocks_patch_from_stranding(harness, monkey
 
     monkeypatch.setattr(cs_mod, "connection_lock", serializing_lock)
 
-    async def fake_revoke(*, descriptor, token):
+    async def fake_revoke(*, descriptor, resolved, client, token):
         await gate.wait()  # park disconnect INSIDE the lock until released
         return oauth_client.RevokeOutcome(outcome="success", http_status=200)
 

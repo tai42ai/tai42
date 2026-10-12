@@ -224,3 +224,46 @@ def test_config_lint_treats_an_empty_manifest_path_as_unset(monkeypatch: pytest.
     result = CliRunner().invoke(app_module.app, ["config", "lint"])
     assert result.exit_code == 0, result.output
     assert "skipping manifest shape check" in result.output
+
+
+_DISCOVERED_CONNECTOR = {
+    "id": "remote",
+    "display_name": "Remote",
+    "kind": "oauth",
+    "origin": "community",
+    "category": "dev",
+    "sub_services": {
+        "main": {
+            "id": "main",
+            "display_name": "Main",
+            "mcp_server": {"type": "http", "url": "https://mcp.example.com/mcp"},
+        }
+    },
+}
+
+
+def test_validate_manifest_file_accepts_a_discovered_stored_client_connector(tmp_path) -> None:
+    from tai42_skeleton.cli.offline import validate_manifest_file
+
+    path = tmp_path / "manifest.yml"
+    path.write_text(json.dumps({"connectors": [_DISCOVERED_CONNECTOR]}), encoding="utf-8")
+    validate_manifest_file(str(path))
+
+
+def test_validate_manifest_file_refuses_a_discovered_env_client_connector_missing_its_env(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tai42_skeleton.cli.offline import validate_manifest_file
+
+    monkeypatch.delenv("REMOTE_ID", raising=False)
+    monkeypatch.delenv("REMOTE_SECRET", raising=False)
+    pinned = {
+        **_DISCOVERED_CONNECTOR,
+        "issuer": "https://auth.example.com",
+        "client_id_env": "REMOTE_ID",
+        "client_secret_env": "REMOTE_SECRET",
+    }
+    path = tmp_path / "manifest.yml"
+    path.write_text(json.dumps({"connectors": [pinned]}), encoding="utf-8")
+    with pytest.raises(typer.BadParameter, match="REMOTE_SECRET"):
+        validate_manifest_file(str(path))

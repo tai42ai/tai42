@@ -6,7 +6,6 @@ import pytest
 
 from tai42_skeleton.connectors.service.connection_service.complete import _extract_account_identity
 from tai42_skeleton.connectors.service.connection_service.validation import (
-    _scopes_for,
     _validate_config_values,
     _validate_return_url,
     _validate_sub_services,
@@ -28,11 +27,6 @@ def test_validate_return_url_rejects_bad(bad):
 def test_validate_sub_services_empty_raises():
     with pytest.raises(ValueError, match="non-empty"):
         _validate_sub_services(make_oauth_descriptor(), [])
-
-
-def test_scopes_for_unions_and_sorts():
-    desc = make_oauth_descriptor()
-    assert _scopes_for(desc, ["mail", "cal"]) == ["cal.read", "mail.read", "mail.send"]
 
 
 def test_validate_config_values_unknown_key():

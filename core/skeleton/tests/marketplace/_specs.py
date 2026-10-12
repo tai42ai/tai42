@@ -58,17 +58,35 @@ def connector_item(
     origin: str = "system",
     client_id_env: str | None = None,
     client_secret_env: str | None = None,
+    discovered: bool = False,
 ) -> dict[str, Any]:
     """A ``connector``-kind provides item carrying a ``ProviderDescriptor`` (no module).
 
     Abstract synthetic providers only (``acme``/``iota``/``kappa``/``relay``): an
     ``oauth`` provider names its ``client_id_env`` / ``client_secret_env`` (defaulting to
     ``<ID>_CLIENT_ID`` / ``<ID>_CLIENT_SECRET``); a ``none`` provider carries neither and
-    needs no install-time env. The item ``name`` equals ``provider.id`` (the manifest /
+    needs no install-time env; a ``discovered`` oauth provider names no endpoints and no env.
+    The item ``name`` equals ``provider.id`` (the manifest /
     uninstall key). ``origin`` must be ``system`` for the ``tai42`` namespace.
     """
-    if kind == "oauth":
+    if kind == "oauth" and discovered:
+        # A discovered provider with a stored client: no endpoints, no env names.
         provider: dict[str, Any] = {
+            "id": provider_id,
+            "display_name": provider_id.title(),
+            "kind": "oauth",
+            "origin": origin,
+            "category": "productivity",
+            "sub_services": {
+                "main": {
+                    "id": "main",
+                    "display_name": "Main",
+                    "mcp_server": {"type": "http", "url": "https://mcp.example.com/mcp"},
+                }
+            },
+        }
+    elif kind == "oauth":
+        provider = {
             "id": provider_id,
             "display_name": provider_id.title(),
             "icon_url": f"https://example.com/{provider_id}.png",

@@ -41,3 +41,20 @@ class MalformedConnectionIdError(ConnectorError):
 
     # Deliberately indistinguishable from a genuinely-absent record (no id-shape oracle), so it shares NOT_FOUND.
     __tai_error_kind__ = ErrorKind.NOT_FOUND
+
+
+class ConnectorClientRequiredError(ConnectorError):
+    """A provider needs an OAuth client this deployment does not have.
+
+    No env client is declared and no stored client can be resolved for the provider's authorization
+    server, so an administrator has to register an app by hand and set its credentials.
+    """
+
+    # A capability this deployment cannot serve until configured, like OperatorMisconfiguredError.
+    __tai_error_kind__ = ErrorKind.UNAVAILABLE
+
+    def __init__(self, provider_id: str, detail: str | None = None):
+        """Build the error naming the ``provider_id`` that has no usable client, with an optional ``detail``."""
+        message = f"provider {provider_id!r} has no OAuth client: set client credentials for it"
+        super().__init__(f"{message} ({detail})" if detail else message)
+        self.provider_id = provider_id

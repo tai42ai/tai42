@@ -9,7 +9,9 @@ first user click.
 from __future__ import annotations
 
 import re
+from ipaddress import ip_address
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -90,8 +92,8 @@ class SubServiceDescriptor(BaseModel):
     id: str
     display_name: str
     description: str = ""
-    # Non-empty only for ``kind == "oauth"`` providers; a no-auth provider has no
-    # scopes. Enforced at the ProviderDescriptor level (which sees ``kind``).
+    # Required non-empty for a declared oauth provider, optional for a discovered
+    # one, unused by a no-auth provider. Enforced at the ProviderDescriptor level.
     scopes: list[str] = Field(default_factory=list)
     # Exactly one launch path: either a fully-declared ``mcp_server``, OR a
     # pkg-launched stdio service via ``entry_point`` (the package/console-script,
@@ -117,8 +119,22 @@ class SubServiceDescriptor(BaseModel):
         return self
 
 
+def _is_loopback_host(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class OAuthEndpoints(BaseModel):
-    """The OAuth endpoint URLs a provider authorizes against, exchanges tokens at, and optionally revokes."""
+    """The OAuth endpoint URLs of a DECLARED provider: authorize, token exchange, and optional revoke.
+
+    A provider that carries this block is in declared mode (fixed endpoints, an env client, no
+    discovery); a ``kind == "oauth"`` provider without it is in discovered mode, where the engine
+    reads the endpoints from the authorization server its MCP server names.
+    """
 
     authorize: str
     token: str
@@ -126,17 +142,24 @@ class OAuthEndpoints(BaseModel):
 
 
 class ProviderDescriptor(BaseModel):
-    """The universal connector-provider contract, registered from the manifest ``connectors`` list at boot/reload."""
+    """The universal connector-provider contract, registered from the manifest ``connectors`` list at boot/reload.
+
+    A ``kind == "oauth"`` provider is in exactly one of two modes. Declared: ``oauth`` carries the
+    endpoints and ``client_id_env`` / ``client_secret_env`` name the operator's client. Discovered:
+    ``oauth`` is unset and the engine discovers the authorization server from the one MCP server all
+    sub-services share; the client is either the env client pinned by ``issuer`` to the authorization
+    server it is registered with, or (all three unset) a stored client.
+    """
 
     id: str
     display_name: str
     description: str = ""
-    icon_url: str
-    """An ``https://`` URL to the provider's icon; http, relative, or empty is
+    icon_url: str | None = None
+    """An ``https://`` URL to the provider's icon, or ``None`` for none; http, relative, or empty is
     rejected. The catalog serves this value verbatim as a brand mark, the same
     rule the plugin spec's ``icon`` enforces."""
-    # "oauth": runs the OAuth dance; carries ``oauth`` + client envs +
-    # per-sub-service scopes. "none": no-auth — no OAuth, optional client-supplied
+    # "oauth": runs the OAuth dance, declared or discovered (see the class docstring).
+    # "none": no-auth — no OAuth, optional client-supplied
     # ``config_fields``. A descriptor is registered from the manifest
     # ``connectors`` list at boot/reload, not by any import side effect.
     kind: Literal["oauth", "none"]
@@ -151,6 +174,9 @@ class ProviderDescriptor(BaseModel):
     oauth: OAuthEndpoints | None = None
     client_id_env: str | None = None
     client_secret_env: str | None = None
+    # Discovered mode only: the authorization server the env client is registered with. The env
+    # secret is never sent to an authorization server other than this one.
+    issuer: str | None = None
     sub_services: dict[str, SubServiceDescriptor]
     # Provider-neutral package-launch spec for pkg-launched stdio sub-services
     # (those declaring ``entry_point`` instead of ``mcp_server``). ``pkg_manager``
@@ -173,10 +199,42 @@ class ProviderDescriptor(BaseModel):
 
     @field_validator("icon_url")
     @classmethod
-    def _check_icon_url(cls, value: str) -> str:
+    def _check_icon_url(cls, value: str | None) -> str | None:
         # The catalog serves this value verbatim as a brand mark; it must be an
         # ``https://`` URL, the same rule the plugin spec's ``icon`` enforces.
+        if value is None:
+            return None
         return check_web_url(value, field="icon_url", schemes=("https",))
+
+    @field_validator("issuer")
+    @classmethod
+    def _check_issuer(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        check_web_url(value, field="issuer", schemes=("https", "http"))
+        split = urlsplit(value)
+        if split.scheme == "http" and not _is_loopback_host(split.hostname or ""):
+            raise ValueError("issuer must be an https URL, or http on a loopback host")
+        return value
+
+    @property
+    def is_discovered(self) -> bool:
+        """Whether this is an OAuth provider in discovered mode (no declared ``oauth`` endpoints)."""
+        return self.kind == "oauth" and self.oauth is None
+
+    @property
+    def discovery_url(self) -> str:
+        """The one MCP server URL every sub-service of a discovered provider shares.
+
+        Raises ``RuntimeError`` for a declared or no-auth provider (a caller bug: only a discovered
+        provider is discovered).
+        """
+        if not self.is_discovered:
+            raise RuntimeError(f"provider {self.id!r} is not discovered (declared or no-auth): it has no discovery URL")
+        first = next(iter(self.sub_services.values()))
+        if first.mcp_server is None or first.mcp_server.url is None:
+            raise RuntimeError(f"discovered provider {self.id!r} has no http mcp_server url")
+        return first.mcp_server.url
 
     @field_validator("sub_services")
     @classmethod
@@ -194,22 +252,47 @@ class ProviderDescriptor(BaseModel):
         if any(sub.entry_point for sub in self.sub_services.values()) and not self.pkg_manager:
             raise ValueError("provider with a pkg-launched (entry_point) sub-service requires pkg_manager")
 
-    def _check_oauth_invariants(self) -> None:
-        if self.oauth is None:
-            raise ValueError("oauth provider requires oauth endpoints")
+    def _check_declared_invariants(self) -> None:
         if not self.client_id_env or not self.client_secret_env:
             raise ValueError("oauth provider requires client_id_env + client_secret_env")
+        if self.issuer is not None:
+            raise ValueError("a declared oauth provider (with oauth endpoints) must not set issuer")
         if self.config_fields:
             raise ValueError("oauth provider must not declare config_fields")
         for sub in self.sub_services.values():
             if not sub.scopes:
                 raise ValueError(f"oauth sub-service {sub.id!r} scopes must be non-empty")
 
+    def _check_discovered_invariants(self) -> None:
+        urls: set[str] = set()
+        for sub in self.sub_services.values():
+            server = sub.mcp_server
+            if server is None or server.type != "http" or server.url is None:
+                raise ValueError(
+                    f"discovered oauth provider: sub-service {sub.id!r} must declare an http mcp_server "
+                    "(no entry_point, stdio or websocket)"
+                )
+            urls.add(server.url)
+        if len(urls) != 1:
+            raise ValueError(
+                f"discovered oauth provider: all sub-services must share one mcp_server url (got {sorted(urls)})"
+            )
+        client_fields = (self.client_id_env, self.client_secret_env, self.issuer)
+        if any(client_fields) and not all(client_fields):
+            raise ValueError(
+                "discovered oauth provider: client_id_env, client_secret_env and issuer must be all set or all "
+                "unset (all set: an env client pinned to its authorization server; all unset: a stored client)"
+            )
+        if self.config_fields:
+            raise ValueError("oauth provider must not declare config_fields")
+
     def _check_noauth_invariants(self) -> None:
         if self.oauth is not None:
             raise ValueError("no-auth provider must not set oauth endpoints")
         if self.client_id_env or self.client_secret_env:
             raise ValueError("no-auth provider must not set client creds envs")
+        if self.issuer is not None:
+            raise ValueError("no-auth provider must not set issuer")
         # config_fields.target must match the transport channel of EVERY
         # sub-service (stdio->env, http/ws->header). A no-auth provider with
         # config_fields must therefore expose a single transport channel.
@@ -238,7 +321,10 @@ class ProviderDescriptor(BaseModel):
     def _check_kind_invariants(self) -> ProviderDescriptor:
         self._check_entry_point_launcher()
         if self.kind == "oauth":
-            self._check_oauth_invariants()
+            if self.oauth is None:
+                self._check_discovered_invariants()
+            else:
+                self._check_declared_invariants()
         else:  # kind == "none"
             self._check_noauth_invariants()
         return self

@@ -1,12 +1,11 @@
 """Client-input validators for the connection lifecycle.
 
-Return-URL shape, sub-service membership and transport support, config-value presence, and scope derivation.
+Return-URL shape, sub-service membership and transport support, and config-value presence.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
 
 from tai42_contract.connectors.providers import ProviderDescriptor
 
@@ -56,7 +55,3 @@ def _validate_config_values(descriptor: ProviderDescriptor, config_values: dict[
     for field in descriptor.config_fields:
         if field.required and not config_values.get(field.key):
             raise ValueError(f"missing required config value {field.key!r} for provider {descriptor.id!r}")
-
-
-def _scopes_for(descriptor: ProviderDescriptor, sub_services: Iterable[str]) -> list[str]:
-    return sorted({scope for sub_id in sub_services for scope in descriptor.sub_services[sub_id].scopes})
