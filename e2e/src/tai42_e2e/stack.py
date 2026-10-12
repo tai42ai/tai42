@@ -38,7 +38,7 @@ from tai42_e2e.topology import Infra, StackConfig, StackResources, Topology, _Pr
 from tai42_e2e.waiting import wait_for
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
 
     from tai42_e2e.procs import ProcessHandle
     from tai42_e2e.tcprelay import TcpRelay
@@ -401,8 +401,16 @@ class TaiStack:
         :func:`tai42_e2e.readiness.wait_workers`)."""
         return await readiness.wait_workers(self, n, port=port, deadline=deadline)
 
-    def _wait_backend_census(self, deadline: float, baseline: Mapping[str, int] | None = None) -> None:
-        readiness.wait_backend_census(self, deadline, baseline)
+    def _wait_fresh_lives(
+        self,
+        kind: str,
+        deadline: float,
+        *,
+        before: Mapping[str, int] | None = None,
+        replaced: Collection[str] | None = None,
+        count: int = 1,
+    ) -> None:
+        readiness.wait_fresh_lives(self, kind, deadline, before=before, replaced=replaced, count=count)
 
     # ---- client helpers --------------------------------------------------
 
@@ -477,14 +485,13 @@ class TaiStack:
             # supervisor (a graceful self-exit), never a manual restart.
             raise RuntimeError(f"restart({name!r}) is unsupported on a supervised stack; recycle via the supervisor")
         handle = self._procs[name]
-        # The backend worker joins no port — its readiness keys on a fresh ``backend``-kind
-        # census LIFE. A restarted worker reuses its stable slot name at an incremented
-        # generation, so capture the pre-restart backend lives (``{name: generation}``)
-        # BEFORE the kill; the post-restart wait then holds until those lives are gone and
-        # a fresh READY backend life has joined, keying on the generation not a new string.
-        before_backends = (
-            {w.name: w.generation for w in self.census() if w.kind == "backend"} if name == "backend" else {}
-        )
+        # A restarted worker answers requests before it has claimed its bus slot, so the
+        # post-restart wait keys on the restarted process's fresh census LIVES. A worker
+        # reuses its stable slot name at an incremented generation, so capture the
+        # pre-restart lives of its kind (``{name: generation}``) and the names this process
+        # holds BEFORE the kill; the wait then holds until those lives are gone and its fresh
+        # READY lives have joined, keying on the generation not a new string.
+        before, replaced = self._restart_baseline(name, handle)
         handle.terminate()
         # The respawn reuses the same port; wait for the killed process to release
         # it before rebinding, else the new process fails to bind and exits early.
@@ -492,7 +499,7 @@ class TaiStack:
             wait_for(lambda p=port: ports.is_free(p), deadline=5.0, message=f"port {port} never freed before restart")
         spec = self._specs[name]
         spawning.spawn(self, spec)
-        self._wait_after_restart(name, before_backends)
+        self._wait_after_restart(name, before, replaced)
 
     def restart_with_env(self, changes: Mapping[str, str | None]) -> None:
         """Apply env ``changes`` (``None`` removes a key) to every serve replica and the backend, then restart them.
@@ -568,26 +575,54 @@ class TaiStack:
         and asserts it left nothing listening (like a leaked port)."""
         self._relays.append(relay)
 
-    def _wait_after_restart(self, name: str, before_backends: Mapping[str, int] | None = None) -> None:
+    def _restart_census_kind(self, name: str) -> str | None:
+        """The bus-census kind a restarted process rejoins as, or ``None`` when it joins no
+        bus (the metrics server, or a busless stack's serve/embed process)."""
+        if name == "backend":
+            return "backend"
+        if (name.startswith("serve") or name == "embed") and child_env.needs_bus(self.config):
+            return "serve"
+        return None
+
+    def _restart_baseline(self, name: str, handle: ProcessHandle) -> tuple[dict[str, int], set[str]]:
+        """The pre-restart ``{name: generation}`` of the restarted process's census kind and
+        the slot names the process itself holds. The backend worker is the only backend-kind
+        process; a serve/embed process holds the serve lives whose pid belongs to its session
+        (the spawned master is a session leader and its uvicorn workers inherit the session),
+        so another replica's worker is never taken for one of its lives."""
+        kind = self._restart_census_kind(name)
+        if kind is None:
+            return {}, set()
+        rows = [w for w in self.census() if w.kind == kind]
+        before = {w.name: w.generation for w in rows}
+        if kind == "backend":
+            return before, set(before)
+        return before, {w.name for w in rows if self._pids_in_session([w.pid], handle.pid)}
+
+    def _wait_after_restart(
+        self,
+        name: str,
+        before: Mapping[str, int] | None = None,
+        replaced: Collection[str] | None = None,
+    ) -> None:
         deadline = self.infra.settings.boot_timeout
-        if name.startswith("serve"):
-            idx = 0 if name in ("serve", "serve-a") else 1
+        if name.startswith("serve") or name == "embed":
+            idx = 0 if name in ("serve", "serve-a", "embed") else 1
             port = self.app_ports[idx]
             readiness.wait_http_ok(self, f"{self.base_url(port)}/health", deadline, "app health")
-            # A respawned serve worker re-runs its boot self-resync gate on rejoin;
-            # drain it (where the profile carries the probe) so a test acting right
-            # after the restart does not race the gate, exactly as at boot.
             if child_env.needs_bus(self.config):
+                # The respawned process answers /health and MCP requests before its workers
+                # have claimed their bus slots; hold until every fresh worker is on the census,
+                # then drain its boot self-resync gate (where the profile carries the probe) so
+                # a test acting right after the restart races neither.
+                count = 1 if name == "embed" else readiness.serve_workers_on_port(self)
+                self._wait_fresh_lives("serve", deadline, before=before, replaced=replaced, count=count)
                 readiness.run_readiness_coro(readiness.drain_gate_coro(self, [port], deadline))
-        elif name == "embed":
-            readiness.wait_http_ok(self, f"{self.base_url(self.app_ports[0])}/health", deadline, "app health")
-            if child_env.needs_bus(self.config):
-                readiness.run_readiness_coro(readiness.drain_gate_coro(self, [self.app_ports[0]], deadline))
         elif name == "metrics":
             assert self.metrics_port is not None
             readiness.wait_http_ok(self, f"http://{self.host}:{self.metrics_port}/metrics", deadline, "metrics")
         elif name == "backend":
-            self._wait_backend_census(deadline, baseline=before_backends)
+            self._wait_fresh_lives("backend", deadline, before=before, replaced=replaced)
 
     # ---- respawn-on-exit supervisor (opt-in supervised shape) ------------
 
