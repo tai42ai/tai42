@@ -379,7 +379,11 @@ _SILENT = "no received-ack within the ack timeout while presence stayed live —
 _COMPUTED = [
     pytest.param(OpOutcome.missing, _SILENT, id="missing"),
     pytest.param(OpOutcome.departed, "presence expired before a reply — worker departed", id="departed"),
-    pytest.param(OpOutcome.timed_out, "acked but did not apply within the apply timeout", id="timed_out"),
+    pytest.param(
+        OpOutcome.timed_out,
+        "acked but did not apply within the apply timeout, which covers the worker's full drain budget",
+        id="timed_out",
+    ),
 ]
 
 

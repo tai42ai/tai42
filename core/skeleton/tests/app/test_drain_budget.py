@@ -51,3 +51,27 @@ def test_the_platform_declares_the_tool_runs_shutdown_drain(monkeypatch: pytest.
     finally:
         monkeypatch.delenv("TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS")
         reset_all_settings()
+
+
+def test_the_platform_budget_is_read_from_the_env_it_is_asked_under(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    from tai42_kit.settings import reset_all_settings
+
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.config.service.resolution import _environ
+
+    monkeypatch.setenv("TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS", "12")
+    reset_all_settings()
+    try:
+        budgets = instance.build_app().drain_budgets
+        # The live value is read (and any settings cache warmed) first.
+        assert budgets.budget() == 12.0
+        # A config change is validated against the env it proposes: the budget read under
+        # that env is the proposed one, not the live one.
+        with _environ({**os.environ, "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "41"}):
+            assert budgets.budget() == 41.0
+        assert budgets.budget() == 12.0
+    finally:
+        monkeypatch.delenv("TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS")
+        reset_all_settings()
