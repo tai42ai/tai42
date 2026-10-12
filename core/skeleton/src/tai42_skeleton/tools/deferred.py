@@ -16,6 +16,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.monitoring import RunAttribution, TraceContext, ambient_trace_context
 from tai42_contract.states.errors import DeferredCallRefusedError
 from tai42_contract.states.models import StateContext
+from tai42_contract.tools import TOOL_META_CRASH_RESUME
 
 from tai42_skeleton.authz.execution_identity import capture_fire_identity
 from tai42_skeleton.states.context import current_state_context, state_context
@@ -86,14 +87,11 @@ class ToolCallKind:
 
     async def resumable(self, payload: dict[str, Any]) -> bool:
         """Whether the tool's registration declares crash-resume."""
-        # The operations package registers app handlers at import; it is reached at call time.
-        from tai42_skeleton.operations.tool_runs.models import _CRASH_RESUME_META_KEY
-
         try:
             tool = await tai42_app.tools.get_tool(payload["tool"])
         except UnknownToolError:
             return False
-        return bool((tool.meta or {}).get(_CRASH_RESUME_META_KEY))
+        return bool((tool.meta or {}).get(TOOL_META_CRASH_RESUME))
 
 
 register_deferred_call_kind("tool", ToolCallKind())

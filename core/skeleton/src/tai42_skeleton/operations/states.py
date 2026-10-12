@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from pydantic import ValidationError
+from tai42_contract.errors import UnavailableError
 from tai42_contract.states import (
     ApplyResult,
     AttachBody,
@@ -60,7 +61,6 @@ from tai42_skeleton.operations import (
     ConflictError,
     NotFoundError,
     NotSupportedError,
-    UnavailableError,
     ValidationRejectedError,
     operation,
 )

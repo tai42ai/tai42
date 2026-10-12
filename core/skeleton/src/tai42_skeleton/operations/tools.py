@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
-from tai42_contract.errors import OperationError
+from tai42_contract.errors import OperationError, UnavailableError
 from tai42_contract.interactions import RunAnswer, RunResultAnswer, RunTerminalFailed
 from tai42_contract.monitoring import RunAttribution
 from tai42_contract.secrets import unwrap_secrets
@@ -71,7 +71,6 @@ from tai42_skeleton.operations import (
     NotSupportedError,
     OperationFailedError,
     PermissionDeniedError,
-    UnavailableError,
     UpstreamError,
     operation,
 )

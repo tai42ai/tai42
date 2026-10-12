@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from fastmcp import Client
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import UnavailableError
 from tai42_contract.interactions import RunResultAnswer
 from tai42_contract.states import StateSubject
 from tai42_contract.states.errors import StatePendingSaveFailedError, StatePendingSaveTimeoutError
@@ -22,7 +23,7 @@ from tai42_contract.states.models import StateContext, SubjectCandidates
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.operations import ConflictError, UnavailableError
+from tai42_skeleton.operations import ConflictError
 from tai42_skeleton.operations import tools as tools_ops
 from tai42_skeleton.states.outbox import drain as drain_mod
 from tai42_skeleton.states.outbox.drain import outbox_apply_scope
