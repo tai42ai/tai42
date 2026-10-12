@@ -253,10 +253,6 @@ class OAuthMcpServer:
         with self._lock:
             self._document_hosts[origin] = (address.rstrip("/"), host)
 
-    def registered_clients(self) -> list[str]:
-        with self._lock:
-            return [c.client_id for c in self._clients.values() if not c.document]
-
     # -- the app ---------------------------------------------------------------------------------
 
     def _build_app(self) -> ASGIApp:
