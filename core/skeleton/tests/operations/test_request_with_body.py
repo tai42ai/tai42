@@ -77,6 +77,7 @@ def test_validate_body_names_each_rule_and_never_the_value() -> None:
 
 class _ProbeLeft(BaseModel):
     kind: Literal["left"]
+    count: int = 0
 
 
 class _ProbeRight(BaseModel):
@@ -93,6 +94,14 @@ def test_validate_body_names_an_unknown_union_tag_without_echoing_it() -> None:
     message = excinfo.value.message
     assert message == "invalid probe params: 'kind' must be one of the expected tags: 'left', 'right'"
     assert "secret-tag-value" not in message
+
+
+def test_validate_body_names_the_field_of_the_tagged_variant() -> None:
+    with pytest.raises(BadRequestError) as excinfo:
+        validate_body(_ProbeUnion, {"kind": "left", "count": "secret-count"}, "probe params")
+    message = excinfo.value.message
+    assert message.startswith("invalid probe params: count: ")
+    assert "secret-count" not in message
 
 
 # -- request_with_body -------------------------------------------------------------
