@@ -394,7 +394,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         ),
     ),
     ("GET", "/api/plugins"): RouteShape(
-        items_key=None, columns=("name", "version", "api_version", "entry", "integrity", "contributions")
+        items_key=None, columns=("name", "version", "api_version", "entry", "integrity", "contributions", "mounts")
     ),
     ("GET", "/api/presets"): RouteShape(
         items_key=None,
