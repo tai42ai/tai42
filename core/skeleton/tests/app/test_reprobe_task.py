@@ -594,7 +594,7 @@ async def test_reprobe_failed_titles_probes_off_the_gate_on_the_reload_budget():
         await asyncio.wait_for(probing.wait(), timeout=5)
 
         async def gated_write() -> str:
-            async with reload_gate.lock:
+            async with reload_gate.synchronized():
                 return "ok"
 
         assert await asyncio.wait_for(gated_write(), timeout=1) == "ok"
