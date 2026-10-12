@@ -9,6 +9,7 @@ bound to a no-op fake at import so the route decorators register cleanly under t
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import types
@@ -22,6 +23,7 @@ import psycopg
 import pytest
 from starlette.requests import Request
 from tai42_contract.accounts.errors import LastAdminError
+from tai42_contract.app import HostedUiPaths
 from tai42_kit.clients import PostgresConnectionSettings, client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
@@ -45,6 +47,14 @@ def _reset_settings_between_tests() -> Any:
 
 # -- bind a no-op app handle before any route module imports --------------------
 
+DEFAULT_HOSTED_UI = HostedUiPaths(
+    login_path="/login",
+    claim_fragment_key="claim",
+    invite_query_key="invite",
+    oauth_callback_path="/oauth-bridge.html",
+    connectors_path="/connectors",
+)
+
 
 class _FakeHttp:
     # Records each route registration's path -> keyword metadata so a test can assert a
@@ -65,6 +75,13 @@ class _FakeHttp:
         # The resolved absolute mount base routes_login.py captures at import — the
         # default login mount; a remap test monkeypatches ``routes_login._MOUNT_BASE``.
         return "/api/login"
+
+    # The deployment's declared hosted-UI addresses; a test overrides them through the
+    # ``hosted_ui`` fixture.
+    hosted_ui_paths: ClassVar[HostedUiPaths] = DEFAULT_HOSTED_UI
+
+    def hosted_ui(self) -> HostedUiPaths:
+        return _FakeHttp.hosted_ui_paths
 
 
 class _FakeLifecycle:
@@ -589,6 +606,16 @@ def _configure_default_database(monkeypatch: pytest.MonkeyPatch) -> None:
     the password themselves."""
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test-secret")
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_DB", "tai_test")
+
+
+@pytest.fixture
+def hosted_ui(monkeypatch: pytest.MonkeyPatch):
+    """Declare synthetic hosted-UI addresses on the fake app for one test."""
+
+    def _declare(**overrides: str) -> None:
+        monkeypatch.setattr(_FakeHttp, "hosted_ui_paths", dataclasses.replace(DEFAULT_HOSTED_UI, **overrides))
+
+    return _declare
 
 
 @pytest.fixture

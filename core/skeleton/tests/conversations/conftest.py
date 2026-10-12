@@ -18,7 +18,7 @@ from typing import Any, ClassVar
 import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ApiConversationRoute, ChannelConversationRoute, ConversationRoute
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils import render as door_contract_module
 from tests.agent._memoryless import MemorylessTestAgent
@@ -597,7 +597,7 @@ def _channel_route(
     turns_per_hour_override: int | None = None,
     error_reply_text: str | None = None,
 ) -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="agent",
@@ -617,7 +617,7 @@ def _api_route(
     turns_per_hour_override: int | None = None,
     error_reply_text: str | None = None,
 ) -> ConversationRoute:
-    return ConversationRoute(
+    return ApiConversationRoute(
         route_name=route_name,
         door="api",
         target_kind="agent",
@@ -634,7 +634,7 @@ def _api_route(
 def _api_route_no_callback(route_name: str = "chat") -> ConversationRoute:
     """A poll-only api route: no callback declared, so it carries no signing secret and its
     answer is read back from the poll door."""
-    return ConversationRoute(
+    return ApiConversationRoute(
         route_name=route_name,
         door="api",
         target_kind="agent",
@@ -660,7 +660,7 @@ def _tool_channel_route(
     reply_expr: str | None = None,
     error_reply_text: str | None = None,
 ) -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="tool",
@@ -683,7 +683,7 @@ def _tool_api_route(
     reply_expr: str | None = None,
     error_reply_text: str | None = None,
 ) -> ConversationRoute:
-    return ConversationRoute(
+    return ApiConversationRoute(
         route_name=route_name,
         door="api",
         target_kind="tool",
@@ -909,3 +909,21 @@ async def _create_stranded_intake(store: ConversationRecordStore, fake: FakeReco
 
 async def _intake_lease(fake: FakeRecordRedis, message_id: str) -> str:
     return (await fake.hgetall(ConversationsSettings().record_key(message_id)))["intake_claim"]
+
+
+# The door rules the route-create union carries, one refused body per rule: (body overrides,
+# the failing location) — refused alike at the HTTP extractor and at the operation.
+DOOR_RULE_REFUSALS = [
+    ({"door": "api", "channel": "twilio"}, "api.channel"),
+    ({"door": "api", "our_identity": "+15550001111"}, "api.our_identity"),
+    ({"door": "api", "callback_url": "https://user@cb.example/x"}, "api.callback_url"),
+    ({"door": "api", "callback_url": "http://cb.example/x"}, "api.callback_url"),
+    ({"door": "channel", "our_identity": "+15550001111"}, "channel.channel"),
+    ({"door": "channel", "channel": "twilio"}, "channel.our_identity"),
+    ({"door": "channel", "channel": "twi:lio", "our_identity": "+15550001111"}, "channel.channel"),
+    (
+        {"door": "channel", "channel": "twilio", "our_identity": "+1", "callback_url": "https://cb.example/x"},
+        "channel.callback_url",
+    ),
+    ({"door": "email"}, "door"),
+]

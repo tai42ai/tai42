@@ -214,7 +214,7 @@ def claim_link(
 ) -> None:
     """Mint a one-time claim link that carries a key you hold to another device.
 
-    The link's token rides the URL FRAGMENT (``/login#claim=<token>``) and is
+    The link's token rides the URL FRAGMENT of the deployment's login page and is
     SINGLE-USE — the first exchange burns it. Prints the claim path and expiry; compose
     the absolute URL (or a QR) from your own origin.
 

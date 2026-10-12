@@ -10,7 +10,13 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-from tai42_contract.conversations import ROUTE_NAME_RE, ConversationRoute, ConversationRouteCreate, OverlapPolicy
+from tai42_contract.conversations import (
+    ROUTE_NAME_RE,
+    ConversationRoute,
+    ConversationRouteBody,
+    ConversationRouteCreateBody,
+    OverlapPolicy,
+)
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.conversations.managers.base_conversations_manager import DoorFlipRefusedError
@@ -22,7 +28,7 @@ from tai42_skeleton.operations.response_models_group_a import (
     ConversationRecordView,
     ConversationRouteCreateResult,
     ConversationRouteListEnvelope,
-    ConversationRouteView,
+    ConversationRouteViewBody,
     RouteRemoveResult,
 )
 
@@ -108,7 +114,7 @@ async def list_conversation_routes() -> dict[str, Any]:
     summary="Get a conversation route",
     tags=["conversations"],
     errors=[BadRequestError, NotFoundError, NotSupportedError],
-    response_model=ConversationRouteView,
+    response_model=ConversationRouteViewBody,
 )
 async def get_conversation_route(route_name: str) -> dict[str, Any]:
     """One conversation route by name, with its ``callback_secret`` withheld.
@@ -129,7 +135,7 @@ async def get_conversation_route(route_name: str) -> dict[str, Any]:
     destructive=True,
     authority_changing=True,
     errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError, ValidationRejectedError],
-    request_model=ConversationRouteCreate,
+    request_model=ConversationRouteCreateBody,
     response_model=ConversationRouteCreateResult,
 )
 async def create_conversation_route(
@@ -188,26 +194,28 @@ async def create_conversation_route(
     # Validate the whole body shape at the operation, not the edge: the MCP tool and a
     # direct call take these flat parameters and bypass the HTTP extractor.
     try:
-        create = ConversationRouteCreate(
-            route_name=route_name,
-            door=door,  # pyright: ignore[reportArgumentType]
-            target_kind=target_kind,  # pyright: ignore[reportArgumentType]
-            target_name=target_name,
-            start_expr=start_expr,
-            cancel_expr=cancel_expr,
-            resume_expr=resume_expr,
-            extras_expr=extras_expr,
-            reply_expr=reply_expr,
-            initial_mode=initial_mode,  # pyright: ignore[reportArgumentType]
-            execution_key=execution_key,
-            channel=channel,
-            our_identity=our_identity,
-            callback_url=callback_url,
-            turns_per_hour_override=turns_per_hour_override,
-            error_reply_text=error_reply_text,
-            locale=locale,
-            overlap=overlap if overlap is not None else OverlapPolicy(),
-        )
+        create = ConversationRouteCreateBody.model_validate(
+            {
+                "route_name": route_name,
+                "door": door,
+                "target_kind": target_kind,
+                "target_name": target_name,
+                "start_expr": start_expr,
+                "cancel_expr": cancel_expr,
+                "resume_expr": resume_expr,
+                "extras_expr": extras_expr,
+                "reply_expr": reply_expr,
+                "initial_mode": initial_mode,
+                "execution_key": execution_key,
+                "channel": channel,
+                "our_identity": our_identity,
+                "callback_url": callback_url,
+                "turns_per_hour_override": turns_per_hour_override,
+                "error_reply_text": error_reply_text,
+                "locale": locale,
+                "overlap": overlap if overlap is not None else OverlapPolicy(),
+            }
+        ).root
     except ValueError as exc:
         raise BadRequestError(f"invalid conversation route: {exc}") from exc
 
@@ -217,7 +225,9 @@ async def create_conversation_route(
     execution_key_fingerprint = await _pkg.assert_execution_key_bindable(
         await _pkg.resolve_caller(), create.execution_key
     )
-    route = ConversationRoute(**create.model_dump(), execution_key_fingerprint=execution_key_fingerprint)
+    route = ConversationRouteBody.model_validate(
+        {**create.model_dump(), "execution_key_fingerprint": execution_key_fingerprint}
+    ).root
     # The write service runs the route's save rules (bind check, expressions, identity claim), mints
     # the callback secret and stores the row; each refusal keeps its own status here.
     with definition_door("conversation route"):

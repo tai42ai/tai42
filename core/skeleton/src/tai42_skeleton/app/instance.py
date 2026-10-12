@@ -42,6 +42,7 @@ from tai42_skeleton.marketplace import settings as marketplace_readiness
 from tai42_skeleton.marketplace.advisories import start_advisories_poll, stop_advisories_poll
 from tai42_skeleton.middleware.rate_limit import check_rate_limit_families
 from tai42_skeleton.plugins.registry import rebuild_studio_plugin_registry
+from tai42_skeleton.plugins.settings import check_hosted_ui_settings
 from tai42_skeleton.routers import tool_runs_settings
 from tai42_skeleton.settings import rate_limit
 from tai42_skeleton.states import db as states_readiness
@@ -262,6 +263,20 @@ def _register_states_lifecycles(app: TaiMCP) -> None:
     app.lifecycle.on_startup(_reconcile_state_template_seeds)
 
 
+def _register_generation_checks(app: TaiMCP) -> None:
+    """Register the checks that run over every generation, at boot and on every reload.
+
+    Every public route of one rate-limit family declares the same budget: checked after the
+    routers are re-imported, so a conflicting install fails before it serves. The hosted-UI
+    page addresses are read the same way, so a malformed ``HOSTED_UI_*`` value refuses there
+    instead of failing the login page or a Connect.
+    """
+    app.lifecycle.on_startup(check_rate_limit_families)
+    app.lifecycle.on_reload(check_rate_limit_families)
+    app.lifecycle.on_startup(check_hosted_ui_settings)
+    app.lifecycle.on_reload(check_hosted_ui_settings)
+
+
 def build_app() -> TaiMCP:
     """Build (once) the process app singleton.
 
@@ -305,11 +320,7 @@ def build_app() -> TaiMCP:
         # deployment is a no-op.
         app.lifecycle.on_startup(assert_skeleton_schema_applied)
         _register_states_lifecycles(app)
-        # Every public route of one rate-limit family declares the same budget. Checked over
-        # the generation being built — at boot and on every reload, after the routers are
-        # re-imported — so a conflicting install fails before it serves.
-        app.lifecycle.on_startup(check_rate_limit_families)
-        app.lifecycle.on_reload(check_rate_limit_families)
+        _register_generation_checks(app)
         if settings.enable:
             # The configured identity providers probe their OWN record stores once at
             # startup, so a deployment against a backend a provider cannot use fails

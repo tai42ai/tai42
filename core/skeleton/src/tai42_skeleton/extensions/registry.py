@@ -164,12 +164,18 @@ class ExtensionRegistry(BaseRegistry):
         except KeyError:
             raise TaiValidationError(f"Extension '{name}' is not registered.") from None
 
-    def available_extensions(self) -> list[dict[str, str]]:
-        """Every registered extension as ``{"name", "kind"}``, sorted by name."""
+    def available_extensions(self) -> list[dict[str, str | bool]]:
+        """Every registered extension as ``{"name", "kind", "multiple"}``, sorted by name.
+
+        ``multiple`` is the kind's own rule: whether one tool may carry more than one extension of it.
+        """
         # Serialize the enum VALUE (lowercase, e.g. "backend"), not its member
         # name ("BACKEND"): only the value round-trips back through
         # ``ExtensionKind("backend")``.
-        return [{"name": name, "kind": self._kinds[name].value} for name in sorted(self._available_extensions)]
+        return [
+            {"name": name, "kind": self._kinds[name].value, "multiple": self._kinds[name].multiple}
+            for name in sorted(self._available_extensions)
+        ]
 
     def validate(self, elements: Sequence[ExtensionElement]):
         """Validate a combo's ``elements``: every name known and per-kind cardinality respected."""

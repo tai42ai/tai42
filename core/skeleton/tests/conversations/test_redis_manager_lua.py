@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from fakeredis import aioredis
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ConversationRoute, ConversationRouteBody
 
 from tai42_skeleton.conversations.managers import redis_conversations_manager as redis_module
 from tai42_skeleton.conversations.managers.redis_conversations_manager import RedisConversationsManager
@@ -59,7 +59,7 @@ def _api_route(name: str = "chat", **over: Any) -> ConversationRoute:
         "callback_secret": "sec-1",
     }
     fields.update(over)
-    return ConversationRoute(**fields)
+    return ConversationRouteBody.model_validate(fields).root
 
 
 async def test_put_keys_and_indexes_the_row_atomically(manager, lua_redis):
@@ -99,7 +99,9 @@ async def test_a_door_flip_is_refused_by_the_write_itself_not_by_an_earlier_coun
 
     with pytest.raises(DoorFlipRefusedError) as refused:
         await manager.put_route(
-            _api_route(door="channel", channel="twilio", our_identity="+15550001111", callback_url=None)
+            _api_route(
+                door="channel", channel="twilio", our_identity="+15550001111", callback_url=None, callback_secret=None
+            )
         )
 
     assert refused.value.from_door == "api"
@@ -117,7 +119,9 @@ async def test_the_door_of_a_route_holding_no_thread_is_still_written(manager, l
 
     assert (
         await manager.put_route(
-            _api_route(door="channel", channel="twilio", our_identity="+15550001111", callback_url=None)
+            _api_route(
+                door="channel", channel="twilio", our_identity="+15550001111", callback_url=None, callback_secret=None
+            )
         )
         is False
     )

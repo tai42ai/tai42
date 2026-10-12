@@ -4,7 +4,7 @@ import logging
 from types import MappingProxyType
 from typing import Any
 
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ConversationRoute, ConversationRouteBody
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -126,7 +126,7 @@ class RedisConversationsManager(BaseConversationsManager):
                 raw = await awaited(r.get(self.settings.route_key(route_name)))
             if raw is None:
                 return None
-            return ConversationRoute.model_validate_json(_as_str(raw))
+            return ConversationRouteBody.model_validate_json(_as_str(raw)).root
         return snapshot.rows.get(route_name)
 
     async def delete_route(self, route_name: str) -> bool:
@@ -177,7 +177,7 @@ class RedisConversationsManager(BaseConversationsManager):
                 unreadable.add(name)
                 continue
             try:
-                routes[name] = ConversationRoute.model_validate_json(_as_str(raw))
+                routes[name] = ConversationRouteBody.model_validate_json(_as_str(raw)).root
             except ValueError:
                 logger.warning("conversations: route name %r has an unparseable row and was skipped", name)
                 unreadable.add(name)

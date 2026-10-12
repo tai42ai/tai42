@@ -169,8 +169,8 @@ class AppContext:
         """A configured client for the resolved server + API key.
 
         With ``anonymous=True`` the client carries NO credential — the api-key
-        resolution (and its interactive prompt) is never triggered — for the single
-        public door the CLI calls (``tai auth claim``, which has no key yet).
+        resolution (and its interactive prompt) is never triggered — for the public
+        doors ``tai auth claim`` calls (it has no key yet).
         """
         return ApiClient(
             self.server_url,

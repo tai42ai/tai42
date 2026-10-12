@@ -65,6 +65,22 @@ class DeclaredRouteMetadata:
     rate_limit_budget: RateLimitBudget | None = None
 
 
+@dataclass(frozen=True)
+class HostedUiPaths:
+    """The page addresses of the hosted UI, as the deployment declares them.
+
+    ``login_path``, ``oauth_callback_path`` and ``connectors_path`` are same-origin paths; a
+    claim link carries its token in the login page's ``#<claim_fragment_key>=`` fragment and an
+    invite link in its ``?<invite_query_key>=`` query.
+    """
+
+    login_path: str
+    claim_fragment_key: str
+    invite_query_key: str
+    oauth_callback_path: str
+    connectors_path: str
+
+
 @runtime_checkable
 class AppHttp(Protocol):
     """The HTTP application facet: middleware, route registration, and mount introspection."""
@@ -202,4 +218,8 @@ class AppHttp(Protocol):
         hardcoded default. Called with no binding present — a core or
         operator-authored module — it raises: those modules own no declared mount.
         """
+        ...
+
+    def hosted_ui(self) -> HostedUiPaths:
+        """The page addresses of the hosted UI, as the deployment declares them."""
         ...

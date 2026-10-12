@@ -19,18 +19,24 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from tai42_contract.access_control.models import AccessPolicy, RoleDefinition
+from tai42_contract.access_control.models import (
+    PATH_COVERAGE_VECTORS,
+    PATTERN_OPEN_PREFIX_VECTORS,
+    AccessPolicy,
+    RoleDefinition,
+)
 from tai42_contract.backend.callback import CallbackSchema
 from tai42_contract.backend.scheduling import ScheduleCreate, ScheduleListRow, ScheduleRecord
 from tai42_contract.channels import ChannelTemplate
 from tai42_contract.conversations import (
-    ConversationRoute,
-    ConversationRouteCreate,
+    ConversationRouteBody,
+    ConversationRouteCreateBody,
     TargetConversationConfig,
 )
 from tai42_contract.hooks.models import HookParams, HookRegister, HookSubject
 from tai42_contract.interactions.models import FormReactionEventBody
 from tai42_contract.presets.models import PresetBody, PresetSeed
+from tai42_contract.settings_profiles.names import PreviousProfileName, SettingsProfileName
 from tai42_contract.states.binding import StateAttach, StateBinding, StateInjection, StateUpdate
 from tai42_contract.states.models import StateDeclaration, StateTemplateDocument
 
@@ -46,8 +52,8 @@ SERVED_DOCUMENTS: dict[str, type[BaseModel]] = {
     "HookParams": HookParams,
     "AccessPolicy": AccessPolicy,
     "RoleDefinition": RoleDefinition,
-    "ConversationRouteCreate": ConversationRouteCreate,
-    "ConversationRoute": ConversationRoute,
+    "ConversationRouteCreate": ConversationRouteCreateBody,
+    "ConversationRoute": ConversationRouteBody,
     "TargetConversationConfig": TargetConversationConfig,
     "ChannelTemplate": ChannelTemplate,
     "StateDeclaration": StateDeclaration,
@@ -61,6 +67,8 @@ SERVED_DOCUMENTS: dict[str, type[BaseModel]] = {
     "ScheduleListRow": ScheduleListRow,
     "ScheduleRecord": ScheduleRecord,
     "FormReactionEvent": FormReactionEventBody,
+    "SettingsProfileName": SettingsProfileName,
+    "PreviousProfileName": PreviousProfileName,
 }
 
 #: The bundle's committed location relative to the package root, and the JSON-schema
@@ -80,7 +88,8 @@ def build_document_schemas() -> dict[str, Any]:
     one document's shape under another's reference.
 
     The envelope carries the exact ``contract_version`` it was cut from, so a consumer
-    pins the shape to a released contract.
+    pins the shape to a released contract, and the ``vectors`` conformance tables a
+    consumer mirroring a served rule checks itself against.
     """
     defs: dict[str, Any] = {}
     documents: dict[str, Any] = {}
@@ -99,6 +108,10 @@ def build_document_schemas() -> dict[str, Any]:
         "contract_version": version("tai42-contract"),
         "$defs": defs,
         "documents": documents,
+        "vectors": {
+            "path_coverage": [dict(row) for row in PATH_COVERAGE_VECTORS],
+            "pattern_open_prefix": [dict(row) for row in PATTERN_OPEN_PREFIX_VECTORS],
+        },
     }
 
 
@@ -115,8 +128,9 @@ def bundle_json(bundle: dict[str, Any]) -> str:
 def bundle_drift(fresh: dict[str, Any], committed: dict[str, Any]) -> list[str]:
     """The loud, distinct reasons the committed bundle is stale against a fresh rebuild, or empty when it is fresh.
 
-    Freshness is judged on the parsed STRUCTURE, never on bytes: each served document and
-    the shared ``$defs`` block of the committed bundle must equal the fresh build's. The
+    Freshness is judged on the parsed STRUCTURE, never on bytes: each served document,
+    the shared ``$defs`` block and the ``vectors`` tables of the committed bundle must
+    equal the fresh build's. The
     ``contract_version`` envelope is a SEPARATE equality — the committed field must match
     the version the fresh build was cut from (the running package version) — so a
     version-only bump (which the release tooling applies to ``contract_version``) is
@@ -142,6 +156,8 @@ def bundle_drift(fresh: dict[str, Any], committed: dict[str, Any]) -> list[str]:
             lines.append(f"document {name!r} changed shape")
     if fresh.get("$defs") != committed.get("$defs"):
         lines.append("the shared $defs block changed")
+    if fresh.get("vectors") != committed.get("vectors"):
+        lines.append("the published vectors changed")
     return lines
 
 

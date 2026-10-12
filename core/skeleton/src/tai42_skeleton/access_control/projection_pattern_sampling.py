@@ -21,6 +21,26 @@ from typing import Any
 
 _NEGATE_CANDIDATES = "abcdefghijkxyz0123456789-_"
 
+_OPEN_PREFIX_METACHARACTERS = re.compile(r"[.*+?()\[\]{}|\\^$]")
+
+
+def pattern_open_prefix(pattern: str) -> str | None:
+    """The literal prefix of an anchored open-wildcard pattern (``^<literal>.*``, the ``$`` optional), else ``None``.
+
+    A returned literal ``L`` means every path starting with ``L`` matches the pattern. Any other
+    shape declines: no ``^``, no trailing ``.*``, an empty literal, or a literal holding a regex
+    metacharacter (a backslash included, so an escaped literal declines too).
+    """
+    if not pattern.startswith("^"):
+        return None
+    body = pattern[1:].removesuffix("$")
+    if not body.endswith(".*"):
+        return None
+    body = body[:-2]
+    if not body or _OPEN_PREFIX_METACHARACTERS.search(body):
+        return None
+    return body
+
 
 def _category_sample(name: str) -> str | None:
     return {

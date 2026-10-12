@@ -14,7 +14,9 @@ from contextlib import asynccontextmanager
 
 import pytest
 from tai42_contract.conversations import (
+    ChannelConversationRoute,
     ConversationRoute,
+    ConversationRouteBody,
     ConversationTurnRef,
     OverlapPolicy,
     TurnSupersededError,
@@ -65,13 +67,13 @@ def _agent_route(policy: OverlapPolicy, *, door: str = "channel", route_name: st
         kwargs |= {"channel": "twilio", "our_identity": _OUR}
     else:
         kwargs |= {"callback_url": "https://cb.example/x", "callback_secret": "sec-1"}
-    return ConversationRoute(**kwargs)
+    return ConversationRouteBody.model_validate(kwargs).root
 
 
 def _tool_route(
     policy: OverlapPolicy, *, start_expr: str | None = None, route_name: str = "tool-line"
 ) -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="tool",

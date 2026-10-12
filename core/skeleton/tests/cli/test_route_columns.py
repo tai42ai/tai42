@@ -165,3 +165,33 @@ def test_no_silent_hand_fallback_where_a_model_exists() -> None:
         if unconsumed:
             offenders.append(f"{label}: hand-written emit_records but derivable route(s) exist: {sorted(unconsumed)}")
     assert not offenders, f"silent hand-fallback where a response model could derive the columns: {offenders}"
+
+
+def test_a_union_of_row_models_sharing_one_field_list_renders_those_fields() -> None:
+    from typing import Annotated, Literal
+
+    from pydantic import BaseModel, Field
+
+    gen = _load_generator()
+
+    class _First(BaseModel):
+        kind: Literal["first"]
+        name: str
+
+    class _Second(BaseModel):
+        kind: Literal["second"]
+        name: str
+
+    class _Other(BaseModel):
+        label: str
+
+    shared = Annotated[_First | _Second, Field(discriminator="kind")]
+
+    class _Shared(BaseModel):
+        items: list[shared]  # type: ignore[valid-type]
+
+    class _Mixed(BaseModel):
+        items: list[_First | _Other]
+
+    assert gen._shape_of(_Shared) == gen.RouteShape(items_key="items", columns=("kind", "name"))
+    assert gen._shape_of(_Mixed) is None

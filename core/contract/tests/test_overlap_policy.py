@@ -1,7 +1,7 @@
 """Contract tests for the overlap policy, the supersede signal, and the answer overlap outcomes.
 
 Pin the :class:`OverlapPolicy` defaults, its field bounds, its cross-field validator both ways,
-its serialization round-trip and its carriage on :class:`ConversationRouteCreate`; the
+its serialization round-trip and its carriage on a route create body; the
 :class:`TurnSupersededError` payload; and the :class:`ConversationAnswer` ``merged``/``superseded``
 outcomes with their ``successor_id`` rules — the shapes the skeleton store, the CLI and the Studio
 consume.
@@ -13,8 +13,8 @@ import pytest
 from pydantic import ValidationError
 
 from tai42_contract.conversations import (
+    ApiConversationRouteCreate,
     ConversationAnswer,
-    ConversationRouteCreate,
     OverlapPolicy,
     TurnSupersededError,
 )
@@ -137,28 +137,28 @@ def _route_kwargs(**overrides: object) -> dict[str, object]:
 
 
 def test_route_defaults_to_the_default_policy():
-    route = ConversationRouteCreate(**_route_kwargs())  # type: ignore[arg-type]
+    route = ApiConversationRouteCreate(**_route_kwargs())  # type: ignore[arg-type]
     assert route.overlap == OverlapPolicy()
 
 
 def test_route_carries_an_explicit_policy_and_round_trips():
     policy = OverlapPolicy(running="cancel", deliver="all", settle_seconds=7)
-    route = ConversationRouteCreate(**_route_kwargs(overlap=policy))  # type: ignore[arg-type]
+    route = ApiConversationRouteCreate(**_route_kwargs(overlap=policy))  # type: ignore[arg-type]
     assert route.overlap == policy
-    restored = ConversationRouteCreate.model_validate_json(route.model_dump_json())
+    restored = ApiConversationRouteCreate.model_validate_json(route.model_dump_json())
     assert restored.overlap == policy
 
 
 def test_route_with_no_overlap_key_validates_to_the_default():
     # A route body with no ``overlap`` key validates to the default policy — pydantic fills it in.
     body = _route_kwargs()
-    route = ConversationRouteCreate.model_validate(body)
+    route = ApiConversationRouteCreate.model_validate(body)
     assert route.overlap == OverlapPolicy()
 
 
 def test_route_rejects_an_invalid_nested_policy():
     with pytest.raises(ValidationError):
-        ConversationRouteCreate(**_route_kwargs(overlap={"deliver": "one", "settle_seconds": 5}))  # type: ignore[arg-type]
+        ApiConversationRouteCreate(**_route_kwargs(overlap={"deliver": "one", "settle_seconds": 5}))  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------- TurnSupersededError

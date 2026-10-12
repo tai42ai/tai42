@@ -7,7 +7,9 @@ a query string. Two halves:
 - :func:`create_claim_link` (authed) resolves a submitted key through the SAME verifier
   chain the gate uses, applies the ownership rule, and writes a single-use record at
   ``ac:claim:<sha256(token)>`` with ``SET ... EX <ttl> NX``. The response returns the
-  claim TOKEN once and a fragment-carrier PATH (``/login#claim=<token>``) — the token
+  claim TOKEN once and a fragment-carrier PATH on the declared hosted-UI login page
+  (``<HOSTED_UI_LOGIN_PATH>#<HOSTED_UI_CLAIM_FRAGMENT_KEY>=<token>``, ``/login#claim=<token>``
+  by default) — the token
   rides the URL FRAGMENT (never a query param, never a header echo), so it never reaches
   a server access log.
 - :func:`exchange_claim_token` (public) burns the record with an atomic ``GETDEL`` — the
@@ -51,6 +53,7 @@ from tai42_skeleton.access_control.policy import policy_enforcer
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
 from tai42_skeleton.access_control.standing import StandingDenied, resolve_standing
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
+from tai42_skeleton.plugins.settings import hosted_ui_settings
 from tai42_skeleton.utils.redis_typing import awaited
 
 logger = logging.getLogger(__name__)
@@ -127,7 +130,8 @@ async def create_claim_link(
     ``ac:claim:<sha256(token)>`` with ``SET ... EX <ttl> NX`` (the raw token is never
     stored). ``ttl_seconds`` defaults to the settings default and is capped at the
     settings ceiling; an over-cap request is a loud 400 (never a silent clamp). Returns
-    ``{"claim_path": "/login#claim=<token>", "token": <token>, "expires_at": <iso8601>}``
+    ``{"claim_path": "<login_path>#<claim_fragment_key>=<token>", "token": <token>, "expires_at": <iso8601>}``
+    (the declared ``HOSTED_UI_*`` addresses)
     — the token rides the URL fragment, and the server returns a PATH, not an absolute
     URL (it does not know the public origin behind a reverse proxy).
     """
@@ -166,7 +170,9 @@ async def create_claim_link(
     expires_at = (datetime.now(UTC) + timedelta(seconds=ttl)).isoformat()
     # Never the token or the key — the caller and the target identity only.
     logger.info("access_control: claim link created by %s for user %s (ttl=%ss)", caller_id, resolved_user_id, ttl)
-    return {"claim_path": f"/login#claim={token}", "token": token, "expires_at": expires_at}
+    hosted_ui = hosted_ui_settings()
+    claim_path = f"{hosted_ui.login_path}#{hosted_ui.claim_fragment_key}={token}"
+    return {"claim_path": claim_path, "token": token, "expires_at": expires_at}
 
 
 def _resolve_ttl(settings: AccessControlSettings, ttl_seconds: int | None) -> int:

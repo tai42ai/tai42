@@ -65,9 +65,16 @@ def _is_model(annotation: Any) -> bool:
 
 def _row_columns(item_type: Any) -> tuple[str, ...] | None:
     """The columns for a list whose element is ``item_type``, or ``None`` when the
-    element is an open object (``dict``/``JsonValue``), a union, or a nested
-    ``RootModel`` — a row shape the table cannot flatten."""
+    element is an open object (``dict``/``JsonValue``), a nested ``RootModel``, or a
+    union whose members are not row models sharing one field list — a row shape the
+    table cannot flatten. A union of row models with the same fields in the same order
+    (a discriminated union whose variants keep every field) renders those fields."""
     item_type = _unwrap_annotated(item_type)
+    if typing.get_origin(item_type) in (types.UnionType, typing.Union):
+        member_columns = {_row_columns(member) for member in typing.get_args(item_type)}
+        if len(member_columns) == 1 and None not in member_columns and ("value",) not in member_columns:
+            return member_columns.pop()
+        return None
     if _is_model(item_type):
         if issubclass(item_type, RootModel):
             return None

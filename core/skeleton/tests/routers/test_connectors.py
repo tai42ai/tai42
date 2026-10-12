@@ -176,6 +176,40 @@ async def test_start_connect_oauth(wiring, monkeypatch):
     assert _data(resp)["data"] == {"flow_id": "f1", "authorize_url": "https://gh/auth"}
 
 
+async def test_connect_doors_pass_an_omitted_return_url_through_unresolved(wiring, monkeypatch):
+    # The connection service resolves an omitted return_url to the declared connectors page;
+    # the HTTP door passes the omission through.
+    seen: dict[str, object] = {}
+
+    async def _capture(**kw):
+        seen[kw.get("connection_id", "start")] = kw["return_url"]
+        return StartConnectResult(flow_id="f1", authorize_url="https://gh/auth")
+
+    monkeypatch.setattr(conn_ops, "load_record_or_none", _acall({"c1": _record()}))
+    monkeypatch.setattr(router.connection_service, "start_connect", _capture)
+    monkeypatch.setattr(router.connection_service, "start_reconnect", _capture)
+    await router.start_connect(_req({"provider_id": "github", "alias": "work", "enabled_sub_services": ["repo"]}))
+    await router.reconnect(_req({"enabled_sub_services": ["repo"]}, connection_id="c1"))
+    assert seen == {"start": None, "c1": None}
+
+    async def _patch(**kw):
+        seen["patch"] = kw["return_url"]
+        return PatchResult(
+            connection_id="c1",
+            enabled_sub_services=["repo"],
+            consent_required=True,
+            flow_id="f2",
+            authorize_url="https://gh/auth",
+            added_manifest_entries=[],
+            removed_manifest_entries=[],
+            fanout=None,
+        )
+
+    monkeypatch.setattr(router.connection_service, "patch_sub_services", _patch)
+    await router.patch_sub_services(_req({"enabled_sub_services": ["repo"]}, connection_id="c1"))
+    assert seen["patch"] is None
+
+
 async def test_start_connect_no_auth(wiring, monkeypatch):
     async def _start(**kw):
         return NoAuthConnectResult(connection_id="c9", added_manifest_entries=["e"], fanout=_FANOUT)

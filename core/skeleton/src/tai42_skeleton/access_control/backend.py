@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from starlette.authentication import AuthCredentials, AuthenticationBackend, AuthenticationError, UnauthenticatedUser
+from tai42_contract.access_control import API_KEY_HEADER
 
 from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
 from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer, render_condition
@@ -64,7 +65,7 @@ def _log_standing_denial(denied: StandingDenied) -> None:
 def extract_credential_candidates(conn) -> list[str]:
     """Every presented credential candidate in the backend's priority order.
 
-    ``Authorization`` Bearer (or a raw ``Authorization`` value with no scheme) first, then ``X-Api-Key``.
+    ``Authorization`` Bearer (or a raw ``Authorization`` value with no scheme) first, then the api-key header.
     Returns the FULL list, not the first match — the logout dispatcher fans out over all of them so a stale
     value in one header cannot hide a live session in the other. Any non-bearer scheme (Basic, Digest, …)
     is never a candidate.
@@ -82,7 +83,7 @@ def extract_credential_candidates(conn) -> list[str]:
             if token:
                 candidates.append(token)
 
-    api_key = conn.headers.get("X-Api-Key")
+    api_key = conn.headers.get(API_KEY_HEADER)
     if api_key:
         candidates.append(api_key)
 

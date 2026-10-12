@@ -35,6 +35,11 @@ from tai42_skeleton.interactions.answer_check import check_answer
 from tai42_skeleton.interactions.question_format import QuestionArguments, question_format
 from tai42_skeleton.interactions.settings import InteractionsSettings
 
+# Imported at collection, before any test boots a manifest onto the shared app: a builtin's
+# registration decorators resolve its module against the bound app's manifest.
+with tai42_app.bound(app):
+    from tai42_skeleton.tools.builtin import interactions as builtin
+
 _FORM_SCHEMA = {
     "type": "object",
     "properties": {"mode": {"type": "string", "enum": ["a", "b"]}, "count": {"type": "integer"}},
@@ -169,9 +174,6 @@ def test_a_value_of_the_wrong_shape_is_a_value_error(answer_format: str, argumen
 
 
 def test_the_view_takes_the_ask_tool_own_argument_types() -> None:
-    with tai42_app.bound(app):
-        from tai42_skeleton.tools.builtin import interactions as builtin
-
     ask_hints = get_type_hints(builtin.ask)
     assert get_type_hints(QuestionArguments) == {name: ask_hints[name] for name in get_type_hints(QuestionArguments)}
 

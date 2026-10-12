@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
 from tai42_contract.access_control.identity import IdentityProvider
+from tai42_contract.access_control.models import PrincipalKind
 from tai42_contract.accounts.models import (
     LoginAttachment,
     LoginCredential,
@@ -34,7 +35,7 @@ class AccountsAdminServices(Protocol):
         self,
         user_id: str,
         *,
-        kind: Literal["human", "service"],
+        kind: PrincipalKind,
         display_name: str,
         created_by: str | None,
         role: str,

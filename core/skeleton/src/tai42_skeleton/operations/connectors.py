@@ -404,9 +404,9 @@ async def start_connect(
     alias: str,
     enabled_sub_services: list[str],
     config_values: dict[str, str],
-    return_url: str,
     redirect_uri: str,
     origin: str,
+    return_url: str | None = None,
 ) -> dict[str, Any]:
     """Begin a Connect (OAuth authorize URL, or an immediate no-auth connection)."""
     # OFF gate: opening a flow needs the store to persist the connection — refuse
@@ -480,9 +480,9 @@ async def disconnect(connection_id: str) -> dict[str, Any]:
 async def reconnect(
     connection_id: str,
     enabled_sub_services: list[str],
-    return_url: str,
     redirect_uri: str,
     origin: str,
+    return_url: str | None = None,
 ) -> dict[str, Any]:
     """Re-run the OAuth flow for an existing connection; an unknown id is a 404."""
     # OFF gate: with no store no connection can exist — a 404 byte-identical to the
@@ -525,9 +525,9 @@ async def reconnect(
 async def patch_sub_services(
     connection_id: str,
     enabled_sub_services: list[str],
-    return_url: str,
     redirect_uri: str,
     origin: str,
+    return_url: str | None = None,
 ) -> dict[str, Any]:
     """Toggle a connection's enabled sub-services; an unknown id is a 404."""
     # OFF gate: with no store no connection can exist — a 404 byte-identical to the

@@ -12,6 +12,43 @@ from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, ConditionMixin, T
 UNIVERSAL_SCOPE: Final = "*"
 """The resource wildcard: a scope set holding it covers every resource id."""
 
+PrincipalKind = Literal["human", "service"]
+"""A principal's kind: ``human`` authenticates through an accounts provider; ``service`` holds keys only."""
+
+API_KEY_HEADER: Final = "x-api-key"
+"""The request header an api key may travel in (header lookup is case-insensitive)."""
+
+PATH_COVERAGE_VECTORS: Final[tuple[dict[str, str | bool], ...]] = (
+    {"prefix": "/api/a", "path": "/api/a", "covered": True},
+    {"prefix": "/api/a", "path": "/api/a/b", "covered": True},
+    {"prefix": "/api/a", "path": "/api/a/b/c", "covered": True},
+    {"prefix": "/api/a", "path": "/api/ab", "covered": False},
+    {"prefix": "/api/a/b", "path": "/api/a", "covered": False},
+    {"prefix": "/api/a", "path": "/api/b", "covered": False},
+    {"prefix": "/api/A", "path": "/api/a/b", "covered": False},
+    {"prefix": "/api/a", "path": "/api", "covered": False},
+)
+"""Conformance rows for path coverage over canonical paths: a path is covered by a prefix when it
+is the prefix itself or a path-segment descendant (``path == prefix or path.startswith(prefix + "/")``)."""
+
+PATTERN_OPEN_PREFIX_VECTORS: Final[tuple[dict[str, str | None], ...]] = (
+    {"pattern": "^/api/x/.*$", "open_prefix": "/api/x/"},
+    {"pattern": "^/api/x/.*", "open_prefix": "/api/x/"},
+    {"pattern": "^/api/x.*$", "open_prefix": "/api/x"},
+    {"pattern": "/api/x/.*$", "open_prefix": None},
+    {"pattern": "^/api/x/$", "open_prefix": None},
+    {"pattern": "^/api/x/.+$", "open_prefix": None},
+    {"pattern": "^.*$", "open_prefix": None},
+    {"pattern": "^/api/(a|b)/.*$", "open_prefix": None},
+    {"pattern": "^/api/x/[0-9]+.*$", "open_prefix": None},
+    {"pattern": r"^/api/x\.y/.*$", "open_prefix": None},
+    {"pattern": r"^/app/my\-slug/.*$", "open_prefix": None},
+    {"pattern": "^/app/my_slug1/.*$", "open_prefix": "/app/my_slug1/"},
+)
+"""Conformance rows for the open prefix the server serves beside a stored route pattern: only an
+anchored open wildcard over a metacharacter-free literal (``^<literal>.*``, ``$`` optional) has one,
+meaning every path starting with the literal matches; every other pattern has none (``None``)."""
+
 # The access-control surfaces' STRICT-TRUE override of the generic condition
 # payload. Unlike the truthy surfaces (hook registration, backend callbacks), the
 # enforcer admits a policy/role condition ONLY when it evaluates to boolean
@@ -68,7 +105,7 @@ class Principal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     user_id: str
-    kind: Literal["human", "service"]
+    kind: PrincipalKind
     display_name: str
     created_by: str | None = None
     disabled: bool = False

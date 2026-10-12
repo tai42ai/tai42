@@ -23,7 +23,7 @@ from typing import Any
 from urllib.parse import quote
 
 import typer
-from tai42_contract.manifest import ExtensionElement
+from tai42_contract.manifest import ExtensionElement, normalize_extension_element
 
 from tai42_cli.commands._route_columns import ROUTE_TABLE_SHAPES
 from tai42_cli.context import AppContext
@@ -113,38 +113,18 @@ def parse_json_value(value: str, *, param_hint: str) -> Any:
 
 
 def parse_extension_element(element: Any, *, param_hint: str) -> ExtensionElement:
-    """One combo element in the lossless extension-combo syntax, structurally validated.
+    """One combo element in the lossless extension-combo syntax, structurally validated by the contract.
 
     It is a non-empty extension NAME (a bare JSON string), or a
-    ``{"name": <non-empty str>, "config": <object>}`` object binding author config to it
-    (``config`` is REQUIRED — the config-less selection is the bare-string form, so a
-    config-free object is malformed) with no other keys.
-
-    This mirrors the ``ExtensionElement`` contract the
-    ``/api/tools/{name}/extensions`` and ``/api/presets`` doors accept, so a combo
-    authored on the CLI round-trips losslessly to the wire. Anything else raises a
-    usage error — a malformed element is never silently dropped.
+    ``{"name": <non-empty str>, "config": <object>}`` object binding author config to it with no
+    other keys — the ``ExtensionElement`` the ``/api/tools/{name}/extensions`` and ``/api/presets``
+    doors accept, so a combo authored on the CLI round-trips losslessly to the wire. Anything else
+    raises a usage error.
     """
-    if isinstance(element, str):
-        if not element:
-            raise typer.BadParameter("an extension name must be a non-empty string", param_hint=param_hint)
-        return element
-    if isinstance(element, dict):
-        name = element.get("name")
-        if not isinstance(name, str) or not name:
-            raise typer.BadParameter("an extension element must have a non-empty string 'name'", param_hint=param_hint)
-        config = element.get("config")
-        if not isinstance(config, dict):
-            raise typer.BadParameter(f"extension element {name!r} must carry a 'config' mapping", param_hint=param_hint)
-        extra = set(element) - {"name", "config"}
-        if extra:
-            raise typer.BadParameter(
-                f"extension element {name!r} has unexpected keys: {sorted(extra)!r}", param_hint=param_hint
-            )
-        return {"name": name, "config": dict(config)}
-    raise typer.BadParameter(
-        "each combo element must be an extension name or a {'name', 'config'} object", param_hint=param_hint
-    )
+    try:
+        return normalize_extension_element(element)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint=param_hint) from exc
 
 
 def parse_extension_combo(value: str, *, param_hint: str) -> list[ExtensionElement]:

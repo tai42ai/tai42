@@ -168,6 +168,33 @@ def test_builtin_rows_match_registrations() -> None:
         )
 
 
+_BUILTIN_PACKAGES = (
+    "tai42_skeleton.tools.builtin",
+    "tai42_skeleton.extensions.builtin",
+    "tai42_skeleton.webhooks.builtin",
+)
+
+
+def _builtin_modules() -> list[str]:
+    import importlib.util
+    import pkgutil
+
+    modules: list[str] = []
+    for package in _BUILTIN_PACKAGES:
+        spec = importlib.util.find_spec(package)
+        assert spec is not None
+        assert spec.submodule_search_locations is not None
+        modules.extend(f"{package}.{info.name}" for info in pkgutil.iter_modules(spec.submodule_search_locations))
+    return modules
+
+
+def test_every_builtin_registration_has_a_row() -> None:
+    # Two-way pin: every builtin registration has a row, and every row is a registration.
+    registered = set().union(*(_registrations(module) for module in _builtin_modules()))
+    rows = {(row["kind"], row["name"]) for row in catalog._BUILTIN_ROWS}
+    assert registered == rows
+
+
 def test_load_catalog_projects_marketplace_items(monkeypatch: pytest.MonkeyPatch) -> None:
     items = [
         {
