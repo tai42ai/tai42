@@ -1,5 +1,7 @@
 """Boot rules: the SUT refuses to start every busless deployment shape that needs the
-worker bus, and the refusal is loud and NAMES ``TAI_BUS_REDIS_URL``.
+worker bus, and the refusal is loud and NAMES ``TAI_BUS_REDIS_URL``; it also refuses a
+bus-enabled config whose fleet apply window is below the retire's drain floor, naming
+both settings and the floor.
 
 Each refusal spawns a REAL entrypoint (``tai serve`` / ``tai backend worker`` / a
 factory-string ``uvicorn``) against a bus-requiring config with no
@@ -191,6 +193,42 @@ def test_factory_string_backend_without_bus_refuses(tmp_path: Path) -> None:
     stderr = spawn_expect_refusal(argv, env, config_dir)
     assert _BUS_VAR in stderr, stderr
     assert "task backend" in stderr, stderr
+
+
+@pytest.mark.needs(
+    "no-stack",
+    "process",
+    "cli",
+    "files",
+    "setting:TAI_BUS_APPLY_TIMEOUT=20",
+    "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=unset",
+)
+def test_apply_window_below_the_drain_floor_refuses(tmp_path: Path) -> None:
+    """A6: ``tai serve`` with the bus configured, a 20 s fleet apply window and the default
+    10 s drain budget refuses nonzero: a reload's retire may legally spend three drains
+    (30 s), so the refusal names both settings and the floor. The rule fires at the
+    ``app_context`` seam before the process joins the bus, so the configured bus URL is
+    never dialled."""
+    config_dir, manifest = _seed_config(tmp_path, backend=False)
+    env = _busless_env(tmp_path, config_dir, manifest)
+    env[_BUS_VAR] = "redis://127.0.0.1:1/0"
+    env["TAI_BUS_APPLY_TIMEOUT"] = "20"
+    argv = [
+        tai_bin(),
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--workers",
+        "1",
+        "--manifest-path",
+        str(manifest),
+    ]
+    stderr = spawn_expect_refusal(argv, env, config_dir)
+    assert "TAI_BUS_APPLY_TIMEOUT=20" in stderr, stderr
+    assert "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=10" in stderr, stderr
+    assert "30 s" in stderr, stderr
 
 
 @pytest.mark.needs("process", "store:redis", "setting:TAI_BUS_REDIS_URL=unset")
