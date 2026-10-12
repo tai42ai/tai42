@@ -410,7 +410,7 @@ async def test_reaction_error_message_uses_the_field_title_not_the_key(
     }
     request, aes_key, iv = _request(payload)
     out = _decrypt_response(await flow_handler(request), aes_key, iv)
-    # The guest reads the human label the field renders, not the raw schema key.
+    # The recipient reads the human label the field renders, not the raw schema key.
     assert out["data"]["error_message"] == "Quantity: must be at least 1"
 
 
