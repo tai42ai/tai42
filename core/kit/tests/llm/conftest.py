@@ -86,7 +86,7 @@ def install_fake_named_pool(monkeypatch) -> tuple[dict[str, Any], list[bool]]:
     assert the pool build (conninfo, sizes, name, per-connection kwargs) and its awaited
     fill without a live server.
 
-    The store/checkpoint factories now build their pool through
+    The store/checkpoint factories build their pool through
     ``tai42_kit.clients.impl.postgres._open_named_pool``, which probes the first
     connection with the real driver before it builds the pool. Faking the driver's
     ``connect`` and the kit pool class on that module exercises the shared seam

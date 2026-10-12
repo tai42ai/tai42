@@ -41,9 +41,10 @@ class _CancelSurfacingPool(AsyncConnectionPool[AsyncConnection[TupleRow]]):
     ``CancelledError`` raised inside that check as a failed check: it returns the connection and
     hands out another, so the cancelled task would carry on as if never cancelled. ``getconn``
     (which ``connection()`` calls) compares the task's ``cancelling()`` count before and after
-    the checkout; a cancellation requested in between is re-raised once the connection is back
-    in the pool. A cancellation delivered and handled before the checkout leaves the count
-    unchanged, so that task still gets its connection.
+    the checkout; a cancellation requested in between is re-raised whether the checkout returns
+    (once the connection is back in the pool) or fails (chained to the checkout's own error). A
+    cancellation delivered and handled before the checkout leaves the count unchanged, so that
+    task still gets its connection.
 
     The type parameter is the pool's default connection type, so the pooled-client generic
     resolves concretely.
@@ -52,7 +53,12 @@ class _CancelSurfacingPool(AsyncConnectionPool[AsyncConnection[TupleRow]]):
     async def getconn(self, timeout: float | None = None) -> AsyncConnection[TupleRow]:
         task = asyncio.current_task()
         cancelling_before = task.cancelling() if task is not None else 0
-        conn = await super().getconn(timeout)
+        try:
+            conn = await super().getconn(timeout)
+        except Exception as exc:
+            if task is not None and task.cancelling() > cancelling_before:
+                raise asyncio.CancelledError from exc
+            raise
         if task is not None and task.cancelling() > cancelling_before:
             await self.putconn(conn)
             raise asyncio.CancelledError
