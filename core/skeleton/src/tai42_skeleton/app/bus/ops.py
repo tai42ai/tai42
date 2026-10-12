@@ -27,6 +27,7 @@ __all__ = [
     "ReloadMcp",
     "ReloadTool",
     "RemoveTool",
+    "ReprobeFailedMcps",
     "fleet_op_wire",
 ]
 
@@ -89,6 +90,14 @@ class ReloadFailedMcps(_FleetOp):
     effects: ClassVar[frozenset[FleetOpEffect]] = _REGISTRY
 
 
+class ReprobeFailedMcps(_FleetOp):
+    """Re-probe the named MCP servers that failed to mount, mounting each that answers now."""
+
+    op: Literal["reprobe_failed_mcps"]
+    titles: list[str]
+    effects: ClassVar[frozenset[FleetOpEffect]] = _REGISTRY
+
+
 class ListFailedMcps(_FleetOp):
     """Report the MCP servers that failed to mount; changes nothing."""
 
@@ -126,6 +135,7 @@ FleetOp = Annotated[
     | ReloadTool
     | RemoveTool
     | ReloadFailedMcps
+    | ReprobeFailedMcps
     | ListFailedMcps
     | EvictTemplate
     | ClearTemplateCache
