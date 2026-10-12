@@ -12,7 +12,7 @@ it loaded: a writer that lost the race raises
 The lifecycle operations reach their external collaborators through this package
 namespace (``get_provider``, ``token_store``, ``load_record``,
 ``load_record_with_blob``, ``connection_lock``, ``clear_refresh_cooldown``,
-``ConfigService``, and the ``state`` / ``manifest_writer`` modules): the operation
+``ConfigService``, ``broadcast``, and the ``state`` / ``manifest_writer`` modules): the operation
 modules read them as attributes here at call time, so overriding one on this package
 object reaches every operation. They are bound before the operation modules are
 imported so the attributes exist as those modules bind against this package.
@@ -34,6 +34,7 @@ from tai42_skeleton.connectors.store import token_store as token_store
 from tai42_skeleton.connectors.store.persistence import ConnectionNotFoundError as ConnectionNotFoundError
 from tai42_skeleton.connectors.store.persistence import load_record as load_record
 from tai42_skeleton.connectors.store.persistence import load_record_with_blob as load_record_with_blob
+from tai42_skeleton.operations._broadcast import broadcast as broadcast
 
 from .complete import complete_connect
 from .disconnect import disconnect

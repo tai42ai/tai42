@@ -67,6 +67,7 @@ def _stub_core() -> Any:
         _extension_registry=MagicMock(),
         _failed_mcps={},
         _mcp_bound_tools={},
+        _mcp_unusable_tools={},
         _mcp_preset_conflicts={},
         _resource_manager_cache=None,
         _fast_mcp=SimpleNamespace(local_provider=SimpleNamespace(remove_tool=lambda name: None)),
@@ -531,3 +532,117 @@ async def test_clean_return_of_perpetual_task_marks_returned(monkeypatch, caplog
     assert m._dead_perpetual_task == ("tai-interactions-expiry-reaper", "returned")
     assert exits == [os.getpid()]
     assert "returned unexpectedly" in caplog.text
+
+
+# -- the set-scoped re-probe of named titles -------------------------------------
+
+
+async def test_reprobe_failed_titles_probes_only_the_named_failed_titles_in_the_manifest():
+    """Exactly the named titles that are failed AND in the manifest are probed; a recovered one is bound and
+    leaves the failed set, a still-down one stays failed, and a named title that is bound or not in the
+    manifest is never probed."""
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg(t).model_dump() for t in ("up", "down", "bound", "other")]})
+    m._failed_mcps = {"up": _row(), "down": _row(), "other": _row(), "gone": _row()}
+    probed: list[str] = []
+
+    async def probe(config, timeout=None):
+        probed.append(config.title)
+        if config.title == "down":
+            raise TimeoutError("still down")
+        return [_FakeMcpTool()]
+
+    m._probe_mcp = probe  # type: ignore[method-assign]
+
+    results = await m._reprobe_failed_titles(["up", "down", "bound", "gone"])
+
+    assert sorted(probed) == ["down", "up"]
+    assert sorted((r["title"], r["status"]) for r in results) == [("down", "unavailable"), ("up", "ok")]
+    assert m._mcp_bound_tools.get("up") == {"up_t"}
+    assert set(m._failed_mcps) == {"down", "other", "gone"}
+
+
+async def test_reprobe_failed_titles_with_no_failed_title_probes_nothing():
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    m._failed_mcps = {}
+    m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
+
+    assert await m._reprobe_failed_titles(["svc"]) == []
+    m._probe_mcp.assert_not_awaited()
+
+
+async def test_reprobe_failed_titles_probes_off_the_gate_on_the_cold_boot_budget():
+    """The named re-probe holds the reload gate only to snapshot and apply, never across the probe."""
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    m._failed_mcps = {"svc": _row()}
+    probing = asyncio.Event()
+    release = asyncio.Event()
+    seen: dict[str, Any] = {}
+
+    async def parked_probe(_config, timeout=None):
+        seen["timeout"] = timeout
+        probing.set()
+        await release.wait()
+        return [_FakeMcpTool()]
+
+    m._probe_mcp = parked_probe  # type: ignore[method-assign]
+
+    task = asyncio.create_task(m._reprobe_failed_titles(["svc"]))
+    try:
+        await asyncio.wait_for(probing.wait(), timeout=5)
+
+        async def gated_write() -> str:
+            async with reload_gate.synchronized():
+                return "ok"
+
+        assert await asyncio.wait_for(gated_write(), timeout=1) == "ok"
+        assert seen["timeout"] == mcp_probe_timeout()
+        assert seen["timeout"] != mcp_reload_probe_timeout()
+    finally:
+        release.set()
+    assert [r["status"] for r in await task] == ["ok"]
+    assert "svc" not in m._failed_mcps
+
+
+async def test_reprobe_failed_titles_leaves_the_loop_backoff_alone(monkeypatch):
+    """A title the named re-probe recovered is simply absent from the loop's next snapshot; the loop's
+    interval goes on from where it was."""
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("a").model_dump(), _cfg("b").model_dump()]})
+    m._failed_mcps = {"a": _row(), "b": _row()}
+    monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
+    loop_probed: list[list[str]] = []
+    up: set[str] = set()
+
+    async def probe(config, timeout=None):
+        if config.title not in up:
+            raise TimeoutError("down")
+        return [_FakeMcpTool()]
+
+    m._probe_mcp = probe  # type: ignore[method-assign]
+    original = m._probe_and_apply_failed
+
+    async def recording(snapshot):
+        loop_probed.append(sorted(snapshot))
+        return await original(snapshot)
+
+    intervals: list[float] = []
+
+    async def fake_sleep(seconds):
+        intervals.append(seconds)
+        if len(intervals) == 2:
+            # Between the loop's passes ``b`` comes back and the named re-probe binds it.
+            up.add("b")
+            await m._reprobe_failed_titles(["b"])
+            m._probe_and_apply_failed = recording  # type: ignore[method-assign]
+        if len(intervals) == 4:
+            raise _Stop
+
+    m._reprobe_sleep = fake_sleep  # type: ignore[method-assign]
+    with pytest.raises(_Stop):
+        await m._reprobe_failed_mcps_loop()
+
+    assert loop_probed == [["a"], ["a"]]
+    assert intervals == [1.0, 2.0, 4.0, 8.0]

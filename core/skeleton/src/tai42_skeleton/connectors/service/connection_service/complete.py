@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import SecretStr
+from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import AuthHealthState, ConnectionGrant, ConnectionRecord
 from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.connectors.service import CompleteConnectResult
@@ -254,6 +255,13 @@ async def _complete_reconnect_or_toggle(
     The old refresh token is kept, when the answer carries none, only if the new grant has the
     record's issuer and client; otherwise the record takes the answer's tokens as they are. A
     successful reconnect clears ``scopes_wanted``. Reconciles its managed manifest entries.
+
+    A reconnect restores a credential the last listing may have failed on: once the record is
+    persisted and the manifest reconciled, the connection's failed entries are re-probed on every
+    worker now, not at the re-probe loop's next pass (a ``reprobe_failed_mcps`` fleet op; a worker
+    where they are bound does nothing). The record is already persisted, so the siblings are asked
+    even when this worker's pass fails, and that failure then raises
+    :class:`~tai42_skeleton.operations._broadcast.FleetBroadcastError`.
     """
     cid = flow_state.reconnect_connection_id
     if not cid:
@@ -325,7 +333,7 @@ async def _complete_reconnect_or_toggle(
             )
 
         # The pipeline runs only when the manifest changes (it writes and reloads whatever it is
-        # given); with no change there is no broadcast to report and the fanout is honestly ``None``.
+        # given), and its fan-out is reported only then; the re-probe below is always asked for.
         # The whole enabled set is reconciled, so an owned entry the run-time check refuses (it fell
         # behind its descriptor) is rewritten by the reconnect.
         config_service = _svc.ConfigService.from_app()
@@ -339,6 +347,14 @@ async def _complete_reconnect_or_toggle(
         fanout: dict[str, Any] | None = None
         if to_remove or pending:
             fanout = (await config_service.apply_change(reconcile)).fanout
+
+    titles = [manifest_writer.managed_title(descriptor.id, sub_service, record.alias) for sub_service in new_enabled]
+    await _svc.broadcast(
+        {"op": "reprobe_failed_mcps", "titles": titles},
+        None,
+        lambda: tai42_app.admin.reprobe_failed_mcps(titles),
+        publish_on_local_failure=True,
+    )
 
     return CompleteConnectResult(
         connection_id=cid,

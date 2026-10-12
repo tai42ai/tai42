@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 from tai42_contract.manifest import TaiMCPConfig
@@ -110,6 +111,30 @@ class McpReprobeMixin(LifecycleState):
             still_failed = set(self._failed_mcps)
         return out, still_failed
 
+    async def _reprobe_failed_titles(self, titles: Iterable[str]) -> list[dict[str, Any]]:
+        """Re-probe, now, those of ``titles`` that are failed and in the manifest; bind the recovered ones.
+
+        The set-scoped pass the background loop runs, for named titles: the snapshot is taken under the
+        reload gate, the probe runs off it on the cold-boot probe budget, and the gate is taken again only to bind
+        (each title re-verified still failed and still in the manifest). A named title that is bound, or
+        not in the manifest, is not probed. The loop's own backoff is left as it is; a title recovered here
+        is simply absent from its next snapshot. Returns the per-title results (empty when nothing was
+        probed).
+        """
+        async with reload_gate.synchronized():
+            manifest = self._manifest
+            mcp_map = (manifest.mcp_map if manifest else {}) or {}
+            snapshot = {t: mcp_map[t] for t in titles if t in self._failed_mcps and t in mcp_map}
+        if not snapshot:
+            return []
+        results, _still_failed = await self._probe_and_apply_failed(snapshot)
+        logger.info(
+            "named failed-MCP re-probe: probed=%s recovered=%s",
+            sorted(snapshot),
+            sorted(r["title"] for r in results if r.get("status") == "ok"),
+        )
+        return results
+
     async def _bring_boot_credentials_up_to_date(self) -> None:
         """After boot's listing, refresh the credentials it could not, then re-probe the entries that now have one.
 
@@ -147,8 +172,8 @@ class McpReprobeMixin(LifecycleState):
         write for up to the probe timeout each pass. The interval starts at
         ``mcp_reprobe_initial_seconds``, doubles (capped at
         ``mcp_reprobe_max_seconds``) after a pass where every probed server stayed
-        down, and resets to the initial value the moment any server recovers or a
-        new one appears in the failed set. An empty failed set probes nothing.
+        down, and resets to the initial value after the pass that sees a recovery or
+        a fresh failure. An empty failed set probes nothing.
 
         A cancellation (shutdown) propagates for a clean exit; any other per-pass
         error is logged loudly and the loop survives to the next pass — a silently

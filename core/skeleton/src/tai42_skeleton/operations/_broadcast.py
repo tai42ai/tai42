@@ -18,10 +18,11 @@ Failure discipline splits the callers into two disciplines, selected by
   a failed local apply raises before anything is broadcast, so the siblings stay
   genuinely untouched.
 * Convergence and store-backed publishers (both ``reload_config`` doors, the
-  connector catalog write) pass ``True``: their persist/convergence intent has
-  already committed, so a failed local apply still broadcasts (siblings converge
-  on the persisted state) and then re-raises with the fleet report attached — a
-  stranded fleet never hides behind a local error.
+  connector catalog write, a completed reconnect's ``reprobe_failed_mcps``) pass
+  ``True``: their persist/convergence intent has already committed, so a failed
+  local apply still broadcasts (siblings converge on the persisted state) and then
+  re-raises with the fleet report attached — a stranded fleet never hides behind a
+  local error.
 
 A store-backed publisher whose apply can fail EITHER before it mutates the store
 (nothing to converge — a not-found, a rejected path) OR once destructive mutation

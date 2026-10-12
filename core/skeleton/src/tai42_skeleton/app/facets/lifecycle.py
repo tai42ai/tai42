@@ -90,6 +90,13 @@ class AdminFacet(_Facet):
         """Retry every sub-MCP app that failed to load and report each outcome."""
         return self._app._reload_failed_mcps()
 
+    async def reprobe_failed_mcps(self, titles: list[str]) -> list[dict[str, Any]]:
+        """Re-probe those of ``titles`` that failed to load, bind the recovered ones, and report each outcome.
+
+        Probes off the reload gate on the cold-boot probe budget and takes the gate only to bind.
+        """
+        return await self._app._reprobe_failed_titles(titles)
+
     def list_failed_mcps(self) -> list[dict[str, Any]]:
         """List the sub-MCP apps that failed to load."""
         return self._app._list_failed_mcps()

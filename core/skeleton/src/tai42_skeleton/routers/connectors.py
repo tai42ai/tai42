@@ -10,9 +10,13 @@ Routes (all AUTHED), prefixed ``/api/connectors``:
 - ``POST   /connections/{id}/reconnect``       — re-run the OAuth flow.
 - ``PATCH  /connections/{id}/sub-services``    — toggle enabled sub-services.
 - ``POST   /tokens/reencrypt``                 — re-encrypt all token and client blobs under the current KEK.
+- ``POST   /providers/discover``               — look an MCP server's sign-in up (admin only).
+- ``POST   /providers``                        — add an MCP server as a provider (admin only).
+- ``DELETE /providers/{id}``                   — remove a provider added by its address (admin only).
+- ``PUT    /providers/{id}/client``            — set a provider's client credentials (admin only).
 - ``POST   /oauth/complete``                   — finalize a callback (code + signed state).
 
-The first eight doors are thin adapters over the operations in
+Every door but the last is a thin adapter over the operations in
 ``tai42_skeleton.operations.connectors`` — no connector logic lives here. Each
 mutating door's body is parsed and validated at the HTTP edge into the operation's
 flat arguments (producing an explicit 400 surface), and the
@@ -44,7 +48,10 @@ from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import FanoutSummary
 from tai42_contract.connectors.errors import ConnectorClientRequiredError
 from tai42_contract.connectors.models import (
+    AddServerRequest,
+    DiscoverServerRequest,
     PatchSubServicesRequest,
+    SetConnectorClientRequest,
     StartConnectRequest,
     StartReconnectRequest,
 )
@@ -60,6 +67,10 @@ from tai42_skeleton.connectors.service import connection_service
 from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.adapter import validation_error_fields
+from tai42_skeleton.operations.connector_providers import add_connector_provider as _add_connector_provider_op
+from tai42_skeleton.operations.connector_providers import discover_connector_server as _discover_connector_server_op
+from tai42_skeleton.operations.connector_providers import remove_connector_provider as _remove_connector_provider_op
+from tai42_skeleton.operations.connector_providers import set_connector_client as _set_connector_client_op
 from tai42_skeleton.operations.connectors import disconnect as _disconnect_op
 from tai42_skeleton.operations.connectors import get_connection as _get_connection_op
 from tai42_skeleton.operations.connectors import list_connections as _list_connections_op
@@ -232,6 +243,51 @@ async def _extract_patch_sub_services(request: Request) -> dict:
     }
 
 
+def _parse_body[M: BaseModel](request_body: dict, model: type[M]) -> M:
+    try:
+        return model.model_validate(request_body)
+    except ValidationError as exc:
+        # Field paths + error types only — never the rejected input values (a body may carry a secret).
+        raise BadRequestError("invalid request body", extra={"fields": validation_error_fields(exc)}) from exc
+
+
+async def _body_of[M: BaseModel](request: Request, model: type[M]) -> M:
+    try:
+        body = await _json_body(request)
+    except _BadRequestError as exc:
+        raise BadRequestError(str(exc)) from exc
+    return _parse_body(body, model)
+
+
+async def _extract_discover(request: Request) -> dict:
+    req = await _body_of(request, DiscoverServerRequest)
+    return {"url": req.url, "provider_id": req.provider_id, "origin": compute_deployment_origin(request)}
+
+
+async def _extract_add_provider(request: Request) -> dict:
+    req = await _body_of(request, AddServerRequest)
+    return {
+        "url": req.url,
+        "provider_id": req.id,
+        "display_name": req.display_name,
+        "description": req.description,
+        "icon_url": req.icon_url,
+        "category": req.category,
+        "scopes": req.scopes,
+    }
+
+
+async def _extract_set_client(request: Request) -> dict:
+    req = await _body_of(request, SetConnectorClientRequest)
+    return {
+        "provider_id": request.path_params["provider_id"],
+        "client_id": req.client_id,
+        "client_secret": req.client_secret.get_secret_value() if req.client_secret is not None else None,
+        "token_endpoint_auth_method": req.token_endpoint_auth_method,
+        "issuer": req.issuer,
+    }
+
+
 # -- Providers / connections / connect flows (operation-backed) --------------
 
 
@@ -300,6 +356,44 @@ reencrypt_connector_tokens = register_operation_route(
     operation_metadata_of(_reencrypt_connector_tokens_op),
     path="/api/connectors/tokens/reencrypt",
     method="POST",
+    action="fenced",
+)
+
+
+# -- The provider door (operation-backed; administrators only) ----------------
+
+discover_provider_server = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_discover_connector_server_op),
+    path="/api/connectors/providers/discover",
+    method="POST",
+    context_extractor=_extract_discover,
+    action="fenced",
+)
+
+add_provider = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_add_connector_provider_op),
+    path="/api/connectors/providers",
+    method="POST",
+    context_extractor=_extract_add_provider,
+    action="fenced",
+)
+
+remove_provider = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_remove_connector_provider_op),
+    path="/api/connectors/providers/{provider_id}",
+    method="DELETE",
+    action="fenced",
+)
+
+set_provider_client = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_set_connector_client_op),
+    path="/api/connectors/providers/{provider_id}/client",
+    method="PUT",
+    context_extractor=_extract_set_client,
     action="fenced",
 )
 

@@ -52,6 +52,22 @@ def mcp_entry_items(spec: PluginSpec) -> list[PluginItem]:
     return items
 
 
+def connector_provider_ids(spec: PluginSpec) -> list[str]:
+    """The ids of the connector providers the spec writes into the manifest ``connectors`` list, in order."""
+    ids: list[str] = []
+    for item in spec.provides:
+        binding = KIND_MANIFEST_BINDINGS.get(item.kind)
+        provider = item.provider
+        if (
+            binding is not None
+            and binding.mode == "descriptor_entry"
+            and provider is not None
+            and provider.id not in ids
+        ):
+            ids.append(provider.id)
+    return ids
+
+
 def env_manifest_pointer(spec: PluginSpec) -> str:
     """The manifest field(s) the spec's DATA items bind into (``mcp`` / ``connectors``), joined.
 

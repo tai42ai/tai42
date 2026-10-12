@@ -48,6 +48,7 @@ REGISTRY_MUTATING_FLEET_OPS: Final[frozenset[str]] = frozenset(
         "reload_tool",
         "remove_tool",
         "reload_failed_mcps",
+        "reprobe_failed_mcps",
     }
 )
 """Worker-bus ops that mutate this process's tool registry.
