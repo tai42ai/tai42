@@ -400,6 +400,37 @@ class DispatchScopeMiddleware(Middleware):
             for tool in await call_next(context)
         ]
 
+    async def _observe_mcp_result(self, scope: DispatchScope, name: str, result: Any) -> None:
+        """Record a ``tools/call`` result on ``scope``: a park by its wire marker, else the tool's reduced output.
+
+        PARK recognition is explicit, never defaulted: a parked call returns the reserved
+        suspended-interaction marker in its structured content and records ``park`` with its
+        interaction id; a resume that left sibling asks open returns the reserved resume-buffered
+        marker. A well-formed non-park result records ``success``. A park that instead surfaced as
+        a raised error is recorded ``error`` by the chokepoint's exception path, so a park is never
+        silently recorded as success.
+        """
+        from tai42_skeleton.tools.binding.result import _tool_result_value
+
+        structured = getattr(result, "structured_content", None)
+        marker = read_suspended_interaction_marker(structured)
+        buffered = read_resume_buffered_marker(structured) if marker is None else None
+        if marker is not None or buffered is not None:
+            # Only a tool that declares it can pause may park: the refusal is the edge's own tool
+            # error carrying the refusal text, raised inside the scope so the row records ``error``.
+            await _refuse_undeclared_mcp_park(self._app, name)
+        if marker is not None:
+            scope.observe_park(marker["interaction_id"])
+        elif buffered is not None:
+            # A resume-buffered partial is observed as the object the in-process door observes,
+            # so both doors record it alike.
+            scope.observe(ResumeBuffered(remaining_ids=buffered["remaining_ids"]))
+        else:
+            # Observe the tool's REDUCED output, not the opaque ``ToolResult`` wrapper, so the
+            # binding's update jq runs over the same value the in-process door observes (its raw
+            # return); the wrapper carries no tool field and is not even JSON-serializable.
+            scope.observe(_tool_result_value(result))
+
     async def on_call_tool(
         self,
         context: MiddlewareContext[Any],
@@ -416,7 +447,6 @@ class DispatchScopeMiddleware(Middleware):
         from tai42_skeleton.interactions.terminal_failure import FAILED_TERMINAL_MESSAGE, failed_outcome_detail
         from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
         from tai42_skeleton.tools.binding import ToolResultEncodingError, find_lone_surrogate
-        from tai42_skeleton.tools.binding.result import _tool_result_value
 
         name = context.message.name
         # The MCP call's arguments, mutated in place by any binding injection so the edge
@@ -448,33 +478,7 @@ class DispatchScopeMiddleware(Middleware):
                         # would throw. Both the structured content and every content block's
                         # JSON-reduced form are walked, since either carries the reduced return.
                         _refuse_unencodable_mcp_result(name, result)
-                        # PARK recognition (explicit — never defaulted): a parked call returns
-                        # the reserved suspended-interaction marker in its structured content;
-                        # record ``park`` with its interaction id. A resume that left sibling asks
-                        # open returns the reserved resume-buffered marker. A well-formed non-park
-                        # result records ``success``. A park that instead surfaced as a raised error is
-                        # recorded ``error`` by the chokepoint's exception path — a park is never
-                        # silently recorded as success.
-                        structured = getattr(result, "structured_content", None)
-                        marker = read_suspended_interaction_marker(structured)
-                        buffered = read_resume_buffered_marker(structured) if marker is None else None
-                        if marker is not None or buffered is not None:
-                            # Only a tool that declares it can pause may park: the refusal is the
-                            # edge's own tool error carrying the refusal text, raised inside the
-                            # scope so the row records ``error``.
-                            await _refuse_undeclared_mcp_park(self._app, name)
-                        if marker is not None:
-                            scope.observe_park(marker["interaction_id"])
-                        elif buffered is not None:
-                            # A resume-buffered partial is observed as the object the in-process
-                            # door observes, so both doors record it alike.
-                            scope.observe(ResumeBuffered(remaining_ids=buffered["remaining_ids"]))
-                        else:
-                            # Observe the tool's REDUCED output, not the opaque ``ToolResult`` wrapper,
-                            # so the binding's update jq runs over the same value the in-process door
-                            # observes (its raw return) — the edge otherwise feeds the wrapper to jq,
-                            # which carries no tool field and is not even JSON-serializable.
-                            scope.observe(_tool_result_value(result))
+                        await self._observe_mcp_result(scope, name, result)
                         return result
                 except ToolError as exc:
                     # A driver's FAILED terminal RAISES ``RunTerminalFailed`` in the tool body;
