@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   expect,
+  test,
   type APIRequestContext,
   type APIResponse,
   type Locator,
@@ -91,6 +92,114 @@ export function apiHeaders(key: string = API_KEY): Record<string, string> {
 }
 
 /**
+ * A server may close an idle keep-alive connection as the client writes on it; that first
+ * write then fails before any reply (Node: `socket hang up` / ECONNRESET). Playwright keeps
+ * only the error message across its channel, so the message is what identifies the reset.
+ */
+const STALE_CONNECTION_RESET = /\bECONNRESET\b|socket hang up/;
+
+function isStaleConnectionReset(error: unknown): error is Error {
+  return error instanceof Error && STALE_CONNECTION_RESET.test(error.message);
+}
+
+/**
+ * Send a request that is safe to repeat, once more on a fresh connection when the first
+ * attempt was reset before any reply. The resend is recorded as a `resent` annotation on the
+ * running test. Any other failure propagates at once; a second reset propagates naming both
+ * attempts. Only for the HTTP safe methods and a POST its caller has verified is a no-op: a
+ * write is never sent through here.
+ */
+async function resendOnceOnReset(label: string, send: () => Promise<APIResponse>): Promise<APIResponse> {
+  try {
+    return await send();
+  } catch (first) {
+    if (!isStaleConnectionReset(first)) throw first;
+    test.info().annotations.push({ type: 'resent', description: `${label}: ${first.message}` });
+    try {
+      return await send();
+    } catch (second) {
+      if (!isStaleConnectionReset(second)) throw second;
+      throw new Error(`${label}: reset on both attempts: ${first.message}; then ${second.message}`, {
+        cause: second,
+      });
+    }
+  }
+}
+
+/** {@link resendOnceOnReset} for one `get`/`head`, or a `post` the caller has verified is a no-op. */
+export function sendRepeatable(
+  request: APIRequestContext,
+  method: 'get' | 'head' | 'post',
+  url: string,
+  options?: Parameters<APIRequestContext['post']>[1],
+): Promise<APIResponse> {
+  const send = (): Promise<APIResponse> => {
+    if (method === 'get') return request.get(url, options);
+    if (method === 'head') return request.head(url, options);
+    return request.post(url, options);
+  };
+  return resendOnceOnReset(`${method.toUpperCase()} ${url}`, send);
+}
+
+/** A request context that sends its reads (GET/HEAD) through {@link resendOnceOnReset};
+ * every write and every other member reaches the wrapped context unchanged. */
+class RepeatableReadsContext implements APIRequestContext {
+  constructor(private readonly inner: APIRequestContext) {}
+
+  get tracing(): APIRequestContext['tracing'] {
+    return this.inner.tracing;
+  }
+
+  get(...[url, options]: Parameters<APIRequestContext['get']>): Promise<APIResponse> {
+    return sendRepeatable(this.inner, 'get', url, options);
+  }
+
+  head(...[url, options]: Parameters<APIRequestContext['head']>): Promise<APIResponse> {
+    return sendRepeatable(this.inner, 'head', url, options);
+  }
+
+  fetch(...[urlOrRequest, options]: Parameters<APIRequestContext['fetch']>): Promise<APIResponse> {
+    const url = typeof urlOrRequest === 'string' ? urlOrRequest : urlOrRequest.url();
+    const method = (options?.method ?? (typeof urlOrRequest === 'string' ? 'GET' : urlOrRequest.method())).toUpperCase();
+    const send = (): Promise<APIResponse> => this.inner.fetch(urlOrRequest, options);
+    return method === 'GET' || method === 'HEAD' ? resendOnceOnReset(`${method} ${url}`, send) : send();
+  }
+
+  post(...args: Parameters<APIRequestContext['post']>): Promise<APIResponse> {
+    return this.inner.post(...args);
+  }
+
+  put(...args: Parameters<APIRequestContext['put']>): Promise<APIResponse> {
+    return this.inner.put(...args);
+  }
+
+  patch(...args: Parameters<APIRequestContext['patch']>): Promise<APIResponse> {
+    return this.inner.patch(...args);
+  }
+
+  delete(...args: Parameters<APIRequestContext['delete']>): Promise<APIResponse> {
+    return this.inner.delete(...args);
+  }
+
+  dispose(...args: Parameters<APIRequestContext['dispose']>): Promise<void> {
+    return this.inner.dispose(...args);
+  }
+
+  storageState(...args: Parameters<APIRequestContext['storageState']>): ReturnType<APIRequestContext['storageState']> {
+    return this.inner.storageState(...args);
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.inner[Symbol.asyncDispose]();
+  }
+}
+
+/** Wrap a request context so its reads resend once past a stale-connection reset. */
+export function repeatableReads(request: APIRequestContext): APIRequestContext {
+  return new RepeatableReadsContext(request);
+}
+
+/**
  * The ceiling on a fleet-mutating request's RESPONSE: a write that fans a reload out and
  * awaits the sibling worker's reload measures at up to ~35s, past Playwright's 30s default.
  * It MUST exceed every `toPass` window that wraps a mutation — a wait that expires inside
@@ -152,7 +261,10 @@ export async function waitForReloadSettle(request: APIRequestContext, key: strin
   let settled = 0;
   while (settled < 4) {
     if (Date.now() > deadline) throw new Error('fleet reload gates never settled within 60s');
-    const res = await request.post('/api/config/reload', { headers: apiHeaders(key), data: { targets: [] } });
+    const res = await sendRepeatable(request, 'post', '/api/config/reload', {
+      headers: apiHeaders(key),
+      data: { targets: [] },
+    });
     if (res.status() === 503) {
       settled = 0;
       continue;

@@ -20,6 +20,7 @@
  */
 import { test as base } from '@playwright/test';
 
+import { repeatableReads } from './helpers';
 import { BUILT_NEEDS, DECLARED_NEEDS, TARGET, type Target } from './target';
 
 function checkNeeds(list: readonly string[]): void {
@@ -62,6 +63,10 @@ export function unmet(target: Target, list: readonly string[] | undefined): stri
 }
 
 export const test = base.extend<{ needs: readonly string[] | undefined; needsGate: void }>({
+  // Every spec's `request` sends its reads through the stale-connection resend seam.
+  request: async ({ request }, use) => {
+    await use(repeatableReads(request));
+  },
   needs: [undefined, { option: true }],
   needsGate: [
     async ({ needs: declared }, use, testInfo) => {

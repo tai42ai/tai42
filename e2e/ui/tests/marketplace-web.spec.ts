@@ -9,7 +9,7 @@
  * rendering is asserted, so this stays order-independent from the Studio spec.
  */
 import { expect, type Page } from '@playwright/test';
-import { MP_URL, MP_WEB_URL, mpAdminHeaders, uniq } from './helpers';
+import { MP_URL, MP_WEB_URL, mpAdminHeaders, sendRepeatable, uniq } from './helpers';
 import { needs, test } from './needs';
 
 needs('helper:marketplace-site');
@@ -151,7 +151,7 @@ test('the Kind facet is server-driven and a router/middleware listing browses + 
   // (`PluginItemKind`), so `GET /api/v1/kinds` is the source of truth for the facet
   // — a new contract kind flows through with zero web changes. The envelope is
   // `{"data":{"kinds":[...]}}`. Never assert against a hardcoded kind list here.
-  const served = await page.request.get(`${MP_URL}/api/v1/kinds`);
+  const served = await sendRepeatable(page.request, 'get', `${MP_URL}/api/v1/kinds`);
   expect(served.ok(), await served.text()).toBeTruthy();
   const kinds = ((await served.json()) as { data: { kinds: string[] } }).data.kinds;
   // The fixture's router/middleware items only reach the facet if the contract still
