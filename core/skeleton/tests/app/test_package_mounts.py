@@ -84,7 +84,13 @@ def _register_pass(overrides: dict[str, dict[str, str]]) -> None:
     surface = HttpSurface(_FakeApp())  # type: ignore[arg-type]
     with bind_module(binding):
         surface.custom_route(
-            "/ping", ["GET"], summary="ping", tags=["synthetic"], response_model=None, no_body_reason="fixture"
+            "/ping",
+            ["GET"],
+            summary="ping",
+            tags=["synthetic"],
+            action="read",
+            response_model=None,
+            no_body_reason="fixture",
         )(_ping)
 
 
@@ -137,7 +143,13 @@ def test_a_package_shipping_no_plugin_spec_has_no_mounts(registry: RouteRegistry
 def test_a_core_route_carries_no_mount_base(registry: RouteRegistry) -> None:
     surface = HttpSurface(_FakeApp())  # type: ignore[arg-type]
     surface.custom_route(
-        "/api/core-thing", ["GET"], summary="core", tags=["core"], response_model=None, no_body_reason="fixture"
+        "/api/core-thing",
+        ["GET"],
+        summary="core",
+        tags=["core"],
+        action="read",
+        response_model=None,
+        no_body_reason="fixture",
     )(_ping)
     (meta,) = registry.live_routes()
     assert meta.mount_base is None
