@@ -325,6 +325,84 @@ async def test_retire_cancels_periodic_loops_and_calls_drain_epoch(monkeypatch: 
     assert drained_supervisors == [0.01]
 
 
+async def test_a_retire_whose_three_drains_each_use_most_of_the_budget_fits_the_drain_floor(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The retire's legal spend is three sequential drains, each bounded by the drain budget.
+
+    An in-flight request, the supervisors' terminal writes and the retired pool's leases each
+    finish at 0.8 of the budget: every drain finishes legally, in sequence, and the whole retire
+    fits ``retire_drain_floor_seconds(budget)`` with no overrun logged. A drain bounded tighter
+    than the budget would log an overrun; a fourth drain would overrun the floor.
+    """
+    import logging
+
+    from tai42_skeleton.app.epoch_retire import retire_drain_floor_seconds
+
+    budget = 1.0
+    step = 0.8 * budget
+    _install_boot("boot-app")
+    boot = current_epoch()
+    boot.admit()  # an ordinary in-flight request of the retiring generation
+
+    async def _finish_the_request() -> None:
+        await asyncio.sleep(step)
+        boot.release()
+
+    finishers: list[asyncio.Task[None]] = []
+    drain_in_flight = boot._drain_in_flight
+
+    async def _request_finishes_inside_its_drain(deadline: float, **kwargs: bool) -> bool:
+        # The request runs 0.8 of the budget from the moment its drain starts waiting.
+        if not finishers:
+            finishers.append(asyncio.create_task(_finish_the_request()))
+        return await drain_in_flight(deadline, **kwargs)
+
+    monkeypatch.setattr(boot, "_drain_in_flight", _request_finishes_inside_its_drain)
+
+    async def _supervisors_write_their_terminals(
+        deadline: float | None = None, *, epoch: int | None = None, reason: str = "", exclude: object = ()
+    ) -> None:
+        assert deadline == budget
+        await asyncio.sleep(step)
+
+    async def _pool_leases_return(number: int, deadline: float) -> None:
+        assert deadline == budget
+        await asyncio.sleep(step)
+
+    monkeypatch.setattr(epoch_retire_mod, "drain_epoch", _pool_leases_return)
+    monkeypatch.setattr("tai42_skeleton.operations.tool_runs.drain_supervisors", _supervisors_write_their_terminals)
+
+    retire_durations: list[float] = []
+    retire = epoch_mod.retire_epoch
+
+    async def _timed_retire(old: Epoch, retired: int, deadline: float | None) -> None:
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        try:
+            await retire(old, retired, deadline)
+        finally:
+            retire_durations.append(loop.time() - start)
+
+    monkeypatch.setattr(epoch_mod, "retire_epoch", _timed_retire)
+
+    with caplog.at_level(logging.WARNING):
+        await build_and_swap_epoch(
+            {"K": "v"},
+            rebuild=lambda: None,
+            build_serving_app=_serve("new-app"),
+            drain_deadline=budget,
+        )
+    await asyncio.gather(*finishers)
+
+    assert len(retire_durations) == 1
+    assert retire_durations[0] >= 3 * step, "the three drains did not run in sequence"
+    assert retire_durations[0] <= retire_drain_floor_seconds(budget)
+    assert retire_drain_floor_seconds(budget) == 3 * budget
+    assert boot.in_flight == 0
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
 async def test_admission_counter_tracks_in_flight() -> None:
     ep = Epoch(number=current_client_epoch())
     assert ep.in_flight == 0

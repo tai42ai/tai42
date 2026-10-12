@@ -3,13 +3,15 @@ reload + broadcast tail and its failure discipline: a local reload that fails af
 persist landed still broadcasts and then re-raises with the fleet report; a raw broadcast
 fault becomes a :class:`~tai42_skeleton.operations._broadcast.FleetBroadcastError` carrying
 the honest bus-unreachable shape; an unconfirmed origin is a loud ERROR log but a returned
-success; expected membership is pinned to op start, not publish time; and the
-backend-needs-bus invariant rejects both directions.
+success; expected membership is pinned to op start, not publish time; the
+backend-needs-bus invariant rejects both directions; and an env change that leaves the
+fleet apply window below the retire's drain floor is refused before it persists.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
@@ -321,3 +323,90 @@ async def test_env_change_with_backend_and_default_namespace_bus_is_allowed(monk
         assert result.document is None
     finally:
         reset_all_settings()
+
+
+# ---------------------------------------------------------------------------
+# apply-window invariant — the window covers three drain budgets after the change
+# ---------------------------------------------------------------------------
+
+
+async def test_env_change_raising_the_drain_past_the_apply_window_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.app.boot_rules import ApplyWindowBelowDrainError
+
+    _with_bus(monkeypatch)
+    monkeypatch.setenv("TAI_BUS_APPLY_TIMEOUT", "90")
+    monkeypatch.delenv("TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS", raising=False)
+    reset_all_settings()
+    store = FakeConfigStore(manifest={"mcp": []}, env={})
+    service, admin, bus = _service(store)
+
+    with pytest.raises(ApplyWindowBelowDrainError) as exc:
+        await service.apply_env_change({"TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "90"})
+
+    message = str(exc.value)
+    assert "TAI_BUS_APPLY_TIMEOUT=90" in message
+    assert "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90" in message
+    assert "270" in message
+    assert store.env_writes == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+async def test_env_change_raising_the_drain_within_a_wide_apply_window_is_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_bus(monkeypatch)
+    monkeypatch.setenv("TAI_BUS_APPLY_TIMEOUT", "270")
+    reset_all_settings()
+    store = FakeConfigStore(manifest={"mcp": []}, env={})
+    service, admin, _bus = _service(store)
+
+    await service.apply_env_change({"TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "90"})
+
+    assert store.env_writes == [{"TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "90"}]
+    assert admin.calls == 1
+
+
+async def test_env_change_without_a_bus_never_applies_the_window_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_bus(monkeypatch)
+    monkeypatch.setenv("TAI_BUS_APPLY_TIMEOUT", "5")
+    reset_all_settings()
+    store = FakeConfigStore(manifest={"mcp": []}, env={})
+    service, admin, _bus = _service(store)
+
+    await service.apply_env_change({"TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "90"})
+
+    assert store.env_writes == [{"TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "90"}]
+    assert admin.calls == 1
+
+
+def _prepare_env_and_mutator(
+    changes: dict[str, str],
+) -> Callable[[dict[str, str]], Awaitable[tuple[dict[str, str], Callable[[dict[str, Any]], None]]]]:
+    def add_server(document: dict[str, Any]) -> None:
+        document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
+
+    async def prepare(_stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
+        return changes, add_server
+
+    return prepare
+
+
+async def test_env_and_manifest_change_raising_the_drain_past_the_apply_window_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tai42_skeleton.app.boot_rules import ApplyWindowBelowDrainError
+
+    _with_bus(monkeypatch)
+    monkeypatch.setenv("TAI_BUS_APPLY_TIMEOUT", "90")
+    reset_all_settings()
+    store = FakeConfigStore(manifest={"mcp": []}, env={})
+    service, admin, bus = _service(store)
+
+    with pytest.raises(ApplyWindowBelowDrainError, match="270"):
+        await service.apply_env_and_change(_prepare_env_and_mutator({"TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "90"}))
+
+    assert store.env_writes == []
+    assert store.persisted == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
