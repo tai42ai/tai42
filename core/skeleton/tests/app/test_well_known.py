@@ -125,7 +125,6 @@ def _served_door(monkeypatch: pytest.MonkeyPatch) -> None:
     access.pg.add_route(f"{DOC}/mcp", "operator-scope")
     install_declaring_provider(monkeypatch, DeclaringTokenProvider())
     monkeypatch.setenv("ACCESS_CONTROL_PUBLIC_BASE_URL", PUBLIC_BASE_URL)
-    monkeypatch.setattr(app, "_serving_selection", app._serving_selection)
 
 
 @pytest.mark.usefixtures("_served_door")

@@ -69,11 +69,10 @@ def _gate(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _process_state_restored(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Restore what a boot or a reload leaves on the process: the env a reload applied and the serving selection."""
+    """Restore what a boot or a reload leaves on the process: the env a reload applied and the route registry."""
     from tai42_skeleton.app.route_registry import route_registry
 
     snapshot = dict(os.environ)
-    monkeypatch.setattr(app, "_serving_selection", app._serving_selection)
     monkeypatch.setattr(route_registry, "_routes", dict(route_registry._routes))
     monkeypatch.setattr(route_registry, "_control_plane_mount", route_registry._control_plane_mount)
     monkeypatch.setattr(app.config.config_manager, "read_env", dict)

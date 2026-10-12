@@ -65,7 +65,6 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> DeclaringTokenProvider:
     declaring = DeclaringTokenProvider()
     install_declaring_provider(monkeypatch, declaring)
     monkeypatch.setenv("ACCESS_CONTROL_PUBLIC_BASE_URL", PUBLIC_BASE_URL)
-    monkeypatch.setattr(app, "_serving_selection", app._serving_selection)
     monkeypatch.setattr(app.config.config_manager, "read_env", dict)
     return declaring
 
@@ -168,7 +167,6 @@ async def test_with_access_control_off_nothing_is_advertised(monkeypatch: pytest
     install_declaring_provider(monkeypatch, DeclaringTokenProvider())
     monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "false")
     monkeypatch.setenv("ACCESS_CONTROL_PUBLIC_BASE_URL", PUBLIC_BASE_URL)
-    monkeypatch.setattr(app, "_serving_selection", app._serving_selection)
     async with served(monkeypatch, manifest("none")) as server, _client(server.base_url) as client:
         admitted = await _refused_post(client, "/mcp")
         document = await client.get(f"{DOC}/mcp")

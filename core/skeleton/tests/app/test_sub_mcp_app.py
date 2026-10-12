@@ -29,7 +29,6 @@ from tai42_contract.sub_mcp import RouteConfig
 
 from tai42_skeleton.app import admission as admission_mod
 from tai42_skeleton.app import sub_mcp_app as sub_mcp_app_module
-from tai42_skeleton.app.serving_selection import ServingSelection
 from tai42_skeleton.app.sub_mcp_app import (
     ROOT_PREFIX,
     SubAppLifespan,
@@ -74,7 +73,6 @@ class _FakeApp:
 
     def __init__(self):
         self.fastmcp = SimpleNamespace()
-        self.serving_selection = ServingSelection(transport="http", stateless_http=False)
 
 
 class _FakeSub:

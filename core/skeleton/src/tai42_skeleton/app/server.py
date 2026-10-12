@@ -52,8 +52,6 @@ from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.media_facet import MediaFacet
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.serving_core import ServingCore, record_sse_surface, record_streamable_http_surface
-from tai42_skeleton.app.serving_selection import ServingSelection
-from tai42_skeleton.app.serving_selection import Transport as ServedTransport
 from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
 from tai42_skeleton.app.transport_stream import TransportStreamDrainExemptMiddleware, bind_sse_session_ender
 from tai42_skeleton.config import ConfigManagerFactory
@@ -216,8 +214,6 @@ class TaiMCP(TaiMCPLifecycleMixin):
         self._storage_registry: StorageRegistry = StorageRegistry()
         self._config_manager = ConfigManagerFactory.create()
         self._mcp_sub_app_router: SubMcpAppRouter = SubMcpAppRouter(app=self)
-        # The served transport; the boot records its selection through ``serving_app``.
-        self._serving_selection = ServingSelection(transport="http", stateless_http=False)
         self._clients: ClientsFacet = ClientsFacet()
 
         # The contract facet namespaces, partitioning the feature surface.
@@ -553,23 +549,6 @@ class TaiMCP(TaiMCPLifecycleMixin):
         _install_error_handlers(base_app)
 
         return self._http_surface.finalize(base_app)
-
-    @property
-    def serving_selection(self) -> ServingSelection:
-        """The transport this process serves, as its boot selected it; every rebuild serves the same."""
-        return self._serving_selection
-
-    def serving_app(self, transport: ServedTransport, *, stateless_http: bool) -> StarletteWithLifespan:
-        """Record the boot's transport selection and build its app; every rebuild and http sub-MCP app reads it."""
-        self._serving_selection = ServingSelection(transport=transport, stateless_http=stateless_http)
-        return self.build_serving_app()
-
-    def build_serving_app(self) -> StarletteWithLifespan:
-        """Build the serving app for the recorded serving selection."""
-        selection = self._serving_selection
-        if selection.transport == "sse":
-            return self.sse_app()
-        return self.http_app(stateless_http=selection.stateless_http_arg)
 
     async def run_async(
         self, transport: Transport | None = None, show_banner: bool = True, **transport_kwargs: Any
