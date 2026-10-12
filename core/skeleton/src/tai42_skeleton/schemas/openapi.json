@@ -11271,11 +11271,18 @@
         "type": "object"
       },
       "ResourceStat": {
-        "description": "One storage resource's inferred content type.",
+        "description": "One storage resource's inferred content type; ``null`` when the provider cannot infer one.",
         "properties": {
           "content_type": {
-            "title": "Content Type",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
           },
           "id": {
             "title": "Id",
