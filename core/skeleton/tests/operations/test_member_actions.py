@@ -131,7 +131,6 @@ def _member(id_: str, *, principal_ids: list[str] | None = None, actions: list[s
     return MemberEntry(
         id=id_,
         email=f"{id_}@x.test",
-        role="editor",
         created_at=datetime.now(UTC),
         principal_ids=principal_ids or [id_],
         actions=actions if actions is not None else ["poke"],
@@ -159,12 +158,17 @@ def _clean_active_providers():
 
 @pytest.fixture
 def principal_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
+    """A ``{user_id: disabled}`` stand-in for the platform principal records; each holds ``editor``."""
     store: dict[str, bool] = {}
 
     async def _list_principals() -> list[dict[str, Any]]:
         return [{"user_id": user_id, "disabled": disabled} for user_id, disabled in store.items()]
 
+    async def _principal_roles(user_ids: list[str]) -> dict[str, str | None]:
+        return {user_id: "editor" for user_id in user_ids if user_id in store}
+
     monkeypatch.setattr(members_ops.management, "list_principals", _list_principals)
+    monkeypatch.setattr(members_ops.roles, "principal_roles", _principal_roles)
     return store
 
 

@@ -4,7 +4,8 @@ An admin lists the declared member-action catalog, invokes one, and a non-admin 
 The catalog door renders every declared action's
 label to a plain string from the real provider's declarations; the invoke door's happy path mints
 a one-time invite link (surfaced only on the result) and its typed-error path maps a provider
-conflict to a 409; both doors refuse a non-admin caller."""
+conflict to a 409; the accepted member's row carries the role each principal holds; both doors
+refuse a non-admin caller."""
 
 from __future__ import annotations
 
@@ -79,6 +80,14 @@ async def test_catalog_renders_invoke_happy_and_error_and_admin_only(
     )
     session = accepted["token"]
     assert session.startswith("tai-sess-"), accepted
+
+    # The accepted person is a member row whose role the platform joins from each principal's
+    # own policy record: the one principal holds the invited role, so the row's role is it too.
+    directory = await admin.get("/api/auth/members")
+    member_row = next((row for row in directory["members"] if row["email"] == email), None)
+    assert member_row is not None, f"the accepted email must appear as a member row: {directory}"
+    assert [principal["role"] for principal in member_row["principals"]] == ["editor"], member_row
+    assert member_row["role"] == "editor", member_row
 
     # (2b) INVOKE typed-error path: inviting the SAME email again is a provider conflict,
     # mapped to a 409 — never a generic 500.

@@ -189,33 +189,41 @@ class AccountsProvider(IdentityProvider):
         ...
 
 
-class LoginAttachingProvider(AccountsProvider):
-    """An accounts provider that can attach an interactive login to an existing principal.
+class LoginOwningProvider(AccountsProvider):
+    """An accounts provider that keeps a login record for principals.
 
-    A provider mixes this in when it owns an interactive credential it can set
-    for a principal (a password, or a one-time invite link). The setup door and
-    the invite flow ``isinstance``-check for it: a provider whose login lives at
-    an external issuer (OIDC) does not implement it, and the caller reports the
-    login as not attached.
-
-    Ownership of a principal's disable/delete follows the login: the principals
-    door asks every registered attaching provider :meth:`has_login`, and a
-    principal some provider claims is managed through that provider's users door
-    (which cleans its login row), never the principals door.
+    A provider mixes this in when it keeps its own record of a principal's login — a record
+    that must never outlive the principal. The principals door asks every registered owning
+    provider :meth:`has_login` before it DELETES a principal: a principal some provider claims
+    is removed through that provider's member actions, which remove the principal and the
+    record together, never through the principals door.
     """
 
     @abstractmethod
     async def has_login(self, user_id: str) -> bool:
-        """Whether this provider holds a login for the principal ``user_id``.
+        """Whether this provider keeps a login record for the principal ``user_id``.
 
-        The principals door reads this to decide who owns a principal's
-        disable/delete: a ``True`` means the provider holds the credential, so the
-        principal is managed through that provider's users door; a ``False`` means
-        it does not (a service principal, an OIDC-provisioned human whose login
-        lives at the issuer, the keys-only owner), and the principals door manages
-        it directly. A backend error raises (fail closed), never a silent ``False``.
+        The principals door reads this before a delete: a ``True`` means the provider's
+        member actions remove the principal; a ``False`` means the provider keeps nothing for
+        it (a service principal, a principal provisioned by hand, the keys-only owner), and
+        the principals door removes it directly. A backend error raises (fail closed), never a
+        silent ``False``.
         """
         ...
+
+
+class LoginAttachingProvider(LoginOwningProvider):
+    """An accounts provider that holds an interactive credential it can set for a principal.
+
+    A provider mixes this in when it owns an interactive credential it can attach to a
+    principal (a password, or a one-time invite link). The setup door and the login-methods
+    door ``isinstance``-check for it: a provider whose login lives at an external issuer
+    does not implement it, and the caller reports the login as not attached.
+
+    The credential's own disabled state lives with the provider, so the principals door also
+    routes a DISABLE of a principal it claims (:meth:`~LoginOwningProvider.has_login`) to the
+    provider's member actions, never the principals door.
+    """
 
     @abstractmethod
     async def attach_login(self, user_id: str, *, credential: LoginCredential) -> LoginAttachment:
@@ -238,4 +246,5 @@ __all__ = [
     "AccountsProvider",
     "AccountsProviderSettings",
     "LoginAttachingProvider",
+    "LoginOwningProvider",
 ]

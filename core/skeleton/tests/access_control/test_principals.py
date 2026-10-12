@@ -2,12 +2,14 @@
 
 Covers create (row + role, id defaulting, duplicate 409, unknown role 400), list, update
 (display name for any kind, disabled through the single writer), delete (revokes owned keys
-+ row), and the two fences a disable/delete passes: the ownership fence (a login-attaching
-provider that holds the principal's login refuses here with a 409, routing to its users
-door) and the last-admin guard (the last enabled admin principal cannot be disabled or
-deleted). An OIDC-provisioned human — a human no attaching provider claims — is disabled and
-deleted here like any un-owned principal. Also the not-found 404s and the admin fence on
-every door.
++ row), and the fences a disable/delete passes: the ownership fences — a delete is refused
+(409) when any login-owning provider keeps a login record for the principal, a disable when a
+login-attaching provider holds its credential, each routing to that provider's member actions
+on the Members page — and the last-admin guard (the last enabled admin principal cannot be
+disabled or deleted). A principal whose login record a provider keeps but whose credential
+lives elsewhere is disabled here and refused on delete; a hand-provisioned OIDC human — no
+provider claims it — is disabled and deleted here like any un-owned principal. Also the
+not-found 404s and the admin fence on every door.
 """
 
 from __future__ import annotations
@@ -62,12 +64,12 @@ class _SpyProvider(ApiKeyIdentityProvider):
 
 
 class _FakeLoginProvider:
-    """A login-attaching provider stand-in: ``has_login`` is true for the ids it holds.
+    """A login-owning provider stand-in: ``has_login`` is true for the ids it holds.
 
-    The door reads this through the monkeypatched ``_login_attaching_providers`` seam, so a
-    test models "a provider that holds this principal's login" (a password human) by adding
-    the id, and "a provider present but not this principal's owner" (an OIDC human) by
-    leaving it out.
+    The door reads this through the monkeypatched ``_login_owning_providers`` /
+    ``_login_attaching_providers`` seams, so a test models "a provider that holds this
+    principal's login" by adding the id, and "a provider present but not this principal's
+    owner" (a hand-provisioned OIDC human) by leaving it out.
     """
 
     def __init__(self, logins: set[str]) -> None:
@@ -88,16 +90,36 @@ def _wire_versioned_store(monkeypatch, mem: _MemStore) -> None:
 
 
 @pytest.fixture(autouse=True)
-def login_provider(monkeypatch) -> set[str]:
-    """A single registered login-attaching provider whose held logins the test controls.
+def _claiming_providers(monkeypatch) -> tuple[set[str], set[str]]:
+    """Two registered providers whose claimed ids the test controls.
 
-    Defaults to holding NO login, so a principal is un-owned (a service principal, an
-    OIDC-provisioned human, the keys-only owner) unless a test adds its id.
+    ``accounts`` holds a credential (a login-attaching provider): it is asked before a delete
+    AND before a disable. ``records`` keeps login records only (a login-owning provider that
+    attaches nothing): it is asked before a delete alone. Both default to claiming nothing, so a
+    principal is un-owned (a service principal, a hand-provisioned OIDC human, the keys-only
+    owner) unless a test adds its id.
     """
-    logins: set[str] = set()
-    provider = _FakeLoginProvider(logins)
-    monkeypatch.setattr(principals_ops, "_login_attaching_providers", lambda: [("accounts", provider)])
-    return logins
+    credentials: set[str] = set()
+    records: set[str] = set()
+    attaching = _FakeLoginProvider(credentials)
+    owning = _FakeLoginProvider(records)
+    monkeypatch.setattr(
+        principals_ops, "_login_owning_providers", lambda: [("accounts", attaching), ("records", owning)]
+    )
+    monkeypatch.setattr(principals_ops, "_login_attaching_providers", lambda: [("accounts", attaching)])
+    return credentials, records
+
+
+@pytest.fixture
+def login_provider(_claiming_providers: tuple[set[str], set[str]]) -> set[str]:
+    """The ids the login-attaching provider (``accounts``) claims."""
+    return _claiming_providers[0]
+
+
+@pytest.fixture
+def record_owner(_claiming_providers: tuple[set[str], set[str]]) -> set[str]:
+    """The ids the login-owning, non-attaching provider (``records``) claims."""
+    return _claiming_providers[1]
 
 
 @pytest.fixture
@@ -246,13 +268,17 @@ async def test_update_missing_principal_is_404(
 async def test_update_disabled_on_a_login_owned_principal_is_409(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis_mgmt: FakeRedis, admin_caller, login_provider: set[str]
 ) -> None:
-    # A provider holds this principal's login, so its disabled state is owned by that
-    # provider's users door.
+    # A provider holds this principal's credential, so its disabled state lives with that
+    # provider and changes through its member actions.
     pg.add_principal("h", kind="human", display_name="H")
     pg.add_policy("h", scopes=["*"])
     login_provider.add("h")
-    with pytest.raises(ConflictError, match="accounts provider"):
+    with pytest.raises(ConflictError) as caught:
         await principals_ops.update_principal(user_id="h", disabled=True)
+    assert str(caught.value) == (
+        "principal 'h' is managed through the 'accounts' accounts provider that owns its login; disable or enable "
+        "it through that provider's member actions on the Members page, not through this door"
+    )
     # Nothing flipped on either home.
     assert pg.principal("h")["disabled"] is False
     assert "disabled" not in pg.policy_body("h")["policy_data"]
@@ -289,14 +315,57 @@ async def test_update_human_display_name_is_allowed(
 async def test_delete_login_owned_principal_is_409(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis_mgmt: FakeRedis, admin_caller, login_provider: set[str]
 ) -> None:
-    # A provider owns this principal's login, so it is deleted through that provider's users
-    # door, not this one.
+    # A provider owns this principal's login, so it is removed through that provider's member
+    # actions, not this door.
     pg.add_principal("h", kind="human", display_name="H")
     pg.add_policy("h", scopes=["*"])
     login_provider.add("h")
-    with pytest.raises(ConflictError, match="accounts provider"):
+    with pytest.raises(ConflictError) as caught:
         await principals_ops.delete_principal(user_id="h")
+    assert str(caught.value) == (
+        "principal 'h' is managed through the 'accounts' accounts provider that owns its login; remove it through "
+        "that provider's member actions on the Members page, not through this door"
+    )
     assert pg.principal("h") is not None
+
+
+async def test_delete_principal_whose_login_record_a_provider_keeps_is_409(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis_mgmt: FakeRedis, admin_caller, record_owner: set[str]
+) -> None:
+    # A provider keeps a login record for this principal but holds no credential (a login
+    # attached at an external issuer): the delete is refused, so the record never outlives the
+    # principal; the provider's member actions remove both.
+    pg.add_principal("oidc:idp:att", kind="human", display_name="H")
+    pg.add_policy("oidc:idp:att", scopes=["*"])
+    pg.add_principal("co", kind="service", display_name="Co")
+    pg.add_policy("co", scopes=["*"])
+    record_owner.add("oidc:idp:att")
+    with pytest.raises(ConflictError) as caught:
+        await principals_ops.delete_principal(user_id="oidc:idp:att")
+    assert str(caught.value) == (
+        "principal 'oidc:idp:att' is managed through the 'records' accounts provider that owns its login; remove it "
+        "through that provider's member actions on the Members page, not through this door"
+    )
+    assert pg.principal("oidc:idp:att") is not None
+    assert pg.policy("oidc:idp:att") is not None
+
+
+async def test_update_disabled_on_a_principal_whose_login_record_a_provider_keeps_flips_both_homes(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis_mgmt: FakeRedis, admin_caller, record_owner: set[str]
+) -> None:
+    # The provider keeps a record but no credential, so no disabled state of its own: the
+    # principals door disables the principal directly, both homes updated, and re-enables it.
+    pg.add_principal("oidc:idp:att", kind="human", display_name="H")
+    pg.add_policy("oidc:idp:att", scopes=["*"])
+    pg.add_principal("co", kind="service", display_name="Co")
+    pg.add_policy("co", scopes=["*"])
+    record_owner.add("oidc:idp:att")
+    row = await principals_ops.update_principal(user_id="oidc:idp:att", disabled=True)
+    assert row.disabled is True
+    assert pg.principal("oidc:idp:att")["disabled"] is True
+    assert pg.policy_body("oidc:idp:att")["policy_data"]["disabled"] is True
+    row = await principals_ops.update_principal(user_id="oidc:idp:att", disabled=False)
+    assert row.disabled is False
 
 
 async def test_delete_oidc_human_is_allowed(

@@ -44,6 +44,7 @@ from tai42_contract.accounts.provider import (
     AccountsProvider,
     AccountsProviderSettings,
     LoginAttachingProvider,
+    LoginOwningProvider,
 )
 
 __all__ = [
@@ -65,6 +66,7 @@ __all__ = [
     "LoginConflictError",
     "LoginCredential",
     "LoginMethod",
+    "LoginOwningProvider",
     "MemberAction",
     "MemberActionBadRequestError",
     "MemberActionCatalog",

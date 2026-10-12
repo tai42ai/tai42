@@ -152,21 +152,20 @@ class PostgresAccountsProvider(LoginAttachingProvider):
 
         Each member carries the platform principal id it holds (this provider provisions one
         principal per user, keyed by ``user_id``) so the Members aggregator joins the
-        access-control ``disabled`` state from the platform's own principal record; the
-        provider does not report ``disabled`` itself (``users.disabled`` stays this
-        plugin's private bookkeeping). Each row's role is the one its principal holds, read
-        for every user in one ``principal_roles`` call; a user with no principal raises
-        (fail loud). Each row names the provider's own action ids that apply to it.
+        access-control ``disabled`` state and the role from the platform's own records; the
+        provider reports neither (``users.disabled`` stays this plugin's private
+        bookkeeping). Each invite's role is the one its principal holds, read for every
+        invited user in one ``principal_roles`` call; an invited user with no principal
+        raises (fail loud). Each row names the provider's own action ids that apply to it.
         """
         rows = await service.users_store().list()
         open_invites = await service.invites_store().list_open()
         invited_ids = {row["user_id"] for row in open_invites}
-        roles = await self.settings.admin.principal_roles([row["user_id"] for row in rows])
+        roles = await self.settings.admin.principal_roles([row["user_id"] for row in open_invites])
         members = [
             MemberEntry(
                 id=row["user_id"],
                 email=row["email"],
-                role=_principal_role(roles, row["user_id"]),
                 created_at=row["created_at"],
                 principal_ids=[row["user_id"]],
                 actions=list(member_actions.MEMBER_ROW_ACTIONS),
@@ -204,8 +203,9 @@ class PostgresAccountsProvider(LoginAttachingProvider):
         """Whether an ``accounts_users`` login row exists for principal ``user_id``.
 
         The principals door reads this to route a disable/delete: a human whose
-        password login lives here is managed through this provider's users door,
-        not the principals door. A store error propagates (fail closed).
+        password login lives here is disabled and removed through this provider's member
+        actions on the Members page, not the principals door. A store error propagates
+        (fail closed).
         """
         return await service.users_store().get_by_user_id(user_id) is not None
 

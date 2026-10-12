@@ -248,23 +248,25 @@ async def test_list_members_partitions_active_members_and_open_invites(wire):
 
     listing = await _listing_provider(wire).list_members()
 
-    assert [(m.id, m.email, m.role) for m in listing.members] == [("usr-active", "a@x.test", "admin")]
+    assert [(m.id, m.email, m.principal_ids) for m in listing.members] == [("usr-active", "a@x.test", ["usr-active"])]
     assert [(i.id, i.email, i.role) for i in listing.invites] == [("usr-pending", "p@x.test", "viewer")]
     assert listing.invites[0].expires_at == exp
-    # One batch read of every user's role.
+    # One batch read of every invited user's role; a member's role is the platform's to join.
     assert [call for call in wire.admin.calls if call[0] == "principal_roles"] == [
-        ("principal_roles", ("usr-active", "usr-pending"))
+        ("principal_roles", ("usr-pending",))
     ]
 
 
-async def test_list_members_role_not_from_a_template_is_none(wire):
-    _seed_login(wire, "usr-direct", email="d@x.test", password_hash="hash", role=None)
+async def test_list_members_invite_role_not_from_a_template_is_none(wire):
+    _seed_login(wire, "usr-direct", email="d@x.test", password_hash=None, role=None)
+    wire.invites.rows["th-1"] = {"user_id": "usr-direct", "expires_at": future(3600), "consumed_at": None}
     listing = await _listing_provider(wire).list_members()
-    assert [(m.id, m.role) for m in listing.members] == [("usr-direct", None)]
+    assert [(i.id, i.role) for i in listing.invites] == [("usr-direct", None)]
 
 
-async def test_list_members_user_without_a_principal_fails_loudly(wire):
-    _seed_login(wire, "usr-orphan", email="o@x.test", password_hash="hash")
+async def test_list_members_invited_user_without_a_principal_fails_loudly(wire):
+    _seed_login(wire, "usr-orphan", email="o@x.test", password_hash=None)
+    wire.invites.rows["th-1"] = {"user_id": "usr-orphan", "expires_at": future(3600), "consumed_at": None}
     del wire.admin.roles["usr-orphan"]
     with pytest.raises(RuntimeError, match="'usr-orphan' has no access-control principal"):
         await _listing_provider(wire).list_members()

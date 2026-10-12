@@ -250,7 +250,7 @@ def test_login_attachment_defaults():
 
 def test_member_entry_accepts_an_aware_created_at_and_normalizes_to_utc():
     created = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone(timedelta(hours=2)))
-    entry = MemberEntry(id="usr-1", email="a@x.test", role="editor", created_at=created, principal_ids=["usr-1"])
+    entry = MemberEntry(id="usr-1", email="a@x.test", created_at=created, principal_ids=["usr-1"])
     assert entry.created_at.tzinfo is UTC
     assert entry.created_at == created
 
@@ -260,47 +260,45 @@ def test_member_entry_rejects_a_naive_created_at():
         MemberEntry(
             id="usr-1",
             email="a@x.test",
-            role="editor",
             created_at=datetime(2026, 1, 2, 3, 4, 5),  # the naive timestamp under test
             principal_ids=["usr-1"],
         )
 
 
-def test_member_entry_requires_non_empty_id_email_role():
+def test_member_entry_requires_non_empty_id_and_email():
     now = datetime.now(UTC)
-    for field, value in (("id", ""), ("email", ""), ("role", "")):
-        kwargs = {"id": "usr-1", "email": "a@x.test", "role": "editor", "created_at": now, "principal_ids": ["usr-1"]}
+    for field, value in (("id", ""), ("email", "")):
+        kwargs = {"id": "usr-1", "email": "a@x.test", "created_at": now, "principal_ids": ["usr-1"]}
         kwargs[field] = value
         with pytest.raises(ValidationError):
             MemberEntry(**kwargs)  # pyright: ignore[reportArgumentType]
 
 
-def test_roles_are_nullable_on_every_member_and_invite_shape():
-    # ``None``: the principal's policy was not written from a role template.
+def test_roles_are_nullable_on_every_role_carrying_shape():
+    # ``None`` on a principal or an invitation: the policy was not written from a role template.
     now = datetime.now(UTC)
-    member = MemberEntry(id="usr-1", email="a@x.test", role=None, created_at=now, principal_ids=["usr-1"])
+    principal = MemberPrincipalState(user_id="usr-1", disabled=False, role=None)
     invite = InviteEntry(id="usr-2", email="b@x.test", role=None, created_at=now, expires_at=now)
-    row = MemberRow(id="usr-1", email="a@x.test", role=None, created_at=now, principals=[], disabled=False, handle="h")
+    row = MemberRow(
+        id="usr-1", email="a@x.test", role=None, created_at=now, principals=[principal], disabled=False, handle="h"
+    )
     invite_row = InviteRow(id="usr-2", email="b@x.test", role=None, created_at=now, expires_at=now, handle="h")
-    assert (member.role, invite.role, row.role, invite_row.role) == (None, None, None, None)
-    for model in (MemberRow, InviteRow, InviteEntry):
+    assert (principal.role, invite.role, row.role, invite_row.role) == (None, None, None, None)
+    for model in (MemberPrincipalState, MemberRow, InviteRow, InviteEntry):
         assert model.model_json_schema()["properties"]["role"]["anyOf"][1] == {"type": "null"}
 
 
 def test_member_entry_requires_at_least_one_principal_id():
     with pytest.raises(ValidationError):
-        MemberEntry(id="usr-1", email="a@x.test", role="editor", created_at=datetime.now(UTC), principal_ids=[])
+        MemberEntry(id="usr-1", email="a@x.test", created_at=datetime.now(UTC), principal_ids=[])
 
 
 def test_member_entry_defaults_actions_to_empty_and_carries_declared_ids():
-    entry = MemberEntry(
-        id="usr-1", email="a@x.test", role="editor", created_at=datetime.now(UTC), principal_ids=["usr-1"]
-    )
+    entry = MemberEntry(id="usr-1", email="a@x.test", created_at=datetime.now(UTC), principal_ids=["usr-1"])
     assert entry.actions == []
     with_actions = MemberEntry(
         id="usr-1",
         email="a@x.test",
-        role="editor",
         created_at=datetime.now(UTC),
         principal_ids=["usr-1", "usr-1b"],
         actions=["disable", "remove"],
@@ -314,7 +312,6 @@ def test_member_entry_forbids_extra_fields():
         MemberEntry(
             id="usr-1",
             email="a@x.test",
-            role="editor",
             created_at=datetime.now(UTC),
             principal_ids=["usr-1"],
             surprise="x",  # pyright: ignore[reportCallIssue]
@@ -349,7 +346,7 @@ def test_invite_entry_defaults_actions_to_empty_and_carries_declared_ids():
 def test_member_listing_holds_members_and_invites():
     now = datetime.now(UTC)
     listing = MemberListing(
-        members=[MemberEntry(id="usr-1", email="a@x.test", role="editor", created_at=now, principal_ids=["usr-1"])],
+        members=[MemberEntry(id="usr-1", email="a@x.test", created_at=now, principal_ids=["usr-1"])],
         invites=[InviteEntry(id="usr-2", email="b@x.test", role="viewer", created_at=now, expires_at=now)],
     )
     assert [m.id for m in listing.members] == ["usr-1"]
@@ -420,16 +417,28 @@ def test_member_row_carries_joined_principals_and_opaque_tokens():
         role="editor",
         created_at=now,
         principals=[
-            MemberPrincipalState(user_id="usr-1", disabled=True),
-            MemberPrincipalState(user_id="usr-1b", disabled=False),
+            MemberPrincipalState(user_id="usr-1", disabled=True, role="editor"),
+            MemberPrincipalState(user_id="usr-1b", disabled=False, role="editor"),
         ],
         disabled=False,
         handle="opaque-handle",
         action_keys=["k1", "k2"],
     )
-    assert [p.user_id for p in row.principals] == ["usr-1", "usr-1b"]
+    assert [(p.user_id, p.role) for p in row.principals] == [("usr-1", "editor"), ("usr-1b", "editor")]
     assert row.disabled is False
     assert row.handle == "opaque-handle"
+
+
+def test_member_principal_state_carries_the_role_its_principal_holds():
+    state = MemberPrincipalState(user_id="usr-1", disabled=False, role="viewer")
+    assert (state.user_id, state.disabled, state.role) == ("usr-1", False, "viewer")
+    with pytest.raises(ValidationError):
+        MemberPrincipalState(user_id="usr-1", disabled=False, role="")
+
+
+def test_member_principal_state_requires_its_role():
+    with pytest.raises(ValidationError):
+        MemberPrincipalState(user_id="usr-1", disabled=False)  # pyright: ignore[reportCallIssue]
 
 
 def test_invite_row_defaults_action_keys_and_directory_holds_rows():
