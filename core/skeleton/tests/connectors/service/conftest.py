@@ -202,7 +202,7 @@ def harness(monkeypatch, oauth_client_env):
         events["broadcasts"].append(
             {"op": op, "targets": targets, "publish_on_local_failure": publish_on_local_failure}
         )
-        return {"op": op["op"], "results": []}
+        return {"op": op.op, "results": []}
 
     monkeypatch.setattr(cs, "broadcast", fake_broadcast)
 
