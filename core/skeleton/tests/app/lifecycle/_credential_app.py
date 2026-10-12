@@ -124,7 +124,7 @@ class AppHarness:
             admin=cast("Any", FakeReloadAdmin()),
             bus=cast("Any", FakeBus()),
         )
-        await service.apply_replace_env({}, driven=False, save_previous=_previous)
+        await service.apply_replace_env({}, save_previous=_previous)
 
 
 def roomy_budgets(monkeypatch: pytest.MonkeyPatch) -> None:
