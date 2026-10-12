@@ -181,7 +181,8 @@ class BackendRuntime(ABC):
     async def turn_over_pool(self, *, reason: str, budget: float) -> None:
         """Replace every worker that predates the mutation named by ``reason``, and CONFIRM it.
 
-        On return, no pre-mutation worker may still serve work. Raise loudly if it
+        On return, no pre-mutation worker may take new work; one still finishing the
+        job it holds exits after it, and is not waited for. Raise loudly if it
         cannot be confirmed within ``budget`` seconds — the
         caller is inside a fleet-op apply, and a raise makes that op report
         ``failed`` rather than a false ``applied``.
