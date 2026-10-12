@@ -4,7 +4,7 @@ with ``TAI_E2E_MARKETPLACE=1``.
 Installing a plugin that provides a ``router`` (and a ``middleware``) proves the README router and
 middleware merges compose: the loader owns the SPA catch-all's last position, and the merge
 inserts the plugin's router BEFORE it. The serving surface is rebuilt fresh
-PER EPOCH — ``epoch._default_build_serving_app`` builds a fresh ``http_app`` off the
+PER EPOCH — ``epoch_defaults.default_build_serving_app`` builds a fresh ``http_app`` off the
 reloaded core each swap, so its route table (including a reload-added router) is
 snapshotted anew and actually serves (``lifecycle._reload_config``: "a reload-added
 router serves after the swap"). So an install reload HOT-LOADS the router — it serves 200

@@ -1,7 +1,7 @@
 """Test helper: drive a reload for a GIVEN manifest through the real build-aside +
 swap path.
 
-Production reads the manifest from the config manager (``_default_rebuild``); a unit
+Production reads the manifest from the config manager (``epoch_defaults.default_rebuild``); a unit
 reload test wants to hand a specific in-memory manifest instead. This drives the same
 ``build_and_swap_epoch`` primitive with a rebuild that installs the given manifest —
 so the build-aside-on-failure and swap-on-success contracts are exercised —

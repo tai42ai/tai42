@@ -185,7 +185,7 @@ def test_request_path_resolves_live_provider_during_an_in_flight_build(monkeypat
                 # Mid-build: the default rebuild has already instantiated + recorded the
                 # NEW generation's provider into ``app._building``. A request-path read must
                 # STILL resolve the live epoch's instance, not the one being built. Clear
-                # ``_building`` in a finally exactly as the real ``_default_build_serving_app``
+                # ``_building`` in a finally exactly as the real ``default_build_serving_app``
                 # does, so a failure leaves no half-built core on the slot.
                 try:
                     building = app._building
