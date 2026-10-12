@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Annotated, Any, TypeVar, cast
 
 from makefun import create_function
 from pydantic import BaseModel
-from pydantic_core import PydanticUndefined, core_schema
+from pydantic_core import PydanticUndefined
 from tai42_contract.agent import Agent
 from tai42_contract.interactions import (
     RunTerminalFailed,
@@ -30,6 +30,7 @@ from tai42_skeleton.agent.thread_reservation import (
     ReservedThreadNamespaceError,
     run_kwargs_from_tool_input,
 )
+from tai42_skeleton.agent.unset import _UNSET
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.tools.binding.secret_tool import _SecretRevealingTool
 
@@ -39,25 +40,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _AgentT = TypeVar("_AgentT", bound=Agent)
-
-
-class _Unset:
-    """Marker for an agent run-tool parameter the caller did not supply.
-
-    The synthesized run tool presents a concrete keyword-only parameter per
-    ``ToolInput`` field so a wrapper/transformer extension can compose over a real
-    signature. An optional field's parameter defaults to the module-level
-    :data:`_UNSET` instance; the body forwards only the parameters whose value is
-    NOT that sentinel, preserving ``from_tool_input``'s set-fields-only contract (a
-    materialized model default would forward every field). ``__get_pydantic_core_schema__``
-    maps the sentinel to an ``any`` schema so pydantic derives the parameter as
-    optional and omits the non-serializable sentinel default from the JSON schema.
-    """
-
-    __get_pydantic_core_schema__ = classmethod(lambda cls, source, handler: core_schema.any_schema())
-
-
-_UNSET = _Unset()
 
 # The output schema advertised for every synthesized agent run tool. ``result``
 # is intentionally unconstrained (an agent returns free-form text OR a structured

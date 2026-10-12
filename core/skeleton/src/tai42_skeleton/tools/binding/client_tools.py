@@ -26,7 +26,7 @@ from tai42_contract.tools import ClientTool, ClientToolError, UndeclaredPauseErr
 from tai42_kit.llm.models import check_tool_name
 from tai42_kit.utils.data import makefun_func_name
 
-from tai42_skeleton.agent.binding import _UNSET
+from tai42_skeleton.agent.unset import _UNSET
 from tai42_skeleton.tools.binding.branch import _BranchBindingMixin
 from tai42_skeleton.tools.binding.errors import UnknownToolError
 from tai42_skeleton.tools.binding.resolution import _ResolutionMixin
