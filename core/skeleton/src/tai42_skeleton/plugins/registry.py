@@ -128,6 +128,8 @@ class Contributions(BaseModel):
     no entry here falls back to the auto-form. ``nav_entries`` declares the ``pages`` the plugin
     surfaces a nav entry for — the manifest-declared form of the shell's runtime
     ``registerNavEntry``, so the catalog/manifest read-surface reports a nav-contributing plugin.
+    ``route_panels`` names the channels whose conversation routes the plugin decorates with a
+    panel — the manifest-declared form of the shell's runtime ``registerRoutePanel``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -136,6 +138,7 @@ class Contributions(BaseModel):
     pages: list[str] = []
     settings_tabs: list[str] = []
     nav_entries: list[str] = []
+    route_panels: list[str] = []
 
     @model_validator(mode="after")
     def _validate_nav_entries(self) -> Contributions:

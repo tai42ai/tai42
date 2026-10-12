@@ -11,6 +11,8 @@ than a fabricated empty list.
 
 from __future__ import annotations
 
+from tai42_skeleton.app.mount_map import package_mounts
+from tai42_skeleton.app.route_registry import route_registry
 from tai42_skeleton.operations import OperationFailedError, operation
 from tai42_skeleton.operations.response_models_group_c import StudioPluginListing
 from tai42_skeleton.plugins.registry import StudioPluginError, current_registry
@@ -23,9 +25,14 @@ from tai42_skeleton.plugins.registry import StudioPluginError, current_registry
     response_model=StudioPluginListing,
 )
 async def list_studio_plugins() -> list:
-    """Every registered studio plugin's manifest contents, or a loud 500 if the registry is unbuilt."""
+    """Every registered studio plugin's manifest contents and route mounts, or a loud 500 if the registry is unbuilt.
+
+    ``mounts`` is read off the committed route generation, so a remapped or dropped route item reads as it is
+    served now.
+    """
     try:
         registry = current_registry()
     except StudioPluginError as exc:
         raise OperationFailedError(str(exc)) from exc
-    return registry.manifest_contents()
+    live = route_registry.live_routes()
+    return [{**manifest, "mounts": package_mounts(manifest["name"], live)} for manifest in registry.manifest_contents()]

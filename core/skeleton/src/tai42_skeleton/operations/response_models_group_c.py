@@ -17,7 +17,7 @@ from __future__ import annotations
 import warnings
 from typing import Literal
 
-from pydantic import BaseModel, JsonValue, RootModel
+from pydantic import BaseModel, Field, JsonValue, RootModel
 from tai42_contract.accounts.models import LoginCredentialKind, LoginMethod
 from tai42_contract.backup import BackupSectionReport
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
@@ -508,12 +508,16 @@ class ResolvedSpanValue(BaseModel):
 # --- Plugins ----------------------------------------------------------------
 
 
-class StudioPluginListing(RootModel[list[StudioPluginManifest]]):
-    """The bare-list body of ``list_studio_plugins``.
+class StudioPluginListingEntry(StudioPluginManifest):
+    """One installed plugin's parsed, validated ``StudioPluginManifest`` plus where its own routes are served."""
 
-    Each installed plugin's parsed, validated ``StudioPluginManifest`` (a fixed
-    shape, reused as-is).
-    """
+    mounts: dict[str, str] = Field(
+        description='The plugin\'s own route items and their resolved absolute bases, `{item: "/api/<base>"}`.'
+    )
+
+
+class StudioPluginListing(RootModel[list[StudioPluginListingEntry]]):
+    """The bare-list body of ``list_studio_plugins``: one entry per installed plugin."""
 
 
 # --- Resources --------------------------------------------------------------

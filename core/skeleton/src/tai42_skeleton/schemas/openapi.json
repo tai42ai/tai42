@@ -3404,7 +3404,7 @@
       },
       "Contributions": {
         "additionalProperties": false,
-        "description": "What a Studio plugin contributes to the shell.\n\n``tool_panels`` is keyed by the tool name whose run panel the plugin replaces; a tool with\nno entry here falls back to the auto-form. ``nav_entries`` declares the ``pages`` the plugin\nsurfaces a nav entry for — the manifest-declared form of the shell's runtime\n``registerNavEntry``, so the catalog/manifest read-surface reports a nav-contributing plugin.",
+        "description": "What a Studio plugin contributes to the shell.\n\n``tool_panels`` is keyed by the tool name whose run panel the plugin replaces; a tool with\nno entry here falls back to the auto-form. ``nav_entries`` declares the ``pages`` the plugin\nsurfaces a nav entry for — the manifest-declared form of the shell's runtime\n``registerNavEntry``, so the catalog/manifest read-surface reports a nav-contributing plugin.\n``route_panels`` names the channels whose conversation routes the plugin decorates with a\npanel — the manifest-declared form of the shell's runtime ``registerRoutePanel``.",
         "properties": {
           "nav_entries": {
             "default": [],
@@ -3420,6 +3420,14 @@
               "type": "string"
             },
             "title": "Pages",
+            "type": "array"
+          },
+          "route_panels": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Route Panels",
             "type": "array"
           },
           "settings_tabs": {
@@ -15919,16 +15927,16 @@
         "type": "array"
       },
       "StudioPluginListing": {
-        "description": "The bare-list body of ``list_studio_plugins``.\n\nEach installed plugin's parsed, validated ``StudioPluginManifest`` (a fixed\nshape, reused as-is).",
+        "description": "The bare-list body of ``list_studio_plugins``: one entry per installed plugin.",
         "items": {
-          "$ref": "#/components/schemas/StudioPluginManifest"
+          "$ref": "#/components/schemas/StudioPluginListingEntry"
         },
         "title": "StudioPluginListing",
         "type": "array"
       },
-      "StudioPluginManifest": {
+      "StudioPluginListingEntry": {
         "additionalProperties": false,
-        "description": "The parsed, validated ``studio-manifest.json``.\n\n``extra=\"forbid\"`` so an unknown field is a loud rejection, not a silently-ignored typo.",
+        "description": "One installed plugin's parsed, validated ``StudioPluginManifest`` plus where its own routes are served.",
         "properties": {
           "api_version": {
             "title": "Api Version",
@@ -15948,6 +15956,14 @@
             "title": "Integrity",
             "type": "object"
           },
+          "mounts": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The plugin's own route items and their resolved absolute bases, `{item: \"/api/<base>\"}`.",
+            "title": "Mounts",
+            "type": "object"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -15963,9 +15979,10 @@
           "api_version",
           "entry",
           "integrity",
-          "contributions"
+          "contributions",
+          "mounts"
         ],
-        "title": "StudioPluginManifest",
+        "title": "StudioPluginListingEntry",
         "type": "object"
       },
       "SubMcpEntry": {
@@ -31461,7 +31478,7 @@
     },
     "/api/plugins": {
       "get": {
-        "description": "Every registered studio plugin's manifest contents, or a loud 500 if the registry is unbuilt.",
+        "description": "Every registered studio plugin's manifest contents and route mounts, or a loud 500 if the registry is unbuilt.\n\n``mounts`` is read off the committed route generation, so a remapped or dropped route item reads as it is\nserved now.",
         "operationId": "get_api_plugins",
         "responses": {
           "200": {

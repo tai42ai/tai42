@@ -104,6 +104,7 @@ class RouteRegistry:
         no_body_reason: str | None = None,
         enveloped: bool = True,
         success_media_types: Mapping[str, tuple[str, ...]] | None = None,
+        mount_base: str | None = None,
     ) -> None:
         """Record one route's metadata.
 
@@ -183,6 +184,7 @@ class RouteRegistry:
             any_authenticated=any_authenticated,
             pre_auth=pre_auth,
             owner=owner,
+            mount_base=mount_base,
             public=public,
             no_body_reason=no_body_reason,
             enveloped=enveloped,
