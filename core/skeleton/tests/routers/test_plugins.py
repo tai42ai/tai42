@@ -96,6 +96,35 @@ async def test_registry_listing(studio_env):
     assert resp.headers["cache-control"] == "no-cache"
 
 
+async def test_registry_listing_carries_each_plugin_mounts(studio_env, monkeypatch):
+    seen: list[str] = []
+
+    def mounts(package, routes):
+        seen.append(package)
+        return {"synthetic": "/api/synthetic-alt"}
+
+    monkeypatch.setattr("tai42_skeleton.operations.plugins.package_mounts", mounts)
+    body = _json(await router.list_studio_plugins(_req()))
+    assert body["data"][0]["mounts"] == {"synthetic": "/api/synthetic-alt"}
+    assert body["data"][0]["contributions"]["route_panels"] == []
+    assert seen == ["acme_plugin"]
+
+
+async def test_registry_listing_reads_mounts_off_the_live_generation(studio_env, monkeypatch):
+    sentinel = [object()]
+    monkeypatch.setattr("tai42_skeleton.operations.plugins.route_registry.live_routes", lambda: sentinel)
+    received: list[object] = []
+
+    def mounts(package, routes):
+        received.append(routes)
+        return {}
+
+    monkeypatch.setattr("tai42_skeleton.operations.plugins.package_mounts", mounts)
+    body = _json(await router.list_studio_plugins(_req()))
+    assert body["data"][0]["mounts"] == {}
+    assert received == [sentinel]
+
+
 async def test_registry_listing_unbuilt_is_loud(monkeypatch):
     monkeypatch.setattr(reg, "_REGISTRY", StagedSlot())
     resp = await router.list_studio_plugins(_req())

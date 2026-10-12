@@ -173,6 +173,27 @@ def test_manifest_carries_nav_entries():
     assert manifest.model_dump()["contributions"]["nav_entries"] == ["home"]
 
 
+# -- route_panels contribution -----------------------------------------------
+
+
+def test_contributions_route_panels_defaults_empty():
+    assert Contributions().route_panels == []
+
+
+def test_manifest_carries_route_panels():
+    manifest = StudioPluginManifest.model_validate(
+        {
+            "name": "ok",
+            "version": "1",
+            "api_version": 1,
+            "entry": "e.js",
+            "integrity": {"e.js": "sha384-" + "A" * 64},
+            "contributions": {"route_panels": ["synthetic"]},
+        }
+    )
+    assert manifest.model_dump()["contributions"]["route_panels"] == ["synthetic"]
+
+
 # -- Traversal primitive -----------------------------------------------------
 
 
