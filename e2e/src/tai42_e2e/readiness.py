@@ -15,7 +15,7 @@ from tai42_e2e.child_env import needs_bus
 from tai42_e2e.waiting import wait_for, wait_for_async
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine, Mapping
+    from collections.abc import Collection, Coroutine, Mapping
 
     from tai42_e2e.stack import TaiStack
 
@@ -181,32 +181,46 @@ def wait_http_ok(stack: TaiStack, url: str, deadline: float, label: str) -> None
     wait_for(probe, deadline=deadline, message=f"{label} never became ready at {url}")
 
 
-def wait_backend_census(stack: TaiStack, deadline: float, baseline: Mapping[str, int] | None = None) -> None:
-    # The bus census lists ALL workers (serve + backend) by slot name, so a restart
-    # keys on a fresh ``backend``-kind LIFE: a worker's slot name is STABLE across a
-    # restart, so a respawn reuses the same name at an INCREMENTED generation (or, if
-    # the old claim has not yet lapsed, the next free name) — never a fresh unrelated
-    # id. ``baseline`` is the pre-restart ``{name: generation}`` of the kind; the wait
-    # holds until BOTH facts land: every baseline life is GONE (its name absent, or a
-    # higher generation on that name) AND at least one fresh READY life of the kind
-    # exists (a name absent from the baseline, or a higher generation on a baseline
-    # name). Keying on the generation ignores a SIGKILLed worker's corpse row — its
-    # presence key lingers at the OLD generation until its heartbeat TTL — so the wait
-    # never passes on the corpse before the replacement has joined and gone ready.
-    base = dict(baseline or {})
+def wait_fresh_lives(
+    stack: TaiStack,
+    kind: str,
+    deadline: float,
+    *,
+    before: Mapping[str, int] | None = None,
+    replaced: Collection[str] | None = None,
+    count: int = 1,
+) -> None:
+    """Hold until ``count`` fresh READY ``kind`` lives are on the bus census and every
+    replaced life is gone.
+
+    A worker's slot name is STABLE across a restart, so a respawn reuses the same name at an
+    INCREMENTED generation (or, if the old claim has not yet lapsed, the next free name) —
+    never a fresh unrelated id. ``before`` is the pre-restart ``{name: generation}`` of every
+    ``kind`` life; ``replaced`` names the lives the restarted process held (default: all of
+    ``before``). A life is fresh when its name is absent from ``before`` or carries a higher
+    generation there; a replaced life is gone when its name is absent or superseded by a
+    higher generation. Keying on the generation ignores a SIGKILLed worker's corpse row — its
+    presence key lingers at the OLD generation until its heartbeat TTL — and never counts a
+    sibling process's untouched life (another replica's worker) as fresh. A restarted worker
+    answers requests before it has claimed its slot (the claim runs on the bus subscription
+    task the app spawns at the end of its startup), so its census row is the signal that it
+    holds its bus identity. With no ``before`` (the boot shape) any ``count`` ready lives pass."""
+    base = dict(before or {})
+    gone = base.keys() if replaced is None else replaced
 
     def probe() -> bool:
         early = early_exit_detail(stack)
         if early is not None:
-            raise RuntimeError(f"backend census: {early}")
-        rows = {w.name: w for w in stack.census() if w.kind == "backend"}
-        old_gone = all(name not in rows or rows[name].generation > gen for name, gen in base.items())
-        fresh_ready = any(
-            w.state == "ready" and (w.name not in base or w.generation > base[w.name]) for w in rows.values()
-        )
-        return old_gone and fresh_ready
+            raise RuntimeError(f"{kind} census: {early}")
+        rows = {w.name: w for w in stack.census() if w.kind == kind}
+        old_gone = all(name not in rows or rows[name].generation > base[name] for name in gone)
+        fresh = [w for w in rows.values() if w.state == "ready" and (w.name not in base or w.generation > base[w.name])]
+        return old_gone and len(fresh) >= count
 
-    want = "a fresh ready backend-kind life" if base else "a ready backend-kind worker"
+    if count == 1:
+        want = f"a fresh ready {kind}-kind life" if base else f"a ready {kind}-kind worker"
+    else:
+        want = f"{count} fresh ready {kind}-kind lives" if base else f"{count} ready {kind}-kind workers"
     wait_for(probe, deadline=deadline, message=f"{want} never appeared in the worker-bus census")
 
 
