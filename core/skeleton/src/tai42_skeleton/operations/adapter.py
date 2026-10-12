@@ -120,8 +120,8 @@ def validate_body[M: BaseModel](model: type[M], body: object, what: str) -> M:
     ``body`` is any decoded JSON value: a value that is not an object is refused by the model's own
     rule ("Input should be a valid dictionary or instance of …"). Value-free: each refusal names the
     declared field path and the bound it violates (pydantic's ``msg``), never the input — a path
-    stops at the first part that is not a declared field (a mapping key or a list index the caller
-    chose).
+    steps through the tag of a root discriminated union's chosen variant and stops at the first part
+    that is not a declared field (a mapping key or a list index the caller chose).
     """
     try:
         return model.model_validate(body)
@@ -135,11 +135,29 @@ def _refusal(model: type[BaseModel], loc: tuple[int | str, ...], msg: str) -> st
     path: list[str] = []
     current: type[BaseModel] | None = model
     for part in loc:
-        if current is None or not isinstance(part, str) or part not in current.model_fields:
+        if current is None or not isinstance(part, str):
             break
+        if part not in current.model_fields:
+            # A discriminated union's location steps through the tag of the variant it chose.
+            current = _tagged_variant(current, part)
+            continue
         path.append(part)
         current = _model_of(current.model_fields[part].annotation)
     return f"{'.'.join(path)}: {msg}" if path else msg
+
+
+def _tagged_variant(model: type[BaseModel], tag: str) -> type[BaseModel] | None:
+    """The variant of a root discriminated union whose tag is ``tag``, else ``None``."""
+    root = model.model_fields.get("root")
+    if root is None or not isinstance(root.discriminator, str):
+        return None
+    for variant in get_args(root.annotation):
+        if not (isinstance(variant, type) and issubclass(variant, BaseModel)):
+            continue
+        tag_field = variant.model_fields.get(root.discriminator)
+        if tag_field is not None and tag in get_args(tag_field.annotation):
+            return variant
+    return None
 
 
 def _model_of(annotation: Any) -> type[BaseModel] | None:
