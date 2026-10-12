@@ -3352,6 +3352,10 @@
             "type": "boolean"
           },
           "target_kind": {
+            "enum": [
+              "agent",
+              "tool"
+            ],
             "title": "Target Kind",
             "type": "string"
           },
@@ -3406,6 +3410,10 @@
             "type": "boolean"
           },
           "target_kind": {
+            "enum": [
+              "agent",
+              "tool"
+            ],
             "title": "Target Kind",
             "type": "string"
           },
@@ -16021,8 +16029,7 @@
             "type": "number"
           },
           "last_delivery_status": {
-            "title": "Last Delivery Status",
-            "type": "string"
+            "$ref": "#/components/schemas/DeliveryStatus"
           },
           "message_count": {
             "title": "Message Count",

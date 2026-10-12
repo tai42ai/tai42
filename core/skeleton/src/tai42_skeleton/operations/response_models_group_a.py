@@ -20,6 +20,7 @@ from tai42_contract.conversations import (
     ApiConversationRouteCreate,
     ChannelConversationRouteCreate,
     ConversationMode,
+    ConversationTargetKind,
     TargetConversationConfig,
 )
 from tai42_contract.plugins import PluginDelivery, RouteMethod
@@ -29,7 +30,7 @@ from tai42_contract.versioning.models import DocumentVersion
 from tai42_skeleton.access_control.projection import PrincipalRef
 from tai42_skeleton.app.route_registry import RouteAction
 from tai42_skeleton.conversations.mode import ModeSource
-from tai42_skeleton.conversations.models import ConversationRecord
+from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.record_pages import TranscriptOrder
 from tai42_skeleton.marketplace.compat import CompatState, UpgradeOutcome
 
@@ -275,7 +276,7 @@ class ThreadSummaryRow(BaseModel):
     client_address: str
     last_activity_at: float
     message_count: int
-    last_delivery_status: str
+    last_delivery_status: DeliveryStatus
 
 
 class ThreadSummaryEnvelope(BaseModel):
@@ -414,7 +415,7 @@ class ConversationConfigSetResult(BaseModel):
     """The created/replaced per-target conversation config."""
 
     created: bool
-    target_kind: str
+    target_kind: ConversationTargetKind
     target_name: str
     config: TargetConversationConfig
 
@@ -423,7 +424,7 @@ class ConversationConfigDeleteResult(BaseModel):
     """A per-target conversation config removal."""
 
     removed: bool
-    target_kind: str
+    target_kind: ConversationTargetKind
     target_name: str
 
 
