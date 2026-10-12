@@ -88,6 +88,16 @@ def _swap_spy() -> tuple[Callable[..., Awaitable[Epoch]], dict[str, Any]]:
     return spy, calls
 
 
+def _discard_spy() -> tuple[Callable[..., Awaitable[None]], dict[str, Any]]:
+    """A ``build_and_discard`` seam that records its call and builds nothing."""
+    calls: dict[str, Any] = {}
+
+    async def spy(env: dict[str, str]) -> None:
+        calls["env"] = dict(env)
+
+    return spy, calls
+
+
 # ---------------------------------------------------------------------------
 # Ordering / failure — env-write-LAST
 # ---------------------------------------------------------------------------
@@ -909,7 +919,7 @@ async def test_a_profile_apply_in_a_forked_job_child_proves_the_build_swaps_noth
     monkeypatch.setenv("TAI_SUPERVISED", "harness")
     store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
     spy, swapped = _swap_spy()
-    discard, discarded = _swap_spy()
+    discard, discarded = _discard_spy()
     orch, seen = _orchestrate_spy(
         RecycleReport(rows=[RecycleRow(name="serve-1", kind="serve", generation_before=1, status=RECYCLED)])
     )
@@ -973,7 +983,7 @@ async def test_a_member_builds_and_swaps_and_never_discards(monkeypatch: pytest.
     monkeypatch.setenv("TAI_SUPERVISED", "harness")
     store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
     swap, swapped = _swap_spy()
-    discard, discarded = _swap_spy()
+    discard, discarded = _discard_spy()
     orch, _seen = _orchestrate_spy()
     await _service(store, FakeBus(origin="serve-applier"), orchestrate=orch).apply_replace_env(
         {"TAI_BUS_NAMESPACE": "new"}, save_previous=_PrevSpy(), build_and_swap=swap, build_and_discard=discard
