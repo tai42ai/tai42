@@ -699,3 +699,49 @@ def test_wait_for_horse_after_kill_does_not_self_timeout(monkeypatch: pytest.Mon
     monkeypatch.setattr(worker_module.os, "wait4", fake_wait4)
     # It must NOT raise despite the interval elapsing across polls.
     assert worker.wait_for_horse() == (424242, 0, "rusage")
+
+
+# --- the job budget at run time ----------------------------------------------
+
+
+@pytest.mark.parametrize("stored_timeout", [300, None, 180])
+def test_the_worker_applies_the_current_job_budget_to_every_job_it_runs(
+    monkeypatch: pytest.MonkeyPatch, stored_timeout: int | None
+) -> None:
+    """A job carries the timeout it was stored with (an already-fired schedule keeps its first one);
+    the worker replaces it with the budget it is configured with when it prepares the job, so a
+    changed ``RQ_TASK_TIMEOUT`` takes effect on the next run once the worker restarts."""
+    from tai42_kit.settings import reset_all_settings
+
+    prepared: list[Any] = []
+
+    class Base:
+        def __init__(self, queues: Any, *args: Any, **kwargs: Any) -> None:
+            self.name = kwargs["name"]
+
+        def prepare_execution(self, job: Any) -> Any:
+            prepared.append(job.timeout)
+            return "execution"
+
+    class TestWorker(worker_module._TaiWorkerMixin, Base):
+        pass
+
+    job = SimpleNamespace(id="nightly", timeout=stored_timeout)
+    monkeypatch.setenv("RQ_TASK_TIMEOUT", "60")
+    reset_all_settings()
+    try:
+        assert TestWorker(["default"], name="w1").prepare_execution(job) == "execution"
+    finally:
+        monkeypatch.delenv("RQ_TASK_TIMEOUT", raising=False)
+        reset_all_settings()
+    assert job.timeout == 60
+    assert prepared == [60]
+
+
+def test_both_worker_classes_prepare_through_the_budget_seam():
+    from rq import SimpleWorker, Worker
+
+    for cls in (worker_module.CustomRQWorker, worker_module.CustomRQSimpleWorker):
+        assert cls.prepare_execution is worker_module._TaiWorkerMixin.prepare_execution
+    assert Worker.prepare_execution is not worker_module._TaiWorkerMixin.prepare_execution
+    assert SimpleWorker.prepare_execution is not worker_module._TaiWorkerMixin.prepare_execution
