@@ -14,11 +14,13 @@ from pydantic import BaseModel
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import Response
+from tai42_contract.app import HostedUiPaths
 
 from tai42_skeleton.app.mount_map import MountBinding, MountRegistrationError, current_mount_binding, note_registered
 from tai42_skeleton.app.raw_path_route import RawPathRoute, SpaFallbackRoute
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import CORE_OWNER, MOUNT_METHODS, RouteOwner, route_registry
+from tai42_skeleton.plugins.settings import hosted_ui_settings
 
 if TYPE_CHECKING:
     from tai42_contract.app import DeclaredRouteMetadata
@@ -310,6 +312,10 @@ class HttpSurface:
                 "tai-plugin.yml, so it has no mount base"
             )
         return binding.resolved_path("")
+
+    def hosted_ui(self) -> HostedUiPaths:
+        """The page addresses of the hosted UI, as the deployment declares them (``HOSTED_UI_*``)."""
+        return hosted_ui_settings().paths()
 
     def route_table_savepoint(self) -> int:
         """The current length of the FastMCP additional-route table — a plugin-import savepoint.

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from tai42_contract.settings_profiles import RESERVED_PROFILE_PREFIX
 
 from tai42_cli.commands._common import (
     app_context,
@@ -35,11 +36,6 @@ app.add_typer(env_app, name="env")
 
 profile_app = typer.Typer(name="profile", help="Manage versioned settings profiles.", no_args_is_help=True)
 app.add_typer(profile_app, name="profile")
-
-# ``@``-prefixed profile names are the apply pipeline's own reserved snapshots
-# (e.g. ``@previous``); the door refuses a user-created one, and the CLI rejects it
-# up front so the operator gets the reason without a round trip.
-_RESERVED_PROFILE_PREFIX = "@"
 
 
 @env_app.command("get")
@@ -263,9 +259,9 @@ def set_profile(
     Example: ``tai config profile set staging LOG_LEVEL=debug --env-file secrets.env --secret-key API_KEY``
     """
     ctx_obj = app_context(ctx)
-    if name.startswith(_RESERVED_PROFILE_PREFIX):
+    if name.startswith(RESERVED_PROFILE_PREFIX):
         raise typer.BadParameter(
-            f"a profile name starting with {_RESERVED_PROFILE_PREFIX!r} is reserved", param_hint="NAME"
+            f"a profile name starting with {RESERVED_PROFILE_PREFIX!r} is reserved", param_hint="NAME"
         )
     env: dict[str, str] = {}
     merge_assignments(

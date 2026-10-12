@@ -42,35 +42,10 @@ from tai42_contract.manifest import ExtensionElement
 from tai42_skeleton.manifest import Manifest  # noqa: F401 — the model-validate seam tests patch
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.adapter import read_json_object
+from tai42_skeleton.operations.presets.readers import read_element
 from tai42_skeleton.operations.tool_extensions import get_tool_extensions as _get_tool_extensions_op
 from tai42_skeleton.operations.tool_extensions import modify_tool_extension_combos as _modify_tool_extension_combos_op
 from tai42_skeleton.operations.tool_extensions import set_tool_extensions as _set_tool_extensions_op
-
-
-def _read_element(element: Any) -> ExtensionElement:
-    """One combo element, structurally validated.
-
-    A non-empty extension NAME (bare string), or a ``{"name": <non-empty str>, "config": <dict>}`` mapping
-    binding author config (``config`` REQUIRED — a config-less selection is the bare-string form, so a
-    config-free dict is malformed) with no other keys. Anything else is a loud 400. Registration of the
-    name is checked later against the live registry.
-    """
-    if isinstance(element, str):
-        if not element:
-            raise BadRequestError("an extension name must be a non-empty string")
-        return element
-    if isinstance(element, dict):
-        name = element.get("name")
-        if not isinstance(name, str) or not name:
-            raise BadRequestError("an extension element must have a non-empty string 'name'")
-        config = element.get("config")
-        if not isinstance(config, dict):
-            raise BadRequestError(f"extension element {name!r} must carry a 'config' mapping")
-        extra = set(element) - {"name", "config"}
-        if extra:
-            raise BadRequestError(f"extension element {name!r} has unexpected keys: {sorted(extra)!r}")
-        return {"name": name, "config": dict(config)}
-    raise BadRequestError("each combo element must be an extension name or a {'name', 'config'} mapping")
 
 
 def _read_combo_members(combos: list[Any]) -> list[list[ExtensionElement]]:
@@ -83,7 +58,7 @@ def _read_combo_members(combos: list[Any]) -> list[list[ExtensionElement]]:
     for combo in combos:
         if not isinstance(combo, list) or not combo:
             raise BadRequestError("each combo must be a non-empty list of extension elements")
-        result.append([_read_element(element) for element in combo])
+        result.append([read_element(element) for element in combo])
     return result
 
 

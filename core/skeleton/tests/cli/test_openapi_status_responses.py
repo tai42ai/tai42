@@ -661,19 +661,21 @@ def test_conversation_message_body_documents_the_optional_wait_seconds(spec: dic
     assert body["content"]["application/json"]["schema"]["$ref"].endswith("/ConversationMessage")
 
 
-def test_conversation_route_create_requires_the_target_and_execution_key(spec: dict) -> None:
+@pytest.mark.parametrize("variant", ["ApiConversationRouteCreate", "ChannelConversationRouteCreate"])
+def test_conversation_route_create_requires_the_target_and_execution_key(spec: dict, variant: str) -> None:
     # Target kind/name and execution key are all required: a route naming no target or no
     # identity cannot be stored.
-    schema = spec["components"]["schemas"]["ConversationRouteCreate"]
+    schema = spec["components"]["schemas"][variant]
     assert {"route_name", "door", "target_kind", "target_name", "execution_key"} <= set(schema["required"])
     for field in ("target_name", "execution_key"):
         assert schema["properties"][field]["minLength"] == 1
 
 
-def test_conversation_route_create_omits_the_server_minted_fields(spec: dict) -> None:
+@pytest.mark.parametrize("variant", ["ApiConversationRouteCreate", "ChannelConversationRouteCreate"])
+def test_conversation_route_create_omits_the_server_minted_fields(spec: dict, variant: str) -> None:
     # ``callback_secret`` and ``execution_key_fingerprint`` are both server-derived, so
     # the create request contract lists neither.
-    schema = spec["components"]["schemas"]["ConversationRouteCreate"]
+    schema = spec["components"]["schemas"][variant]
     for field in ("callback_secret", "execution_key_fingerprint"):
         assert field not in schema.get("properties", {})
         assert field not in schema.get("required", [])
@@ -709,3 +711,24 @@ def test_grant_gated_read_doors_document_no_403(spec: dict, api_routes: list[Rou
     assert 403 not in meta.error_statuses
     assert 404 in meta.error_statuses
     assert "403" not in spec["paths"][path]["get"]["responses"]
+
+
+def test_conversation_route_create_body_is_the_door_discriminated_union(spec: dict) -> None:
+    body = spec["paths"]["/api/conversations/{route_name}"]["post"]["requestBody"]["content"]["application/json"]
+    assert body["schema"] == {"$ref": "#/components/schemas/ConversationRouteCreateBody"}
+    component = spec["components"]["schemas"]["ConversationRouteCreateBody"]
+    assert component["discriminator"]["propertyName"] == "door"
+    assert component["oneOf"] == [
+        {"$ref": "#/components/schemas/ApiConversationRouteCreate"},
+        {"$ref": "#/components/schemas/ChannelConversationRouteCreate"},
+    ]
+    channel = spec["components"]["schemas"]["ChannelConversationRouteCreate"]
+    assert channel["properties"]["channel"]["pattern"] == "^[^:]*[^:\\s][^:]*$"
+
+
+def test_conversation_route_reads_serve_the_door_discriminated_view(spec: dict) -> None:
+    one = spec["paths"]["/api/conversations/{route_name}"]["get"]["responses"]["200"]["content"]["application/json"]
+    data = one["schema"]["properties"]["data"]
+    assert data == {"$ref": "#/components/schemas/ConversationRouteViewBody"}
+    view = spec["components"]["schemas"]["ConversationRouteViewBody"]
+    assert view["discriminator"]["propertyName"] == "door"

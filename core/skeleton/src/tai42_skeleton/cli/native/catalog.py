@@ -39,7 +39,8 @@ _COLUMNS = ["name", "kind", "package", "source", "module", "description"]
 
 # The tai42-skeleton builtins — the ONE place they live (the core is not a
 # marketplace listing, so nothing else carries them). test_native_catalog.py pins this
-# table to the actual builtin registrations so it cannot rot silently.
+# table to the actual builtin registrations both ways, so a row cannot rot and a
+# builtin cannot go missing.
 _BUILTIN_ROWS: list[dict[str, str]] = [
     {
         "name": "ask",
@@ -144,6 +145,14 @@ _BUILTIN_ROWS: list[dict[str, str]] = [
         "source": "builtin",
         "module": "tai42_skeleton.tools.builtin.doors",
         "description": "Deliver a structured event to a conversation thread under the deployment's own identity.",
+    },
+    {
+        "name": "sandbox_exec",
+        "kind": "tool",
+        "package": "tai42-skeleton",
+        "source": "builtin",
+        "module": "tai42_skeleton.tools.builtin.sandbox_exec",
+        "description": "Run a command in a disposable sandbox session (fenced).",
     },
     {
         "name": "monitor",

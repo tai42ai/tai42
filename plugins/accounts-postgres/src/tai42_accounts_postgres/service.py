@@ -119,8 +119,11 @@ async def mint_session(user_id: str) -> str:
 
 
 def invite_login_path(raw_invite_token: str) -> str:
-    """The origin-relative Studio path an admin hands to the invitee."""
-    return f"/login?invite={raw_invite_token}"
+    """The origin-relative hosted-UI path an admin hands to the invitee: the declared login page and invite key."""
+    from tai42_contract.app import tai42_app
+
+    paths = tai42_app.http.hosted_ui()
+    return f"{paths.login_path}?{paths.invite_query_key}={raw_invite_token}"
 
 
 def too_many_attempts_message(retry_after: int) -> str:

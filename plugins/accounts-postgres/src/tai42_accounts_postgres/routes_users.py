@@ -16,7 +16,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from tai42_contract.access_control import get_current_user_id
+from tai42_contract.access_control import API_KEY_HEADER, get_current_user_id
 from tai42_contract.app import tai42_app
 
 # Arms the accounts backup-section on_startup hook. Homed HERE (a manifest-loaded
@@ -73,7 +73,7 @@ def _presented_session_hash(request: Request) -> str | None:
         elif scheme.lower() == "bearer":
             token = rest.strip() or None
     if token is None:
-        token = request.headers.get("X-Api-Key")
+        token = request.headers.get(API_KEY_HEADER)
     if token and token.startswith(SESSION_TOKEN_PREFIX):
         return service.token_hash(token)
     return None

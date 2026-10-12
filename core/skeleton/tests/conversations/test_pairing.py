@@ -12,6 +12,8 @@ import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import (
+    ApiConversationRoute,
+    ChannelConversationRoute,
     ConversationRoute,
     ConversationTargetKind,
     OverlapPolicy,
@@ -116,7 +118,7 @@ class _FakeTemplateApp:
 
 
 def _channel_route(route_name: str = "line-a", channel: str = "twilio", our_identity: str = "+15550001111"):
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="agent",
@@ -129,7 +131,7 @@ def _channel_route(route_name: str = "line-a", channel: str = "twilio", our_iden
 
 
 def _api_route(route_name: str = "chat"):
-    return ConversationRoute(
+    return ApiConversationRoute(
         route_name=route_name,
         door="api",
         target_kind="agent",
@@ -205,7 +207,7 @@ def _tool_route(
     *,
     start_expr: str | None = None,
 ):
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="tool",
@@ -418,7 +420,7 @@ async def test_cross_target_redeem_is_an_answered_refusal(env, monkeypatch):
     # A code minted on a DIFFERENT target: redeeming it here merges across targets and refuses.
     other = TargetConversationConfig(target_kind="tool", target_name="pinger", multichannel=True)
     env.seed_target_config(other)
-    tool_route = ConversationRoute(
+    tool_route = ChannelConversationRoute(
         route_name="tool-line",
         door="channel",
         target_kind="tool",
@@ -864,7 +866,7 @@ def _cancel_agent_route(route_name: str = "line-a", our_identity: str = _OUR) ->
 
 
 def _tool_api_route(route_name: str = "chat") -> ConversationRoute:
-    return ConversationRoute(
+    return ApiConversationRoute(
         route_name=route_name,
         door="api",
         target_kind="tool",

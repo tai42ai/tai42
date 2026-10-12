@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict
 from starlette.background import BackgroundTask
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import ApplyResponse, ProfileApplyResponse
-from tai42_contract.settings_profiles import SettingsProfileBody
+from tai42_contract.settings_profiles import PREVIOUS_PROFILE_NAME, RESERVED_PROFILE_PREFIX, SettingsProfileBody
 from tai42_contract.settings_profiles.errors import (
     SettingsProfileExistsError,
     SettingsProfileNotFoundError,
@@ -285,15 +285,6 @@ async def reload_config(targets: list[str] | None = None) -> Any:
 _PROFILE_STORE_NOUN = "versioned-document store"
 _PROFILE_STORE_CODE = "versioning-not-configured"
 
-# Reserved profile-name prefix — ``@``-prefixed names (e.g. ``@previous``) are the
-# apply pipeline's own reserved snapshots; a user may not create one and they are
-# excluded from the listing.
-_RESERVED_PREFIX = "@"
-
-# The reserved rollback snapshot the apply pipeline saves the pre-apply stored env
-# into, so an operator can roll back a bad apply by applying ``@previous``.
-_PREVIOUS_NAME = "@previous"
-
 
 class ProfileRollback(BaseModel):
     """A settings-profile rollback request — the target version to make active."""
@@ -337,7 +328,7 @@ async def list_profiles() -> list[dict[str, Any]]:
     store = _profile_store()
     rows: list[dict[str, Any]] = []
     for rec in await store.list_profiles():
-        if rec.name.startswith(_RESERVED_PREFIX):
+        if rec.name.startswith(RESERVED_PROFILE_PREFIX):
             continue
         try:
             body = await store.get_active_body(rec.name)
@@ -383,9 +374,10 @@ async def put_profile(name: str, description: str, env: dict[str, str], secret_k
     boundary validator (``ConfigService._validate_replace``): a payload carrying an X-band key or leaving
     a manifest ``!ENV`` marker dangling is refused at save time, naming the key.
     """
-    if name.startswith(_RESERVED_PREFIX):
+    if name.startswith(RESERVED_PROFILE_PREFIX):
         raise BadRequestError(
-            f"settings profile name {name!r} is reserved: names starting with {_RESERVED_PREFIX!r} are not allowed"
+            f"settings profile name {name!r} is reserved: "
+            f"names starting with {RESERVED_PROFILE_PREFIX!r} are not allowed"
         )
     _require_profile_store()
     body = SettingsProfileBody(description=description, env=env, secret_keys=secret_keys)
@@ -577,11 +569,11 @@ async def _save_previous_version(stored_env: dict[str, str]) -> None:
         secret_keys=parse_secret_marks(stored_env.get(SECRET_MARKS_ENV_VAR)),
     )
     try:
-        await store.get_profile(_PREVIOUS_NAME)
+        await store.get_profile(PREVIOUS_PROFILE_NAME)
     except SettingsProfileNotFoundError:
-        await store.create_profile(_PREVIOUS_NAME, body)
+        await store.create_profile(PREVIOUS_PROFILE_NAME, body)
     else:
-        await store.save_version(_PREVIOUS_NAME, body)
+        await store.save_version(PREVIOUS_PROFILE_NAME, body)
 
 
 @operation(

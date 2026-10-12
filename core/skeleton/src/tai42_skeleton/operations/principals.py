@@ -21,10 +21,10 @@ for any kind.
 from __future__ import annotations
 
 from secrets import token_urlsafe
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field, RootModel
-from tai42_contract.access_control.models import Principal
+from tai42_contract.access_control.models import Principal, PrincipalKind
 from tai42_contract.accounts import LoginAttachingProvider
 
 from tai42_skeleton.access_control import management, roles
@@ -41,7 +41,7 @@ class PrincipalCreate(BaseModel):
     """
 
     user_id: str | None = None
-    kind: Literal["human", "service"]
+    kind: PrincipalKind
     display_name: str = Field(min_length=1)
     role: str = Field(min_length=1)
 

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Final, Literal
 from urllib.parse import urlsplit
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, ConfigDict, Field, RootModel, field_validator
 
 from tai42_contract.conversation_target import ConversationTargetKind
 from tai42_contract.conversations.overlap import OverlapPolicy
@@ -34,7 +34,9 @@ ConversationDoor = Literal["api", "channel"]
 #: committed), not only the active one. Passing the whole create model (not just the name) lets
 #: the owner judge the target against those door fields. Blocking only — a warning is not a
 #: bind-path concept.
-TargetBindValidator = Callable[["ConversationRouteCreate", "PresetBody | None"], Awaitable[Sequence[str]]]
+TargetBindValidator = Callable[
+    ["ApiConversationRouteCreate | ChannelConversationRouteCreate", "PresetBody | None"], Awaitable[Sequence[str]]
+]
 
 #: A thread's conversation control mode: ``agent`` runs the target turn (an agent run or a
 #: tool dispatch); ``manual`` suppresses the target turn so an operator answers by hand,
@@ -48,18 +50,36 @@ CONVERSATION_MODES: tuple[ConversationMode, ...] = ("agent", "manual")
 # vocabulary must exclude ``:``.
 ROUTE_NAME_RE = re.compile(r"^[a-z0-9-]+$")
 
+#: An absolute https URL (scheme case-insensitive) whose authority is non-empty and carries no
+#: ``@`` userinfo. It never refuses a value :func:`_require_https_url` accepts; that check stays the
+#: authority for what the pattern cannot express (an empty hostname, a malformed bracket host, a
+#: whitespace or control character anywhere).
+HTTPS_CALLBACK_PATTERN: Final = r"^[hH][tT][tT][pP][sS]://[^/?#@]+(?:[/?#]|$)"
 
-def _is_https_url(value: str) -> bool:
+#: A channel name: non-blank and ``:``-free. It prefixes the inbound-dedupe and outbound-index
+#: keys, so a ``:`` in it would shift the separator and let one channel read another's entry.
+CHANNEL_NAME_PATTERN: Final = r"^[^:]*[^:\s][^:]*$"
+
+#: A non-blank text: at least one non-whitespace character.
+NON_BLANK_PATTERN: Final = r"\S"
+
+
+def _require_https_url(value: str) -> str:
     # Must parse (not ``startswith``): rejects hostless ``https://``, scheme-only or
     # relative strings, ``user@host`` authority spoofing, and malformed authorities.
+    # ``urlsplit`` silently strips leading whitespace/control characters and drops tab/CR/LF,
+    # so a value carrying any is refused before parsing: the stored URL is the one validated.
+    clean = not any(ch.isspace() or not ch.isprintable() for ch in value)
     try:
-        split = urlsplit(value)
+        split = urlsplit(value) if clean else None
     except ValueError:
-        return False
-    return split.scheme == "https" and bool(split.hostname) and "@" not in split.netloc
+        split = None
+    if split is None or split.scheme != "https" or not split.hostname or "@" in split.netloc:
+        raise ValueError("callback_url must be an absolute https URL with no userinfo")
+    return value
 
 
-class ConversationRouteCreate(ParkableDoorMixin):
+class _ConversationRouteFields(ParkableDoorMixin):
     """The client-facing create/edit body for a conversation route: the fields a caller supplies.
 
     Binds a ``(target_kind, target_name)`` — an ``agent`` run or a ``tool`` dispatch — to
@@ -68,21 +88,21 @@ class ConversationRouteCreate(ParkableDoorMixin):
     ``start_expr`` / ``extras_expr``) plus a ``reply_expr`` (jq mapping the started run's result to
     the reply): ``start_expr`` builds the run's kwargs (a tool dispatch's kwargs or an agent run's
     ``astream`` kwargs), the cancel/resume jqs act on the run's parked interactions, and
-    ``reply_expr`` maps the terminal to the participant reply. ``api`` rows MAY carry an https
-    ``callback_url`` (the answer sink; when absent
-    the caller reads its answer back from the poll door); ``channel`` rows carry the
-    registry ``channel`` plus the ``our_identity`` the medium is texted at (N rows may
-    share a channel, each its own identity). The server-derived ``callback_secret`` and
-    ``execution_key_fingerprint`` are deliberately absent; :class:`ConversationRoute` is
-    this shape plus those. Frozen.
+    ``reply_expr`` maps the terminal to the participant reply. The door variants refine the
+    door-exclusive fields: :class:`ApiConversationRouteCreate` MAY carry an https ``callback_url``
+    (the answer sink; when absent the caller reads its answer back from the poll door);
+    :class:`ChannelConversationRouteCreate` carries the registry ``channel`` plus the
+    ``our_identity`` the medium is texted at (N rows may share a channel, each its own identity).
+    Each variant keeps every field, a field exclusive to the other door typed ``None``. The
+    server-derived ``callback_secret`` and ``execution_key_fingerprint`` are deliberately absent;
+    the stored variants are these shapes plus those. Frozen.
     """
 
     model_config = ConfigDict(frozen=True)
 
     # A ``:``-free slug: it keys the ``bridge:{route_name}:{client_address}`` thread
     # namespace, where a ``:`` would let one route's threads collide with another's.
-    route_name: str
-    door: ConversationDoor
+    route_name: Annotated[str, Field(pattern=ROUTE_NAME_RE.pattern)]
     target_kind: ConversationTargetKind
     target_name: str = Field(min_length=1)
     # A templated text carrying (inline or by stored id) a jq program mapping the inbound turn
@@ -182,18 +202,15 @@ class ConversationRouteCreate(ParkableDoorMixin):
             "the agent run or tool dispatch and every tool call the turn makes."
         ),
     )
-    channel: str | None = None  # door=channel: the registry name, ``:``-free
-    our_identity: str | None = None  # door=channel: the medium address we are texted at
-    callback_url: str | None = None  # door=api: the optional https answer sink; absent = poll-only
     # A per-route override of the global ``per_address_turns_per_hour`` cap: the positive
     # per-hour turn rate this route's per-address buckets run at, or ``None`` to run at the
     # global rate.
     turns_per_hour_override: int | None = Field(default=None, gt=0)
     # The participant-facing reply sent when a conversational turn on this route fails; ``None`` uses
     # the built-in English default. LITERAL text — no placeholders/templating. Non-blank when
-    # set. (No other text field in this file carries a max_length; 2000 is a defensible bound
-    # for a single participant-facing reply.)
-    error_reply_text: str | None = Field(default=None, min_length=1, max_length=2000)
+    # set: a whitespace-only reply would deliver an empty message where the default was
+    # intended. (2000 is a defensible bound for a single participant-facing reply.)
+    error_reply_text: Annotated[str, Field(min_length=1, max_length=2000, pattern=NON_BLANK_PATTERN)] | None = None
     # The operator-declared default locale for templated reply parts when the turn states none;
     # the last fallback under a per-turn or stored-contact locale, canonicalized through the one
     # locale seam (a malformed tag is rejected loudly, never guessed). ``None`` declares no
@@ -204,61 +221,51 @@ class ConversationRouteCreate(ParkableDoorMixin):
     # message and leaves the payload unchanged.
     overlap: OverlapPolicy = OverlapPolicy()
 
-    @field_validator("route_name")
-    @classmethod
-    def _check_route_name(cls, value: str) -> str:
-        if not ROUTE_NAME_RE.fullmatch(value):
-            raise ValueError(f"route_name must be a slug matching {ROUTE_NAME_RE.pattern!r}: {value!r}")
-        return value
-
-    @field_validator("error_reply_text")
-    @classmethod
-    def _check_error_reply_text(cls, value: str | None) -> str | None:
-        # A set override must be non-blank: a whitespace-only reply would deliver an empty
-        # participant-facing message where the built-in default was intended.
-        if value is not None and not value.strip():
-            raise ValueError("error_reply_text must be non-blank when set")
-        return value
-
     @field_validator("locale")
     @classmethod
     def _canonical_locale(cls, value: str | None) -> str | None:
         return normalize_optional_locale(value)
 
-    @model_validator(mode="after")
-    def _check_door_fields(self) -> ConversationRouteCreate:
-        if self.door == "channel":
-            if not (self.channel and self.channel.strip()):
-                raise ValueError("door=channel requires a non-blank channel")
-            if ":" in self.channel:
-                # The channel name prefixes the inbound-dedupe and outbound-index keys, so
-                # a ``:`` in it shifts the separator and lets one channel read another's.
-                raise ValueError(f"door=channel requires a channel name free of ':': {self.channel!r}")
-            if not (self.our_identity and self.our_identity.strip()):
-                raise ValueError("door=channel requires a non-blank our_identity")
-            if self.callback_url is not None:
-                raise ValueError("door=channel carries no callback_url")
-        else:
-            if self.callback_url is not None and not _is_https_url(self.callback_url):
-                raise ValueError("door=api callback_url must be an absolute https url when set")
-            if self.channel is not None:
-                raise ValueError("door=api carries no channel")
-            if self.our_identity is not None:
-                raise ValueError("door=api carries no our_identity")
-        return self
+
+class ApiConversationRouteCreate(_ConversationRouteFields):
+    """An ``api`` route: answers by signed callback to ``callback_url`` when set, else by the poll door."""
+
+    door: Literal["api"]
+    channel: None = None
+    our_identity: None = None
+    callback_url: Annotated[str, Field(pattern=HTTPS_CALLBACK_PATTERN), AfterValidator(_require_https_url)] | None = (
+        None
+    )
 
 
-class ConversationRoute(ConversationRouteCreate):
-    """The stored routing row: :class:`ConversationRouteCreate` plus the two server-derived fields.
+class ChannelConversationRouteCreate(_ConversationRouteFields):
+    """A ``channel`` route: answers through the registry ``channel`` at the ``our_identity`` address."""
 
-    What the manager persists and backup restore validates.
+    door: Literal["channel"]
+    # The registry channel name, and the medium address we are texted at.
+    channel: Annotated[str, Field(pattern=CHANNEL_NAME_PATTERN)]
+    our_identity: Annotated[str, Field(pattern=NON_BLANK_PATTERN)]
+    callback_url: None = None
 
-    ``callback_secret`` (present only on an ``api`` row that declares a ``callback_url``)
-    signs the delivery callback; it is excluded from export and re-minted per row on import,
-    so callbacks signed with the pre-import secret no longer verify.
-    ``execution_key_fingerprint`` is the bound key's per-mint
-    identity: a turn matches it against the live key, so a revoke+remint of the same
-    ``user_id`` fails closed.
+
+#: The create/edit body of a conversation route, discriminated on ``door``.
+ConversationRouteCreate = Annotated[
+    ApiConversationRouteCreate | ChannelConversationRouteCreate, Field(discriminator="door")
+]
+
+
+class ConversationRouteCreateBody(RootModel[ConversationRouteCreate]):
+    """The published, validating form of a route create: ``.root`` is the door's variant."""
+
+
+class ApiConversationRoute(ApiConversationRouteCreate):
+    """The stored ``api`` routing row: the create shape plus the two server-derived fields.
+
+    ``callback_secret`` (present only when the row declares a ``callback_url``) signs the
+    delivery callback; it is excluded from export and re-minted per row on import, so
+    callbacks signed with the pre-import secret no longer verify.
+    ``execution_key_fingerprint`` is the bound key's per-mint identity: a turn matches it
+    against the live key, so a revoke+remint of the same ``user_id`` fails closed.
     """
 
     callback_secret: str | None = None
@@ -269,3 +276,24 @@ class ConversationRoute(ConversationRouteCreate):
             "server-side at create and never client-supplied."
         ),
     )
+
+
+class ChannelConversationRoute(ChannelConversationRouteCreate):
+    """The stored ``channel`` routing row: the create shape plus the bound key's fingerprint (no callback secret)."""
+
+    callback_secret: None = None
+    execution_key_fingerprint: str = Field(
+        min_length=1,
+        description=(
+            "The bound key's per-mint identity the turn resolves against, derived "
+            "server-side at create and never client-supplied."
+        ),
+    )
+
+
+#: The stored routing row the manager persists and backup restore validates, discriminated on ``door``.
+ConversationRoute = Annotated[ApiConversationRoute | ChannelConversationRoute, Field(discriminator="door")]
+
+
+class ConversationRouteBody(RootModel[ConversationRoute]):
+    """The validating form of a stored route row: ``.root`` is the door's variant."""

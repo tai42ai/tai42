@@ -4,12 +4,13 @@ combo / schema payload raises before any store write."""
 from __future__ import annotations
 
 import pytest
+from tai42_contract.manifest import normalize_extension_element
 
 from tai42_skeleton.operations import presets as preset_ops
 
 
 def test_read_element_rejects_empty_string() -> None:
-    with pytest.raises(preset_ops.BadRequestError, match="non-empty string"):
+    with pytest.raises(preset_ops.BadRequestError, match="non-empty extension name"):
         preset_ops.read_element("")
 
 
@@ -75,3 +76,15 @@ def test_read_output_schema_variants() -> None:
     assert preset_ops.read_output_schema({"type": "object"}) == {"type": "object"}
     with pytest.raises(preset_ops.BadRequestError, match="JSON object"):
         preset_ops.read_output_schema("nope")
+
+
+_MALFORMED_ELEMENTS = ["", 5, {"config": {}}, {"name": "x"}, {"name": "x", "config": {}, "bogus": 1}]
+
+
+@pytest.mark.parametrize("element", _MALFORMED_ELEMENTS)
+def test_read_element_refuses_with_the_contract_normalizer_message(element: object) -> None:
+    with pytest.raises(ValueError, match="extension") as contract:
+        normalize_extension_element(element)
+    with pytest.raises(preset_ops.BadRequestError) as caught:
+        preset_ops.read_element(element)
+    assert str(caught.value) == str(contract.value)

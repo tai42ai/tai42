@@ -8,7 +8,7 @@ import time
 from typing import Any, cast
 
 import pytest
-from tai42_contract.conversations import ConversationRouteCreate
+from tai42_contract.conversations import ApiConversationRoute, ApiConversationRouteCreate, ConversationRouteCreate
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
@@ -17,7 +17,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, NotFoundError, ValidationRejectedError
 
-from .conftest import _assert_park_cancelled, _seed_park
+from .conftest import DOOR_RULE_REFUSALS, _assert_park_cancelled, _seed_park
 
 
 class _FakeRouteRequest:
@@ -394,7 +394,7 @@ async def test_the_same_identity_on_another_channel_is_a_different_route(wired):
 async def test_create_rejects_a_colon_channel_name(wired):
     # The channel name qualifies the dedupe and outbound-index keys ahead of the provider's
     # own id, so a ``:`` in it would move that boundary.
-    with pytest.raises(BadRequestError, match="free of ':'"):
+    with pytest.raises(BadRequestError, match=r"channel\.channel\n  String should match pattern"):
         await ops.create_conversation_route(
             route_name="line",
             door="channel",
@@ -562,7 +562,7 @@ async def test_create_accepts_the_door_exprs_on_an_agent_target(wired):
 
 
 async def test_create_rejects_a_colon_route_name(wired):
-    with pytest.raises(BadRequestError, match="slug"):
+    with pytest.raises(BadRequestError, match=r"api\.route_name\n  String should match pattern"):
         await ops.create_conversation_route(
             route_name="bad:name",
             door="api",
@@ -642,7 +642,7 @@ async def test_list_counts_an_indexed_route_with_no_row(monkeypatch):
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: manager)
 
     def _route(name: str) -> ConversationRoute:
-        return ConversationRoute(
+        return ApiConversationRoute(
             route_name=name,
             door="api",
             target_kind="agent",
@@ -1105,7 +1105,7 @@ async def test_owner_validator_receives_the_full_route_model_and_candidate(wired
             start_expr=TemplatedText(content="{message: .message}"),
         )
     model = seen["model"]
-    assert isinstance(model, ConversationRouteCreate)
+    assert isinstance(model, ApiConversationRouteCreate)
     assert model.route_name == "chat"
     assert model.target_name == "echo-tool"
     assert model.start_expr is not None
@@ -1199,7 +1199,7 @@ async def test_platform_rule_reads_baked_tool_names_for_a_preset_over_an_agent(w
 
     from tai42_skeleton.conversations.target_validators import target_bind_refusal_lines
 
-    route = ConversationRouteCreate(
+    route = ApiConversationRouteCreate(
         route_name="chat",
         door="api",
         target_kind="tool",
@@ -1396,3 +1396,13 @@ async def test_the_channel_identity_is_stored_canonical(wired):
         our_identity="  +15550001111 ",
     )
     assert wired.rows["line"].our_identity == "+15550001111"
+
+
+@pytest.mark.parametrize(("overrides", "location"), DOOR_RULE_REFUSALS)
+async def test_the_operation_refuses_each_door_rule_with_a_400(wired, overrides: dict, location: str):
+    # The MCP tool and a direct call bypass the HTTP extractor; the operation validates the same union.
+    fields = {"route_name": "line", "target_kind": "agent", "target_name": "relay", "execution_key": "svc", **overrides}
+    with pytest.raises(BadRequestError, match="invalid conversation route") as caught:
+        await ops.create_conversation_route(**fields)
+    assert location in str(caught.value) or (location == "door" and "union_tag_invalid" in str(caught.value))
+    assert wired.rows == {}

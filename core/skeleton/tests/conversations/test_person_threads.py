@@ -14,7 +14,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
-from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
+from tai42_contract.conversations import (
+    ApiConversationRoute,
+    ChannelConversationRoute,
+    ConversationRoute,
+    Person,
+    PersonAddress,
+)
 
 from tai42_skeleton.conversations import persons as persons_module
 from tai42_skeleton.conversations import records as records_module
@@ -33,7 +39,7 @@ _THREAD = f"{PERSON_THREAD_PREFIX}{_PERSON_ID}"
 
 
 def _api_route(route_name: str) -> ConversationRoute:
-    return ConversationRoute(
+    return ApiConversationRoute(
         route_name=route_name,
         door="api",
         target_kind="agent",
@@ -45,7 +51,7 @@ def _api_route(route_name: str) -> ConversationRoute:
 
 
 def _channel_route(route_name: str) -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="agent",
@@ -380,7 +386,7 @@ async def test_person_transcript_q_search_reports_truncated_on_budget(fake, monk
 
 async def test_a_target_mismatch_is_404(fake, monkeypatch):
     # The route resolves to a DIFFERENT target than the person is scoped to.
-    other_target = ConversationRoute(
+    other_target = ApiConversationRoute(
         route_name="chat-api",
         door="api",
         target_kind="agent",

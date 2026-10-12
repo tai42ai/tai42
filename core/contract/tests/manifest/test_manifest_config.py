@@ -3,12 +3,21 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
 
-from tai42_contract.manifest import AgentsConfig, ApiToolsConfig, Manifest, MCPConfig, TaiMCPConfig, ToolsConfig
+from tai42_contract.manifest import (
+    AgentsConfig,
+    ApiToolsConfig,
+    Manifest,
+    MCPConfig,
+    TaiMCPConfig,
+    ToolsConfig,
+    normalize_extension_element,
+)
 
 # === manifest — ExtensionsConfigMixin.normalize_extensions ==================
 
@@ -105,6 +114,34 @@ def test_extensions_dict_element_missing_config_raises():
 def test_extensions_dict_element_extra_key_raises():
     with pytest.raises(ValueError, match="unexpected keys"):
         _tools_cfg(extensions={"x": [{"name": "ask_external", "config": {}, "bogus": 1}]})
+
+
+def test_extensions_empty_name_member_raises_naming_key():
+    with pytest.raises(ValueError, match=r"extensions\['x'\].*non-empty extension name"):
+        _tools_cfg(extensions={"x": [["chain", ""]]})
+
+
+def test_normalize_extension_element_passes_a_name_and_a_bound_config():
+    assert normalize_extension_element("chain") == "chain"
+    bound = {"name": "ask_external", "config": {"verifier": {"name": "gh"}}}
+    assert normalize_extension_element(bound) == bound
+
+
+@pytest.mark.parametrize(
+    ("member", "message"),
+    [
+        ("", "an extension element is a non-empty extension name or a {'name', 'config'} mapping"),
+        ({"config": {}}, "an extension element must have a non-empty string 'name'"),
+        ({"name": "", "config": {}}, "an extension element must have a non-empty string 'name'"),
+        ({"name": "x"}, "extension element 'x' must carry a 'config' mapping"),
+        ({"name": "x", "config": {}, "bogus": 1}, "extension element 'x' has unexpected keys: ['bogus']"),
+        (1, "an extension element is a non-empty extension name or a {'name', 'config'} mapping"),
+    ],
+)
+def test_normalize_extension_element_refuses_a_malformed_member(member: object, message: str):
+    with pytest.raises(ValueError, match=re.escape(message)) as caught:
+        normalize_extension_element(member)
+    assert str(caught.value) == message
 
 
 def test_extensions_independent_of_include():

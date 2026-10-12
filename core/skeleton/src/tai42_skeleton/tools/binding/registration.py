@@ -198,7 +198,7 @@ class _RegistrationMixin(_BranchBindingMixin):
         """
         return frozenset(self._mcp_bound_tools.get(title, set()))
 
-    def available_extensions(self) -> list[dict[str, str]]:
+    def available_extensions(self) -> list[dict[str, str | bool]]:
         return self._extension_registry.available_extensions()
 
     @staticmethod

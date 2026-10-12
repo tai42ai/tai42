@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 from fakeredis import FakeServer, aioredis
 from redis.asyncio.client import PubSub
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ChannelConversationRoute
 from tai42_kit.settings import UnknownOwnedSettingError
 
 from tai42_skeleton.conversations import caps as caps_module
@@ -456,7 +456,7 @@ async def _lease_held_by_a(thread_id: str):
 
 
 async def test_door_operator_send_blocks_behind_a_turn(fake, monkeypatch):
-    route = ConversationRoute(
+    route = ChannelConversationRoute(
         route_name="line",
         door="channel",
         target_kind="agent",  # pyright: ignore[reportArgumentType]

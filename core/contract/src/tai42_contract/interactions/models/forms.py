@@ -56,7 +56,7 @@ class FormOption(BaseModel):
     re-publish.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     value: str
     label: str | None = None
@@ -89,7 +89,7 @@ class FormData(BaseModel):
     empty list) is done once by the interaction request. Frozen.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     values: dict[str, Any] = {}
     options: dict[str, list[FormOption]] = {}
@@ -108,7 +108,7 @@ class DisplayBlock(BaseModel):
     ``text`` on an image). Raises ``ValueError`` on any ill-formed combination.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: Literal["heading", "body", "image"]
     text: str | None = None
@@ -150,7 +150,7 @@ class FormPage(BaseModel):
     interaction request enforces the coverage); absent ``pages`` means one page.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     title: str
     fields: list[str]

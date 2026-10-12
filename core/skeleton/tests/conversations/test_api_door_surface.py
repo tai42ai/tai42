@@ -8,6 +8,8 @@ an HTTP response is what is under test — the auth stack is exercised in
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -25,6 +27,8 @@ from tai42_skeleton.conversations.turn import (
 )
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations.errors import NotSupportedError
+
+from .conftest import DOOR_RULE_REFUSALS
 
 _PATH = "/api/conversations/chat/messages"
 
@@ -479,3 +483,34 @@ def test_a_malformed_locale_is_a_400(monkeypatch):
     resp = _post(client, body={"external_user_id": "u-7", "text": "hi", "locale": "not a locale!"})
     assert resp.status_code == 400
     assert engine.calls == []
+
+
+# The HTTP door renders each refusal through the one body rule: the violated rule, never the input.
+_DOOR_RULE_TEXTS = [
+    ({"door": "api", "channel": "twilio"}, "Input should be None"),
+    ({"door": "api", "our_identity": "+15550001111"}, "Input should be None"),
+    ({"door": "api", "callback_url": "https://user@cb.example/x"}, "String should match pattern"),
+    ({"door": "api", "callback_url": "http://cb.example/x"}, "String should match pattern"),
+    ({"door": "channel", "our_identity": "+15550001111"}, "Field required"),
+    ({"door": "channel", "channel": "twilio"}, "Field required"),
+    ({"door": "channel", "channel": "twi:lio", "our_identity": "+15550001111"}, "String should match pattern"),
+    (
+        {"door": "channel", "channel": "twilio", "our_identity": "+1", "callback_url": "https://cb.example/x"},
+        "Input should be None",
+    ),
+    ({"door": "email"}, "'door' must be one of the expected tags: 'api', 'channel'"),
+]
+
+
+def test_the_door_rule_texts_cover_every_door_rule_refusal():
+    assert [overrides for overrides, _ in _DOOR_RULE_TEXTS] == [overrides for overrides, _ in DOOR_RULE_REFUSALS]
+
+
+@pytest.mark.parametrize(("overrides", "rule"), _DOOR_RULE_TEXTS)
+async def test_extract_route_create_refuses_each_door_rule(overrides: dict, rule: str):
+    router = _router()
+    body = {"target_kind": "agent", "target_name": "relay", "execution_key": "svc", **overrides}
+    with pytest.raises(BadRequestError, match=r"^invalid conversation route: ") as caught:
+        await router._extract_route_create(_create_request(json.dumps(body).encode()))
+    assert rule in caught.value.message
+    assert "email" not in caught.value.message

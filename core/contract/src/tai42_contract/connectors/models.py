@@ -333,7 +333,8 @@ class StartConnectRequest(BaseModel):
     # No-auth only: client-filled values for the provider's config_fields.
     # Empty/omitted for oauth.
     config_values: dict[str, str] = Field(default_factory=dict)
-    return_url: str = "/connectors"
+    # A same-origin path to land on after consent; omitted, the deployment's declared connectors page.
+    return_url: str | None = None
 
 
 class StartConnectResponse(BaseModel):
@@ -357,14 +358,16 @@ class StartReconnectRequest(BaseModel):
     """Request body to start reconnecting an existing connection."""
 
     enabled_sub_services: list[str] = Field(min_length=1, max_length=64)
-    return_url: str = "/connectors"
+    # A same-origin path to land on after consent; omitted, the deployment's declared connectors page.
+    return_url: str | None = None
 
 
 class PatchSubServicesRequest(BaseModel):
     """Request body to change a connection's enabled sub-services."""
 
     enabled_sub_services: list[str] = Field(min_length=1, max_length=64)
-    return_url: str = "/connectors"
+    # A same-origin path to land on after consent; omitted, the deployment's declared connectors page.
+    return_url: str | None = None
 
 
 class PatchSubServicesResponse(BaseModel):

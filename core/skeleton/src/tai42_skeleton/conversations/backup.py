@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 from tai42_contract.backup import BackupSectionReport
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ConversationRoute, ConversationRouteBody
 from tai42_contract.states.errors import StatesError
 
 from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError, ExecutionKeyScan
@@ -61,7 +61,7 @@ async def export_conversation_routes() -> dict[str, Any]:
 def _validate_row(
     item: Any, existing: dict[str, ConversationRoute], mode: Literal["skip", "overwrite"], report: BackupSectionReport
 ) -> ConversationRoute | None:
-    """The :class:`ConversationRoute` a backup row parses to, or ``None`` when it is not written.
+    """The stored route a backup row parses to, or ``None`` when it is not written.
 
     ``None`` when the row is rejected (a validation failure recorded per row) or left fully
     untouched (an existing route under ``skip`` — no re-mint, no re-assertion of its execution
@@ -69,7 +69,7 @@ def _validate_row(
     """
     route_name = item.get("route_name") if isinstance(item, dict) else None
     try:
-        route = ConversationRoute.model_validate(item)
+        route = ConversationRouteBody.model_validate(item).root
     except ValidationError as exc:
         # Rejected per row rather than written unanchored.
         report.errors.append(f"route {route_name!r}: {exc}")

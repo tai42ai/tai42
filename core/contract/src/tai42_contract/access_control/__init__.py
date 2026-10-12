@@ -19,16 +19,19 @@ from tai42_contract.access_control.identity import (
     IdentityProviderSettings,
 )
 from tai42_contract.access_control.models import (
+    API_KEY_HEADER,
     UNIVERSAL_SCOPE,
     AccessPolicy,
     IdentityRecord,
     JqAuthContext,
     Principal,
+    PrincipalKind,
     RoleDefinition,
 )
 from tai42_contract.access_control.verifier import Verifier
 
 __all__ = [
+    "API_KEY_HEADER",
     "KEY_FINGERPRINT_CLAIM",
     "OWNER_USER_ID_CLAIM",
     "UNIVERSAL_SCOPE",
@@ -40,6 +43,7 @@ __all__ = [
     "IdentityRecord",
     "JqAuthContext",
     "Principal",
+    "PrincipalKind",
     "RoleDefinition",
     "Verifier",
     "caller_may_read_secrets",
