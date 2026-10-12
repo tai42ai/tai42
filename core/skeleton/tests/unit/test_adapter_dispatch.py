@@ -1,6 +1,6 @@
 """Unit tests for transport-aware dispatch + token_expired retry.
 
-These cover the pure helpers — ``_detect_transport`` (general, in the adapter)
+These cover the pure helpers — ``detect_transport`` (general, ``manifest.transport``)
 and ``_merge_http_auth`` / ``extract_connector_error_payload`` (connector glue,
 in ``connectors.token_injection``). The end-to-end wrapper exercise (resolver →
 transport branch → meta injection → retry) lands in the integration suite
@@ -21,29 +21,29 @@ from tai42_skeleton.connectors.token_injection import (
     _merge_http_auth,
     extract_connector_error_payload,
 )
-from tai42_skeleton.tools.adapters.mcp_tool_to_func import _detect_transport
+from tai42_skeleton.manifest.transport import detect_transport
 
-# -- _detect_transport --------------------------------------------------------
+# -- detect_transport --------------------------------------------------------
 
 
-def test_detect_transport_http():
+def testdetect_transport_http():
     cfg = MCPConfig(type="http", url="https://x.test/sse")
-    assert _detect_transport(cfg) == "http"
+    assert detect_transport(cfg) == "http"
 
 
-def test_detect_transport_stdio():
+def testdetect_transport_stdio():
     cfg = MCPConfig(type="stdio", command="uvx", args=["tool"])
-    assert _detect_transport(cfg) == "stdio"
+    assert detect_transport(cfg) == "stdio"
 
 
-def test_detect_transport_uds():
+def testdetect_transport_uds():
     cfg = MCPConfig(type="uds", uds="/tmp/mcp.sock")
-    assert _detect_transport(cfg) == "uds"
+    assert detect_transport(cfg) == "uds"
 
 
-def test_detect_transport_ambiguous_raises():
+def testdetect_transport_ambiguous_raises():
     # MCPConfig._exactly_one_transport now rejects this at
-    # construction; bypass it via model_construct to verify _detect_transport
+    # construction; bypass it via model_construct to verify detect_transport
     # is still defensive (programmatic mutation could in principle bypass
     # the model validator).
     cfg = MCPConfig.model_construct(
@@ -52,13 +52,13 @@ def test_detect_transport_ambiguous_raises():
         command="uvx",
     )
     with pytest.raises(RuntimeError, match="ambiguous"):
-        _detect_transport(cfg)
+        detect_transport(cfg)
 
 
-def test_detect_transport_empty_raises():
+def testdetect_transport_empty_raises():
     cfg = MCPConfig(type=None)
     with pytest.raises(RuntimeError, match="no transport"):
-        _detect_transport(cfg)
+        detect_transport(cfg)
 
 
 # -- _merge_http_auth ---------------------------------------------------------

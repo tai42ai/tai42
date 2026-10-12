@@ -10,6 +10,9 @@ from tai42_contract.manifest import TaiMCPConfig
 
 from tai42_skeleton.app import lifecycle as _lifecycle
 from tai42_skeleton.app.lifecycle.state import LifecycleState
+from tai42_skeleton.connectors.managed_listing import ManagedListing, list_with_managed_auth
+from tai42_skeleton.connectors.runtime.credentials_step import bring_credentials_up_to_date
+from tai42_skeleton.connectors.runtime.http_status import exception_chain, mcp_http_status
 from tai42_skeleton.settings.cache import mcp_probe_timeout, mcp_reload_probe_timeout
 from tai42_skeleton.tools import mcp_health
 
@@ -34,40 +37,6 @@ _UNREACHABLE_EXC: tuple[type[BaseException], ...] = (
 )
 
 
-def _exc_chain(exc: BaseException) -> list[BaseException]:
-    """The exception and every ``__cause__`` / ``__context__`` behind it, cycle-guarded.
-
-    A probe failure is often a wrapped error (a client error around an ``httpx``
-    response error), so the HTTP status and the transport class are read across the
-    whole chain, not just the outermost exception.
-    """
-    chain: list[BaseException] = []
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        chain.append(current)
-        current = current.__cause__ or current.__context__
-    return chain
-
-
-def _mcp_http_status(exc: BaseException) -> int | None:
-    """The HTTP status a probe failure carries, if any — from an ``httpx`` response error or a ``status_code``.
-
-    Walks the cause chain so a wrapped response error still yields its status; ``None``
-    when no exception in the chain carries an integer status (a pure transport failure).
-    """
-    for err in _exc_chain(exc):
-        response = getattr(err, "response", None)
-        status = getattr(response, "status_code", None)
-        if isinstance(status, int):
-            return status
-        status = getattr(err, "status_code", None)
-        if isinstance(status, int):
-            return status
-    return None
-
-
 def _mcp_failure_category(exc: BaseException, http_status: int | None) -> str:
     """A coarse, credential-free category for a failed probe: ``auth`` / ``unreachable`` / ``error``.
 
@@ -79,7 +48,7 @@ def _mcp_failure_category(exc: BaseException, http_status: int | None) -> str:
         return "auth"
     if http_status is not None:
         return "error"
-    if any(isinstance(err, _UNREACHABLE_EXC) for err in _exc_chain(exc)):
+    if any(isinstance(err, _UNREACHABLE_EXC) for err in exception_chain(exc)):
         return "unreachable"
     return "error"
 
@@ -92,17 +61,51 @@ class McpProbeMixin(LifecycleState):
 
         ``timeout`` defaults to the cold-boot ``mcp_probe_timeout``. Raises on
         failure/timeout; callers decide whether to skip-and-record or surface the
-        error. The probe runs through the pooled ``FastMCPClient`` (one-shot,
-        off-pool) so no raw fastmcp ``Client`` is opened by the app.
+        error. The listing goes through the managed-credential seam
+        (:func:`list_with_managed_auth`): the request without a credential first,
+        a credential only when the server answers it 401; the budget bounds the whole
+        seam. Each attempt is a one-shot, off-pool ``FastMCPClient`` so no raw fastmcp
+        ``Client`` is opened by the app. Whether the server demanded a credential is
+        noted for the title whatever the outcome (:meth:`_note_credential_demand`).
         """
 
+        def _open(effective: TaiMCPConfig):
+            return self.clients.client_ctx(_lifecycle.FastMCPClient, fresh=True, config=effective.model_dump())
+
+        async def _list(client: Any) -> list["mcp.types.Tool"]:
+            return await client.list_tools()
+
         async def _do() -> list["mcp.types.Tool"]:
-            async with self.clients.client_ctx(
-                _lifecycle.FastMCPClient, fresh=True, config=config.model_dump()
-            ) as client:
-                return await client.list_tools()
+            listing = ManagedListing(open_client=_open)
+            try:
+                return await list_with_managed_auth(config, listing, _list)
+            finally:
+                self._note_credential_demand(config.title, demanded=listing.credential_demanded)
 
         return await asyncio.wait_for(_do(), timeout=timeout if timeout is not None else mcp_probe_timeout())
+
+    def _note_credential_demand(self, title: str, *, demanded: bool) -> None:
+        """Keep, per title, whether its server answered its LAST listing's request without a credential with a 401.
+
+        Kept beside the failed set of the same serving generation; set and cleared by each listing.
+        """
+        if demanded:
+            self._mcp_credential_demanded.add(title)
+        else:
+            self._mcp_credential_demanded.discard(title)
+
+    async def _bring_listed_credentials_up_to_date(self) -> dict[str, bool]:
+        """Bring up to date the credentials of the live entries whose server demanded one at their last listing.
+
+        Returns, per selected title, whether a credential is now in hand (see
+        :func:`bring_credentials_up_to_date`); bounded by one ``mcp_reload_probe_timeout``.
+        """
+        manifest = self._manifest
+        if manifest is None or not manifest.mcp:
+            return {}
+        demanded = set(self._mcp_credential_demanded)
+        entries = [config for config in manifest.mcp if config.title in demanded]
+        return await bring_credentials_up_to_date(entries, timeout=mcp_reload_probe_timeout())
 
     async def _load_mcps(
         self,
@@ -156,7 +159,7 @@ class McpProbeMixin(LifecycleState):
         credentials — and the exception CLASS goes only to the operator log, not the
         LLM-callable record. So a 401 reads as ``auth``, never as an outage.
         """
-        http_status = _mcp_http_status(exc)
+        http_status = mcp_http_status(exc)
         category = _mcp_failure_category(exc, http_status)
         message = mcp_health.redact_probe_error(str(exc))
         self._failed_mcps[config.title] = {

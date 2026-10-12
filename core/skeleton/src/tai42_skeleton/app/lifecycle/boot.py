@@ -42,6 +42,7 @@ class BootMixin(LifecycleState):
         self._manifest = manifest
         self._failed_mcps = {}
         self._mcp_bound_tools = {}
+        self._mcp_credential_demanded = set()
         # Reset so a dropped agent doesn't linger across update()/reload —
         # importer.py re-fires the @tai42_app.agents.agent decorator each start().
         self._agent_binding.reset()

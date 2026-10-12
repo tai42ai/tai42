@@ -4,17 +4,28 @@ the ``_load_mcps`` probe seam (early return, budgets, pooled client)."""
 from __future__ import annotations
 
 import asyncio
+import logging
+import threading
+import time
 from contextlib import asynccontextmanager
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 from unittest.mock import AsyncMock
 
 import httpx
+import pytest
+from tai42_contract.connectors.models import AuthHealthState, ConnectorRef
+from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
 from tai42_skeleton.app import lifecycle as lifecycle_module
+from tai42_skeleton.app.clients import ClientsFacet
 from tai42_skeleton.app.instance import app
+from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools import mcp_health
 
+from ...connectors import mcp_fakes
+from ...connectors.credential_path import CONNECTION_ID, CredentialPath, on_loop, owner_loop
+from ._credential_app import BUDGET, roomy_budgets
 from ._doubles import _cfg, _failed_row, _FakeMcpTool, _Mixin
 
 
@@ -219,3 +230,380 @@ def test_unusable_schema_tool_named_in_skipped_tools(monkeypatch):
             assert "svc_broken" not in result["tools"]
 
     asyncio.run(run())
+
+
+# -- the listing through the managed-credential seam ----------------------------------------------
+#
+# A managed OAuth entry over http whose real loopback server either lists without a credential or
+# demands one; the connection's sealed record sits under the real resolver; every request, store
+# read, lock take and token request is counted (``credential_path``).
+
+
+def _mixin(*entries: TaiMCPConfig) -> _Mixin:
+    m = _Mixin()
+    m.clients = ClientsFacet()
+    m._manifest = Manifest.model_validate({"mcp": [e.model_dump() for e in entries]})
+    return m
+
+
+def _probe(m: _Mixin, config: TaiMCPConfig) -> Any:
+    """The probe as the boot listing runs it: a throwaway loop, no refresh owner bound."""
+    return run_blocking(lambda: m._probe_mcp(config, timeout=BUDGET))
+
+
+def _record(m: _Mixin, config: TaiMCPConfig) -> dict:
+    """Probe ``config`` and record a failure as every door does; return the failure record (or ``{}``)."""
+    try:
+        _probe(m, config)
+    except Exception as exc:
+        m._record_failed_mcp(config, exc)
+    return m._failed_mcps.get(config.title, {})
+
+
+def test_a_server_that_demands_a_credential_lists_with_the_stored_one(path):
+    path.connect()
+    path.mcp.reset(mcp_fakes.bearer_only("at-old"))
+    tools = _probe(_mixin(path.entry), path.entry)
+    assert [t.name for t in tools] == ["ping"]
+    assert path.attempts == [None, "Bearer at-old"]
+    assert path.locks == 0
+    assert path.token_requests == 0
+    assert path.store.writes == 0
+
+
+def test_an_expired_token_is_refreshed_once_and_the_tools_list(path):
+    path.connect(expires_in=-5)
+    path.token_endpoint()
+    path.mcp.reset(mcp_fakes.bearer_only("at-new"))
+    m = _mixin(path.entry)
+    with owner_loop() as loop:
+        tools = on_loop(loop, m._probe_mcp(path.entry, timeout=BUDGET * 4))
+    assert [t.name for t in tools] == ["ping"]
+    assert path.attempts == [None, "Bearer at-new"]
+    assert path.token_requests == 1
+
+
+def test_a_managed_oauth_stdio_entry_is_listed_with_no_resolve(path, monkeypatch):
+    path.connect(health=AuthHealthState.RECONNECT_REQUIRED)
+    stdio = TaiMCPConfig(
+        title="acme_mail_work",
+        config=MCPConfig(type="stdio", command="uvx", args=["acme-mcp"]),
+        managed=ConnectorRef(connection_id=CONNECTION_ID, provider_id="acme", sub_service="mail"),
+    )
+    opened: list[dict] = []
+
+    class _Client:
+        async def list_tools(self):
+            return [_FakeMcpTool()]
+
+    @asynccontextmanager
+    async def fake_ctx(client_cls, *args, **kwargs):
+        opened.append(kwargs["config"])
+        yield _Client()
+
+    m = _mixin(stdio)
+    monkeypatch.setattr(m.clients, "client_ctx", fake_ctx)
+    assert [t.name for t in _probe(m, stdio)] == ["ping"]
+    assert opened == [stdio.model_dump()]
+    assert path.loads == 0
+
+
+@pytest.mark.parametrize("server_policy", ["anonymous", "demands"])
+def test_a_managed_no_auth_entry_gets_one_request_and_no_store_read(path, server_policy):
+    from tai42_contract.connectors.providers import ConfigFieldSpec, McpServerDescriptor, SubServiceDescriptor
+    from tai42_contract.connectors.providers import ProviderDescriptor as Descriptor
+
+    from tai42_skeleton.connectors.providers import registry
+
+    registry.register_connector(
+        Descriptor(
+            id="statics",
+            display_name="Statics",
+            kind="none",
+            origin="system",
+            category="data",
+            config_fields=[ConfigFieldSpec(key="api_key", label="Key", target="header")],
+            sub_services={
+                "main": SubServiceDescriptor(
+                    id="main", display_name="Main", mcp_server=McpServerDescriptor(type="http", url=path.mcp.url)
+                )
+            },
+        )
+    )
+    entry = TaiMCPConfig(
+        title="statics_main_x",
+        config=MCPConfig(type="http", url=path.mcp.url),
+        managed=ConnectorRef(connection_id=CONNECTION_ID, provider_id="statics", sub_service="main"),
+    )
+    path.mcp.reset(mcp_fakes.anonymous if server_policy == "anonymous" else mcp_fakes.bearer_only("x"))
+    m = _mixin(entry)
+    record = _record(m, entry)
+    assert path.attempts == [None]
+    assert path.loads == 0
+    # A server without sign-in is never noted as demanding a credential: no step brings one up to date.
+    assert entry.title not in m._mcp_credential_demanded
+    if server_policy == "anonymous":
+        assert record == {}
+    else:
+        assert (record["category"], record["http_status"]) == ("auth", 401)
+
+
+def test_a_hand_written_entry_gets_one_request_and_no_credential(path):
+    hand = TaiMCPConfig(title="hand", config=MCPConfig(type="http", url=path.mcp.url))
+    path.mcp.reset(mcp_fakes.bearer_only("x"))
+    record = _record(_mixin(hand), hand)
+    assert (record["category"], record["http_status"]) == ("auth", 401)
+    assert path.attempts == [None]
+    assert path.loads == 0
+
+
+_ANONYMOUS_CASES = [
+    "fresh token",
+    "expired token, token endpoint never answers",
+    "lock held by another holder",
+    "store unreachable",
+    "reconnect required",
+    "refresh cooldown",
+    "record missing",
+]
+
+
+@pytest.mark.parametrize("case", _ANONYMOUS_CASES)
+def test_a_server_that_lists_without_a_credential_gets_one_request_and_no_store_lock_or_refresh(path, case):
+    path.connect(expires_in=-5 if case.startswith("expired") else 3600)
+    path.token_endpoint(delay=30)
+    if case == "lock held by another holder":
+        path.lock_held = True
+    if case == "store unreachable":
+        path.store.unreachable = True
+    if case == "reconnect required":
+        path.connect(health=AuthHealthState.RECONNECT_REQUIRED)
+    if case == "refresh cooldown":
+        path.cooldown = True
+    if case == "record missing":
+        path.store.blob = None
+    path.mcp.reset(mcp_fakes.anonymous)
+    m = _mixin(path.entry)
+    with owner_loop() as loop:
+        started = time.monotonic()
+        tools = on_loop(loop, m._probe_mcp(path.entry, timeout=BUDGET))
+        elapsed = time.monotonic() - started
+    assert [t.name for t in tools] == ["ping"]
+    assert path.attempts == [None]
+    assert not any(path.mcp.authorizations)
+    assert (path.loads, path.locks, path.token_requests) == (0, 0, 0)
+    assert elapsed < BUDGET
+
+
+def test_the_credential_demand_is_noted_from_the_last_listing(path):
+    path.connect()
+    m = _mixin(path.entry)
+    path.mcp.reset(mcp_fakes.bearer_only("at-old"))
+    _probe(m, path.entry)
+    assert path.entry.title in m._mcp_credential_demanded  # demanded, then bound with the credential
+    path.mcp.reset(mcp_fakes.bearer_only("someone-else"))
+    _record(m, path.entry)
+    assert path.entry.title in m._mcp_credential_demanded  # demanded, and failed
+    path.mcp.reset(mcp_fakes.anonymous)
+    _probe(m, path.entry)
+    assert path.entry.title not in m._mcp_credential_demanded  # listed without a credential: cleared
+
+
+def test_a_refused_stored_token_is_force_refreshed_once_fenced_on_it(path, caplog):
+    path.connect(access_token="at-revoked")
+    path.token_endpoint()
+    path.mcp.reset(mcp_fakes.bearer_only("at-new"))
+    m = _mixin(path.entry)
+    with caplog.at_level(logging.WARNING), owner_loop() as loop:
+        tools = on_loop(loop, m._probe_mcp(path.entry, timeout=BUDGET * 4))
+    assert [t.name for t in tools] == ["ping"]
+    assert path.attempts == [None, "Bearer at-revoked", "Bearer at-new"]
+    assert path.token_requests == 1
+    assert any(
+        CONNECTION_ID in r.getMessage() and "refused the stored credential" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_a_reconnect_required_connection_is_recorded_auth_naming_the_connection(path):
+    path.connect(expires_in=-5, health=AuthHealthState.RECONNECT_REQUIRED)
+    path.mcp.reset(mcp_fakes.bearer_only("at-new"))
+    m = _mixin(path.entry)
+    with owner_loop() as loop:
+        try:
+            on_loop(loop, m._probe_mcp(path.entry, timeout=BUDGET * 4))
+        except Exception as exc:
+            m._record_failed_mcp(path.entry, exc)
+    record = m._failed_mcps[path.entry.title]
+    assert record["category"] == "auth"
+    assert CONNECTION_ID in record["message"]
+    assert "reconnect" in record["message"]
+    assert path.token_requests == 0
+
+
+def test_a_token_endpoint_that_is_down_is_recorded_auth_and_the_health_follows_the_engine(path, monkeypatch):
+    import tai42_skeleton.connectors.runtime.resolver as resolver_mod
+
+    monkeypatch.setattr(resolver_mod, "TRANSIENT_BACKOFF_BASE_SECONDS", 0.0)
+    path.connect(expires_in=-5)
+    path.token_endpoint(status=503, body={"error": "temporarily_unavailable"})
+    path.mcp.reset(mcp_fakes.bearer_only("at-new"))
+    m = _mixin(path.entry)
+    with owner_loop() as loop:
+        try:
+            on_loop(loop, m._probe_mcp(path.entry, timeout=BUDGET * 4))
+        except Exception as exc:
+            m._record_failed_mcp(path.entry, exc)
+    record = m._failed_mcps[path.entry.title]
+    assert record["category"] == "auth"
+    assert CONNECTION_ID in record["message"]
+    assert path.stored().auth_health_state is AuthHealthState.REFRESH_FAILING
+
+
+@pytest.mark.parametrize("server_policy", ["demands", "anonymous"])
+def test_a_forged_entry_is_listed_with_no_credential_ever(path, caplog, server_policy):
+    path.connect()
+    forged = TaiMCPConfig(
+        title="borrowed",
+        config=MCPConfig(type="http", url=path.mcp.url.replace("127.0.0.1", "localhost")),
+        managed=ConnectorRef(connection_id=CONNECTION_ID, provider_id="acme", sub_service="mail"),
+    )
+    path.mcp.reset(mcp_fakes.bearer_only("at-old") if server_policy == "demands" else mcp_fakes.anonymous)
+    m = _mixin(forged)
+    with caplog.at_level(logging.ERROR), owner_loop() as loop:
+        try:
+            on_loop(loop, m._probe_mcp(forged, timeout=BUDGET))
+        except Exception as exc:
+            m._record_failed_mcp(forged, exc)
+    assert path.attempts == [None]
+    assert not any(path.mcp.authorizations)
+    assert (path.loads, path.locks, path.token_requests) == (0, 0, 0)
+    if server_policy == "demands":
+        assert (m._failed_mcps["borrowed"]["category"], m._failed_mcps["borrowed"]["http_status"]) == ("auth", 401)
+        assert any(r.levelno == logging.ERROR and "'borrowed'" in r.getMessage() for r in caplog.records)
+    else:
+        assert "borrowed" not in m._failed_mcps
+
+
+def test_a_scope_challenge_at_the_listing_names_the_scopes_and_writes_nothing(path):
+    path.connect()
+    path.mcp.reset(
+        lambda token: mcp_fakes.UNAUTHORIZED if token is None else mcp_fakes.insufficient_scope("mail.admin")
+    )
+    m = _mixin(path.entry)
+    record = _record(m, path.entry)
+    assert record["category"] == "auth"
+    assert record["http_status"] == 403
+    assert "mail.admin" in record["message"]
+    assert "reconnect" in record["message"]
+    assert path.store.writes == 0
+    assert path.stored().scopes_wanted == []
+
+
+# -- the budget is kept and the rotation survives, on each door's real loop ------------------------
+
+
+def _slow_rotation(path: CredentialPath) -> None:
+    path.connect(expires_in=-5)
+    path.token_endpoint(delay=BUDGET + 0.7)
+    path.mcp.reset(mcp_fakes.bearer_only("at-new"))
+
+
+def _door(m: _Mixin, door: str, config: TaiMCPConfig, loop: asyncio.AbstractEventLoop) -> Any:
+    """Drive one listing of ``config`` through ``door``; return the door's outcome."""
+    if door == "reload":
+        return run_blocking(m._load_mcps)
+    if door == "targeted reload":
+        return m._reload_mcp(config.title)
+    if door == "reload-failed":
+        m._failed_mcps[config.title] = _failed_row()
+        return m._reload_failed_mcps()
+    return on_loop(loop, m._probe_and_apply_failed({config.title: config}))
+
+
+def _bound(m: _Mixin, door: str, outcome: Any, title: str) -> bool:
+    if door == "reload":
+        successes, _failures = outcome
+        return [cfg.title for cfg, _tools in successes] == [title]
+    if door == "targeted reload":
+        return outcome["status"] == "ok"
+    results = outcome if door == "reload-failed" else outcome[0]
+    return [r["status"] for r in results] == ["ok"]
+
+
+@pytest.mark.parametrize("door", ["reload", "targeted reload", "reload-failed", "re-probe"])
+def test_the_budget_is_kept_and_the_rotation_survives(path, monkeypatch, door):
+    _slow_rotation(path)
+    m = _mixin(path.entry)
+    monkeypatch.setattr(lifecycle_module, "is_epoch_rebuild_in_progress", lambda: True)
+    with owner_loop() as loop:
+        if door == "re-probe":
+            m._failed_mcps[path.entry.title] = _failed_row()
+        started = time.monotonic()
+        outcome = _door(m, door, path.entry, loop)
+        elapsed = time.monotonic() - started
+        assert not _bound(m, door, outcome, path.entry.title)
+        assert elapsed < BUDGET + 0.5
+        path.eventually_rotated()
+        assert path.token_requests == 1
+        roomy_budgets(monkeypatch)
+        m._failed_mcps[path.entry.title] = _failed_row()
+        assert _bound(m, door, _door(m, door, path.entry, loop), path.entry.title)
+
+
+def test_the_boot_listing_makes_no_refresh_request(path):
+    _slow_rotation(path)
+    m = _mixin(path.entry)
+    record = _record(m, path.entry)  # no refresh owner is bound at boot
+    assert (record["category"], record["http_status"]) == ("auth", 401)
+    assert path.attempts == [None]
+    assert path.token_requests == 0
+    assert path.locks == 0
+
+
+@pytest.mark.parametrize("door", ["boot", "targeted reload", "reload-failed", "re-probe"])
+def test_each_caller_binds_a_managed_entry(path, door):
+    path.connect()
+    path.mcp.reset(mcp_fakes.bearer_only("at-old"))
+    m = _mixin(path.entry)
+    with owner_loop() as loop:
+        if door == "boot":
+            successes, failures = run_blocking(m._load_mcps)
+            assert failures == []
+            assert [cfg.title for cfg, _tools in successes] == [path.entry.title]
+        else:
+            if door == "re-probe":
+                m._failed_mcps[path.entry.title] = _failed_row()
+            assert _bound(m, door, _door(m, door, path.entry, loop), path.entry.title)
+            assert m._mcp_bound_tools[path.entry.title]
+
+
+@pytest.mark.parametrize("door", ["targeted reload", "re-probe"])
+@pytest.mark.parametrize("entry_kind", ["expired token", "mismatched entry"])
+def test_an_anonymous_listing_applies_with_no_refresh_and_no_eviction_error(path, door, entry_kind):
+    path.connect(expires_in=-5)
+    path.token_endpoint(delay=30)
+    path.mcp.reset(mcp_fakes.anonymous)
+    entry = path.entry
+    if entry_kind == "mismatched entry":
+        entry = TaiMCPConfig(
+            title="borrowed",
+            config=MCPConfig(type="http", url=path.mcp.url.replace("127.0.0.1", "localhost")),
+            managed=ConnectorRef(connection_id=CONNECTION_ID, provider_id="acme", sub_service="mail"),
+        )
+    m = _mixin(entry)
+    with owner_loop() as loop:
+        m._failed_mcps[entry.title] = _failed_row()
+        started = time.monotonic()
+        assert _bound(m, door, _door(m, door, entry, loop), entry.title)
+        assert time.monotonic() - started < BUDGET
+    assert path.token_requests == 0
+    assert path.locks == 0
+
+
+def test_the_note_is_kept_beside_the_failed_set_of_the_generation(path):
+    m = _mixin(path.entry)
+    m._note_credential_demand("a", demanded=True)
+    assert m._serving_core._mcp_credential_demanded == {"a"}
+    m._note_credential_demand("a", demanded=False)
+    assert m._serving_core._mcp_credential_demanded == set()
+    assert threading.current_thread() is threading.main_thread()

@@ -19,6 +19,7 @@ from tai42_contract.connectors.store import ConnectorTokenStore
 from tai42_skeleton.connectors.runtime.resolver import (
     ConnectorAuthExpiredError,
     ConnectorConnectionError,
+    ConnectorInsufficientScopeError,
     ConnectorReconnectRequiredError,
     ConnectorRefreshFailingError,
     ManagedAuth,
@@ -32,6 +33,7 @@ __all__ = [
     "ConnectorAuthExpiredError",
     "ConnectorConnectionError",
     "ConnectorError",
+    "ConnectorInsufficientScopeError",
     "ConnectorReconnectRequiredError",
     "ConnectorRef",
     "ConnectorRefreshFailingError",

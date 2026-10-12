@@ -88,6 +88,17 @@ def get_provider(provider_id: str) -> ProviderDescriptor:
     return descriptor
 
 
+def get_provider_staged(provider_id: str) -> ProviderDescriptor:
+    """Resolve a descriptor from the generation in force where the caller runs.
+
+    The STAGED generation while a build is staging (the one being built), else the committed one.
+    """
+    descriptor = _GENERATION.write_target().get(provider_id)
+    if descriptor is None:
+        raise KeyError(f"Unknown Connectors provider: {provider_id!r}")
+    return descriptor
+
+
 def list_providers() -> list[ProviderDescriptor]:
     """Every COMMITTED descriptor — the request-path catalog view."""
     return list(_GENERATION.committed().values())

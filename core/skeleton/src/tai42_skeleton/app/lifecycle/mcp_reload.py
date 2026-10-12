@@ -10,8 +10,8 @@ from tai42_skeleton.app import lifecycle as _lifecycle
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.connectors.token_injection import evict_pooled_session
+from tai42_skeleton.manifest.transport import detect_transport
 from tai42_skeleton.tools import mcp_health
-from tai42_skeleton.tools.adapters.mcp_tool_to_func import _detect_transport
 from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 logger = logging.getLogger(__name__)
@@ -144,7 +144,7 @@ class McpReloadMixin(LifecycleState):
         re-derived. A failed eviction propagates — it must not silently leave a
         corpse in the pool.
         """
-        transport = _detect_transport(config.config)
+        transport = detect_transport(config.config)
 
         async def _evict() -> None:
             await evict_pooled_session(config, transport, _lifecycle.FastMCPClient())
