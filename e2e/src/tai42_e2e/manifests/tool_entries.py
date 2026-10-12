@@ -48,6 +48,7 @@ def _probe_tools_entry(
     *,
     with_backend_branches: bool,
     with_schedule_branch: bool = False,
+    with_async_branch: bool = False,
     with_monitor_branch: bool = False,
     with_undeclared_park_chain: bool = False,
 ) -> dict:
@@ -55,7 +56,9 @@ def _probe_tools_entry(
     ``sync_task`` combos (needs a backend stack). ``with_schedule_branch`` attaches
     ``schedule_task`` to ``e2e_record`` — enabled only on ``build_schedule_stack``,
     never on the reload-heavy ``replicas`` profile (on celery a ``schedule_task``
-    tool riding reload churn can leave the prefork pool unable to dispatch)."""
+    tool riding reload churn can leave the prefork pool unable to dispatch).
+    ``with_async_branch`` attaches ``async_task`` to ``run_tool``: any tool by name queued
+    as a backend job, its result read back with ``backend_task_result``."""
     extensions: dict[str, list[list[str]]] = {
         "e2e_echo": [["prometheus_metrics"]],
         "e2e_fail": [["prometheus_metrics"]],
@@ -84,6 +87,10 @@ def _probe_tools_entry(
         # Branch run_tool into run_tool_schedule_task: the scheduling analog of
         # run_tool_sync_task — schedules any tool by name (the sweep-schedulable leg).
         extensions["run_tool"] = [*extensions.get("run_tool", []), ["schedule_task"]]
+    if with_async_branch:
+        # Branch run_tool into run_tool_async_task: queue any tool by name as a backend job
+        # and return its task id at once (the job's caller holds no connection open on it).
+        extensions["run_tool"] = [*extensions.get("run_tool", []), ["async_task"]]
     if with_monitor_branch:
         # Trace a standalone e2e_echo call as one TOOL span, giving the observability read
         # surface a run to serve back (build_monitoring_stack's langfuse records it).
@@ -168,8 +175,14 @@ _TOOLBOX_EXTRA_TOOL_ENTRIES: list[dict] = [
 # Every agent in the reference package, one manifest entry each (own module, so
 # ``include`` names the one agent that module registers). All run on the scripted LLM
 # stub + local stack resources.
+_TOOLS_AGENT_ENTRY: dict = {
+    "title": "tai-agents-tools",
+    "module": "tai42_agents.tools_agent",
+    "include": ["tools_agent"],
+}
+
 _AGENT_ENTRIES: list[dict] = [
-    {"title": "tai-agents-tools", "module": "tai42_agents.tools_agent", "include": ["tools_agent"]},
+    _TOOLS_AGENT_ENTRY,
     {"title": "tai-agents-deep", "module": "tai42_agents.langchain_deep_agent", "include": ["langchain_deep_agent"]},
     {"title": "tai-agents-refine", "module": "tai42_agents.refine_agent", "include": ["refine_agent"]},
     {"title": "tai-agents-voting", "module": "tai42_agents.voting_agent", "include": ["voting_agent"]},

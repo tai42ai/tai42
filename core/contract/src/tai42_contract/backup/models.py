@@ -14,7 +14,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from tai42_contract.app.responses import FanoutSummary
+from tai42_contract.app.responses import AwaitingWorker, FanoutSummary, RecycleRoll
 
 
 class BackupSectionInfo(BaseModel):
@@ -38,14 +38,18 @@ class BackupSectionReport(BaseModel):
     the per-record counts (``skipped`` is the per-record REJECTION count, each also
     carried in ``errors``), ``errors`` is the per-record failure messages, and
     ``fanout`` is the platform's own per-worker report for a section whose restore
-    broadcasts a fleet eviction (``None`` for every section that does not).
+    broadcasts a fleet eviction (``None`` for every section that does not), and
+    ``recycle`` the fleet recycle roll a section's restore ran for a recycle-class env
+    change (``None`` for every section that ran none), and ``awaiting_respawn`` the workers
+    still awaiting a respawn after the section's env change (name + keys; empty for every
+    section that ran none).
 
     ``details`` is an OPEN map for an importer's OWN counts and data — a
     per-entity breakdown, a ``skipped_existing`` tally, minted credentials to
     surface once — so a backend declares its own shape there without the platform
     knowing it. The typed surface is CLOSED (``extra="forbid"``): an importer that
     returns a stray top-level field is a wrong shape the registry refuses loudly
-    rather than silently dropping. ``validate_assignment`` coerces ``fanout`` on
+    rather than silently dropping. ``validate_assignment`` coerces ``fanout`` and ``recycle`` on
     assignment, so a mutation building the report cannot leave an unvalidated shape.
     """
 
@@ -57,3 +61,5 @@ class BackupSectionReport(BaseModel):
     errors: list[str] = Field(default_factory=list)
     details: dict[str, Any] = Field(default_factory=dict)
     fanout: FanoutSummary | None = None
+    recycle: RecycleRoll | None = None
+    awaiting_respawn: list[AwaitingWorker] = Field(default_factory=list[AwaitingWorker])

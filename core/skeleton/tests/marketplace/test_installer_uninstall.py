@@ -54,7 +54,7 @@ async def test_uninstall_reloads_to_convergence_when_manifest_already_clean() ->
     # The apply re-persists the (unchanged) empty manifest and reloads through the pipeline.
     assert h.svc.writes == [{}]
     assert h.svc.calls == 1
-    assert result["reload"]["reloaded"] is True
+    assert result["reload"].local["reloaded"] is True
     # Convergence order: the apply (persist + deregister reload) BEFORE pip uninstall + row delete.
     order = [e for e in h.events if e in ("cm:write", "reload", "pip", "store:delete")]
     assert order == ["cm:write", "reload", "pip", "store:delete"]

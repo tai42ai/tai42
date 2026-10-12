@@ -118,7 +118,14 @@ def reload_config(
     """Soft-restart the worker fleet — all of them, or only ``--target`` ones.
 
     The response is the per-worker fleet report (one row per worker with its
-    reload outcome). Example: ``tai fleet reload-config --target serve-1``
+    reload outcome).
+
+    Each worker's row names the recycle-class keys awaiting a respawn
+    (``awaiting_respawn``): the soft restart carries every hot key in place, and
+    those keys take effect only when that worker is respawned through the
+    deployment's supervisor (on a bare deployment, a server restart).
+
+    Example: ``tai fleet reload-config --target serve-1``
     """
     ctx_obj = app_context(ctx)
     targets = list(target) if target else None

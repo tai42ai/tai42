@@ -9,6 +9,7 @@ handler never schedules — it only arms.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -23,7 +24,7 @@ from tai42_contract.app import tai42_app
 import tai42_skeleton.app.bus as bus_module
 from tai42_skeleton.app.bus import WorkerBus, WorkerIdentity, WorkerKind, WorkerState, _PresenceValue
 from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings
-from tai42_skeleton.app.graceful_exit import request_backend_graceful_exit, request_serve_graceful_exit
+from tai42_skeleton.app.graceful_exit import request_graceful_exit
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 
@@ -199,14 +200,8 @@ class _Mixin(TaiMCPLifecycleMixin):
         self._mcp_bound_tools[config.title] = {f"{config.title}_t"}
 
 
-@pytest.mark.parametrize(
-    ("kind", "primitive"),
-    [
-        (WorkerKind.serve, request_serve_graceful_exit),
-        (WorkerKind.backend, request_backend_graceful_exit),
-    ],
-)
-async def test_recycle_dispatch_arms_the_kind_primitive(kind: WorkerKind, primitive: Any) -> None:
+@pytest.mark.parametrize("kind", [WorkerKind.serve, WorkerKind.backend])
+async def test_recycle_dispatch_arms_the_graceful_exit_of_this_worker(kind: WorkerKind) -> None:
     m = _Mixin()
     m._bus = _make_bus(kind)
 
@@ -214,9 +209,12 @@ async def test_recycle_dispatch_arms_the_kind_primitive(kind: WorkerKind, primit
 
     # The applied payload names the graceful-exit kind only — never an env value.
     assert result == {"recycling": kind.value}
-    # The slot is armed with this process's graceful self-exit; it fires only later,
-    # after the terminal reply ships (proven by the bus tests above).
-    assert m._bus._post_reply_slot is primitive
+    # The slot is armed with this worker's graceful exit, aimed at its own bus pid; it fires
+    # only later, after the terminal reply ships (proven by the bus tests above).
+    slot = m._bus._post_reply_slot
+    assert isinstance(slot, functools.partial)
+    assert slot.func is request_graceful_exit
+    assert slot.args == (m._bus.identity.pid,)
 
 
 async def test_apply_bus_op_recycle_returns_payload_and_fires_hook() -> None:

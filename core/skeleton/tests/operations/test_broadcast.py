@@ -13,6 +13,7 @@ rows carry a settable PTTL, so an apply that fades a row is exactly what these d
 from __future__ import annotations
 
 import logging
+import signal
 
 import pytest
 
@@ -132,3 +133,179 @@ async def test_fanout_body_carries_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     local_body = fleet_fanout(local)
     assert local_body["mode"] == "local-only"
     assert "ok" not in local_body
+
+
+# -- the operation's verdict: workers still awaiting a respawn ------------------
+
+
+def _row(name: str, keys: list[str] | None, outcome: str = "applied") -> WorkerResult:
+    payload = None if keys is None else {"status": "ok", "env_keys": 2, "awaiting_respawn": keys}
+    return WorkerResult(name=name, outcome=OpOutcome(outcome), payload=payload)
+
+
+def _report(*rows: WorkerResult) -> FleetResult:
+    return FleetResult(op="reload_config", results=list(rows))
+
+
+_KEY = "BACKEND_MANIFEST_KEY"
+
+
+def test_a_reload_that_rolls_nothing_leaves_every_listed_worker_awaiting() -> None:
+    from tai42_skeleton.operations._broadcast import awaiting_respawn_after
+
+    verdict = awaiting_respawn_after(
+        _report(_row("serve-1", [_KEY]), _row("backend-1", []), _row("backend-2", None)),
+        None,
+        None,
+        self_exit_armed=False,
+    )
+
+    assert [(w.name, w.keys) for w in verdict] == [("serve-1", [_KEY])]
+
+
+def test_a_converged_roll_with_the_writer_armed_leaves_nobody_awaiting() -> None:
+    from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
+    from tai42_skeleton.app.recycle import RECYCLED, RecycleReport, RecycleRow
+    from tai42_skeleton.operations._broadcast import awaiting_respawn_after
+
+    roll = RecycleReport(rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED)])
+    writer = WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=1)
+
+    verdict = awaiting_respawn_after(
+        _report(_row("serve-1", [_KEY]), _row("backend-1", [_KEY])), roll, writer, self_exit_armed=True
+    )
+
+    assert verdict == []
+
+
+def test_a_stopped_roll_leaves_its_unreached_and_stopped_targets_and_the_writer_awaiting() -> None:
+    from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
+    from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, RecycleReport, RecycleRow, RecycleStop
+    from tai42_skeleton.operations._broadcast import awaiting_respawn_after
+
+    roll = RecycleReport(
+        rows=[
+            RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED),
+            RecycleRow(name="backend-2", kind="backend", generation_before=1, status=TIMED_OUT, detail="slow"),
+        ],
+        stopped=RecycleStop(kind="backend", name="backend-2", detail="slow"),
+    )
+    writer = WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=1)
+    report = _report(
+        _row("serve-1", [_KEY]), _row("backend-1", [_KEY]), _row("backend-2", [_KEY]), _row("serve-2", [_KEY])
+    )
+
+    verdict = awaiting_respawn_after(report, roll, writer, self_exit_armed=False)
+
+    assert [w.name for w in verdict] == ["backend-2", "serve-1", "serve-2"]
+
+
+def test_the_awaiting_verdict_is_logged_once_naming_every_worker(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    from tai42_contract.app.responses import AwaitingWorker
+
+    from tai42_skeleton.operations._broadcast import log_awaiting_respawn
+
+    with caplog.at_level(logging.ERROR):
+        log_awaiting_respawn([])
+        log_awaiting_respawn(
+            [AwaitingWorker(name="backend-2", keys=[_KEY]), AwaitingWorker(name="serve-1", keys=[_KEY])]
+        )
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors == [
+        "worker(s) awaiting a respawn — recycle-class key(s) changed in the stored env since they were bound and "
+        "nothing in this operation respawns them: backend-2 (BACKEND_MANIFEST_KEY), serve-1 (BACKEND_MANIFEST_KEY) — "
+        "restart each through the deployment's supervisor (bare: restart the server)"
+    ]
+
+
+def _fork_child_bus(monkeypatch: pytest.MonkeyPatch) -> FakeBus:
+    """A forked job child's bus: a non-member acting for its member parent ``backend-1``."""
+    from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
+
+    bus = FakeBus(origin="backend-1/fork-7", remotes=["backend-1"])
+    bus._identity = WorkerIdentity(name="backend-1/fork-7", kind=WorkerKind.backend, pid=7, generation=0, member=False)
+    bus._member = WorkerIdentity(name="backend-1", kind=WorkerKind.backend, pid=1, generation=3)
+    return _install(monkeypatch, bus)
+
+
+async def test_a_non_member_publisher_applies_nothing_locally_and_its_member_converges_as_a_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A fork child is never a fleet target: it has no serving surface of its own, so the
+    # whole-fleet op runs no local apply there and publishes with no self entry; the member
+    # parent applies it as a sibling.
+    bus = _fork_child_bus(monkeypatch)
+    applied: list[str] = []
+
+    async def apply() -> str:
+        applied.append("local")
+        return "applied"
+
+    body = await broadcast({"op": "reload_tool"}, None, apply)
+
+    assert applied == []
+    assert [call[2] for call in bus.publish_calls] == [None]
+    assert [row["name"] for row in body["results"]] == ["backend-1"]
+
+
+async def test_the_writer_exit_of_a_non_member_aims_at_the_member_it_acts_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tai42_skeleton.app import graceful_exit
+    from tai42_skeleton.operations._broadcast import writer_exit_response
+
+    _fork_child_bus(monkeypatch)
+    kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(graceful_exit.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    response = writer_exit_response({"status": "ok"}, armed=True)
+    assert response.background is not None
+    await response.background()
+
+    assert kills == [(1, signal.SIGTERM)]
+
+
+async def test_the_writer_exit_of_a_member_aims_at_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.app import graceful_exit
+    from tai42_skeleton.operations._broadcast import writer_exit_response
+
+    bus = _install(monkeypatch, FakeBus(origin="serve-a"))
+    kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(graceful_exit.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    response = writer_exit_response({"status": "ok"}, armed=True)
+    assert response.background is not None
+    await response.background()
+
+    assert kills == [(bus.identity.pid, signal.SIGTERM)]
+
+
+async def test_a_preset_fan_out_from_a_non_member_carries_no_self_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A preset write run inside a forked job child: the child is never a fleet target, so its
+    # reload and removal fan-outs publish no self entry and the member parent loads the change as
+    # a sibling.
+    from tai42_skeleton.operations.presets import fanout
+
+    bus = _fork_child_bus(monkeypatch)
+
+    reloaded = await fanout._fanout_reload("p1", None)
+    removed = await fanout._fanout_remove("p1", None)
+
+    assert [call[2] for call in bus.publish_calls] == [None, None]
+    assert [row.name for row in reloaded.results] == ["backend-1"]
+    assert [row.name for row in removed.results] == ["backend-1"]
+
+
+async def test_a_preset_fan_out_from_a_member_carries_its_applied_self_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.operations.presets import fanout
+
+    bus = _install(monkeypatch, FakeBus(origin="serve-a", remotes=["serve-b"]))
+
+    await fanout._fanout_reload("p1", None)
+
+    local = bus.publish_calls[0][2]
+    assert local is not None
+    assert local.outcome == OpOutcome.applied

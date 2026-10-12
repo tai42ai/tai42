@@ -170,6 +170,35 @@ def test_fork_child_derives_a_nonmember_identity() -> None:
     assert child.kind == WorkerKind.backend
 
 
+def test_a_member_acts_for_itself() -> None:
+    bus = make_bus(kind=WorkerKind.backend)
+    bus._identity = WorkerIdentity(name="backend-2", kind=WorkerKind.backend, pid=11, generation=7)
+    assert bus.member_identity is bus.identity
+
+
+def test_fork_child_keeps_the_member_it_acts_for_across_further_forks() -> None:
+    # A forked job child is a non-member, but it acts for the member it was forked from: the
+    # writer's role and its post-reply exit belong to that member. A child that forks again
+    # still acts for the same member, the top of its lineage.
+    bus = make_bus(kind=WorkerKind.backend)
+    member = WorkerIdentity(name="backend-2", kind=WorkerKind.backend, pid=11, generation=7)
+    bus._identity = member
+    bus._fork_child_nonmember()
+    assert bus.identity.member is False
+    assert bus.member_identity == member
+    bus._fork_child_nonmember()
+    assert bus.identity.member is False
+    assert bus.identity.name == f"backend-2/fork-{os.getpid()}/fork-{os.getpid()}"
+    assert bus.member_identity == member
+
+
+def test_fork_child_of_a_local_bus_acts_for_the_local_identity() -> None:
+    bus = WorkerBus.local(WorkerKind.serve)
+    local = bus.identity
+    bus._fork_child_nonmember()
+    assert bus.member_identity == local
+
+
 def test_fork_child_drops_the_inherited_heartbeat_thread() -> None:
     # A fork child inherits only the forking thread: the parent's heartbeat thread does
     # not exist there, so the child drops the inherited handle and never stops or joins it.

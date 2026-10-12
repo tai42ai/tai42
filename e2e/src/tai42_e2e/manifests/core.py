@@ -5,12 +5,13 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from tai42_e2e.manifests.feature_env import _base_env
+from tai42_e2e.manifests.feature_env import _base_env, _llm_env, _memory_agent_state_env
 from tai42_e2e.manifests.tool_entries import (
     _CORE_ROUTERS,
     _EXTENSION_MODULES,
     _PROJECTED_API_TOOLS,
     _TOOLBOX_EXTRA_TOOL_ENTRIES,
+    _TOOLS_AGENT_ENTRY,
     _builtin_entries,
     _probe_tools_entry,
     _toolbox_tools_entry,
@@ -322,21 +323,32 @@ def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
     ``BACKEND_MANIFEST_KEY`` / ``BACKEND_TOOL_NAME_ARG`` are the recycle-class fields the flip
     test diffs (``reload_class="recycle"``, not in any refused tier on the ``harness`` shape).
     The recycle step budget is widened so a real worker RESPAWN boot fits inside the per-step
-    census wait ``orchestrate_recycle`` allows the replacement."""
+    census wait ``orchestrate_recycle`` allows the replacement. The backup router is mounted so
+    a backup ``env`` restore — an env write — rolls the same recycle.
+
+    The tool doors of an env write beyond MCP ride here too: ``run_tool_async_task`` queues the
+    projected ``write_env`` or ``apply_profile`` as a backend job (the writer is then the backend
+    worker that ran it), and ``tools_agent`` on the scripted LLM stub (``res.llm_base_url``) calls
+    ``write_env`` from an agent run."""
     manifest = {
         "default_routers": "none",
-        "routers_modules": _CORE_ROUTERS,
+        "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.backup"],
         "extensions_modules": _EXTENSION_MODULES,
         "backend_module": variants.backend.module,
         "storage_module": variants.storage.module,
         "tools": [
-            _probe_tools_entry(with_backend_branches=True),
+            _probe_tools_entry(with_backend_branches=True, with_async_branch=True),
             *_builtin_entries(),
         ],
-        "api_tools": _PROJECTED_API_TOOLS,
+        "agents": [_TOOLS_AGENT_ENTRY],
+        # ``apply_profile`` is authority-changing (off the default projected surface): named so a
+        # backend job can apply a profile.
+        "api_tools": {**_PROJECTED_API_TOOLS, "include": ["apply_profile"]},
         "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
+    env.update(_memory_agent_state_env())
+    env.update(_llm_env(res))
     # A recycled worker's replacement must boot + rejoin the census within the recycle
     # orchestrator's per-step budget (``shutdown_drain_seconds``); a fresh process boot is far
     # slower than the 10s default, so widen it for this leg.

@@ -61,7 +61,7 @@ def _failure_detail(result: Any) -> str:
 async def backend_task_status(task_id: str) -> str:
     """Return the current status of a given task ID."""
     async with pool.arq_connection() as arq_redis:
-        job = Job(task_id, arq_redis, _deserializer=job_deserializer)
+        job = Job(task_id, arq_redis, _queue_name=arq_settings().queue_name, _deserializer=job_deserializer)
         status = await job.status()
         return status.value if status else "unknown"
 
@@ -85,7 +85,7 @@ async def backend_task_result(task_id: str, timeout: float | None = None) -> Any
     stored tagged description (type name and ``repr``) instead of the value.
     """
     async with pool.arq_connection() as arq_redis:
-        job = Job(task_id, arq_redis, _deserializer=job_deserializer)
+        job = Job(task_id, arq_redis, _queue_name=arq_settings().queue_name, _deserializer=job_deserializer)
         status = await job.status()
         if status == JobStatus.not_found:
             return f"Task {task_id} not found"
@@ -119,7 +119,7 @@ async def backend_cancel_task(task_id: str) -> str:
     aborted-or-failed, with the raw stored value appended.
     """
     async with pool.arq_connection() as arq_redis:
-        job = Job(task_id, arq_redis, _deserializer=job_deserializer)
+        job = Job(task_id, arq_redis, _queue_name=arq_settings().queue_name, _deserializer=job_deserializer)
         status = await job.status()
         if status in (JobStatus.not_found, JobStatus.complete):
             return f"Task {task_id} cannot be canceled (status: {status})"
@@ -177,7 +177,9 @@ async def backend_active_tasks() -> dict[str, Any]:
             job_ids.append(raw[len(in_progress_key_prefix) :])
         tasks: dict[str, Any] = {}
         for job_id in job_ids:
-            status = await Job(job_id, arq_redis, _deserializer=job_deserializer).status()
+            status = await Job(
+                job_id, arq_redis, _queue_name=arq_settings().queue_name, _deserializer=job_deserializer
+            ).status()
             if status == JobStatus.in_progress:
                 tasks[job_id] = {"status": status.value}
         return tasks

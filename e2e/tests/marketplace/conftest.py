@@ -35,6 +35,7 @@ from tai42_e2e.catalog_seed import (
     assert_zeta_ranges_bracket_running_contract,
     forge_zeta_wheel,
     seed_fixture_catalog,
+    seed_lambda_listing,
     seed_zeta_listing,
 )
 from tai42_e2e.fixture_catalog import (
@@ -44,6 +45,7 @@ from tai42_e2e.fixture_catalog import (
     EPSILON_PACKAGE,
     ETA_PACKAGE,
     GAMMA_PACKAGE,
+    LAMBDA_PACKAGE,
     THETA_PACKAGE,
     ZETA_COMPAT_VERSION,
     ZETA_INCOMPAT_VERSION,
@@ -58,6 +60,7 @@ from tai42_e2e.manifests import (
     build_marketplace_connectors_stack,
     build_marketplace_prefix_stack,
     build_marketplace_stack,
+    build_marketplace_supervised_stack,
     build_router_merge_stack,
 )
 from tai42_e2e.marketplace import MarketplaceService
@@ -108,6 +111,7 @@ _FIXTURE_DISTRIBUTIONS = (
     THETA_PACKAGE,
     ZETA_PACKAGE,
     ETA_PACKAGE,
+    LAMBDA_PACKAGE,
 )
 
 
@@ -269,6 +273,30 @@ def marketplace_stack(
         infra,
         tmp_path_factory.mktemp("marketplace"),
         build_marketplace_stack,
+        resource_kwargs=resource_kwargs,
+    )
+
+
+@pytest.fixture(scope="module")
+def marketplace_supervised_stack(
+    infra: Infra,
+    tmp_path_factory: pytest.TempPathFactory,
+    marketplace_service: MarketplaceService,
+    package_index: FixturePackageIndex,
+    fixture_artifacts: FixtureArtifacts,
+) -> Iterator[TaiStack]:
+    """The marketplace stack on a supervised shape with a backend sibling, its registry also
+    carrying the lambda listing (a plugin whose tool module defines a recycle-class settings
+    group)."""
+    asyncio.run(seed_lambda_listing(marketplace_service, package_index, fixture_artifacts))
+    resource_kwargs = {
+        "marketplace_url": marketplace_service.base_url,
+        "package_index_url": package_index.url,
+    }
+    yield from boot_stack(
+        infra,
+        tmp_path_factory.mktemp("marketplace-supervised"),
+        build_marketplace_supervised_stack,
         resource_kwargs=resource_kwargs,
     )
 

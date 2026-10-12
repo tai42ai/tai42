@@ -103,6 +103,7 @@ from tai42_e2e.manifests.marketplace import (
     build_marketplace_prefix_stack,
     build_marketplace_quarantine_stack,
     build_marketplace_stack,
+    build_marketplace_supervised_stack,
 )
 from tai42_e2e.manifests.monitoring import build_dead_collector_monitoring_stack, build_monitoring_stack
 from tai42_e2e.manifests.off import build_off_stack
@@ -216,6 +217,7 @@ __all__ = [
     "build_marketplace_prefix_stack",
     "build_marketplace_quarantine_stack",
     "build_marketplace_stack",
+    "build_marketplace_supervised_stack",
     "build_media_bridge_no_store_stack",
     "build_media_bridge_stack",
     "build_minimal_stack",

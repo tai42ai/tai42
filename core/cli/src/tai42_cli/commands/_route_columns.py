@@ -21,6 +21,9 @@ class RouteShape(NamedTuple):
 
 
 ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
+    ("DELETE", "/api/agents-config/entries/{title}"): RouteShape(
+        items_key="awaiting_respawn", columns=("name", "keys")
+    ),
     ("DELETE", "/api/connectors/connections/{connection_id}"): RouteShape(
         items_key=None,
         columns=(
@@ -31,6 +34,8 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "fanout",
         ),
     ),
+    ("DELETE", "/api/mcp-config/entries/{title}"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
+    ("DELETE", "/api/tools-config/entries/{title}"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("GET", "/api/agents"): RouteShape(
         items_key="items", columns=("name", "description", "tool_name", "input_schema", "spec_runnable")
     ),
@@ -501,6 +506,8 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("PATCH", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"): RouteShape(
         items_key="folded_from", columns=("target_kind", "target_name", "kind", "key")
     ),
+    ("POST", "/api/agents-config/entries"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
+    ("POST", "/api/api-tools"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("POST", "/api/auth/api-keys/{user_id}/scopes"): RouteShape(
         items_key=None, columns=("user_id", "updated", "scopes")
     ),
@@ -513,6 +520,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("POST", "/api/auth/roles/{name}/rollback"): RouteShape(
         items_key=None, columns=("condition", "name", "description", "scopes", "base_tier", "allow_all", "grants")
     ),
+    ("POST", "/api/config/env"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("POST", "/api/config/reload"): RouteShape(
         items_key="results", columns=("name", "outcome", "payload", "error", "detail")
     ),
@@ -522,10 +530,14 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("POST", "/api/fleet/reload-config"): RouteShape(
         items_key="results", columns=("name", "outcome", "payload", "error", "detail")
     ),
+    ("POST", "/api/manifest/replace"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("POST", "/api/marketplace/uninstall"): RouteShape(
         items_key=None, columns=("ref", "uninstalled", "reload", "notes")
     ),
     ("POST", "/api/marketplace/upgrade-all"): RouteShape(items_key="results", columns=("ref", "outcome", "detail")),
+    ("POST", "/api/mcp-config"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
+    ("POST", "/api/mcp-config/entries"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
+    ("POST", "/api/mcp-config/secret-env"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("POST", "/api/mcp-status/reload-failed"): RouteShape(
         items_key="results", columns=("name", "outcome", "payload", "error", "detail")
     ),
@@ -540,12 +552,14 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ),
     ("POST", "/api/states/{name}/records/search"): RouteShape(items_key="matches", columns=("subject", "updated_at")),
     ("POST", "/api/sub-mcp"): RouteShape(items_key=None, columns=("slug", "tools", "transport")),
+    ("POST", "/api/tools-config/entries"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("POST", "/api/tools/reload"): RouteShape(
         items_key="results", columns=("name", "outcome", "payload", "error", "detail")
     ),
     ("POST", "/api/tools/remove"): RouteShape(
         items_key="results", columns=("name", "outcome", "payload", "error", "detail")
     ),
+    ("POST", "/api/tools/{name}/extensions"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("PUT", "/api/auth/roles/{name}"): RouteShape(
         items_key=None, columns=("condition", "name", "description", "scopes", "base_tier", "allow_all", "grants")
     ),

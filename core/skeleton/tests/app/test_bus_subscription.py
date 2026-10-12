@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -482,8 +483,8 @@ async def test_dead_perpetual_task_marks_and_exits_for_every_registration(
     process's graceful exit. Parametrized over all six task names so no registration is
     uncovered."""
     m = _Mixin()
-    exits: list[WorkerKind] = []
-    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: exits.append(kind))
+    exits: list[int] = []
+    monkeypatch.setattr(lifespan, "request_graceful_exit", exits.append)
 
     async def boom():
         raise RuntimeError("perpetual task died")
@@ -495,4 +496,25 @@ async def test_dead_perpetual_task_marks_and_exits_for_every_registration(
     await asyncio.sleep(0)  # let the done-callback run
 
     assert m._dead_perpetual_task == (task_name, "RuntimeError")
-    assert exits == [m._worker_kind]
+    assert exits == [os.getpid()]
+
+
+async def test_a_reconnect_resync_names_its_own_keys_awaiting_a_respawn(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The resyncing worker is its own initiator: nothing in a resync respawns it, so the
+    # recycle-class keys its reload states as moved are its own loud verdict.
+    m = _Mixin()
+    m._bus = cast("Any", SimpleNamespace(identity=SimpleNamespace(name="serve-1")))
+
+    async def fake_dispatch(op: dict[str, Any]) -> Any:
+        return {"status": "ok", "env_keys": 2, "awaiting_respawn": ["BACKEND_MANIFEST_KEY"]}
+
+    monkeypatch.setattr(m, "_dispatch_bus_op", fake_dispatch)
+    m._boot_ready.set()
+    with caplog.at_level(logging.ERROR):
+        await m._resync_on_ready()
+
+    lines = [r.getMessage() for r in caplog.records if "awaiting a respawn" in r.getMessage()]
+    assert len(lines) == 1
+    assert "serve-1 (BACKEND_MANIFEST_KEY)" in lines[0]

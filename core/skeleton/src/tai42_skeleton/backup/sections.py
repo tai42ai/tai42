@@ -21,7 +21,7 @@ import logging
 from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.app.responses import FanoutSummary
+from tai42_contract.app.responses import FanoutSummary, RecycleRoll
 from tai42_contract.backup import BackupSectionReport
 from tai42_contract.states import StateBinding
 from tai42_contract.states.errors import StatesError
@@ -71,6 +71,7 @@ def _export_env() -> dict[str, str]:
 
 async def _import_env(payload: dict[str, str]) -> BackupSectionReport:
     from tai42_skeleton.config.service import ConfigService
+    from tai42_skeleton.operations._broadcast import result_recycle_roll
 
     config_manager = tai42_app.config.config_manager
     try:
@@ -81,7 +82,14 @@ async def _import_env(payload: dict[str, str]) -> BackupSectionReport:
     updated = sum(1 for key in payload if key in existing)
     # Apply through the pipeline: validated, reloaded, broadcast to the fleet.
     result = await ConfigService.from_app().apply_env_change(payload)
-    return BackupSectionReport(created=created, updated=updated, fanout=FanoutSummary.model_validate(result.fanout))
+    roll = result_recycle_roll(result)
+    return BackupSectionReport(
+        created=created,
+        updated=updated,
+        fanout=FanoutSummary.model_validate(result.fanout),
+        recycle=None if roll is None else RecycleRoll.model_validate(roll),
+        awaiting_respawn=list(result.awaiting_respawn),
+    )
 
 
 # -- access_control ----------------------------------------------------------

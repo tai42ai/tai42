@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import os
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -252,6 +253,7 @@ class FakeConfigService:
         self.fail_reload_on: set[int] = set()
         self.fail_broadcast_on: set[int] = set()
         self.raise_on_validate: Exception | None = None
+        self.replace_calls: list[dict[str, Any]] = []
 
     async def apply_change(self, mutator: Any) -> ApplyResult:
         document = copy.deepcopy(self._cm._manifest)
@@ -275,7 +277,10 @@ class FakeConfigService:
         # so the process env plus any ``changes`` stands in.
         return {**os.environ, **changes}
 
-    async def apply_replace(self, document: dict[str, Any]) -> ApplyResult:
+    async def apply_replace(
+        self, document: dict[str, Any], *, continues: ApplyResult | None = None, recycle_keys: Sequence[str] = ()
+    ) -> ApplyResult:
+        self.replace_calls.append({"continues": continues, "recycle_keys": tuple(recycle_keys)})
         return self._persist(copy.deepcopy(document))
 
     def _persist(self, document: dict[str, Any]) -> ApplyResult:

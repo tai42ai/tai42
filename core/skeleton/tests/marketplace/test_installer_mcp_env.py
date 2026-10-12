@@ -17,6 +17,7 @@ An mcp-server install routes through the COMBINED env+manifest pipeline: the req
 from __future__ import annotations
 
 import copy
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -151,7 +152,9 @@ class _FakeSvc:
         self._cm._manifest = document
         return ApplyResult(fleet=_fleet_report(), local={"reloaded": True}, document=document)
 
-    async def apply_replace(self, document: dict[str, Any]) -> ApplyResult:
+    async def apply_replace(
+        self, document: dict[str, Any], *, continues: ApplyResult | None = None, recycle_keys: Sequence[str] = ()
+    ) -> ApplyResult:
         self._cm._manifest = copy.deepcopy(document)
         return ApplyResult(fleet=_fleet_report(), local={"reloaded": True}, document=document)
 

@@ -6,13 +6,15 @@ it returns.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from tai42_skeleton.operations._broadcast import fleet_fanout
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from tai42_contract.app.responses import AwaitingWorker
 
     from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, WorkerIdentity
     from tai42_skeleton.app.recycle import RecycleReport
@@ -88,12 +90,29 @@ class ApplyResult:
     bus with an unconfirmed worker named in ``fleet.results`` (``fleet.ok`` is then
     ``False``), or a bus-unreachable result (``fleet.reachable`` is ``False`` with only
     ``fleet.error``). Both are returned successes: persist + local reload landed, and
-    recovery is a fleet reload.
+    recovery is a fleet reload. ``recycle`` is the fleet recycle roll an env change
+    carrying a recycle-class key ran (``None`` when it carried none, so nothing rolled),
+    ``self_identity`` the writer's own identity for that roll, and ``serve_affecting``
+    whether the change carries recycle-class keys (every one is taken as affecting the
+    writer's own serve surface). ``awaiting_respawn`` is the operation's verdict after the roll:
+    the workers still awaiting a respawn (``operations._broadcast.awaiting_respawn_after``).
     """
 
     fleet: FleetResult
     local: dict[str, Any]
     document: dict[str, Any] | None = None
+    recycle: RecycleReport | None = None
+    self_identity: WorkerIdentity | None = None
+    serve_affecting: bool = False
+    awaiting_respawn: list[AwaitingWorker] = field(default_factory=list)
+
+    @property
+    def self_exit_armed(self) -> bool:
+        """Whether the writer's own deferred recycle (the post-response self-exit) happens.
+
+        The predicate :attr:`ProfileApplyOutcome.self_exit_armed` applies, shared.
+        """
+        return self_exit_armed(self.serve_affecting, self.recycle)
 
     @property
     def fanout(self) -> dict[str, Any]:
@@ -118,6 +137,8 @@ class ProfileApplyOutcome:
     worker's own identity (name + generation) — the source for the self-deferred row's
     ``generation_before``. ``serve_affecting`` is whether the diff carries recycle keys
     that affect the applier's own serve surface. ``fleet`` is the reload broadcast report.
+    ``awaiting_respawn`` is the operation's verdict after the roll: the workers still awaiting a
+    respawn.
     """
 
     hot: list[str]
@@ -125,6 +146,7 @@ class ProfileApplyOutcome:
     self_identity: WorkerIdentity
     serve_affecting: bool
     fleet: FleetResult
+    awaiting_respawn: list[AwaitingWorker] = field(default_factory=list)
 
     @property
     def self_exit_armed(self) -> bool:
@@ -133,4 +155,13 @@ class ProfileApplyOutcome:
         Only for a serve-affecting diff whose roll converged: a roll that stopped never
         recycles anything past the row it stopped at, the applier's self-exit included.
         """
-        return self.serve_affecting and self.recycle is not None and self.recycle.converged
+        return self_exit_armed(self.serve_affecting, self.recycle)
+
+
+def self_exit_armed(serve_affecting: bool, recycle: RecycleReport | None) -> bool:
+    """Whether the writer's own deferred recycle (the post-response self-exit) happens.
+
+    Only for a serve-affecting change whose roll converged: a roll that stopped never
+    recycles anything past the row it stopped at, the writer's self-exit included.
+    """
+    return serve_affecting and recycle is not None and recycle.converged

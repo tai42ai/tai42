@@ -488,6 +488,8 @@ async def test_mcp_config_valid_persists_and_reloads(fake):
         "status": "ok",
         "env_keys": 3,
         "fanout": {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"},
+        "recycle": None,
+        "awaiting_respawn": [],
     }
     assert fake.cm.written is not None
     assert fake.cm.written["mcp"] == []

@@ -15,6 +15,7 @@ import pytest
 from fakeredis import aioredis
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.store.store_registry import store_registry
+from tai42_kit.settings import bind_respawn_class_env
 
 import tai42_skeleton.app.bus as bus_module
 from tai42_skeleton.app import epoch as epoch_mod
@@ -79,7 +80,7 @@ async def test_the_reload_releases_then_builds(monkeypatch: pytest.MonkeyPatch) 
     mixin._config_manager = _EnvConfig()  # pyright: ignore[reportAttributeAccessIssue]
     mixin._serving_loop = asyncio.get_running_loop()
 
-    assert await asyncio.to_thread(mixin._reload_config) == {"status": "ok", "env_keys": 1}
+    assert await asyncio.to_thread(mixin._reload_config) == {"status": "ok", "env_keys": 1, "awaiting_respawn": []}
     assert order == ["release", "build"]
 
 
@@ -135,7 +136,11 @@ async def test_a_gated_reload_that_blocks_the_serving_loop_keeps_the_bus_slot(
                 await asyncio.sleep(0.01)
         before = bus.identity
         with caplog.at_level(logging.WARNING):
-            assert await reload_gate.run(mixin._reload_config, reimports=False) == {"status": "ok", "env_keys": 1}
+            assert await reload_gate.run(mixin._reload_config, reimports=False) == {
+                "status": "ok",
+                "env_keys": 1,
+                "awaiting_respawn": [],
+            }
             # The heartbeat's next beat after the stall must still find the claim held.
             await asyncio.sleep(ttl)
         after = bus.identity
@@ -147,3 +152,37 @@ async def test_a_gated_reload_that_blocks_the_serving_loop_keeps_the_bus_slot(
         subscription.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await subscription
+
+
+class _RecycleEnvConfig:
+    def read_env(self) -> dict[str, str]:
+        return {"TAI_BUS_HEARTBEAT_TTL": "7", "LOG_LEVEL": "debug"}
+
+
+async def test_the_reload_states_the_recycle_class_keys_moved_off_their_bound_value_and_logs_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    # Imported for its registration side effect: the bus group is recycle-class.
+    import tai42_skeleton.app.bus_settings  # noqa: F401
+
+    monkeypatch.setenv("TAI_BUS_HEARTBEAT_TTL", "15")
+    monkeypatch.setenv("LOG_LEVEL", "info")
+    bind_respawn_class_env()
+
+    async def _build(env: dict[str, str]) -> Any:
+        epoch_mod.apply_env_and_reset_settings(env)
+
+    monkeypatch.setattr(epoch_mod, "build_and_swap_epoch", _build)
+    monkeypatch.setattr(epoch_mod, "_loaded_env_keys", set())
+    mixin = _Mixin()
+    mixin._config_manager = _RecycleEnvConfig()  # pyright: ignore[reportAttributeAccessIssue]
+    mixin._serving_loop = asyncio.get_running_loop()
+
+    with caplog.at_level(logging.ERROR):
+        result = await asyncio.to_thread(mixin._reload_config)
+
+    # The reload states the fact; the operation that started it judges whether anything carries it.
+    assert result == {"status": "ok", "env_keys": 2, "awaiting_respawn": ["TAI_BUS_HEARTBEAT_TTL"]}
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR] == []

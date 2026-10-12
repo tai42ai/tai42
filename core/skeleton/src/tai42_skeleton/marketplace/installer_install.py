@@ -171,7 +171,7 @@ class _InstallFlow(_InstallerBase):
             "package": spec.package,
             "advisories": resolve.require_list(resolved, "advisories"),
             "notes": notes.install_notes(spec),
-            "reload": manifest_apply.reload_report(apply_result),
+            "reload": apply_result,
             "pip_output": pip_output,
             "routes": routes_mod.mounted_rows(resolved_route_list),
         }
@@ -279,7 +279,11 @@ class _InstallFlow(_InstallerBase):
                 manifest_persisted = True
                 await self._record_install_row(ref, pinned_version, spec, source, resolved, resolved_mounts)
                 row_persisted = True
-                return await self._svc().apply_replace(self._cm().read_manifest_preserved())
+                # The failed forward reload rolled nothing: hand the change's recycle-class keys
+                # to the recovery reload, which rolls them.
+                return await self._svc().apply_replace(
+                    self._cm().read_manifest_preserved(), recycle_keys=reload_error.unrolled_recycle_keys
+                )
             manifest_persisted = True
             await self._record_install_row(ref, pinned_version, spec, source, resolved, resolved_mounts)
             row_persisted = True
@@ -359,7 +363,7 @@ class _InstallFlow(_InstallerBase):
             ensure_pip_available()
 
         cm = self._cm()
-        reload_result: dict[str, Any] | None
+        reload_result: ApplyResult | None
         changed = remove_provides(dict(cm.read_manifest_preserved()), spec)
         if changed or provides.has_manifest_provides(spec):
             # Converge the live registration to the stripped manifest BEFORE removing
@@ -369,7 +373,7 @@ class _InstallFlow(_InstallerBase):
             def mutator(document: dict[str, Any]) -> None:
                 remove_provides(document, spec)
 
-            reload_result = manifest_apply.reload_report(await manifest_apply.apply_composed(self._svc(), mutator))
+            reload_result = await manifest_apply.apply_composed(self._svc(), mutator)
         else:
             # A plugin whose provides are all env-selected wrote no manifest
             # entry, so there is nothing to deregister — no apply, no reload.

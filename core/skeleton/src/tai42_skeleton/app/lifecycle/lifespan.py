@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 from tai42_skeleton.app import lifecycle as _lifecycle
 from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_shared_config
 from tai42_skeleton.app.bus import WorkerKind
-from tai42_skeleton.app.graceful_exit import graceful_exit_for
+from tai42_skeleton.app.graceful_exit import request_graceful_exit
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.readiness_sentinel import remove_ready_sentinel
 from tai42_skeleton.app.reload_gate import reload_gate
@@ -69,10 +70,6 @@ class LifespanMixin(LifecycleState):
             # raises loudly on a failed establisher (never a healthy-looking half-start).
             # A reload re-establishes them post-swap through the build+swap primitive.
             await self._run_post_swap_handlers(raise_on_error=True)
-            # Remember this process's kind before the perpetual tasks spawn, so
-            # their shared done-callback requests the matching graceful-exit
-            # primitive when one of them dies.
-            self._worker_kind = kind
             # Join the worker bus: construct this process's one bus (worker kind
             # ``serve`` or ``backend``) and open its single long-lived subscription.
             # The subscription registers presence and self-resyncs (reload_config)
@@ -164,7 +161,7 @@ class LifespanMixin(LifecycleState):
         else:
             reason = type(task.exception()).__name__
         self._dead_perpetual_task = (task.get_name(), reason)
-        graceful_exit_for(self._worker_kind)()
+        request_graceful_exit(os.getpid())
 
     async def _teardown_resources(self) -> None:
         """Release process-wide resources at shutdown.

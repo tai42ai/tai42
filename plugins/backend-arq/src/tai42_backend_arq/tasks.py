@@ -50,7 +50,7 @@ async def callback_job(
     # The schema crosses the queue as JSON, so it arrives as a plain mapping.
     if not isinstance(callback, CallbackSchema):
         callback = CallbackSchema.model_validate(callback)
-    job = Job(previous_job_id, ctx["redis"], _deserializer=job_deserializer)
+    job = Job(previous_job_id, ctx["redis"], _queue_name=arq_settings().queue_name, _deserializer=job_deserializer)
     timeout = arq_settings().callback_timeout
     start_time = time.time()
 

@@ -1,16 +1,19 @@
 """settings_cache registry: cached accessors register for the global reset,
 caches clear before custom hooks run, and hooks see fresh values. The epoch
 stamp + sweep find a retired-epoch instance a holder kept alive, and skip
-primitives."""
+primitives, and never roster an instance whose settings change only by a process
+respawn or restart."""
 
 import gc
-from typing import cast
+import logging
+from typing import ClassVar, cast
 
 import pytest
-from pydantic_settings import BaseSettings
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tai42_kit.clients.base import advance_client_epoch, current_client_epoch
-from tai42_kit.settings import cache_registry
+from tai42_kit.settings import ReloadClass, TaiBaseSettings, cache_registry, registry
 from tai42_kit.settings.cache_registry import (
     _EPOCH_STAMP_ATTR,
     keyed_settings_cache,
@@ -25,17 +28,21 @@ from tai42_kit.settings.cache_registry import (
 
 @pytest.fixture(autouse=True)
 def _isolated_registry():
-    """Snapshot the global registry + stamp roster so test state doesn't leak.
+    """Snapshot the global registry, the stamp roster and the settings registry so test state doesn't leak.
 
     Restored in this fixture's own teardown, before the suite's settings reset runs,
-    so a hook a test registers never reaches that reset.
+    so a hook a test registers never reaches that reset, and a settings group a test
+    defines never stays registered.
     """
     saved = (cache_registry._CACHE_CLEARS, cache_registry._RESET_HOOKS, cache_registry._stamp_roster)
+    saved_groups = dict(registry._REGISTRY)
     cache_registry._CACHE_CLEARS = dict(saved[0])
     cache_registry._RESET_HOOKS = dict(saved[1])
     cache_registry._stamp_roster = list(saved[2])
     yield
     cache_registry._CACHE_CLEARS, cache_registry._RESET_HOOKS, cache_registry._stamp_roster = saved
+    registry._REGISTRY.clear()
+    registry._REGISTRY.update(saved_groups)
 
 
 def test_settings_cache_caches_and_resets():
@@ -581,3 +588,119 @@ def test_a_name_re_registered_with_the_other_call_shape_is_refused():
     settings_cache(zero_arg)
     with pytest.raises(TypeError, match="zero-argument accessor; it cannot become a one-argument one"):
         keyed_settings_cache(one_arg)
+
+
+def _hold_through_a_reload[S: BaseSettings](settings_cls: type[S]) -> tuple[S, int]:
+    """Build ``settings_cls`` through a cached accessor, keep it, and retire its epoch."""
+
+    @settings_cache
+    def accessor() -> S:
+        return settings_cls()
+
+    held = accessor()
+    return held, advance_client_epoch()
+
+
+_SWEEP_LOGGER = "tai42_kit.settings.cache_registry"
+
+
+@pytest.mark.parametrize("disposition", ["recycle", "excluded"])
+def test_a_held_group_that_changes_only_by_respawn_is_never_reported(caplog, disposition):
+    class _RespawnOnlySettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="RESPAWNONLY_")
+        reload_class: ClassVar[ReloadClass] = cast(ReloadClass, disposition)
+
+        value: int = 1
+
+    caplog.set_level(logging.ERROR, logger=_SWEEP_LOGGER)
+    held, retired = _hold_through_a_reload(_RespawnOnlySettings)
+
+    assert _of_type(sweep_stale_settings(retired), _RespawnOnlySettings) == []
+    assert [r for r in caplog.records if r.name == _SWEEP_LOGGER] == []
+    assert held.value == 1
+
+
+def test_a_group_that_changes_only_by_respawn_is_not_rostered():
+    class _UnrosteredSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="UNROSTERED_")
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        value: int = 1
+
+    mark = settings_birth_mark()
+    roster = len(cache_registry._stamp_roster)
+    instance = _UnrosteredSettings()
+
+    cache_registry._stamp_settings(instance)
+
+    assert len(cache_registry._stamp_roster) == roster
+    assert settings_birth_mark() == mark
+    assert not hasattr(instance, _EPOCH_STAMP_ATTR)
+
+
+def test_a_held_recycle_group_with_one_hot_field_is_reported(caplog):
+    class _PartlyHotSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="PARTLYHOT_")
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        rebuilt: int = 1
+        live: int = Field(default=2, json_schema_extra={"reload": "hot"})
+
+    caplog.set_level(logging.ERROR, logger=_SWEEP_LOGGER)
+    held, retired = _hold_through_a_reload(_PartlyHotSettings)
+
+    found = _of_type(sweep_stale_settings(retired), _PartlyHotSettings)
+    assert len(found) == 1
+    assert "_PartlyHotSettings (epoch" in caplog.text
+    assert held.live == 2
+
+
+def test_a_held_hot_group_whose_every_field_changes_only_by_respawn_is_never_reported():
+    class _EveryFieldPinnedSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="EVERYFIELDPINNED_")
+
+        rebuilt: int = Field(default=1, json_schema_extra={"reload": "recycle"})
+        pinned: int = Field(default=2, json_schema_extra={"reload": "excluded"})
+
+    held, retired = _hold_through_a_reload(_EveryFieldPinnedSettings)
+
+    assert _of_type(sweep_stale_settings(retired), _EveryFieldPinnedSettings) == []
+    assert held.pinned == 2
+
+
+def test_a_held_recycle_group_nesting_a_hot_group_is_reported():
+    class _HotChildSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="HOTCHILD_")
+
+        flag: bool = True
+
+    class _RecycleParentSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="RECYCLEPARENT_")
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        child: _HotChildSettings = Field(default_factory=_HotChildSettings)
+
+    held, retired = _hold_through_a_reload(_RecycleParentSettings)
+
+    assert len(_of_type(sweep_stale_settings(retired), _RecycleParentSettings)) == 1
+    assert held.child.flag is True
+
+
+def test_a_held_group_that_changes_only_by_respawn_through_a_keyed_accessor_is_never_reported(caplog):
+    class _KeyedRespawnOnlySettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="KEYEDRESPAWNONLY_")
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        name: str = ""
+
+    @keyed_settings_cache
+    def accessor(name: str) -> _KeyedRespawnOnlySettings:
+        return _KeyedRespawnOnlySettings(name=name)
+
+    caplog.set_level(logging.ERROR, logger=_SWEEP_LOGGER)
+    held = accessor("a")
+    retired = advance_client_epoch()
+
+    assert _of_type(sweep_stale_settings(retired), _KeyedRespawnOnlySettings) == []
+    assert [r for r in caplog.records if r.name == _SWEEP_LOGGER] == []
+    assert held.name == "a"

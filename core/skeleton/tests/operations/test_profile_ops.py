@@ -25,6 +25,7 @@ from tai42_contract.versioning.errors import (
 )
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 
+from tai42_skeleton.app import graceful_exit
 from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, RecycleReport, RecycleRow, RecycleStop
 from tai42_skeleton.config.recycle_policy import CapabilityReport, Shape
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
@@ -399,9 +400,9 @@ async def test_apply_arms_self_exit_when_serve_affecting(
     response = await config_ops.apply_profile("p")
     assert isinstance(response, OperationResponse)
     # A serve-affecting recycle arms the applier's OWN deferred self-exit as a post-flush
-    # BackgroundTask wrapping ``request_serve_graceful_exit`` — never an inline create_task.
+    # BackgroundTask wrapping ``request_graceful_exit`` — never an inline create_task.
     assert response.background is not None
-    assert response.background.func is config_ops.request_serve_graceful_exit
+    assert response.background.func is graceful_exit.request_graceful_exit
     assert response.payload["refused"] == []
     assert response.payload["hot"] == ["A"]
     # The profile's active env is what the pipeline was handed.

@@ -1,8 +1,8 @@
 """Validation on the resolved projection of a manifest / env / profile-replace change.
 
 Covers the pydantic ``Manifest`` schema, the boundary refusals (X-band, unknown owned-prefix
-settings, key material, dangling ``!ENV``, incomplete admin pair), and the backend-needs-bus
-invariant in both directions.
+settings, key material, an unrecyclable change, dangling ``!ENV``, incomplete admin pair), and
+the backend-needs-bus invariant in both directions.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from tai42_skeleton.app.bus_settings import BusSettings, bus_settings
 from tai42_skeleton.config.boundary import (
     refuse_incomplete_admin_pair,
     refuse_key_material,
+    refuse_unrecyclable_env_change,
     refuse_unresolved_env,
     refuse_x_band,
 )
@@ -25,6 +26,18 @@ from tai42_skeleton.settings.owned_settings import refuse_unknown_owned_env_writ
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+
+def _refuse_unrecyclable_merge(stored: Mapping[str, str], changes: Mapping[str, str]) -> list[str]:
+    """Refuse an env override merge the deployment shape cannot carry by a recycle; return its recycle-class keys.
+
+    The env the merge would store is ``stored`` overlaid with ``changes``, an empty value
+    removing its key (the store drops empties). The returned keys are the ones the merge
+    changes that only a worker recycle carries, sorted.
+    """
+    proposed = {key: value for key, value in {**stored, **changes}.items() if value != ""}
+    _hot, recycle = refuse_unrecyclable_env_change(stored, proposed, change="this env change")
+    return recycle
 
 
 class _ValidationMixin(_ConfigServiceBase):
@@ -45,10 +58,11 @@ class _ValidationMixin(_ConfigServiceBase):
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_settings().enabled)
         refuse_unresolved_env(document, dict(os.environ))
 
-    def _validate_env(self, changes: dict[str, str]) -> None:
-        """Validate the effective config an env change produces.
+    def _validate_env(self, changes: dict[str, str]) -> list[str]:
+        """Validate the effective config an env change produces; return the recycle-class keys it changes.
 
-        Refuses an X-band key in the change PAYLOAD, resolves the persisted manifest's ``!ENV``
+        Refuses an X-band key in the change PAYLOAD and a change the deployment shape cannot carry
+        by a recycle, resolves the persisted manifest's ``!ENV``
         markers against the post-change env (so a marker that materializes a backend participates,
         and a dropped reference is caught as dangling), and evaluates the backend-needs-bus
         invariant against the post-change bus configuration (so removing the bus while a backend
@@ -56,10 +70,11 @@ class _ValidationMixin(_ConfigServiceBase):
         """
         refuse_x_band(changes.keys())
         refuse_unknown_owned_env_write([key for key, value in changes.items() if value != ""])
+        stored = self._read_stored_env()
         # Change-aware: refuse a key-material key only when the payload SETS it to a value
         # different from the current stored value (rotation-via-editor), never an unchanged
         # carry — the stored env is the real values a read-modify-write round-trip re-sends.
-        refuse_key_material(changes, self._read_stored_env())
+        refuse_key_material(changes, stored)
         effective = self.effective_env(changes)
         refuse_incomplete_admin_pair(effective)
         with _environ(effective):
@@ -73,11 +88,14 @@ class _ValidationMixin(_ConfigServiceBase):
             # Studio env edit on a default-only deployment.
             bus_configured = BusSettings().enabled
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
+        # Last, so a change the backend-needs-bus rule refuses is named by that rule.
+        return _refuse_unrecyclable_merge(stored, changes)
 
-    def _validate_env_and_manifest(self, changes: dict[str, str], document: Mapping[str, Any]) -> None:
-        """Validate a combined env-write + manifest-mutate before it persists.
+    def _validate_env_and_manifest(self, changes: dict[str, str], document: Mapping[str, Any]) -> list[str]:
+        """Validate a combined env-write + manifest-mutate before it persists; return the recycle-class keys it changes.
 
-        Refuses an X-band key in the env change PAYLOAD, resolves the MUTATED manifest's
+        Refuses an X-band key in the env change PAYLOAD and a change the deployment shape cannot
+        carry by a recycle, resolves the MUTATED manifest's
         ``!ENV`` markers against the post-change effective env (so the marker the mutator
         just wrote resolves against the value the env write supplies, and a dropped
         reference is caught as dangling), validates the resolved projection, and
@@ -85,9 +103,10 @@ class _ValidationMixin(_ConfigServiceBase):
         """
         refuse_x_band(changes.keys())
         refuse_unknown_owned_env_write([key for key, value in changes.items() if value != ""])
+        stored = self._read_stored_env()
         # Change-aware key-material refusal (see :meth:`_validate_env`): a CHANGE to a KEK /
         # signing key is refused, an unchanged carry is allowed.
-        refuse_key_material(changes, self._read_stored_env())
+        refuse_key_material(changes, stored)
         effective = self.effective_env(changes)
         refuse_incomplete_admin_pair(effective)
         with _environ(effective):
@@ -95,6 +114,7 @@ class _ValidationMixin(_ConfigServiceBase):
             manifest = self._validated_projection(document)
             bus_configured = BusSettings().enabled
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
+        return _refuse_unrecyclable_merge(stored, changes)
 
     def _validate_replace(self, profile_env: dict[str, str]) -> None:
         """Validate a whole-env REPLACE (a settings-profile apply) before it persists.

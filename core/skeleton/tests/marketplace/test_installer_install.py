@@ -53,10 +53,10 @@ async def test_install_happy_step_order_manifest_response(monkeypatch: pytest.Mo
     # The response reports the RESOLVED version even though the caller passed None.
     assert result["version"] == "1.0.0"
     assert result["package"] == "tai42-toolbox"
-    # The reload field carries the local reload result plus the standard fleet fan-out
-    # summary (single-worker harness => the local-only note).
-    assert result["reload"]["reloaded"] is True
-    assert result["reload"]["fanout"] == {
+    # The reload field hands up the change's structured outcome (the op renders it): the
+    # local reload result plus the fleet fan-out (single-worker harness => the local-only note).
+    assert result["reload"].local["reloaded"] is True
+    assert result["reload"].fanout == {
         "mode": "local-only",
         "note": "no worker bus configured; only this worker reloaded",
     }
@@ -395,7 +395,7 @@ async def test_install_env_marker_on_non_string_field_validates_resolved(monkeyp
     assert persisted["api_tools"]["expose_destructive"] == marker
     # One apply persisted + reloaded + broadcast, and the attribution row was written.
     assert h.svc.calls == 1
-    assert result["reload"]["reloaded"] is True
+    assert result["reload"].local["reloaded"] is True
     assert h.store.record_calls[-1][0] == "tai42/toolbox"
 
 
@@ -459,7 +459,10 @@ def _collision_forward(monkeypatch: pytest.MonkeyPatch):
 
     async def _forward(*_args, **_kwargs):
         raise FleetBroadcastError(
-            "reload_config", FleetResult(op="reload_config", reachable=True), collision
+            "reload_config",
+            FleetResult(op="reload_config", reachable=True),
+            collision,
+            unrolled_recycle_keys=("BACKEND_MANIFEST_KEY",),
         ) from collision
 
     monkeypatch.setattr(env_apply, "apply_provides_change", _forward)
@@ -500,6 +503,8 @@ async def test_commit_install_recovers_a_remapped_route_collision(monkeypatch: p
     assert h.store.record_calls[-1][10] == {"r": "remap"}
     assert result.local == {"reloaded": True}
     assert "store:delete" not in h.events
+    # The failed forward reload rolled nothing, so the recovery reload rolls the change's keys.
+    assert h.svc.replace_calls[-1] == {"continues": None, "recycle_keys": ("BACKEND_MANIFEST_KEY",)}
 
 
 async def test_commit_install_unwinds_when_the_recovery_remount_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -517,11 +522,11 @@ async def test_commit_install_unwinds_when_the_recovery_remount_fails(monkeypatc
     original = h.svc.apply_replace
     calls = {"n": 0}
 
-    async def _replace(document: Any) -> Any:
+    async def _replace(document: Any, **continuation: Any) -> Any:
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("remount build failed")
-        return await original(document)
+        return await original(document, **continuation)
 
     monkeypatch.setattr(h.svc, "apply_replace", _replace)
 

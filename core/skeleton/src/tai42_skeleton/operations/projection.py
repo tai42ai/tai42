@@ -103,10 +103,21 @@ def _make_tool(op: OperationMetadata) -> Callable[..., Awaitable[object]]:
             result = await func(**kwargs)
         except OperationError as exc:
             raise ToolError(exc.message) from exc
-        # An operation that returns an ``OperationResponse`` attaches an HTTP-edge
-        # post-flush background task (the profile-apply self-exit) that is meaningless
-        # over MCP — project its ``payload`` alone.
+        # An operation that returns an ``OperationResponse`` arms a post-reply background task
+        # (the writer's graceful exit after a converged recycle roll). Every tool door flows
+        # through here — MCP, ``tai tools run``, an agent, a preset, a hook, and a schedule or a
+        # submit run inside a backend job — so the task runs here, once the operation returned
+        # and before the call does: no door's loop is relied on to run it later. The exit is the
+        # worker's graceful stop, whose drain lets the in-flight reply ship (HTTP, MCP), the
+        # in-flight call return (an in-process door) or the in-flight job finish (a backend door)
+        # before the process ends. A failing task is logged at ERROR and never raised into the
+        # reply: the operation's change already landed.
         if isinstance(result, OperationResponse):
+            if result.background is not None:
+                try:
+                    await result.background()
+                except Exception:
+                    logger.exception("a projected operation's post-reply task failed")
             return result.payload
         return result
 

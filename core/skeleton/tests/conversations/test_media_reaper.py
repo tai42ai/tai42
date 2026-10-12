@@ -10,6 +10,7 @@ all exercised against the shipped code, not a stand-in.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -326,8 +327,8 @@ async def test_media_reaper_dead_task_marks_readiness(monkeypatch: pytest.Monkey
             self._mcp_bound_tools[config.title] = set()
 
     m = _M()
-    exits: list[object] = []
-    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: exits.append(kind))
+    exits: list[int] = []
+    monkeypatch.setattr(lifespan, "request_graceful_exit", exits.append)
 
     async def _returns_immediately() -> None:
         return None
@@ -340,4 +341,4 @@ async def test_media_reaper_dead_task_marks_readiness(monkeypatch: pytest.Monkey
     await asyncio.sleep(0)  # let the done-callback run
 
     assert m._dead_perpetual_task == ("tai-media-retention-reaper", "returned")
-    assert exits == [m._worker_kind]
+    assert exits == [os.getpid()]

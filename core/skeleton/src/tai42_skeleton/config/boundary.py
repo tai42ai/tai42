@@ -1,4 +1,4 @@
-"""The shared env-write boundary validator — three refusals every env/manifest writer crosses.
+"""The shared env-write boundary validator — the refusals every env/manifest writer crosses.
 
 The refusals are enforced at the :class:`~tai42_skeleton.config.service.ConfigService` validation layer.
 
@@ -38,6 +38,16 @@ Unset connector-env refusal
     that leaves either var absent from the effective env is refused, naming the
     ``(VAR, json-pointer)`` pairs exactly like the marker refusal.
 
+Unrecyclable-change refusal
+    A ``recycle``-class key takes effect only when its worker is respawned, so a change
+    to one must be carried by a recycle. A change the deployment shape cannot carry is
+    refused, naming the keys: a key the shape pins (a respawn re-injects the deployment
+    value, or the key reaches the worker bus itself) on every shape, and any
+    ``recycle``-class key on a bare deployment, which has no supervisor to respawn a
+    worker under the new value. :func:`refuse_unrecyclable_env_change` diffs the stored
+    env against the env the write would store, so a key carried unchanged is never
+    refused.
+
 The single-call authority :func:`refuse_unresolved_env` runs BOTH the dangling
 ``!ENV`` and the unset connector-env refusals — every config-pipeline writer and
 the offline lint cross it.
@@ -52,7 +62,12 @@ from typing import Any
 from tai42_kit.settings import registered_settings
 from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 
-from tai42_skeleton.config.recycle_policy import X_CLASSIFIED_DEPLOYMENT_BARE_READS
+from tai42_skeleton.config.recycle_policy import (
+    X_CLASSIFIED_DEPLOYMENT_BARE_READS,
+    _refuse_unrecyclable,
+    _replace_diff_keys,
+    capability_report,
+)
 from tai42_skeleton.connectors.manifest_env import connector_client_env_refs
 
 # Boot-identity + manifest-path bare reads that NO settings class in the
@@ -113,6 +128,26 @@ def reload_class_by_env_var() -> dict[str, str]:
             if field.env_var:
                 mapping[field.env_var] = field.reload_class
     return mapping
+
+
+def refuse_unrecyclable_env_change(
+    stored: Mapping[str, str], proposed: Mapping[str, str], *, change: str
+) -> tuple[list[str], list[str]]:
+    """Refuse an env change this deployment shape cannot carry; return its ``(hot, recycle)`` keys.
+
+    ``proposed`` is the WHOLE env the write would store. The keys it adds, removes or
+    changes against ``stored`` are classified by the live registry: a key the shape pins
+    is refused on every shape, and a ``recycle``-class key is refused on a bare
+    deployment, each a :class:`ValueError` naming ``change`` and the keys. Otherwise the
+    changed ``hot``-class keys (a key with no registered field counts as ``hot``) and the
+    changed ``recycle``-class keys are returned, sorted. Names only.
+    """
+    diff_keys = _replace_diff_keys(stored, proposed)
+    reload_classes = reload_class_by_env_var()
+    hot = sorted(key for key in diff_keys if reload_classes.get(key, "hot") == "hot")
+    recycle = sorted(key for key in diff_keys if reload_classes.get(key) == "recycle")
+    _refuse_unrecyclable(diff_keys, recycle, capability_report(), change=change)
+    return hot, recycle
 
 
 def x_band_env_keys() -> frozenset[str]:

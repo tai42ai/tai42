@@ -176,27 +176,32 @@ def _replace_diff_keys(stored: Mapping[str, str], proposed: Mapping[str, str]) -
     return added | removed | changed
 
 
-def _refuse_unrecyclable(diff_keys: set[str], recycle_diff_keys: list[str], report: CapabilityReport) -> None:
-    """Refuse a profile apply whose diff cannot be carried on this deployment shape.
+def _refuse_unrecyclable(
+    diff_keys: set[str], recycle_diff_keys: list[str], report: CapabilityReport, *, change: str
+) -> None:
+    """Refuse an env change whose diff cannot be carried on this deployment shape.
 
     A diff key the shape PINS (``refused_keys`` — a pod/container respawn re-injects it,
     or it reaches the worker bus itself) is refused upfront naming the key: a recycle can
     never make it stick. A recycle-class diff on a BARE (unsupervised) deployment is
     refused wholesale — no supervisor exists to respawn a worker under the new env. Both
-    are loud ``ValueError``s the operations layer maps to a 400. Names only.
+    are loud ``ValueError``s the operations layer maps to a 400, naming ``change`` (what is
+    being applied, e.g. ``"this settings profile"``) and the keys. Names only.
     """
     pinned = sorted(diff_keys & set(report.refused_keys))
     if pinned:
         raise ValueError(
-            f"Refusing to apply this settings profile on a {report.shape.value!r} deployment: it changes "
+            f"Refusing to apply {change} on a {report.shape.value!r} deployment: it changes "
             f"deployment-pinned key(s) a recycle cannot carry (a pod/container respawn re-injects them, or "
             f"they reach the worker bus itself): {', '.join(pinned)}. Change them in the deployment manifest."
         )
     if recycle_diff_keys and not report.recycle_supported:
         raise ValueError(
-            "Refusing to apply this settings profile on a bare (unsupervised) deployment: it changes "
+            f"Refusing to apply {change} on a bare (unsupervised) deployment: it changes "
             f"recycle-class key(s) that require a worker recycle, and no supervisor is present to respawn "
-            f"workers under the new env: {', '.join(recycle_diff_keys)}. Run under a supervised deployment."
+            f"workers under the new env: {', '.join(recycle_diff_keys)}. Set them in the deployment's environment "
+            "(or the stored .env) and restart the server, or run under a supervised deployment, where a recycle "
+            "carries them."
         )
 
 

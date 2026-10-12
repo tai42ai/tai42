@@ -101,7 +101,9 @@ async def _backup_restore(monkeypatch: pytest.MonkeyPatch) -> None:
     registry = BackupRegistry()
     register_core_sections(registry)
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(backup=registry, storage=instance.app.storage))
-    result = await import_backup({"version": 1, "sections": {"templates": {"welcome@he": "shalom"}}}, ["templates"])
+    result = (
+        await import_backup({"version": 1, "sections": {"templates": {"welcome@he": "shalom"}}}, ["templates"])
+    ).payload
     monkeypatch.setattr(tai42_app, "_impl", instance.app)
     assert result.ok, result
 

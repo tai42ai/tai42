@@ -438,7 +438,7 @@ def test_cancelling_a_watch_that_died_completes_the_shutdown(monkeypatch: pytest
         raise RuntimeError("watch broke")
 
     monkeypatch.setattr(hw, "run_monitoring_health_watch", dies)
-    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: None)
+    monkeypatch.setattr(lifespan, "request_graceful_exit", lambda pid: None)
 
     async def run() -> tuple[str, str] | None:
         m = _M()

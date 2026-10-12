@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -28,7 +29,6 @@ from unittest.mock import AsyncMock
 import pytest
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
-from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
 from tai42_skeleton.app.reload_gate import reload_gate
@@ -410,7 +410,7 @@ async def test_cancel_reprobe_task_swallows_non_cancel_error(caplog, monkeypatch
     m = _Mixin()
     # The death routes through the done-callback, which requests a graceful exit; stub
     # it so the unit test never self-delivers a real SIGTERM.
-    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: None)
+    monkeypatch.setattr(lifespan, "request_graceful_exit", lambda pid: None)
 
     async def boom():
         raise RuntimeError("task died")
@@ -438,7 +438,7 @@ async def test_reprobe_task_death_is_logged_at_error(caplog, monkeypatch):
     m = _Mixin()
     # The death also requests a graceful exit; stub it so the unit test never
     # self-delivers a real SIGTERM.
-    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: None)
+    monkeypatch.setattr(lifespan, "request_graceful_exit", lambda pid: None)
 
     async def boom():
         raise RuntimeError("reprobe loop escaped")
@@ -474,12 +474,11 @@ async def test_app_context_spawns_and_cancels_reprobe_task():
 async def test_dead_reprobe_marks_and_requests_graceful_exit(monkeypatch, caplog):
     """A perpetual task that dies with an exception routes through the shared
     done-callback: the death is logged at ERROR, the dead-task marker carries the
-    task name + exception type, and the process requests its kind's graceful exit.
+    task name + exception type, and the process requests its own graceful exit.
     A cancellation (shutdown) instead sets no marker and requests no exit."""
     m = _Mixin()
-    m._worker_kind = WorkerKind.backend
-    exits: list[WorkerKind] = []
-    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: exits.append(kind))
+    exits: list[int] = []
+    monkeypatch.setattr(lifespan, "request_graceful_exit", exits.append)
 
     async def boom():
         raise RuntimeError("reprobe loop escaped")
@@ -492,13 +491,13 @@ async def test_dead_reprobe_marks_and_requests_graceful_exit(monkeypatch, caplog
         await asyncio.sleep(0)  # let the done-callback run
 
     assert m._dead_perpetual_task == ("tai-failed-mcp-reprobe", "RuntimeError")
-    assert exits == [WorkerKind.backend]
+    assert exits == [os.getpid()]
     assert "terminated with an exception" in caplog.text
 
     # A cancellation (shutdown) is not death: no marker, no exit.
     m2 = _Mixin()
     exits.clear()
-    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: exits.append(kind))
+    monkeypatch.setattr(lifespan, "request_graceful_exit", exits.append)
 
     async def runs():
         await asyncio.sleep(3600)
@@ -517,8 +516,8 @@ async def test_clean_return_of_perpetual_task_marks_returned(monkeypatch, caplog
     """A perpetual task that RETURNS cleanly is also a death: the marker reason is
     the literal ``"returned"`` and the process still requests its graceful exit."""
     m = _Mixin()
-    exits: list[WorkerKind] = []
-    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: exits.append(kind))
+    exits: list[int] = []
+    monkeypatch.setattr(lifespan, "request_graceful_exit", exits.append)
 
     async def returns():
         return None
@@ -530,5 +529,5 @@ async def test_clean_return_of_perpetual_task_marks_returned(monkeypatch, caplog
         await asyncio.sleep(0)  # let the done-callback run
 
     assert m._dead_perpetual_task == ("tai-interactions-expiry-reaper", "returned")
-    assert exits == [WorkerKind.serve]
+    assert exits == [os.getpid()]
     assert "returned unexpectedly" in caplog.text

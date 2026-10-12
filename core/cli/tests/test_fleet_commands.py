@@ -188,3 +188,31 @@ def test_fleet_reload_config(monkeypatch: pytest.MonkeyPatch) -> None:
         return data_response({"report": []})
 
     assert run_cli(monkeypatch, handler, ["fleet", "reload-config", "--target", "serve-1"]).exit_code == 0
+
+
+def test_fleet_reload_config_shows_each_worker_s_keys_awaiting_a_respawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return data_response(
+            {
+                "op": "reload_config",
+                "reachable": True,
+                "ok": True,
+                "results": [
+                    {
+                        "name": "serve-1",
+                        "outcome": "applied",
+                        "payload": {"status": "ok", "env_keys": 3, "awaiting_respawn": ["BACKEND_MANIFEST_KEY"]},
+                    },
+                    {
+                        "name": "backend-1",
+                        "outcome": "applied",
+                        "payload": {"status": "ok", "env_keys": 3, "awaiting_respawn": []},
+                    },
+                ],
+            }
+        )
+
+    result = run_cli(monkeypatch, handler, ["fleet", "reload-config"])
+    assert result.exit_code == 0, result.output
+    assert "serve-1" in result.output
+    assert "BACKEND_MANIFEST_KEY" in result.output

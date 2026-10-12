@@ -339,6 +339,8 @@ async def test_write_env_reloads_through_gate_same_result_shape(monkeypatch: pyt
             "status": "ok",
             "env_keys": 1,
             "fanout": {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"},
+            "recycle": None,
+            "awaiting_respawn": [],
         }
     }
     assert manager.written == [{"NEW": "val"}]
