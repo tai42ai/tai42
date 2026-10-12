@@ -5,12 +5,13 @@
  * instant and a past value is blocked locally, every server status renders verbatim, and
  * the chat URL composes on the channel's mount base.
  */
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, type Mock, vi } from 'vitest';
 
 import { MintEntryCodeDialog } from './MintEntryCodeDialog';
+import { gateQueryClient } from './query-client';
 import { gateRequest, MOUNT_BASE, renderWithClient, stubClient } from './test-utils';
 
 /** A host api error as the api-client raises it. */
@@ -29,7 +30,7 @@ const MINTED = {
 function renderMint(mintCode: Mock, onClose: () => void, baseUrl = '', base = MOUNT_BASE) {
   const client = stubClient(gateRequest({ mintCode }, base), baseUrl);
   return renderWithClient(
-    <QueryClientProvider client={new QueryClient()}>
+    <QueryClientProvider client={gateQueryClient(vi.fn())}>
       <MintEntryCodeDialog base={base} identity="web-1" onClose={onClose} />
     </QueryClientProvider>,
     client,

@@ -6,8 +6,9 @@
  *
  * Where the web channel's routes are not mounted on this deployment the panel makes no
  * request and says so. The panel holds its own query cache (the host's is not shared
- * across the plugin boundary) and renders only SDK components and tokens, so it themes
- * with the host in both themes.
+ * across the plugin boundary) carrying the host's rules — no retry, a 401 routes to
+ * sign-in — and renders only SDK components and tokens, so it themes with the host in
+ * both themes.
  */
 import {
   Button,
@@ -19,13 +20,15 @@ import {
   ErrorState,
   type RoutePanelProps,
   Skeleton,
+  useOnUnauthorized,
 } from '@tai42/studio-sdk';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { type CSSProperties, type ReactNode, useState } from 'react';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { type CSSProperties, type ReactNode, useRef, useState } from 'react';
 
 import { EntryCodesTable } from './EntryCodesTable';
 import { getGateBase } from './gate-base';
 import { MintEntryCodeDialog } from './MintEntryCodeDialog';
+import { gateQueryClient } from './query-client';
 import { RevokeCodeDialog } from './RevokeCodeDialog';
 import { useEntryGate } from './useEntryGate';
 
@@ -62,8 +65,16 @@ function GateUnavailable(): ReactNode {
 
 export function EntryGatePanel({ route }: RoutePanelProps): ReactNode {
   const base = getGateBase();
-  // The panel's own query cache, held for the life of the mounted panel.
-  const [queryClient] = useState(() => new QueryClient());
+  // The panel's own query cache with the host's rules (no retry; a 401 routes to sign-in),
+  // held for the life of the mounted panel. The ref keeps the current sign-in handler.
+  const onUnauthorized = useOnUnauthorized();
+  const signIn = useRef(onUnauthorized);
+  signIn.current = onUnauthorized;
+  const [queryClient] = useState(() =>
+    gateQueryClient(() => {
+      signIn.current();
+    }),
+  );
   if (base === null) return <GateUnavailable />;
   return (
     <QueryClientProvider client={queryClient}>
