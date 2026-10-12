@@ -1,6 +1,80 @@
 {
   "components": {
     "schemas": {
+      "AddServerRequest": {
+        "description": "Add the MCP server at ``url`` as a discovered provider.",
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Category"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Display Name"
+          },
+          "icon_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Icon Url"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Id"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "AddServerRequest",
+        "type": "object"
+      },
       "AdvisorySnapshot": {
         "description": "The advisory snapshot for the installed plugins.\n\nEach advisory row is an upstream registry object forwarded verbatim (its shape is owned by the\nregistry); ``fetched_at`` is the ISO-8601 fetch time.",
         "properties": {
@@ -1292,14 +1366,32 @@
         "type": "object"
       },
       "ApplyResponse": {
-        "description": "The standard mutation-op response: this worker's local reload result merged with the fleet fan-out summary.\n\n``env_keys`` is the count of env keys the reload loaded.",
+        "description": "The standard mutation-op response: this worker's local reload result merged with the fleet fan-out summary.\n\n``env_keys`` is the count of env keys the reload loaded. ``recycle`` is the fleet recycle\nroll the change ran — ``null`` when it carried no recycle-class key. ``awaiting_respawn`` is\nthe operation's verdict: the workers still awaiting a respawn after it (name + keys) — empty\nwhen the change rolled a recycle that converged and this worker recycles itself; a worker the\nroll did not reach, and every listed worker of a change that rolls nothing, keep their keys.",
         "properties": {
+          "awaiting_respawn": {
+            "items": {
+              "$ref": "#/components/schemas/AwaitingWorker"
+            },
+            "title": "Awaiting Respawn",
+            "type": "array"
+          },
           "env_keys": {
             "title": "Env Keys",
             "type": "integer"
           },
           "fanout": {
             "$ref": "#/components/schemas/FanoutSummary"
+          },
+          "recycle": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecycleRoll"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "status": {
             "title": "Status",
@@ -1363,11 +1455,14 @@
         "type": "object"
       },
       "AttachAck": {
-        "description": "A template-attach confirmation — the ``state`` and ``template`` attached.",
+        "description": "A template-attach confirmation — the ``state`` and ``template`` attached.\n\n``held`` names the saves held by a failed pending save whose subjects were read over their committed records.",
         "properties": {
           "attached": {
             "title": "Attached",
             "type": "boolean"
+          },
+          "held": {
+            "$ref": "#/components/schemas/HeldPendingSaveList"
           },
           "state": {
             "title": "State",
@@ -1387,7 +1482,7 @@
         "type": "object"
       },
       "AttachUpdateAck": {
-        "description": "An attachment-declarations update confirmation — the ``state`` and ``template`` updated.",
+        "description": "An attachment-declarations update confirmation — the ``state`` and ``template`` updated.\n\n``held`` names the saves held by a failed pending save whose subjects were read over their committed records.",
         "properties": {
           "state": {
             "title": "State",
@@ -1419,6 +1514,28 @@
         ],
         "title": "AuthHealthState",
         "type": "string"
+      },
+      "AwaitingWorker": {
+        "description": "One worker an operation names as still awaiting a respawn.\n\nIts recycle-class ``keys`` changed in the stored env since its process bound them (at boot, or\nwhen the plugin that declares them was loaded), and nothing in the operation respawns it.",
+        "properties": {
+          "keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Keys",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "keys"
+        ],
+        "title": "AwaitingWorker",
+        "type": "object"
       },
       "BackendInfo": {
         "description": "Backend identity.\n\n``backend``/``module`` are ``null`` when no provider is registered\n(``present`` false).",
@@ -1591,8 +1708,15 @@
       },
       "BackupSectionReport": {
         "additionalProperties": false,
-        "description": "One section's import outcome — the typed result every importer returns.\n\nThe platform reads ONLY these fields: ``created``/``updated``/``skipped`` are\nthe per-record counts (``skipped`` is the per-record REJECTION count, each also\ncarried in ``errors``), ``errors`` is the per-record failure messages, and\n``fanout`` is the platform's own per-worker report for a section whose restore\nbroadcasts a fleet eviction (``None`` for every section that does not).\n\n``details`` is an OPEN map for an importer's OWN counts and data — a\nper-entity breakdown, a ``skipped_existing`` tally, minted credentials to\nsurface once — so a backend declares its own shape there without the platform\nknowing it. The typed surface is CLOSED (``extra=\"forbid\"``): an importer that\nreturns a stray top-level field is a wrong shape the registry refuses loudly\nrather than silently dropping. ``validate_assignment`` coerces ``fanout`` on\nassignment, so a mutation building the report cannot leave an unvalidated shape.",
+        "description": "One section's import outcome — the typed result every importer returns.\n\nThe platform reads ONLY these fields: ``created``/``updated``/``skipped`` are\nthe per-record counts (``skipped`` is the per-record REJECTION count, each also\ncarried in ``errors``), ``errors`` is the per-record failure messages, and\n``fanout`` is the platform's own per-worker report for a section whose restore\nbroadcasts a fleet eviction (``None`` for every section that does not), and\n``recycle`` the fleet recycle roll a section's restore ran for a recycle-class env\nchange (``None`` for every section that ran none), and ``awaiting_respawn`` the workers\nstill awaiting a respawn after the section's env change (name + keys; empty for every\nsection that ran none).\n\n``details`` is an OPEN map for an importer's OWN counts and data — a\nper-entity breakdown, a ``skipped_existing`` tally, minted credentials to\nsurface once — so a backend declares its own shape there without the platform\nknowing it. The typed surface is CLOSED (``extra=\"forbid\"``): an importer that\nreturns a stray top-level field is a wrong shape the registry refuses loudly\nrather than silently dropping. ``validate_assignment`` coerces ``fanout`` and ``recycle`` on\nassignment, so a mutation building the report cannot leave an unvalidated shape.",
         "properties": {
+          "awaiting_respawn": {
+            "items": {
+              "$ref": "#/components/schemas/AwaitingWorker"
+            },
+            "title": "Awaiting Respawn",
+            "type": "array"
+          },
           "created": {
             "default": 0,
             "title": "Created",
@@ -1614,6 +1738,17 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/FanoutSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "recycle": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecycleRoll"
               },
               {
                 "type": "null"
@@ -2528,7 +2663,7 @@
         "type": "object"
       },
       "CheckpointSweepResult": {
-        "description": "The checkpoint-sweep report.\n\n``finished_swept`` / ``waiting_swept`` list the threads deleted past each horizon;\n``spared`` lists the threads past a horizon a live-thread filter reported live.\n``skipped`` is set only when the provider has no waiting-horizon sweep (its threads\nexpire by key TTL, or live as long as the process).",
+        "description": "The checkpoint-sweep report.\n\n``finished_swept`` / ``waiting_swept`` list the threads deleted past each horizon;\n``spared`` lists the threads past a horizon a live-thread filter reported live.\n``skipped`` is set only when the provider has no waiting-horizon sweep (its threads\nexpire by key TTL, or live as long as the process). ``waiting_minutes`` /\n``finished_minutes`` are the platform's two retention values: the default and the\nceiling of every thread's retention, which a thread's owner may declare shorter.",
         "properties": {
           "finished_minutes": {
             "title": "Finished Minutes",
@@ -2983,6 +3118,13 @@
             "title": "Provider Id",
             "type": "string"
           },
+          "scopes_wanted": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes Wanted",
+            "type": "array"
+          },
           "unreachable_sub_services": {
             "items": {
               "type": "string"
@@ -3056,15 +3198,38 @@
         "type": "object"
       },
       "ConnectorReencryptResult": {
-        "description": "The KEK re-encrypt sweep's outcome.\n\n``scanned`` blobs split into ``reencrypted`` (rewritten under the current KEK), ``skipped`` (already under\nthe current key), and ``failed`` (no configured key could open them, or compare-and-set contention was not\nresolved). ``failed_connection_ids`` names each failed connection; ``cas_retries``\ncounts compare-and-set retries forced by concurrent refreshes.",
+        "description": "The KEK re-encrypt sweep's outcome, for the connection tokens and the stored client credentials.\n\n``scanned`` connection blobs split into ``reencrypted`` (rewritten under the current KEK), ``skipped``\n(already under the current key), and ``failed`` (no configured key could open them, or compare-and-set\ncontention was not resolved); ``failed_connection_ids`` names each failed connection. The ``clients_*``\ncounts split the stored OAuth client blobs the same way, ``failed_client_row_ids`` naming each failed\nclient row. ``cas_retries`` counts the compare-and-set retries concurrent writers forced in both tables.",
         "properties": {
           "cas_retries": {
             "title": "Cas Retries",
             "type": "integer"
           },
+          "clients_failed": {
+            "title": "Clients Failed",
+            "type": "integer"
+          },
+          "clients_reencrypted": {
+            "title": "Clients Reencrypted",
+            "type": "integer"
+          },
+          "clients_scanned": {
+            "title": "Clients Scanned",
+            "type": "integer"
+          },
+          "clients_skipped": {
+            "title": "Clients Skipped",
+            "type": "integer"
+          },
           "failed": {
             "title": "Failed",
             "type": "integer"
+          },
+          "failed_client_row_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Failed Client Row Ids",
+            "type": "array"
           },
           "failed_connection_ids": {
             "items": {
@@ -3092,6 +3257,11 @@
           "skipped",
           "failed",
           "failed_connection_ids",
+          "clients_scanned",
+          "clients_reencrypted",
+          "clients_skipped",
+          "clients_failed",
+          "failed_client_row_ids",
           "cas_retries"
         ],
         "title": "ConnectorReencryptResult",
@@ -4281,6 +4451,133 @@
         "title": "DisconnectResponse",
         "type": "object"
       },
+      "DiscoverServerRequest": {
+        "description": "Look up an MCP server's authorization: by its address, or the server of an existing discovered provider.",
+        "properties": {
+          "provider_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Provider Id"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Url"
+          }
+        },
+        "title": "DiscoverServerRequest",
+        "type": "object"
+      },
+      "DiscoveredServerView": {
+        "description": "What a look-up found: the server's protected resource and the sign-in service a new login would use.",
+        "properties": {
+          "authorization_servers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Authorization Servers",
+            "type": "array"
+          },
+          "automatic_client": {
+            "title": "Automatic Client",
+            "type": "boolean"
+          },
+          "client_issuer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Client Issuer"
+          },
+          "issuer": {
+            "title": "Issuer",
+            "type": "string"
+          },
+          "redirect_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Redirect Uri"
+          },
+          "registration_supported": {
+            "title": "Registration Supported",
+            "type": "boolean"
+          },
+          "resource": {
+            "title": "Resource",
+            "type": "string"
+          },
+          "resource_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Resource Name"
+          },
+          "scopes_supported": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes Supported",
+            "type": "array"
+          },
+          "suggested_display_name": {
+            "title": "Suggested Display Name",
+            "type": "string"
+          },
+          "suggested_id": {
+            "title": "Suggested Id",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "resource",
+          "issuer",
+          "authorization_servers",
+          "registration_supported",
+          "automatic_client",
+          "scopes_supported",
+          "suggested_id",
+          "suggested_display_name"
+        ],
+        "title": "DiscoveredServerView",
+        "type": "object"
+      },
       "DisplayBlock": {
         "additionalProperties": false,
         "description": "One ordered display element shown on a form page beside its input fields. Frozen.\n\n``kind`` chooses the element: ``heading`` and ``body`` carry ``text``; ``image``\ncarries a ``src`` (its reference) and an optional ``alt`` (the text a surface that\ncannot draw the image shows instead). A block is either STATIC — its ``text``/``src``\nis given here — or declares a ``slot``: a name a form reaction's ``display`` update\nfills while the form is open (a computed total is a display slot). A static block\nrequires its content; a slotted block may omit it (the reaction supplies it). A\nblock carries only the content its ``kind`` allows (no ``src``/``alt`` on text, no\n``text`` on an image). Raises ``ValueError`` on any ill-formed combination.",
@@ -5164,6 +5461,41 @@
         ],
         "title": "FreshLife",
         "type": "object"
+      },
+      "HeldPendingSave": {
+        "additionalProperties": false,
+        "description": "One outstanding save whose subjects are held by a failed save.\n\n``save_id`` names the held save, ``held_by`` the failed save holding it (equal to ``save_id``\nfor the failed save itself), and ``subjects`` the subjects it writes. Frozen.",
+        "properties": {
+          "held_by": {
+            "title": "Held By",
+            "type": "string"
+          },
+          "save_id": {
+            "title": "Save Id",
+            "type": "string"
+          },
+          "subjects": {
+            "items": {
+              "$ref": "#/components/schemas/StateSubject"
+            },
+            "title": "Subjects",
+            "type": "array"
+          }
+        },
+        "required": [
+          "save_id",
+          "held_by"
+        ],
+        "title": "HeldPendingSave",
+        "type": "object"
+      },
+      "HeldPendingSaveList": {
+        "description": "The saves held by a failed pending save that a door read past or was accepted beside.\n\nEach names the held save, the failed save holding it, and the subjects it writes.",
+        "items": {
+          "$ref": "#/components/schemas/HeldPendingSave"
+        },
+        "title": "HeldPendingSaveList",
+        "type": "array"
       },
       "HookListView": {
         "description": "The registered hooks plus the live per-topic verifier bindings and derived trigger-auth axis.\n\n``topic_verifiers`` values are dumped binding metadata (an open,\nsecret-adjacent map, kept opaque so a bound config is not widened onto the wire);\n``trigger_auth`` maps each visible topic to how its webhook ingress door\nauthenticates, derived live, never stored.",
@@ -6350,7 +6682,7 @@
       },
       "InviteRow": {
         "additionalProperties": false,
-        "description": "An invite row in the aggregated directory the Members door returns.\n\nDisplay fields plus the opaque routing tokens. An invitation holds no principal, so it\ncarries no principal state; ``role`` is provider-sourced, correct while no principal\nexists yet.",
+        "description": "An invite row in the aggregated directory the Members door returns.\n\nDisplay fields plus the opaque routing tokens. An invitation holds no principal, so it\ncarries no principal state, and ``role`` is provider-sourced; ``None`` — the policy is\nnot written from a role template.",
         "properties": {
           "action_keys": {
             "items": {
@@ -6385,9 +6717,16 @@
             "type": "string"
           },
           "role": {
-            "minLength": 1,
-            "title": "Role",
-            "type": "string"
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
           }
         },
         "required": [
@@ -7324,11 +7663,23 @@
       },
       "MemberPrincipalState": {
         "additionalProperties": false,
-        "description": "One platform principal a member holds, with its access-control state joined in.\n\n``user_id`` is the platform principal id; ``disabled`` is taken from that principal's\nown record (the store the principals listing reads), never from a provider.",
+        "description": "One platform principal a member holds, with its access-control state joined in.\n\n``user_id`` is the platform principal id; ``disabled`` is taken from that principal's\nown record (the store the principals listing reads) and ``role`` is the role it holds,\njoined from its own policy record — both never from a provider. ``role`` is ``None``\nwhen the principal's policy was not written from a role template.",
         "properties": {
           "disabled": {
             "title": "Disabled",
             "type": "boolean"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
           },
           "user_id": {
             "minLength": 1,
@@ -7338,14 +7689,15 @@
         },
         "required": [
           "user_id",
-          "disabled"
+          "disabled",
+          "role"
         ],
         "title": "MemberPrincipalState",
         "type": "object"
       },
       "MemberRow": {
         "additionalProperties": false,
-        "description": "A member row in the aggregated directory the Members door returns.\n\nDisplay fields plus the platform-joined principal state and opaque routing tokens.\n``handle`` routes an invoke back to the producing provider and pins this row;\n``action_keys`` are the opaque catalog keys of the actions applicable to it — a caller\njoins and echoes both, never parses them. ``principals`` carries each principal's\njoined state; ``disabled`` is derived True only when EVERY principal is disabled, so a\nperson with any enabled principal still reads active while the per-principal truth\nstays visible. ``role`` is provider-sourced.",
+        "description": "A member row in the aggregated directory the Members door returns.\n\nDisplay fields plus the platform-joined principal state and opaque routing tokens.\n``handle`` routes an invoke back to the producing provider and pins this row;\n``action_keys`` are the opaque catalog keys of the actions applicable to it — a caller\njoins and echoes both, never parses them. ``principals`` carries each principal's\njoined state; ``disabled`` is derived True only when EVERY principal is disabled, so a\nperson with any enabled principal still reads active while the per-principal truth\nstays visible. ``role`` is derived too: the one name every principal holds, ``None``\nwhen there is no single name — every principal's policy was set directly, or the\nprincipals hold different roles; ``principals[].role`` carries each principal's own.",
         "properties": {
           "action_keys": {
             "items": {
@@ -7386,9 +7738,16 @@
             "type": "array"
           },
           "role": {
-            "minLength": 1,
-            "title": "Role",
-            "type": "string"
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
           }
         },
         "required": [
@@ -8118,7 +8477,7 @@
         "type": "object"
       },
       "OAuthComplete": {
-        "description": "The OAuth provider callback payload.\n\nThe signed ``state`` and the authorization ``code``, or a provider-reported ``error``.",
+        "description": "The OAuth provider callback payload.\n\nThe signed ``state`` and the authorization ``code``, or a provider-reported ``error``, with the\nredirect's ``iss`` (the issuer that answered, RFC 9207) when it carried one.",
         "properties": {
           "code": {
             "anyOf": [
@@ -8143,6 +8502,18 @@
             ],
             "default": null,
             "title": "Error"
+          },
+          "iss": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Iss"
           },
           "state": {
             "anyOf": [
@@ -10397,8 +10768,15 @@
         "type": "object"
       },
       "ProfileApplyResponse": {
-        "description": "The dedicated profile-apply response.\n\n``hot`` are the hot-class diff key names; ``recycle`` the recycled/self-deferred worker lines;\n``fresh`` the new ready lives seen since the pre-apply snapshot; ``refused`` is empty on success\n(any refusal aborts the pipeline before a response is built); ``fanout`` the reload broadcast's\nfleet summary. Names only — never env values.",
+        "description": "The dedicated profile-apply response.\n\n``hot`` are the hot-class diff key names; ``recycle`` the worker lines of the recycle roll;\n``fresh`` the new ready lives seen since the pre-apply snapshot; ``refused`` is empty on success\n(any refusal aborts the pipeline before a response is built); ``recycle_stopped`` is ``null``\nwhen the roll ran to its end, otherwise where it stopped and why; ``awaiting_respawn`` the\nworkers still awaiting a respawn after the apply (name + keys; empty when the roll converged);\n``fanout`` the reload broadcast's fleet summary. Names only — never env values.",
         "properties": {
+          "awaiting_respawn": {
+            "items": {
+              "$ref": "#/components/schemas/AwaitingWorker"
+            },
+            "title": "Awaiting Respawn",
+            "type": "array"
+          },
           "fanout": {
             "$ref": "#/components/schemas/FanoutSummary"
           },
@@ -10422,6 +10800,17 @@
             },
             "title": "Recycle",
             "type": "array"
+          },
+          "recycle_stopped": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecycleStop"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "refused": {
             "items": {
@@ -10776,6 +11165,24 @@
             "title": "Category",
             "type": "string"
           },
+          "client_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "env",
+                  "manual",
+                  "dynamic",
+                  "unset"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Client Source"
+          },
           "config_fields": {
             "items": {
               "$ref": "#/components/schemas/ConfigFieldSpec"
@@ -10793,8 +11200,16 @@
             "type": "string"
           },
           "icon_url": {
-            "title": "Icon Url",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Icon Url"
           },
           "id": {
             "title": "Id",
@@ -10816,6 +11231,11 @@
             "title": "Origin",
             "type": "string"
           },
+          "removable": {
+            "default": false,
+            "title": "Removable",
+            "type": "boolean"
+          },
           "sub_services": {
             "items": {
               "$ref": "#/components/schemas/SubServiceView"
@@ -10827,7 +11247,6 @@
         "required": [
           "id",
           "display_name",
-          "icon_url",
           "kind",
           "origin",
           "category",
@@ -10861,9 +11280,38 @@
         "title": "ProviderCatalogResponse",
         "type": "object"
       },
-      "PruneResult": {
-        "description": "The ``prune_state_retention`` report.\n\n``pruned`` maps each state whose records were swept to the number deleted (empty when nothing was past its horizon).",
+      "ProviderMutationResponse": {
+        "description": "The provider's catalog entry after a change, and the fleet report of the manifest write it made.",
         "properties": {
+          "fanout": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fanout"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/ProviderCatalogEntry"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "title": "ProviderMutationResponse",
+        "type": "object"
+      },
+      "PruneResult": {
+        "description": "The ``prune_state_retention`` report.\n\n``pruned`` maps each state whose records were swept to the number deleted (empty when nothing was past its\nhorizon); ``held`` names the saves held by a failed pending save whose subjects kept their records.",
+        "properties": {
+          "held": {
+            "$ref": "#/components/schemas/HeldPendingSaveList"
+          },
           "pruned": {
             "additionalProperties": {
               "type": "integer"
@@ -10953,8 +11401,20 @@
         "type": "object"
       },
       "RecycleEntry": {
-        "description": "One recycled or self-deferred worker line in a profile-apply report.",
+        "description": "One worker line in a profile-apply report.\n\n``status`` is ``recycled`` (confirmed on reality), ``timed-out`` or ``failed`` (the\ntarget the roll stopped at), or ``self-deferred`` (the applier's own post-response\nself-exit). ``detail`` names why a ``timed-out`` / ``failed`` target did not\nconverge, and is ``null`` otherwise.",
         "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Detail"
+          },
           "generation_before": {
             "title": "Generation Before",
             "type": "integer"
@@ -10979,6 +11439,73 @@
           "generation_before"
         ],
         "title": "RecycleEntry",
+        "type": "object"
+      },
+      "RecycleRoll": {
+        "description": "The report of a fleet recycle roll an env change carrying a recycle-class key ran.\n\n``recycle`` the worker lines of the roll (the writer's own ``self-deferred`` line when its\npost-response self-exit is armed); ``fresh`` the new ready lives seen since the change began;\n``recycle_stopped`` is ``null`` when the roll ran to its end, otherwise where it stopped and\nwhy. Names only — never env values.",
+        "properties": {
+          "fresh": {
+            "items": {
+              "$ref": "#/components/schemas/FreshLife"
+            },
+            "title": "Fresh",
+            "type": "array"
+          },
+          "recycle": {
+            "items": {
+              "$ref": "#/components/schemas/RecycleEntry"
+            },
+            "title": "Recycle",
+            "type": "array"
+          },
+          "recycle_stopped": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecycleStop"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "recycle",
+          "fresh"
+        ],
+        "title": "RecycleRoll",
+        "type": "object"
+      },
+      "RecycleStop": {
+        "description": "Where a profile apply's recycle roll stopped and why.\n\n``name`` is the target the roll stopped at (its line in ``recycle`` carries the\ntarget's own outcome), or ``null`` when the bus could not be read before a target was\nreached.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "required": [
+          "kind",
+          "name",
+          "detail"
+        ],
+        "title": "RecycleStop",
         "type": "object"
       },
       "ReloadConfig": {
@@ -11040,6 +11567,38 @@
           "error",
           "reloading"
         ],
+        "type": "object"
+      },
+      "RemoveProviderResponse": {
+        "description": "A removed provider, how many stored clients went with it, and the fleet report of the manifest write.",
+        "properties": {
+          "fanout": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fanout"
+          },
+          "provider_id": {
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "removed_clients": {
+            "title": "Removed Clients",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "provider_id",
+          "removed_clients"
+        ],
+        "title": "RemoveProviderResponse",
         "type": "object"
       },
       "RemovedByName": {
@@ -11682,7 +12241,7 @@
         "type": "array"
       },
       "RouteMappingRow": {
-        "description": "One HTTP route joined with its scope mapping and route-registry metadata.\n\n``mapped`` is the route's scope id, the public marker, or ``null`` when unmapped;\n``action`` is its authorization action class, ``null`` when the route carries no\nregistry metadata.",
+        "description": "One HTTP route joined with its scope mapping and route-registry metadata.\n\n``mapped`` is the route's scope id, the public marker, or ``null`` when unmapped;\n``action`` is its authorization action class, ``null`` when the route carries no\nregistry metadata; ``declared_public`` is ``True`` when the route is public by its own\ndeclaration and so answers everyone whatever scope it is mapped to.",
         "properties": {
           "action": {
             "anyOf": [
@@ -11700,6 +12259,10 @@
               }
             ],
             "title": "Action"
+          },
+          "declared_public": {
+            "title": "Declared Public",
+            "type": "boolean"
           },
           "mapped": {
             "anyOf": [
@@ -11741,7 +12304,8 @@
           "mapped",
           "tags",
           "summary",
-          "action"
+          "action",
+          "declared_public"
         ],
         "title": "RouteMappingRow",
         "type": "object"
@@ -12838,6 +13402,64 @@
           "updated_at"
         ],
         "title": "ServedStateView",
+        "type": "object"
+      },
+      "SetConnectorClientRequest": {
+        "description": "Store the client credentials of an app registered by hand for a discovered provider.",
+        "properties": {
+          "client_id": {
+            "minLength": 1,
+            "title": "Client Id",
+            "type": "string"
+          },
+          "client_secret": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Client Secret"
+          },
+          "issuer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Issuer"
+          },
+          "token_endpoint_auth_method": {
+            "anyOf": [
+              {
+                "enum": [
+                  "client_secret_post",
+                  "client_secret_basic",
+                  "none"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Token Endpoint Auth Method"
+          }
+        },
+        "required": [
+          "client_id"
+        ],
+        "title": "SetConnectorClientRequest",
         "type": "object"
       },
       "SetMcpSecretEnv": {
@@ -13987,6 +14609,110 @@
         "title": "StateDeclarationList",
         "type": "array"
       },
+      "StateDeclarationPutResponse": {
+        "additionalProperties": false,
+        "description": "The stored declaration a create or re-declare answers, with the held saves it was accepted beside.",
+        "properties": {
+          "default_subject_kind": {
+            "title": "Default Subject Kind",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "effective_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Effective Schema"
+          },
+          "held": {
+            "$ref": "#/components/schemas/HeldPendingSaveList"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "regimes": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/StateRegimeRule"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Regimes"
+          },
+          "retention_days": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0,
+                "maximum": 2147483647,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Retention Days"
+          },
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ],
+            "title": "Schema"
+          },
+          "subject_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Subject Kinds",
+            "type": "array"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "name",
+          "subject_kinds",
+          "default_subject_kind"
+        ],
+        "title": "StateDeclarationPutResponse",
+        "type": "object"
+      },
       "StateDeleteResult": {
         "description": "A state (or state-template) delete confirmation — ``deleted`` and the ``name`` removed.",
         "properties": {
@@ -14120,6 +14846,247 @@
         "title": "StateInjection",
         "type": "object"
       },
+      "StatePendingSave": {
+        "description": "One outstanding pending state save, without its record data or call arguments.\n\n``status`` is ``pending`` (records not yet applied), ``calls`` (records applied, calls queued),\n``running`` (a call is running) or ``failed`` (held until an operator retries or discards it;\n``failed_phase`` says which part failed).",
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "calls": {
+            "items": {
+              "$ref": "#/components/schemas/StatePendingSaveCall"
+            },
+            "title": "Calls",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "failed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed At"
+          },
+          "failed_phase": {
+            "anyOf": [
+              {
+                "enum": [
+                  "records",
+                  "calls"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed Phase"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "states": {
+            "items": {
+              "type": "string"
+            },
+            "title": "States",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "calls",
+              "running",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "subjects": {
+            "items": {
+              "$ref": "#/components/schemas/StatePendingSaveSubject"
+            },
+            "title": "Subjects",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "run_id",
+          "states",
+          "subjects",
+          "calls",
+          "attempts",
+          "last_error",
+          "failed_phase",
+          "created_at",
+          "failed_at"
+        ],
+        "title": "StatePendingSave",
+        "type": "object"
+      },
+      "StatePendingSaveCall": {
+        "description": "One call a pending save runs after its records apply: its call ``kind`` and what it calls.",
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "target"
+        ],
+        "title": "StatePendingSaveCall",
+        "type": "object"
+      },
+      "StatePendingSaveDiscarded": {
+        "description": "A discarded pending save's id.",
+        "properties": {
+          "discarded": {
+            "title": "Discarded",
+            "type": "string"
+          }
+        },
+        "required": [
+          "discarded"
+        ],
+        "title": "StatePendingSaveDiscarded",
+        "type": "object"
+      },
+      "StatePendingSaveRetried": {
+        "description": "A retried pending save's state after its records phase.\n\n``applied`` — it landed whole and is gone; ``pending`` — it waits behind an older save or a\ncontended subject; ``calls`` / ``running`` — its records applied and its calls are queued or\nrunning; ``failed`` — it failed again (``last_error`` says why).",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "status": {
+            "enum": [
+              "applied",
+              "pending",
+              "calls",
+              "running",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "last_error"
+        ],
+        "title": "StatePendingSaveRetried",
+        "type": "object"
+      },
+      "StatePendingSaveSubject": {
+        "description": "One subject a pending save writes, under its ``state``.",
+        "properties": {
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/StateSubject"
+          }
+        },
+        "required": [
+          "state",
+          "subject"
+        ],
+        "title": "StatePendingSaveSubject",
+        "type": "object"
+      },
+      "StatePendingSavesPage": {
+        "description": "One page of pending saves, newest first, with the totals of every outstanding and every failed save.\n\n``next_cursor`` is the cursor the next page reads from, ``null`` on the last page.",
+        "properties": {
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/StatePendingSave"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "outstanding": {
+            "title": "Outstanding",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "outstanding",
+          "failed"
+        ],
+        "title": "StatePendingSavesPage",
+        "type": "object"
+      },
       "StateRecord": {
         "additionalProperties": false,
         "description": "A read record: a subject's ``data`` document with its sequence and fold provenance.\n\nCarries the ``state``, its ``subject``, the ``data`` document and its monotonic ``seq``, plus\nthe ``canonical_subject`` a fold resolved the subject to and every subject ``folded_from`` into\nit. Frozen.",
@@ -14204,6 +15171,10 @@
       "StateSearchPage": {
         "description": "One keyset page of a state's containment-matched records (``search_state_records``) — the matching subjects.\n\n``next_cursor`` is ``null`` on the last page.",
         "properties": {
+          "held": {
+            "$ref": "#/components/schemas/HeldPendingSaveList",
+            "description": "Saves held by a failed pending save: their subjects are matched on their last applied data."
+          },
           "matches": {
             "items": {
               "$ref": "#/components/schemas/StateSubjectEntry"
@@ -14236,6 +15207,10 @@
           "consumers": {
             "title": "Consumers",
             "type": "integer"
+          },
+          "held": {
+            "$ref": "#/components/schemas/HeldPendingSaveList",
+            "description": "Saves held by a failed pending save; the counts are over committed records and exclude them."
           },
           "per_field": {
             "additionalProperties": {
@@ -14321,6 +15296,10 @@
       "StateSubjectsPage": {
         "description": "One keyset page of a state's subjects (``list_state_subjects``).\n\n``next_cursor`` is the cursor the next page reads from, ``null`` on the last page.",
         "properties": {
+          "held": {
+            "$ref": "#/components/schemas/HeldPendingSaveList",
+            "description": "Saves held by a failed pending save: their subjects show their last applied data."
+          },
           "next_cursor": {
             "anyOf": [
               {
@@ -16536,7 +17515,7 @@
         "type": "object"
       },
       "ToolRunView": {
-        "description": "A background tool run's full status view.\n\n``finished_at``/``result``/``error``/``resumed_interactions`` are present only once the run reaches a\nterminal status, so they are optional; ``result`` is the tool's arbitrary output;\n``resumed_interactions`` is the parked interaction ids the run resumed or took while it executed\n(``[]`` when it resumed nothing).",
+        "description": "A background tool run's full status view.\n\n``finished_at``/``result``/``error``/``resumed_interactions`` are present only once the run reaches a\nterminal status, so they are optional; ``result`` is the tool's arbitrary output;\n``resumed_interactions`` is the parked interaction ids the run resumed or took while it executed\n(``[]`` when it resumed nothing).\n\n``outcome`` is present only on a ``failed`` record whose run reached a failed terminal (a run that\nraises the contract's ``RunTerminalFailed``): the driver's outcome, whole, as the sync run-tool door\ndelivers it under the same name; ``error`` is then the plain ``tool run failed``. A plain raise records\nits message under ``error`` and no ``outcome``.",
         "properties": {
           "error": {
             "anyOf": [
@@ -16561,6 +17540,17 @@
             ],
             "default": null,
             "title": "Finished At"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "result": {
             "anyOf": [
@@ -18291,6 +19281,16 @@
             },
             "description": "Resource not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
           "501": {
             "content": {
               "application/json": {
@@ -18396,6 +19396,16 @@
               }
             },
             "description": "Resource not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
           },
           "501": {
             "content": {
@@ -18577,6 +19587,16 @@
               }
             },
             "description": "Resource not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
           },
           "501": {
             "content": {
@@ -18995,7 +20015,7 @@
     },
     "/api/auth/members": {
       "get": {
-        "description": "Aggregate every registered accounts provider's people and invitations (admin only).\n\nEach provider's :meth:`~tai42_contract.accounts.provider.AccountsProvider.list_members`\nsupplies its own members and invites; the aggregate wraps them into wire rows in provider\nname order, minting each row's opaque handle and action keys and joining each member's\nper-principal ``disabled`` state from the platform's own principal store (read once per\ncall). A member row's ``disabled`` is derived True only when EVERY principal is disabled.\nProvider errors propagate (loud, never a silently empty listing).",
+        "description": "Aggregate every registered accounts provider's people and invitations (admin only).\n\nEach provider's :meth:`~tai42_contract.accounts.provider.AccountsProvider.list_members`\nsupplies its own members and invites; the aggregate wraps them into wire rows in provider\nname order, minting each row's opaque handle and action keys and joining each member\nprincipal's ``disabled`` state (the principal store, read once per call) and the role it\nholds (one ``principal_roles`` read for every member principal). A member row's\n``disabled`` is derived True only when EVERY principal is disabled; its ``role`` is the\none role every principal holds, else ``None``. Provider errors propagate (loud, never a\nsilently empty listing).",
         "operationId": "get_api_auth_members",
         "responses": {
           "200": {
@@ -19188,7 +20208,7 @@
     },
     "/api/auth/principals/{user_id}": {
       "delete": {
-        "description": "Delete a principal, revoking every key it owns plus its policy row (admin only).\n\nRefused (409) when a login-attaching accounts provider owns the principal's login — that\nprovider's users door deletes it and cleans the login row. A principal no attaching\nprovider claims (service, OIDC-provisioned human, keys-only owner) is deleted here;\ndeleting the last enabled admin principal is refused (409) behind the store's\nadvisory-locked guard. A missing principal is a 404.",
+        "description": "Delete a principal, revoking every key it owns plus its policy row (admin only).\n\nRefused (409) when a login-owning accounts provider keeps a login record for the principal\n— that provider's member actions on the Members page remove the principal and the record\ntogether, so the record never outlives the principal. A principal no provider claims\n(service, hand-provisioned OIDC human, keys-only owner) is deleted here; deleting the last\nenabled admin principal is refused (409) by the last-admin guard. A missing principal is a\n404.",
         "operationId": "delete_api_auth_principals_user_id",
         "parameters": [
           {
@@ -19272,7 +20292,7 @@
         "x-destructive": true
       },
       "put": {
-        "description": "Update a principal's display name and/or disabled state (admin only).\n\nBoth fields are omit-means-keep. A ``disabled`` change is refused (409) when a\nlogin-attaching accounts provider owns the principal's login — its disabled state lives\nat that provider's users door — and otherwise flips both homes through the single\ndisabled writer. Disabling the last enabled admin principal is refused (409) behind the\nstore's advisory-locked guard. A display-name edit is accepted for any kind. Returns the\nupdated principal; a missing principal is a 404.",
+        "description": "Update a principal's display name and/or disabled state (admin only).\n\nBoth fields are omit-means-keep. A ``disabled`` change is refused (409) when a\nlogin-attaching accounts provider holds the principal's credential — its disabled state\nlives with that provider and changes through its member actions on the Members page — and\notherwise flips both homes through the guarded disabled writer (a principal whose login\nrecord a provider keeps without holding its credential is disabled here). Disabling the\nlast enabled admin principal is refused (409) by the last-admin guard. A display-name edit\nis accepted for any kind. Returns the updated principal; a missing principal is a 404.",
         "operationId": "put_api_auth_principals_user_id",
         "parameters": [
           {
@@ -20163,7 +21183,7 @@
     },
     "/api/auth/routes": {
       "get": {
-        "description": "Enumerate the app's own HTTP routes with each route's current scope mapping.\n\nCovers the mapper's route picker and its \"unassigned routes\" bucket (the ``mapped: null``\nentries).\n\n``routes`` is the app's live route table (the route-adapter extractor hands the\noperation ``request.app.routes`` so it stays request-free). One entry per\n:class:`starlette.routing.Route`, sorted by ``path``. ``Mount`` entries (the sub-MCP\nmount, the MCP mount) are EXCLUDED — a mount is not a bindable url and the sub-MCP\nsurface has its own door. The exclusion is an explicit ``isinstance`` filter: any\nroute-table entry that is neither a ``Route`` nor a ``Mount`` raises loudly (a new\nStarlette routing type must be classified here, never silently dropped). ``methods``\nis the route's method set sorted with ``HEAD`` removed (Starlette auto-adds it to\nevery GET route — noise for the mapper). ``mapped`` is the url's value from\n``get_all_route_mappings`` looked up by the EXACT path string — a scope id, the\npublic marker for a public pin, or ``null`` when the path has no mapping. Exact-key\nlookup only: this door does not attempt dynamic-pattern matching.\n\nEach entry is JOINED with its :class:`RouteMetadata` (from\n``route_registry.load_all_routes()``, a separate collection) to also carry the\nroute's feature ``tags`` + ``summary`` + authorization ``action`` — the data the\nStudio Roles page groups the per-tag tri-state by and marks the ``fenced``/``secret``\n(admin-only) routes it must never offer a grant for. The join is keyed on the route\nTEMPLATE + its method set with ``HEAD`` stripped on BOTH sides (Starlette auto-adds\n``HEAD`` to a GET), so the two collections compare like-for-like; a registered route\nwhose method set fails to join is a loud STOP (a normalization drift), never a\nsilently dropped row.",
+        "description": "Enumerate the app's own HTTP routes with each route's current scope mapping.\n\nCovers the mapper's route picker and its \"unassigned routes\" bucket (the ``mapped: null``\nentries).\n\n``routes`` is the app's live route table (the route-adapter extractor hands the\noperation ``request.app.routes`` so it stays request-free). One entry per\n:class:`starlette.routing.Route`, sorted by ``path``. ``Mount`` entries (the sub-MCP\nmount, the MCP mount) are EXCLUDED — a mount is not a bindable url and the sub-MCP\nsurface has its own door. The exclusion is an explicit ``isinstance`` filter: any\nroute-table entry that is neither a ``Route`` nor a ``Mount`` raises loudly (a new\nStarlette routing type must be classified here, never silently dropped). ``methods``\nis the route's method set sorted with ``HEAD`` removed (Starlette auto-adds it to\nevery GET route — noise for the mapper). ``mapped`` is the url's value from\n``get_all_route_mappings`` looked up by the EXACT path string — a scope id, the\npublic marker for a public pin, or ``null`` when the path has no mapping. Exact-key\nlookup only: this door does not attempt dynamic-pattern matching.\n\n``declared_public`` is ``True`` for a route public by its own declaration: it answers\neveryone whatever scope it is mapped to (the access check's declared-public tier), so the\nscope writer refuses to map it.\n\nEach entry is JOINED with its :class:`RouteMetadata` (from\n``route_registry.load_all_routes()``, a separate collection) to also carry the\nroute's feature ``tags`` + ``summary`` + authorization ``action`` — the data the\nStudio Roles page groups the per-tag tri-state by and marks the ``fenced``/``secret``\n(admin-only) routes it must never offer a grant for. The join is keyed on the route\nTEMPLATE + its method set with ``HEAD`` stripped on BOTH sides (Starlette auto-adds\n``HEAD`` to a GET), so the two collections compare like-for-like; a registered route\nwhose method set fails to join is a loud STOP (a normalization drift), never a\nsilently dropped row.",
         "operationId": "get_api_auth_routes",
         "responses": {
           "200": {
@@ -20721,7 +21741,7 @@
     },
     "/api/backup/import": {
       "post": {
-        "description": "Import each SELECTED section of ``document`` in registration order and return a per-section report.\n\n``mode`` is the per-record policy (``skip`` or ``overwrite``). A ``version`` other than 1\nraises ``BadRequestError``; an unknown, absent, or failing section carries its error in\nthe report and makes ``ok`` false.",
+        "description": "Import each SELECTED section of ``document`` in registration order and return a per-section report.\n\n``mode`` is the per-record policy (``skip`` or ``overwrite``). A ``version`` other than 1\nraises ``BadRequestError``; an unknown, absent, or failing section carries its error in\nthe report and makes ``ok`` false. A section whose restore rolled a worker recycle (an env\nsection changing a recycle-class key on a supervised deployment) carries the roll in its\n``recycle``; when that roll converged, this worker recycles itself after replying.",
         "operationId": "post_api_backup_import",
         "requestBody": {
           "content": {
@@ -20895,7 +21915,7 @@
     },
     "/api/checkpoints/sweep": {
       "post": {
-        "description": "Delete the checkpoint threads of the deployment's store that are past their retention horizon.\n\nA finished thread (marked by its owner) goes ``checkpoint_retention_finished_minutes`` after the\nmark; on ``postgres``/``sqlite`` any thread goes ``checkpoint_retention_waiting_minutes`` after its\nnewest checkpoint (``redis`` expires it by key TTL and ``memory`` keeps it for the process — both\nreported in ``skipped``). A thread a registered live-thread filter claims is spared and listed.",
+        "description": "Delete the checkpoint threads of the deployment's store that are past their retention horizon.\n\nA finished thread (marked by its owner) goes at the due time stored with its mark; on\n``postgres``/``sqlite`` any thread goes its waiting retention (declared by its owner, else\n``checkpoint_retention_waiting_minutes``) after its newest checkpoint (``redis`` expires it by key\nTTL and ``memory`` keeps it for the process — both reported in ``skipped``). A thread a\nregistered live-thread filter claims is spared and listed. ``waiting_minutes`` and\n``finished_minutes`` in the result are the platform's values: the default and ceiling of every\nthread's retention.",
         "operationId": "post_api_checkpoints_sweep",
         "responses": {
           "200": {
@@ -21047,7 +22067,7 @@
         ]
       },
       "post": {
-        "description": "Merge env overrides into the stored config and hot-reload this worker and the fleet.\n\n``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;\nthe marks variable itself is never accepted as an ``env`` key.",
+        "description": "Merge env overrides into the stored config and reload this worker and the fleet.\n\nA hot-class key is re-read in place. A recycle-class key rolls a worker recycle across the\nfleet on a supervised deployment: the response's ``recycle`` carries the roll's rows (``null``\nwhen the change carried no recycle-class key), and when the roll converged this worker\nrecycles itself after replying — on the HTTP edge and on every projected tool door alike (a\npost-reply graceful self-exit its supervisor respawns).\nA change the deployment cannot carry is refused with a 400 before anything is written, naming\nthe key: a recycle-class key on a bare (unsupervised) deployment, and the bus URL or a key the\ndeployment pins on every shape.\n\n``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;\nthe marks variable itself is never accepted as an ``env`` key.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
         "operationId": "post_api_config_env",
         "requestBody": {
           "content": {
@@ -21122,7 +22142,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "Merge env overrides and hot-reload the process config",
+        "summary": "Merge env overrides and reload the fleet",
         "tags": [
           "config"
         ],
@@ -21453,7 +22473,7 @@
     },
     "/api/config/profiles/{name}/apply": {
       "post": {
-        "description": "Apply the profile's active env as the WHOLE stored env band and reload the fleet.\n\nThe profile's ``secret_keys`` are written as the stored secret marks in the same replace.\n\nA key the profile omits is deleted, save the carried deployment X band; build+swap a fresh serving\nepoch under it, persist env-write-LAST, broadcast the reload, and recycle the fleet for recycle-class\ndiffs. NO request body.\n\nThe response is the dedicated ``profileApplyResponse``\n``{hot, recycle:[{name, kind, status, generation_before}], fresh:[{name, kind,\ngeneration}], refused:[] on success, fanout}`` — key names + worker identities only,\nnever env values. ``recycle`` is one line per recycled/timed-out sibling (plus the\napplier's own deferred self-exit line when it must self-exit); ``fresh`` is the\nper-kind new ready lives observed since the pre-apply snapshot, capacity evidence never\nclaimed as any target's successor. A refusal (X-band key, dangling ``!ENV``, a recycle-\nclass diff the deployment shape cannot carry) aborts upfront with a loud 400 naming\nthe key, before anything is snapshotted, built, or persisted. When the diff carries\nserve-affecting recycle keys the applier's OWN recycle is armed as a post-response\ngraceful self-exit (a Starlette ``BackgroundTask``) — its supervisor respawns it on\nthe new env. 404 for an absent name.",
+        "description": "Apply the profile's active env as the WHOLE stored env band and reload the fleet.\n\nThe profile's ``secret_keys`` are written as the stored secret marks in the same replace.\n\nA key the profile omits is deleted, save the carried deployment X band; build+swap a fresh serving\nepoch under it, persist env-write-LAST, broadcast the reload, and recycle the fleet for recycle-class\ndiffs. NO request body.\n\nThe response is the dedicated ``profileApplyResponse`` ``{hot, recycle:[{name, kind, status,\ngeneration_before, detail}], fresh:[{name, kind, generation}], refused:[],\nrecycle_stopped:{kind, name, detail} | null, awaiting_respawn:[{name, keys}], fanout}`` — key names\n+ worker identities only,\nnever env values. ``recycle`` is one line per sibling the roll reached (plus the applier's\nown deferred self-exit line when it is armed). A ``recycled`` line is confirmed on reality;\nthe roll stops at the first line that is not: ``timed-out`` (its old life did not go, fresh\ncapacity did not boot, or it never returned to ready, within the step budget) or ``failed``\n(the worker refused the op, or the bus could not be reached while it was in hand), its\n``detail`` naming why — or when the bus could not be read before a target was reached.\n``recycle_stopped`` names where the roll stopped and why (``null`` when it ran to its end; a\n``null`` name when no target was in hand). Later siblings and the applier's own recycle are\nthen not attempted, and the call still answers with the report: the env is persisted and the\nfleet reloaded. ``fresh`` is the per-kind new ready lives observed since the pre-apply\nsnapshot, capacity evidence never claimed as any target's successor. ``refused`` is ``[]``:\na refusal (X-band key, dangling ``!ENV``, a recycle-class diff the deployment shape cannot\ncarry) aborts upfront with a loud 400 naming the key, before anything is snapshotted, built,\nor persisted. ``awaiting_respawn`` names the workers (name + keys) still awaiting a respawn\nafter the roll — empty when it converged. When the diff carries serve-affecting recycle keys\nand the roll converged, the applier's OWN recycle is armed as a post-reply graceful self-exit\n— after the HTTP body flushes, or once a projected tool call (MCP, ``tai tools run``, an\nagent, a preset, a schedule, a hook) returned — and its supervisor respawns it on the new\nenv. 404 for an absent name.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
         "operationId": "post_api_config_profiles_name_apply",
         "parameters": [
           {
@@ -21885,7 +22905,7 @@
     },
     "/api/config/reload": {
       "post": {
-        "description": "Soft-restart the process from its manifest, in-process with no pod restart.\n\nRefreshes env from the config manager, resets every settings cache, and re-initializes from the\nmanifest. Applied on this worker (when it is a target) and broadcast to the fleet (all workers, or only\n``targets``); the response embeds the per-worker fleet report.\n\nHeavy (a full re-init); meant for env/config saves, not tool edits. A convergence\nop: its whole purpose is aligning siblings to persisted state, so a failed local\nreload still broadcasts and then re-raises with the fleet report attached.",
+        "description": "Soft-restart the process from its manifest, in-process with no pod restart.\n\nRefreshes env from the config manager, resets every settings cache, and re-initializes from the\nmanifest. Applied on this worker (when it is a target) and broadcast to the fleet (all workers, or only\n``targets``); the response embeds the per-worker fleet report.\n\nHeavy (a full re-init); meant for env/config saves, not tool edits. A convergence\nop: its whole purpose is aligning siblings to persisted state, so a failed local\nreload still broadcasts and then re-raises with the fleet report attached.\n\nCalled over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that\nworker), the reload answers on the session that called it and then retires that session with the\ngeneration it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an\nSSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave\nthat worker out, nothing reloads there and the session keeps working.\n\nEach worker's payload is ``{status, env_keys, awaiting_respawn}``: ``awaiting_respawn`` names the\nrecycle-class keys whose value now differs from the one that worker bound (at boot, or when the\nplugin that declares them was loaded) — the soft\nrestart carries every hot key in place, and those keys take effect only when the worker is\nrespawned through the deployment's supervisor (on a bare deployment, a server restart). This\noperation ERROR-logs one line naming every such worker and its keys.",
         "operationId": "post_api_config_reload",
         "requestBody": {
           "content": {
@@ -22570,7 +23590,7 @@
     },
     "/api/connectors/providers": {
       "get": {
-        "description": "The provider catalog — one entry per registered connector provider, plus category groupings.\n\nThe category groupings are those the UI arranges the providers under.\nProviders come from the in-memory registry (populated from the manifest's\n``connectors`` list at boot/reload), so they list regardless of store\nconfiguration. The category\ngroupings live in the connector store's Postgres, so they are served only when\nthat store is configured (otherwise an empty grouping list, mirroring the\nOFF-state connections read).",
+        "description": "The provider catalog — one entry per registered connector provider, plus category groupings.\n\nThe category groupings are those the UI arranges the providers under.\nProviders come from the in-memory registry (populated from the manifest's\n``connectors`` list at boot/reload), so they list regardless of store\nconfiguration; each says whether the provider door may remove it and where its\nsign-in client comes from (``unset`` for a stored-client provider and never\nremovable while the store is not configured). The category\ngroupings live in the connector store's Postgres, so they are served only when\nthat store is configured (otherwise an empty grouping list, mirroring the\nOFF-state connections read).",
         "operationId": "get_api_connectors_providers",
         "responses": {
           "200": {
@@ -22611,11 +23631,397 @@
         "tags": [
           "connectors"
         ]
+      },
+      "post": {
+        "description": "Add the MCP server at ``url`` as a discovered provider, written to the manifest and broadcast to the fleet.\n\nIts id is ``provider_id`` or a suggestion from the host. An id that is not free — a provider in the\nmanifest, a stored connection record (live or lapsed), or a stored client row under it — is a 409\nnaming which; nothing is deleted.",
+        "operationId": "post_api_connectors_providers",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddServerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/ProviderMutationResponse"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Malformed request."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReloadingError"
+                }
+              }
+            },
+            "description": "The server is applying a config reload; retry shortly.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Add an MCP server as a connector provider",
+        "tags": [
+          "connectors"
+        ],
+        "x-destructive": true
+      }
+    },
+    "/api/connectors/providers/discover": {
+      "post": {
+        "description": "Look up the sign-in of the MCP server at ``url``, or of the server of the discovered provider ``provider_id``.\n\nPersists nothing. ``origin`` is the deployment origin a sign-in would start from: it decides the\ncallback address an app registered by hand must allow and whether this deployment's client-identity\ndocument can serve the login. An unknown provider is a 404; a declared one a 400.",
+        "operationId": "post_api_connectors_providers_discover",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiscoverServerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/DiscoveredServerView"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Malformed request."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Look up an MCP server's sign-in",
+        "tags": [
+          "connectors"
+        ]
+      }
+    },
+    "/api/connectors/providers/{provider_id}": {
+      "delete": {
+        "description": "Remove a removable provider and its stored clients.\n\nA provider that is not removable here is a 409 naming where it is managed; a provider with a\nLIVE connection is a 409 naming the count. A connection whose session has lapsed is purged first,\nthrough the disconnect routine. The manifest change comes before the client rows are deleted, so a\nfailed change leaves them; a failed deletion after it is raised, and running the remove again\ndeletes the rows left under the id (nothing else holds it any more; no manifest change, so no\nfan-out).",
+        "operationId": "delete_api_connectors_providers_provider_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/RemoveProviderResponse"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReloadingError"
+                }
+              }
+            },
+            "description": "The server is applying a config reload; retry shortly.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Remove a connector provider added by its address",
+        "tags": [
+          "connectors"
+        ],
+        "x-destructive": true
+      }
+    },
+    "/api/connectors/providers/{provider_id}/client": {
+      "put": {
+        "description": "Store the client credentials of an app registered by hand for the discovered provider ``provider_id``.\n\nThe credentials are stored for one sign-in service the provider's server lists: ``issuer`` when\ngiven (400 when the server does not list it), else the one the provider's manual client is already\nstored for while the server still lists it; with neither, a 400 ``connector-client-issuer-required``\nnaming the listed ones — the secret is never sent to a sign-in service nobody chose. Only a\ndiscovered provider that names no env client takes stored credentials.",
+        "operationId": "put_api_connectors_providers_provider_id_client",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetConnectorClientRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/ProviderMutationResponse"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Malformed request."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Set the client credentials of a connector provider",
+        "tags": [
+          "connectors"
+        ]
       }
     },
     "/api/connectors/tokens/reencrypt": {
       "post": {
-        "description": "Re-encrypt every stored connector token blob under the current ``CONNECTORS_KEK``.\n\nThe KEK-rotation convergence sweep: after ``CONNECTORS_KEK`` is rotated (new current\nkey, old key moved to ``CONNECTORS_KEK_PREVIOUS``), this rewrites every blob still\nunder a previous key so the previous key can be retired. Idempotent — a blob already\nunder the current key is skipped. A blob no configured key can open is counted and\nnamed in ``failed_connection_ids``, never silently dropped. A missing/malformed\ncurrent ``CONNECTORS_KEK`` is a deployment-wide config fault and surfaces as a named\n``NotSupportedError`` (501), never an unnamed 500.",
+        "description": "Re-encrypt every stored connector token and client credential under the current ``CONNECTORS_KEK``.\n\nThe KEK-rotation convergence sweep: after ``CONNECTORS_KEK`` is rotated (new current\nkey, old key moved to ``CONNECTORS_KEK_PREVIOUS``), this rewrites every connection blob\nand every stored OAuth client blob still under a previous key so the previous key can\nbe retired. Idempotent — a blob already under the current key is skipped. A blob no\nconfigured key can open is counted and named in ``failed_connection_ids`` /\n``failed_client_row_ids``, never silently dropped. A missing/malformed\ncurrent ``CONNECTORS_KEK`` is a deployment-wide config fault and surfaces as a named\n``NotSupportedError`` (501), never an unnamed 500.",
         "operationId": "post_api_connectors_tokens_reencrypt",
         "responses": {
           "200": {
@@ -22662,7 +24068,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "Re-encrypt connector tokens under the current KEK",
+        "summary": "Re-encrypt connector tokens and client credentials under the current KEK",
         "tags": [
           "connectors"
         ]
@@ -25107,7 +26513,7 @@
     },
     "/api/fleet/reload-config": {
       "post": {
-        "description": "Soft-restart the worker fleet, optionally restricted to the named ``targets``.",
+        "description": "Soft-restart the worker fleet, optionally restricted to the named ``targets``.\n\nCalled over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that\nworker), the reload answers on the session that called it and then retires that session with the\ngeneration it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an\nSSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave\nthat worker out, nothing reloads there and the session keeps working.\n\nEach worker's payload is ``{status, env_keys, awaiting_respawn}``: ``awaiting_respawn`` names the\nrecycle-class keys whose value now differs from the one that worker bound (at boot, or when the\nplugin that declares them was loaded) — the soft\nrestart carries every hot key in place, and those keys take effect only when the worker is\nrespawned through the deployment's supervisor (on a bare deployment, a server restart). This\noperation ERROR-logs one line naming every such worker and its keys.",
         "operationId": "post_api_fleet_reload_config",
         "requestBody": {
           "content": {
@@ -27203,7 +28609,7 @@
     },
     "/api/marketplace/install": {
       "post": {
-        "description": "Resolve, pip install, patch the manifest, reload, and record attribution.\n\nNothing is pip-installed for a descriptor-only plugin; aborts and unwinds on any\nfailure (see :meth:`Installer.install`). When the spec declares install-time env\n``env`` / ``secret_keys`` satisfy the required ``!ENV`` markers or connector-env in\nthe same combined transaction. ``route_mounts`` remaps declared route bases;\n``accept_public_routes`` acknowledges public routes. The result's ``routes`` lists\nevery route the install mounted.",
+        "description": "Resolve, pip install, patch the manifest, reload, and record attribution.\n\nNothing is pip-installed for a descriptor-only plugin; aborts and unwinds on any\nfailure (see :meth:`Installer.install`). When the spec declares install-time env\n``env`` / ``secret_keys`` satisfy the required ``!ENV`` markers or connector-env in\nthe same combined transaction. ``route_mounts`` remaps declared route bases;\n``accept_public_routes`` acknowledges public routes. The result's ``routes`` lists\nevery route the install mounted. An install-time env change carrying a recycle-class key\nrolls a worker recycle (the receipt's ``reload.recycle``); when it converged this worker\nrecycles itself after replying.",
         "operationId": "post_api_marketplace_install",
         "requestBody": {
           "content": {
@@ -27449,7 +28855,7 @@
     },
     "/api/marketplace/installed": {
       "get": {
-        "description": "The installed inventory.\n\nShaped ``{\"installed\": [...]}``.\n\nEach installed row carries the update picture computed from the registry's\nversion rows against the RUNNING contract: ``latest`` (newest published\nversion, or ``null`` with none), ``update_available`` (a newer COMPATIBLE\nversion exists — an incompatible newer version never advertises as an\nupdate), ``incompatible_newer`` (the newest such blocked version, so \"an\nupdate exists but needs a newer core\" is visible, or ``null``), and\n``compat`` — the live ``{status, reason}`` verdict of the row's installed\ndistribution against the running contract. A per-row not-found — the\nupstream listing vanished or was suspended — is row STATE, not a route\nfailure: that row answers ``latest: null``, ``update_available: false``,\n``missing_upstream: true``, so one dead listing never fails the whole\ninventory. A transport/garbled-upstream failure still surfaces as a 502,\nand a garbled LOCAL row (an unparsable stored version) as a 500 — serving\nrows without their update picture would be a silent degrade of the spec'd\nshape.\n\nEach row also carries ``items`` — the ``{kind, name}`` of every item its\nstored spec provides (from LOCAL truth, never the registry). Studio joins\nthese against the manifest's ``mcp`` entry titles to render an\ninstaller-written entry read-only.\n\nEach row also carries ``route_mounts`` — the persisted ``{item_name: base}``\nmount the row is installed at (empty means every item at its declared base),\nso Studio seeds its update flow and renders routes at the ACTUAL mounted base.\n\nEach row also carries ``delivery`` — ``package`` for a pip-installed plugin,\n``descriptor`` for a descriptor-only plugin whose stored spec names no package.",
+        "description": "The installed inventory.\n\nShaped ``{\"installed\": [...]}``.\n\nEach installed row carries the update picture computed from the registry's\nversion rows against the RUNNING contract: ``latest`` (newest published\nversion, or ``null`` with none), ``update_available`` (a newer COMPATIBLE\nversion exists — an incompatible newer version never advertises as an\nupdate), ``incompatible_newer`` (the newest such blocked version, so \"an\nupdate exists but needs a newer core\" is visible, or ``null``), and\n``compat`` — the live ``{status, reason}`` verdict of the row's installed\ndistribution against the running contract. A per-row not-found — the\nupstream listing vanished or was suspended — is row STATE, not a route\nfailure: that row answers ``latest: null``, ``update_available: false``,\n``missing_upstream: true``, so one dead listing never fails the whole\ninventory. A transport/garbled-upstream failure still surfaces as a 502,\nand a garbled LOCAL row (a stored spec that no longer validates, a malformed\nstored ref, an unparsable stored version) as a 500 naming the row — serving\nrows without their update picture would be a silent degrade of the spec'd\nshape.\n\nEach row also carries ``items`` — the ``{kind, name}`` of every item its\nstored spec provides (from LOCAL truth, never the registry). Studio joins\nthese against the manifest's ``mcp`` entry titles to render an\ninstaller-written entry read-only.\n\nEach row also carries ``route_mounts`` — the persisted ``{item_name: base}``\nmount the row is installed at (empty means every item at its declared base),\nso Studio seeds its update flow and renders routes at the ACTUAL mounted base.\n\nEach row also carries ``delivery`` — ``package`` for a pip-installed plugin,\n``descriptor`` for a descriptor-only plugin whose stored spec names no package.",
         "operationId": "get_api_marketplace_installed",
         "responses": {
           "200": {
@@ -27923,7 +29329,7 @@
     },
     "/api/marketplace/update": {
       "post": {
-        "description": "Resolve the target, pip upgrade, re-patch the manifest, reload, and upsert attribution.\n\nNothing is pip-upgraded for a descriptor-only plugin; the same pre-flights apply\nas install (see :meth:`Installer.update`). ``env`` / ``secret_keys`` satisfy a new\nversion's required ``!ENV`` markers or connector-env. ``route_mounts`` remaps\ndeclared route bases (surviving items keep their stored base);\n``accept_public_routes`` acknowledges public routes not already approved. The\nresult's ``routes`` lists every route the update mounted.",
+        "description": "Resolve the target, pip upgrade, re-patch the manifest, reload, and upsert attribution.\n\nNothing is pip-upgraded for a descriptor-only plugin; the same pre-flights apply\nas install (see :meth:`Installer.update`). ``env`` / ``secret_keys`` satisfy a new\nversion's required ``!ENV`` markers or connector-env. ``route_mounts`` remaps\ndeclared route bases (surviving items keep their stored base);\n``accept_public_routes`` acknowledges public routes not already approved. The\nresult's ``routes`` lists every route the update mounted. An update-time env change\ncarrying a recycle-class key rolls a worker recycle (the receipt's ``reload.recycle``);\nwhen it converged this worker recycles itself after replying.",
         "operationId": "post_api_marketplace_update",
         "requestBody": {
           "content": {
@@ -28452,7 +29858,7 @@
     },
     "/api/mcp-config/secret-env": {
       "post": {
-        "description": "Store a pasted secret as an env value and reference it from the manifest by a marker.\n\nThe env KEY is EITHER an explicit ``key`` OR generated from ``key_hint`` — exactly one\n(``key | key_hint``). Writes the secret ``value`` to the env store under that key AND\nmarks the key secret (adding it to ``TAI_ENV_SECRET_KEYS``), and writes an ``!ENV ${KEY}``\nMARKER at ``manifest_pointer`` — all through the combined\n``ConfigService.apply_env_and_change`` pipeline so the env write and the manifest mutate\nstay consistent. Partial-failure: a manifest-persist failure after the env write does\nNO rollback — the env write stands as an inert, re-runnable orphan and the op raises\nloudly. An explicit ``key`` colliding with an existing stored key holding a DIFFERENT value\nis a loud 400 naming the key; a generated key never shadows a registered settings\n``env_var``. The pointer's HEAD segment MUST be ``mcp`` (loud 400 otherwise). The response\nis the ``reloadConfigResult`` shape; the resolved key is NEVER returned. A dangling\n``!ENV`` / X-band refusal surfaces as a loud 400 naming the key (the shared boundary\nvalidator, same as ``POST /api/mcp-config``).",
+        "description": "Store a pasted secret as an env value and reference it from the manifest by a marker.\n\nThe env KEY is EITHER an explicit ``key`` OR generated from ``key_hint`` — exactly one\n(``key | key_hint``). Writes the secret ``value`` to the env store under that key AND\nmarks the key secret (adding it to ``TAI_ENV_SECRET_KEYS``), and writes an ``!ENV ${KEY}``\nMARKER at ``manifest_pointer`` — all through the combined\n``ConfigService.apply_env_and_change`` pipeline so the env write and the manifest mutate\nstay consistent. Partial-failure: a manifest-persist failure after the env write does\nNO rollback — the env write stands as an inert, re-runnable orphan and the op raises\nloudly. An explicit ``key`` colliding with an existing stored key holding a DIFFERENT value\nis a loud 400 naming the key; a generated key never shadows a registered settings\n``env_var``. The pointer's HEAD segment MUST be ``mcp`` (loud 400 otherwise). The response\nis the ``reloadConfigResult`` shape; the resolved key is NEVER returned. A dangling\n``!ENV`` / X-band refusal surfaces as a loud 400 naming the key (the shared boundary\nvalidator, same as ``POST /api/mcp-config``). An explicit ``key`` that is a recycle-class\nsetting rolls a worker recycle as every env write does (the response's ``recycle``; this\nworker recycles itself after replying when the roll converged).",
         "operationId": "post_api_mcp_config_secret_env",
         "requestBody": {
           "content": {
@@ -28893,7 +30299,7 @@
     },
     "/api/notifications": {
       "get": {
-        "description": "List internal notifications, newest-first.\n\nA RESTRICTED caller reads its OWN per-identity feed (complete within its own\nbound — never truncated by other identities' volume, never a broadcast); an\nUNRESTRICTED caller reads the shared feed unchanged (today's operator view).",
+        "description": "List internal notifications, newest-first.\n\nA RESTRICTED caller reads its OWN per-identity feed (complete within its own\nbound — never truncated by other identities' volume, never a broadcast); an\nUNRESTRICTED caller reads the shared feed unchanged (the operator view).",
         "operationId": "get_api_notifications",
         "responses": {
           "200": {
@@ -31515,6 +32921,16 @@
             },
             "description": "Resource not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -31539,14 +32955,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }
@@ -32296,9 +33719,265 @@
         ]
       }
     },
+    "/api/state-pending-saves": {
+      "get": {
+        "description": "Outstanding pending state saves newest first, with the outstanding and failed totals.\n\n``status`` ``failed`` lists the failed saves only; ``outstanding`` (or none) lists every save\nstill outstanding. A page holds at most ``limit`` saves; ``cursor`` continues from a page's\n``next_cursor``.",
+        "operationId": "get_api_state_pending_saves",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/StatePendingSavesPage"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Request failed validation."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "List pending state saves",
+        "tags": [
+          "states"
+        ]
+      }
+    },
+    "/api/state-pending-saves/{id}": {
+      "delete": {
+        "description": "Drop a failed pending save for good: its record writes and deferred calls are never applied.",
+        "operationId": "delete_api_state_pending_saves_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/StatePendingSaveDiscarded"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Request failed validation."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Discard a failed pending state save",
+        "tags": [
+          "states"
+        ],
+        "x-destructive": true
+      }
+    },
+    "/api/state-pending-saves/{id}/retry": {
+      "post": {
+        "description": "Requeue a failed pending save and apply its records now; answer its status after that.\n\n``applied`` when the save landed whole and is gone; ``calls`` or ``running`` while its calls\nare queued or running; ``failed`` (with ``last_error``) when it failed again.",
+        "operationId": "post_api_state_pending_saves_id_retry",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/StatePendingSaveRetried"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Request failed validation."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Retry a failed pending state save",
+        "tags": [
+          "states"
+        ]
+      }
+    },
     "/api/state-retention/prune": {
       "post": {
-        "description": "Delete every record past its state's ``retention_days`` horizon.\n\nReturns the per-state deleted counts.",
+        "description": "Delete every record past its state's ``retention_days`` horizon.\n\nReturns the per-state deleted counts and the saves held by a failed save whose records it kept.",
         "operationId": "post_api_state_retention_prune",
         "responses": {
           "200": {
@@ -32338,6 +34017,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -32777,6 +34466,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -32864,7 +34563,7 @@
         ]
       },
       "put": {
-        "description": "Upsert a state declaration; the ``name`` is taken from the path.\n\nWith records present only additive schema changes are accepted — a narrowing is refused\nwhile records exist.",
+        "description": "Upsert a state declaration; the ``name`` is taken from the path.\n\nWith records present only additive schema changes are accepted — a narrowing is refused\nwhile records exist. The state's pending saves are applied first; a save held by a failed\nsave counts as records present and an accepted re-declare names it in ``held``.",
         "operationId": "put_api_states_name",
         "parameters": [
           {
@@ -32883,7 +34582,7 @@
                 "schema": {
                   "properties": {
                     "data": {
-                      "$ref": "#/components/schemas/StateDeclaration"
+                      "$ref": "#/components/schemas/StateDeclarationPutResponse"
                     }
                   },
                   "required": [
@@ -32944,6 +34643,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -33296,6 +35005,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -33398,6 +35117,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -33549,6 +35278,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -33647,6 +35386,16 @@
             },
             "description": "Resource not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -33666,6 +35415,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -33763,6 +35522,16 @@
             },
             "description": "Resource not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -33782,6 +35551,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -33878,6 +35657,16 @@
             },
             "description": "Resource not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -33897,6 +35686,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -33994,6 +35793,16 @@
             },
             "description": "Resource not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -34013,6 +35822,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -34112,6 +35931,16 @@
             },
             "description": "Resource not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -34131,6 +35960,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -34259,6 +36098,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -34366,6 +36215,16 @@
             },
             "description": "Resource not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -34385,6 +36244,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -34489,6 +36358,16 @@
             },
             "description": "Resource not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -34508,6 +36387,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -34607,6 +36496,16 @@
             },
             "description": "Resource not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -34626,6 +36525,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -34701,6 +36610,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -34776,6 +36695,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
