@@ -235,8 +235,9 @@ def _real_bus_url(infra: Infra, stack: TaiStack) -> str:
 
 
 # A liveness bound: twice the slowest legitimate run, stack boot included, measured under host
-# load 260-330 on 20 cores (419.5s: the relayed fleet's boot and convergence, the outage held
-# past the TTL, the restore and re-convergence), rounded up to the next 10s.
+# load 260-330 on 20 cores (419.5s: the relayed fleet's boot and convergence, the sever, the
+# feature-store call, the wait for every presence key to expire, and the stack's teardown),
+# rounded up to the next 10s.
 @pytest.mark.timeout(840)
 @pytest.mark.needs(
     "probe-tools",
