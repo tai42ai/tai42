@@ -7,7 +7,7 @@ import json
 import httpx
 import pytest
 
-from .remote_harness import data_response, error_response, run_cli
+from .remote_harness import data_response, error_response, run_cli, visible
 
 
 def test_auth_whoami_happy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -126,7 +126,7 @@ def test_auth_claim_refuses_a_link_carrying_the_fragment_key_twice(monkeypatch: 
 
     result = run_cli(monkeypatch, handler, ["auth", "claim", "https://host/login#claim=a&claim=b"])
     assert result.exit_code != 0
-    assert "the pasted link carries 2 claim= fragments; exactly one is expected" in " ".join(result.output.split())
+    assert "the pasted link carries 2 claim= fragments; exactly one is expected" in visible(result.output)
 
 
 def test_auth_claim_accepts_a_bare_token_without_a_discovery_request(monkeypatch: pytest.MonkeyPatch) -> None:

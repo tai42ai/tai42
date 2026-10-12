@@ -7,7 +7,7 @@ import json
 import httpx
 import pytest
 
-from .remote_harness import data_response, error_response, run_cli
+from .remote_harness import data_response, error_response, run_cli, visible
 
 
 def _parse_tool_call(request: httpx.Request) -> tuple[str, dict[str, object]]:
@@ -282,7 +282,7 @@ def test_tools_apply_rejects_empty_string_element(monkeypatch: pytest.MonkeyPatc
 
     result = run_cli(monkeypatch, handler, ["tools", "apply", "my_tool", "--combo", '[""]'])
     assert result.exit_code != 0
-    assert "non-empty extension name" in " ".join(result.output.split())
+    assert "non-empty extension name" in visible(result.output)
 
 
 def test_tools_apply_rejects_object_without_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -318,7 +318,7 @@ def test_tools_apply_rejects_non_element(monkeypatch: pytest.MonkeyPatch) -> Non
 
     result = run_cli(monkeypatch, handler, ["tools", "apply", "my_tool", "--combo", "[5]"])
     assert result.exit_code != 0
-    assert "non-empty extension name" in " ".join(result.output.split())
+    assert "non-empty extension name" in visible(result.output)
 
 
 def test_tools_extensions_add_posts_add_side(monkeypatch: pytest.MonkeyPatch) -> None:

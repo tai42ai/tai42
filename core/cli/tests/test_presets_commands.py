@@ -236,7 +236,7 @@ def test_presets_create_rejects_empty_string_element(monkeypatch: pytest.MonkeyP
         ["presets", "create", "greet", "--base-tool", "echo", "--description", "d", "--extensions", '[[""]]'],
     )
     assert result.exit_code != 0
-    assert "non-empty extension name" in " ".join(result.output.split())
+    assert "non-empty extension name" in visible(result.output)
 
 
 def test_presets_create_rejects_non_string_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -301,7 +301,7 @@ def test_presets_create_rejects_non_element(monkeypatch: pytest.MonkeyPatch) -> 
         ["presets", "create", "greet", "--base-tool", "echo", "--description", "d", "--extensions", "[[5]]"],
     )
     assert result.exit_code != 0
-    assert "non-empty extension name" in " ".join(result.output.split())
+    assert "non-empty extension name" in visible(result.output)
 
 
 def test_presets_delete(monkeypatch: pytest.MonkeyPatch) -> None:
