@@ -13,7 +13,7 @@
  * proof still polls to convergence rather than reading once.
  */
 import { expect, type APIRequestContext, type Page } from '@playwright/test';
-import { apiHeaders, awaitMutation, MP_URL, mpAdminHeaders, seedCredential, uniq } from './helpers';
+import { apiHeaders, awaitMutation, MP_URL, mpAdminHeaders, seedCredential, sendRepeatable, uniq } from './helpers';
 import { needs, test } from './needs';
 
 needs('kind:marketplace_store', 'mutable', 'helper:registry', 'helper:package-index');
@@ -36,7 +36,7 @@ interface InstalledRow {
 
 /** The attribution inventory as `ref@version` strings, over the same-origin API. */
 async function installedRefs(request: APIRequestContext): Promise<string[]> {
-  const res = await request.get('/api/marketplace/installed', { headers: apiHeaders() });
+  const res = await sendRepeatable(request, 'get', '/api/marketplace/installed', { headers: apiHeaders() });
   expect(res.ok(), await res.text()).toBeTruthy();
   const body = (await res.json()) as { data: { installed: InstalledRow[] } };
   return body.data.installed.map((row) => `${row.ref}@${row.version}`);
@@ -44,7 +44,7 @@ async function installedRefs(request: APIRequestContext): Promise<string[]> {
 
 /** The registered tool names over the same-origin `GET /api/tools`. */
 async function apiToolNames(request: APIRequestContext): Promise<string[]> {
-  const res = await request.get('/api/tools', { headers: apiHeaders() });
+  const res = await sendRepeatable(request, 'get', '/api/tools', { headers: apiHeaders() });
   expect(res.ok(), await res.text()).toBeTruthy();
   const body = (await res.json()) as { data: string[] };
   return body.data;
