@@ -557,13 +557,13 @@ class _PinnedReturnsMidRollBus(_ScriptedBus):
             self._rows = [*self._rows, _row("backend-1", WorkerKind.backend, generation=2)]
         return list(self._rows)
 
-    async def publish(self, op: dict[str, Any], targets: list[str] | None, local: Any) -> FleetResult:
+    async def publish(self, op: FleetOp, targets: list[str] | None, local: Any) -> FleetResult:
         target = (targets or [None])[0]
         assert target is not None
-        self.published.append((op["op"], (target,)))
+        self.published.append((op.op, (target,)))
         transform = reuse_freed_slot if target == "backend-1" else old_gone_no_capacity
         self._rows = transform(list(self._rows), target)
-        return FleetResult(op=op["op"], results=[WorkerResult(name=target, outcome=OpOutcome.applied)])
+        return FleetResult(op=op.op, results=[WorkerResult(name=target, outcome=OpOutcome.applied)])
 
 
 async def test_a_pinned_target_returning_mid_roll_is_not_counted_as_another_targets_capacity() -> None:

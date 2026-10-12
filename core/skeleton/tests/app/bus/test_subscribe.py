@@ -390,7 +390,7 @@ async def test_claim_survives_a_subscription_loop_stall(
             await asyncio.wait_for(_until(lambda: len(readies) >= 1), timeout=3.0)
             first = worker.identity
             assert (first.name, first.generation) == ("serve-1", 1)
-            result = await publisher.publish({"op": "reload_config"}, targets=[first.name], local=None)
+            result = await publisher.publish(_RELOAD, targets=[first.name], local=None)
             # The next beat after the stall must still find the claim held.
             await asyncio.sleep(ttl)
 
