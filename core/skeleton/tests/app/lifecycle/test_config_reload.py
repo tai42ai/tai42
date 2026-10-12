@@ -113,13 +113,13 @@ async def _until_rotated(path, timeout: float = 60.0) -> None:
 
 @pytest.mark.parametrize("door", DOORS)
 def test_a_token_endpoint_slower_than_the_budget_holds_the_reload_one_budget(monkeypatch, path, door):
-    from tai42_skeleton.app import epoch
+    from tai42_skeleton.app import epoch_defaults
 
     harness = AppHarness(monkeypatch, path)
     path.connect()
     path.mcp.reset(mcp_fakes.bearer_only("at-old", "at-new"))
     path.token_endpoint(delay=BUDGET * 3)
-    original = epoch._default_bring_credentials_up_to_date
+    original = epoch_defaults.default_bring_credentials_up_to_date
     spent: list[float] = []
 
     async def timed() -> None:
@@ -127,7 +127,7 @@ def test_a_token_endpoint_slower_than_the_budget_holds_the_reload_one_budget(mon
         await original()
         spent.append(time.monotonic() - started)
 
-    monkeypatch.setattr(epoch, "_default_bring_credentials_up_to_date", timed)
+    monkeypatch.setattr(epoch_defaults, "default_bring_credentials_up_to_date", timed)
 
     async def run():
         async with app.app_context(harness.manifest()):

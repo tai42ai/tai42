@@ -46,7 +46,7 @@ from tai42_kit.clients import advance_client_epoch, current_client_epoch
 from tai42_kit.settings import reset_all_settings, unbind_respawn_class_env
 from tai42_kit.settings.cache_registry import restamp_settings_born_after, settings_birth_mark
 
-from tai42_skeleton.app.admission import EpochAdmissionApp
+from tai42_skeleton.app import epoch_defaults
 from tai42_skeleton.app.epoch_retire import retire_epoch
 from tai42_skeleton.app.retired_generations import detach_retired_generations
 
@@ -319,17 +319,10 @@ _current: Epoch | None = None
 _serving_slot: dict[str, Any] | None = None
 
 
-def _default_streamable_http_app() -> ASGIApp:
-    """The serving app of a process that attached none of its own: the default streamable-HTTP app."""
-    from tai42_skeleton.app import instance
-
-    return instance.app.http_app()
-
-
 # Builds the serving app on the transport the process serves (recorded by the worker
 # lifespan with the boot serving app), so every rebuilt generation serves the transport
 # the boot one does.
-_serving_app_builder: Callable[[], ASGIApp] = _default_streamable_http_app
+_serving_app_builder: Callable[[], ASGIApp] = epoch_defaults.default_streamable_http_app
 
 # Whether the worker booted its streamable-HTTP transport stateless, recorded with the
 # dispatch slot (``None`` while no boot serving app is attached). A streamable-HTTP sub-MCP
@@ -453,6 +446,14 @@ def boot_stateless_http() -> bool | None:
     return _boot_stateless_http
 
 
+def serving_app_builder() -> Callable[[], ASGIApp]:
+    """The builder every rebuilt generation builds its serving app with: the boot one's transport.
+
+    The default streamable-HTTP builder while no boot serving app is attached.
+    """
+    return _serving_app_builder
+
+
 async def clear_epoch() -> None:
     """Drop the process serving generation, closing its FastMCP lifespan and adopted sub-app lifespans.
 
@@ -465,7 +466,7 @@ async def clear_epoch() -> None:
         await current.close_transports()
     _current = None
     _serving_slot = None
-    _serving_app_builder = _default_streamable_http_app
+    _serving_app_builder = epoch_defaults.default_streamable_http_app
     _boot_stateless_http = None
     _loaded_env_keys = set()
     unbind_respawn_class_env()
@@ -552,79 +553,6 @@ async def _outside_any_request[T](step: Callable[[], Awaitable[T]]) -> T:
     return await asyncio.create_task(_step(), context=contextvars.Context())
 
 
-def _default_rebuild() -> None:
-    """Build the fresh serving core off to the side and re-initialise the process registries into it.
-
-    Runs under the ALREADY applied proposed env (the primitive applied it before
-    calling this). A fresh ``ServingCore`` (fresh FastMCP under a freshly-read AuthAdapter) is set
-    on the app's ``_building`` slot, so ``start()`` and the epoch handlers register
-    into it — the live core is NEVER touched. The env is NOT re-read from the store: the
-    proposed env is live in ``os.environ`` and the settings caches were cleared, so this
-    resolves every settings read under the env about to be persisted. On ANY
-    failure the half-built core is discarded (``_building`` dropped) and re-raised, so
-    the live epoch keeps serving untouched.
-    """
-    from tai42_skeleton.app import instance
-    from tai42_skeleton.manifest import Manifest
-
-    app = instance.app
-    app._building = app._build_serving_core()
-    try:
-        manifest = Manifest.model_validate(app.config.config_manager.read_manifest())
-        app.lifecycle.reload_registries(manifest)
-    except BaseException:
-        # Discard the half-built core so every read resolves back to the live epoch.
-        app._building = None
-        raise
-
-
-async def _default_build_serving_app(epoch: Epoch) -> ASGIApp:
-    """Build this generation's fresh dispatch handle off the just-built core and enter its FastMCP lifespan.
-
-    A fresh serving app on the process's transport is built off the ``_building`` core's
-    fresh FastMCP, so its route table — including a reload-added router — is snapshotted
-    anew and actually serves. Its FastMCP lifespan (a fresh session manager) is entered
-    through a dedicated-task supervisor so the swap task can later close it in the same
-    context; the built core (the retire drops it) and, weakly, the lifespan-bearing app
-    (the serving surface every request's scope points at) are recorded on the epoch, and
-    ``_building`` is cleared so post-swap reads resolve through ``current_epoch()``.
-    """
-    from tai42_skeleton.app import instance
-    from tai42_skeleton.app.sub_mcp_app import SubAppLifespan
-
-    app = instance.app
-    core = app._building
-    if core is None:
-        raise RuntimeError("no core was built for this epoch — the rebuild step must run first")
-    try:
-        inner = _serving_app_builder()
-        lifespan_app = getattr(inner, "mcp_lifespan_app", inner)
-        supervisor = SubAppLifespan(lifespan_app)
-        # Enter the fresh FastMCP lifespan (fresh session-manager task group); a
-        # lifespan-enter failure has already unwound itself when start() re-raises.
-        await supervisor.start()
-        epoch.core = core
-        epoch.supervisor = supervisor
-        epoch.record_serving_surface(lifespan_app)
-        return EpochAdmissionApp(inner, epoch)
-    finally:
-        app._building = None
-
-
-async def _default_establish_background_loops() -> None:
-    """Re-establish the swapped-in generation's loop-affine background loops on the serving loop.
-
-    Covers the advisories poll and the conversations delivery sweep, registering
-    each with the now-current epoch so it retires with the generation. The
-    per-epoch handlers ran on a throwaway build-thread loop and could not spawn a
-    loop that survives the build, so these are (re)started here instead. Loud but
-    non-fatal on a single establisher's failure — the fresh epoch already serves.
-    """
-    from tai42_skeleton.app import instance
-
-    await instance.app._run_post_swap_handlers(raise_on_error=False)
-
-
 @dataclass
 class _EpochBuild:
     """A generation built off to the side: the epoch, its serving handle, and what restores the live state."""
@@ -651,8 +579,8 @@ async def _build_epoch(
     """
     from tai42_skeleton.app.registry_staging import begin_staging_all
 
-    rebuild = rebuild or _default_rebuild
-    build_serving_app = build_serving_app or _default_build_serving_app
+    rebuild = rebuild or epoch_defaults.default_rebuild
+    build_serving_app = build_serving_app or epoch_defaults.default_build_serving_app
 
     snapshot = dict(os.environ)
     loaded_before = set(_loaded_env_keys)
@@ -728,13 +656,6 @@ async def build_and_discard_epoch(
     logger.info("epoch built under the proposed env and discarded: this process is not a bus member and swaps nothing")
 
 
-async def _default_bring_credentials_up_to_date() -> None:
-    """The live app's credentials step: one reload probe budget, raising nothing, idle with no live refresh owner."""
-    from tai42_skeleton.app import instance
-
-    await instance.app._bring_listed_credentials_up_to_date()
-
-
 async def build_and_swap_epoch(
     proposed_env: Mapping[str, str],
     *,
@@ -778,9 +699,9 @@ async def build_and_swap_epoch(
     """
     from tai42_skeleton.app.registry_staging import commit_staging_all
 
-    await (bring_credentials_up_to_date or _default_bring_credentials_up_to_date)()
+    await (bring_credentials_up_to_date or epoch_defaults.default_bring_credentials_up_to_date)()
 
-    establish_background_loops = establish_background_loops or _default_establish_background_loops
+    establish_background_loops = establish_background_loops or epoch_defaults.default_establish_background_loops
     build = await _build_epoch(proposed_env, rebuild, build_serving_app)
     new_epoch, serving_app, settings_mark = build.epoch, build.serving_app, build.settings_mark
 
