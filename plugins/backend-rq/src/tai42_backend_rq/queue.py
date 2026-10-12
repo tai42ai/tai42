@@ -16,8 +16,9 @@ class TaskBudgetQueue(Queue):
     """An rq queue whose default job timeout is the dispatch's ``task_timeout``.
 
     rq gives a job the queue's default timeout when the job is created on it and when a
-    scheduled job without one is moved onto it, so every job — enqueued or scheduler-fired —
-    is bounded by the same budget.
+    scheduled job without one is moved onto it, so a stored job records the budget it was
+    enqueued under. The worker runs every job under its own current budget regardless
+    (``_TaiWorkerMixin.prepare_execution``).
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
