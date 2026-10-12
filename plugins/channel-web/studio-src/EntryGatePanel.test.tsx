@@ -249,3 +249,38 @@ describe('EntryGatePanel — mint + revoke', () => {
     expect(rowRevoke).not.toHaveClass('tai-btn-danger');
   });
 });
+
+/** The api-client's 401, as it reaches the bundle (recognised by name). */
+function unauthorized(): Error {
+  return Object.assign(new Error('unauthorized'), { name: 'ApiUnauthorizedError', status: 401 });
+}
+
+describe('EntryGatePanel — the host rules', () => {
+  it('shows a failing gate read at once, with no retry', async () => {
+    const getGate = vi.fn().mockRejectedValue(apiError('gate read boom', 500));
+    renderPanel({ getGate });
+    expect(await screen.findByRole('alert')).toHaveTextContent('gate read boom');
+    expect(getGate).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends a 401 on the gate read to sign-in', async () => {
+    const getGate = vi.fn().mockRejectedValue(unauthorized());
+    const { onUnauthorized } = renderPanel({ getGate });
+    await waitFor(() => {
+      expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    });
+    expect(getGate).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends a 401 on a gate change to sign-in', async () => {
+    const user = userEvent.setup();
+    const getGate = vi.fn().mockResolvedValue({ enabled: true, codes: [makeCode()] });
+    const setGate = vi.fn().mockRejectedValue(unauthorized());
+    const { onUnauthorized } = renderPanel({ getGate, setGate });
+    await user.click(await screen.findByRole('checkbox', { name: 'Require an entry code' }));
+    await waitFor(() => {
+      expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    });
+    expect(setGate).toHaveBeenCalledTimes(1);
+  });
+});
