@@ -69,7 +69,7 @@ def _install_pool(monkeypatch, *, open_raises):
         async def close(self):
             self.closed = True
 
-    monkeypatch.setattr(pg_mod, "AsyncConnectionPool", _FakePool)
+    monkeypatch.setattr(pg_mod, "_CancelSurfacingPool", _FakePool)
     return pools
 
 
@@ -93,7 +93,7 @@ def _install_ok_pool(monkeypatch):
         async def close(self):
             self.closed = True
 
-    monkeypatch.setattr(pg_mod, "AsyncConnectionPool", _FakePool)
+    monkeypatch.setattr(pg_mod, "_CancelSurfacingPool", _FakePool)
     return pools
 
 
@@ -229,7 +229,7 @@ async def test_pinned_connection_builds_a_one_connection_pinned_pool(monkeypatch
     def _connection(self):
         return _FakeConnCtx()
 
-    monkeypatch.setattr(pg_mod.AsyncConnectionPool, "connection", _connection, raising=False)
+    monkeypatch.setattr(pg_mod._CancelSurfacingPool, "connection", _connection, raising=False)
 
     settings = PostgresConnectionSettings(
         pg_host="h", pg_port=5433, pg_db="db", pg_user="u", pg_password=SecretStr("secret")
