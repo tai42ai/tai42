@@ -325,7 +325,7 @@ async def test_fleet_reload_config_logs_the_workers_awaiting_a_respawn(
     assert "serve-test (BACKEND_MANIFEST_KEY)" in lines[0]
 
 
-def test_the_env_door_reply_carries_the_operation_verdict_not_the_local_fact() -> None:
+def test_the_env_door_reply_carries_the_operation_verdict_not_the_local_fact(monkeypatch: pytest.MonkeyPatch) -> None:
     from tai42_contract.app.responses import AwaitingWorker
 
     from tai42_skeleton.app.bus import FleetResult
@@ -337,7 +337,7 @@ def test_the_env_door_reply_carries_the_operation_verdict_not_the_local_fact() -
         local={"status": "ok", "env_keys": 1, "awaiting_respawn": ["BACKEND_MANIFEST_KEY"]},
         awaiting_respawn=[AwaitingWorker(name="serve-2", keys=["BACKEND_MANIFEST_KEY"])],
     )
-    instance.app._bus = FakeBus()  # type: ignore[attr-defined]
+    monkeypatch.setattr(instance.app, "_bus", FakeBus())
     body = apply_response(result)
     assert body["awaiting_respawn"] == [{"name": "serve-2", "keys": ["BACKEND_MANIFEST_KEY"]}]
     assert body["status"] == "ok"

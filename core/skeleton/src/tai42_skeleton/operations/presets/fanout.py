@@ -80,11 +80,20 @@ async def _fanout_reload(name: str, expected_at_start: dict[str, int] | None) ->
     report = await instance.app.bus.publish(
         {"op": _RELOAD_OP, "kind": "preset", "name": name},
         None,
-        LocalApplyResult(outcome=OpOutcome.applied),
+        _self_entry(),
         expected_at_start=expected_at_start,
     )
     log_non_convergence(report)
     return report
+
+
+def _self_entry() -> LocalApplyResult | None:
+    """This worker's already-applied self entry, or ``None`` in a process that is not a bus member.
+
+    A non-member (a job child a backend worker forked) is never a fleet target, so the bus takes
+    no self entry from it; its member loads the change as a sibling.
+    """
+    return LocalApplyResult(outcome=OpOutcome.applied) if instance.app.bus.identity.member else None
 
 
 def _addressed_siblings(report: FleetResult) -> set[str]:
@@ -110,7 +119,7 @@ async def _fanout_remove(name: str, expected_at_start: dict[str, int] | None) ->
     report = await instance.app.bus.publish(
         {"op": _REMOVE_OP, "kind": "preset", "name": name},
         None,
-        LocalApplyResult(outcome=OpOutcome.applied),
+        _self_entry(),
         expected_at_start=expected_at_start,
     )
     log_non_convergence(report)

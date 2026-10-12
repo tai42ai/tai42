@@ -135,7 +135,9 @@ async def safe_schedule_transition(
         if not enforce_job_id and current_job_id:
             # Abort the job being replaced first; a failed abort propagates
             # rather than leave the old job live alongside its replacement.
-            await request_job_abort(Job(current_job_id, redis=redis, _deserializer=job_deserializer))
+            await request_job_abort(
+                Job(current_job_id, redis=redis, _queue_name=arq_settings().queue_name, _deserializer=job_deserializer)
+            )
 
         next_job_id = uuid.uuid4().hex
         new_mapping: dict[str, Any] = {
@@ -168,7 +170,14 @@ async def abort_schedule_task(key: str) -> None:
             prev_job_id = data.get(b"job_id", b"").decode()
             if prev_job_id:
                 await arq_redis.hset(key, "aborted", prev_job_id)
-                await request_job_abort(Job(prev_job_id, redis=arq_redis, _deserializer=job_deserializer))
+                await request_job_abort(
+                    Job(
+                        prev_job_id,
+                        redis=arq_redis,
+                        _queue_name=arq_settings().queue_name,
+                        _deserializer=job_deserializer,
+                    )
+                )
 
 
 async def recover_stalled_schedules(ctx: dict[str, Any]) -> None:
@@ -204,7 +213,7 @@ async def recover_stalled_schedules(ctx: dict[str, Any]) -> None:
             if not job_id:
                 should_recover = True
             else:
-                job = Job(job_id, redis=redis, _deserializer=job_deserializer)
+                job = Job(job_id, redis=redis, _queue_name=arq_settings().queue_name, _deserializer=job_deserializer)
                 status = await job.status()
 
                 # not_found: pending job lost. complete: ran but never rescheduled.

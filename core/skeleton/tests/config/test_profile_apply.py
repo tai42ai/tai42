@@ -848,9 +848,11 @@ async def test_a_converged_profile_roll_leaves_nobody_awaiting_a_respawn(
     spy, _ = _swap_spy()
     orch, _seen = _orchestrate_spy()
     with caplog.at_level(logging.ERROR):
-        outcome = await _service(
-            store, _MovedBus(origin="serve-applier", remotes=["serve-b"]), orchestrate=orch
-        ).apply_replace_env({"TAI_BUS_NAMESPACE": "new"}, save_previous=_PrevSpy(), build_and_swap=spy)
+        bus = _MovedBus(origin="serve-applier", remotes=["serve-b"])
+        monkeypatch.setattr(instance.app, "_bus", bus)
+        outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
+            {"TAI_BUS_NAMESPACE": "new"}, save_previous=_PrevSpy(), build_and_swap=spy
+        )
     assert outcome.awaiting_respawn == []
     assert profile_apply_response(outcome)["awaiting_respawn"] == []
     assert [r for r in caplog.records if "awaiting a respawn" in r.getMessage()] == []
@@ -868,6 +870,7 @@ async def test_a_stopped_profile_roll_leaves_the_unreached_awaiting(
     )
     orch, _seen = _orchestrate_spy(raises=RecycleTimeoutError("serve-b", "slow", partial))
     bus = _MovedBus(origin="serve-applier", remotes=["serve-b", "serve-c"])
+    monkeypatch.setattr(instance.app, "_bus", bus)
     with caplog.at_level(logging.ERROR):
         outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
             {"TAI_BUS_NAMESPACE": "new"}, save_previous=_PrevSpy(), build_and_swap=spy
@@ -909,6 +912,7 @@ async def test_a_profile_apply_in_a_forked_job_child_swaps_nothing_and_acts_for_
         RecycleReport(rows=[RecycleRow(name="serve-1", kind="serve", generation_before=1, status=RECYCLED)])
     )
     bus = _ForkChildBus()
+    monkeypatch.setattr(instance.app, "_bus", bus)
     with caplog.at_level(logging.ERROR):
         outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
             {"TAI_BUS_NAMESPACE": "new"}, save_previous=_PrevSpy(), build_and_swap=spy
