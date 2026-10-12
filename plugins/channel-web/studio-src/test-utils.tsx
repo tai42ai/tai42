@@ -10,6 +10,7 @@ import {
   ApiProvider,
   type ChannelConversationRoute,
   ThemeProvider,
+  UnauthorizedProvider,
 } from '@tai42/studio-sdk';
 import { render, type RenderResult } from '@testing-library/react';
 import type { ReactElement } from 'react';
@@ -102,24 +103,35 @@ export function stubClient(request: ReturnType<typeof gateRequest>, baseUrl = ''
   return { baseUrl, request } as unknown as ApiClient;
 }
 
-export function renderWithClient(ui: ReactElement, client: ApiClient): RenderResult {
+export function renderWithClient(
+  ui: ReactElement,
+  client: ApiClient,
+  onUnauthorized: () => void = vi.fn(),
+): RenderResult {
   return render(
-    <ApiProvider value={client}>
-      <ThemeProvider>{ui}</ThemeProvider>
-    </ApiProvider>,
+    <UnauthorizedProvider value={onUnauthorized}>
+      <ApiProvider value={client}>
+        <ThemeProvider>{ui}</ThemeProvider>
+      </ApiProvider>
+    </UnauthorizedProvider>,
   );
 }
 
 /** Render the panel for the default web route under a captured mount base. */
 export function renderPanel(
   doors: GateDoors,
-  { base = MOUNT_BASE, baseUrl = '' }: { base?: string | null; baseUrl?: string } = {},
+  {
+    base = MOUNT_BASE,
+    baseUrl = '',
+    onUnauthorized = vi.fn(),
+  }: { base?: string | null; baseUrl?: string; onUnauthorized?: Mock } = {},
 ) {
   setGateBase(base);
   const request = gateRequest(doors, base ?? MOUNT_BASE);
   const result = renderWithClient(
     <EntryGatePanel pluginId="tai42_channel_web" route={webRoute()} />,
     stubClient(request, baseUrl),
+    onUnauthorized,
   );
-  return { ...result, request };
+  return { ...result, request, onUnauthorized };
 }
