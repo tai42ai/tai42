@@ -6,7 +6,7 @@ from typing import Any
 
 from tai42_contract.app.responses import ApplyResponse
 
-from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
+from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write
@@ -61,7 +61,7 @@ async def update_api_tools(
     include_remove = include_remove or []
     exclude_add = exclude_add or []
     exclude_remove = exclude_remove or []
-    with translate_orphan_env_write(), translate_backend_needs_bus(BadRequestError):
+    with translate_orphan_env_write(), translate_config_invariants(BadRequestError):
         try:
             if not (include_add or include_remove or exclude_add or exclude_remove):
                 raise ValueError("nothing to change")  # noqa: TRY301 translated to BadRequestError below

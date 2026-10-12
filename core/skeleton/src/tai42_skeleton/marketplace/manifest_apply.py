@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
+from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.config.service import ApplyResult, ConfigService
 from tai42_skeleton.marketplace.errors import ManifestComposeError
 
@@ -45,7 +45,7 @@ async def apply_composed(svc: ConfigService, mutator: Callable[[dict[str, Any]],
     the structural provides patch ingests no resolved secret value, so the pipeline's
     secret seal is a no-op.
     """
-    with translate_backend_needs_bus(composed_manifest_invalid):
+    with translate_config_invariants(composed_manifest_invalid):
         try:
             return await svc.apply_change(mutator)
         except ValidationError as exc:

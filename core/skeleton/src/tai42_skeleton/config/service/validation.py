@@ -1,8 +1,9 @@
 """Validation on the resolved projection of a manifest / env / profile-replace change.
 
 Covers the pydantic ``Manifest`` schema, the boundary refusals (X-band, unknown owned-prefix
-settings, key material, an unrecyclable change, dangling ``!ENV``, incomplete admin pair), and
-the backend-needs-bus invariant in both directions.
+settings, key material, an unrecyclable change, dangling ``!ENV``, incomplete admin pair), the
+backend-needs-bus invariant in both directions, and the apply-window invariant (a bus-enabled
+config's fleet apply window covers the retire's drain floor) against the post-change env.
 """
 
 from __future__ import annotations
@@ -10,7 +11,11 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-from tai42_skeleton.app.boot_rules import check_backend_needs_bus
+from tai42_skeleton.app.boot_rules import (
+    check_apply_window_covers_drain,
+    check_backend_needs_bus,
+    declared_drain_budgets,
+)
 from tai42_skeleton.app.bus_settings import BusSettings, bus_settings
 from tai42_skeleton.config.boundary import (
     refuse_incomplete_admin_pair,
@@ -40,6 +45,25 @@ def _refuse_unrecyclable_merge(stored: Mapping[str, str], changes: Mapping[str, 
     return recycle
 
 
+def _check_apply_window(effective: dict[str, str]) -> None:
+    """Evaluate the apply-window invariant against the post-change env ``effective``.
+
+    The bus settings and the declared drain budget are read fresh under ``effective`` (never
+    the cached singletons, which hold the live env), so a change to either setting — or to
+    the bus itself — is judged as the reloaded process would see it. A busless env uses no
+    apply window. The drain-budget registry is reached outside the modeled env, so the app is
+    never first built under it.
+    """
+    with _environ(effective):
+        bus = BusSettings()
+    if not bus.enabled:
+        return
+    budgets = declared_drain_budgets()
+    with _environ(effective):
+        drain_budget = budgets.budget()
+    check_apply_window_covers_drain(bus_enabled=True, apply_timeout=bus.apply_timeout, drain_budget=drain_budget)
+
+
 class _ValidationMixin(_ConfigServiceBase):
     """The validate-before-persist gate every pipeline entrypoint runs its change through.
 
@@ -66,7 +90,7 @@ class _ValidationMixin(_ConfigServiceBase):
         markers against the post-change env (so a marker that materializes a backend participates,
         and a dropped reference is caught as dangling), and evaluates the backend-needs-bus
         invariant against the post-change bus configuration (so removing the bus while a backend
-        remains is rejected too).
+        remains is rejected too) and the apply-window invariant against the post-change env.
         """
         refuse_x_band(changes.keys())
         refuse_unknown_owned_env_write([key for key, value in changes.items() if value != ""])
@@ -88,7 +112,8 @@ class _ValidationMixin(_ConfigServiceBase):
             # Studio env edit on a default-only deployment.
             bus_configured = BusSettings().enabled
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
-        # Last, so a change the backend-needs-bus rule refuses is named by that rule.
+        _check_apply_window(effective)
+        # Last, so a change the bus invariants refuse is named by their rule.
         return _refuse_unrecyclable_merge(stored, changes)
 
     def _validate_env_and_manifest(self, changes: dict[str, str], document: Mapping[str, Any]) -> list[str]:
@@ -99,7 +124,7 @@ class _ValidationMixin(_ConfigServiceBase):
         ``!ENV`` markers against the post-change effective env (so the marker the mutator
         just wrote resolves against the value the env write supplies, and a dropped
         reference is caught as dangling), validates the resolved projection, and
-        evaluates backend-needs-bus against the post-change bus configuration.
+        evaluates backend-needs-bus and the apply-window invariant against the post-change env.
         """
         refuse_x_band(changes.keys())
         refuse_unknown_owned_env_write([key for key, value in changes.items() if value != ""])
@@ -114,6 +139,7 @@ class _ValidationMixin(_ConfigServiceBase):
             manifest = self._validated_projection(document)
             bus_configured = BusSettings().enabled
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
+        _check_apply_window(effective)
         return _refuse_unrecyclable_merge(stored, changes)
 
     def _validate_replace(self, profile_env: dict[str, str]) -> None:
@@ -125,7 +151,7 @@ class _ValidationMixin(_ConfigServiceBase):
         effective env — the applier legitimately CARRIES the whole X band across
         ``replace_env``), refuses a change that leaves a manifest ``!ENV`` marker
         dangling against the replace-effective env, and evaluates the backend-needs-bus
-        invariant against that same env.
+        and apply-window invariants against that same env.
         """
         refuse_x_band(profile_env.keys())
         refuse_unknown_owned_env_write([key for key, value in profile_env.items() if value != ""])
@@ -148,6 +174,7 @@ class _ValidationMixin(_ConfigServiceBase):
             manifest = self._validated_projection(preserved)
             bus_configured = BusSettings().enabled
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
+        _check_apply_window(effective)
 
     def _validated_projection(self, document: Mapping[str, Any]) -> Manifest:
         """Build and validate the RESOLVED in-memory projection of a PRESERVED document.

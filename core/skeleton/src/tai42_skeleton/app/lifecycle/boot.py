@@ -13,7 +13,7 @@ from tai42_contract.app import tai42_app
 from tai42_kit.accounts.registry import reset_registry as reset_accounts_registry
 
 from tai42_skeleton.app import lifecycle as _lifecycle
-from tai42_skeleton.app.boot_rules import require_bus_for_backend
+from tai42_skeleton.app.boot_rules import require_apply_window_covers_drain, require_bus_for_backend
 from tai42_skeleton.app.epoch import applied_env_keys
 from tai42_skeleton.app.kind_status import warn_if_noop_monitoring
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
@@ -227,6 +227,9 @@ class BootMixin(LifecycleState):
         # the bus is unconfigured is refused here (an env-materialized backend or an
         # out-of-band manifest edit). The shared-config rule is boot-fixed env, no reload twin.
         require_bus_for_backend(manifest)
+        # Reload-time re-check of the apply-window invariant under the env about to be
+        # persisted: a window below the retire's drain floor is refused before the rebuild.
+        require_apply_window_covers_drain()
         self.start(manifest)
         run_blocking(lambda: self._run_handlers(self._epoch_handlers(), raise_on_error=True))
         # Audit the STAGED route generation before the build commits it: fail the rebuild

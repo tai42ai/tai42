@@ -68,12 +68,16 @@ class ToolRunsSettings(TaiBaseSettings):
     # cap is per-process (each worker counts its own runs). Must be positive.
     max_concurrent_runs: int = Field(default=32, gt=0)
 
-    # How long the shutdown handler waits for cancelled supervisors to write their
-    # terminal records before teardown proceeds to close pooled clients. A run that
-    # does not finish its terminal write in this window reconciles to ``lost``
-    # later. Also the drain budget of a config reload's retire of the previous
-    # serving generation: how long its in-flight requests and runs may take to
-    # finish (the reload's own request is waited for apart from it). Must be positive.
+    # The platform's declared drain budget, with three uses. How long the shutdown
+    # handler waits for cancelled supervisors to write their terminal records before
+    # teardown proceeds to close pooled clients (a run that does not finish its
+    # terminal write in this window reconciles to ``lost`` later). The per-step drain
+    # budget of a config reload's retire of the previous serving generation: how long
+    # its in-flight requests, its runs and its retired client pools may each take to
+    # finish (the reload's own request is waited for apart from it). The recycle
+    # orchestrator's per-step budget. The fleet apply window (``TAI_BUS_APPLY_TIMEOUT``)
+    # stays at or above three of it — the boot rules refuse a config where it does
+    # not. Must be positive.
     shutdown_drain_seconds: float = Field(default=10, gt=0)
 
 

@@ -35,7 +35,7 @@ from tai42_contract.settings_profiles.errors import (
 from tai42_kit.db import component_store_configured
 from tai42_kit.settings import present_env_value, registered_settings
 
-from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
+from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config import config_mode
@@ -246,7 +246,7 @@ async def write_env(env: dict[str, str], secret_keys: list[str] | None = None) -
     # effective (resolved) config against the backend-needs-bus invariant, writes the
     # env, reloads locally, and broadcasts the reload to the whole fleet. An invalid
     # env key or effective config rejects before anything is written and maps to 400.
-    with translate_backend_needs_bus(BadRequestError):
+    with translate_config_invariants(BadRequestError):
         try:
             result = await ConfigService.from_app().apply_env_change(env, secret_keys)
         except ValueError as exc:
@@ -427,7 +427,7 @@ async def put_profile(name: str, description: str, env: dict[str, str], secret_k
     # Refuse a profile that carries a deployment X-band key or a dangling !ENV marker
     # BEFORE it is persisted — the same replace-semantics validation the apply pipeline
     # runs, so an unappliable profile is never committed.
-    with translate_backend_needs_bus(BadRequestError):
+    with translate_config_invariants(BadRequestError):
         try:
             ConfigService.from_app()._validate_replace(body.env)
         except ValueError as exc:
@@ -670,7 +670,7 @@ async def apply_profile(name: str) -> OperationResponse:
         body = await _profile_store().get_active_body(name)
     except SettingsProfileNotFoundError as exc:
         raise NotFoundError(f"settings profile {name!r} not found") from exc
-    with translate_backend_needs_bus(BadRequestError):
+    with translate_config_invariants(BadRequestError):
         try:
             outcome = await ConfigService.from_app().apply_replace_env(
                 _profile_env(body), save_previous=_save_previous_version

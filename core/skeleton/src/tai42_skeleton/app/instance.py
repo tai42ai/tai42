@@ -84,7 +84,9 @@ def _declare_platform_readiness_and_drain(app: TaiMCP) -> None:
     readiness.register("states", states_readiness.readiness_targets)
     readiness.register("conversations", conversations_readiness.readiness_targets)
     readiness.register("bus", bus_settings.readiness_targets)
-    app.drain_budgets.register("tool_runs", lambda: tool_runs_settings.tool_runs_settings().shutdown_drain_seconds)
+    # Constructed fresh on every read, so the budget follows the env current at the call —
+    # including a proposed env a config change is validated under.
+    app.drain_budgets.register("tool_runs", lambda: tool_runs_settings.ToolRunsSettings().shutdown_drain_seconds)
 
 
 def connectors_in_use() -> bool:

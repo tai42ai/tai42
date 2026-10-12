@@ -442,7 +442,10 @@ class WorkerBusPublishMixin:
                     outcome=OpOutcome.departed,
                     detail="acked then its presence key expired before applying — worker departed mid-apply",
                 )
-            detail = "acked but did not apply within the apply timeout — op delivered, verify via fleet census/reload"
+            detail = (
+                "acked but did not apply within the apply timeout, which covers the worker's full drain budget — "
+                "its reload is stuck past it; read the worker's log, verify via fleet census/reload"
+            )
             if transport_error is not None:
                 detail = f"{detail} (reply collection transport error: {transport_error})"
             return WorkerResult(name=name, outcome=OpOutcome.timed_out, detail=detail)

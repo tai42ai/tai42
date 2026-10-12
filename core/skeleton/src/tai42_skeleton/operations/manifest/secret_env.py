@@ -9,7 +9,7 @@ from tai42_contract.app.responses import ApplyResponse
 from tai42_kit.settings import unknown_owned_env_keys
 from tai42_kit.utils.data.env_markers import format_env_marker
 
-from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
+from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
 from tai42_skeleton.config.file_manager import ENV_KEY_RE
 from tai42_skeleton.config.service import ConfigService
@@ -210,7 +210,7 @@ async def set_mcp_secret_env(
 
         return changes, mutator
 
-    with translate_orphan_env_write(), translate_backend_needs_bus(BadRequestError):
+    with translate_orphan_env_write(), translate_config_invariants(BadRequestError):
         try:
             result = await service.apply_env_and_change(prepare, manifest_pointer=manifest_pointer)
         except ValueError as exc:
