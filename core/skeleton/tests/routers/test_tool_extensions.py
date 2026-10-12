@@ -617,6 +617,9 @@ def test_post_on_mcp_provided_tool_applies(cfg, monkeypatch):
             "description": "ping",
             "inputSchema": {"type": "object", "properties": {}},
             "outputSchema": {},
+            "title": None,
+            "annotations": None,
+            "icons": None,
         },
     )()
     monkeypatch.setattr(instance.app, "_probe_mcp", AsyncMock(return_value=[fake_tool]))

@@ -11,8 +11,11 @@ set of DEFAULTS the caller's validated object deep-merges over, caller-wins-per-
 while the REMAINING arguments keep the base tool's real typed schema
 (names, types, descriptions), NOT one opaque ``params`` blob. The preset's
 ``description`` is set on the transformed tool, so a bind re-applies it from the
-stored body every time. A preset carries NO native tags — grouping is the
-tool_meta overlay's job.
+stored body every time. A preset's display identity is its own name and description:
+it serves none of its base's ``title``, ``annotations.title`` or ``icons``. Its
+behaviour hints are its base's (:func:`_hints_of`): a preset calls the base body with
+some arguments fixed, and a hint describes that body. A preset carries NO native tags —
+grouping is the tool_meta overlay's job.
 
 Bake through the PROGRAMMATIC ``transform_args`` path (whose ``default`` accepts
 any value, incl. dict/list) rather than a declarative scalar-only path, so a
@@ -63,6 +66,7 @@ from tai42_skeleton.tools.binding.secret_arguments import reveal_for_validation
 from tai42_skeleton.tools.reveal_gate import secret_was_revealed, stowed_park, stowed_reveal_payload
 
 if TYPE_CHECKING:
+    from mcp.types import ToolAnnotations
     from tai42_contract.app import TaiApp
 
 
@@ -133,6 +137,16 @@ async def preset_bind(
     return _bind_validated(base, name, description, transform_args, output_schema)
 
 
+def _hints_of(base: Tool) -> ToolAnnotations | None:
+    """The behaviour hints a preset over ``base`` serves: the base's annotations without their display title.
+
+    ``None`` when the base declares none.
+    """
+    if base.annotations is None:
+        return None
+    return base.annotations.model_copy(update={"title": None})
+
+
 def _bind_plain(base: Tool, name: str, description: str, transform_args: dict[str, ArgTransform]) -> Tool:
     """Transform ``base`` baking the hidden constants, with NO output schema.
 
@@ -142,6 +156,8 @@ def _bind_plain(base: Tool, name: str, description: str, transform_args: dict[st
         base,
         name=name,
         description=description,
+        title=None,
+        annotations=_hints_of(base),
         transform_args=transform_args,
     )
 
@@ -167,6 +183,8 @@ def _bind_agent_forced(
         base,
         name=name,
         description=description,
+        title=None,
+        annotations=_hints_of(base),
         transform_args=transform_args,
         output_schema=output_schema,
     )
@@ -247,6 +265,8 @@ def _bind_validated(
         base,
         name=name,
         description=description,
+        title=None,
+        annotations=_hints_of(base),
         transform_args=transform_args,
         output_schema=output_schema,
         transform_fn=_enforce_output_schema,
@@ -432,6 +452,8 @@ def _bind_with_input_schema(
         base,
         name=name,
         description=description,
+        title=None,
+        annotations=_hints_of(base),
         output_schema=advertised_output_schema,
         transform_fn=_route,
     )

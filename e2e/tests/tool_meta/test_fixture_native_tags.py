@@ -33,6 +33,7 @@ _FIXTURE_TOOLS = frozenset(
         "e2e_http_probe",
         "run_tool",
         "e2e_resolve_connector",
+        "e2e_connection_grant",
     }
 )
 

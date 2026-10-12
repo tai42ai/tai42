@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import pytest
 from fastmcp.tools import Tool
+from mcp.types import Icon, ToolAnnotations
 from tai42_contract.app import TaiApp, tai42_app
 from tai42_contract.secrets import SecretValue, mask_secrets
 from tai42_contract.template import TemplatedText
@@ -823,3 +824,80 @@ def test_deep_merge_aliases_secret_value_leaves_in_baked_only_subtrees():
     assert merged["headers"]["auth"] is secret
     assert merged["headers"] is not baked["headers"]
     assert merged["other"] == 1
+
+
+# -- a preset's identity and its base's behaviour hints -------------------------
+
+_BASE_TITLE = "List Things"
+_BASE_ANNOTATIONS = ToolAnnotations(title="Annotated listing", readOnlyHint=True, openWorldHint=False)
+_BASE_HINTS = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+_BASE_ICONS = [Icon(src="https://icons.example/list.svg")]
+
+
+def _displayed(tool: Tool, annotations: ToolAnnotations | None = _BASE_ANNOTATIONS) -> Tool:
+    """``tool`` carrying a display title, ``annotations`` and icons of its own."""
+    return tool.model_copy(update={"title": _BASE_TITLE, "annotations": annotations, "icons": _BASE_ICONS})
+
+
+_PATHS = [
+    pytest.param(_base_tool, (), None, {}, id="plain"),
+    pytest.param(
+        _dict_base_tool, (), None, {"output_schema": {"type": "object", "properties": {}}}, id="output-schema"
+    ),
+    pytest.param(
+        _agent_base_tool,
+        ("agent_run",),
+        None,
+        {"output_schema": {"type": "object", "properties": {"city": {"type": "string"}}}},
+        id="agent",
+    ),
+    pytest.param(
+        _payload_base_tool,
+        (),
+        _Support("payload"),
+        {"input_schema": {"type": "object", "properties": {"a": {"type": "integer"}}}},
+        id="input-schema",
+    ),
+]
+
+
+@pytest.mark.parametrize(("make_base", "agent_names", "support", "bind_kwargs"), _PATHS)
+async def test_preset_serves_its_own_identity_and_its_base_behaviour_hints(
+    make_base: Any, agent_names: tuple[str, ...], support: object | None, bind_kwargs: dict[str, Any]
+) -> None:
+    base = make_base()
+    tool = await preset_bind(
+        _app(_displayed(base), agent_names=agent_names, support=support),
+        base.name,
+        {},
+        name="my_other_preset",
+        description="A different authored tool.",
+        **bind_kwargs,
+    )
+    served = tool.to_mcp_tool()
+    assert (served.name, served.description) == ("my_other_preset", "A different authored tool.")
+    assert (served.title, served.icons) == (None, None), served
+    assert served.annotations == _BASE_HINTS, served
+
+
+@pytest.mark.parametrize(("make_base", "agent_names", "support", "bind_kwargs"), _PATHS)
+async def test_preset_over_a_base_without_annotations_serves_none(
+    make_base: Any, agent_names: tuple[str, ...], support: object | None, bind_kwargs: dict[str, Any]
+) -> None:
+    base = make_base()
+    tool = await preset_bind(
+        _app(_displayed(base, annotations=None), agent_names=agent_names, support=support),
+        base.name,
+        {},
+        name="p",
+        **bind_kwargs,
+    )
+    assert tool.to_mcp_tool().annotations is None
+
+
+async def test_preset_over_a_destructive_base_keeps_destructive_hint() -> None:
+    base = _base_tool().model_copy(update={"annotations": ToolAnnotations(destructiveHint=True)})
+    tool = await preset_bind(_app(base), "weather", {"units": "imperial"}, name="p")
+    served = tool.to_mcp_tool()
+    assert served.annotations is not None
+    assert served.annotations.destructiveHint is True

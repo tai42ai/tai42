@@ -50,3 +50,23 @@ async def e2e_age_connection_token(connection_id: str, seconds_ago: int = 60) ->
     if not committed:
         raise RuntimeError(f"connection {connection_id} changed while its expiry was being moved")
     return {"aged": True}
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_connection_grant(connection_id: str) -> dict:
+    """Read the stored grant facts of ``connection_id``: never a token, only what the grant records.
+
+    ``grant`` is ``None`` for a connection made under a declared provider, else its ``issuer``,
+    ``resource`` and ``client_id`` (``None``: the env client). ``access_token_expires_at`` is the
+    stored expiry (ISO 8601) or ``None``; ``has_refresh_token`` says whether one is stored.
+    """
+    from tai42_skeleton.connectors.store.persistence import load_record_with_blob
+
+    record, _ = await load_record_with_blob(connection_id)
+    expires_at = record.access_token_expires_at
+    return {
+        "grant": None if record.grant is None else record.grant.model_dump(mode="json"),
+        "access_token_expires_at": None if expires_at is None else expires_at.isoformat(),
+        "has_refresh_token": record.refresh_token is not None,
+        "auth_health_state": record.auth_health_state.value,
+    }

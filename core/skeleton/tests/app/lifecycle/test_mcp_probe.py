@@ -194,6 +194,9 @@ class _UnusableSchemaTool:
     description = "malformed"
     inputSchema: ClassVar[dict] = {"anyOf": []}
     outputSchema: ClassVar[dict] = {}
+    title = None
+    annotations = None
+    icons = None
 
 
 class _UsableSchemaTool:
@@ -201,6 +204,9 @@ class _UsableSchemaTool:
     description = "ok"
     inputSchema: ClassVar[dict] = {"type": "object", "properties": {"q": {"type": "string"}}}
     outputSchema: ClassVar[dict] = {}
+    title = None
+    annotations = None
+    icons = None
 
 
 def test_unusable_schema_tool_named_in_skipped_tools(monkeypatch):

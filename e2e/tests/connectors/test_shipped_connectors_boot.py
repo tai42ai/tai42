@@ -136,8 +136,12 @@ async def test_atlassian_launch_url_shape(shipped_connectors_stack: TaiStack) ->
     assert "read:issue:jira" in query["scope"].split(" "), query
 
 
-# Slack has no real leg in this suite (no ``TAI_E2E_REAL`` seam), so its client_id is always
-# the fixture ``SLACK_CLIENT_ID`` and this leg always runs.
+# Same as the google leg: the real CONNECTORS_SLACK_CLIENT_ID replaces the fixture ``SLACK_CLIENT_ID``
+# under TAI_E2E_REAL=connector-slack.
+@pytest.mark.skipif(
+    HarnessSettings().is_real("connector-slack"),
+    reason="fixture client_id is the connector-slack mock leg; the real leg on the creds host",
+)
 @pytest.mark.needs("setting:CONNECTORS_SLACK_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_slack_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
@@ -161,8 +165,12 @@ async def test_slack_launch_url_shape(shipped_connectors_stack: TaiStack) -> Non
     assert "search:read" in query["scope"].split(" "), query
 
 
-# GitHub has no real leg in this suite either, so its client_id is always the fixture
-# ``GITHUB_CLIENT_ID`` and this leg always runs.
+# Same as the google leg: the real CONNECTORS_GITHUB_CLIENT_ID replaces the fixture ``GITHUB_CLIENT_ID``
+# under TAI_E2E_REAL=connector-github.
+@pytest.mark.skipif(
+    HarnessSettings().is_real("connector-github"),
+    reason="fixture client_id is the connector-github mock leg; the real leg on the creds host",
+)
 @pytest.mark.needs("setting:CONNECTORS_GITHUB_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_github_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
