@@ -85,7 +85,8 @@ Importing the package registers, as an import side-effect on the global
   signal escalates to RQ's cold shutdown.
 - `beat [rqscheduler options]` — runs the recurring-job scheduler
   (`rq-scheduler`), with `--queue-class tai42_backend_rq.queue.TaskBudgetQueue`
-  so every job it moves onto the queue is bounded by `RQ_TASK_TIMEOUT`.
+  so a job it moves onto the queue is stored with `RQ_TASK_TIMEOUT`; the worker runs
+  every job under its own current `RQ_TASK_TIMEOUT`.
 - `dashboard [rq-dashboard options]` — runs the RQ web dashboard.
 
 ## Fleet control
@@ -158,7 +159,7 @@ Env group `RQ_` (a `tai42_kit` settings class, cached and reset on live reload):
 | `RQ_REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL (broker and results). |
 | `RQ_RQ_PREFIX` | `rq:` | Key prefix RQ uses for its Redis structures. |
 | `RQ_MANIFEST_KEY` | `MANIFEST_KEY` | Env key the worker CLI stores the manifest JSON under (inherited by forked work-horses). |
-| `RQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: every job's default timeout (enqueued or scheduler-fired, through `TaskBudgetQueue`), and how long a `sync_task` dispatch waits for its job's result. |
+| `RQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the timeout the worker runs every job under (enqueued or scheduler-fired, whatever timeout the job was stored with), and how long a `sync_task` dispatch waits for its job's result. |
 | `RQ_TOOL_NAME_ARG` | `backend_tool_name` | Kwarg carrying the target tool name in a queued job. |
 
 The defaults of `RQ_MANIFEST_KEY`, `RQ_TASK_TIMEOUT`, and `RQ_TOOL_NAME_ARG`
