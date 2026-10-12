@@ -13,11 +13,11 @@ from typing import Any
 
 import pytest
 from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError
+from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.interactions.ask import delivery as delivery_module
 from tai42_skeleton.interactions.ask.delivery import deliver_with_retry
 from tai42_skeleton.interactions.ask.timing import DeadlineWindow
-from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore
 
 
@@ -63,7 +63,7 @@ def _window(seconds: float = 30.0) -> DeadlineWindow:
 def pruned(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
 
-    async def _prune(settings: Any, store: Any, interaction_id: str, group_id: str) -> str:
+    async def _prune(store: Any, interaction_id: str, group_id: str) -> str:
         calls.append(interaction_id)
         return "pruned"
 
@@ -75,11 +75,10 @@ def pruned(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return calls
 
 
-async def _deliver(channel: _RecordingChannel, frame: ChannelDelivery, settings: InteractionsSettings) -> None:
+async def _deliver(channel: _RecordingChannel, frame: ChannelDelivery) -> None:
     await deliver_with_retry(
         channel,
         frame,
-        settings,
         InteractionStore("tai:interactions"),
         _window(),
         channel="probe",
@@ -96,25 +95,28 @@ async def test_a_delivery_past_its_deadline_is_never_sent_and_the_question_is_pr
     # A sync frame whose timeout passed, or an async park whose expiry passed: same refusal.
     channel = _RecordingChannel()
     with pytest.raises(ChannelDeliveryError, match="already timed out") as caught:
-        await _deliver(channel, _frame(datetime.now(UTC) - past), InteractionsSettings())
+        await _deliver(channel, _frame(datetime.now(UTC) - past))
     assert channel.delivered == []
     assert caught.value.retryable is False
     assert "nothing was sent" in str(caught.value)
     assert pruned == ["i-1", "event:i-1"]
 
 
-async def test_a_deadline_passing_during_the_backoff_is_refused_before_the_next_send(pruned):
-    settings = InteractionsSettings(delivery_max_attempts=3, delivery_retry_backoff_seconds=1.5)
+async def test_a_deadline_passing_during_the_backoff_is_refused_before_the_next_send(pruned, monkeypatch):
+    # The dispatcher reads the interactions settings at each use: three attempts, 1.5 s apart.
+    monkeypatch.setenv("INTERACTIONS_DELIVERY_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("INTERACTIONS_DELIVERY_RETRY_BACKOFF_SECONDS", "1.5")
+    reset_all_settings()
     channel = _RecordingChannel(failures=[ChannelDeliveryError("transient", retryable=True)])
     frame = _frame(datetime.now(UTC) + timedelta(seconds=1))
     with pytest.raises(ChannelDeliveryError, match="already timed out"):
-        await _deliver(channel, frame, settings)
+        await _deliver(channel, frame)
     assert len(channel.delivered) == 1
     assert pruned == ["i-1", "event:i-1"]
 
 
 async def test_a_live_delivery_is_sent(pruned):
     channel = _RecordingChannel()
-    await _deliver(channel, _frame(datetime.now(UTC) + timedelta(minutes=5)), InteractionsSettings())
+    await _deliver(channel, _frame(datetime.now(UTC) + timedelta(minutes=5)))
     assert len(channel.delivered) == 1
     assert pruned == []
