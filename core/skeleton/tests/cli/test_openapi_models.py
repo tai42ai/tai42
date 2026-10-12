@@ -687,3 +687,9 @@ def test_the_route_mapping_methods_stay_open_strings(spec: dict) -> None:
     # The routes listing reads the live route table, which also holds routes the platform does not declare.
     schema = spec["components"]["schemas"]["RouteMappingRow"]["properties"]["methods"]
     assert schema["items"] == {"type": "string"}
+
+
+def test_a_storage_stat_publishes_its_nullable_content_type(spec: dict) -> None:
+    # A provider that cannot infer a type answers null (the contract's ObjectStat.content_type).
+    schema = spec["components"]["schemas"]["ResourceStat"]["properties"]["content_type"]
+    assert {"type": "null"} in schema["anyOf"]
