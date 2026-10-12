@@ -270,7 +270,7 @@ async def test_a_non_member_publisher_applies_nothing_locally_and_its_member_con
         applied.append("local")
         return "applied"
 
-    body = await broadcast({"op": "reload_tool"}, None, apply)
+    body = await broadcast(_RELOAD_TOOL, None, apply)
 
     assert applied == []
     assert [call[2] for call in bus.publish_calls] == [None]
