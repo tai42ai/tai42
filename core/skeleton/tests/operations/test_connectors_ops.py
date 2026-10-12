@@ -516,17 +516,16 @@ async def test_get_connection_probe_is_bounded_by_timeout(monkeypatch: pytest.Mo
 
 
 async def test_get_connection_probes_sub_services_concurrently(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The enabled sub-services are probed concurrently, so the aggregate wall time
-    # stays near a SINGLE per-item delay rather than their sum. A sequential probe
-    # of N sub-services each delayed ``d`` would take ~N*d; concurrency observes all
-    # N probes in flight at once and completes in ~d. The reported unreachable set
-    # preserves ``enabled_sub_services`` order.
+    # The enabled sub-services are probed concurrently: each probe answers only once all N
+    # are in flight together, so a sequential implementation never gets past its first
+    # probe and runs into the bound. The reported unreachable set preserves
+    # ``enabled_sub_services`` order.
     subs = ["mail", "cal", "docs", "chat", "drive"]
     record = make_oauth_record(provider_id="acme", enabled_sub_services=subs)
     monkeypatch.setattr(conn_ops, "load_record_or_none", _acall({record.connection_id: record}))
     monkeypatch.setattr(conn_ops, "get_provider", lambda pid: make_oauth_descriptor(provider_id="acme"))
 
-    delay = 0.05
+    all_in_flight = asyncio.Event()
     in_flight = 0
     max_in_flight = 0
     down = {"cal", "chat"}  # these read unreachable
@@ -539,8 +538,10 @@ async def test_get_connection_probes_sub_services_concurrently(monkeypatch: pyte
         nonlocal in_flight, max_in_flight
         in_flight += 1
         max_in_flight = max(max_in_flight, in_flight)
+        if in_flight == len(subs):
+            all_in_flight.set()
         try:
-            await asyncio.sleep(delay)
+            await all_in_flight.wait()
         finally:
             in_flight -= 1
         return sub_service not in down
@@ -548,18 +549,15 @@ async def test_get_connection_probes_sub_services_concurrently(monkeypatch: pyte
     monkeypatch.setattr(conn_ops, "resolve_managed_auth", _resolve)
     monkeypatch.setattr(conn_ops, "probe", _probe)
 
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    view = await conn_ops.get_connection(connection_id=record.connection_id)
-    elapsed = loop.time() - started
+    # Measured at most 0.47 s with thirty copies in parallel at load 358.
+    async with asyncio.timeout(10.0):
+        view = await conn_ops.get_connection(connection_id=record.connection_id)
 
     # Order preserved: the down sub-services in enabled order.
     assert view["unreachable_sub_services"] == ["cal", "chat"]
     # All probes were in flight at once — only a concurrent implementation reaches
     # a max-in-flight equal to the number of sub-services.
     assert max_in_flight == len(subs)
-    # And the wall time is bounded near a single delay, well under the sequential sum.
-    assert elapsed < delay * len(subs)
 
 
 async def test_list_connections_is_probe_free(monkeypatch: pytest.MonkeyPatch) -> None:

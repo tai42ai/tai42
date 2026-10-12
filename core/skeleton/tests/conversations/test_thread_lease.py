@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio as _aio
 import threading
-import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from itertools import count
@@ -629,23 +628,39 @@ def lua(monkeypatch) -> _LuaServer:
     return server
 
 
-async def _hold(lease: ThreadTurnLease, thread_id: str, entered: _aio.Event, release: _aio.Event) -> float:
-    """Hold ``thread_id``'s lease until ``release`` is set; return the moment the body ends."""
+async def _hold(lease: ThreadTurnLease, thread_id: str, entered: _aio.Event, release: _aio.Event) -> None:
+    """Hold ``thread_id``'s lease until ``release`` is set."""
     async with lease.held(thread_id):
         entered.set()
         await release.wait()
-        return time.perf_counter()
 
 
-async def _wait_and_take(lease: ThreadTurnLease, thread_id: str, waiting: _aio.Event) -> float:
-    """Take ``thread_id``'s lease once free; return the moment it was acquired."""
+async def _wait_and_take(lease: ThreadTurnLease, thread_id: str, waiting: _aio.Event) -> None:
+    """Take ``thread_id``'s lease once free."""
     waiting.set()
     async with lease.held(thread_id):
-        return time.perf_counter()
+        pass
 
 
-async def test_a_waiter_takes_the_lease_within_one_listener_round_of_the_release(lua):
+def _record_wait_endings(monkeypatch) -> list[str]:
+    """Record how each of the lease's release waits ended: ``"woken"`` or ``"lease bound"``.
+
+    A wait ends either on the listener's wake-up or when the holder's remaining lease runs out.
+    """
+    endings: list[str] = []
+    real_wait = thread_lease_module._wait_for_release
+
+    async def _recording(woken: _aio.Event, seconds: float) -> None:
+        await real_wait(woken, seconds)
+        endings.append("woken" if woken.is_set() else "lease bound")
+
+    monkeypatch.setattr(thread_lease_module, "_wait_for_release", _recording)
+    return endings
+
+
+async def test_a_waiter_takes_the_lease_within_one_listener_round_of_the_release(lua, monkeypatch):
     settings = ConversationsSettings()
+    endings = _record_wait_endings(monkeypatch)
     worker_a, worker_b = ThreadTurnLease(lambda: settings), ThreadTurnLease(lambda: settings)
     a_in, a_release, b_waiting = _aio.Event(), _aio.Event(), _aio.Event()
     holder = _aio.create_task(_hold(worker_a, _THREAD, a_in, a_release))
@@ -658,9 +673,10 @@ async def test_a_waiter_takes_the_lease_within_one_listener_round_of_the_release
     assert not waiter.done()
 
     a_release.set()
-    released_at = await holder
-    acquired_at = await _aio.wait_for(waiter, 1)
-    assert acquired_at - released_at < 0.1
+    await holder
+    await _aio.wait_for(waiter, 1)
+    # The one wait ended on the release's wake-up, not on A's remaining lease.
+    assert endings == ["woken"]
     # One attempt before the listener, one after it subscribed, one after the release.
     assert lua.client.acquire_attempts() == 3
 
@@ -668,6 +684,7 @@ async def test_a_waiter_takes_the_lease_within_one_listener_round_of_the_release
 async def test_a_listener_without_decoded_responses_wakes_the_waiter(lua, monkeypatch):
     monkeypatch.setenv("CONVERSATIONS_DECODE_RESPONSES", "false")
     settings = ConversationsSettings()
+    endings = _record_wait_endings(monkeypatch)
     worker_a, worker_b = ThreadTurnLease(lambda: settings), ThreadTurnLease(lambda: settings)
     a_in, a_release, b_waiting = _aio.Event(), _aio.Event(), _aio.Event()
     holder = _aio.create_task(_hold(worker_a, _THREAD, a_in, a_release))
@@ -676,10 +693,10 @@ async def test_a_listener_without_decoded_responses_wakes_the_waiter(lua, monkey
     await _aio.wait_for(b_waiting.wait(), 1)
     await _aio.sleep(0.05)
     a_release.set()
-    released_at = await holder
-    acquired_at = await _aio.wait_for(waiter, 1)
+    await holder
+    await _aio.wait_for(waiter, 1)
     assert lua.fresh_settings[0]["decode_responses"] is False
-    assert acquired_at - released_at < 0.1
+    assert endings == ["woken"]
 
 
 async def test_an_uncontended_turn_takes_the_lease_without_a_listener(lua):

@@ -31,6 +31,12 @@ from .test_epoch import (  # noqa: F401 - _reset_epoch_state is the autouse fixt
 
 DRAIN_ERROR = "still in flight after the drain budget"
 
+# The drain budget of the cases that tell a drain which waited on a request from one which did
+# not: a drain waiting on a request that cannot finish runs out this budget and reports it,
+# while one that did not wait returns in a fraction of it (measured 0.014-0.025 s on a busy
+# host, at most 0.441 s at load 250-300).
+DRAIN_BUDGET_S = 10.0
+
 
 async def _deferred_tails_finished() -> None:
     async with asyncio.timeout(2.0):
@@ -136,7 +142,6 @@ async def test_a_request_reaching_the_gate_during_a_synchronous_drain_is_not_cou
     log: list[str] = []
     boot.supervisor = _ClosingSupervisor(log)  # type: ignore[assignment]
     go = asyncio.Event()
-    budget = 0.5
 
     async def _lookup() -> None:
         await go.wait()
@@ -152,13 +157,13 @@ async def test_a_request_reaching_the_gate_during_a_synchronous_drain_is_not_cou
             loop.call_later(0.01, go.set)
             start = loop.time()
             await build_and_swap_epoch(
-                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=budget
+                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=DRAIN_BUDGET_S
             )
             took = loop.time() - start
             assert log == [], "the retire closed under a request waiting on the gate"
         await request
         await _deferred_tails_finished()
-    assert took < budget / 2, f"the synchronous drain waited {took:.3f}s on a request blocked on the gate"
+    assert took < DRAIN_BUDGET_S, f"the synchronous drain waited {took:.3f}s on a request blocked on the gate"
     assert log == ["waited out", "answered", "closed"]
     assert DRAIN_ERROR not in caplog.text
 
@@ -323,7 +328,7 @@ async def test_a_session_call_driving_a_reload_answers_before_the_close(
         async with reload_gate.driving():
             start = loop.time()
             await build_and_swap_epoch(
-                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=0.5
+                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=DRAIN_BUDGET_S
             )
             took.append(loop.time() - start)
         await answer.wait()
@@ -335,7 +340,7 @@ async def test_a_session_call_driving_a_reload_answers_before_the_close(
 
     with caplog.at_level(logging.ERROR):
         stream = _served_request(boot, _session_stream)
-        async with asyncio.timeout(2.0):
+        async with asyncio.timeout(2 * DRAIN_BUDGET_S):
             while not took:
                 await asyncio.sleep(0)
         await asyncio.sleep(0.1)
@@ -344,7 +349,7 @@ async def test_a_session_call_driving_a_reload_answers_before_the_close(
         await stream
         await _deferred_tails_finished()
     assert log == ["driver answered", "closed"]
-    assert took[0] < 0.25, "the reload drained synchronously inside its own driver"
+    assert took[0] < DRAIN_BUDGET_S, "the reload drained synchronously inside its own driver"
     assert (boot.driving, boot.in_flight) == (set(), 0)
     assert DRAIN_ERROR not in caplog.text
 
