@@ -23,7 +23,7 @@ import logging
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-from tai42_contract.connectors.errors import ConnectorError, OperatorMisconfiguredError
+from tai42_contract.connectors.errors import ConnectorClientRequiredError, ConnectorError, OperatorMisconfiguredError
 from tai42_contract.connectors.models import (
     AuthHealthState,
     ConnectedAccountView,
@@ -57,6 +57,7 @@ from tai42_skeleton.connectors.runtime.resolver import resolve_managed_auth
 from tai42_skeleton.connectors.service import connection_service
 from tai42_skeleton.connectors.store import token_store
 from tai42_skeleton.connectors.store.catalog_store import fetch_categories
+from tai42_skeleton.connectors.store.client_store import ConnectorStoreNotConfiguredError
 from tai42_skeleton.connectors.store.persistence import load_record_or_none
 from tai42_skeleton.connectors.store.reencrypt import reencrypt_connection_tokens
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
@@ -87,6 +88,11 @@ _NOT_CONFIGURED_CODE = "connectors-not-configured"
 # whole feature being off.
 _PROVIDER_NOT_CONFIGURED_CODE = "connector-provider-not-configured"
 
+# The machine-readable code a flow refusal carries when a provider has no client to sign in
+# with: it names no env client, no client is stored or registrable, and the client-identity
+# document is not available to it — the server needs a hand-registered app.
+_CLIENT_CREDENTIALS_REQUIRED_CODE = "connector-client-credentials-required"
+
 # The machine-readable code the KEK-rotation sweep refusal carries when the CURRENT
 # ``CONNECTORS_KEK`` is missing or malformed — a deployment-wide config fault for every
 # row, not a per-blob failure. Distinct from the store-not-configured and per-provider
@@ -104,6 +110,18 @@ def _not_supported_from_misconfig(exc: OperatorMisconfiguredError) -> NotSupport
     pointer as a structured field.
     """
     return NotSupportedError(str(exc), extra={"code": _PROVIDER_NOT_CONFIGURED_CODE, "env_var": exc.env_var})
+
+
+def _not_supported_from_client_required(exc: ConnectorClientRequiredError) -> NotSupportedError:
+    """Map a provider with no client to sign in with to a named, actionable 501 naming the provider."""
+    return NotSupportedError(
+        str(exc), extra={"code": _CLIENT_CREDENTIALS_REQUIRED_CODE, "provider_id": exc.provider_id}
+    )
+
+
+def _not_supported_from_store_off(exc: ConnectorStoreNotConfiguredError) -> NotSupportedError:
+    """Map the client store's own not-configured refusal to the same 501 the token store's gate answers."""
+    return NotSupportedError(str(exc), extra={"code": _NOT_CONFIGURED_CODE})
 
 
 # -- Serialization (through the contract wire models; never leaks secrets) ----
@@ -392,6 +410,10 @@ async def start_connect(
         # The provider's OAuth client credentials env var is unset — a named,
         # actionable 501, never an unnamed 500.
         raise _not_supported_from_misconfig(exc) from exc
+    except ConnectorClientRequiredError as exc:
+        raise _not_supported_from_client_required(exc) from exc
+    except ConnectorStoreNotConfiguredError as exc:
+        raise _not_supported_from_store_off(exc) from exc
     except (ValueError, oauth_client.OAuthError) as exc:
         # An off-list Origin surfaces as RedirectUriNotAllowedError (an OAuthError);
         # map it to a clean 400 rather than let it escape as a 500.
@@ -462,6 +484,10 @@ async def reconnect(
         # The provider's OAuth client credentials env var is unset — a named,
         # actionable 501, never an unnamed 500.
         raise _not_supported_from_misconfig(exc) from exc
+    except ConnectorClientRequiredError as exc:
+        raise _not_supported_from_client_required(exc) from exc
+    except ConnectorStoreNotConfiguredError as exc:
+        raise _not_supported_from_store_off(exc) from exc
     except (ValueError, oauth_client.OAuthError) as exc:
         # An off-list Origin surfaces as RedirectUriNotAllowedError (an OAuthError);
         # map it to a clean 400 rather than let it escape as a 500.
@@ -503,6 +529,10 @@ async def patch_sub_services(
         # The provider's OAuth client credentials env var is unset — a named,
         # actionable 501, never an unnamed 500.
         raise _not_supported_from_misconfig(exc) from exc
+    except ConnectorClientRequiredError as exc:
+        raise _not_supported_from_client_required(exc) from exc
+    except ConnectorStoreNotConfiguredError as exc:
+        raise _not_supported_from_store_off(exc) from exc
     except (ValueError, oauth_client.OAuthError) as exc:
         # An off-list Origin surfaces as RedirectUriNotAllowedError (an OAuthError);
         # map it to a clean 400 rather than let it escape as a 500.
@@ -523,20 +553,21 @@ async def patch_sub_services(
 
 
 @operation(
-    summary="Re-encrypt connector tokens under the current KEK",
+    summary="Re-encrypt connector tokens and client credentials under the current KEK",
     tags=["connectors"],
     authority_changing=True,
     errors=[NotSupportedError],
     response_model=ConnectorReencryptResult,
 )
 async def reencrypt_connector_tokens() -> dict[str, Any]:
-    """Re-encrypt every stored connector token blob under the current ``CONNECTORS_KEK``.
+    """Re-encrypt every stored connector token and client credential under the current ``CONNECTORS_KEK``.
 
     The KEK-rotation convergence sweep: after ``CONNECTORS_KEK`` is rotated (new current
-    key, old key moved to ``CONNECTORS_KEK_PREVIOUS``), this rewrites every blob still
-    under a previous key so the previous key can be retired. Idempotent — a blob already
-    under the current key is skipped. A blob no configured key can open is counted and
-    named in ``failed_connection_ids``, never silently dropped. A missing/malformed
+    key, old key moved to ``CONNECTORS_KEK_PREVIOUS``), this rewrites every connection blob
+    and every stored OAuth client blob still under a previous key so the previous key can
+    be retired. Idempotent — a blob already under the current key is skipped. A blob no
+    configured key can open is counted and named in ``failed_connection_ids`` /
+    ``failed_client_row_ids``, never silently dropped. A missing/malformed
     current ``CONNECTORS_KEK`` is a deployment-wide config fault and surfaces as a named
     ``NotSupportedError`` (501), never an unnamed 500.
     """
@@ -547,6 +578,8 @@ async def reencrypt_connector_tokens() -> dict[str, Any]:
         raise NotSupportedError(not_configured_message("connector token store"), extra={"code": _NOT_CONFIGURED_CODE})
     try:
         return await reencrypt_connection_tokens()
+    except ConnectorStoreNotConfiguredError as exc:
+        raise _not_supported_from_store_off(exc) from exc
     except ConnectorEncryptionConfigError as exc:
         # A missing/malformed CURRENT CONNECTORS_KEK is a deployment fault for every
         # row, not a per-blob failure: surface it as a named, actionable 501 rather

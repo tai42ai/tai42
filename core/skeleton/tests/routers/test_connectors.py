@@ -10,6 +10,7 @@ from typing import cast
 
 import pytest
 from starlette.requests import Request
+from tai42_contract.connectors.errors import ConnectorClientRequiredError
 from tai42_contract.connectors.models import AuthHealthState
 from tai42_contract.connectors.service import (
     AliasInUseError,
@@ -450,6 +451,7 @@ async def test_oauth_complete_oauth_error(wiring, monkeypatch):
         lambda: router.connection_service.AliasInUseError("dup alias"),
         lambda: router.connection_service.ConnectionNotFoundError("c1"),
         lambda: router.connection_service.ConcurrentConnectionUpdateError("c1"),
+        lambda: ConnectorClientRequiredError("remote", "the client row is gone"),
     ],
 )
 async def test_oauth_complete_completion_error_maps_to_failed(wiring, monkeypatch, make_exc):

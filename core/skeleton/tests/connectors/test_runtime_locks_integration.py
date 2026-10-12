@@ -111,11 +111,11 @@ def fake() -> Iterator[FakeOAuthServer]:
 
 class _Store:
     def __init__(self, record: ConnectionRecord) -> None:
-        self.blob = crypto.encrypt(record.to_storage_json().encode(), connection_id=record.connection_id)
+        self.blob = crypto.encrypt(record.to_storage_json().encode(), aad=record.connection_id)
         self.cid = record.connection_id
 
     def record(self) -> ConnectionRecord:
-        return ConnectionRecord.model_validate_json(crypto.decrypt(self.blob, connection_id=self.cid))
+        return ConnectionRecord.model_validate_json(crypto.decrypt(self.blob, aad=self.cid))
 
     async def put(self, connection_id, blob, *, create_only=False, expected_blob=None, session_expires_at=None):
         if expected_blob is not None and expected_blob != self.blob:

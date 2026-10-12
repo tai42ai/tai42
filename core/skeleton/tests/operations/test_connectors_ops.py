@@ -14,13 +14,14 @@ from types import SimpleNamespace
 from typing import get_args
 
 import pytest
-from tai42_contract.connectors.errors import OperatorMisconfiguredError
+from tai42_contract.connectors.errors import ConnectorClientRequiredError, OperatorMisconfiguredError
 from tai42_contract.connectors.models import AuthHealthState
 from tai42_contract.manifest import ApiToolsConfig
 
 from tai42_skeleton.connectors.oauth.crypto import ConnectorEncryptionConfigError
 from tai42_skeleton.connectors.runtime.resolver import ConnectorReconnectRequiredError, ManagedAuth
 from tai42_skeleton.connectors.store.catalog_store import ConnectorCategory
+from tai42_skeleton.connectors.store.client_store import ConnectorStoreNotConfiguredError
 from tai42_skeleton.operations import (
     BadRequestError,
     NotFoundError,
@@ -380,6 +381,91 @@ async def test_patch_sub_services_missing_provider_creds_is_501(monkeypatch: pyt
         )
     assert exc_info.value.status == 501
     assert exc_info.value.extra["code"] == "connector-provider-not-configured"
+
+
+# -- a provider with no client / the client store off → named 501 --------------------------
+
+
+def _flow_door_calls():
+    return [
+        (
+            "start_connect",
+            lambda: conn_ops.start_connect(
+                provider_id="remote",
+                alias="work",
+                enabled_sub_services=["files"],
+                config_values={},
+                return_url="/connectors",
+                redirect_uri="https://app/oauth-bridge.html",
+                origin="https://app",
+            ),
+        ),
+        (
+            "start_reconnect",
+            lambda: conn_ops.reconnect(
+                connection_id="c1",
+                enabled_sub_services=["files"],
+                return_url="/connectors",
+                redirect_uri="https://app/oauth-bridge.html",
+                origin="https://app",
+            ),
+        ),
+        (
+            "patch_sub_services",
+            lambda: conn_ops.patch_sub_services(
+                connection_id="c1",
+                enabled_sub_services=["files"],
+                return_url="/connectors",
+                redirect_uri="https://app/oauth-bridge.html",
+                origin="https://app",
+            ),
+        ),
+    ]
+
+
+@pytest.mark.parametrize("door", ["start_connect", "start_reconnect", "patch_sub_services"])
+async def test_a_provider_that_needs_a_hand_registered_client_is_a_named_501(
+    monkeypatch: pytest.MonkeyPatch, door: str
+) -> None:
+    monkeypatch.setattr(conn_ops, "load_record_or_none", _acall({"c1": _record("c1")}))
+
+    async def _raise(**kw):
+        raise ConnectorClientRequiredError("remote", "the server offers no registration")
+
+    monkeypatch.setattr(conn_ops.connection_service, door, _raise)
+    call = dict(_flow_door_calls())[door]
+    with pytest.raises(NotSupportedError) as exc_info:
+        await call()
+    assert exc_info.value.status == 501
+    assert exc_info.value.extra == {"code": "connector-client-credentials-required", "provider_id": "remote"}
+    assert "remote" in exc_info.value.message
+
+
+@pytest.mark.parametrize("door", ["start_connect", "start_reconnect", "patch_sub_services"])
+async def test_the_client_store_off_is_the_store_off_501(monkeypatch: pytest.MonkeyPatch, door: str) -> None:
+    monkeypatch.setattr(conn_ops, "load_record_or_none", _acall({"c1": _record("c1")}))
+
+    async def _raise(**kw):
+        raise ConnectorStoreNotConfiguredError("the connector client store is not configured: set X")
+
+    monkeypatch.setattr(conn_ops.connection_service, door, _raise)
+    call = dict(_flow_door_calls())[door]
+    with pytest.raises(NotSupportedError) as exc_info:
+        await call()
+    assert exc_info.value.status == 501
+    assert exc_info.value.extra == {"code": "connectors-not-configured"}
+
+
+async def test_the_rotation_sweep_maps_the_client_store_off_to_the_store_off_501(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _raise():
+        raise ConnectorStoreNotConfiguredError("the connector client store is not configured: set X")
+
+    monkeypatch.setattr(conn_ops, "reencrypt_connection_tokens", _raise)
+    with pytest.raises(NotSupportedError) as exc_info:
+        await conn_ops.reencrypt_connector_tokens()
+    assert exc_info.value.extra == {"code": "connectors-not-configured"}
 
 
 def test_reconnect_and_patch_declare_not_supported_error() -> None:

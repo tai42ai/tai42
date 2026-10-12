@@ -10,6 +10,7 @@ from tai42_contract.connectors.service import StartConnectResult
 
 from tai42_skeleton.connectors.oauth import authorization, redirect, state
 from tai42_skeleton.connectors.oauth import client as oauth_client
+from tai42_skeleton.connectors.store import client_store
 
 
 def _flow_redirect_uri(descriptor: ProviderDescriptor, *, redirect_uri: str, origin: str) -> str:
@@ -46,14 +47,21 @@ async def _start_flow(
     anything is discovered or stored, so a spoofed ``Origin`` header cannot mint a
     deployment-signed state pointing off-list. The authorization and the client are
     resolved before the flow record is written, which records the issuer of the
-    validated metadata. ``record`` is the connection a reconnect or toggle re-consents.
+    validated metadata; a stored-client provider's discovery is bound to the issuer of
+    its manual client when it has one. ``record`` is the connection a reconnect or
+    toggle re-consents.
     """
     redirect.validate_origin_allowed(origin)
     flow_redirect_uri = oauth_client.validate_redirect_uri(
         _flow_redirect_uri(descriptor, redirect_uri=redirect_uri, origin=origin)
     )
-    resolved = await authorization.resolve_authorization(descriptor)
-    client = await authorization.resolve_client(descriptor, resolved, redirect_uri=flow_redirect_uri)
+    # A stored-client provider's administrator app keeps receiving its new logins while the
+    # server lists the app's issuer, wherever it stands in the server's list.
+    bound_issuer = (
+        None if descriptor.client_id_env else await client_store.active_client_store().manual_issuer(descriptor.id)
+    )
+    resolved = await authorization.resolve_authorization(descriptor, bound_issuer=bound_issuer)
+    client = await authorization.resolve_client(descriptor, resolved, redirect_uri=flow_redirect_uri, origin=origin)
     scopes = authorization.requested_scopes(descriptor, enabled_sub_services, resolved, record=record)
 
     verifier, challenge = oauth_client.generate_pkce_pair()

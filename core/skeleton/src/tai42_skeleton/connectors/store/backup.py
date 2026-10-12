@@ -1,13 +1,17 @@
 """Store-level backup export/import for the connector Postgres tables.
 
 These helpers work below the network-gated service layer; no provider re-probe, no
-OAuth replay. Two independent section pairs cover the two halves of connector state:
+OAuth replay. Three independent section pairs cover connector state:
 
   * categories — the public, secret-free ``connector_category`` grouping rows, read
     and written at the SQL layer.
   * connections — the per-connection token records, each carrying its AES-GCM
     ciphertext verbatim (base64, NEVER decrypted), read and restored through the
     token store's own full-listing and restore methods.
+  * OAuth clients — the stored manual and dynamic client rows, each carrying its sealed
+    credentials verbatim (base64, NEVER decrypted) under its original ``client_row_id``
+    (the blob is sealed to it), read and restored through the client store's own
+    enumeration and restore methods.
 
 KEK constraint: a restore is usable only under the SAME ``CONNECTORS_KEK``; under a
 different KEK the ciphertext is intact but undecryptable and the load path fails loudly
@@ -25,6 +29,8 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
+from tai42_skeleton.connectors.store import client_store
+from tai42_skeleton.connectors.store.client_store import StoredClientRow
 from tai42_skeleton.connectors.store.redis_pg import RedisPgConnectorTokenStore, StoredConnection
 from tai42_skeleton.db import SKELETON_COMPONENT
 
@@ -164,6 +170,79 @@ async def import_connector_connections(
             report.skipped += 1
         else:
             _count(report, result.outcome == "updated")
+    return report
+
+
+# -- connector_oauth_clients (sealed client credentials, secret) -------------
+
+
+def _iso(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+def _when(value: str | None) -> datetime | None:
+    return None if value is None else datetime.fromisoformat(value)
+
+
+async def export_connector_oauth_clients() -> list[dict[str, Any]]:
+    """Export every stored OAuth client row, ``encrypted_blob`` base64-encoded AS-IS.
+
+    Never decrypted, so the KEK boundary is never crossed. Dead and expired rows are exported
+    too: a grant issued under one still names it.
+    """
+    rows = await client_store.active_client_store().enumerate_rows()
+    return [
+        {
+            "client_row_id": row.client_row_id,
+            "provider_id": row.provider_id,
+            "issuer": row.issuer,
+            "client_id": row.client_id,
+            "source": row.source,
+            "redirect_uri": row.redirect_uri,
+            "secret_expires_at": _iso(row.secret_expires_at),
+            "dead": row.dead,
+            "encrypted_blob_b64": base64.b64encode(row.encrypted_blob).decode("ascii"),
+            "created_at": _iso(row.created_at),
+            "updated_at": _iso(row.updated_at),
+        }
+        for row in rows
+    ]
+
+
+async def import_connector_oauth_clients(
+    payload: list[dict[str, Any]], mode: Literal["skip", "overwrite"] = "skip"
+) -> BackupSectionReport:
+    """Restore each client row whole under its original ``client_row_id`` through the client store.
+
+    A row is matched by its natural key (``provider_id``, ``issuer``, ``client_id``); an imported
+    manual row also meets the provider's existing manual row. ``skip`` leaves a matched row
+    untouched and reports the imported one as skipped; ``overwrite`` replaces the matched rows with
+    the imported one. Any database error aborts the section.
+    """
+    rows = [
+        StoredClientRow(
+            client_row_id=entry["client_row_id"],
+            provider_id=entry["provider_id"],
+            issuer=entry["issuer"],
+            client_id=entry["client_id"],
+            source=entry["source"],
+            redirect_uri=entry.get("redirect_uri"),
+            secret_expires_at=_when(entry.get("secret_expires_at")),
+            dead=bool(entry["dead"]),
+            encrypted_blob=base64.b64decode(entry["encrypted_blob_b64"]),
+            created_at=datetime.fromisoformat(entry["created_at"]),
+            updated_at=datetime.fromisoformat(entry["updated_at"]),
+        )
+        for entry in payload
+    ]
+    results = await client_store.active_client_store().restore(rows, overwrite=mode == "overwrite")
+
+    report = _empty_report()
+    for result in results:
+        if result.outcome == "skipped_existing":
+            report.details["skipped_existing"] += 1
+        else:
+            _count(report, result.outcome == "replaced")
     return report
 
 

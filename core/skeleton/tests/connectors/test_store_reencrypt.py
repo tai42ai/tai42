@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -16,8 +17,10 @@ from tai42_kit.settings import reset_all_settings
 import tai42_skeleton.connectors.store.redis_pg as redis_pg
 import tai42_skeleton.connectors.store.reencrypt as reencrypt
 from tai42_skeleton.connectors.oauth import crypto
+from tai42_skeleton.connectors.store.client_store import open_row, seal_credentials
 from tai42_skeleton.connectors.store.reencrypt import reencrypt_connection_tokens
 
+from .client_store_fake import FakeClientStore
 from .conftest import CID, CID2, TEST_KEK_B64
 
 # A second, unrelated 32-byte key the rotation moves TO (current), keeping A as previous.
@@ -156,14 +159,14 @@ def _decrypts_under_b_alone(blob: bytes, connection_id: str, monkeypatch) -> byt
     monkeypatch.setenv("CONNECTORS_KEK", _KEY_B_B64)
     monkeypatch.delenv("CONNECTORS_KEK_PREVIOUS", raising=False)
     reset_all_settings()
-    return crypto.decrypt(blob, connection_id=connection_id)
+    return crypto.decrypt(blob, aad=connection_id)
 
 
 async def test_sweep_reencrypts_stale_and_skips_current(sweep_fakes, monkeypatch):
     pg, _ = sweep_fakes
-    stale = crypto.encrypt(b"token-1", connection_id=CID)  # under A (crypto_env default)
+    stale = crypto.encrypt(b"token-1", aad=CID)  # under A (crypto_env default)
     _rotate_to_b(monkeypatch)
-    current = crypto.encrypt(b"token-2", connection_id=CID2)  # under B (now current)
+    current = crypto.encrypt(b"token-2", aad=CID2)  # under B (now current)
     _seed(pg, CID, stale)
     _seed(pg, CID2, current)
 
@@ -183,7 +186,7 @@ async def test_sweep_reencrypts_stale_and_skips_current(sweep_fakes, monkeypatch
 
 async def test_sweep_includes_expired_rows(sweep_fakes, monkeypatch):
     pg, _ = sweep_fakes
-    stale = crypto.encrypt(b"token-exp", connection_id=CID)  # under A
+    stale = crypto.encrypt(b"token-exp", aad=CID)  # under A
     _rotate_to_b(monkeypatch)
     past = datetime.now(UTC) - timedelta(days=1)
     _seed(pg, CID, stale, exp=past)
@@ -205,7 +208,7 @@ async def test_sweep_counts_undecryptable_as_failed(sweep_fakes, monkeypatch):
     monkeypatch.setenv("CONNECTORS_KEK", _ORPHAN_KEY)
     monkeypatch.delenv("CONNECTORS_KEK_PREVIOUS", raising=False)
     reset_all_settings()
-    orphan = crypto.encrypt(b"unreadable", connection_id=CID)
+    orphan = crypto.encrypt(b"unreadable", aad=CID)
     _rotate_to_b(monkeypatch)
     _seed(pg, CID, orphan)
 
@@ -221,7 +224,7 @@ async def test_sweep_counts_undecryptable_as_failed(sweep_fakes, monkeypatch):
 
 async def test_sweep_missing_kek_propagates(sweep_fakes, monkeypatch):
     pg, _ = sweep_fakes
-    blob = crypto.encrypt(b"token", connection_id=CID)  # under A
+    blob = crypto.encrypt(b"token", aad=CID)  # under A
     _seed(pg, CID, blob)
     # A missing KEK is a deployment fault for EVERY row — it must propagate, not be
     # counted as a per-row failure.
@@ -237,9 +240,9 @@ async def test_sweep_cas_miss_reread_already_current_is_skipped(sweep_fakes, mon
     # the current key: the sweep re-reads, sees the peer's current-key blob, and skips —
     # counting the retry, never rewriting a converged blob.
     pg, _ = sweep_fakes
-    stale = crypto.encrypt(b"token", connection_id=CID)  # under A
+    stale = crypto.encrypt(b"token", aad=CID)  # under A
     _rotate_to_b(monkeypatch)
-    peer_current = crypto.encrypt(b"token", connection_id=CID)  # peer already rewrote under B
+    peer_current = crypto.encrypt(b"token", aad=CID)  # peer already rewrote under B
     _seed(pg, CID, stale)
 
     def _peer_rewrote_under_current(pg_, cid):
@@ -262,7 +265,7 @@ async def test_sweep_cas_miss_reread_deleted_row_is_skipped(sweep_fakes, monkeyp
     # A concurrent disconnect deletes the row between the sweep's read and its write: the
     # CAS misses, the re-read finds no row, and the sweep skips it — nothing to converge.
     pg, _ = sweep_fakes
-    stale = crypto.encrypt(b"token", connection_id=CID)  # under A
+    stale = crypto.encrypt(b"token", aad=CID)  # under A
     _rotate_to_b(monkeypatch)
     _seed(pg, CID, stale)
 
@@ -286,12 +289,10 @@ async def test_sweep_sustained_cas_contention_fails_after_max_retries(sweep_fake
     # still-stale (previous-key) blob, so no CAS ever commits. The sweep exhausts its
     # bounded retry budget and reports the row as failed — never a silent give-up.
     pg, _ = sweep_fakes
-    stale = crypto.encrypt(b"token-0", connection_id=CID)  # under A
+    stale = crypto.encrypt(b"token-0", aad=CID)  # under A
     # Precompute distinct still-stale (A) blobs the peer rotates in on each attempt, so
     # every re-read yields a decryptable-but-not-current blob and the next CAS misses too.
-    peer_stale = [
-        crypto.encrypt(f"token-{i}".encode(), connection_id=CID) for i in range(1, reencrypt._MAX_CAS_RETRIES + 2)
-    ]
+    peer_stale = [crypto.encrypt(f"token-{i}".encode(), aad=CID) for i in range(1, reencrypt._MAX_CAS_RETRIES + 2)]
     _rotate_to_b(monkeypatch)
     _seed(pg, CID, stale)
 
@@ -312,3 +313,100 @@ async def test_sweep_sustained_cas_contention_fails_after_max_retries(sweep_fake
     assert result["failed_connection_ids"] == [CID]
     # One miss per attempt across the bounded budget (initial try + _MAX_CAS_RETRIES).
     assert result["cas_retries"] == reencrypt._MAX_CAS_RETRIES + 1
+
+
+# -- the stored OAuth client rows -----------------------------------------------------------
+
+
+def _client_row(store: FakeClientStore):
+    return store.add_row(provider_id="remote", issuer="https://as.example.com", client_id="dyn", source="dynamic")
+
+
+async def test_the_sweep_rewrites_stale_client_rows_and_reports_them(sweep_fakes, monkeypatch, client_store_fake):
+    stale = _client_row(client_store_fake)
+    _rotate_to_b(monkeypatch)
+    current = _client_row(client_store_fake)
+
+    result = await reencrypt_connection_tokens()
+
+    assert (result["clients_scanned"], result["clients_reencrypted"], result["clients_skipped"]) == (2, 1, 1)
+    assert (result["clients_failed"], result["failed_client_row_ids"]) == (0, [])
+    rewritten = client_store_fake.row(stale.client_row_id)
+    assert rewritten.encrypted_blob != stale.encrypted_blob
+    assert client_store_fake.row(current.client_row_id).encrypted_blob == current.encrypted_blob
+    assert "rewrite_blob" in client_store_fake.calls
+    monkeypatch.delenv("CONNECTORS_KEK_PREVIOUS")
+    reset_all_settings()
+    assert open_row(rewritten).client_secret == "stored-secret"
+
+
+async def test_an_unreadable_client_row_is_counted_and_named(sweep_fakes, monkeypatch, client_store_fake):
+    row = _client_row(client_store_fake)
+    client_store_fake.rows[0] = replace(row, encrypted_blob=crypto.encrypt(b"x", aad="elsewhere"))
+
+    result = await reencrypt_connection_tokens()
+
+    assert result["clients_failed"] == 1
+    assert result["failed_client_row_ids"] == [row.client_row_id]
+
+
+async def test_a_client_row_changed_meanwhile_is_reread_once(sweep_fakes, monkeypatch, client_store_fake):
+    stale = _client_row(client_store_fake)
+    _rotate_to_b(monkeypatch)
+    peer = seal_credentials(stale.client_row_id, "peer-secret", "client_secret_post")
+    original = client_store_fake.rewrite_blob
+
+    async def _peer_wins_first(client_row_id, new_blob, *, expected_blob):
+        if expected_blob == stale.encrypted_blob:
+            client_store_fake.rows[0] = replace(stale, encrypted_blob=peer)
+            return False
+        return await original(client_row_id, new_blob, expected_blob=expected_blob)
+
+    monkeypatch.setattr(client_store_fake, "rewrite_blob", _peer_wins_first)
+    result = await reencrypt_connection_tokens()
+    # The peer's write is already under the current key: skipped after one re-read.
+    assert (result["clients_skipped"], result["cas_retries"]) == (1, 1)
+    assert client_store_fake.row(stale.client_row_id).encrypted_blob == peer
+
+
+async def test_a_client_row_deleted_meanwhile_is_skipped(sweep_fakes, monkeypatch, client_store_fake):
+    stale = _client_row(client_store_fake)
+    _rotate_to_b(monkeypatch)
+
+    async def _gone(client_row_id, new_blob, *, expected_blob):
+        client_store_fake.rows.clear()
+        return False
+
+    monkeypatch.setattr(client_store_fake, "rewrite_blob", _gone)
+    result = await reencrypt_connection_tokens()
+    assert (result["clients_skipped"], result["clients_failed"]) == (1, 0)
+    assert stale.client_row_id not in result["failed_client_row_ids"]
+
+
+async def test_sustained_contention_on_a_client_row_fails_it(sweep_fakes, monkeypatch, client_store_fake):
+    stale = _client_row(client_store_fake)
+    _rotate_to_b(monkeypatch)
+    _rotate_back = TEST_KEK_B64
+
+    async def _always_lose(client_row_id, new_blob, *, expected_blob):
+        # A peer keeps writing a blob still under the previous key.
+        monkeypatch.setenv("CONNECTORS_KEK", _rotate_back)
+        reset_all_settings()
+        client_store_fake.rows[0] = replace(
+            stale, encrypted_blob=seal_credentials(stale.client_row_id, "s", "client_secret_post")
+        )
+        _rotate_to_b(monkeypatch)
+        return False
+
+    monkeypatch.setattr(client_store_fake, "rewrite_blob", _always_lose)
+    result = await reencrypt_connection_tokens()
+    assert result["failed_client_row_ids"] == [stale.client_row_id]
+    assert result["cas_retries"] == reencrypt._MAX_CAS_RETRIES + 1
+
+
+async def test_a_missing_kek_on_a_client_row_propagates(sweep_fakes, monkeypatch, client_store_fake):
+    _client_row(client_store_fake)
+    monkeypatch.delenv("CONNECTORS_KEK")
+    reset_all_settings()
+    with pytest.raises(crypto.ConnectorEncryptionConfigError):
+        await reencrypt_connection_tokens()

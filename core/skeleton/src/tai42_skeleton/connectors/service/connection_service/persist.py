@@ -43,7 +43,7 @@ async def _persist(
     """
     blob = crypto.encrypt(
         record.to_storage_json().encode("utf-8"),
-        connection_id=record.connection_id,
+        aad=record.connection_id,
     )
     # provider_id/alias back the durable UNIQUE (provider_id, alias) constraint;
     # a create-only insert that collides raises AliasInUseError from the store (the

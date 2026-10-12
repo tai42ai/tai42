@@ -346,7 +346,7 @@ def _schedule_error_text(entry: Any) -> str:
     return str(entry)
 
 
-# -- connector_categories / connector_connections ----------------------------
+# -- connector_categories / connector_connections / connector_oauth_clients ----
 
 
 async def _export_connector_categories() -> dict[str, Any]:
@@ -371,6 +371,18 @@ async def _import_connector_connections(payload: list[dict[str, Any]]) -> Backup
     from tai42_skeleton.connectors.store.backup import import_connector_connections
 
     return await import_connector_connections(payload, current_import_mode())
+
+
+async def _export_connector_oauth_clients() -> list[dict[str, Any]]:
+    from tai42_skeleton.connectors.store.backup import export_connector_oauth_clients
+
+    return await export_connector_oauth_clients()
+
+
+async def _import_connector_oauth_clients(payload: list[dict[str, Any]]) -> BackupSectionReport:
+    from tai42_skeleton.connectors.store.backup import import_connector_oauth_clients
+
+    return await import_connector_oauth_clients(payload, current_import_mode())
 
 
 # -- versioned_documents (the kind-agnostic versioned-document store) ---------
@@ -443,6 +455,9 @@ def register_core_sections(registry: Any) -> None:
     registry.register_section("connector_categories", _export_connector_categories, _import_connector_categories)
     registry.register_section(
         "connector_connections", _export_connector_connections, _import_connector_connections, secret=True
+    )
+    registry.register_section(
+        "connector_oauth_clients", _export_connector_oauth_clients, _import_connector_oauth_clients, secret=True
     )
     # Body-opaque and kind-agnostic, so ONE section covers every kind. secret=True:
     # the ``settings_profile`` kind stores env values verbatim, secrets included

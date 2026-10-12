@@ -24,7 +24,6 @@ from tai42_kit.settings import reset_all_settings
 import tai42_skeleton.connectors.runtime.resolver as resolver_mod
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.connectors.oauth import crypto, discovery
-from tai42_skeleton.connectors.oauth.authorization import ClientSource
 from tai42_skeleton.connectors.runtime import refresh_owner
 from tai42_skeleton.connectors.runtime.resolver import (
     ConnectorReconnectRequiredError,
@@ -32,6 +31,7 @@ from tai42_skeleton.connectors.runtime.resolver import (
     resolve_managed_auth,
 )
 
+from .client_store_fake import FakeClientStore
 from .conftest import CID, make_discovered_descriptor
 from .oauth_fakes import FakeOAuthServer, Reply, serve
 
@@ -50,10 +50,10 @@ class _Store:
 
     @staticmethod
     def seal(record: ConnectionRecord) -> bytes:
-        return crypto.encrypt(record.to_storage_json().encode(), connection_id=record.connection_id)
+        return crypto.encrypt(record.to_storage_json().encode(), aad=record.connection_id)
 
     def record(self) -> ConnectionRecord:
-        return ConnectionRecord.model_validate_json(crypto.decrypt(self.blob, connection_id=CID))
+        return ConnectionRecord.model_validate_json(crypto.decrypt(self.blob, aad=CID))
 
     async def put(self, connection_id, blob, *, create_only=False, expected_blob=None, session_expires_at=None):
         self.puts.append((blob, expected_blob))
@@ -260,29 +260,19 @@ async def test_a_token_with_no_expiry_is_served_without_a_refresh(wiring: _Wirin
 # -- the issuer table -------------------------------------------------------------------
 
 
-async def test_a_server_that_adds_a_second_server_first_moves_no_grant(wiring: _Wiring, fake: FakeOAuthServer):
+async def test_a_server_that_adds_a_second_server_first_moves_no_grant(
+    wiring: _Wiring, fake: FakeOAuthServer, client_store_fake: FakeClientStore
+):
     mcp = _publish(fake, servers=("/b", "/a"))
-    store = wiring.use(_record(grant=ConnectionGrant(issuer=f"{fake.base}/a")), make_discovered_descriptor(mcp_url=mcp))
-    monkey_client(wiring)
+    client_store_fake.add_row(provider_id="remote", issuer=f"{fake.base}/a", client_id="stored-1", source="manual")
+    store = wiring.use(
+        _record(grant=ConnectionGrant(issuer=f"{fake.base}/a", client_id="stored-1")),
+        make_discovered_descriptor(mcp_url=mcp),
+    )
     _rotating(fake)
     await resolve_managed_auth(CID, "remote", "files")
     assert [r.path for r in _token_requests(fake)] == ["/a/token"]
     assert store.record().auth_health_state is AuthHealthState.HEALTHY
-
-
-def monkey_client(wiring: _Wiring, *, source: ClientSource = "manual") -> None:
-    """Serve the stored-client lookup a stored client (the store itself is a later seam)."""
-    from tai42_skeleton.connectors.oauth import authorization
-
-    async def _resolve_client(descriptor, resolved, *, redirect_uri=None, client_id=None):
-        return authorization.ResolvedClient(
-            client_id=client_id or "stored-1",
-            client_secret="stored-secret",
-            auth_method="client_secret_post",
-            source=source,
-        )
-
-    wiring.monkeypatch.setattr(authorization, "resolve_client", _resolve_client)
 
 
 async def test_no_pin_and_the_grants_server_no_longer_listed_requires_a_reconnect(
@@ -405,17 +395,101 @@ async def test_a_stored_client_grant_under_a_descriptor_that_now_names_an_env_cl
     assert fake.received == []
 
 
-async def test_a_refused_dynamic_client_requires_a_reconnect(wiring: _Wiring, fake: FakeOAuthServer):
+async def test_a_refused_dynamic_client_is_marked_dead_and_requires_a_reconnect(
+    wiring: _Wiring, fake: FakeOAuthServer, client_store_fake: FakeClientStore
+):
     mcp = _publish(fake)
+    issuer = f"{fake.base}/a"
+    row = client_store_fake.add_row(
+        provider_id="remote", issuer=issuer, client_id="dyn-1", source="dynamic", redirect_uri="https://x/cb"
+    )
     store = wiring.use(
-        _record(grant=ConnectionGrant(issuer=f"{fake.base}/a", client_id="dyn-1")),
+        _record(grant=ConnectionGrant(issuer=issuer, client_id="dyn-1")),
         make_discovered_descriptor(mcp_url=mcp),
     )
-    monkey_client(wiring, source="dynamic")
+    await discovery.discover(mcp)
+    fake.clear()
     fake.route("POST", "/a/token", Reply(status=401, body={"error": "invalid_client"}))
     with pytest.raises(ConnectorReconnectRequiredError):
         await resolve_managed_auth(CID, "remote", "files")
     assert store.record().auth_health_state is AuthHealthState.RECONNECT_REQUIRED
+    assert client_store_fake.row(row.client_row_id).dead
+    # The cached documents were dropped: the next resolution discovers afresh.
+    await discovery.discover(mcp)
+    assert [r.path for r in fake.received if r.path == "/prm"] == ["/prm"]
+
+
+async def test_a_dead_dynamic_client_takes_the_terminal_transition_before_sending(
+    wiring: _Wiring, fake: FakeOAuthServer, client_store_fake: FakeClientStore
+):
+    mcp = _publish(fake)
+    issuer = f"{fake.base}/a"
+    client_store_fake.add_row(provider_id="remote", issuer=issuer, client_id="dyn-1", source="dynamic", dead=True)
+    store = wiring.use(
+        _record(grant=ConnectionGrant(issuer=issuer, client_id="dyn-1")), make_discovered_descriptor(mcp_url=mcp)
+    )
+    with pytest.raises(ConnectorReconnectRequiredError):
+        await resolve_managed_auth(CID, "remote", "files")
+    assert store.record().auth_health_state is AuthHealthState.RECONNECT_REQUIRED
+    assert _token_requests(fake) == []
+
+
+async def test_a_removed_client_row_takes_the_terminal_transition_before_sending(
+    wiring: _Wiring, fake: FakeOAuthServer
+):
+    mcp = _publish(fake)
+    store = wiring.use(
+        _record(grant=ConnectionGrant(issuer=f"{fake.base}/a", client_id="gone-1")),
+        make_discovered_descriptor(mcp_url=mcp),
+    )
+    with pytest.raises(ConnectorReconnectRequiredError):
+        await resolve_managed_auth(CID, "remote", "files")
+    assert store.record().auth_health_state is AuthHealthState.RECONNECT_REQUIRED
+    assert _token_requests(fake) == []
+
+
+async def test_a_refused_manual_client_is_a_failing_refresh_until_its_credentials_are_set_again(
+    wiring: _Wiring, fake: FakeOAuthServer, client_store_fake: FakeClientStore, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(resolver_mod, "TRANSIENT_RETRY_BUDGET", 1)
+    mcp = _publish(fake)
+    issuer = f"{fake.base}/a"
+    await client_store_fake.put_manual("remote", issuer, "app-1", "wrong-secret", "client_secret_post")
+    store = wiring.use(
+        _record(grant=ConnectionGrant(issuer=issuer, client_id="app-1")), make_discovered_descriptor(mcp_url=mcp)
+    )
+    fake.route("POST", "/a/token", Reply(status=401, body={"error": "invalid_client"}))
+    with pytest.raises(ConnectorRefreshFailingError):
+        await resolve_managed_auth(CID, "remote", "files")
+    assert store.record().auth_health_state is AuthHealthState.REFRESH_FAILING
+    (manual,) = client_store_fake.rows
+    assert not manual.dead
+
+    await client_store_fake.put_manual("remote", issuer, "app-1", "right-secret", "client_secret_post")
+    wiring.cooldown.clear()
+    fake.clear()
+    fake.route("POST", "/a/token", Reply(body={"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 60}))
+    auth = await resolve_managed_auth(CID, "remote", "files")
+    assert auth is not None
+    assert auth.access_token == "at-new"
+    assert store.record().auth_health_state is AuthHealthState.HEALTHY
+    (sent,) = _token_requests(fake)
+    assert sent.form["client_secret"] == "right-secret"
+
+
+async def test_a_refused_env_client_is_a_failing_refresh(
+    wiring: _Wiring, fake: FakeOAuthServer, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(resolver_mod, "TRANSIENT_RETRY_BUDGET", 1)
+    mcp = _publish(fake)
+    store = wiring.use(
+        _record(grant=ConnectionGrant(issuer=f"{fake.base}/a")),
+        make_discovered_descriptor(mcp_url=mcp, issuer=f"{fake.base}/a"),
+    )
+    fake.route("POST", "/a/token", Reply(status=401, body={"error": "invalid_client"}))
+    with pytest.raises(ConnectorRefreshFailingError):
+        await resolve_managed_auth(CID, "remote", "files")
+    assert store.record().auth_health_state is AuthHealthState.REFRESH_FAILING
 
 
 async def test_an_env_secret_changed_between_two_attempts_is_used_by_the_second(

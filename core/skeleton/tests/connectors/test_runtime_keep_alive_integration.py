@@ -79,7 +79,7 @@ async def _seed(store: RedisPgConnectorTokenStore, provider: str, cid: str, *, s
         auth_health_state=AuthHealthState.HEALTHY,
         created_at=now,
     )
-    blob = crypto.encrypt(record.to_storage_json().encode(), connection_id=cid)
+    blob = crypto.encrypt(record.to_storage_json().encode(), aad=cid)
     await store.put(
         cid, blob, create_only=True, provider_id=provider, alias="team", session_expires_at=session_expires_at
     )

@@ -106,7 +106,7 @@ def test_validate_redirect_uri_rejects_unallowlisted_bridge_origin():
     # CONNECTORS_REDIRECT_URI_ALLOWLIST, or every Connect flow bounced through it
     # fails closed here at the token exchange.
     with pytest.raises(RedirectUriNotAllowedError, match="not in the allow-list"):
-        client.validate_redirect_uri("https://bridge.tai42.ai/oauth-bridge.html")
+        client.validate_redirect_uri("https://bridge.example.com/oauth-bridge.html")
 
 
 def test_validate_redirect_uri_rejects_empty_allowlist(monkeypatch):

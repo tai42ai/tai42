@@ -28,10 +28,13 @@ from tai42_skeleton.connectors.oauth import crypto
 from tai42_skeleton.connectors.store.backup import (
     export_connector_categories,
     export_connector_connections,
+    export_connector_oauth_clients,
     import_connector_categories,
     import_connector_connections,
+    import_connector_oauth_clients,
 )
 
+from .client_store_fake import FakeClientStore
 from .conftest import CID, CID2
 
 # The durable ``UNIQUE (provider_id, alias)`` constraint name from the skeleton schema.
@@ -282,14 +285,14 @@ async def test_categories_created_at_preserved_on_restore(pg):
 
 
 def _seed_encrypted(pg: _FakePg, *, connection_id: str, provider_id: str, alias: str, plaintext: bytes) -> bytes:
-    blob = crypto.encrypt(plaintext, connection_id=connection_id)
+    blob = crypto.encrypt(plaintext, aad=connection_id)
     pg.connections[connection_id] = {"provider_id": provider_id, "alias": alias, "blob": blob, "exp": None}
     return blob
 
 
 async def test_connections_round_trip_blob_identical(pg):
     exp = datetime(2030, 6, 1, tzinfo=UTC)
-    blob = crypto.encrypt(b"secret-token", connection_id=CID)
+    blob = crypto.encrypt(b"secret-token", aad=CID)
     pg.connections[CID] = {"provider_id": "acme", "alias": "work", "blob": blob, "exp": exp}
 
     payload = await export_connector_connections()
@@ -315,7 +318,7 @@ async def test_connections_round_trip_blob_identical(pg):
 async def test_restored_blob_undecryptable_under_wrong_kek_raises(pg, monkeypatch):
     """A restore under a DIFFERENT CONNECTORS_KEK yields intact-but-dead
     ciphertext: decrypt fails LOUDLY (InvalidTag), never a silent skip."""
-    blob = crypto.encrypt(b"secret-token", connection_id=CID)
+    blob = crypto.encrypt(b"secret-token", aad=CID)
     pg.connections[CID] = {"provider_id": "acme", "alias": "work", "blob": blob, "exp": None}
 
     payload = await export_connector_connections()
@@ -324,14 +327,14 @@ async def test_restored_blob_undecryptable_under_wrong_kek_raises(pg, monkeypatc
     restored = pg.connections[CID]["blob"]
 
     # Same KEK still decrypts the restored ciphertext.
-    assert crypto.decrypt(restored, connection_id=CID) == b"secret-token"
+    assert crypto.decrypt(restored, aad=CID) == b"secret-token"
 
     # Swap in a different 32-byte KEK; the restored ciphertext no longer decrypts.
     other_kek = base64.b64encode(bytes(range(100, 132))).decode("ascii")
     monkeypatch.setenv("CONNECTORS_KEK", other_kek)
     reset_all_settings()
     with pytest.raises(InvalidTag):
-        crypto.decrypt(restored, connection_id=CID)
+        crypto.decrypt(restored, aad=CID)
 
 
 async def test_connections_alias_collision_on_different_id_is_reported(pg):
@@ -372,7 +375,7 @@ async def test_connections_alias_collision_on_different_id_is_reported(pg):
 
 
 async def test_connections_reimport_counts_updates(pg):
-    blob = crypto.encrypt(b"tok", connection_id=CID)
+    blob = crypto.encrypt(b"tok", aad=CID)
     pg.connections[CID] = {"provider_id": "acme", "alias": "work", "blob": blob, "exp": None}
     payload = await export_connector_connections()
 
@@ -384,7 +387,7 @@ async def test_connections_reimport_counts_updates(pg):
 async def test_connections_reimport_under_skip_leaves_existing(pg):
     """Under ``skip`` (the default) an already-present connection is left untouched —
     counted as a clean skip, never re-upserted."""
-    blob = crypto.encrypt(b"tok", connection_id=CID)
+    blob = crypto.encrypt(b"tok", aad=CID)
     pg.connections[CID] = {"provider_id": "acme", "alias": "work", "blob": blob, "exp": None}
     payload = await export_connector_connections()
 
@@ -400,7 +403,7 @@ async def test_import_writes_the_restored_blob_back_at_the_new_version(pg):
     to the restored ciphertext at the row's new ``cache_version`` — ``get`` serves a cached
     blob on a HIT with no read-side version check, so a warm entry must not keep the
     pre-import token."""
-    blob = crypto.encrypt(b"fresh-token", connection_id=CID)
+    blob = crypto.encrypt(b"fresh-token", aad=CID)
     pg.connections[CID] = {"provider_id": "acme", "alias": "work", "blob": blob, "exp": None, "ver": 1}
     payload = await export_connector_connections()
     pg.redis.warm[_REC_KEY] = {"blob": b"stale", "ver": b"1"}
@@ -415,7 +418,7 @@ async def test_import_tombstones_an_expired_restored_row(pg):
     """An expired restored row leaves a version-only tombstone at its new version, so no stale
     blob can be served or re-installed."""
     past = datetime(2000, 1, 1, tzinfo=UTC)
-    blob = crypto.encrypt(b"lapsed", connection_id=CID)
+    blob = crypto.encrypt(b"lapsed", aad=CID)
     pg.connections[CID] = {"provider_id": "acme", "alias": "work", "blob": blob, "exp": past, "ver": 1}
     payload = await export_connector_connections()
     pg.redis.warm[_REC_KEY] = {"blob": b"stale", "ver": b"1"}
@@ -428,7 +431,7 @@ async def test_import_tombstones_an_expired_restored_row(pg):
 async def test_skip_leaves_warm_cache_untouched(pg):
     """Under ``skip`` an existing connection is not re-upserted, so its warm cache
     entry — serving the connection that is being left in place — is not touched."""
-    blob = crypto.encrypt(b"fresh-token", connection_id=CID)
+    blob = crypto.encrypt(b"fresh-token", aad=CID)
     pg.connections[CID] = {"provider_id": "acme", "alias": "work", "blob": blob, "exp": None, "ver": 1}
     payload = await export_connector_connections()
     pg.redis.warm[_REC_KEY] = {"blob": blob, "ver": b"1"}
@@ -495,3 +498,66 @@ async def test_connections_non_alias_unique_violation_raises(pg):
     pg.raise_on_conn_insert = _OtherUniqueViolation()
     with pytest.raises(UniqueViolation):
         await import_connector_connections(payload)
+
+
+# -- connector_oauth_clients (through the client store's own methods) ------------------------
+
+
+async def test_client_rows_export_their_sealed_blob_verbatim(client_store_fake: FakeClientStore):
+    row = client_store_fake.add_row(
+        provider_id="remote",
+        issuer="https://as.example.com",
+        client_id="dyn",
+        source="dynamic",
+        client_secret="never-exported-in-clear",
+        redirect_uri="https://app.example.com/oauth-bridge.html",
+        secret_expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        dead=True,
+    )
+    (entry,) = await export_connector_oauth_clients()
+    assert entry == {
+        "client_row_id": row.client_row_id,
+        "provider_id": "remote",
+        "issuer": "https://as.example.com",
+        "client_id": "dyn",
+        "source": "dynamic",
+        "redirect_uri": "https://app.example.com/oauth-bridge.html",
+        "secret_expires_at": "2030-01-01T00:00:00+00:00",
+        "dead": True,
+        "encrypted_blob_b64": base64.b64encode(row.encrypted_blob).decode("ascii"),
+        "created_at": row.created_at.isoformat(),
+        "updated_at": row.updated_at.isoformat(),
+    }
+    assert "never-exported-in-clear" not in str(entry)
+    assert client_store_fake.calls == ["enumerate_rows"]
+
+
+@pytest.mark.parametrize("mode", ["skip", "overwrite"])
+async def test_client_rows_import_through_the_store_and_count_each_outcome(
+    client_store_fake: FakeClientStore, mode: str
+):
+    kept = client_store_fake.add_row(
+        provider_id="remote", issuer="https://as.example.com", client_id="a", source="dynamic"
+    )
+    exported = await export_connector_oauth_clients()
+    client_store_fake.rows.clear()
+    other = client_store_fake.add_row(
+        provider_id="remote", issuer="https://as.example.com", client_id="a", source="dynamic"
+    )
+    fresh = client_store_fake.add_row(
+        provider_id="remote", issuer="https://as.example.com", client_id="b", source="dynamic"
+    )
+    payload = [*exported, *[e for e in await export_connector_oauth_clients() if e["client_id"] == "b"]]
+    client_store_fake.rows.remove(fresh)
+
+    report = await import_connector_oauth_clients(payload, mode)  # type: ignore[arg-type]
+
+    assert "restore" in client_store_fake.calls
+    if mode == "skip":
+        assert (report.created, report.updated, report.details["skipped_existing"]) == (1, 0, 1)
+        assert {row.client_row_id for row in client_store_fake.rows} == {other.client_row_id, fresh.client_row_id}
+    else:
+        assert (report.created, report.updated, report.details["skipped_existing"]) == (1, 1, 0)
+        assert {row.client_row_id for row in client_store_fake.rows} == {kept.client_row_id, fresh.client_row_id}
+    restored = {row.client_row_id: row for row in client_store_fake.rows}
+    assert restored[fresh.client_row_id].encrypted_blob == fresh.encrypted_blob

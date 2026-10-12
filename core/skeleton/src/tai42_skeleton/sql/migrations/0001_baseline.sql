@@ -2,8 +2,9 @@
 -- skeleton component — baseline schema (migration 0001)
 -- ============================================================
 -- The full core-owned schema the skeleton features require: the connector
--- token store + market catalog, the generic versioned-document store and its
--- role_audit append-only triggers, the access-control policy/route tables, the
+-- token store, OAuth client store and market catalog, the generic
+-- versioned-document store and its role_audit append-only triggers, the
+-- access-control policy/route tables, the
 -- marketplace install-attribution record, the tool-metadata overlay, and the
 -- platform-side runs index. One transaction (the runner wraps each file); every
 -- object guards with IF NOT EXISTS / ON CONFLICT so a replay is inert.
@@ -54,6 +55,48 @@ CREATE TABLE IF NOT EXISTS connector_connections (
 -- (`WHERE connection_id = %s`); the listing read enumerates the table. The
 -- `UNIQUE (provider_id, alias)` constraint additionally indexes those two
 -- columns to arbitrate concurrent same-alias connects.
+
+-- ------------------------------------------------------------
+-- Connectors — OAuth client store (sealed client credentials)
+-- ------------------------------------------------------------
+-- The OAuth clients the engine holds for a provider that names no env client:
+-- a MANUAL client an administrator registered by hand, and DYNAMIC clients the
+-- engine registered with an authorization server (RFC 7591). Read once per flow
+-- start and once per refresh, never on the token hot path, so it has no cache.
+--
+-- `encrypted_blob` is AES-GCM ciphertext of a JSON object holding the client
+-- secret and the token-endpoint authentication method, sealed with
+-- `oauth-client:<client_row_id>` as associated data, so a blob cannot be moved
+-- to another row or into `connector_connections`.
+--
+-- The lookup columns are plaintext because the store selects by them:
+-- `provider_id` and `issuer` (a client is bound to the authorization server that
+-- issued it and is never used with another), `client_id` (public by protocol:
+-- it travels in every authorization URL), `source`, `redirect_uri` (the ONE
+-- redirect URI a dynamic client was registered with; NULL for a manual client),
+-- `secret_expires_at` (NULL = never) and `dead` (the authorization server refused
+-- the client). Dynamic rows are insert-only: a flow whose redirect URI no row was
+-- registered for registers another client, so grants issued under an earlier
+-- registration keep refreshing.
+CREATE TABLE IF NOT EXISTS connector_oauth_clients (
+    client_row_id      UUID         NOT NULL,
+    provider_id        TEXT         NOT NULL,
+    issuer             TEXT         NOT NULL,
+    client_id          TEXT         NOT NULL,
+    source             TEXT         NOT NULL CHECK (source IN ('manual', 'dynamic')),
+    redirect_uri       TEXT,
+    secret_expires_at  TIMESTAMPTZ,
+    dead               BOOLEAN      NOT NULL DEFAULT false,
+    encrypted_blob     BYTEA        NOT NULL,
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (client_row_id),
+    CONSTRAINT connector_oauth_clients_natural_key UNIQUE (provider_id, issuer, client_id)
+);
+-- One manual client per provider. The natural-key constraint also indexes
+-- `provider_id` as its leading column: every provider-scoped read uses it.
+CREATE UNIQUE INDEX IF NOT EXISTS connector_oauth_clients_one_manual
+    ON connector_oauth_clients (provider_id) WHERE source = 'manual';
 
 -- ------------------------------------------------------------
 -- Connector categories — grouping for the Connectors UI tabs. GLOBAL. One row
