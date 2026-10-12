@@ -66,3 +66,16 @@ def test_pyproject_ships_the_docs_tree_as_package_data():
         "the in-package docs/ tree must ship via the 'docs/*' glob on the "
         "'tai42_channel_web' [tool.setuptools.package-data] key, or the wheel omits docs/index.mdx"
     )
+
+
+def test_plugin_spec_provides_the_web_studio_plugin():
+    spec = _spec()
+    studio_items = [item for item in spec.provides if item.kind.value == "studio-plugin"]
+    assert [(item.name, item.module) for item in studio_items] == [("web", "tai42_channel_web")]
+
+
+def test_studio_bundle_is_declared_in_package_data():
+    package_data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"][
+        "package-data"
+    ]
+    assert "studio/*" in package_data["tai42_channel_web"]
