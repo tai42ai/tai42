@@ -14,10 +14,11 @@ from tai42_kit.llm.classifier import get_classifier, get_classifier_async
 from tai42_kit.llm.embedding import get_embedding, get_embedding_async
 from tai42_kit.llm.models import get_llm, get_llm_async, system_prompt_cache_mark
 from tai42_kit.llm.monitoring_callbacks import MonitoringCallbackHandler, declared_chain_payload
-from tai42_kit.llm.run_trace import RunTrace, bind_run_trace, resolve_trace_context
+from tai42_kit.llm.run_trace import InvalidRunTraceError, RunTrace, bind_run_trace, resolve_trace_context
 from tai42_kit.llm.store.store_registry import store_registry
 
 __all__ = [
+    "InvalidRunTraceError",
     "MonitoringCallbackHandler",
     "RunTrace",
     "bind_run_trace",

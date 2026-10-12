@@ -235,12 +235,15 @@ class TestAstreamAndRun:
                 agent.astream(
                     user_message=TemplatedText(content="hi"),
                     thread_id="th",
-                    langgraph_config={"configurable": {"monitoring_trace_id": "x"}},
+                    langgraph_config={"configurable": {"monitoring_trace_id": "1" * 32}},
                 )
             )
         )
 
-        assert captured["build_kwargs"]["config"]["configurable"] == {"monitoring_trace_id": "x", "thread_id": "th"}
+        assert captured["build_kwargs"]["config"]["configurable"] == {
+            "monitoring_trace_id": "1" * 32,
+            "thread_id": "th",
+        }
 
     @pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
     def test_unsupported_abc_param_raises_naming_the_exact_face(

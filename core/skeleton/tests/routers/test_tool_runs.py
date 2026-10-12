@@ -25,6 +25,7 @@ from starlette.requests import Request
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.context import reset_request_user_id, set_request_user_id
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import RunTerminalFailed
 
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_identity_claims,
@@ -249,6 +250,45 @@ async def test_failed_tool_records_failed_and_error(wired):
     assert data["error"] == "boom"
     assert "result" not in data
     assert data["finished_at"]
+
+
+async def test_a_failed_terminal_records_the_plain_message_and_the_outcome_whole(wired):
+    tools = wired.install_tools()
+    tools.exc = RunTerminalFailed({"reason": "aborted", "detail": {"n": 1}})
+    run_id = _json(await router.submit_run(_post(b'{"tool_name": "alpha", "arguments": {}}')))["data"]["run_id"]
+    await _drain()
+    data = _json(await router.get_run(_get(run_id)))["data"]
+    assert data["status"] == "failed"
+    assert data["error"] == "tool run failed"
+    assert data["outcome"] == {"reason": "aborted", "detail": {"n": 1}}
+    assert "result" not in data
+    assert data["finished_at"]
+    (entry,) = _json(await router.list_tool_runs(_list("alpha")))["data"]
+    assert "outcome" not in entry
+    assert "error" not in entry
+
+
+async def test_a_plain_raise_records_its_message_and_no_outcome(wired):
+    tools = wired.install_tools()
+    tools.exc = RuntimeError("boom")
+    run_id = _json(await router.submit_run(_post(b'{"tool_name": "alpha", "arguments": {}}')))["data"]["run_id"]
+    await _drain()
+    data = _json(await router.get_run(_get(run_id)))["data"]
+    assert data["error"] == "boom"
+    assert "outcome" not in data
+
+
+async def test_a_failed_terminal_whose_outcome_cannot_be_encoded_records_the_named_refusal(wired):
+    tools = wired.install_tools()
+    tools.exc = RunTerminalFailed({"detail": {"text": "lone \ud800 surrogate"}})
+    run_id = _json(await router.submit_run(_post(b'{"tool_name": "alpha", "arguments": {}}')))["data"]["run_id"]
+    await _drain()
+    data = _json(await router.get_run(_get(run_id)))["data"]
+    assert data["status"] == "failed"
+    assert "'alpha'" in data["error"]
+    assert "cannot be JSON-encoded at $" in data["error"]
+    assert "detail" in data["error"]
+    assert "outcome" not in data
 
 
 async def test_unknown_tool_is_rejected_404_before_a_record_is_created(wired):

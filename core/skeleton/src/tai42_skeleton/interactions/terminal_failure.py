@@ -5,12 +5,16 @@ driver's outcome as an OPAQUE payload. :func:`failed_outcome_detail` is for what
 LOGS about that failure: it reproduces the payload as-is, never reading a key inside it, CAPPED so a
 large payload cannot bloat the recorded detail. Its callers are the conversation turns (which record
 the capped detail and deliver the route's generic client-safe reply) and the synchronous run-tool
-door (which LOGS the capped detail — and, separately, delivers the outcome WHOLE to its one live
-caller as data, untruncated, never through this capped render). The delivery chokepoint delivers the
+door, the MCP edge and the background tool-run supervisor (which LOG the capped detail — and,
+separately, deliver or record the outcome WHOLE as data under ``outcome``, untruncated, beside the plain
+:data:`FAILED_TERMINAL_MESSAGE`, never through this capped render). The delivery chokepoint delivers the
 outcome whole through its ladder and does not use this helper at all.
 """
 
 from __future__ import annotations
+
+#: The one plain message a door delivers or records for a failed terminal, beside the outcome itself.
+FAILED_TERMINAL_MESSAGE = "tool run failed"
 
 #: A rendered outcome is capped, so a large payload cannot bloat the recorded detail.
 FAILED_OUTCOME_DETAIL_LIMIT = 200
@@ -39,4 +43,4 @@ def failed_outcome_detail(outcome: object) -> str:
     is the RECORDED detail only — a live caller the sync run-tool door serves is delivered the
     outcome whole as data, never this capped render.
     """
-    return f"tool run failed: {capped_repr(outcome)}"
+    return f"{FAILED_TERMINAL_MESSAGE}: {capped_repr(outcome)}"

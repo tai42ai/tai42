@@ -27,14 +27,26 @@ from dataclasses import dataclass
 from typing import Any
 
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import ErrorKind
 from tai42_contract.monitoring import (
     MONITORING_PARENT_SPAN_ID_KEY,
     MONITORING_TRACE_ID_KEY,
     TraceContext,
     get_ambient_trace_context,
+    is_span_id,
+    is_trace_id,
 )
 
 from tai42_kit.llm.monitoring_callbacks import ChainPayloads, MonitoringCallbackHandler
+
+
+class InvalidRunTraceError(ValueError):
+    """A run's config names an explicit trace id or parent anchor that no monitoring writer can record under.
+
+    The caller's input is refused before the run starts, naming the configurable key and the value it carried.
+    """
+
+    __tai_error_kind__ = ErrorKind.BAD_INPUT
 
 
 @dataclass(frozen=True)
@@ -57,10 +69,24 @@ def resolve_trace_context(config: dict[str, Any] | None = None) -> TraceContext:
     ``MONITORING_PARENT_SPAN_ID_KEY`` anchor) wins; else the ambient
     :func:`~tai42_contract.monitoring.get_ambient_trace_context` deposit; else a fresh
     32-hex root trace with no parent. Pure — reads only, mints no side effect.
+
+    An explicit trace id that is not 32 lower-hex (not all zeros), or a caller's parent anchor that is not 16
+    lower-hex (not all zeros), is refused with :class:`InvalidRunTraceError`: a run never proceeds under a lineage
+    no writer can record. An empty explicit trace id reads as absent.
     """
     configurable = (config or {}).get("configurable", {})
     trace_id = configurable.get(MONITORING_TRACE_ID_KEY)
     parent_span_id = configurable.get(MONITORING_PARENT_SPAN_ID_KEY)
+    if trace_id and not is_trace_id(trace_id):
+        raise InvalidRunTraceError(
+            f"configurable[{MONITORING_TRACE_ID_KEY!r}] must be a 32-character lowercase hex trace id that is not all "
+            f"zeros; got {trace_id!r}"
+        )
+    if parent_span_id is not None and not is_span_id(parent_span_id):
+        raise InvalidRunTraceError(
+            f"configurable[{MONITORING_PARENT_SPAN_ID_KEY!r}] must be a 16-character lowercase hex span id that is not "
+            f"all zeros; got {parent_span_id!r}"
+        )
     if not trace_id:
         ambient = get_ambient_trace_context()
         if ambient is not None and ambient.trace_id:
@@ -80,8 +106,8 @@ def bind_run_trace(
 ) -> RunTrace:
     """Resolve the run's lineage and return the per-invoke config carrying the monitoring callbacks.
 
-    Resolves the lineage with :func:`resolve_trace_context` and returns a :class:`RunTrace`
-    whose ``config`` is ``config`` copied by value — a fresh top-level mapping, a fresh
+    Resolves the lineage with :func:`resolve_trace_context` (its :class:`InvalidRunTraceError` propagates) and
+    returns a :class:`RunTrace` whose ``config`` is ``config`` copied by value — a fresh top-level mapping, a fresh
     ``configurable``, and a fresh ``callbacks`` list — so one base config can feed many
     parallel invocations without colliding. When the active writer records
     (``is_recording()``), a :class:`MonitoringCallbackHandler` bound to the lineage is
