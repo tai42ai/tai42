@@ -63,7 +63,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 from tai42_kit.fork_gate import fork_gate
 from tai42_kit.llm import release_loop_bound_resources
 
-from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
+from tai42_skeleton.app.epoch import Epoch, build_and_discard_epoch, build_and_swap_epoch
 from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
 from tai42_skeleton.app.reload_gate import FORK_QUIESCE_SECONDS, reload_gate
 from tai42_skeleton.config.boundary import refuse_unrecyclable_env_change
@@ -417,6 +417,7 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         *,
         save_previous: Callable[[dict[str, str]], Awaitable[None]],
         build_and_swap: Callable[..., Awaitable[Epoch]] = build_and_swap_epoch,
+        build_and_discard: Callable[..., Awaitable[None]] = build_and_discard_epoch,
         release_llm_pools: Callable[[], Awaitable[None]] = release_loop_bound_resources,
     ) -> ProfileApplyOutcome:
         """Apply a settings profile: the env-write-LAST reload pipeline.
@@ -429,10 +430,14 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
            class diff the deployment shape cannot carry; read the applier's own identity
            and the fleet membership the step-5 report is judged against.
         2. Snapshot the current stored env as the reserved ``@previous`` version.
-        3. ``build_and_swap_epoch(profile_env)`` holding the reload gate as its driver
-           (:meth:`ReloadGate.driving`), so the retire waits for THIS door's own request
-           to answer apart from the drain budget; a build failure re-raises and this
-           method returns nothing persisted.
+        3. Build the epoch under ``profile_env`` holding the reload gate as its driver
+           (:meth:`ReloadGate.driving`): a bus member builds and swaps it in
+           (``build_and_swap_epoch``), so the retire waits for THIS door's own request to
+           answer apart from the drain budget; a process that is not a bus member (a job
+           child a backend worker forked) has no serving surface to swap into, so it builds
+           the same epoch and discards it (``build_and_discard_epoch``) — the env is proven
+           to build on every door. A build failure re-raises and this method returns nothing
+           persisted.
         4. ``replace_env`` — the LAST env write, reached only after a successful build.
         5. Broadcast the reload to the fleet, then roll a recycle across it for the
            recycle-class diff over the targets pinned in step 1 (the applier's own
@@ -501,19 +506,18 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         # dedicated thread so ownership stays single-threaded and this loop is never
         # blocked while job spans drain.
         #
-        # A process that is not a bus member (a job child a backend worker forked) has no
-        # serving surface to swap: it builds nothing, and its member converges on the persisted
-        # env as a sibling through the STEP 5 broadcast.
-        if bus.identity.member:
-            async with reload_gate.driving(), fork_gate.exclusive_async(timeout=FORK_QUIESCE_SECONDS):
-                # Release the loop-bound kit resources BEFORE the build's settings reset drops
-                # their per-loop registries: build_and_swap_epoch opens with
-                # ``reset_all_settings()``, whose resource-registry reset REFUSES to drop a
-                # registry still holding live resources on a running loop (a prior agent run
-                # leaves a cached checkpoint saver behind). AppLifecycle._reload_config makes
-                # the same release before its own build_and_swap_epoch.
-                await release_llm_pools()
-                await build_and_swap(profile_env)
+        # The build is this door's proof that the env builds, on every path. A process that
+        # is not a bus member (a job child a backend worker forked) has no serving surface to
+        # swap into: it builds the same epoch and discards it, and its member converges on
+        # the persisted env as a sibling through the STEP 5 broadcast.
+        async with reload_gate.driving(), fork_gate.exclusive_async(timeout=FORK_QUIESCE_SECONDS):
+            # Release the loop-bound kit resources BEFORE the build's settings reset drops
+            # their per-loop registries: the build opens with ``reset_all_settings()``, whose
+            # resource-registry reset REFUSES to drop a registry still holding live resources
+            # on a running loop (a prior agent run leaves a cached checkpoint saver behind).
+            # AppLifecycle._reload_config makes the same release before its own build.
+            await release_llm_pools()
+            await (build_and_swap if bus.identity.member else build_and_discard)(profile_env)
 
         # STEP 4 — env-write-LAST: persist the proposed env as the WHOLE stored map only
         # after the build succeeded. A failed build never reaches this line.

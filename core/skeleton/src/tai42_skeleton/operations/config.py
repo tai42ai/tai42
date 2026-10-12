@@ -309,7 +309,9 @@ async def reload_config(targets: list[str] | None = None) -> Any:
 # DECLARED env so a profile carrying a deployment X-band key or a dangling ``!ENV`` marker
 # is refused at save time (a 400 naming the key), never persisted to be applied later.
 # ``apply_profile`` replaces the WHOLE stored env with the profile's env, builds+swaps a
-# fresh serving epoch under it (env-write-LAST), broadcasts the reload, recycles the fleet
+# fresh serving epoch under it (env-write-LAST; a process that is not a bus member — a job
+# child a backend worker forked — builds the epoch and discards it, the same proof before the
+# write), broadcasts the reload, recycles the fleet
 # for recycle-class diffs, and — for a serve-affecting recycle — arms the applier's own
 # deferred graceful self-exit as a post-reply background task.
 

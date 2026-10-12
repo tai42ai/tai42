@@ -5,7 +5,10 @@ builds a NEW epoch off to the side under a proposed env and — only if the buil
 succeeds — swaps it in atomically (the ASGI dispatch slot plus the current-epoch
 pointer) and retires the previous one. A failed build is DISCARDED with zero
 mutation of the live epoch and the process env restored exactly, so the old epoch
-keeps serving.
+keeps serving. The one build has two endings: a bus member swaps it in
+(:func:`build_and_swap_epoch`); a process that is not a bus member (a job child a
+backend worker forked) has no serving surface to swap into and discards the proven
+build (:func:`build_and_discard_epoch`), so the env is proven to build there too.
 
 The process spine stays process-lifetime and is deliberately NOT rebuilt per epoch:
 the ``TaiMCP`` identity, the worker bus + subscription, ``reload_gate``, the boot
@@ -23,7 +26,7 @@ into a build hold ``tai42_kit.fork_gate``'s exclusive side against a backend's j
 span: ``reload_gate.run(..., reimports=True)``
 (the ``reload_config`` doors, which marshal the build back onto the serving loop) and
 ``ConfigService.apply_replace_env`` (the profile-apply door, which awaits
-``build_and_swap_epoch`` on the serving loop under ``fork_gate.exclusive_async``). A
+``build_and_swap_epoch`` or ``build_and_discard_epoch`` under ``fork_gate.exclusive_async``). A
 build reached by any other route must take that same exclusive side.
 """
 
@@ -599,6 +602,109 @@ async def _default_establish_background_loops() -> None:
     await instance.app._run_post_swap_handlers(raise_on_error=False)
 
 
+@dataclass
+class _EpochBuild:
+    """A generation built off to the side: the epoch, its serving handle, and what restores the live state."""
+
+    epoch: Epoch
+    serving_app: ASGIApp
+    settings_mark: Any
+    env_snapshot: dict[str, str]
+    loaded_before: set[str]
+
+
+async def _build_epoch(
+    proposed_env: Mapping[str, str],
+    rebuild: Callable[[], Any] | None,
+    build_serving_app: Callable[[Epoch], Awaitable[ASGIApp]] | None,
+) -> _EpochBuild:
+    """Build a fresh generation under ``proposed_env`` OFF TO THE SIDE, with zero mutation of the live epoch.
+
+    Snapshots ``os.environ``, applies ``proposed_env`` (removed-key reconciled) and clears the
+    settings accessor cache so the build reads it, opens a staged generation for every
+    per-generation global, then runs ``rebuild`` and ``build_serving_app``. All of it runs
+    before the client epoch advances. A failure is discarded (:func:`_discard_build`) with the
+    ERROR line and re-raised; the applied env stays live on success, for the caller's ending.
+    """
+    from tai42_skeleton.app.registry_staging import begin_staging_all
+
+    rebuild = rebuild or _default_rebuild
+    build_serving_app = build_serving_app or _default_build_serving_app
+
+    snapshot = dict(os.environ)
+    loaded_before = set(_loaded_env_keys)
+
+    global _building_epoch
+    new_epoch = Epoch(number=current_client_epoch())
+    _building_epoch = new_epoch
+    try:
+        apply_env_and_reset_settings(proposed_env)
+        # Every settings instance read from here on is read under the proposed env for the
+        # generation being built; the mark lets a commit stamp them with its epoch.
+        settings_mark = settings_birth_mark()
+        # Open a staged generation for every per-generation global, so ``start()`` and the
+        # epoch handlers populate the generation being built and the live epoch's globals
+        # stay untouched until a commit.
+        begin_staging_all()
+        rebuild()
+        serving_app = await _outside_any_request(lambda: build_serving_app(new_epoch))
+        if new_epoch._surface is None:
+            new_epoch.record_serving_surface(serving_app)
+    except BaseException:
+        logger.error(
+            "epoch build failed under the proposed env — discarded; the previous epoch keeps serving",
+            exc_info=True,
+        )
+        await _discard_build(new_epoch, snapshot, loaded_before)
+        raise
+    finally:
+        _building_epoch = None
+    return _EpochBuild(new_epoch, serving_app, settings_mark, snapshot, loaded_before)
+
+
+async def _discard_build(new_epoch: Epoch, snapshot: dict[str, str], loaded_before: set[str]) -> None:
+    """Discard a generation built off to the side; the live epoch keeps serving with zero mutation.
+
+    Drops every staged generation and re-derives the process caches from the untouched
+    committed state: the staged registrations are discarded, the env is restored exactly, the
+    settings accessor cache is cleared, and the route index is re-derived from the live route
+    registry (a partial reimport may have added routes — the spine route registry dedups and is
+    never rolled back). A lifespan the build entered belongs to the discarded generation and is
+    closed with it.
+    """
+    from tai42_skeleton.access_control.role_gate import reset_route_index
+    from tai42_skeleton.app.registry_staging import abort_staging_all
+    from tai42_skeleton.tools.binding.surface import bump_tool_surface_generation
+
+    abort_staging_all()
+    # The discarded build's core is dropped, so the listed tool set reverts to the live
+    # core's: a cache filled from the building core during the build never matches again.
+    bump_tool_surface_generation()
+    _restore_env(snapshot, loaded_before)
+    reset_all_settings()
+    reset_route_index()
+    await new_epoch.close_transports()
+
+
+async def build_and_discard_epoch(
+    proposed_env: Mapping[str, str],
+    *,
+    rebuild: Callable[[], Any] | None = None,
+    build_serving_app: Callable[[Epoch], Awaitable[ASGIApp]] | None = None,
+) -> None:
+    """Prove ``proposed_env`` builds a serving epoch, then discard the build; the live epoch is untouched.
+
+    The ending a process that is not a bus member gives a profile apply's build (a job child a
+    backend worker forked has no serving surface to swap into): the same build
+    :func:`build_and_swap_epoch` runs, discarded on success exactly as a failed build is, so the
+    env is proven to build before the caller persists it. A failure is discarded, logged at
+    ERROR and re-raised; a success is logged at INFO.
+    """
+    build = await _build_epoch(proposed_env, rebuild, build_serving_app)
+    await _discard_build(build.epoch, build.env_snapshot, build.loaded_before)
+    logger.info("epoch built under the proposed env and discarded: this process is not a bus member and swaps nothing")
+
+
 async def build_and_swap_epoch(
     proposed_env: Mapping[str, str],
     *,
@@ -638,60 +744,11 @@ async def build_and_swap_epoch(
     default to the running app; they are injectable so the build/swap/discard contract
     is exercised in isolation.
     """
-    from tai42_skeleton.app.registry_staging import abort_staging_all, begin_staging_all, commit_staging_all
+    from tai42_skeleton.app.registry_staging import commit_staging_all
 
-    rebuild = rebuild or _default_rebuild
-    build_serving_app = build_serving_app or _default_build_serving_app
     establish_background_loops = establish_background_loops or _default_establish_background_loops
-
-    snapshot = dict(os.environ)
-    loaded_before = set(_loaded_env_keys)
-
-    # All fallible work runs before the epoch counter advances, so a failed build
-    # leaves the monotonic client epoch — and every piece of live state — untouched.
-    global _building_epoch
-    new_epoch = Epoch(number=current_client_epoch())
-    _building_epoch = new_epoch
-    try:
-        apply_env_and_reset_settings(proposed_env)
-        # Every settings instance read from here on is read under the proposed env for the
-        # generation being built; the mark lets the commit below stamp them with its epoch.
-        settings_mark = settings_birth_mark()
-        # Open a staged generation for every per-generation global, so ``start()`` and the
-        # epoch handlers populate the generation being built and the live epoch's globals
-        # stay untouched until the atomic commit below.
-        begin_staging_all()
-        rebuild()
-        serving_app = await _outside_any_request(lambda: build_serving_app(new_epoch))
-        if new_epoch._surface is None:
-            new_epoch.record_serving_surface(serving_app)
-    except BaseException:
-        # Drop every staged generation and re-derive the process caches from the
-        # untouched committed state: the staged registrations are discarded, the env is
-        # restored exactly, the settings accessor cache is cleared, and the route index
-        # is re-derived from the live route registry (a partial reimport may have added
-        # routes — the spine route registry dedups and is never rolled back). The
-        # live epoch keeps serving with zero mutation.
-        from tai42_skeleton.access_control.role_gate import reset_route_index
-        from tai42_skeleton.tools.binding.surface import bump_tool_surface_generation
-
-        abort_staging_all()
-        # The discarded build's core is dropped, so the listed tool set reverts to the live
-        # core's: a cache filled from the building core during the build never matches again.
-        bump_tool_surface_generation()
-        _restore_env(snapshot, loaded_before)
-        reset_all_settings()
-        reset_route_index()
-        logger.error(
-            "epoch build failed under the proposed env — discarded; the previous epoch keeps serving",
-            exc_info=True,
-        )
-        # A lifespan the build entered (the reload cancelled once the build finished, or a
-        # failure after the enter) belongs to the discarded generation and is closed with it.
-        await new_epoch.close_transports()
-        raise
-    finally:
-        _building_epoch = None
+    build = await _build_epoch(proposed_env, rebuild, build_serving_app)
+    new_epoch, serving_app, settings_mark = build.epoch, build.serving_app, build.settings_mark
 
     retired = advance_client_epoch()
     new_epoch.number = current_client_epoch()
