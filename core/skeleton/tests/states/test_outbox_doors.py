@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from fastmcp import Client
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import RunResultAnswer
 from tai42_contract.states import StateSubject
 from tai42_contract.states.errors import StatePendingSaveFailedError, StatePendingSaveTimeoutError
 from tai42_contract.states.models import StateContext, SubjectCandidates
@@ -53,7 +54,7 @@ def test_the_run_tool_door_drains_once_and_its_nested_dispatch_adds_none(monkeyp
         async with app.app_context(Manifest.model_validate({})):
             _register_probe_tools(inner)
             result = await tools_ops.run_tool("probe_door", {}, subject=_SUBJECT)
-            assert result == "inner"
+            assert result == RunResultAnswer(result="inner")
 
     asyncio.run(run())
     assert inner == ["inner"]
