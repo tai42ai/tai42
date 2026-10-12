@@ -35,6 +35,7 @@ from fastmcp.exceptions import ToolError
 from mcp.shared.exceptions import McpError
 from mcp.types import Tool
 
+from tai42_e2e.httpapi import RELOAD_GATE_DEADLINE
 from tai42_e2e.httpapi import _is_reloading as _response_is_reloading
 from tai42_e2e.waiting import wait_for_async
 
@@ -51,8 +52,10 @@ _SESSION_TERMINATED_MARKER = "Session terminated"
 
 # Ceiling for transparently recovering from a session swap: re-opening a fresh
 # session (polling past a reload-gate handshake rejection on the fresh initialize) and
-# re-issuing. A swap window settles in seconds; this is only the safety bound.
-_SESSION_REINIT_DEADLINE = 15.0
+# re-issuing. A liveness bound: twice the slowest legitimate swap window measured under
+# host load ~130 on 20 cores — a call held through a resumed worker's two back-to-back
+# rebuilds was answered by the second swap 22s after it was sent.
+_SESSION_REINIT_DEADLINE = 45.0
 
 
 def platform_apply_timeout() -> float:
@@ -199,7 +202,7 @@ class McpClient:
         *,
         raise_on_error: bool = True,
         retry_on_reloading: bool = False,
-        ready_deadline: float = 10.0,
+        ready_deadline: float = RELOAD_GATE_DEADLINE,
         meta: dict[str, Any] | None = None,
     ) -> CallToolResult:
         """Call ``name`` with ``arguments``. With ``raise_on_error=False`` an MCP

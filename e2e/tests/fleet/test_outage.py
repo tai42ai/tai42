@@ -70,7 +70,15 @@ _UNREACHABLE = {"url": "http://127.0.0.1:1/mcp"}
 
 # ---- two concurrent writers both persist ---------------------------------
 
+# Liveness bounds (a bound on a hang, not a performance limit), each twice the slowest
+# legitimate completion measured with the race under host load 100-330 on 20 cores:
+# one connect request answered in at most 145.0s (server-side: the persist plus the reload
+# and its MCP probes), and the whole test, stack boot included, finished in at most 413.3s.
+_CONNECT_READ_TIMEOUT = 290.0
+_CONCURRENT_CONNECTS_TIMEOUT = 830
 
+
+@pytest.mark.timeout(_CONCURRENT_CONNECTS_TIMEOUT)
 @pytest.mark.needs(
     "kind:connectors",
     "probe-tools",
@@ -99,6 +107,7 @@ async def test_concurrent_connects_both_persist(
             "/api/connectors/connections/start",
             json={"provider_id": provider_id, "alias": alias, "enabled_sub_services": ["default"]},
             retry_on_reloading=True,
+            timeout=_CONNECT_READ_TIMEOUT,
         )
 
     # Fire both writers simultaneously — the race the lost-update regression lives
@@ -122,7 +131,7 @@ async def test_concurrent_connects_both_persist(
 # rewrites only the ``mcp`` block, every other line byte-identical). Seeded verbatim via
 # ``raw_manifest`` because ``yaml.safe_dump`` cannot carry comments; the comments live on
 # NON-mcp keys the mcp-section replace never touches.
-_D2_SEED = """\
+_COMMENTED_MANIFEST_SEED = """\
 # Fleet manifest — managed by the platform team, edit with care.
 routers_modules:
   - tai42_skeleton.routers.health
@@ -139,14 +148,20 @@ mcp:
 """
 
 
-def build_d2_stack(res: StackResources, variants: Variants) -> StackConfig:
+def build_commented_manifest_stack(res: StackResources, variants: Variants) -> StackConfig:
     """A single busless worker (file mode, no backend, no bus → boots and serves) whose
     manifest is the commented seed above, seeded byte-verbatim. The bare profile's env
     (feature Redis wiring) rides along; the seed replaces only the manifest document."""
     cfg = build_bare_stack(res, variants)
-    return replace(cfg, name="d2-comments", raw_manifest=_D2_SEED, run_backend=False, run_metrics=False)
+    return replace(
+        cfg, name="commented-manifest", raw_manifest=_COMMENTED_MANIFEST_SEED, run_backend=False, run_metrics=False
+    )
 
 
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured under host load 260-330 on 20 cores (156.2s), rounded up
+# to the next 10s.
+@pytest.mark.timeout(320)
 @pytest.mark.needs("mutable", "process", "files", "setting:raw-manifest")
 async def test_comment_preservation(fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]) -> None:
     """A UI-path config edit (``POST /api/mcp-config`` — the comment-preserving
@@ -155,11 +170,11 @@ async def test_comment_preservation(fresh_stack: Callable[..., TaiStack], uniq: 
     The assertion is scoped to the unedited region (everything before the ``mcp:``
     key), per the "byte-stable modulo edited keys" guarantee — the comments and
     their exact bytes survive, while the mcp block is legitimately rewritten."""
-    stack = fresh_stack(build_d2_stack)
+    stack = fresh_stack(build_commented_manifest_stack)
     path = manifest_file(stack)
-    assert path.read_text() == _D2_SEED, "the raw-text seed was not written byte-verbatim"
+    assert path.read_text() == _COMMENTED_MANIFEST_SEED, "the raw-text seed was not written byte-verbatim"
 
-    new_title = uniq("d2_mcp")
+    new_title = uniq("edited_mcp")
     await stack.api().post(
         "/api/mcp-config",
         json={"mcp": [{"title": new_title, "config": _UNREACHABLE}]},
@@ -167,7 +182,7 @@ async def test_comment_preservation(fresh_stack: Callable[..., TaiStack], uniq: 
     )
 
     persisted = path.read_text()
-    unedited, _, _ = _D2_SEED.partition("mcp:")
+    unedited, _, _ = _COMMENTED_MANIFEST_SEED.partition("mcp:")
     assert persisted.startswith(unedited), (
         "an mcp-section edit rewrote unedited lines (comments must be byte-stable modulo the edited keys):\n"
         f"---seed head---\n{unedited}\n---persisted---\n{persisted}"
@@ -184,7 +199,7 @@ async def test_comment_preservation(fresh_stack: Callable[..., TaiStack], uniq: 
 # A SHORT heartbeat TTL: a subscriber refreshes at a third of it, so a bus the SUT
 # cannot reach lets every presence key lapse within one TTL — held past, the recovery
 # re-registration is a real signal (with surviving keys the recovery poll is vacuous).
-_D3A_TTL = "3"
+_SHORT_HEARTBEAT_TTL = "3"
 
 
 @pytest.fixture
@@ -203,7 +218,7 @@ def relayed_bus_fleet(infra: Infra, fresh_stack: Callable[..., TaiStack]) -> tup
         raise
     stack = fresh_stack(
         build_fleet_stack,
-        env_overrides={"TAI_BUS_HEARTBEAT_TTL": _D3A_TTL},
+        env_overrides={"TAI_BUS_HEARTBEAT_TTL": _SHORT_HEARTBEAT_TTL},
         resource_kwargs={"bus_redis_host": bus_relay.listen_host, "bus_redis_port": bus_relay.port},
         relays=[bus_relay],
     )
@@ -219,6 +234,11 @@ def _real_bus_url(infra: Infra, stack: TaiStack) -> str:
     return f"redis://{host}:{port}/{stack.resources.redis_idx}"
 
 
+# A liveness bound: twice the slowest legitimate run, stack boot included, measured under host
+# load 260-330 on 20 cores (419.5s: the relayed fleet's boot and convergence, the sever, the
+# feature-store call, the wait for every presence key to expire, and the stack's teardown),
+# rounded up to the next 10s.
+@pytest.mark.timeout(840)
 @pytest.mark.needs(
     "probe-tools",
     "process",
@@ -250,7 +270,15 @@ async def test_bus_outage_isolates_feature_stores_and_expires_presence(
     bus_relay.sever()
 
     # Feature stores are untouched by the bus outage — a feature-Redis-backed call succeeds.
-    await api.post("/api/tool-runs", json={"tool_name": "e2e_echo", "arguments": {"payload": "x"}}, expect=202)
+    # A worker that lost its slot before the sever re-mints and self-resyncs, and a run
+    # dispatched while that reload holds the gate gets the retriable ``reloading`` 503, so the
+    # call polls past it as every client does; any other answer fails at once.
+    await api.post(
+        "/api/tool-runs",
+        json={"tool_name": "e2e_echo", "arguments": {"payload": "x"}},
+        expect=202,
+        retry_on_reloading=True,
+    )
 
     # The outage outlasts the TTL: every presence key expires on the (directly-read) bus
     # Redis — with the SUT's own bus endpoint severed, no worker can refresh its key.
@@ -262,6 +290,11 @@ async def test_bus_outage_isolates_feature_stores_and_expires_presence(
     await wait_for_async(keys_expired, deadline=20.0, message="bus presence keys never expired during the outage")
 
 
+# A liveness bound: twice the slowest legitimate run, stack boot included, measured under host
+# load up to ~315 on 20 cores (566.3s: the relayed fleet's boot and convergence, the mutation
+# during the outage, the restore, the re-mint wait and the fleet reload), rounded up to the
+# next 10s.
+@pytest.mark.timeout(1140)
 @pytest.mark.needs(
     "probe-tools",
     "mutable",
@@ -291,7 +324,7 @@ async def test_mutation_during_outage_reports_and_fleet_recovers(
 
     # A 200 (so the local persist + reload committed — a failed local reload would raise)
     # whose fanout is the honest unreachable shape (connection error, no worker list).
-    title = uniq("d3a_mcp")
+    title = uniq("outage_mcp")
     result = await api.post(
         "/api/mcp-config", json={"mcp": [{"title": title, "config": _UNREACHABLE}]}, retry_on_reloading=True
     )
@@ -341,13 +374,16 @@ async def test_mutation_during_outage_reports_and_fleet_recovers(
 # The two-sided silent-worker envelope: ack+apply deadlines SHORT (the report cuts to the
 # ``missing`` verdict quickly and the mutation is bounded), heartbeat TTL well ABOVE the
 # scenario window (the stopped worker's presence key survives, so the verdict is ``missing``
-# — alive but silent — never ``departed``).
-_D3B_ACK_TIMEOUT = "2"
-_D3B_APPLY_TIMEOUT = "3"
-_D3B_TTL = "60"
+# — alive but silent — never ``departed``). A ``missing`` verdict needs the stopped worker's
+# row still FRESH (beat age under 2/3 of the TTL) at the mutation's publish census, which
+# comes after the mutation's own local reload: the slowest measured under host load on 20
+# cores took 50.1s, so 2/3 of the TTL is twice that.
+_SHORT_ACK_TIMEOUT = "2"
+_SHORT_APPLY_TIMEOUT = "3"
+_SILENT_WORKER_TTL = "155"
 
 
-def build_d3b_stack(res: StackResources, variants: Variants) -> StackConfig:
+def build_silent_worker_stack(res: StackResources, variants: Variants) -> StackConfig:
     """A REPLICAS(2) no-backend fleet — two ``--workers 1`` masters, so a SIGSTOPped
     replica has NO uvicorn multiprocess supervisor to SIGKILL it (a ``-w N`` child
     would be reaped in ~5s). ``PYTHONHASHSEED`` pinned so the two replicas' probe
@@ -357,11 +393,13 @@ def build_d3b_stack(res: StackResources, variants: Variants) -> StackConfig:
     env = {
         **cfg.env,
         "PYTHONHASHSEED": "0",
-        "TAI_BUS_ACK_TIMEOUT": _D3B_ACK_TIMEOUT,
-        "TAI_BUS_APPLY_TIMEOUT": _D3B_APPLY_TIMEOUT,
-        "TAI_BUS_HEARTBEAT_TTL": _D3B_TTL,
+        "TAI_BUS_ACK_TIMEOUT": _SHORT_ACK_TIMEOUT,
+        "TAI_BUS_APPLY_TIMEOUT": _SHORT_APPLY_TIMEOUT,
+        "TAI_BUS_HEARTBEAT_TTL": _SILENT_WORKER_TTL,
     }
-    return replace(cfg, name="d3b-replicas", topology=Topology.REPLICAS, run_backend=False, run_metrics=False, env=env)
+    return replace(
+        cfg, name="silent-replicas", topology=Topology.REPLICAS, run_backend=False, run_metrics=False, env=env
+    )
 
 
 async def _probe(stack: TaiStack, port: int) -> tuple[int, str]:
@@ -394,6 +432,10 @@ async def _replicas_converged(stack: TaiStack, *, deadline: float = 60.0, differ
     return await wait_for_async(attempt, deadline=deadline, message=f"the two replicas never reached: {goal}")
 
 
+# A liveness bound: twice the slowest legitimate run, stack boot included, measured under host
+# load 190-320 on 20 cores (465.7s: the two replicas' boot and convergence, the mutation cut to
+# its apply deadline, the resume and the converging fleet reload), rounded up to the next 10s.
+@pytest.mark.timeout(940)
 @pytest.mark.needs(
     "probe-tools",
     "mutable",
@@ -404,7 +446,7 @@ async def _replicas_converged(stack: TaiStack, *, deadline: float = 60.0, differ
     "setting:PYTHONHASHSEED=0",
     "setting:TAI_BUS_ACK_TIMEOUT=2",
     "setting:TAI_BUS_APPLY_TIMEOUT=3",
-    "setting:TAI_BUS_HEARTBEAT_TTL=60",
+    "setting:TAI_BUS_HEARTBEAT_TTL=155",
 )
 async def test_silent_worker_reports_missing_then_converges(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
@@ -414,7 +456,7 @@ async def test_silent_worker_reports_missing_then_converges(
     its publish-time report — alive but silent, not ``departed``. After SIGCONT the
     fleet converges to the final persisted state (a fleet reload converges it; the
     buffered broadcast may also apply on resume — the assertion is the final digest)."""
-    stack = fresh_stack(build_d3b_stack)
+    stack = fresh_stack(build_silent_worker_stack)
     api_a = stack.api(port=stack.port_a)
 
     # Normalize both replicas onto one baseline digest.
@@ -441,7 +483,7 @@ async def test_silent_worker_reports_missing_then_converges(
         # A mutation on the live replica: replica B is in the census (its key survives),
         # so it is an expected worker — silent, it is cut to ``missing`` at the apply
         # deadline (not ``departed``, which would need an expired key).
-        title = uniq("d3b_mcp")
+        title = uniq("silent_mcp")
         result = await api_a.post(
             "/api/mcp-config", json={"mcp": [{"title": title, "config": _UNREACHABLE}]}, retry_on_reloading=True
         )
@@ -466,9 +508,9 @@ async def test_silent_worker_reports_missing_then_converges(
 # renews no presence key, so its remaining PTTL decays below the freshness bound
 # (``ttl - 2*interval`` = ``ttl/3`` = 10s) at ~``2*ttl/3`` = 20s while the row is STILL
 # present (it expires only at ``ttl`` = 30s). That ~10s window — row present but past the
-# freshness gate — is where a ``ready`` row reads STALE. A NEW builder rather than a TTL
-# edit to ``build_d3b_stack``: that stack's 60s TTL is load-bearing for the silent-worker
-# leg (its key must survive well above the window so the verdict is ``missing``).
+# freshness gate — is where a ``ready`` row reads STALE. It is its own builder because the
+# silent-worker stack's TTL must stay well above that window: its stopped worker's key must
+# survive, fresh, to the mutation's census so the verdict is ``missing``.
 _STALE_TTL = "30"
 
 
@@ -481,8 +523,8 @@ def build_stale_stack(res: StackResources, variants: Variants) -> StackConfig:
     env = {
         **cfg.env,
         "PYTHONHASHSEED": "0",
-        "TAI_BUS_ACK_TIMEOUT": _D3B_ACK_TIMEOUT,
-        "TAI_BUS_APPLY_TIMEOUT": _D3B_APPLY_TIMEOUT,
+        "TAI_BUS_ACK_TIMEOUT": _SHORT_ACK_TIMEOUT,
+        "TAI_BUS_APPLY_TIMEOUT": _SHORT_APPLY_TIMEOUT,
         "TAI_BUS_HEARTBEAT_TTL": _STALE_TTL,
     }
     return replace(
@@ -490,7 +532,10 @@ def build_stale_stack(res: StackResources, variants: Variants) -> StackConfig:
     )
 
 
-@pytest.mark.timeout(120)
+# A liveness bound: twice the slowest legitimate run measured under host load 100-330 on
+# 20 cores (183.1s: the stack boot and readiness waits, the 20s decay to stale, the
+# broadcast and the post-resume reload).
+@pytest.mark.timeout(370)
 @pytest.mark.needs(
     "probe-tools",
     "mutable",
@@ -503,9 +548,7 @@ def build_stale_stack(res: StackResources, variants: Variants) -> StackConfig:
     "setting:TAI_BUS_APPLY_TIMEOUT=3",
     "setting:TAI_BUS_HEARTBEAT_TTL=30",
 )
-async def test_stale_worker_flag_flips_and_broadcast_reports_stale(
-    fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
-) -> None:
+async def test_stale_worker_flag_flips_and_broadcast_reports_stale(fresh_stack: Callable[..., TaiStack]) -> None:
     """One REPLICAS master SIGSTOPped renews no presence key: its row decays past the
     server-computed freshness bound while STILL present (30s TTL), so the fleet listing
     flags it ``stale``. A broadcast fired the instant the flag flips reports that worker
@@ -547,14 +590,14 @@ async def test_stale_worker_flag_flips_and_broadcast_reports_stale(
 
         # Broadcast IMMEDIATELY, while the stale row is still present: it fails the
         # freshness gate as a quiet ``ready`` row, so the report names it ``stale`` (never a
-        # silent skip, never ``missing`` — that verdict needs a FRESH key).
-        title = uniq("stale_mcp")
-        result = await api_a.post(
-            "/api/mcp-config", json={"mcp": [{"title": title, "config": _UNREACHABLE}]}, retry_on_reloading=True
-        )
-        fanout = assert_fleet_fanout(result)
-        outcomes = {entry["name"]: entry["outcome"] for entry in fanout["results"]}
-        assert outcomes.get(b_name) == "stale", f"the stale replica was not reported stale: {fanout}"
+        # silent skip, never ``missing`` — that verdict needs a FRESH key). The broadcast is
+        # the failed-MCP re-probe, whose local apply re-probes nothing here: the publish
+        # census lands well inside the ~10s stale window. A config mutation's local reload
+        # outlasts that window on a loaded host (up to 21.4s measured), and the row would
+        # expire before the census.
+        result = await api_a.post("/api/mcp-status/reload-failed", json={}, retry_on_reloading=True)
+        outcomes = {entry["name"]: entry["outcome"] for entry in result["results"]}
+        assert outcomes.get(b_name) == "stale", f"the stale replica was not reported stale: {result}"
     finally:
         # Always resume replica B — a stopped process left behind would fail teardown.
         os.killpg(b_pgid, signal.SIGCONT)
@@ -562,5 +605,3 @@ async def test_stale_worker_flag_flips_and_broadcast_reports_stale(
     # Post-recovery a fleet reload converges the resumed replica back onto the persisted state.
     await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
     await _replicas_converged(stack)
-    document = yaml.safe_load(manifest_file(stack).read_text()) or {}
-    assert title in [entry["title"] for entry in document.get("mcp", [])], "the mutation did not persist"

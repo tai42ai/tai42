@@ -21,6 +21,7 @@ from tai42_contract.sub_mcp import RouteConfig
 from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 
 from tai42_skeleton.access_control.path_canon import under_prefix
+from tai42_skeleton.app.epoch import boot_stateless_http
 from tai42_skeleton.app.transport_stream import (
     SessionCallAdmissionMiddleware,
     TransportStreamDrainExemptMiddleware,
@@ -541,8 +542,9 @@ class SubMcpAppRouter:
             # dispatcher rewrites an ``/app/{slug}`` request to sub-app scope path
             # ``/`` (see ``__call__``), so the endpoint must live at ``/`` — the
             # FastMCP default of ``/mcp`` would leave the rewritten ``/`` request
-            # 404ing against the sub-app.
-            sub_app = mcp.http_app(path="/", middleware=sub_middleware("/"))
+            # 404ing against the sub-app. It runs in the stateless mode the worker
+            # booted with, so a multi-worker deployment serves it like the main endpoint.
+            sub_app = mcp.http_app(path="/", middleware=sub_middleware("/"), stateless_http=boot_stateless_http())
 
         app_lifespan = SubAppLifespan(sub_app)
         # start() enters the lifespan in its dedicated task and blocks until it is

@@ -80,16 +80,20 @@ def translate_orphan_env_write() -> Iterator[None]:
 def fleet_fanout(fleet: FleetResult) -> dict[str, Any]:
     """Summarize a pipeline broadcast for a mutation response's ``fanout`` field.
 
-    A single-worker deployment reaches no sibling, so the fan-out collapses to a
-    human note; a reachable multi-worker broadcast returns the per-worker report, and
-    an unreachable bus returns its error shape. The publisher's own worker is excluded
+    A broadcast that reaches no sibling collapses to a human note stating why: a
+    busless deployment's local publish (``local_only``) has no worker bus, while a
+    publish over the bus that found no other worker on the census says that instead.
+    A reachable multi-worker broadcast returns the per-worker report, and an
+    unreachable bus returns its error shape. The publisher's own worker is excluded
     when deciding local-only, so a lone worker never reports a fan-out.
     """
     if not fleet.reachable:
         return {"mode": "unreachable", **fleet.model_dump(mode="json")}
+    if fleet.local_only:
+        return {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"}
     remotes = [result for result in fleet.results if result.name != instance.app.bus.identity.name]
     if not remotes:
-        return {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"}
+        return {"mode": "local-only", "note": "no other worker is on the worker bus; only this worker reloaded"}
     return {"mode": "fleet", **fleet.model_dump(mode="json")}
 
 

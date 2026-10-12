@@ -212,7 +212,8 @@ class FakeCM:
 
 
 def _fleet_report() -> FleetResult:
-    return FleetResult(op="reload_config", results=[])
+    """The single-worker harness's broadcast: the busless bus's local-only report."""
+    return FleetResult(op="reload_config", local_only=True, results=[])
 
 
 def _unreachable_report() -> FleetResult:
