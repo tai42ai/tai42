@@ -18,6 +18,11 @@ if TYPE_CHECKING:
 FINISHED_TABLE: Final = "tai42_checkpoint_finished"
 FORMAT_TABLE: Final = "tai42_checkpoint_format"
 
+# The transaction-scoped advisory lock every first build of a kit table takes before its DDL:
+# concurrent ``CREATE TABLE IF NOT EXISTS`` statements race in Postgres (a unique violation on the
+# type catalog), so the first builds run one at a time.
+_BUILD_LOCK_SQL: Final = "SELECT pg_advisory_xact_lock(hashtext(%s))"
+
 _STALE_THREADS_SQL: Final = (
     "SELECT thread_id FROM checkpoints GROUP BY thread_id "
     "HAVING max((checkpoint->>'ts')::timestamptz) < %(cutoff)s ORDER BY thread_id"
@@ -41,7 +46,8 @@ async def holds_checkpoints(pool: AsyncConnectionPool) -> bool:
 
 async def create_finished_table(pool: AsyncConnectionPool) -> None:
     """Create the finished-thread ledger table and its time index."""
-    async with pool.connection() as conn:
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(_BUILD_LOCK_SQL, (FINISHED_TABLE,))
         await conn.execute(
             f"CREATE TABLE IF NOT EXISTS {FINISHED_TABLE} "
             "(thread_id TEXT PRIMARY KEY, finished_at TIMESTAMPTZ NOT NULL)"
@@ -83,10 +89,12 @@ async def forget_finished(pool: AsyncConnectionPool, thread_ids: Sequence[str]) 
 async def read_format_generation(pool: AsyncConnectionPool) -> int | None:
     """The store-format generation the marker table records, or ``None`` when none is recorded."""
     async with pool.connection() as conn:
-        await conn.execute(
-            f"CREATE TABLE IF NOT EXISTS {FORMAT_TABLE} "
-            "(id SMALLINT PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL)"
-        )
+        async with conn.transaction():
+            await conn.execute(_BUILD_LOCK_SQL, (FORMAT_TABLE,))
+            await conn.execute(
+                f"CREATE TABLE IF NOT EXISTS {FORMAT_TABLE} "
+                "(id SMALLINT PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL)"
+            )
         async with conn.cursor() as cur:
             await cur.execute(f"SELECT generation FROM {FORMAT_TABLE} WHERE id = 1")  # noqa: S608 -- constant table name
             row = await cur.fetchone()

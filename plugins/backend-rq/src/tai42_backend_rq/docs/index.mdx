@@ -20,7 +20,7 @@ The `RQ_` env group. `RQ_REDIS_URL` falls back to the shared
 | --- | --- | --- |
 | `RQ_REDIS_URL` | `redis://localhost:6379/0` | Broker and results. |
 | `RQ_RQ_PREFIX` | `rq:` | Key prefix for every RQ structure in Redis. |
-| `RQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: every job's timeout on the worker, and how long a synchronous dispatch waits for a result. |
+| `RQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the timeout the worker runs every job under, and how long a synchronous dispatch waits for a result. |
 | `RQ_MANIFEST_KEY` | `MANIFEST_KEY` | Env var the worker stores the manifest JSON under, inherited by forked work-horses. |
 | `RQ_TOOL_NAME_ARG` | `backend_tool_name` | Queued-job kwarg naming the target tool. |
 
@@ -50,9 +50,9 @@ processes, so that is deliberate.
 - `backend_registered_tasks` and `backend_list_failed_tasks` are not implemented.
 - The rq scheduler cannot honour a relative interval: a schedule with `relative: true`
   is refused on create, update and import.
-- Every job — enqueued or moved onto the queue by the scheduler — takes
-  `RQ_TASK_TIMEOUT` as its timeout. The worker and scheduler bind it when they start,
-  so a change converges through a process recycle.
+- The worker runs every job — enqueued, or fired by the scheduler — under its own
+  `RQ_TASK_TIMEOUT`, whatever timeout the job was stored with, so a change converges
+  through a worker recycle.
 
 ## See also
 
