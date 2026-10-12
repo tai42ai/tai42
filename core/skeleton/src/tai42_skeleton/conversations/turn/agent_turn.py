@@ -33,6 +33,7 @@ from tai42_kit.interactions.door_contract import DOOR_START_DEFAULT, evaluate_do
 from tai42_skeleton.authz.execution import authorize_execution_agent_run, bind_execution_identity
 from tai42_skeleton.conversations.target_validators import caller_ask_landing_for_route
 from tai42_skeleton.conversations.turn import accessors
+from tai42_skeleton.conversations.turn.completion_delivery import COMPLETION_TOOL_NAME
 from tai42_skeleton.conversations.turn.outcome import (
     _ResolvedOutcome,
     _serialize_structured,
@@ -240,10 +241,6 @@ async def _run_agent_turn(
     it), so the run's first ask records ``asked_by == [agent]``; it mints the run-delivery id and
     reads the bound completion as this run's out-of-band delivery address.
     """
-    # ``completion_delivery`` imports this module's sibling, so the constant is read lazily to keep
-    # the door↔turn package free of an import cycle.
-    from tai42_skeleton.conversations.turn.completion_delivery import COMPLETION_TOOL_NAME
-
     agent = accessors._agent_registry().get(route.target_name)
     if agent is None:
         return _tool_error(f"agent {route.target_name!r} is not registered", route)

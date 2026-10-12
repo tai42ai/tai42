@@ -107,8 +107,8 @@ def _acting_principal() -> tuple[str | None, Mapping[str, Any] | None, bool]:
     The same rule :func:`~tai42_skeleton.operations._authority.resolve_caller` applies, so
     isolation and the pass-role gate never key on different principals.
 
-    Imported at call time: ``authz`` reaches this module back through
-    ``access_control.backend``.
+    Imported at call time: ``authz`` reaches this module back through ``authz.check`` →
+    ``access_control.policy`` → ``access_control.store`` → ``access_control.principals_mixin``.
     """
     from tai42_skeleton.authz.execution_identity import get_execution_identity
 

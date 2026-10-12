@@ -11,6 +11,7 @@ from tai42_contract.access_control import OWNER_USER_ID_CLAIM, UNIVERSAL_SCOPE
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, IdentityProvider
 from tai42_kit.settings import register_settings_reset
 
+from tai42_skeleton.access_control import role_gate
 from tai42_skeleton.access_control.path_canon import (
     ENCODED_SLASH,
     MalformedPathError,
@@ -331,12 +332,8 @@ class AccessControlVerifier(TokenVerifier):
         """
         if method is None or ENCODED_SLASH not in path:
             return False
-        # Imported at call time: ``role_gate`` triggers the router-import universe, which
-        # this foundational module is imported ahead of.
-        from tai42_skeleton.access_control.role_gate import resolve_route_meta
-
         try:
-            raw_route = resolve_route_meta(path, method)
+            raw_route = role_gate.resolve_route_meta(path, method)
         except MalformedPathError:
             raw_route = None
         if raw_route is None:
@@ -471,16 +468,12 @@ class AccessControlVerifier(TokenVerifier):
         Reads the registry's declaration via :func:`resolve_served_surface` (handler routes AND
         the mounted MCP/sub-MCP transports): an ``authed=True`` match answers ``{UNIVERSAL_SCOPE}``;
         a public match, no match, a method-less lookup, or a malformed path answers empty (those
-        fall through to the public fallbacks or to the fail-closed deny). Imported at call time —
-        ``role_gate`` triggers the router-import universe this foundational module is imported
-        ahead of, mirroring ``_reject_encoded_slash``.
+        fall through to the public fallbacks or to the fail-closed deny).
         """
         if method is None:
             return set()
-        from tai42_skeleton.access_control.role_gate import resolve_served_surface
-
         try:
-            meta = resolve_served_surface(path, method)
+            meta = role_gate.resolve_served_surface(path, method)
         except MalformedPathError:
             return set()
         if meta is not None and meta.authed:

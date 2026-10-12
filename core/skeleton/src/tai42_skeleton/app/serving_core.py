@@ -15,6 +15,7 @@ from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import MOUNT_METHODS, route_registry
 from tai42_skeleton.app.sessions import ReloadRejectionMiddleware, SessionRegistry, SessionTrackingMiddleware
 from tai42_skeleton.app.transport_stream import SessionCallAdmissionMiddleware
+from tai42_skeleton.authz.middleware import AuthzMiddleware
 from tai42_skeleton.backend.registry import BackendHolder
 from tai42_skeleton.backup import BackupRegistry, register_core_sections
 from tai42_skeleton.channels.registry import ChannelRegistry
@@ -163,10 +164,7 @@ class ServingCore:
         # retriable "reloading" error while the reload gate is held.
         self._fast_mcp.add_middleware(ReloadRejectionMiddleware(reload_gate))
         # Tool-edge authorization for projected operations, on the main server AND (in
-        # ``_build_sub_app``) every sub-MCP mount. Imported locally to avoid an import
-        # cycle (authz -> operations -> app -> server).
-        from tai42_skeleton.authz.middleware import AuthzMiddleware
-
+        # ``_build_sub_app``) every sub-MCP mount.
         self._fast_mcp.add_middleware(AuthzMiddleware(app))
         # Run-time tier fence for this MCP edge: an MCP ``tools/call`` reaches ``Tool.run``
         # directly, never the ``ToolBinding.run_tool`` seam that fences the in-process

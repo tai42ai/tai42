@@ -18,6 +18,9 @@ from tai42_contract.manifest import TaiMCPConfig
 from tai42_contract.storage import Storage
 from tai42_contract.template import TemplatedText
 
+from tai42_skeleton.access_control.adapter import AuthAdapter
+from tai42_skeleton.access_control.middleware import DisabledAccessControlSecretCapabilityMiddleware
+from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.app.channels_facet import ChannelsFacet
 from tai42_skeleton.app.clients import ClientsFacet
 from tai42_skeleton.app.conversations_facet import ConversationsFacet
@@ -241,12 +244,8 @@ class TaiMCP(TaiMCPLifecycleMixin):
         """Build a fresh ``ServingCore`` under the CURRENT env.
 
         A fresh FastMCP and the feature collaborators registered onto it, with the access-control
-        adapter read fresh unless a construction-time ``auth`` pins it. Imported locally to
-        avoid an import cycle (access_control -> ... -> app.server).
+        adapter read fresh unless a construction-time ``auth`` pins it.
         """
-        from tai42_skeleton.access_control.adapter import AuthAdapter
-        from tai42_skeleton.access_control.settings import access_control_settings
-
         if self._auth_override is not None:
             auth: TokenVerifier | None = self._auth_override
         else:
@@ -453,11 +452,6 @@ class TaiMCP(TaiMCPLifecycleMixin):
         on; that stream is exempt from its generation's retire drain
         (:class:`~tai42_skeleton.app.transport_stream.TransportStreamDrainExemptMiddleware`).
         """
-        # Local import mirrors ``_build_serving_core``: access_control -> ... -> app.server
-        # is a cycle, so the adapter surface is reached lazily here too.
-        from tai42_skeleton.access_control.middleware import DisabledAccessControlSecretCapabilityMiddleware
-        from tai42_skeleton.access_control.settings import access_control_settings
-
         gate_off_secret_capability = (
             [] if access_control_settings().enable else [Middleware(DisabledAccessControlSecretCapabilityMiddleware)]
         )

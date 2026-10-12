@@ -49,6 +49,7 @@ from tai42_contract.interactions.models import AnswerMismatchPolicy
 from tai42_kit.clients.impl.http import HttpxClient
 
 from tai42_skeleton.channels.send_span import send_span
+from tai42_skeleton.hooks import cache as hooks_cache
 from tai42_skeleton.interactions.settings import interactions_settings
 
 logger = logging.getLogger(__name__)
@@ -338,18 +339,13 @@ async def _emit_answer_rejected(
 async def _emit_event(topic: str, payload: dict[str, Any], *, failure_desc: str) -> None:
     """Emit ``topic`` with ``payload`` on the hooks manager, best-effort.
 
-    The one seam the inbound emitters share: the deferred hooks-manager import and the
+    The one seam the inbound emitters share: the hooks-manager lookup and the
     log-then-swallow of a hooks-manager fault, so an operator-telemetry emit never fails the
     inbound webhook. ``failure_desc`` completes the log line ``inbound: failed to emit
     <topic> <failure_desc>``.
     """
-    # Local import: reach the hooks-manager accessor only when emitting, keeping this
-    # module's load-time import surface to the contract + kit (the codebase's
-    # function-local-import pattern for avoiding an import cycle across packages).
-    from tai42_skeleton.hooks.cache import get_hooks_manager
-
     try:
-        await get_hooks_manager().on_event(topic=topic, payload=payload)
+        await hooks_cache.get_hooks_manager().on_event(topic=topic, payload=payload)
     except Exception:
         logger.warning("inbound: failed to emit %r %s", topic, failure_desc, exc_info=True)
 

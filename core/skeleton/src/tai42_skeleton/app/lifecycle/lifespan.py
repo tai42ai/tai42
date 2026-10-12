@@ -14,6 +14,7 @@ from tai42_skeleton.app.graceful_exit import request_graceful_exit
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.readiness_sentinel import remove_ready_sentinel
 from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.config.recycle_policy import require_supervision_declared
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.owned_settings import require_known_owned_settings
 
@@ -33,10 +34,7 @@ class LifespanMixin(LifecycleState):
         require_bus_for_shared_config()
         require_bus_for_backend(manifest)
         # A supervised marker must arrive with the deployment's pinned set, so the recycle
-        # refusal never runs on a guessed list. Imported here: the recycle policy imports the
-        # app package this module belongs to.
-        from tai42_skeleton.config.recycle_policy import require_supervision_declared
-
+        # refusal never runs on a guessed list.
         require_supervision_declared()
         from tai42_skeleton.app.epoch import clear_epoch, current_epoch_or_none, install_boot_core
 
