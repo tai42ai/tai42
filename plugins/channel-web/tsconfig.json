@@ -30,5 +30,5 @@
 
     "noEmit": true
   },
-  "include": ["public-src"]
+  "include": ["public-src", "studio-src"]
 }

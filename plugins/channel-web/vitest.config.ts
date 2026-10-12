@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 
 /**
- * Vitest config for the public chat page source: a jsdom DOM environment + React
+ * Vitest config for the public chat page and the Studio bundle sources: a jsdom DOM environment + React
  * Testing Library, so the page's components, stream reducer, and fetch seam are
  * exercised as real rendered DOM.
  *
@@ -62,9 +62,11 @@ export default defineConfig({
     },
     coverage: {
       provider: 'v8',
-      include: ['public-src/**/*.{ts,tsx}'],
+      include: ['public-src/**/*.{ts,tsx}', 'studio-src/**/*.{ts,tsx}'],
       exclude: [
         'public-src/**/*.test.{ts,tsx}',
+        'studio-src/**/*.test.{ts,tsx}',
+        'studio-src/test-utils.tsx',
         'public-src/test-setup.ts',
         'public-src/**/*.d.ts',
       ],

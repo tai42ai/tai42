@@ -62,8 +62,9 @@ fires the registrations as its import side-effect: the `"web"` channel on
 `tai42_app.channels`, and — via the `routes` import — the public
 `/api/channels/web` doors on `tai42_app.http`. A bare `import tai42_channel_web`
 registers **nothing** — the package is library-safe; only the register module
-carries the side-effect. The plugin contributes no Studio UI: its surface is the
-public chat page it serves itself.
+carries the side-effect. The plugin contributes the entry-gate panel to a web route's
+drill-in in the Studio (studio-plugin item `web`); its visitor surface is the public chat
+page it serves itself.
 
 ## The chat page
 
@@ -151,6 +152,11 @@ to an ungated deployment — the gate is opt-in per identity.
 ```
 https://<your deployment>/api/channels/web/chat/<identity>?tai_entry=<code>
 ```
+
+In the Studio, the entry-gate panel on a web route's drill-in reads and changes the
+gate and mints and revokes codes. It shows only where the deployment lists
+`tai42_channel_web` under `studio_plugins` (a marketplace install adds it); the gate
+doors work by API and CLI either way.
 
 Entry codes are **operator-minted**, multi-use, optionally expiring, revocable, and
 **hashed at rest** — only a code's SHA-256 is stored; the raw code exists in flight
