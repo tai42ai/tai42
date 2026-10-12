@@ -115,7 +115,7 @@ class McpReprobeMixin(LifecycleState):
         """Re-probe, now, those of ``titles`` that are failed and in the manifest; bind the recovered ones.
 
         The set-scoped pass the background loop runs, for named titles: the snapshot is taken under the
-        reload gate, the probe runs off it on the reload budget, and the gate is taken again only to bind
+        reload gate, the probe runs off it on the cold-boot probe budget, and the gate is taken again only to bind
         (each title re-verified still failed and still in the manifest). A named title that is bound, or
         not in the manifest, is not probed. The loop's own backoff is left as it is; a title recovered here
         is simply absent from its next snapshot. Returns the per-title results (empty when nothing was

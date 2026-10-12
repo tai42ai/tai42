@@ -93,7 +93,7 @@ class AdminFacet(_Facet):
     async def reprobe_failed_mcps(self, titles: list[str]) -> list[dict[str, Any]]:
         """Re-probe those of ``titles`` that failed to load, bind the recovered ones, and report each outcome.
 
-        Probes off the reload gate on the reload budget and takes the gate only to bind.
+        Probes off the reload gate on the cold-boot probe budget and takes the gate only to bind.
         """
         return await self._app._reprobe_failed_titles(titles)
 

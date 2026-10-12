@@ -572,7 +572,7 @@ async def test_reprobe_failed_titles_with_no_failed_title_probes_nothing():
     m._probe_mcp.assert_not_awaited()
 
 
-async def test_reprobe_failed_titles_probes_off_the_gate_on_the_reload_budget():
+async def test_reprobe_failed_titles_probes_off_the_gate_on_the_cold_boot_budget():
     """The named re-probe holds the reload gate only to snapshot and apply, never across the probe."""
     m = _Mixin()
     m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
@@ -598,7 +598,8 @@ async def test_reprobe_failed_titles_probes_off_the_gate_on_the_reload_budget():
                 return "ok"
 
         assert await asyncio.wait_for(gated_write(), timeout=1) == "ok"
-        assert seen["timeout"] == mcp_reload_probe_timeout()
+        assert seen["timeout"] == mcp_probe_timeout()
+        assert seen["timeout"] != mcp_reload_probe_timeout()
     finally:
         release.set()
     assert [r["status"] for r in await task] == ["ok"]
