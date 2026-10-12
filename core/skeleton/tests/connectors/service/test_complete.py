@@ -11,6 +11,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.connectors.service import AliasInUseError, CompleteConnectResult, FlowOperation
 
 from tai42_skeleton.app import instance
+from tai42_skeleton.app.bus.ops import ReprobeFailedMcps
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.service.connection_service import (
     ConcurrentConnectionUpdateError,
@@ -478,7 +479,7 @@ async def test_a_reconnect_that_changes_entries_runs_the_pipeline_then_asks_for_
     assert result.fanout == _FANOUT
     assert events["broadcasts"] == [
         {
-            "op": {"op": "reprobe_failed_mcps", "titles": ["acme_cal_work", "acme_mail_work"]},
+            "op": ReprobeFailedMcps(op="reprobe_failed_mcps", titles=["acme_cal_work", "acme_mail_work"]),
             "publish_on_local_failure": True,
         }
     ]
@@ -498,7 +499,7 @@ async def test_a_toggle_on_completion_asks_for_the_reprobe_too(harness, monkeypa
     await complete_connect(flow_id=flow.flow_id, code="auth")
 
     assert [b["op"] for b in events["broadcasts"]] == [
-        {"op": "reprobe_failed_mcps", "titles": ["acme_cal_work", "acme_mail_work"]}
+        ReprobeFailedMcps(op="reprobe_failed_mcps", titles=["acme_cal_work", "acme_mail_work"])
     ]
     assert events["broadcasts"][0]["publish_on_local_failure"] is True
 
