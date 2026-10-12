@@ -188,7 +188,7 @@ def test_prefork_does_not_hold_the_span_across_the_horses_whole_run(monkeypatch)
     worker = cast("Any", object.__new__(worker_module.CustomRQWorker))
 
     # rq's own execute_job runs unwrapped: only the fork instant inside it is gated.
-    worker.execute_job("job", "queue")
+    worker.execute_job(SimpleNamespace(id="job", timeout=None), "queue")
     assert during_monitor == [0], "the gate is still held while the horse runs"
     assert fork_gate.live_spans == 0
 
