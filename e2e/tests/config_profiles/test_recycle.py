@@ -514,10 +514,20 @@ async def test_an_env_write_run_as_a_backend_job_recycles_the_backend_worker_tha
     written = _tool_map(await _backend_job_result(recycle_stack, task_id))
 
     assert written["awaiting_respawn"] == [], written
+    _assert_every_worker_applied(written["fanout"])
     roll = written["recycle"]
     await _assert_the_backend_worker_wrote_and_recycles(
         recycle_stack, roll["recycle"], roll["recycle_stopped"], before_backend, before_serve, offsets
     )
+
+
+def _assert_every_worker_applied(fanout: dict[str, Any]) -> None:
+    """The reload fan-out a backend job published reached the whole fleet, every worker ``applied`` —
+    the worker running the job included, whose pool turnover does not wait for that job."""
+    assert fanout["mode"] == "fleet", fanout
+    assert fanout["results"], fanout
+    for row in fanout["results"]:
+        assert row["outcome"] == "applied", f"{row} in {fanout}"
 
 
 async def _assert_the_backend_worker_wrote_and_recycles(
@@ -599,6 +609,7 @@ async def test_a_profile_apply_run_as_a_backend_job_recycles_the_fleet_and_the_b
 
     assert applied["refused"] == [], applied
     assert applied["awaiting_respawn"] == [], applied
+    _assert_every_worker_applied(applied["fanout"])
     await _assert_the_backend_worker_wrote_and_recycles(
         recycle_stack, applied["recycle"], applied["recycle_stopped"], before_backend, before_serve, offsets
     )
