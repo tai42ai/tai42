@@ -234,7 +234,6 @@ def test_a_busy_pre_restart_child_still_waits_for_the_pool_to_refill(monkeypatch
     # The busy child is exempt from "gone", never from the pool's size: a two-child pool
     # holding only the busy pre-restart child is confirmed once the second child is forked.
     control = _install(monkeypatch, [_pool([111], max_conc=2), _pool([111, 222], max_conc=2)], [_busy(111)])
-    monkeypatch.setattr(prefork, "_POOL_RECYCLE_POLL_INTERVAL", 0.0)
     prefork._confirm_turnover(_HOST, ({111, 112}, 2), timeout=5.0)
     assert len(control.connections) == 2
 
@@ -298,7 +297,7 @@ def test_wedged_restart_that_cannot_respawn_fails_loudly(
         prefork._restart_pool_and_confirm(_HOST, ({111}, 1), budget=0.2)
     assert kills == [(111, signal.SIGKILL)]
     assert "wedged inside billiard (_putlock)" in str(excinfo.value)
-    assert "old children still present: [111]" in str(excinfo.value)
+    assert "idle pre-restart children still present: [111]" in str(excinfo.value)
 
 
 def test_confirm_failure_after_a_healthy_restart_is_not_blamed_on_a_wedge(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -311,7 +310,7 @@ def test_confirm_failure_after_a_healthy_restart_is_not_blamed_on_a_wedge(monkey
     assert control.broadcasts == [("pool_restart", [_HOST])]
     assert kills == []
     assert "wedged" not in str(excinfo.value)
-    assert "old children still present: [111]" in str(excinfo.value)
+    assert "idle pre-restart children still present: [111]" in str(excinfo.value)
 
 
 def test_restart_propagation_bound_fits_inside_the_turnover_budget() -> None:
