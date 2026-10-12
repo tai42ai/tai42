@@ -68,7 +68,7 @@ _VALID_TRANSPORTS = ("http", "sse", "stdio")
 
 def is_valid_slug(slug: str) -> bool:
     """Whether ``slug`` is a well-formed sub-MCP slug: one lowercase-safe path segment."""
-    return _SLUG_RE.match(slug) is not None
+    return PATH_SEGMENT_SLUG_RE.match(slug) is not None
 
 
 def validate_registration(slug: str, transport: str) -> None:
