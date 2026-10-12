@@ -43,8 +43,9 @@ migration chain:
 
 - `accounts_users` — one row per human user: the opaque, stable `user_id`
   (`usr-…`), the normalized email, the argon2id password hash (NULL until an
-  invite is accepted), and the disabled flag. A member's role is not stored here:
-  it is the role the person's platform principal holds, read through
+  invite is accepted), and the disabled flag. A role is not stored here: the
+  platform's Members listing joins a member's role from the principal it holds,
+  and an invitation's role is the one its principal holds, read through
   `AccountsAdminServices.principal_roles`.
 - `accounts_sessions` — one row per live login: the SHA-256 hash of the
   `tai-sess-…` token (the raw token is never stored), with sliding-idle

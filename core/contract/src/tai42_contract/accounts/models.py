@@ -22,8 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tai42_contract.template import TemplatedText
 
-# A member's platform role name, or ``None`` when the principal's policy was not written
-# from a role template.
+# A platform role name, or ``None`` when the policy is not written from a role template.
 _RoleName = Annotated[str, Field(min_length=1)] | None
 
 _ROUTE_PATH_CHARS = re.compile(r"\A[A-Za-z0-9._~/%-]*\Z")
@@ -217,23 +216,20 @@ class MemberEntry(BaseModel):
     """One person an accounts provider owns: an account the operator manages.
 
     ``id`` is the provider's stable handle for the person — the id its own actions act on.
-    ``email`` is the sign-in identity the provider holds for them. ``role`` names the
-    platform role the person holds; only the name rides here, the role's definition is read
-    from the role listing. ``None`` — the principal's policy was not written from a role
-    template. ``created_at`` is timezone-aware (UTC).
+    ``email`` is the sign-in identity the provider holds for them. ``created_at`` is
+    timezone-aware (UTC).
 
     ``principal_ids`` are the platform principal id(s) this person holds (at least one — a
     person with none is an invitation, not a member); the Members operation joins them
-    against the platform's own principal records to resolve the access-control
-    ``disabled`` state, which is NOT a provider fact and so does not ride here.
-    ``actions`` are the provider's OWN member-action ids applicable to this row.
+    against the platform's own records to resolve each principal's access-control
+    ``disabled`` state and the role it holds. Neither is a provider fact, so neither rides
+    here. ``actions`` are the provider's OWN member-action ids applicable to this row.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1)
     email: str = Field(min_length=1)
-    role: _RoleName
     created_at: datetime
     principal_ids: list[str] = Field(min_length=1)
     actions: list[str] = Field(default_factory=list)
@@ -251,8 +247,8 @@ class InviteEntry(BaseModel):
 
     ``id`` is the provider's stable handle for the invited person — the id its own actions
     act on. ``email`` is the invited address; ``role`` names the platform role the person
-    will hold (only the name, as on :class:`MemberEntry`; ``None`` — the principal's policy
-    was not written from a role template). ``created_at`` and
+    will hold (only the name — the role's definition is read from the role listing; ``None``
+    — the policy is not written from a role template). ``created_at`` and
     ``expires_at`` are timezone-aware (UTC). ``actions`` are the provider's OWN
     member-action ids applicable to this row. An invitation holds no principal yet, so it
     carries no ``principal_ids``.
@@ -294,13 +290,16 @@ class MemberPrincipalState(BaseModel):
     """One platform principal a member holds, with its access-control state joined in.
 
     ``user_id`` is the platform principal id; ``disabled`` is taken from that principal's
-    own record (the store the principals listing reads), never from a provider.
+    own record (the store the principals listing reads) and ``role`` is the role it holds,
+    joined from its own policy record — both never from a provider. ``role`` is ``None``
+    when the principal's policy was not written from a role template.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     user_id: str = Field(min_length=1)
     disabled: bool
+    role: _RoleName
 
 
 class MemberRow(BaseModel):
@@ -312,8 +311,9 @@ class MemberRow(BaseModel):
     joins and echoes both, never parses them. ``principals`` carries each principal's
     joined state; ``disabled`` is derived True only when EVERY principal is disabled, so a
     person with any enabled principal still reads active while the per-principal truth
-    stays visible. ``role`` is provider-sourced; ``None`` — the principal's policy was not
-    written from a role template.
+    stays visible. ``role`` is derived too: the one name every principal holds, ``None``
+    when there is no single name — every principal's policy was set directly, or the
+    principals hold different roles; ``principals[].role`` carries each principal's own.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -332,8 +332,8 @@ class InviteRow(BaseModel):
     """An invite row in the aggregated directory the Members door returns.
 
     Display fields plus the opaque routing tokens. An invitation holds no principal, so it
-    carries no principal state; ``role`` is provider-sourced; ``None`` — the principal's
-    policy was not written from a role template.
+    carries no principal state, and ``role`` is provider-sourced; ``None`` — the policy is
+    not written from a role template.
     """
 
     model_config = ConfigDict(extra="forbid")
