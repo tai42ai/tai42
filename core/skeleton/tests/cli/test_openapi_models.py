@@ -26,6 +26,7 @@ from tai42_skeleton.cli.openapi import (
     build_openapi_spec,
 )
 from tai42_skeleton.cli.openapi import _operation as _emit_operation
+from tai42_skeleton.conversations.models import DeliveryStatus
 
 from .conftest import _operation, schemas_for
 
@@ -670,6 +671,9 @@ def _enum_of(spec: dict, schema: dict) -> list[str]:
         ("MetricsResult", "granularity", ["hour", "day", "week"]),
         ("ObservabilityRunView", "status", ["error", "success"]),
         ("PrincipalRef", "kind", ["human", "service"]),
+        ("ThreadSummaryRow", "last_delivery_status", [status.value for status in DeliveryStatus]),
+        ("ConversationConfigSetResult", "target_kind", ["agent", "tool"]),
+        ("ConversationConfigDeleteResult", "target_kind", ["agent", "tool"]),
     ],
 )
 def test_a_closed_response_field_publishes_its_values(
