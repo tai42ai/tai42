@@ -264,6 +264,7 @@ jobs:
           # freshness check diffs after a rebuild.
           read -r -d '' FRONTEND <<'EOF' || true
           channel-web|plugins/channel-web|src/tai42_channel_web/public
+          channel-web|plugins/channel-web|src/tai42_channel_web/studio
           EOF
           frontends='[]'
           while IFS='|' read -r name dir dist; do

@@ -188,6 +188,11 @@
           "type": "yaml",
           "path": "src/tai42_channel_web/tai-plugin.yml",
           "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "src/tai42_channel_web/studio/studio-manifest.json",
+          "jsonpath": "$.version"
         }
       ]
     },
