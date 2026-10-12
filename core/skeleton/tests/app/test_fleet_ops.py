@@ -27,6 +27,7 @@ from tai42_skeleton.app.bus.ops import (
     ReloadMcp,
     ReloadTool,
     RemoveTool,
+    ReprobeFailedMcps,
     fleet_op_wire,
 )
 from tai42_skeleton.app.instance import app
@@ -128,6 +129,12 @@ _PUBLISHERS: list[tuple[str, FleetOp, dict[str, Any], frozenset[FleetOpEffect]]]
         _REGISTRY,
     ),
     ("app/recycle.py", Recycle(op="recycle"), {"op": "recycle"}, _NONE),
+    (
+        "connectors/service/connection_service/complete.py reconnect",
+        ReprobeFailedMcps(op="reprobe_failed_mcps", titles=["acme_cal_work", "acme_mail_work"]),
+        {"op": "reprobe_failed_mcps", "titles": ["acme_cal_work", "acme_mail_work"]},
+        _REGISTRY,
+    ),
 ]
 
 
@@ -148,6 +155,7 @@ def test_every_op_model_has_a_publisher_row() -> None:
         ReloadTool,
         RemoveTool,
         ReloadFailedMcps,
+        ReprobeFailedMcps,
         ListFailedMcps,
         EvictTemplate,
         ClearTemplateCache,
@@ -161,10 +169,11 @@ def test_every_op_model_has_a_publisher_row() -> None:
         ({"op": "rebuild_everything"}, "rebuild_everything"),
         ({}, "op"),
         ({"op": "reload_mcp"}, "title"),
+        ({"op": "reprobe_failed_mcps"}, "titles"),
         ({"op": "evict_template", "path": 7}, "path"),
         ({"op": "reload_tool", "kind": "preset", "name": "acme", "extra": 1}, "extra"),
     ],
-    ids=["unknown-op", "no-op", "missing-field", "wrong-type", "unknown-field"],
+    ids=["unknown-op", "no-op", "missing-field", "missing-titles", "wrong-type", "unknown-field"],
 )
 def test_an_unknown_or_malformed_op_is_refused(raw: dict[str, Any], match: str) -> None:
     with pytest.raises(ValidationError, match=match):

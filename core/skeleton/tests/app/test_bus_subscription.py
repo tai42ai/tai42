@@ -34,7 +34,7 @@ from tai42_contract.storage import Storage
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app.bus import WorkerBus, WorkerKind
-from tai42_skeleton.app.bus.ops import ClearTemplateCache, EvictTemplate, FleetOp
+from tai42_skeleton.app.bus.ops import ClearTemplateCache, EvictTemplate, FleetOp, ReprobeFailedMcps
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
 from tai42_skeleton.app.lifecycle import bus_subscription as bus_subscription_module
@@ -476,3 +476,19 @@ async def test_a_reconnect_resync_names_its_own_keys_awaiting_a_respawn(
     lines = [r.getMessage() for r in caplog.records if "awaiting a respawn" in r.getMessage()]
     assert len(lines) == 1
     assert "serve-1 (BACKEND_MANIFEST_KEY)" in lines[0]
+
+
+async def test_dispatch_reprobe_failed_mcps_reaches_the_admin_with_the_titles(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    async def reprobe(titles: list[str]) -> list[dict[str, Any]]:
+        seen.append(list(titles))
+        return [{"title": t, "status": "ok"} for t in titles]
+
+    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(admin=SimpleNamespace(reprobe_failed_mcps=reprobe)))
+
+    result = await _Mixin()._dispatch_bus_op(ReprobeFailedMcps(op="reprobe_failed_mcps", titles=["a", "b"]))
+
+    # The bare per-title list, the shape the publisher's own apply rides on its self entry.
+    assert result == [{"title": "a", "status": "ok"}, {"title": "b", "status": "ok"}]
+    assert seen == [["a", "b"]]
