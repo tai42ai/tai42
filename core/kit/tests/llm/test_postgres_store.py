@@ -97,3 +97,90 @@ async def test_format_generation_is_written_once_and_read_back(saver_and_pool):
 def test_first_column_reads_dict_and_tuple_rows():
     assert postgres_store._first({"thread_id": "a"}) == "a"
     assert postgres_store._first(("b",)) == "b"
+
+
+async def test_concurrent_first_builds_of_the_kit_tables_converge(saver_and_pool):
+    import asyncio
+
+    _saver, pool = saver_and_pool
+    async with pool.connection() as conn:
+        await conn.execute(f"DROP TABLE IF EXISTS {postgres_store.FORMAT_TABLE}")
+        await conn.execute(f"DROP TABLE IF EXISTS {postgres_store.FINISHED_TABLE}")
+    results = await asyncio.gather(*(postgres_store.read_format_generation(pool) for _ in range(16)))
+    assert results == [None] * 16
+    await asyncio.gather(*(postgres_store.create_finished_table(pool) for _ in range(16)))
+    async with pool.connection() as conn:
+        await conn.execute(f"DROP TABLE {postgres_store.FORMAT_TABLE}")
+
+
+class _RecordingConnection:
+    """A connection stand-in recording every statement and transaction boundary in order."""
+
+    def __init__(self, log: list[str]) -> None:
+        self._log = log
+
+    async def execute(self, sql: str, params: Any = None) -> None:
+        self._log.append(sql.split(" (")[0] if sql.startswith("CREATE") else sql)
+
+    def transaction(self) -> Any:
+        log = self._log
+
+        class _Tx:
+            async def __aenter__(self) -> None:
+                log.append("BEGIN")
+
+            async def __aexit__(self, *exc: object) -> None:
+                log.append("COMMIT")
+
+        return _Tx()
+
+    def cursor(self) -> Any:
+        class _Cursor:
+            async def __aenter__(self) -> Any:
+                return self
+
+            async def __aexit__(self, *exc: object) -> None:
+                return None
+
+            async def execute(self, sql: str, params: Any = None) -> None:
+                return None
+
+            async def fetchone(self) -> Any:
+                return None
+
+        return _Cursor()
+
+
+class _RecordingPool:
+    def __init__(self) -> None:
+        self.log: list[str] = []
+
+    def connection(self) -> Any:
+        conn = _RecordingConnection(self.log)
+
+        class _Ctx:
+            async def __aenter__(self) -> Any:
+                return conn
+
+            async def __aexit__(self, *exc: object) -> None:
+                return None
+
+        return _Ctx()
+
+
+@pytest.mark.parametrize(
+    ("build", "table"),
+    [
+        (postgres_store.read_format_generation, postgres_store.FORMAT_TABLE),
+        (postgres_store.create_finished_table, postgres_store.FINISHED_TABLE),
+    ],
+)
+async def test_a_first_build_creates_its_table_under_the_build_lock(build: Any, table: str) -> None:
+    # Concurrent ``CREATE TABLE IF NOT EXISTS`` races in Postgres (a unique violation on the type
+    # catalog); every first build takes one transaction-scoped advisory lock before its DDL.
+    pool = _RecordingPool()
+    await build(cast("Any", pool))
+    assert pool.log[0] == "BEGIN"
+    assert pool.log[1].startswith("SELECT pg_advisory_xact_lock(")
+    assert pool.log[2] == f"CREATE TABLE IF NOT EXISTS {table}"
+    assert pool.log.index("COMMIT") > 2
