@@ -32,11 +32,15 @@ class ProcessHandle:
     _proc: subprocess.Popen[bytes] | None = field(default=None, repr=False)
 
     def start(self) -> None:
-        """Fork the process into its own session, logging to ``log_path``."""
+        """Fork the process into its own session, appending to ``log_path``.
+
+        A respawned life appends to the same log, so a reader holding an offset taken in an
+        earlier life still reads everything written after it.
+        """
         if self._proc is not None:
             raise RuntimeError(f"process {self.name!r} already started")
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_file = self.log_path.open("wb")
+        log_file = self.log_path.open("ab")
         # The file handle is owned by the child's stdout/stderr; closing it here
         # is safe because the OS dup'd it into the child. Keep a reference on the
         # handle object so the fd stays open for the child's lifetime.

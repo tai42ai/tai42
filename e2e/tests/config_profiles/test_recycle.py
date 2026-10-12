@@ -477,8 +477,7 @@ def _read_log(stack: TaiStack, name: str) -> str:
 def _assert_no_forbidden_lines(stack: TaiStack, offsets: dict[str, int]) -> None:
     for name, offset in offsets.items():
         text = _read_log(stack, name)
-        written = text[offset:] if len(text) >= offset else text
-        for line in written.splitlines():
+        for line in text[offset:].splitlines():
             assert not any(marker in line for marker in _FORBIDDEN_LINES), f"{name} logged: {line}"
 
 
