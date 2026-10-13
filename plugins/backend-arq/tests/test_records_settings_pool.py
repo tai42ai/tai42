@@ -14,14 +14,14 @@ import pytest
 from arq import ArqRedis
 from arq.connections import RedisSettings
 from arq.jobs import DeserializationError, SerializationError, deserialize_result, serialize_job, serialize_result
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from redis.asyncio import ConnectionPool
+from tai42_contract.backend import CrontabCadence, IntervalCadence
 from tai42_kit.backend import BackendDispatchSettings
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import registered_settings
 
 from tai42_backend_arq import pool, records
-from tai42_backend_arq.records import ScheduleRecord
 from tai42_backend_arq.settings import (
     UNSERIALIZABLE_KEY,
     ArqSettings,
@@ -37,48 +37,46 @@ _DISPATCH_FIELDS = frozenset({"manifest_key", "task_timeout", "tool_name_arg"})
 # -- records ---------------------------------------------------------------------
 
 
-def test_schedule_record_defaults_and_required_fields() -> None:
-    record = ScheduleRecord(name="s", schedule={"__type__": "interval", "every": 60.0}, enabled=True)
-    assert record.args == []
-    assert record.kwargs == {}
-    with pytest.raises(ValidationError):
-        ScheduleRecord.model_validate({"name": "bad"})
-
-
-def test_unknown_schedule_kind_is_rejected() -> None:
-    with pytest.raises(ValueError, match="'interval' or 'crontab'"):
-        ScheduleRecord(name="job", schedule={"__type__": "hourly"}, enabled=True)
-
-
-def test_boolean_every_is_rejected() -> None:
-    with pytest.raises(ValueError, match="numeric 'every'"):
-        ScheduleRecord(name="job", schedule={"__type__": "interval", "every": True}, enabled=True)
-
-
-def test_non_bool_relative_is_rejected() -> None:
-    with pytest.raises(ValueError, match="'relative' must be a bool"):
-        ScheduleRecord(name="job", schedule={"__type__": "interval", "every": 5, "relative": "yes"}, enabled=True)
-
-
-def test_crontab_missing_fields_are_named() -> None:
-    with pytest.raises(ValueError, match="missing required field"):
-        ScheduleRecord(name="job", schedule={"__type__": "crontab", "minute": "0"}, enabled=True)
-
-
 def test_derive_cron_or_interval() -> None:
-    assert records.derive_cron_or_interval({"__type__": "interval", "every": 60.0}) == 60
-    assert records.derive_cron_or_interval({"__type__": "interval", "every": 1.5}) == 1.5
-    crontab = {
-        "__type__": "crontab",
-        "minute": "0",
-        "hour": "9",
-        "day_of_month": "*",
-        "month_of_year": "*",
-        "day_of_week": "1",
-    }
+    assert records.derive_cron_or_interval(IntervalCadence(every=60.0)) == 60
+    assert records.derive_cron_or_interval(IntervalCadence(every=1.5)) == 1.5
+    crontab = CrontabCadence(minute="0", hour="9", day_of_week="1")
     assert records.derive_cron_or_interval(crontab) == "0 9 * * 1"
-    with pytest.raises(ValueError, match="Unsupported schedule type"):
-        records.derive_cron_or_interval({"__type__": "solar"})
+
+
+def test_read_stored_cadence_reads_a_cadence_dump() -> None:
+    raw = IntervalCadence(every=60).model_dump_json()
+    assert records.read_stored_cadence("s", raw, "arq:schedule:*") == IntervalCadence(every=60.0)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        orjson.dumps({"__type__": "interval", "every": 60.0, "relative": False}),
+        None,
+        b"not json",
+    ],
+)
+def test_read_stored_cadence_refuses_an_un_reset_hash(raw: bytes | None) -> None:
+    with pytest.raises(records.ScheduleStoreFormatError) as caught:
+        records.read_stored_cadence("nightly", raw, "arq:schedule:*")
+    assert str(caught.value) == (
+        "arq schedule 'nightly' is stored in a format this backend no longer reads; delete the keys "
+        "matching 'arq:schedule:*' and re-create the schedules"
+    )
+
+
+def test_the_store_format_error_is_a_conflict() -> None:
+    from tai42_contract.errors import ErrorKind
+
+    assert records.ScheduleStoreFormatError.__tai_error_kind__ is ErrorKind.CONFLICT
+
+
+def test_refuse_relative() -> None:
+    records.refuse_relative(IntervalCadence(every=5))
+    records.refuse_relative(CrontabCadence())
+    with pytest.raises(ValueError, match="does not support relative interval schedules"):
+        records.refuse_relative(IntervalCadence(every=5, relative=True))
 
 
 def test_parse_cron_or_interval() -> None:
@@ -131,7 +129,7 @@ def test_dispatch_surface_is_the_shared_group_under_this_prefix() -> None:
     # through a recycle rather than in place.
     assert fields["manifest_key"].reload_class == "recycle"
     assert fields["tool_name_arg"].reload_class == "recycle"
-    assert fields["task_timeout"].reload_class == "hot"
+    assert fields["task_timeout"].reload_class == "recycle"
 
     # The abstract group itself never claims an env surface of its own.
     assert [group.name for group in registered_settings() if group.name == "BackendDispatchSettings"] == []

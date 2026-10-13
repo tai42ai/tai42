@@ -320,7 +320,7 @@ def queue(monkeypatch) -> FakeQueue:
         fake_queue.name = name
         return fake_queue
 
-    monkeypatch.setattr(tasks, "Queue", make_queue)
+    monkeypatch.setattr(tasks, "TaskBudgetQueue", make_queue)
     monkeypatch.setattr(tasks, "client_ctx", make_client_ctx(object()))
     return fake_queue
 
@@ -393,7 +393,7 @@ async def test_enqueue_carries_the_forwarded_pair_onto_the_callback(app, monkeyp
     # A task fired from within a door forwards its subject/identity onto the job; the callback runs as a
     # SEPARATE dependent job, so the same pair is carried on its spec or the follow-up loses the door.
     queue = _FakeQueue("q")
-    monkeypatch.setattr(tasks, "Queue", lambda name, connection=None: queue)
+    monkeypatch.setattr(tasks, "TaskBudgetQueue", lambda name, connection=None: queue)
     monkeypatch.setattr(tasks, "client_ctx", make_client_ctx(object()))
     await tasks.enqueue_task(backend_tool_name="greet", callback_kwargs=CallbackSchema(tool="next"), **_FORWARDED)
     callback_call = queue.calls[1]
@@ -410,7 +410,7 @@ async def test_enqueue_carries_the_gate_state_onto_a_plain_callback(
     # decided in this, the submitting process: ON fail-closes, OFF is the synthetic admin.
     access_control(gate_enabled)
     queue = _FakeQueue("q")
-    monkeypatch.setattr(tasks, "Queue", lambda name, connection=None: queue)
+    monkeypatch.setattr(tasks, "TaskBudgetQueue", lambda name, connection=None: queue)
     monkeypatch.setattr(tasks, "client_ctx", make_client_ctx(object()))
     await tasks.enqueue_task(
         backend_tool_name="greet",

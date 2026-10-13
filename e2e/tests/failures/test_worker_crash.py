@@ -59,9 +59,9 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-# The job sleeps this long; the sync_task result wait is bounded to
-# ``_TASK_TIMEOUT`` (> the sleep, so an unkilled run succeeds — the failure below
-# is attributable to the crash).
+# The job sleeps this long; the dispatch job budget (the worker limit and the
+# sync_task result wait) is ``_TASK_TIMEOUT`` (> the sleep, so an unkilled run
+# succeeds within the budget — the failure below is attributable to the crash).
 _SLEEP_SECONDS = 6
 _TASK_TIMEOUT = 12
 
@@ -83,8 +83,9 @@ async def _submit_slow_run(stack: TaiStack, key: str, seconds: float) -> str:
 async def test_worker_crash_mid_job_reaches_bounded_terminal_then_recovers(
     infra: Infra, fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
-    # Bound the backend's sync_task result wait so an orphaned job surfaces a
-    # terminal in seconds rather than the multi-minute production default.
+    # Bound the backend's job budget (worker limit and sync_task result wait) so an
+    # orphaned job surfaces a terminal in seconds rather than the multi-minute
+    # production default.
     env = infra.variants.backend.task_timeout_env(_TASK_TIMEOUT)
     stack = fresh_stack(env_overrides=env)
 

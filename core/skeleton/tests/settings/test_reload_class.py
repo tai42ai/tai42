@@ -73,7 +73,7 @@ def test_class_level_default_stays_hot() -> None:
         ("CoreSettings", "mcp_probe_timeout", "hot"),
         ("BackendSettings", "manifest_key", "recycle"),
         ("BackendSettings", "tool_name_arg", "recycle"),
-        ("BackendSettings", "task_timeout", "hot"),
+        ("BackendSettings", "task_timeout", "recycle"),
         ("AppArgsSettings", "transport", "excluded"),
         ("AppArgsSettings", "host", "excluded"),
         ("AppArgsSettings", "port", "excluded"),

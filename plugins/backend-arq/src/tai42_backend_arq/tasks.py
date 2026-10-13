@@ -15,6 +15,7 @@ from typing import Any
 
 from arq.connections import ArqRedis
 from arq.jobs import Job, JobStatus
+from tai42_contract.backend import SCHEDULE_CADENCE_KEY, SCHEDULE_NAME_KEY
 from tai42_kit.backend import CallbackSchema, backend_fire, callback_execution, carry_forwarded_fire
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
@@ -31,8 +32,8 @@ ARQ_TASK_OPTS: dict[str, Any] = {
 }
 
 ARQ_SCHEDULE_OPTS: dict[str, Any] = {
-    "backend_schedule_name": str,
-    "backend_schedule": int | float | str | dict[str, Any],
+    SCHEDULE_NAME_KEY: str,
+    SCHEDULE_CADENCE_KEY: dict[str, Any],
 }
 
 

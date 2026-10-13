@@ -35,7 +35,7 @@ from typing import Any, Self
 
 import click
 from redis import Redis
-from rq import Queue, SimpleWorker, Worker
+from rq import SimpleWorker, Worker
 from rq.exceptions import StopRequested
 from rq.timeouts import HorseMonitorTimeoutException, TimerDeathPenalty, UnixSignalDeathPenalty
 from rq.worker import WorkerStatus
@@ -43,6 +43,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
 from tai42_kit.fork_gate import fork_gate
 
+from tai42_backend_rq.queue import TaskBudgetQueue
 from tai42_backend_rq.settings import rq_settings
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ class _TaiWorkerMixin:
     * Bounds each idle dequeue poll (``_DEQUEUE_POLL_SECONDS``) AND returns to the
       outer ``work`` loop each poll so an off-thread drain request is honored
       within seconds even while the worker is idle.
+    * Runs every job under the worker's current job budget (:meth:`prepare_execution`).
     * Holds a :meth:`fork_gate.job_span` around the two SCHEDULER-SPAWNING bodies — the
       start rq performs with the work loop and the re-spawn from its maintenance pass —
       so no child is created while this process re-imports its manifest modules on a
@@ -107,6 +109,17 @@ class _TaiWorkerMixin:
     @property
     def dequeue_timeout(self) -> int:
         return _DEQUEUE_POLL_SECONDS
+
+    def prepare_execution(self, job: Any) -> Any:
+        """Run ``job`` under this worker's job budget, ``RQ_TASK_TIMEOUT``.
+
+        A job carries the timeout it was stored with — the enqueuing process's budget, and for a
+        recurring schedule the budget of its first fire, kept for every later fire. rq's worker
+        reads ``job.timeout`` for the horse monitor and the death penalty, so it is set here, where
+        both worker classes prepare every job before running it (the forked horse inherits it).
+        """
+        job.timeout = rq_settings().task_timeout
+        return super().prepare_execution(job)  # pyright: ignore[reportAttributeAccessIssue]
 
     def dequeue_job_and_maintain_ttl(self, timeout: int | None, max_idle_time: int | None = None) -> Any:
         """Honor an off-thread drain request even while IDLE.
@@ -415,7 +428,7 @@ def _build_worker(
         prepare_forking_worker()
 
     redis_conn = Redis.from_url(url)
-    queue = Queue(rq_settings().queue_name, connection=redis_conn)
+    queue = TaskBudgetQueue(rq_settings().queue_name, connection=redis_conn)
     worker = worker_class([queue], name=name, connection=redis_conn, default_result_ttl=results_ttl)
     return worker, redis_conn
 

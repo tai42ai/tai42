@@ -62,9 +62,10 @@ async def test_schedule_door_contract_parks_from_the_worker(
     await api.post(
         "/api/schedules",
         json={
-            "tool_name": "run_tool_schedule_task",
+            "tool_name": "run_tool",
             "tool_kwargs": {"tool_name": "e2e_echo", "arguments": {"payload": "placeholder"}},
-            "schedule_kwargs": {"backend_schedule_name": schedule_name, "backend_schedule": _INTERVAL_SECONDS},
+            "cadence": {"kind": "interval", "every": _INTERVAL_SECONDS},
+            "schedule_name": schedule_name,
             "execution_key": execution_key,
             "start_expr": {"content": dispatch},
         },
@@ -96,9 +97,10 @@ async def test_schedule_contract_jq_requires_execution_key(
         "POST",
         "/api/schedules",
         json={
-            "tool_name": "run_tool_schedule_task",
+            "tool_name": "run_tool",
             "tool_kwargs": {},
-            "schedule_kwargs": {"backend_schedule_name": uniq("bad"), "backend_schedule": _INTERVAL_SECONDS},
+            "cadence": {"kind": "interval", "every": _INTERVAL_SECONDS},
+            "schedule_name": uniq("bad"),
             "start_expr": {"content": '{tool_name: "e2e_echo", arguments: {payload: .}}'},
         },
     )
@@ -118,7 +120,8 @@ async def test_reserved_schedule_door_key_refused_at_create(
         json={
             "tool_name": "e2e_record",
             "tool_kwargs": {"backend_schedule_forged": "x"},
-            "schedule_kwargs": {"backend_schedule_name": uniq("bad"), "backend_schedule": _INTERVAL_SECONDS},
+            "cadence": {"kind": "interval", "every": _INTERVAL_SECONDS},
+            "schedule_name": uniq("bad"),
         },
     )
     assert resp.status_code == 400, resp.text

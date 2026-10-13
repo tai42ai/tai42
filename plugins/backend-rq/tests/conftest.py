@@ -529,3 +529,12 @@ def _make_stateful_scheduler(store: dict[str, _StatefulScheduledJob], zset: dict
             times[job.id] = date_time.timestamp()
 
     return FakeScheduler
+
+
+def scheduler_factory(scheduler_cls: Callable[..., Any]) -> Callable[[Any], Any]:
+    """A stand-in for ``scheduler_for``: builds ``scheduler_cls`` over the given connection."""
+
+    def _factory(connection: Any) -> Any:
+        return scheduler_cls(queue_name="default", connection=connection)
+
+    return _factory

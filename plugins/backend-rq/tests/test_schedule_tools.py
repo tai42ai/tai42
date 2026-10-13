@@ -20,6 +20,7 @@ from .conftest import (
     _make_stateful_scheduler,
     _patch_redis,
     _StatefulScheduledJob,
+    scheduler_factory,
 )
 
 
@@ -56,7 +57,7 @@ async def test_cancel_task_scheduled_branch(monkeypatch):
         def cancel(self, name):
             canceled.append(name)
 
-    monkeypatch.setattr(tools, "Scheduler", FakeScheduler)
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(FakeScheduler))
     _patch_redis(monkeypatch, FakeSyncRedis())
 
     assert await tools.backend_cancel_task("sched-1") == "Scheduled Task sched-1 canceled"
@@ -65,7 +66,7 @@ async def test_cancel_task_scheduled_branch(monkeypatch):
 
 async def test_cancel_task_job_branches(monkeypatch):
     settings = rq_settings()
-    monkeypatch.setattr(tools, "Scheduler", _make_scheduler(FakeJob, contains=False))
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(_make_scheduler(FakeJob, contains=False)))
     redis = FakeSyncRedis(kv={settings.rq_job_key("j1"): "1"})
     _patch_redis(monkeypatch, redis)
 
@@ -115,22 +116,27 @@ async def test_list_schedules_reports_next_run(monkeypatch):
 
         def get_jobs(self, with_times=False):
             assert with_times is True
-            return [(_NamedJob(meta={"interval": 60.0}), next_run)]
+            return [
+                (_NamedJob(meta={"interval": 60.0}, kwargs={rq_settings().tool_name_arg: "echo", "x": 1}), next_run)
+            ]
 
-    monkeypatch.setattr(tools, "Scheduler", FakeScheduler)
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(FakeScheduler))
     _patch_redis(monkeypatch, FakeSyncRedis())
 
     [row] = await tools.backend_list_schedules()
     assert row["name"] == "sched-1"
     # RQ has no disabled-schedule state, so a listed schedule is always live.
     assert row["enabled"] is True
-    assert row["meta"] == {"interval": 60.0}
+    # A typed ``ScheduleListRow``: the fired tool and the cadence, never the job's kwargs or meta.
+    assert row["tool"] == "echo"
+    assert row["cadence"] == {"kind": "interval", "every": 60.0, "relative": False}
+    assert set(row) == {"name", "tool", "cadence", "enabled", "next_run_at_ts", "next_run_at_iso", "error"}
     assert row["next_run_at_ts"] == next_run.replace(tzinfo=UTC).timestamp()
     assert row["next_run_at_iso"] == next_run.replace(tzinfo=UTC).isoformat()
 
 
 async def test_get_schedule_not_found_when_absent(monkeypatch):
-    monkeypatch.setattr(tools, "Scheduler", _make_scheduler(FakeJob, contains=False))
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(_make_scheduler(FakeJob, contains=False)))
     _patch_redis(monkeypatch, FakeSyncRedis())
 
     assert await tools.backend_get_schedule("sched-1") == {"status": "not_found", "name": "sched-1"}
@@ -142,7 +148,7 @@ async def test_get_schedule_not_found_when_job_missing(monkeypatch):
     def _raise_missing():
         raise NoSuchJobError("gone")
 
-    monkeypatch.setattr(tools, "Scheduler", _make_scheduler(_raise_missing))
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(_make_scheduler(_raise_missing)))
     _patch_redis(monkeypatch, FakeSyncRedis())
 
     assert await tools.backend_get_schedule("sched-1") == {"status": "not_found", "name": "sched-1"}
@@ -154,7 +160,7 @@ async def test_get_schedule_propagates_real_fetch_failure(monkeypatch):
     def _raise_boom():
         raise RuntimeError("redis exploded")
 
-    monkeypatch.setattr(tools, "Scheduler", _make_scheduler(_raise_boom))
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(_make_scheduler(_raise_boom)))
     _patch_redis(monkeypatch, FakeSyncRedis())
 
     with pytest.raises(RuntimeError, match="redis exploded"):
@@ -163,22 +169,31 @@ async def test_get_schedule_propagates_real_fetch_failure(monkeypatch):
 
 async def test_get_schedule_returns_details_on_success(monkeypatch):
     settings = rq_settings()
-    monkeypatch.setattr(tools, "Scheduler", _make_scheduler(FakeJob))
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(_make_scheduler(FakeJob)))
     _patch_redis(monkeypatch, FakeSyncRedis(zsets={settings.rq_scheduler_zset: {"sched-1": 500.0}}))
 
     result = await tools.backend_get_schedule("sched-1")
     assert result["name"] == "sched-1"
-    assert result["definition"]["schedule"] == {"__type__": "interval", "every": 60}
+    assert result["definition"]["schedule"] == {"kind": "interval", "every": 60.0, "relative": False}
     assert result["next_run_at_ts"] == 500.0
     assert result["next_run_at_iso"] == datetime.fromtimestamp(500.0, tz=UTC).isoformat()
 
 
 async def test_get_schedule_cron_definition(monkeypatch):
-    monkeypatch.setattr(tools, "Scheduler", _make_scheduler(lambda: FakeJob(meta={"cron_string": "0 9 * * 1"})))
+    monkeypatch.setattr(
+        tools, "scheduler_for", scheduler_factory(_make_scheduler(lambda: FakeJob(meta={"cron_string": "0 9 * * 1"})))
+    )
     _patch_redis(monkeypatch, FakeSyncRedis())
 
     result = await tools.backend_get_schedule("sched-cron")
-    assert result["definition"]["schedule"] == {"__type__": "crontab", "cron_string": "0 9 * * 1"}
+    assert result["definition"]["schedule"] == {
+        "kind": "crontab",
+        "minute": "0",
+        "hour": "9",
+        "day_of_month": "*",
+        "month_of_year": "*",
+        "day_of_week": "1",
+    }
     assert result["next_run_at_ts"] is None
 
 
@@ -208,7 +223,7 @@ async def test_run_schedule_now_enqueues_via_scheduler(monkeypatch):
     now and re-arms the recurrence)."""
     job = FakeJob()
     enqueued: list[FakeJob] = []
-    monkeypatch.setattr(tools, "Scheduler", _run_now_scheduler({"sched-1": job}, enqueued))
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(_run_now_scheduler({"sched-1": job}, enqueued)))
     _patch_redis(monkeypatch, FakeSyncRedis())
 
     assert await tools.backend_run_schedule_now("sched-1") == {"status": "queued", "name": "sched-1"}
@@ -217,7 +232,7 @@ async def test_run_schedule_now_enqueues_via_scheduler(monkeypatch):
 
 async def test_run_schedule_now_not_found(monkeypatch):
     enqueued: list[FakeJob] = []
-    monkeypatch.setattr(tools, "Scheduler", _run_now_scheduler({}, enqueued))
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(_run_now_scheduler({}, enqueued)))
     _patch_redis(monkeypatch, FakeSyncRedis())
 
     assert await tools.backend_run_schedule_now("missing") == {"status": "not_found", "name": "missing"}
@@ -227,7 +242,7 @@ async def test_run_schedule_now_not_found(monkeypatch):
 async def test_enable_schedule_aliases_run_now(monkeypatch):
     job = FakeJob()
     enqueued: list[FakeJob] = []
-    monkeypatch.setattr(tools, "Scheduler", _run_now_scheduler({"sched-1": job}, enqueued))
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(_run_now_scheduler({"sched-1": job}, enqueued)))
     _patch_redis(monkeypatch, FakeSyncRedis())
 
     assert await tools.backend_enable_schedule("sched-1") == {"status": "queued", "name": "sched-1"}
@@ -235,7 +250,7 @@ async def test_enable_schedule_aliases_run_now(monkeypatch):
 
 
 async def test_update_schedule_not_found(monkeypatch):
-    monkeypatch.setattr(tools, "Scheduler", _make_stateful_scheduler({}))
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(_make_stateful_scheduler({})))
     _patch_redis(monkeypatch, FakeSyncRedis())
 
     assert await tools.backend_update_schedule("missing", new_schedule=30) == {
@@ -246,7 +261,7 @@ async def test_update_schedule_not_found(monkeypatch):
 
 async def test_update_schedule_no_changes(monkeypatch):
     store = {"sched-1": _StatefulScheduledJob("sched-1", "tool_execution", [], {}, {"interval": 60.0})}
-    monkeypatch.setattr(tools, "Scheduler", _make_stateful_scheduler(store))
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(_make_stateful_scheduler(store)))
     _patch_redis(monkeypatch, FakeSyncRedis())
 
     assert await tools.backend_update_schedule("sched-1") == {"status": "skipped", "message": "No changes provided"}
@@ -256,7 +271,7 @@ def _update_env(monkeypatch, store: dict[str, _StatefulScheduledJob]) -> dict[st
     """Wire a stateful scheduler + a sync Redis sharing one scheduled-jobs zset."""
     settings = rq_settings()
     zset: dict[str, float] = dict.fromkeys(store, 1.0)
-    monkeypatch.setattr(tools, "Scheduler", _make_stateful_scheduler(store, zset))
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(_make_stateful_scheduler(store, zset)))
     _patch_redis(monkeypatch, FakeSyncRedis(zsets={settings.rq_scheduler_zset: zset}))
     return zset
 
@@ -330,6 +345,32 @@ async def test_update_schedule_rejects_fractional_interval_keeping_the_old(monke
     with pytest.raises(ValueError, match="whole seconds"):
         await tools.backend_update_schedule("sched-1", new_schedule=0.5)
     assert store["sched-1"].meta == {"interval": 60}
+
+
+async def test_update_schedule_refuses_a_relative_interval_keeping_the_old(monkeypatch):
+    store = {"sched-1": _StatefulScheduledJob("sched-1", "tool_execution", [], {}, {"interval": 60})}
+    _update_env(monkeypatch, store)
+
+    with pytest.raises(ValueError, match="the rq backend does not support relative interval schedules"):
+        await tools.backend_update_schedule("sched-1", new_schedule={"kind": "interval", "every": 30, "relative": True})
+    assert store["sched-1"].meta == {"interval": 60}
+
+
+async def test_list_schedules_job_without_the_tool_key_raises(monkeypatch):
+    class _NamedJob(FakeJob):
+        id = "orphan"
+
+    class FakeScheduler:
+        def __init__(self, queue_name=None, connection=None):
+            pass
+
+        def get_jobs(self, with_times=False):
+            return [(_NamedJob(meta={"interval": 60}), datetime(2030, 1, 1))]
+
+    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(FakeScheduler))
+    _patch_redis(monkeypatch, FakeSyncRedis())
+    with pytest.raises(ValueError, match="schedule 'orphan' carries no"):
+        await tools.backend_list_schedules()
 
 
 async def test_update_schedule_new_interval_with_explicit_next_run(monkeypatch):

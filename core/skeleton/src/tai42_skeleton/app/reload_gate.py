@@ -94,11 +94,11 @@ REJECT_MESSAGE = "reloading — the server is applying a config reload; retry sh
 #   snapshot of the import locks and is immune thereafter — so a reload's wait here is
 #   normally milliseconds, however long the job itself runs.
 # * SOLO / GEVENT: the job runs IN the worker process, so its span lasts the whole job.
-#   rq's queue default job timeout (``rq.Queue.DEFAULT_TIMEOUT``, 180s — the enqueue path
-#   sets no ``job_timeout``) is the NOMINAL bound, six times this budget, but on these
-#   pools it is not reliably enforceable: off the main thread the timer death penalty
-#   cannot interrupt a C-blocked call, so a job wedged in one runs past it. The degraded
-#   proceed below is what actually bounds this side.
+#   rq's job timeout is the dispatch ``task_timeout`` (``RQ_TASK_TIMEOUT``, 300 s by
+#   default), the NOMINAL bound, ten times this budget, but on these pools it is not
+#   reliably enforceable: off the main thread the timer death penalty cannot interrupt a
+#   C-blocked call, so a job wedged in one runs past it. The degraded proceed below is
+#   what actually bounds this side.
 #
 # A reload therefore proceeds UNGUARDED — logging the fork gate's ERROR — in exactly two
 # residual cases: a solo/gevent job that has already been running longer than 30s, or a
@@ -106,9 +106,6 @@ REJECT_MESSAGE = "reloading — the server is applying a config reload; retry sh
 # child is exposed to the re-import race the gate otherwise closes. That
 # is the accepted tradeoff: the alternative is a reload that misses its fleet ack (and, on
 # a sibling, blocks fleet convergence) behind a long-running job.
-#
-# (``RQ_TASK_TIMEOUT`` / ``rq_settings().task_timeout`` is NOT the relevant bound — it
-# caps how long the enqueuing caller waits for a result, not how long the job executes.)
 FORK_QUIESCE_SECONDS = 30.0
 
 

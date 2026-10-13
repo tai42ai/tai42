@@ -15,22 +15,32 @@ import time
 from typing import Any, Protocol
 
 from makefun import create_function
+from pydantic import TypeAdapter
 from rq.exceptions import NoSuchJobError
 from rq.job import JobStatus
-from rq_scheduler import Scheduler
 from tai42_contract.app import tai42_app
+from tai42_contract.backend import (
+    SCHEDULE_BRANCH_SUFFIX,
+    SCHEDULE_CADENCE_KEY,
+    SCHEDULE_EXTENSION,
+    SCHEDULE_NAME_KEY,
+    CrontabCadence,
+    IntervalCadence,
+    ScheduleCadence,
+)
 from tai42_contract.extensions import ExtensionKind
 from tai42_kit.backend import prepare_backend_kwargs
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import SyncRedisClient
 from tai42_kit.utils.data import makefun_func_name
-from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 from tai42_kit.utils.schedule_subject import SCHEDULE_STAMPED_DOOR_OPTS
 
-from tai42_backend_rq.schedules import apply_normalized_schedule
+from tai42_backend_rq.schedules import apply_normalized_schedule, refuse_relative, scheduler_for
 from tai42_backend_rq.settings import rq_settings
 from tai42_backend_rq.signatures import add_signature_params
 from tai42_backend_rq.tasks import RQ_SCHEDULE_OPTS, RQ_TASK_OPTS, enqueue_task, tool_execution
+
+_CADENCE: TypeAdapter[IntervalCadence | CrontabCadence] = TypeAdapter(ScheduleCadence)
 
 
 class _PollableJob(Protocol):
@@ -104,13 +114,14 @@ def sync_task(func: Any, name: str, description: str) -> Any:
     return branch
 
 
-@tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name="schedule_task")
+@tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name=SCHEDULE_EXTENSION)
 def schedule_task(func: Any, name: str, description: str) -> Any:
     """Branch ``func`` into ``<name>_schedule_task``: register a recurring schedule.
 
-    The schedule (interval or crontab) runs the tool via the queue.
+    The schedule (an interval or crontab cadence) runs the tool via the queue; a relative
+    interval is refused.
     """
-    raw_name = f"{name}_schedule_task"
+    raw_name = f"{name}{SCHEDULE_BRANCH_SUFFIX}"
     safe_name = makefun_func_name(raw_name)
     new_description = f"Scheduled version of '{name}'. Schedules the task to run later via a background queue."
     new_description += f"\n\nOriginal Doc:\n{description}" if description else ""
@@ -122,17 +133,15 @@ def schedule_task(func: Any, name: str, description: str) -> Any:
     async def func_impl(*args: Any, **kwargs: Any) -> None:
         kwargs = await prepare_backend_kwargs(func, rq_settings().tool_name_arg, name, kwargs, scheduled=True)
 
-        schedule_name = kwargs.pop("backend_schedule_name", None)
-        schedule_in = kwargs.pop("backend_schedule", None)
+        schedule_name = kwargs.pop(SCHEDULE_NAME_KEY, None)
         if not schedule_name:
-            raise ValueError("backend_schedule_name is required")
-        if schedule_in is None:
-            raise ValueError("backend_schedule is required")
-        norm = normalize_schedule(schedule_in)
+            raise ValueError(f"{SCHEDULE_NAME_KEY} is required")
+        cadence = _CADENCE.validate_python(kwargs.pop(SCHEDULE_CADENCE_KEY))
+        refuse_relative(cadence)
 
         async with client_ctx(SyncRedisClient, url=rq_settings().redis_url) as r:
-            scheduler = Scheduler(queue_name=rq_settings().queue_name, connection=r)
-            await apply_normalized_schedule(scheduler, norm, tool_execution, list(args), kwargs, schedule_name)
+            scheduler = scheduler_for(r)
+            await apply_normalized_schedule(scheduler, cadence, tool_execution, list(args), kwargs, schedule_name)
 
     branch = create_function(
         func_signature=sig.replace(return_annotation=inspect.Signature.empty),

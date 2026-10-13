@@ -86,9 +86,10 @@ async def test_schedule_fires_across_reload_then_unschedules_cross_worker(
     await api_a.post(
         "/api/schedules",
         json={
-            "tool_name": "e2e_record_schedule_task",
+            "tool_name": "e2e_record",
             "tool_kwargs": {"key": key, "value": "tick"},
-            "schedule_kwargs": {"backend_schedule_name": schedule_name, "backend_schedule": _INTERVAL_SECONDS},
+            "cadence": {"kind": "interval", "every": _INTERVAL_SECONDS},
+            "schedule_name": schedule_name,
         },
     )
 
@@ -142,7 +143,10 @@ async def test_schedule_fires_across_reload_then_unschedules_cross_worker(
     # The schedule appears in the cross-worker listing read from replica B — which may
     # still be finishing its own reload, so ride past the gate rather than race it.
     listing = await api_b.get("/api/schedules", retry_on_reloading=True)
-    assert any(row.get("name") == schedule_name for row in listing), listing
+    (row,) = [row for row in listing if row.get("name") == schedule_name]
+    # A typed ``ScheduleListRow`` on every backend: the fired tool and the cadence.
+    assert row["tool"] == "e2e_record", row
+    assert row["cadence"] == {"kind": "interval", "every": float(_INTERVAL_SECONDS), "relative": False}, row
 
     # Unschedule THROUGH replica B — the schedule B never created, proving the
     # state is shared, not worker-local.

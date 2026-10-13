@@ -6,8 +6,10 @@ import inspect
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from rq.exceptions import NoSuchJobError
 from rq.job import JobStatus
+from tai42_contract.backend import SCHEDULE_CADENCE_KEY, SCHEDULE_NAME_KEY, IntervalCadence
 from tai42_kit.utils.schedule_subject import (
     SCHEDULE_CONTRACT_ARG,
     SCHEDULE_EXECUTION_FINGERPRINT_ARG,
@@ -19,7 +21,7 @@ from tai42_kit.utils.schedule_subject import (
 from tai42_backend_rq import extensions
 from tai42_backend_rq.settings import rq_settings
 
-from .conftest import make_client_ctx
+from .conftest import make_client_ctx, scheduler_factory
 
 
 async def sample_tool(x: int, note: str = "hi") -> dict[str, Any]:
@@ -139,6 +141,9 @@ async def test_async_task_branch_returns_task_id(monkeypatch):
     assert await branch(x=1) == {"task_id": "job-42", "status": "submitted"}
 
 
+_HOURLY = {"kind": "interval", "every": 3600, "relative": False}
+
+
 async def test_schedule_task_branch_applies_schedule(monkeypatch):
     applied: list[tuple[Any, ...]] = []
 
@@ -147,20 +152,22 @@ async def test_schedule_task_branch_applies_schedule(monkeypatch):
 
     monkeypatch.setattr(extensions, "apply_normalized_schedule", fake_apply)
     monkeypatch.setattr(extensions, "client_ctx", make_client_ctx(object()))
-    monkeypatch.setattr(extensions, "Scheduler", lambda queue_name=None, connection=None: object())
+    monkeypatch.setattr(
+        extensions, "scheduler_for", scheduler_factory(lambda queue_name=None, connection=None: object())
+    )
 
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     assert branch.__name__ == "sample_tool_schedule_task"
     params = inspect.signature(branch).parameters
-    assert {"backend_schedule_name", "backend_schedule"} <= set(params)
+    assert {SCHEDULE_NAME_KEY, SCHEDULE_CADENCE_KEY} <= set(params)
 
     # The create door wraps the branch dispatch in this marker; a ``schedule_task`` branch dispatched
     # outside it is refused, so a registration test drives it under the marker like the create door does.
     with schedule_create_fire():
-        await branch(x=7, backend_schedule_name="nightly", backend_schedule=3600)
+        await branch(x=7, backend_schedule_name="nightly", backend_schedule=_HOURLY)
 
     [(norm, func, _args, kwargs, name)] = applied
-    assert norm == {"__type__": "interval", "every": 3600.0, "relative": False}
+    assert norm == IntervalCadence(every=3600.0)
     assert func is extensions.tool_execution
     assert name == "nightly"
     # The queued job dispatches back onto the original tool by name.
@@ -180,7 +187,9 @@ async def test_schedule_task_carries_the_create_stamped_keys(monkeypatch):
 
     monkeypatch.setattr(extensions, "apply_normalized_schedule", fake_apply)
     monkeypatch.setattr(extensions, "client_ctx", make_client_ctx(object()))
-    monkeypatch.setattr(extensions, "Scheduler", lambda queue_name=None, connection=None: object())
+    monkeypatch.setattr(
+        extensions, "scheduler_for", scheduler_factory(lambda queue_name=None, connection=None: object())
+    )
 
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     params = inspect.signature(branch).parameters
@@ -191,7 +200,7 @@ async def test_schedule_task_carries_the_create_stamped_keys(monkeypatch):
         await branch(
             x=7,
             backend_schedule_name="nightly",
-            backend_schedule=3600,
+            backend_schedule=_HOURLY,
             **{
                 SCHEDULE_EXECUTION_KEY_ARG: "svc-key",
                 SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
@@ -209,41 +218,67 @@ async def test_schedule_task_binds_the_settings_queue_name(monkeypatch):
     """The scheduler enqueues due jobs onto the ``queue_name`` setting's queue, so
     a schedule fires onto the SAME per-stack queue the worker consumes — without
     it, a namespaced worker would never see its own scheduled jobs."""
+    from tai42_backend_rq import schedules as schedules_module
+    from tai42_backend_rq.queue import TaskBudgetQueue
     from tai42_backend_rq.settings import RqSettings
 
     captured: dict[str, Any] = {}
 
-    def fake_scheduler(queue_name: Any = None, connection: Any = None) -> Any:
+    def fake_scheduler(queue_name: Any = None, connection: Any = None, queue_class: Any = None) -> Any:
         captured["queue_name"] = queue_name
+        captured["queue_class"] = queue_class
         return object()
 
     async def fake_apply(scheduler: Any, norm: Any, func: Any, args: Any, kwargs: Any, name: Any) -> None:
         pass
 
-    monkeypatch.setattr(extensions, "rq_settings", lambda: RqSettings(queue_name="tai42_e2e_abc123:default"))
+    settings = RqSettings(queue_name="tai42_e2e_abc123:default")
+    monkeypatch.setattr(extensions, "rq_settings", lambda: settings)
+    monkeypatch.setattr(schedules_module, "rq_settings", lambda: settings)
+    monkeypatch.setattr(schedules_module, "Scheduler", fake_scheduler)
     monkeypatch.setattr(extensions, "apply_normalized_schedule", fake_apply)
     monkeypatch.setattr(extensions, "client_ctx", make_client_ctx(object()))
-    monkeypatch.setattr(extensions, "Scheduler", fake_scheduler)
 
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     with schedule_create_fire():
-        await branch(x=7, backend_schedule_name="nightly", backend_schedule=3600)
+        await branch(x=7, backend_schedule_name="nightly", backend_schedule=_HOURLY)
 
     assert captured["queue_name"] == "tai42_e2e_abc123:default"
+    assert captured["queue_class"] is TaskBudgetQueue
 
 
-async def test_schedule_task_requires_name_and_schedule():
+async def test_schedule_task_requires_name_and_cadence():
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     with schedule_create_fire(), pytest.raises(ValueError, match="backend_schedule_name is required"):
-        await branch(x=1, backend_schedule=30)
-    with schedule_create_fire(), pytest.raises(ValueError, match="backend_schedule is required"):
+        await branch(x=1, backend_schedule=_HOURLY)
+    with schedule_create_fire(), pytest.raises(ValidationError):
         await branch(x=1, backend_schedule_name="nightly")
+
+
+async def test_schedule_task_refuses_a_relative_interval(monkeypatch):
+    applied: list[Any] = []
+
+    async def fake_apply(*args: Any) -> None:
+        applied.append(args)
+
+    monkeypatch.setattr(extensions, "apply_normalized_schedule", fake_apply)
+    branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
+    with (
+        schedule_create_fire(),
+        pytest.raises(ValueError, match="the rq backend does not support relative interval schedules"),
+    ):
+        await branch(
+            x=1, backend_schedule_name="s", backend_schedule={"kind": "interval", "every": 60, "relative": True}
+        )
+    assert applied == []
 
 
 async def test_schedule_task_rejects_bad_schedule(monkeypatch):
     monkeypatch.setattr(extensions, "client_ctx", make_client_ctx(object()))
-    monkeypatch.setattr(extensions, "Scheduler", lambda queue_name=None, connection=None: object())
+    monkeypatch.setattr(
+        extensions, "scheduler_for", scheduler_factory(lambda queue_name=None, connection=None: object())
+    )
 
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
-    with schedule_create_fire(), pytest.raises(ValueError, match="Unsupported schedule format"):
+    with schedule_create_fire(), pytest.raises(ValidationError):
         await branch(x=1, backend_schedule_name="s", backend_schedule={"type": "bogus"})

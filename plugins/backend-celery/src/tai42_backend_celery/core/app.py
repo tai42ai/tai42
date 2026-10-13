@@ -86,6 +86,9 @@ def create_celery_app() -> Celery:
         worker_concurrency=settings.worker_concurrency,
         worker_send_task_events=True,  # worker emits task-* events
         task_send_sent_event=True,  # beat/client emits 'task-sent'
+        # The dispatch job budget: the prefork pool kills a task (dispatched or beat-fired)
+        # that runs past it. Bound when the worker starts.
+        task_time_limit=settings.task_timeout,
     )
 
     return app

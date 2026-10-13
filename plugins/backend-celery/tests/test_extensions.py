@@ -8,6 +8,8 @@ from typing import Any, ClassVar
 import pytest
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from celery.schedules import crontab, schedule
+from pydantic import ValidationError
+from tai42_contract.backend import SCHEDULE_CADENCE_KEY, SCHEDULE_NAME_KEY
 from tai42_contract.extensions import ExtensionKind
 from tai42_kit.utils.schedule_subject import (
     SCHEDULE_CONTRACT_ARG,
@@ -169,6 +171,9 @@ class _FakeEntry:
         self.saved = True
 
 
+_INTERVAL_30 = {"kind": "interval", "every": 30, "relative": False}
+
+
 @pytest.fixture
 def fake_entry(monkeypatch: pytest.MonkeyPatch) -> type[_FakeEntry]:
     _FakeEntry.instances = []
@@ -179,12 +184,12 @@ def fake_entry(monkeypatch: pytest.MonkeyPatch) -> type[_FakeEntry]:
 async def test_schedule_task_saves_interval_entry(fake_entry) -> None:
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     params = inspect.signature(branch).parameters
-    assert {"backend_schedule_name", "backend_schedule"} <= set(params)
+    assert {SCHEDULE_NAME_KEY, SCHEDULE_CADENCE_KEY} <= set(params)
 
     # The create door wraps the branch dispatch in this marker; a ``schedule_task`` branch dispatched
     # outside it is refused, so a registration test drives it under the marker like the create door does.
     with schedule_create_fire():
-        await branch(a=1, backend_schedule_name="nightly", backend_schedule=30)
+        await branch(a=1, backend_schedule_name="nightly", backend_schedule=_INTERVAL_30)
     (entry,) = fake_entry.instances
     assert entry.saved
     assert entry.kwargs["name"] == "nightly"
@@ -213,7 +218,7 @@ async def test_schedule_task_carries_the_create_stamped_keys(fake_entry) -> None
         await branch(
             a=1,
             backend_schedule_name="nightly",
-            backend_schedule=30,
+            backend_schedule=_INTERVAL_30,
             **{
                 SCHEDULE_EXECUTION_KEY_ARG: "svc-key",
                 SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
@@ -229,24 +234,37 @@ async def test_schedule_task_carries_the_create_stamped_keys(fake_entry) -> None
 async def test_schedule_task_saves_crontab_entry(fake_entry) -> None:
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     with schedule_create_fire():
-        await branch(a=1, backend_schedule_name="weekday", backend_schedule="0 9 * * 1")
+        await branch(
+            a=1,
+            backend_schedule_name="weekday",
+            backend_schedule={"kind": "crontab", "minute": "0", "hour": "9", "day_of_week": "1"},
+        )
     (entry,) = fake_entry.instances
     assert isinstance(entry.kwargs["schedule"], crontab)
+    assert entry.kwargs["schedule"]._orig_day_of_week == "1"
 
 
-async def test_schedule_task_requires_name_and_schedule(fake_entry) -> None:
+async def test_schedule_task_keeps_a_relative_interval(fake_entry) -> None:
+    branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
+    with schedule_create_fire():
+        await branch(
+            a=1, backend_schedule_name="nightly", backend_schedule={"kind": "interval", "every": 30, "relative": True}
+        )
+    (entry,) = fake_entry.instances
+    assert entry.kwargs["schedule"].relative is True
+
+
+async def test_schedule_task_requires_name_and_cadence(fake_entry) -> None:
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     with pytest.raises(ValueError, match="backend_schedule_name is required"):
-        await branch(a=1, backend_schedule=30)
-    with pytest.raises(ValueError, match="backend_schedule is required"):
+        await branch(a=1, backend_schedule=_INTERVAL_30)
+    with schedule_create_fire(), pytest.raises(ValidationError):
         await branch(a=1, backend_schedule_name="nightly")
     assert fake_entry.instances == []
 
 
-async def test_schedule_task_rejects_an_unknown_normalized_kind(fake_entry, monkeypatch) -> None:
-    """Defensive guard behind normalize_schedule: an unexpected kind raises."""
-    monkeypatch.setattr(extensions, "normalize_schedule", lambda s: {"__type__": "hourly"})
+async def test_schedule_task_refuses_a_malformed_cadence(fake_entry) -> None:
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
-    with schedule_create_fire(), pytest.raises(ValueError, match="Unsupported schedule type"):
-        await branch(a=1, backend_schedule_name="nightly", backend_schedule=30)
+    with schedule_create_fire(), pytest.raises(ValidationError):
+        await branch(a=1, backend_schedule_name="nightly", backend_schedule={"__type__": "interval", "every": 30.0})
     assert fake_entry.instances == []

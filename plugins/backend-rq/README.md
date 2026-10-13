@@ -66,8 +66,9 @@ Importing the package registers, as an import side-effect on the global
   round-trip.
 - **Three BACKEND tool extensions** via `@tai42_app.extensions.extension`:
   `sync_task` (queue and wait for the result), `async_task` (queue and return
-  the job id), and `schedule_task` (register a recurring interval/crontab
-  schedule). Each mints a `<tool>_<extension>` branch tool whose queued job
+  the job id), and `schedule_task` (register a recurring schedule from the
+  contract's typed cadence, `tai42_contract.backend.scheduling`; a relative
+  interval is refused loudly — the rq scheduler cannot honour it). Each mints a `<tool>_<extension>` branch tool whose queued job
   dispatches back onto the original tool by name.
 
 ## Runtime
@@ -83,7 +84,9 @@ Importing the package registers, as an import side-effect on the global
   SIGTERM/SIGINT request a warm shutdown (finish the current job), a repeated
   signal escalates to RQ's cold shutdown.
 - `beat [rqscheduler options]` — runs the recurring-job scheduler
-  (`rq-scheduler`).
+  (`rq-scheduler`), with `--queue-class tai42_backend_rq.queue.TaskBudgetQueue`
+  so a job it moves onto the queue is stored with `RQ_TASK_TIMEOUT`; the worker runs
+  every job under its own current `RQ_TASK_TIMEOUT`.
 - `dashboard [rq-dashboard options]` — runs the RQ web dashboard.
 
 ## Fleet control
@@ -131,16 +134,18 @@ task's stored failure — the persisted traceback text — when the task FAILED)
 `backend_ping_worker`, `backend_list_active_workers`.
 
 Schedule tools: `backend_schedule_exists`, `backend_get_schedule`,
-`backend_list_schedules` (canonical row keys `name` / `enabled` /
-`next_run_at_ts` / `next_run_at_iso`, plus the `meta` extra; `enabled` is
+`backend_list_schedules` (the contract's `ScheduleListRow`: `name` / `tool` /
+`cadence` / `enabled` / `next_run_at_ts` / `next_run_at_iso`; `enabled` is
 always true because RQ has no disabled-schedule state),
 `backend_delete_schedule`, `backend_enable_schedule` (delegates to run-now and
 returns that op's `queued` / `not_found` statuses),
 `backend_disable_schedule` (delegates to delete and returns that op's
 `deleted` / `not_found` statuses — RQ has no disabled-schedule state),
 `backend_run_schedule_now`, `backend_update_schedule`,
-`backend_export_schedules`, `backend_import_schedules` (per-row errors
-surfaced as `{"index", "name", "error"}`, never swallowed).
+`backend_export_schedules`, `backend_import_schedules` (the contract's
+`ScheduleRecord` rows and `ScheduleImportReport`; per-row errors surfaced as
+`{"index", "name", "error"}`, never swallowed; a relative interval or a
+disabled row is a per-row error).
 
 Not supported on RQ (raise `NotImplementedError`): `backend_registered_tasks`,
 `backend_list_failed_tasks`.
@@ -154,7 +159,7 @@ Env group `RQ_` (a `tai42_kit` settings class, cached and reset on live reload):
 | `RQ_REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL (broker and results). |
 | `RQ_RQ_PREFIX` | `rq:` | Key prefix RQ uses for its Redis structures. |
 | `RQ_MANIFEST_KEY` | `MANIFEST_KEY` | Env key the worker CLI stores the manifest JSON under (inherited by forked work-horses). |
-| `RQ_TASK_TIMEOUT` | `300` | Seconds a `sync_task` dispatch waits for its job's result. |
+| `RQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the timeout the worker runs every job under (enqueued or scheduler-fired, whatever timeout the job was stored with), and how long a `sync_task` dispatch waits for its job's result. |
 | `RQ_TOOL_NAME_ARG` | `backend_tool_name` | Kwarg carrying the target tool name in a queued job. |
 
 The defaults of `RQ_MANIFEST_KEY`, `RQ_TASK_TIMEOUT`, and `RQ_TOOL_NAME_ARG`

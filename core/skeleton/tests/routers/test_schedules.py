@@ -15,7 +15,9 @@ from typing import cast
 import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
+from tai42_contract.backend import CrontabCadence
 
+from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.routers import schedules as router
 from tai42_skeleton.tools.binding import UnknownToolError
 
@@ -104,11 +106,29 @@ def install(monkeypatch):
 # -- GET /api/schedules ------------------------------------------------------
 
 
+_ROW = {
+    "name": "nightly",
+    "tool": "send_report",
+    "cadence": {
+        "kind": "crontab",
+        "minute": "0",
+        "hour": "9",
+        "day_of_month": "*",
+        "month_of_year": "*",
+        "day_of_week": "*",
+    },
+    "enabled": True,
+    "next_run_at_ts": None,
+    "next_run_at_iso": None,
+    "error": None,
+}
+
+
 async def test_list_calls_backend_tool(install):
-    fake = install(_FakeTools(_MARKERS, run_result=[{"name": "nightly"}]))
+    fake = install(_FakeTools(_MARKERS, run_result=[_ROW]))
     resp = await router.list_schedules(_req())
     assert resp.status_code == 200
-    assert _json(resp) == {"data": [{"name": "nightly"}]}
+    assert _json(resp) == {"data": [_ROW]}
     assert fake.run_calls == [("backend_list_schedules", {})]
 
 
@@ -140,21 +160,64 @@ async def test_delete_501_when_backend_absent(install):
 # -- POST /api/schedules -----------------------------------------------------
 
 
-async def test_create_translates_cron_to_the_branch(install):
-    # A friendly ``cron`` on a base tool is translated onto the ``<tool>_schedule_task``
-    # branch's ``backend_schedule``; the tool's own kwargs ride along and the base tool is
-    # never dispatched with a cadence key merged into its arguments.
+async def test_create_dispatches_a_typed_crontab_to_the_vehicle(install):
+    # A typed cadence on a base tool dispatches the ``<tool>_schedule_task`` vehicle with the
+    # dumped cadence; the tool's own kwargs ride along.
     fake = install(_FakeTools(_MARKERS | {"send_report", "send_report_schedule_task"}, run_result={"scheduled": True}))
     body = (
         b'{"tool_name": "send_report", "tool_kwargs": {"to": "a"},'
-        b' "schedule_kwargs": {"cron": "0 9 * * *", "backend_schedule_name": "nightly"}}'
+        b' "cadence": {"kind": "crontab", "minute": "0", "hour": "9"}, "schedule_name": "nightly"}'
     )
     resp = await router.create_schedule(_body_req(body))
     assert resp.status_code == 200
     assert _json(resp) == {"data": {"scheduled": True}}
     assert fake.run_calls == [
-        ("send_report_schedule_task", {"to": "a", "backend_schedule_name": "nightly", "backend_schedule": "0 9 * * *"})
+        (
+            "send_report_schedule_task",
+            {"to": "a", "backend_schedule_name": "nightly", "backend_schedule": _ROW["cadence"]},
+        )
     ]
+
+
+async def test_create_dispatches_a_typed_interval_to_the_vehicle(install):
+    fake = install(_FakeTools(_MARKERS | {"send_report", "send_report_schedule_task"}, run_result=None))
+    body = b'{"tool_name": "send_report", "cadence": {"kind": "interval", "every": 30}, "schedule_name": "half"}'
+    resp = await router.create_schedule(_body_req(body))
+    assert resp.status_code == 200
+    (_, arguments) = fake.run_calls[0]
+    assert arguments["backend_schedule"] == {"kind": "interval", "every": 30.0, "relative": False}
+
+
+async def test_create_schedule_name_without_a_cadence_400(install):
+    fake = install(_FakeTools(_MARKERS | {"send_report"}, run_result=None))
+    resp = await router.create_schedule(_body_req(b'{"tool_name": "send_report", "schedule_name": "nightly"}'))
+    assert resp.status_code == 400
+    assert _json(resp) == {
+        "error": "invalid schedule create params: Value error, schedule_name needs a cadence; "
+        "a run-once schedule has no name"
+    }
+    assert fake.run_calls == []
+
+
+async def test_create_vehicle_tool_name_400(install):
+    fake = install(_FakeTools(_MARKERS | {"send_report", "send_report_schedule_task"}, run_result=None))
+    body = b'{"tool_name": "send_report_schedule_task", "cadence": {"kind": "interval", "every": 30}}'
+    resp = await router.create_schedule(_body_req(body))
+    assert resp.status_code == 400
+    assert _json(resp) == {
+        "error": "invalid schedule create params: Value error, tool_name names a schedule vehicle; "
+        "pass the base tool and a cadence"
+    }
+    assert fake.run_calls == []
+
+
+async def test_create_schedule_kwargs_is_refused_400(install):
+    fake = install(_FakeTools(_MARKERS | {"send_report", "send_report_schedule_task"}, run_result=None))
+    body = b'{"tool_name": "send_report", "schedule_kwargs": {"cron": "0 9 * * *"}}'
+    resp = await router.create_schedule(_body_req(body))
+    assert resp.status_code == 400
+    assert _json(resp) == {"error": "invalid schedule create params: Extra inputs are not permitted"}
+    assert fake.run_calls == []
 
 
 async def test_create_passes_a_plain_string_subject_kwarg_to_the_tool(install):
@@ -180,7 +243,7 @@ async def test_create_stamps_the_top_level_subject_as_the_reserved_door_arg(inst
     body = (
         b'{"tool_name": "send_report", "tool_kwargs": {"to": "a"},'
         b' "subject": {"target_kind": "agent", "target_name": "a-42", "kind": "job", "key": "j1"},'
-        b' "schedule_kwargs": {"cron": "0 9 * * *", "backend_schedule_name": "nightly"}}'
+        b' "cadence": {"kind": "crontab", "minute": "0", "hour": "9"}, "schedule_name": "nightly"}'
     )
     resp = await router.create_schedule(_body_req(body))
     assert resp.status_code == 200
@@ -268,21 +331,21 @@ async def test_create_missing_tool_name_400(install):
     install(_FakeTools(_MARKERS))
     resp = await router.create_schedule(_body_req(b'{"tool_kwargs": {}}'))
     assert resp.status_code == 400
-    assert "tool_name" in _json(resp)["error"]
+    assert _json(resp) == {"error": "invalid schedule create params: tool_name: Field required"}
 
 
 async def test_create_tool_kwargs_not_object_400(install):
     install(_FakeTools(_MARKERS))
     resp = await router.create_schedule(_body_req(b'{"tool_name": "t", "tool_kwargs": []}'))
     assert resp.status_code == 400
-    assert "tool_kwargs" in _json(resp)["error"]
+    assert _json(resp) == {"error": "invalid schedule create params: tool_kwargs: Input should be a valid dictionary"}
 
 
-async def test_create_schedule_kwargs_not_object_400(install):
+async def test_create_unknown_cadence_kind_400(install):
     install(_FakeTools(_MARKERS))
-    resp = await router.create_schedule(_body_req(b'{"tool_name": "t", "schedule_kwargs": 5}'))
+    resp = await router.create_schedule(_body_req(b'{"tool_name": "t", "cadence": {"kind": "solar"}}'))
     assert resp.status_code == 400
-    assert "schedule_kwargs" in _json(resp)["error"]
+    assert _json(resp)["error"].startswith("invalid schedule create params: ")
 
 
 async def test_extract_create_forwards_execution_key_and_contract():
@@ -290,7 +353,7 @@ async def test_extract_create_forwards_execution_key_and_contract():
     # the extractor's returned dict is exactly what ``create_schedule`` is called with.
     body = (
         b'{"tool_name": "send_report", "tool_kwargs": {"to": "a"},'
-        b' "schedule_kwargs": {"cron": "0 9 * * *"}, "execution_key": "k-42",'
+        b' "cadence": {"kind": "crontab", "minute": "0", "hour": "9"}, "execution_key": "k-42",'
         b' "start_expr": {"content": "start"}, "cancel_expr": {"content": "cancel"},'
         b' "resume_expr": {"content": "resume"}, "extras_expr": {"content": "extras"}}'
     )
@@ -302,7 +365,7 @@ async def test_extract_create_forwards_execution_key_and_contract():
     assert kwargs["extras_expr"].content == "extras"
     assert kwargs["tool_name"] == "send_report"
     assert kwargs["tool_kwargs"] == {"to": "a"}
-    assert kwargs["schedule_kwargs"] == {"cron": "0 9 * * *"}
+    assert kwargs["cadence"] == CrontabCadence(minute="0", hour="9")
 
 
 async def test_extract_create_absent_contract_fields_are_none():
@@ -312,19 +375,20 @@ async def test_extract_create_absent_contract_fields_are_none():
     for field in ("start_expr", "cancel_expr", "resume_expr", "extras_expr"):
         assert kwargs[field] is None
     assert kwargs["tool_kwargs"] == {}
-    assert kwargs["schedule_kwargs"] == {}
+    assert kwargs["cadence"] is None
+    assert kwargs["schedule_name"] is None
 
 
 async def test_extract_create_contract_jq_without_execution_key_400():
     # ``ScheduleCreate`` refuses a contract jq with no execution key; the edge surfaces it as a 400.
-    with pytest.raises(router.BadRequestError):
+    with pytest.raises(BadRequestError):
         await router._extract_create(_body_req(b'{"tool_name": "t", "start_expr": {"content": "x"}}'))
 
 
 async def test_extract_create_bad_state_binding_400():
-    with pytest.raises(router.BadRequestError) as excinfo:
+    with pytest.raises(BadRequestError) as excinfo:
         await router._extract_create(_body_req(b'{"tool_name": "t", "state_binding": 5}'))
-    assert "state_binding" in str(excinfo.value)
+    assert str(excinfo.value).startswith("invalid schedule create params: ")
 
 
 # -- GET /api/schedules/server-datetime --------------------------------------
