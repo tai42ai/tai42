@@ -53,12 +53,12 @@ def _interactions_double() -> SimpleNamespace:
     """The ``app.interactions`` seam the run paths reach: the real visit + its two shaping helpers.
 
     The background-submit and inline-hook run paths drive the shared visit and shape their terminal
-    record through ``tai42_app.interactions.{visit,normalise_started,park_answer}``; this exposes the
+    record through ``tai42_app.interactions.{visit,normalise_started,run_answer}``; this exposes the
     real callables, whose interactions-store seams the tests wire when a park must be read back.
     """
     return SimpleNamespace(
         visit=visit_module.visit,
-        park_answer=visit_module.park_answer,
+        run_answer=visit_module.run_answer,
         normalise_started=visit_module.normalise_started,
     )
 
@@ -257,11 +257,14 @@ async def test_background_submit_of_a_user_parking_tool_records_the_suspended_se
     # No caller ask: ``caller_interaction_ids`` is empty, so a poller's submitter knows the park is
     # answered out of band (a user answer), not through ``resume_parked``.
     assert json.loads(record["result"]) == {
-        "interaction_id": "i-detached",
-        "expiry_at": None,
-        "resume_owner": None,
-        "interaction_ids": ["i-detached"],
-        "caller_interaction_ids": [],
+        "kind": "parked",
+        "suspended": {
+            "interaction_id": "i-detached",
+            "expiry_at": None,
+            "resume_owner": None,
+            "interaction_ids": ["i-detached"],
+            "caller_interaction_ids": [],
+        },
     }
 
 
@@ -279,10 +282,27 @@ async def test_background_submit_of_a_caller_asking_tool_records_the_ask_entries
     record = await wired.store.get_run(wired.fake, out["run_id"])
     assert record["status"] == "parked"
     answer = json.loads(record["result"])
-    assert list(answer) == ["asks"]
+    assert list(answer) == ["kind", "asks", "suspended"]
+    assert answer["kind"] == "asks"
     assert [entry["id"] for entry in answer["asks"]] == ["c1"]
     assert answer["asks"][0]["to"] == "caller"
     assert answer["asks"][0]["question"] == "proceed?"
+
+
+async def test_background_parked_ask_entries_carry_no_null_keys(wired):
+    # The parked record's ask entries list only their set fields: an unset optional field is absent,
+    # never a null key — the same entry shape the sync door answers.
+    ifake, istore = _wire_interactions_store(wired.monkeypatch)
+    await _seed_caller_ask(istore, ifake, "c1")
+    tools = wired.install()
+    tools.result = SuspendedInteraction(interaction_id="c1", interaction_ids=["c1"], caller_interaction_ids=["c1"])
+    out = await ops.submit_run("alpha", {}, subject=_SUBJECT)
+    await _drain()
+
+    record = await wired.store.get_run(wired.fake, out["run_id"])
+    (entry,) = json.loads(record["result"])["asks"]
+    assert [key for key, value in entry.items() if value is None] == []
+    assert {"id", "status", "to", "question", "answer_format"} <= entry.keys()
 
 
 async def test_hook_run_recorded_of_a_caller_asking_tool_records_the_ask_entries(wired):
@@ -301,7 +321,8 @@ async def test_hook_run_recorded_of_a_caller_asking_tool_records_the_ask_entries
     assert [entry["status"] for entry in entries] == ["parked"]
     record = await wired.store.get_run(wired.fake, entries[0]["run_id"])
     answer = json.loads(record["result"])
-    assert list(answer) == ["asks"]
+    assert list(answer) == ["kind", "asks", "suspended"]
+    assert answer["kind"] == "asks"
     assert [entry["id"] for entry in answer["asks"]] == ["c1"]
     assert answer["asks"][0]["to"] == "caller"
 
@@ -319,11 +340,14 @@ async def test_hook_run_recorded_of_a_user_parking_tool_records_the_suspended_se
     assert [entry["status"] for entry in entries] == ["parked"]
     record = await wired.store.get_run(wired.fake, entries[0]["run_id"])
     assert json.loads(record["result"]) == {
-        "interaction_id": "u-hook",
-        "expiry_at": None,
-        "resume_owner": None,
-        "interaction_ids": ["u-hook"],
-        "caller_interaction_ids": [],
+        "kind": "parked",
+        "suspended": {
+            "interaction_id": "u-hook",
+            "expiry_at": None,
+            "resume_owner": None,
+            "interaction_ids": ["u-hook"],
+            "caller_interaction_ids": [],
+        },
     }
 
 
@@ -382,7 +406,8 @@ async def test_crash_resume_re_drive_records_caller_asks_under_the_fires_own_sub
     entries = await ops.list_tool_runs("alpha")
     assert [entry["status"] for entry in entries] == ["parked"]
     answer = json.loads((await wired.store.get_run(wired.fake, entries[0]["run_id"]))["result"])
-    assert list(answer) == ["asks"]
+    assert list(answer) == ["kind", "asks", "suspended"]
+    assert answer["kind"] == "asks"
     assert [entry["id"] for entry in answer["asks"]] == ["c1"]
     assert answer["asks"][0]["to"] == "caller"
     # The deposited context is the FIRE's hook door, never the reader door's ambient one.
@@ -432,11 +457,14 @@ async def test_crash_resume_re_drive_records_the_suspended_sentinel_for_a_user_p
     assert [entry["status"] for entry in entries] == ["parked"]
     result = json.loads((await wired.store.get_run(wired.fake, entries[0]["run_id"]))["result"])
     assert result == {
-        "interaction_id": "i-detached",
-        "expiry_at": None,
-        "resume_owner": None,
-        "interaction_ids": ["i-detached"],
-        "caller_interaction_ids": [],
+        "kind": "parked",
+        "suspended": {
+            "interaction_id": "i-detached",
+            "expiry_at": None,
+            "resume_owner": None,
+            "interaction_ids": ["i-detached"],
+            "caller_interaction_ids": [],
+        },
     }
 
 
@@ -512,7 +540,8 @@ async def test_background_submit_of_a_crash_resume_tool_is_redriven_with_the_par
     assert statuses == ["lost", "parked"]
     parked = next(entry for entry in entries if entry["status"] == "parked")
     answer = json.loads((await wired.store.get_run(wired.fake, parked["run_id"]))["result"])
-    assert list(answer) == ["asks"]
+    assert list(answer) == ["kind", "asks", "suspended"]
+    assert answer["kind"] == "asks"
     assert [entry["id"] for entry in answer["asks"]] == ["c1"]
     assert answer["asks"][0]["to"] == "caller"
 

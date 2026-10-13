@@ -9,7 +9,7 @@ from .base import _Facet
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
-    from tai42_contract.interactions import Ask, ParkedEntry, QuestionFormat, Visit, VisitOutcome
+    from tai42_contract.interactions import Ask, ParkedEntry, QuestionFormat, RunAnswer, Visit, VisitOutcome
     from tai42_contract.states import StateContext
 
 
@@ -27,6 +27,27 @@ class InteractionsFacet(_Facet):
         from tai42_skeleton.interactions.answer_check import check_answer
 
         return check_answer(question, answer)
+
+    def question_format(
+        self,
+        answer_format: str,
+        *,
+        options: list[str] | None = None,
+        schema: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        pages: list[dict[str, Any]] | None = None,
+        reactions: dict[str, Any] | None = None,
+    ) -> QuestionFormat:
+        """The answer-check view of an ask with these arguments (the ``ask`` tool's own parameter names).
+
+        Delegates to :func:`tai42_skeleton.interactions.question_format.question_format`: the stored
+        ``format_payload`` minus EXTERNAL's delivery keys, built by the ask door's own mapping.
+        """
+        from tai42_skeleton.interactions.question_format import question_format
+
+        return question_format(
+            answer_format, options=options, schema=schema, data=data, pages=pages, reactions=reactions
+        )
 
     async def react(self, interaction_id: str, event: dict[str, Any], partial_values: dict[str, Any]) -> dict[str, Any]:
         """Run an OPEN reacting form's handler for ``event`` with the values filled so far — the ONE reaction seam.
@@ -82,16 +103,15 @@ class InteractionsFacet(_Facet):
 
         return visit
 
-    def park_answer(self, outcome: VisitOutcome) -> Any:
-        """The ONE park-answer shape a direct door hands back for a visit outcome.
+    def run_answer(self, outcome: VisitOutcome) -> RunAnswer:
+        """The ONE run answer a direct door hands back for a visit outcome, discriminated on ``kind``.
 
-        A facade EXPOSURE of :func:`tai42_skeleton.interactions.visit.park_answer`: the caller ask
-        entries, the suspended sentinel, the tool's own result, or ``None`` — never revealing a
-        wrapped secret (the sync door reveals those on the ``result`` kind itself).
+        A facade EXPOSURE of :func:`tai42_skeleton.interactions.visit.run_answer` — never revealing a
+        wrapped secret (the sync door reveals those on its own ``result``).
         """
-        from tai42_skeleton.interactions.visit import park_answer
+        from tai42_skeleton.interactions.visit import run_answer
 
-        return park_answer(outcome)
+        return run_answer(outcome)
 
     async def normalise_started(self, value: Any) -> VisitOutcome:
         """Classify a raw start return into a ``started`` :class:`VisitOutcome` over the ambient subject.

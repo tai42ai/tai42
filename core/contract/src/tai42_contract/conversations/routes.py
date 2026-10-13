@@ -88,8 +88,8 @@ class ConversationRouteCreate(ParkableDoorMixin):
     # A templated text carrying (inline or by stored id) a jq program mapping the inbound turn
     # payload to the started run's kwargs, overriding the mixin's generic ``start_expr`` gloss with
     # this route's own input keys. Rendered then compiled at create. ``reply_expr`` (below) maps the
-    # SUCCESS shape: a result whose own ``status`` names a non-success terminal diverts to the turn's
-    # error outcome without being mapped. Both carry the ``x-tai42-expression`` schema annotation
+    # run's returned value; a failed run raises and takes the error outcome before mapping. Both
+    # carry the ``x-tai42-expression`` schema annotation
     # (via ``Annotated`` so the attribute default stays the ``None`` literal — the api-gate flags a
     # ``Field(default=...)`` redeclaration as breaking) so a schema-driven UI auto-renders the jq
     # editor. The four door jqs read the run's currently parked interactions as ``$parked``.

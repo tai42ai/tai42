@@ -25,6 +25,7 @@ from tai42_skeleton.app.bus import (
     WorkerKind,
     WorkerState,
 )
+from tai42_skeleton.app.bus.ops import ReloadConfig
 
 from .conftest import (
     _drop_presence,
@@ -37,6 +38,9 @@ from .conftest import (
     _until,
     make_bus,
 )
+
+_RELOAD = ReloadConfig(op="reload_config")
+_RELOAD_WIRE = {"op": "reload_config"}
 
 # -- census -------------------------------------------------------------------
 
@@ -146,13 +150,6 @@ async def test_census_reads_the_index_never_a_keyspace_scan(recording_bus_client
     assert "smembers" in touched
 
 
-async def test_publish_requires_a_non_empty_op_name() -> None:
-    bus = make_bus()
-    local = LocalApplyResult(outcome=OpOutcome.applied)
-    with pytest.raises(ValueError, match="non-empty 'op' name"):
-        await bus.publish({}, targets=None, local=local)
-
-
 # -- two-phase ack then apply -------------------------------------------------
 
 
@@ -171,13 +168,13 @@ async def test_two_phase_ack_then_slow_apply_reports_applied(wire_bus_client: No
     task, worker_id = await _spawn_subscriber(worker, slow_apply)
     try:
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        result = await publisher.publish(_RELOAD, targets=None, local=local)
         assert result.ok
         by_name = {r.name: r for r in result.results}
         assert by_name[worker_id.name].outcome == OpOutcome.applied
         assert by_name[worker_id.name].payload == {"reloaded": True}
         assert by_name[publisher.identity.name].outcome == OpOutcome.applied
-        assert seen == [{"op": "reload_config"}]
+        assert seen == [_RELOAD_WIRE]
     finally:
         await _stop(task)
 
@@ -194,7 +191,7 @@ async def test_all_terminal_early_exit_returns_before_apply_deadline(wire_bus_cl
         loop = asyncio.get_running_loop()
         start = loop.time()
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        result = await publisher.publish(_RELOAD, targets=None, local=local)
         elapsed = loop.time() - start
         assert result.ok
         assert elapsed < 2.0
@@ -267,7 +264,7 @@ async def test_silent_but_present_worker_is_missing(wire_bus_client: None, serve
     # the whole short apply window), so it is an EXPECTED worker — yet nobody replies.
     await _register_bare_presence(server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000)
 
-    result = await publisher.publish({"op": "reload_config"}, targets=["backend-1"], local=None)
+    result = await publisher.publish(_RELOAD, targets=["backend-1"], local=None)
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-1"].outcome == OpOutcome.missing
     assert by_name["backend-1"].detail is not None
@@ -279,7 +276,7 @@ async def test_targeted_name_absent_from_census_is_departed(
     # A targeted name with NO presence key at all stays in the expected set (generation
     # unknown) and is reported ``departed`` at the cut — never silently dropped.
     publisher = make_bus(ack_timeout=0.03, apply_timeout=0.1)
-    result = await publisher.publish({"op": "reload_config"}, targets=["backend-9"], local=None)
+    result = await publisher.publish(_RELOAD, targets=["backend-9"], local=None)
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-9"].outcome == OpOutcome.departed
 
@@ -305,7 +302,7 @@ async def test_expired_presence_worker_is_departed(
 
     monkeypatch.setattr(publisher, "_classify_workers", _census_then_expire)
 
-    result = await publisher.publish({"op": "reload_config"}, targets=["backend-1"], local=None)
+    result = await publisher.publish(_RELOAD, targets=["backend-1"], local=None)
     assert censuses == [{"backend-1": 1}], "the target was not censused ready and fresh"
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-1"].outcome == OpOutcome.departed
@@ -325,7 +322,7 @@ async def test_whole_fleet_publish_reports_a_resyncing_row(wire_bus_client: None
     )
 
     local = LocalApplyResult(outcome=OpOutcome.applied)
-    result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+    result = await publisher.publish(_RELOAD, targets=None, local=local)
 
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-1"].outcome == OpOutcome.resyncing
@@ -341,7 +338,7 @@ async def test_whole_fleet_publish_reports_a_recycling_row(wire_bus_client: None
     )
 
     local = LocalApplyResult(outcome=OpOutcome.applied)
-    result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+    result = await publisher.publish(_RELOAD, targets=None, local=local)
 
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-1"].outcome == OpOutcome.recycling
@@ -360,7 +357,7 @@ async def test_whole_fleet_publish_reports_a_ready_but_decayed_row_as_stale(
     )
 
     local = LocalApplyResult(outcome=OpOutcome.applied)
-    result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+    result = await publisher.publish(_RELOAD, targets=None, local=local)
 
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-1"].outcome == OpOutcome.stale
@@ -377,7 +374,7 @@ async def test_whole_fleet_publish_reports_a_decayed_resyncing_row_as_stale(
     )
 
     local = LocalApplyResult(outcome=OpOutcome.applied)
-    result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+    result = await publisher.publish(_RELOAD, targets=None, local=local)
 
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-1"].outcome == OpOutcome.stale
@@ -391,7 +388,7 @@ async def test_targeted_gap_row_carries_its_gap_outcome(wire_bus_client: None, s
         server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000, state=WorkerState.resyncing
     )
 
-    result = await publisher.publish({"op": "reload_config"}, targets=["backend-1"], local=None)
+    result = await publisher.publish(_RELOAD, targets=["backend-1"], local=None)
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-1"].outcome == OpOutcome.resyncing
 
@@ -421,7 +418,7 @@ async def test_targeted_worker_replaced_mid_apply_is_departed(
 
     bumper = asyncio.create_task(bump_generation())
     try:
-        result = await publisher.publish({"op": "reload_config"}, targets=["backend-1"], local=None)
+        result = await publisher.publish(_RELOAD, targets=["backend-1"], local=None)
     finally:
         await bumper
     by_name = {r.name: r for r in result.results}
@@ -451,7 +448,7 @@ async def test_a_worker_that_fades_before_publish_is_off_the_census_entirely(wir
     try:
         await _drop_presence(server, publisher._settings, worker_id.name)
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        result = await publisher.publish(_RELOAD, targets=None, local=local)
         assert [r.name for r in result.results] == [publisher.identity.name]
         assert result.ok
     finally:
@@ -477,7 +474,7 @@ async def test_expected_at_start_still_collects_a_faded_workers_confirmation(wir
 
         await _drop_presence(server, publisher._settings, worker_id.name)
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local, expected_at_start=at_start)
+        result = await publisher.publish(_RELOAD, targets=None, local=local, expected_at_start=at_start)
 
         by_name = {r.name: r for r in result.results}
         assert by_name[worker_id.name].outcome == OpOutcome.applied
@@ -502,7 +499,7 @@ async def test_expected_at_start_worker_that_never_returns_is_departed_at_the_cu
     loop = asyncio.get_running_loop()
     start = loop.time()
     local = LocalApplyResult(outcome=OpOutcome.applied)
-    result = await publisher.publish({"op": "reload_config"}, targets=None, local=local, expected_at_start=at_start)
+    result = await publisher.publish(_RELOAD, targets=None, local=local, expected_at_start=at_start)
     elapsed = loop.time() - start
 
     by_name = {r.name: r for r in result.results}
@@ -528,9 +525,7 @@ async def test_expected_at_start_never_overrides_a_live_gap_row(
     loop = asyncio.get_running_loop()
     start = loop.time()
     local = LocalApplyResult(outcome=OpOutcome.applied)
-    result = await publisher.publish(
-        {"op": "reload_config"}, targets=None, local=local, expected_at_start={"backend-1": 1}
-    )
+    result = await publisher.publish(_RELOAD, targets=None, local=local, expected_at_start={"backend-1": 1})
     elapsed = loop.time() - start
 
     by_name = {r.name: r for r in result.results}
@@ -547,9 +542,7 @@ async def test_expected_at_start_never_widens_targets_nor_re_admits_self(
     publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.2)
     at_start = {"backend-2": 1, publisher.identity.name: 1}
 
-    result = await publisher.publish(
-        {"op": "reload_config"}, targets=["backend-1"], local=None, expected_at_start=at_start
-    )
+    result = await publisher.publish(_RELOAD, targets=["backend-1"], local=None, expected_at_start=at_start)
 
     assert [r.name for r in result.results] == ["backend-1"]
 
@@ -570,12 +563,12 @@ async def test_nonmember_whole_fleet_publish_broadcasts_with_no_phantom_self(wir
 
     task, member_id = await _spawn_subscriber(member, record)
     try:
-        result = await child.publish({"op": "reload_config"}, targets=None, local=None)
+        result = await child.publish(_RELOAD, targets=None, local=None)
         names = {r.name for r in result.results}
         assert member_id.name in names  # the member applied the child's broadcast
         assert result.results[0].outcome == OpOutcome.applied
         assert child.identity.name not in names  # no phantom self entry for the non-member
-        await _until(lambda: applied == [{"op": "reload_config"}])
+        await _until(lambda: applied == [_RELOAD_WIRE])
     finally:
         await _stop(task)
 
@@ -586,7 +579,7 @@ async def test_nonmember_publish_with_local_raises(wire_bus_client: None) -> Non
     child = _make_nonmember_bus()
     local = LocalApplyResult(outcome=OpOutcome.applied)
     with pytest.raises(ValueError, match="exclude the publisher"):
-        await child.publish({"op": "reload_config"}, targets=None, local=local)
+        await child.publish(_RELOAD, targets=None, local=local)
 
 
 async def test_nonmember_validate_targets_rejects_its_own_name(wire_bus_client: None) -> None:
@@ -619,7 +612,7 @@ async def test_echo_skip_synthesizes_self_and_never_reapplies(wire_bus_client: N
     task, self_id = await _spawn_subscriber(bus, record)
     try:
         local = LocalApplyResult(outcome=OpOutcome.applied, payload={"n": 1})
-        result = await bus.publish({"op": "reload_config"}, targets=None, local=local)
+        result = await bus.publish(_RELOAD, targets=None, local=local)
         assert result.ok
         assert [r.name for r in result.results] == [self_id.name]
         assert result.results[0].outcome == OpOutcome.applied
@@ -633,7 +626,7 @@ async def test_echo_skip_synthesizes_self_and_never_reapplies(wire_bus_client: N
 async def test_self_failure_reported_when_local_failed(wire_bus_client: None) -> None:
     publisher = make_bus()
     local = LocalApplyResult(outcome=OpOutcome.failed, error="ValueError: boom")
-    result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+    result = await publisher.publish(_RELOAD, targets=None, local=local)
     assert not result.ok
     self_entry = result.results[0]
     assert self_entry.outcome == OpOutcome.failed
@@ -648,9 +641,9 @@ async def test_publish_raises_when_targeted_self_without_local(wire_bus_client: 
     # A real bus names itself from its claimed identity; set one for the validation path.
     bus._identity = WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=1)
     with pytest.raises(ValueError, match="can never reply"):
-        await bus.publish({"op": "reload_config"}, targets=None, local=None)
+        await bus.publish(_RELOAD, targets=None, local=None)
     with pytest.raises(ValueError, match="can never reply"):
-        await bus.publish({"op": "reload_config"}, targets=[bus.identity.name], local=None)
+        await bus.publish(_RELOAD, targets=[bus.identity.name], local=None)
 
 
 async def test_publish_raises_when_local_given_but_self_excluded(wire_bus_client: None) -> None:
@@ -658,7 +651,7 @@ async def test_publish_raises_when_local_given_but_self_excluded(wire_bus_client
     bus._identity = WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=1)
     local = LocalApplyResult(outcome=OpOutcome.applied)
     with pytest.raises(ValueError, match="exclude the publisher"):
-        await bus.publish({"op": "reload_config"}, targets=["backend-1"], local=local)
+        await bus.publish(_RELOAD, targets=["backend-1"], local=local)
 
 
 # -- namespace isolation ------------------------------------------------------
@@ -680,7 +673,7 @@ async def test_namespace_isolation_no_cross_talk(wire_bus_client: None, server: 
 
         # B publishes on its own channel; A's subscriber (different channel) must not fire.
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        result_b = await bus_b.publish({"op": "reload_config"}, targets=None, local=local)
+        result_b = await bus_b.publish(_RELOAD, targets=None, local=local)
         assert [r.name for r in result_b.results] == [bus_b.identity.name]
         await asyncio.sleep(0.05)
         assert a_calls == []  # no cross-channel delivery
@@ -696,7 +689,7 @@ async def test_bus_unreachable_shape(wire_bus_client: None, server: fakeredis.Fa
     publisher._identity = WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=1)
     server.connected = False
     local = LocalApplyResult(outcome=OpOutcome.applied)
-    result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+    result = await publisher.publish(_RELOAD, targets=None, local=local)
     assert result.reachable is False
     assert result.results == []
     assert result.error is not None
@@ -709,7 +702,7 @@ async def test_bus_unreachable_shape_on_wrapped_disconnect(
     publisher._identity = WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=1)
     server.connected = False
     local = LocalApplyResult(outcome=OpOutcome.applied)
-    result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+    result = await publisher.publish(_RELOAD, targets=None, local=local)
     assert result.reachable is False
     assert result.results == []
     assert result.error is not None
@@ -745,7 +738,7 @@ async def test_local_variant(wire_bus_client: None) -> None:
     bus = WorkerBus.local()
 
     local = LocalApplyResult(outcome=OpOutcome.applied, payload={"ok": True})
-    result = await bus.publish({"op": "reload_config"}, targets=None, local=local)
+    result = await bus.publish(_RELOAD, targets=None, local=local)
     assert isinstance(result, FleetResult)
     assert result.local_only
     assert result.ok
@@ -767,9 +760,9 @@ async def test_local_variant(wire_bus_client: None) -> None:
 
     await bus.validate_targets([bus.identity.name])
     with pytest.raises(ValueError, match="cannot reach"):
-        await bus.publish({"op": "x"}, targets=["backend-other"], local=None)
+        await bus.publish(_RELOAD, targets=["backend-other"], local=None)
     with pytest.raises(ValueError, match="can never reply"):
-        await bus.publish({"op": "x"}, targets=None, local=None)
+        await bus.publish(_RELOAD, targets=None, local=None)
 
     async def noop(_op: dict, *, deadline: float) -> None:
         return None
@@ -793,7 +786,7 @@ async def test_live_but_slow_apply_is_timed_out(wire_bus_client: None) -> None:
     task, worker_id = await _spawn_subscriber(worker, slow)
     try:
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        result = await publisher.publish(_RELOAD, targets=None, local=local)
         by_name = {r.name: r for r in result.results}
         assert by_name[worker_id.name].outcome == OpOutcome.timed_out
         assert by_name[worker_id.name].detail is not None
@@ -817,7 +810,7 @@ async def test_a_worker_draining_inside_the_drain_floor_answers_applied(wire_bus
     task, worker_id = await _spawn_subscriber(worker, draining)
     try:
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        result = await publisher.publish(_RELOAD, targets=None, local=local)
         by_name = {r.name: r for r in result.results}
         assert by_name[worker_id.name].outcome == OpOutcome.applied
         assert result.ok

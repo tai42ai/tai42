@@ -232,6 +232,6 @@ async def test_a_sibling_applying_the_fleet_op_renders_the_created_variant(monke
 
     # Another worker wrote the store through a door and broadcast the op this worker applies.
     store.items["welcome@he"] = b"shalom"
-    await instance.app._dispatch_bus_op({"op": "evict_template", "path": "welcome@he"})
+    await instance.app._apply_bus_op({"op": "evict_template", "path": "welcome@he"}, deadline=1e9)
 
     assert await manager.render_by_id("welcome", locale="he") == "shalom"

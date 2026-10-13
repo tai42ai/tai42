@@ -79,11 +79,8 @@ def test_both_builders_raise_an_undeclared_park_raw(app_tools: Any, signal: str)
 
 
 def test_both_builders_park_over_a_declared_tool(app_tools: Any) -> None:
-    from tai42_contract.interactions import (
-        read_suspended_interaction_marker,
-        reset_resume_continuation_tool,
-        set_resume_continuation_tool,
-    )
+    from tai42_contract.interactions import reset_resume_continuation_tool, set_resume_continuation_tool
+    from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 
     def declared(**_kw: Any) -> SuspendedInteraction:
         return SuspendedInteraction(interaction_id="i-declared", resume_owner="agent_resume")

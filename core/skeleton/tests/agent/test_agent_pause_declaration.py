@@ -17,8 +17,9 @@ from typing import Any
 import pytest
 from fastmcp import Client
 from mcp.types import TextContent
-from tai42_contract.interactions import SuspendedInteraction, read_suspended_interaction_marker
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.tools import TOOL_META_PAUSES, UndeclaredPauseError
+from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest

@@ -11,14 +11,11 @@ chain lineage the parked interaction recorded, which the platform deposits aroun
 
 from __future__ import annotations
 
-from tai42_contract.interactions import (
-    ParkDeliveryUnauthorizedError,
-    ParkResumeUnauthorizedError,
-    is_chained_park_key,
-)
+from tai42_contract.interactions import ParkDeliveryUnauthorizedError, ParkResumeUnauthorizedError
 from tai42_contract.tools import get_run_delivery_id
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.interactions.park_adoption import is_chained_park_key
 
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
 from tai42_skeleton.interactions.store import InteractionStore

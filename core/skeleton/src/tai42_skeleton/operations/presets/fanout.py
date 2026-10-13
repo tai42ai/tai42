@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome
+from tai42_skeleton.app.bus.ops import ReloadTool, RemoveTool
 from tai42_skeleton.operations._broadcast import log_non_convergence, snapshot_membership
 
 # The wire op names these fan-outs publish. Named once because the op-start census
@@ -78,7 +79,7 @@ async def _fanout_reload(name: str, expected_at_start: dict[str, int] | None) ->
     if not _fleet_fanout_ready():
         return FleetResult(op=_RELOAD_OP, local_only=True)
     report = await instance.app.bus.publish(
-        {"op": _RELOAD_OP, "kind": "preset", "name": name},
+        ReloadTool(op="reload_tool", kind="preset", name=name),
         None,
         _self_entry(),
         expected_at_start=expected_at_start,
@@ -117,7 +118,7 @@ async def _fanout_remove(name: str, expected_at_start: dict[str, int] | None) ->
     if not _fleet_fanout_ready():
         return FleetResult(op=_REMOVE_OP, local_only=True)
     report = await instance.app.bus.publish(
-        {"op": _REMOVE_OP, "kind": "preset", "name": name},
+        RemoveTool(op="remove_tool", kind="preset", name=name),
         None,
         _self_entry(),
         expected_at_start=expected_at_start,

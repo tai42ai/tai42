@@ -5,10 +5,10 @@ and never rejoined: ``app_context`` builds the bus (``serve``/``backend`` ``Work
 or the no-op local variant), subscribes with ``_apply_bus_op`` as the callback and
 ``_resync_on_ready`` as the on-ready self-resync, and cancels it at shutdown.
 
-* ``_apply_bus_op`` dispatches an op to its local admin primitive AND fires the
-  ``on_fleet_op_applied`` handlers with the op NAME and the seconds left before the
-  apply deadline — the op has not fully applied until they finish, so a raising
-  handler fails the op;
+* ``_apply_bus_op`` validates a delivered op into its typed model, dispatches it to its
+  local admin primitive AND fires the ``on_fleet_op_applied`` handlers with the applied
+  op — its declared effects and the seconds left before the apply deadline — the op has
+  not fully applied until they finish, so a raising handler fails the op;
 * ``_resync_on_ready`` routes the reconnect self-resync through the same apply
   path, so the hook fires for the resync reload too (a celery worker's prefork
   children must not stay stale on the exact path the resync heals);
@@ -29,10 +29,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.backend import FleetOpApplied, FleetOpEffect
 from tai42_contract.storage import Storage
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app.bus import WorkerBus, WorkerKind
+from tai42_skeleton.app.bus.ops import ClearTemplateCache, EvictTemplate, FleetOp, ReprobeFailedMcps
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
 from tai42_skeleton.app.lifecycle import bus_subscription as bus_subscription_module
@@ -94,40 +96,39 @@ def _freeze_monotonic(monkeypatch: pytest.MonkeyPatch, now: float) -> None:
     monkeypatch.setattr(bus_subscription_module.time, "monotonic", lambda: now)
 
 
-async def test_apply_bus_op_dispatches_then_fires_hook_with_op_name_and_budget(
+async def test_apply_bus_op_dispatches_then_fires_hook_with_the_applied_op(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     m = _Mixin()
     sentinel = {"status": "ok", "from": "dispatch"}
 
-    async def fake_dispatch(op: dict[str, Any]) -> Any:
+    async def fake_dispatch(op: FleetOp) -> Any:
         return sentinel
 
     monkeypatch.setattr(m, "_dispatch_bus_op", fake_dispatch)
     _freeze_monotonic(monkeypatch, 100.0)
 
-    fired: list[tuple[str, float]] = []
-    m._on_fleet_op_applied(lambda name, budget: fired.append((name, budget)))
+    fired: list[FleetOpApplied] = []
+    m._on_fleet_op_applied(fired.append)
 
     result = await m._apply_bus_op({"op": "reload_mcp", "title": "svc"}, deadline=125.0)
 
     # The dispatch result becomes the op's terminal payload, and the hook fired AFTER
-    # the op applied, with the op name (to filter by op) and the seconds left before
-    # the deadline.
+    # the op applied, with the op's declared effects and the seconds left before the deadline.
     assert result is sentinel
-    assert fired == [("reload_mcp", 25.0)]
+    assert fired == [FleetOpApplied(op="reload_mcp", effects=frozenset({FleetOpEffect.registry}), budget=25.0)]
 
 
 async def test_a_passed_deadline_hands_a_zero_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     m = _Mixin()
 
-    async def fake_dispatch(op: dict[str, Any]) -> Any:
+    async def fake_dispatch(op: FleetOp) -> Any:
         return None
 
     monkeypatch.setattr(m, "_dispatch_bus_op", fake_dispatch)
     _freeze_monotonic(monkeypatch, 200.0)
     fired: list[float] = []
-    m._on_fleet_op_applied(lambda _name, budget: fired.append(budget))
+    m._on_fleet_op_applied(lambda applied: fired.append(applied.budget))
 
     await m._apply_bus_op({"op": "reload_config"}, deadline=150.0)
 
@@ -137,12 +138,12 @@ async def test_a_passed_deadline_hands_a_zero_budget(monkeypatch: pytest.MonkeyP
 async def test_a_raising_hook_fails_the_op(monkeypatch: pytest.MonkeyPatch) -> None:
     m = _Mixin()
 
-    async def fake_dispatch(op: dict[str, Any]) -> Any:
+    async def fake_dispatch(op: FleetOp) -> Any:
         return {"status": "ok"}
 
     monkeypatch.setattr(m, "_dispatch_bus_op", fake_dispatch)
 
-    def boom(_name: str, _budget: float) -> None:
+    def boom(_applied: FleetOpApplied) -> None:
         raise RuntimeError("prefork turnover failed")
 
     m._on_fleet_op_applied(boom)
@@ -153,14 +154,14 @@ async def test_a_raising_hook_fails_the_op(monkeypatch: pytest.MonkeyPatch) -> N
         await m._apply_bus_op({"op": "list_failed_mcps"}, deadline=1e9)
 
 
-async def test_a_one_argument_hook_fails_the_op(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_two_argument_hook_fails_the_op(monkeypatch: pytest.MonkeyPatch) -> None:
     m = _Mixin()
 
-    async def fake_dispatch(op: dict[str, Any]) -> Any:
+    async def fake_dispatch(op: FleetOp) -> Any:
         return {"status": "ok"}
 
     monkeypatch.setattr(m, "_dispatch_bus_op", fake_dispatch)
-    m._on_fleet_op_applied(lambda name: None)
+    m._on_fleet_op_applied(lambda name, budget: None)
 
     with pytest.raises(TypeError):
         await m._apply_bus_op({"op": "reload_config"}, deadline=1e9)
@@ -170,8 +171,8 @@ async def test_self_resync_routes_reload_config_through_the_apply_path(monkeypat
     m = _Mixin()
     dispatched: list[str] = []
 
-    async def fake_dispatch(op: dict[str, Any]) -> Any:
-        dispatched.append(op["op"])
+    async def fake_dispatch(op: FleetOp) -> Any:
+        dispatched.append(op.op)
         return {"status": "ok"}
 
     monkeypatch.setattr(m, "_dispatch_bus_op", fake_dispatch)
@@ -180,7 +181,7 @@ async def test_self_resync_routes_reload_config_through_the_apply_path(monkeypat
     _freeze_monotonic(monkeypatch, 50.0)
 
     fired: list[tuple[str, float]] = []
-    m._on_fleet_op_applied(lambda name, budget: fired.append((name, budget)))
+    m._on_fleet_op_applied(lambda applied: fired.append((applied.op, applied.budget)))
 
     try:
         # Boot (first connect): the live config was JUST built by start(), so the resync
@@ -207,8 +208,8 @@ async def test_self_resync_swallows_a_failing_apply_and_stays_live(
     m._boot_ready.set()
     dispatched: list[str] = []
 
-    async def flaky_dispatch(op: dict[str, Any]) -> Any:
-        dispatched.append(op["op"])
+    async def flaky_dispatch(op: FleetOp) -> Any:
+        dispatched.append(op.op)
         # Only the resync apply (the first call) blows up; a later delivered op
         # applies cleanly, proving the subscription stayed live.
         if len(dispatched) == 1:
@@ -235,7 +236,7 @@ async def test_self_resync_propagates_cancellation(monkeypatch: pytest.MonkeyPat
     # A reconnect (boot-ready latched), so the resync actually reloads and can cancel.
     m._boot_ready.set()
 
-    async def cancel_dispatch(_op: dict[str, Any]) -> Any:
+    async def cancel_dispatch(_op: FleetOp) -> Any:
         raise asyncio.CancelledError
 
     monkeypatch.setattr(m, "_dispatch_bus_op", cancel_dispatch)
@@ -249,7 +250,7 @@ async def test_self_resync_propagates_cancellation(monkeypatch: pytest.MonkeyPat
 async def test_a_successful_self_resync_latches_boot_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     m = _Mixin()
 
-    async def ok_dispatch(_op: dict[str, Any]) -> Any:
+    async def ok_dispatch(_op: FleetOp) -> Any:
         return {"status": "ok"}
 
     monkeypatch.setattr(m, "_dispatch_bus_op", ok_dispatch)
@@ -273,7 +274,7 @@ async def test_a_failing_reconnect_resync_keeps_boot_ready_latched(
 
     # Boot (first connect) skips the reload and latches ready — the registry was
     # already built by start().
-    async def ok_dispatch(_op: dict[str, Any]) -> Any:
+    async def ok_dispatch(_op: FleetOp) -> Any:
         return {"status": "ok"}
 
     monkeypatch.setattr(m, "_dispatch_bus_op", ok_dispatch)
@@ -282,7 +283,7 @@ async def test_a_failing_reconnect_resync_keeps_boot_ready_latched(
 
     # A subsequent reconnect resync whose reload FAILS is swallowed (the subscription
     # stays live) and never un-latches the one-way boot-ready signal.
-    async def boom(_op: dict[str, Any]) -> Any:
+    async def boom(_op: FleetOp) -> Any:
         raise RuntimeError("reconnect reload blew up")
 
     monkeypatch.setattr(m, "_dispatch_bus_op", boom)
@@ -295,8 +296,8 @@ def test_on_fleet_op_applied_is_registered_through_the_lifecycle_facet() -> None
     fired: list[str] = []
 
     @app.lifecycle.on_fleet_op_applied
-    def _handler(op_name: str, budget: float) -> None:  # pragma: no cover - registration only
-        fired.append(op_name)
+    def _handler(applied: FleetOpApplied) -> None:  # pragma: no cover - registration only
+        fired.append(applied.op)
 
     key = f"{_handler.__module__}.{_handler.__qualname__}"
     try:
@@ -378,7 +379,7 @@ async def test_dispatch_evict_template_drops_the_worker_compilation(monkeypatch:
     assert await manager.render_by_id("m.j2", {"x": 1}) == "v1 1"  # populate this worker's cache
     assert manager.get_cache_info().currsize == 1
 
-    result = await _Mixin()._dispatch_bus_op({"op": "evict_template", "path": "m.j2"})
+    result = await _Mixin()._dispatch_bus_op(EvictTemplate(op="evict_template", path="m.j2"))
 
     assert result == {"evicted": "m.j2"}
     assert manager.get_cache_info().currsize == 0  # the stale compilation is gone
@@ -390,7 +391,7 @@ async def test_dispatch_evict_template_prefix_drops_only_the_directory(monkeypat
     await manager.render_by_id("other.j2", {"y": 2})
     assert manager.get_cache_info().currsize == 2
 
-    result = await _Mixin()._dispatch_bus_op({"op": "evict_template", "path": "dir", "prefix": True})
+    result = await _Mixin()._dispatch_bus_op(EvictTemplate(op="evict_template", path="dir", prefix=True))
 
     assert result == {"evicted": "dir"}
     # Only the compilation under the prefix is dropped; the sibling stays cached.
@@ -398,11 +399,13 @@ async def test_dispatch_evict_template_prefix_drops_only_the_directory(monkeypat
     assert await manager.render_by_id("other.j2", {"y": 9}) == "9"
 
 
-async def test_dispatch_evict_template_without_a_path_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_manager(monkeypatch, {"m.j2": "{{ x }}"})
+async def test_an_evict_template_without_a_path_fails_before_anything_applies(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = _install_manager(monkeypatch, {"m.j2": "{{ x }}"})
+    await manager.render_by_id("m.j2", {"x": 1})
     # A malformed fleet op must fail its confirmation, never apply a partial op.
-    with pytest.raises(ValueError, match="evict_template fleet op missing 'path'"):
-        await _Mixin()._dispatch_bus_op({"op": "evict_template"})
+    with pytest.raises(ValueError, match="path"):
+        await _Mixin()._apply_bus_op({"op": "evict_template"}, deadline=1e9)
+    assert manager.get_cache_info().currsize == 1
 
 
 async def test_dispatch_clear_template_cache_drops_everything(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -411,81 +414,10 @@ async def test_dispatch_clear_template_cache_drops_everything(monkeypatch: pytes
     await manager.render_by_id("b.j2", {"y": 2})
     assert manager.get_cache_info().currsize == 2
 
-    result = await _Mixin()._dispatch_bus_op({"op": "clear_template_cache"})
+    result = await _Mixin()._dispatch_bus_op(ClearTemplateCache(op="clear_template_cache"))
 
     assert result == {"cleared": True}
     assert manager.get_cache_info().currsize == 0
-
-
-async def test_dispatch_reprobe_failed_mcps_reaches_the_admin_with_the_titles(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[list[str]] = []
-
-    async def reprobe(titles: list[str]) -> list[dict[str, Any]]:
-        seen.append(list(titles))
-        return [{"title": t, "status": "ok"} for t in titles]
-
-    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(admin=SimpleNamespace(reprobe_failed_mcps=reprobe)))
-
-    result = await _Mixin()._dispatch_bus_op({"op": "reprobe_failed_mcps", "titles": ["a", "b"]})
-
-    # The bare per-title list, the shape the publisher's own apply rides on its self entry.
-    assert result == [{"title": "a", "status": "ok"}, {"title": "b", "status": "ok"}]
-    assert seen == [["a", "b"]]
-
-
-async def test_dispatch_reprobe_failed_mcps_without_titles_raises_loudly() -> None:
-    with pytest.raises(ValueError, match="reprobe_failed_mcps fleet op missing 'titles'"):
-        await _Mixin()._dispatch_bus_op({"op": "reprobe_failed_mcps"})
-
-
-async def test_dispatch_an_unknown_op_raises_loudly() -> None:
-    with pytest.raises(ValueError, match="unknown fleet op 'no_such_op'"):
-        await _Mixin()._dispatch_bus_op({"op": "no_such_op"})
-
-
-# -- drift guard: the contract's mutating-op set vs this dispatch --------------
-
-
-def test_registry_mutating_ops_match_the_dispatch() -> None:
-    """``POOL_TURNOVER_FLEET_OPS`` is a SECOND source of truth for op names that
-    live as literals in ``_dispatch_bus_op``. A backend base reads the contract set
-    to decide whether a pool that persists across jobs must be turned over, so an op
-    added here and not there turns over nothing and leaves stale workers serving —
-    silently. This test is the only thing preventing that divergence.
-
-    ``list_failed_mcps`` is a query and ``recycle`` ends the process, so both are
-    dispatched ops that are deliberately NOT pool-turnover ops. The two template-cache
-    ops (``evict_template`` / ``clear_template_cache``) drop the compiled-template cache
-    rather than the tool registry, so they are NOT registry-mutating but ARE
-    pool-turnover ops (a persisted worker's compiled cache goes stale)."""
-    import ast
-    import inspect
-    import textwrap
-
-    from tai42_contract.backend import (
-        POOL_TURNOVER_FLEET_OPS,
-        REGISTRY_MUTATING_FLEET_OPS,
-        TEMPLATE_EVICTION_FLEET_OPS,
-    )
-
-    # The template-eviction ops must ride the pool-turnover set (so a forking backend's
-    # children are recycled) while staying OUT of the registry-mutating set.
-    assert TEMPLATE_EVICTION_FLEET_OPS <= POOL_TURNOVER_FLEET_OPS
-    assert not (TEMPLATE_EVICTION_FLEET_OPS & REGISTRY_MUTATING_FLEET_OPS)
-
-    tree = ast.parse(textwrap.dedent(inspect.getsource(TaiMCPLifecycleMixin._dispatch_bus_op)))
-    dispatched: set[str] = set()
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == "op_name"):
-            continue
-        for comparator in node.comparators:
-            elements = comparator.elts if isinstance(comparator, ast.Tuple | ast.List | ast.Set) else [comparator]
-            dispatched.update(e.value for e in elements if isinstance(e, ast.Constant) and isinstance(e.value, str))
-
-    assert dispatched == POOL_TURNOVER_FLEET_OPS | {
-        "list_failed_mcps",
-        "recycle",
-    }
 
 
 @pytest.mark.parametrize(
@@ -544,3 +476,19 @@ async def test_a_reconnect_resync_names_its_own_keys_awaiting_a_respawn(
     lines = [r.getMessage() for r in caplog.records if "awaiting a respawn" in r.getMessage()]
     assert len(lines) == 1
     assert "serve-1 (BACKEND_MANIFEST_KEY)" in lines[0]
+
+
+async def test_dispatch_reprobe_failed_mcps_reaches_the_admin_with_the_titles(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    async def reprobe(titles: list[str]) -> list[dict[str, Any]]:
+        seen.append(list(titles))
+        return [{"title": t, "status": "ok"} for t in titles]
+
+    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(admin=SimpleNamespace(reprobe_failed_mcps=reprobe)))
+
+    result = await _Mixin()._dispatch_bus_op(ReprobeFailedMcps(op="reprobe_failed_mcps", titles=["a", "b"]))
+
+    # The bare per-title list, the shape the publisher's own apply rides on its self entry.
+    assert result == [{"title": "a", "status": "ok"}, {"title": "b", "status": "ok"}]
+    assert seen == [["a", "b"]]

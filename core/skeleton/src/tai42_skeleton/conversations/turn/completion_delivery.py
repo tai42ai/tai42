@@ -27,16 +27,16 @@ from tai42_skeleton.interactions.authorization import assert_delivery_authorized
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
 
 # The registered name of the hidden completion-delivery tool. The conversation door binds it
-# (``set_park_completion``) around an agent turn, carrying this turn's thread as the opaque
-# delivery address, so an async ``ask`` may park with a path back to this thread; a resumed
-# run's driver fires it with the generic contract payload (that context merged with
-# ``{result, completion_id, status}``) and it mints the answered record + spawns delivery. Must
-# equal the registered tool name.
+# (``set_park_completion``) around an agent turn, carrying this turn's thread on the delivery
+# address, so an async ``ask`` may park with a path back to this thread; the platform fires it
+# with the generic contract payload (the address's context merged with ``{thread_id, result,
+# completion_id, status}``) and it mints the answered record + spawns delivery. Must equal the
+# registered tool name.
 COMPLETION_TOOL_NAME = "conversation_deliver"
 
 # The registered name of the hidden GENERIC tool-route completion-delivery tool. The
 # conversation door binds it (``set_park_completion``) around a TOOL turn, carrying this
-# turn's thread as the opaque delivery address AND the originating route name, so ANY parking
+# turn's thread on the delivery address AND the originating route name, so ANY parking
 # tool may async-park with a path back to this thread; the parked tool's own resumer fires it
 # with the deferred outcome and it maps that through the originating route's ``reply_expr`` +
 # spawns delivery. Must equal the registered tool name. Knows nothing of the parking tool —
@@ -147,7 +147,7 @@ async def deliver_agent_completion(
 
     The completion continuation the conversation door bound around a parked agent turn: a
     resumed run's driver fires it by name with the generic contract payload — the bound context
-    (``thread_id``, this turn's delivery address) merged with ``{result, completion_id, status}``
+    (the address's ``thread_id`` and context) merged with ``{result, completion_id, status}``
     — when the run drives to a terminal out of band. It reverses the thread to its route +
     address, mints the outcome as an already-``answered`` record keyed by ``completion_id``, and
     hands it to the SAME delivery machine a produced answer takes — never appending to the
@@ -278,7 +278,7 @@ async def deliver_agent_completion(
 
 
 async def deliver_tool_completion(
-    delivery_thread_id: str | None,
+    thread_id: str | None,
     completion_id: str | None,
     result: Any = None,
     status: str | None = PARK_COMPLETION_FAILED,
@@ -289,9 +289,9 @@ async def deliver_tool_completion(
 
     The GENERIC sibling of :func:`deliver_agent_completion`: the completion continuation the
     conversation door binds around a parked tool turn. When the parked tool's own resumer
-    drives to a clean terminal out of band, it fires this by name with the bound context
-    (``delivery_thread_id`` plus the originating ``route_name``) plus
-    ``{completion_id, result, status}``. It reverses the thread to its delivery address (the
+    drives to a clean terminal out of band, the platform fires this by name with the bound
+    context (the originating ``route_name`` and ``message_id``) plus the address's ``thread_id``
+    and ``{completion_id, result, status}``. It reverses the thread to its delivery address (the
     SAME reversal an agent completion uses — a tool turn runs under the same reversible bridge
     thread), maps the terminal ``result`` through the ORIGINATING route's ``reply_expr`` (the
     SAME mapping the live tool turn applied), and hands the reply to the SAME delivery machine a
@@ -336,7 +336,7 @@ async def deliver_tool_completion(
     :func:`deliver_agent_completion` states. A missing ``completion_id`` RAISES: it is the
     idempotency key and nothing can guess a stable one, so delivering anyway would key every
     key-less fire onto ONE record — the second such terminal, from an unrelated park, would read
-    the first as already delivered and vanish. A missing ``delivery_thread_id`` DROPS (logged,
+    the first as already delivered and vanish. A missing ``thread_id`` DROPS (logged,
     ``{"message_id": None}``): nothing reverses a completion id to a thread, so the payload is
     permanently unroutable and raising the retriable error would only buy an unending retry storm
     against a fire no attempt can ever land. An unresolvable but PRESENT thread still raises —
@@ -357,16 +357,16 @@ async def deliver_tool_completion(
         # so a re-fire of an already-delivered terminal takes this benign path even when the
         # second fire lost its address.
         return {"message_id": completion_id}
-    if not delivery_thread_id:
+    if not thread_id:
         # A fire whose completion binding carried no address: nothing can route it and no retry
         # ever will, so it is dropped LOUDLY rather than raising the retriable delivery error.
         logger.error(
-            "conversations: a tool park completion (%s) fired with no bound delivery_thread_id; it carries no "
+            "conversations: a tool park completion (%s) fired with no bound thread_id; it carries no "
             "delivery address, so the resumed outcome cannot be routed and is dropped",
             completion_id,
         )
         return {"message_id": None}
-    route, client_address = await _resolve_completion_target(delivery_thread_id)
+    route, client_address = await _resolve_completion_target(thread_id)
     # Map through the ORIGINATING route's reply_expr (pinned at park time), not the reversed
     # delivery route — a linked person may have written from a different route since the park,
     # whose reply_expr would map the terminal wrongly.
@@ -375,7 +375,7 @@ async def deliver_tool_completion(
         pinned = await cache.get_conversations_manager().get_route(route_name)
         if pinned is None:
             raise CompletionDeliveryError(
-                f"originating route {route_name!r} for parked thread {delivery_thread_id!r} no longer exists"
+                f"originating route {route_name!r} for parked thread {thread_id!r} no longer exists"
             )
         mapping_route = pinned
     if _completion_succeeded(DELIVER_TOOL_COMPLETION_NAME, completion_id, status):
@@ -411,7 +411,7 @@ async def deliver_tool_completion(
     record = _new_record(
         route=route,
         message_id=completion_id,
-        thread_id=delivery_thread_id,
+        thread_id=thread_id,
         client_address=client_address,
         caller_principal=_COMPLETION_PRINCIPAL,
         provider_message_id=None,

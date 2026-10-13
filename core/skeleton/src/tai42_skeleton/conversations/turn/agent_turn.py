@@ -302,7 +302,7 @@ async def _run_agent_turn(
             ) as identity:
                 await authorize_execution_agent_run(identity, route.target_name)
                 completion_token = set_park_completion(
-                    COMPLETION_TOOL_NAME, {"thread_id": thread_id, "message_id": record.message_id}
+                    COMPLETION_TOOL_NAME, {"message_id": record.message_id}, thread_id=thread_id
                 )
                 try:
                     # The outermost minting call frame as a PUSH of the agent's name, under the

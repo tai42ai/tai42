@@ -43,7 +43,7 @@ from tai42_contract.channels.options import (
 )
 from tai42_contract.channels.options import NOTIFICATION_OPTION_MAX_CHARS as NOTIFICATION_OPTION_MAX_CHARS
 from tai42_contract.channels.options import NOTIFICATION_OPTIONS_MAX as NOTIFICATION_OPTIONS_MAX
-from tai42_contract.channels.protocol import Channel, notify_in_order
+from tai42_contract.channels.protocol import Channel
 from tai42_contract.channels.templates import ChannelTemplate
 
 __all__ = [
@@ -71,5 +71,4 @@ __all__ = [
     "check_interactive_composition",
     "check_options",
     "check_sections",
-    "notify_in_order",
 ]

@@ -47,6 +47,8 @@ dependencies = [
     # Imported directly by utils/data/json_schema_util.py (the draft-2020-12
     # validate_against_json_schema path).
     "jsonschema>=4",
+    # Imported lazily by conversations/entry_params.py (the dropped-params counter).
+    "prometheus-client>=0.24",
 ]
 
 [project.urls]

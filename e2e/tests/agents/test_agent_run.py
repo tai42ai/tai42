@@ -135,7 +135,10 @@ async def test_agent_preset_baking_a_system_message_runs_on_both_doors(
         "/api/run-tool",
         json={"tool_name": name, "arguments": {"user_message": {"content": "hi"}}},
     )
-    assert final in json.dumps(http_result), f"run-tool HTTP door did not return the scripted final: {http_result}"
+    assert http_result["kind"] == "result", http_result
+    assert final in json.dumps(http_result["result"]), (
+        f"run-tool HTTP door did not return the scripted final: {http_result}"
+    )
 
     # MCP tools/call edge.
     async with agents_stack.mcp() as mcp:
@@ -183,7 +186,8 @@ async def test_agent_preset_over_agent_receives_the_engine_holder_per_call_kwarg
         "/api/run-tool",
         json={"tool_name": name, "arguments": dict(_ENGINE_AGENT_HOLDER_PER_CALL_KWARGS)},
     )
-    assert http_value in json.dumps(http_result), (
+    assert http_result["kind"] == "result", http_result
+    assert http_value in json.dumps(http_result["result"]), (
         f"run-tool HTTP door did not return the structured answer: {http_result}"
     )
 

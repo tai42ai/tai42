@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from tai42_contract.interactions import ChainedResume, current_execution_identity, get_chained_resume
+from tai42_contract.interactions import ChainedResume, get_chained_resume
 from tai42_kit.llm.checkpoint import checkpoint_park_horizon, durable_checkpoint_providers, register_live_thread_filter
 from tai42_kit.llm.settings import llm_provider_settings
 
@@ -54,8 +54,6 @@ class ParkIdentity:
         "bind",
         "completion_context",
         "completion_tool",
-        "execution_fingerprint",
-        "execution_identity",
         "rebuild_kwargs",
         "retention_bound",
         "thread_id",
@@ -71,8 +69,6 @@ class ParkIdentity:
         completion_tool: str | None = None,
         completion_context: Mapping[str, Any] | None = None,
         retention_bound: datetime | None = None,
-        execution_identity: str | None = None,
-        execution_fingerprint: str = "",
     ) -> None:
         self.agent_name = agent_name
         self.thread_id = thread_id
@@ -91,11 +87,6 @@ class ParkIdentity:
         # The latest wall-time every store backing this park is guaranteed to still hold it;
         # ``None`` = keep-forever. Gated against each ask deadline at persist time.
         self.retention_bound = retention_bound
-        # The execution identity this run is authorized as — its ``(key, fingerprint)`` — carried
-        # forward onto every entry so a later resume drive re-binds it, never fail-open. ``None``
-        # key = no identity was bound (or the host has no identity system).
-        self.execution_identity = execution_identity
-        self.execution_fingerprint = execution_fingerprint
 
 
 def _thread_id(config: dict[str, Any]) -> str | None:
@@ -174,10 +165,6 @@ def build_park_identity(
     # identity carries neither; the engine's ``aresume_park`` reads them back out.
     pinned = {**rebuild_kwargs, "checkpoint_provider": resolved_provider, "recursion_limit": recursion_limit}
     retention_bound = _min_horizon(_checkpoint_retention_horizon(resolved_provider), extra_retention_horizon)
-    # Capture the identity this run is authorized as, so a later out-of-band completion fire runs
-    # under it. On a resume this helper is re-entered under the continuation's bound identity, so a
-    # re-park re-captures the same one — carried forward exactly like the completion tool.
-    execution_identity, execution_fingerprint = current_execution_identity()
     return ParkIdentity(
         agent_name=agent_name,
         thread_id=thread_id,
@@ -186,8 +173,6 @@ def build_park_identity(
         completion_tool=completion_tool,
         completion_context=completion_context,
         retention_bound=retention_bound,
-        execution_identity=execution_identity,
-        execution_fingerprint=execution_fingerprint,
     )
 
 

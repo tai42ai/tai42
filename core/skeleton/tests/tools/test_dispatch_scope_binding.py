@@ -19,7 +19,7 @@ import asyncio
 from typing import Any
 
 import pytest
-from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction, read_resume_buffered_marker
+from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
 from tai42_contract.states import (
     ApplyResult,
     StateAttach,
@@ -40,6 +40,7 @@ from tai42_contract.tools import (
     reset_current_tool_invocation,
     set_current_tool_invocation,
 )
+from tai42_kit.interactions.park_marker import read_resume_buffered_marker
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest

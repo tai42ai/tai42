@@ -18,6 +18,7 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_REPARKED,
     AnswerFormat,
     ChainedResume,
+    DeliveryAddress,
     InteractionRequest,
     SuspendedInteraction,
     reset_chained_resume,
@@ -238,7 +239,7 @@ async def test_a_park_under_a_plain_delivery_binding_notifies_nothing(
     _wire(monkeypatch, fake_client_ctx)
     # The conversation door's own binding is not a chain: its delivery tool has no horizon to
     # refresh, so it is never fired with a notice it cannot answer.
-    completion = set_park_completion("deliver_agent_completion", {"thread_id": "bridge:r:a"})
+    completion = set_park_completion("deliver_agent_completion", thread_id="bridge:r:a")
     try:
         await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
     finally:
@@ -292,7 +293,7 @@ def _bind_run(*, with_address: bool):
     """
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
-    completion = set_park_completion("deliver_tool", {"thread_id": "t1"}) if with_address else None
+    completion = set_park_completion("deliver_tool", thread_id="t1") if with_address else None
 
     def _reset() -> None:
         if completion is not None:
@@ -320,7 +321,7 @@ async def test_both_to_values_store_the_same_run_delivery_pair(monkeypatch, fake
     assert us is not None
     assert cs is not None
     # Every ask of the run stores the RUN's one address and one identity — no ``to`` branch.
-    assert us.request.delivery == ("deliver_tool", {"thread_id": "t1"})
+    assert us.request.delivery == DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1")
     assert cs.request.delivery == us.request.delivery
     assert us.request.run_delivery_id is not None
     assert cs.request.run_delivery_id == us.request.run_delivery_id

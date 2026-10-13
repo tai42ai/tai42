@@ -249,7 +249,8 @@ class TestToolErrorMiddleware:
         # present and untruncated — with an error status, not the bare contract message.
         import json
 
-        from tai42_contract.interactions import RunTerminalFailed, failed_outcome_text
+        from tai42_contract.interactions import RunTerminalFailed
+        from tai42_kit.interactions.outcome_text import failed_outcome_text
 
         saver = InMemorySaver()
         model = ScriptedChatModel([_tool_call("my_preset", "call_1"), AIMessage(content="recovered")])

@@ -273,7 +273,7 @@ async def test_mcp_edge_park_defers_door_updates_to_the_real_terminal(monkeypatc
     # The SAME deferral holds for a run started at the MCP ``tools/call`` edge: the edge shares the
     # dispatch chokepoint, so a park there captures the binding and applies it at the terminal too.
     from fastmcp.tools.base import ToolResult
-    from tai42_contract.interactions import read_suspended_interaction_marker, suspended_interaction_marker
+    from tai42_kit.interactions.park_marker import read_suspended_interaction_marker, suspended_interaction_marker
 
     from tai42_skeleton.tools.dispatch_scope import DispatchScopeMiddleware
 

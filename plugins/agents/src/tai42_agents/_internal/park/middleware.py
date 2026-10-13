@@ -15,7 +15,7 @@ hands its caller the raw marker. The ownership check is a NESTING discriminator 
 park that crossed a nested run's face, which carries no owner), NOT an authenticity token: the
 resume owner is a public continuation name, so it does not by itself defend against content a
 model shaped to name the bound continuation. What this hook does defend is shape — a malformed
-"marker" is never read as a park (:func:`~tai42_contract.interactions.read_suspended_interaction_marker`
+"marker" is never read as a park (:func:`~tai42_kit.interactions.park_marker.read_suspended_interaction_marker`
 returns ``None`` for one naming no interaction and raises for one lacking its id lists, which is
 answered with a model-visible error) — and this before-model hook holds no interactions-store handle, so
 store-authoritative existence checks are not applied here.
@@ -45,12 +45,9 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 from langgraph.prebuilt.tool_node import msg_content_output
 from langgraph.types import interrupt
-from tai42_contract.interactions import (
-    MalformedParkMarkerError,
-    NestedParkOwnershipError,
-    assert_park_adoptable,
-    read_suspended_interaction_marker,
-)
+from tai42_contract.interactions import MalformedParkMarkerError, NestedParkOwnershipError
+from tai42_kit.interactions.park_adoption import assert_park_adoptable
+from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 
 from tai42_agents._internal.park.errors import AgentParkMarkerError
 

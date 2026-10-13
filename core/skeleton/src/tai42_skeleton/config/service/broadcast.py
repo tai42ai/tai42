@@ -20,6 +20,7 @@ from tai42_skeleton.app.bus import (
     WorkerKind,
     WorkerRow,
 )
+from tai42_skeleton.app.bus.ops import ReloadConfig
 from tai42_skeleton.app.recycle import RecycleError, RecycleReport, RecycleStop
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.recycle_policy import CENSUS_TARGET_KINDS, _recycle_step_timeout
@@ -117,7 +118,9 @@ class _BroadcastMixin(_ConfigServiceBase):
             else None
         )
         try:
-            report = await self._bus.publish({"op": "reload_config"}, None, local, expected_at_start=expected_at_start)
+            report = await self._bus.publish(
+                ReloadConfig(op="reload_config"), None, local, expected_at_start=expected_at_start
+            )
         except Exception as broadcast_error:
             error = f"{type(broadcast_error).__name__}: {broadcast_error}"
             report = FleetResult(op="reload_config", reachable=False, error=error)
@@ -210,7 +213,7 @@ class _BroadcastMixin(_ConfigServiceBase):
         local, local_result, local_failure = await self._local_reload(bus)
 
         try:
-            report = await self._bus.publish({"op": op_name}, None, local, expected_at_start=at_start)
+            report = await self._bus.publish(ReloadConfig(op="reload_config"), None, local, expected_at_start=at_start)
         except Exception as broadcast_error:
             # The persist already committed, so a raw broadcast failure must not escape
             # the post-persist contract. Surface it as a FleetBroadcastError carrying

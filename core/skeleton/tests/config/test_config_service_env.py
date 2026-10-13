@@ -21,6 +21,7 @@ import pytest
 # registry, and the backend group's ``BACKEND_MANIFEST_KEY`` is recycle-class.
 import tai42_skeleton.backend.settings  # noqa: F401
 from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
+from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, RecycleError, RecycleReport, RecycleRow, RecycleStop
 from tai42_skeleton.config.service import OrphanEnvWriteError
 
@@ -254,7 +255,7 @@ _MOVED = {"status": "ok", "env_keys": 1, "awaiting_respawn": ["BACKEND_MANIFEST_
 class _MovedBus(FakeBus):
     """A fake bus whose every sibling answers the reload with the fact that its env moved."""
 
-    async def publish(self, op: dict[str, Any], targets: Any, local: Any, *, expected_at_start: Any = None) -> Any:
+    async def publish(self, op: FleetOp, targets: Any, local: Any, *, expected_at_start: Any = None) -> Any:
         from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerResult
 
         report = await super().publish(op, targets, local, expected_at_start=expected_at_start)

@@ -27,14 +27,13 @@ from tai42_contract.agent.events import (
 )
 from tai42_contract.interactions import (
     ChainedResume,
-    new_chained_park_key,
     reset_chained_resume,
     reset_resume_continuation_tool,
-    resolve_park_adoption,
     set_chained_resume,
     set_resume_continuation_tool,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.interactions.park_adoption import new_chained_park_key, resolve_park_adoption
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 from tests._deep_agent_fakes import (
     _client_tool,

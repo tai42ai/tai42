@@ -6,6 +6,7 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol, runtime_checkable
 
+from tai42_contract.backend.runtime import FleetOpApplied
 from tai42_contract.backup import BackupSectionInfo, BackupSectionReport
 from tai42_contract.clients import BaseClient
 from tai42_contract.config import ConfigManager
@@ -80,15 +81,14 @@ class AppLifecycle(Protocol):
         """
         ...
 
-    def on_fleet_op_applied(self, func: Callable[[str, float], Any]) -> Callable[[str, float], Any]:
+    def on_fleet_op_applied(self, func: Callable[[FleetOpApplied], Any]) -> Callable[[FleetOpApplied], Any]:
         """Register a handler fired after any worker-bus op applies in this process.
 
-        Also fired after the reconnect self-resync reload. The handler is called
-        ``handler(op_name, budget)``: ``op_name`` lets it act on some ops and skip others
-        (a query op carries no state change to react to); ``budget`` — seconds remaining
-        before the publisher's report cut, measured from this process's receipt of the op
-        (the bus transit before receipt is not subtracted); a post-apply obligation that
-        cannot finish within it must raise.
+        Also fired after the reconnect self-resync reload. The handler takes ONE argument — the
+        applied op with its declared effects (:class:`~tai42_contract.backend.FleetOpApplied`);
+        decide on ``effects``, never on ``op`` (a query op declares none). Its ``budget`` is the
+        seconds remaining before the publisher's report cut, measured from this process's
+        receipt of the op; a post-apply obligation that cannot finish within it must raise.
         """
         ...
 

@@ -16,7 +16,6 @@ from contextlib import asynccontextmanager
 import pytest
 from fakeredis import aioredis
 from pydantic import ValidationError
-from tai42_contract.conversations import build_inbound_media_params
 from tai42_contract.interactions import MEDIA_ROUTE_PREFIX, MediaKind, MediaOrigin
 from tai42_contract.interactions.models.media_errors import (
     MediaAlreadyBoundError,
@@ -26,6 +25,7 @@ from tai42_contract.interactions.models.media_errors import (
     MediaTooLargeError,
     MediaTypeNotAllowedError,
 )
+from tai42_kit.conversations.inbound_media import build_inbound_media_params
 from tai42_kit.interactions import media_ingest_cap_settings
 
 from tai42_skeleton.conversations import media_meta as meta_module
@@ -295,7 +295,9 @@ async def test_parity_media_filename_equals_sanitised(provider):
         declared_size=None,
         origin=_origin(),
     )
-    params = build_inbound_media_params(kind="document", media_id=doc.media_id, filename=doc.item.filename)
+    params = build_inbound_media_params(
+        door="probe", kind="document", media_id=doc.media_id, filename=doc.item.filename
+    )
     assert params["media_filename"] == doc.item.filename == "report.pdf"
 
 

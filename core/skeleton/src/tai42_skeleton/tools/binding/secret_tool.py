@@ -5,13 +5,9 @@ from typing import Any
 import mcp.types
 from fastmcp.tools.base import ToolResult
 from fastmcp.tools.function_tool import FunctionTool
-from tai42_contract.interactions import (
-    ResumeBuffered,
-    SuspendedInteraction,
-    resume_buffered_marker,
-    suspended_interaction_marker,
-)
+from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
 from tai42_contract.secrets import contains_secrets, mask_secrets, unwrap_secrets
+from tai42_kit.interactions.park_marker import resume_buffered_marker, suspended_interaction_marker
 
 from tai42_skeleton.tools.reveal_gate import inprocess_reveal_gate, note_secret_reveal
 

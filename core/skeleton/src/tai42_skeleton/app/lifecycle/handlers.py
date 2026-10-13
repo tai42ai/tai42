@@ -5,6 +5,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from tai42_contract.backend import FleetOpApplied
 from tai42_contract.template import TemplateEviction
 
 from tai42_skeleton.app.lifecycle.state import LifecycleState
@@ -38,7 +39,7 @@ class LifecycleHandlersMixin(LifecycleState):
         return func
 
     def _on_fleet_op_applied(self, func: Callable):
-        """Register a handler fired with the OP NAME and the apply BUDGET after every applied bus op and the resync.
+        """Register a handler fired with the APPLIED OP (effects and budget) after every applied bus op and the resync.
 
         Keyed by qualified name so a module re-import replaces rather than accumulates.
         """
@@ -129,17 +130,17 @@ class LifecycleHandlersMixin(LifecycleState):
         """
         await self._run_handlers(list(self._post_swap_handlers.values()), raise_on_error=raise_on_error)
 
-    async def _run_fleet_op_applied_handlers(self, op_name: str, budget: float) -> None:
-        """Fire every ``on_fleet_op_applied`` handler with the op name and the seconds left of the apply window.
+    async def _run_fleet_op_applied_handlers(self, applied: FleetOpApplied) -> None:
+        """Fire every ``on_fleet_op_applied`` handler with the applied op, its effects and the apply budget.
 
         A raising handler propagates (fail-loud), turning the op's terminal reply into ``failed`` —
         the post-apply obligation is part of the op applying.
         """
         for handler in list(self._fleet_op_applied_handlers.values()):
             if inspect.iscoroutinefunction(handler):
-                await handler(op_name, budget)
+                await handler(applied)
             else:
-                handler(op_name, budget)
+                handler(applied)
 
     def _epoch_handlers(self) -> list[Callable]:
         """The ONE ordered per-epoch handler list: startup handlers then reload handlers.

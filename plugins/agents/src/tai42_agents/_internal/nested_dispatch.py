@@ -49,11 +49,11 @@ from collections.abc import Iterator
 from tai42_contract.interactions import (
     ChainedResume,
     get_resume_continuation_tool,
-    new_chained_park_key,
     reset_chained_resume,
     set_chained_resume,
 )
 from tai42_contract.tools import current_call_chain
+from tai42_kit.interactions.park_adoption import new_chained_park_key
 
 from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME
 from tai42_agents._internal.park.chain import CHAINED_PARK_DELIVERY_TOOL_NAME

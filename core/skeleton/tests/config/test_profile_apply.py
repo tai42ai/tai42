@@ -31,6 +31,7 @@ from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.admission import RequestAdmission
 from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind, WorkerRow, WorkerState
+from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.recycle import (
     FAILED,
@@ -862,7 +863,7 @@ _MOVED = {"status": "ok", "env_keys": 1, "awaiting_respawn": ["TAI_BUS_NAMESPACE
 class _MovedBus(FakeBus):
     """A fake bus whose every sibling answers the reload with the fact that its env moved."""
 
-    async def publish(self, op: dict[str, Any], targets: Any, local: Any, *, expected_at_start: Any = None) -> Any:
+    async def publish(self, op: FleetOp, targets: Any, local: Any, *, expected_at_start: Any = None) -> Any:
         from tai42_skeleton.app.bus import OpOutcome, WorkerResult
 
         report = await super().publish(op, targets, local, expected_at_start=expected_at_start)

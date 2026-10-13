@@ -24,6 +24,7 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_SUCCEEDED,
     AnswerFormat,
     ChainedResume,
+    DeliveryAddress,
     InteractionRequest,
     ResumeBuffered,
     RunFailed,
@@ -121,7 +122,7 @@ def _request(interaction_id: str = "iid-g", **overrides: Any) -> InteractionRequ
         "continuation_identity": "svc-key",
         "expiry_at": now + timedelta(hours=1),
         "run_delivery_id": "rd-g",
-        "delivery": ("door_address", {"thread_id": "tg"}),
+        "delivery": DeliveryAddress(tool="door_address", context=None, thread_id="tg"),
     }
     fields.update(overrides)
     return InteractionRequest(**fields)
@@ -193,7 +194,7 @@ async def test_the_owning_driver_tells_its_captured_caller_inside_the_parks_fram
     assert binds == [("svc-key", "fp-g")]
     assert call["origin"] == "iid-g"
     assert call["run_delivery_id"] == "rd-g"
-    assert call["run_delivery"] == ("door_address", {"thread_id": "tg"})
+    assert call["run_delivery"] == DeliveryAddress(tool="door_address", context=None, thread_id="tg")
     # The stored caller is told, with the routing the driver captured.
     assert wiring["fired"]["chain_token"] == "probe-caller-key"
     assert wiring["fired"]["status"] == PARK_COMPLETION_FAILED

@@ -102,7 +102,7 @@ async def test_the_parked_record_carries_the_caller_ask_entries(
     ask_id = await caller_ask_id(api_a, subj)
 
     answer = view["result"]
-    assert list(answer) == ["asks"]
+    assert answer["kind"] == "asks", answer
     entry = next(a for a in answer["asks"] if a["id"] == ask_id)
     assert entry["to"] == "caller"
     assert entry["question"]

@@ -251,9 +251,52 @@ async def test_run_tool_happy(install):
     fake = install(_FakeTools({"alpha": _tool("alpha")}, run_result={"ok": 1}))
     resp = await router.run_tool(_body_req(b'{"tool_name": "alpha", "arguments": {"x": 2}}'))
     assert resp.status_code == 200
-    assert _json(resp) == {"data": {"ok": 1}}
+    assert _json(resp) == {"data": {"kind": "result", "result": {"ok": 1}}}
     # The sync door offloads a sync tool body onto a worker thread.
     assert fake.run_calls == [("alpha", {"x": 2}, True)]
+
+
+async def test_run_tool_a_tool_value_shaped_like_a_park_is_a_result(install):
+    # The body is discriminated by the visit outcome, never by the tool value's shape: a tool whose
+    # own value looks like a caller-ask answer comes back as a ``result`` carrying that value.
+    value = {"kind": "asks", "asks": [{"interaction_id": "i-1", "question": "?"}]}
+    install(_FakeTools({"alpha": _tool("alpha")}, run_result=value))
+    resp = await router.run_tool(_body_req(b'{"tool_name": "alpha"}'))
+    assert resp.status_code == 200
+    assert _json(resp) == {"data": {"kind": "result", "result": value}}
+
+
+class _CallerAskInteractions:
+    """A ``visit`` fake whose run parks on one caller ask; the run answer is the real one."""
+
+    async def visit(self, *, target_name, cancel, resume, start, extras, state_binding=None, receives_outcome=True):
+        from tai42_contract.interactions import ParkedEntry, SuspendedInteraction, VisitOutcome
+
+        entry = ParkedEntry(id="c1", status="asking", to="caller", question="proceed?", answer_format="confirm")
+        sentinel = SuspendedInteraction(interaction_id="c1", interaction_ids=["c1"], caller_interaction_ids=["c1"])
+        return VisitOutcome(action="started", kind="asks", asks=[entry], suspended=sentinel)
+
+    def run_answer(self, outcome):
+        from tai42_skeleton.interactions.visit import run_answer
+
+        return run_answer(outcome)
+
+
+async def test_run_tool_caller_ask_entries_carry_no_null_keys(monkeypatch):
+    # The door's ``asks`` body lists each entry with only its set fields: an unset optional field is
+    # absent, never a null key.
+    monkeypatch.setattr(
+        tai42_app,
+        "_impl",
+        SimpleNamespace(tools=_FakeTools({"alpha": _tool("alpha")}), interactions=_CallerAskInteractions()),
+    )
+    resp = await router.run_tool(_body_req(b'{"tool_name": "alpha"}'))
+    assert resp.status_code == 200
+    body = _json(resp)["data"]
+    assert body["kind"] == "asks"
+    assert body["asks"] == [
+        {"id": "c1", "status": "asking", "to": "caller", "question": "proceed?", "answer_format": "confirm"}
+    ]
 
 
 async def test_run_tool_defaults_arguments_to_empty(install):
@@ -321,7 +364,7 @@ async def test_run_tool_sync_body_does_not_stall_the_loop(install):
     tick_task = asyncio.ensure_future(ticker())
     resp = await router.run_tool(_body_req(b'{"tool_name": "slow"}'))
     await tick_task
-    assert _json(resp) == {"data": {"done": True}}
+    assert _json(resp) == {"data": {"kind": "result", "result": {"done": True}}}
     # The loop kept ticking while the sync body blocked its thread.
     assert len(ticks) == 30
 

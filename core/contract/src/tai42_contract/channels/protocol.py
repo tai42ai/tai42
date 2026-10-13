@@ -1,9 +1,8 @@
-"""The ``Channel`` Protocol and the ``notify_in_order`` in-order delivery primitive."""
+"""The ``Channel`` Protocol."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from tai42_contract.channels.delivery import ChannelDelivery
 from tai42_contract.channels.notification import ChannelNotification
@@ -96,22 +95,8 @@ class Channel(Protocol):
     neither (and has no override) is a loud config error at send, never a silent unbounded or
     truncated send.
 
-    A channel MAY also declare one OPTIONAL method, ``deliver_ordered(notifications)``,
-    for a NATIVE in-order batch (a bulk API, a transactional transcript append) — the
-    same documented-member convention as ``validate_form_schema`` and the capability
-    flags, NOT a Protocol method (so declaring it never tightens the runtime structural
-    check and a channel that omits it stays a valid ``Channel``). It takes a
-    ``Sequence[ChannelNotification]`` and returns ``list[list[str]]`` — the per-message
-    ids in send order, one list per notification — sending strictly in order and never
-    reordering, skipping or parallelising; the FIRST failure raises
-    :class:`ChannelDeliveryError` / :class:`ChannelInputError`, with the accepted ids
-    named in the exception message (as the WhatsApp body-then-media send does). A caller
-    reaches the default sequential behaviour through :func:`notify_in_order`, which
-    dispatches to ``deliver_ordered`` when declared and otherwise loops ``notify``; a
-    channel that declares neither still delivers a batch one ``notify`` at a time.
-
     A channel MAY also declare the OPTIONAL "working-on-it" (typing) signal — the
-    same documented-member convention as ``deliver_ordered``, ``validate_form_schema``
+    same documented-member convention as ``validate_form_schema``
     and the capability flags, NOT Protocol members (so declaring them never tightens
     the runtime structural check and a channel that omits them stays a valid
     ``Channel``). It is two members. An OPTIONAL ``ClassVar
@@ -166,63 +151,3 @@ class Channel(Protocol):
         :class:`NotImplementedError`.
         """
         raise NotImplementedError
-
-
-async def notify_in_order(
-    channel: Channel,
-    notifications: Sequence[ChannelNotification],
-    *,
-    on_sent: Callable[[int, list[str]], None] | None = None,
-) -> list[list[str]]:
-    """Deliver ``notifications`` to ``channel`` STRICTLY in order, returning the per-message ids of each.
-
-    One ``list[str]`` per notification, in the same order.
-
-    The default sequential in-order primitive every channel "inherits" by a caller using
-    this helper — the place a Protocol default can actually reach a structural
-    implementer. When the channel declares the OPTIONAL ``deliver_ordered`` member (read
-    defensively with ``getattr``, the platform's established convention for optional
-    channel abilities) the batch is handed to it as a native ordered send; otherwise each
-    notification is delivered with one awaited ``notify`` before the next goes out. Either
-    way delivery is never reordered, never parallelised and never skipped, and it STOPS at
-    the first raise (:class:`ChannelDeliveryError` / :class:`ChannelInputError`) — the
-    caller learns how far the sequence got from ``on_sent`` (and, for a native batch, from
-    the exception naming the accepted ids).
-
-    ``on_sent(index, ids)`` is the progress hook a caller uses to record each accepted send
-    (a send ledger, say); it fires once per notification in send order. It is intentionally
-    the ONLY progress seam — a caller that needs work BETWEEN sends (a per-send lease refresh)
-    drives ``notify`` itself rather than routing through this helper, which cannot express a
-    pre-send hook.
-
-    Two honesty caveats a durable caller must weigh before relying on ``on_sent``:
-
-    - This helper is NOT yet wired into the conversations delivery machine (which chunks and
-      ledgers each send inline in :mod:`tai42_skeleton.conversations.delivery`). It is the
-      documented in-order primitive, not the code path a durable ordered answer currently
-      flows through.
-    - Per-send timing holds ONLY on the sequential (``notify``-loop) path, where ``on_sent``
-      fires AFTER each accepted send and BEFORE the next goes out. On the native
-      ``deliver_ordered`` path the whole batch is sent inside that one call and ``on_sent``
-      fires per index only AFTER it returns — so a durable caller that needs per-send
-      ledgering interleaved with the sends must NOT rely on ``on_sent`` there; it should ledger
-      inline (as the conversations machine does) rather than through this helper.
-    """
-    ordered = list(notifications)
-    native = getattr(channel, "deliver_ordered", None)
-    if callable(native):
-        # ``deliver_ordered`` is a documented OPTIONAL member, not a Protocol method, so it
-        # is read off the instance untyped; cast it to its documented signature.
-        ordered_send = cast("Callable[[Sequence[ChannelNotification]], Awaitable[list[list[str]]]]", native)
-        results: list[list[str]] = await ordered_send(ordered)
-        if on_sent is not None:
-            for index, ids in enumerate(results):
-                on_sent(index, ids)
-        return results
-    results = []
-    for index, notification in enumerate(ordered):
-        ids = await channel.notify(notification)
-        results.append(ids)
-        if on_sent is not None:
-            on_sent(index, ids)
-    return results

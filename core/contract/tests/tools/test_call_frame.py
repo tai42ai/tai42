@@ -9,7 +9,7 @@ import contextvars
 
 import pytest
 
-from tai42_contract.interactions.continuation import reset_park_completion, set_park_completion
+from tai42_contract.interactions.continuation import DeliveryAddress, reset_park_completion, set_park_completion
 from tai42_contract.tools import (
     NestedDoorFrameError,
     RunDelivery,
@@ -75,13 +75,15 @@ def test_extras_default_empty_and_bound_value() -> None:
 
 def test_outermost_start_mints_a_run_delivery_id_and_reads_the_door_address() -> None:
     assert get_run_delivery_id() is None
-    completion = set_park_completion("deliver_tool_completion", {"delivery_thread_id": "bridge:r:a"})
+    completion = set_park_completion("deliver_tool_completion", {"route_name": "chat"}, thread_id="bridge:r:a")
     try:
         with tool_call_frame("main"):
             run_id = get_run_delivery_id()
             assert run_id is not None
-            # The address is the door's bound completion, read once at the start.
-            assert get_run_delivery() == ("deliver_tool_completion", {"delivery_thread_id": "bridge:r:a"})
+            # The address is the door's bound completion, its thread included, read once at the start.
+            assert get_run_delivery() == DeliveryAddress(
+                tool="deliver_tool_completion", context={"route_name": "chat"}, thread_id="bridge:r:a"
+            )
     finally:
         reset_park_completion(completion)
     assert get_run_delivery_id() is None

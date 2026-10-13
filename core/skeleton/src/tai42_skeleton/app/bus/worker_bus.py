@@ -232,13 +232,6 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
                 exc_info=True,
             )
 
-    @staticmethod
-    def _op_name(op: dict[str, Any]) -> str:
-        name = op.get("op")
-        if not isinstance(name, str) or not name:
-            raise ValueError("publish: op dict must carry a non-empty 'op' name")
-        return name
-
     def _local_row(self) -> WorkerRow:
         identity = self.identity
         joined_at = self._joined_at if self._joined_at is not None else _utcnow_iso()

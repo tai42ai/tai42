@@ -4,11 +4,27 @@ import asyncio
 import functools
 import logging
 import time
-from typing import Any
+from typing import Any, assert_never
 
 from tai42_contract.app import tai42_app
+from tai42_contract.backend import FleetOpApplied
 
 from tai42_skeleton.app.bus import WorkerBus, WorkerKind
+from tai42_skeleton.app.bus.ops import (
+    FLEET_OP_ADAPTER,
+    ClearTemplateCache,
+    DeregisterMcp,
+    EvictTemplate,
+    FleetOp,
+    ListFailedMcps,
+    Recycle,
+    ReloadConfig,
+    ReloadFailedMcps,
+    ReloadMcp,
+    ReloadTool,
+    RemoveTool,
+    ReprobeFailedMcps,
+)
 from tai42_skeleton.app.bus_settings import bus_settings
 from tai42_skeleton.app.graceful_exit import request_graceful_exit
 from tai42_skeleton.app.lifecycle.state import LifecycleState
@@ -16,17 +32,6 @@ from tai42_skeleton.app.readiness_sentinel import write_ready_sentinel
 from tai42_skeleton.app.reload_gate import reload_gate
 
 logger = logging.getLogger(__name__)
-
-
-def _op_field(op: dict[str, Any], key: str) -> Any:
-    """Return a required field of a delivered fleet op, raising loudly when absent.
-
-    A malformed fleet op must fail its confirmation, never apply a partial op.
-    """
-    value = op.get(key)
-    if value is None:
-        raise ValueError(f"{op.get('op')} fleet op missing {key!r}")
-    return value
 
 
 class BusSubscriptionMixin(LifecycleState):
@@ -102,8 +107,8 @@ class BusSubscriptionMixin(LifecycleState):
                 # config was JUST built by ``start()``, so a swap would be pure
                 # redundant work (and would retire the just-built epoch) — skip it and
                 # only latch boot-ready below.
-                result = await self._apply_bus_op(
-                    {"op": "reload_config"}, deadline=time.monotonic() + bus_settings().apply_timeout
+                result = await self._apply_fleet_op(
+                    ReloadConfig(op="reload_config"), deadline=time.monotonic() + bus_settings().apply_timeout
                 )
                 self._judge_resync(result)
         except asyncio.CancelledError:
@@ -179,79 +184,95 @@ class BusSubscriptionMixin(LifecycleState):
             # subscription cannot abort the remaining shutdown steps.
             pass
 
-    async def _apply_bus_op(self, op: dict[str, Any], *, deadline: float) -> Any:
-        """Apply one fleet op delivered from a sibling worker (or the self-resync), then fire the post-apply hooks.
+    async def _apply_bus_op(self, raw: dict[str, Any], *, deadline: float) -> Any:
+        """Apply one fleet op delivered from a sibling worker.
+
+        The delivered dict is validated into its typed op first: an unknown op or a missing or
+        malformed field raises before anything applies, so the confirmation reports ``failed``
+        and no partial op ever lands.
+        """
+        return await self._apply_fleet_op(FLEET_OP_ADAPTER.validate_python(raw), deadline=deadline)
+
+    async def _apply_fleet_op(self, op: FleetOp, *, deadline: float) -> Any:
+        """Apply one fleet op (delivered, or the self-resync), then fire the post-apply hooks.
 
         The sibling-worker counterpart of a route-received admin call: it maps each op
         to the local admin primitive. The heavy sync ops run on a worker thread through
         the reload gate, identically to the HTTP path; the tool reload/remove ops
         dispatch through the async per-kind reloader; ``reprobe_failed_mcps`` runs the
         set-scoped re-probe on the serving loop, taking the reload gate only to snapshot and
-        bind; ``list_failed_mcps`` is a plain in-process read. An unrecognized op raises loudly.
+        bind; ``list_failed_mcps`` is a plain in-process read.
 
-        After the op applies, ``on_fleet_op_applied`` handlers fire with the op name and
-        the seconds left before ``deadline`` (a ``time.monotonic()`` instant) — the op
-        has not fully "applied" until they finish (a celery worker must re-fork its
-        prefork pool before it reports applied), and a raising handler fails the op.
-        The returned value becomes the op's terminal ``applied`` payload; the publisher
+        After the op applies, ``on_fleet_op_applied`` handlers fire with the applied op — its
+        declared effects and the seconds left before ``deadline`` (a ``time.monotonic()``
+        instant). The op has not fully "applied" until they finish (a celery worker must
+        re-fork its prefork pool before it reports applied), and a raising handler fails the
+        op. The returned value becomes the op's terminal ``applied`` payload; the publisher
         echo-skips its own broadcast, so this never re-applies a self-op.
         """
         result = await self._dispatch_bus_op(op)
-        await self._run_fleet_op_applied_handlers(_op_field(op, "op"), max(0.0, deadline - time.monotonic()))
+        applied = FleetOpApplied(op=op.op, effects=type(op).effects, budget=max(0.0, deadline - time.monotonic()))
+        await self._run_fleet_op_applied_handlers(applied)
         return result
 
-    async def _dispatch_bus_op(self, op: dict[str, Any]) -> Any:
+    async def _dispatch_bus_op(self, op: FleetOp) -> Any:
         """Route one fleet op to its local admin primitive and return its result."""
-        op_name = op.get("op")
-        if op_name == "reload_config":
-            return await reload_gate.run(tai42_app.admin.reload_config, reimports=True)
-        if op_name == "reload_mcp":
-            title = _op_field(op, "title")
-            return await reload_gate.run(lambda: tai42_app.admin.reload_mcp(title), reimports=False)
-        if op_name == "deregister_mcp":
-            title = _op_field(op, "title")
-            return await reload_gate.run(lambda: tai42_app.admin.deregister_mcp(title), reimports=False)
-        if op_name in ("reload_tool", "remove_tool"):
-            action = "reload" if op_name == "reload_tool" else "remove"
-            return await tai42_app.admin.run_tool_reload(_op_field(op, "kind"), action, _op_field(op, "name"))
-        if op_name == "reload_failed_mcps":
-            # Return the BARE list — the same shape the publisher's own self-apply
-            # (operations/manifest.py) rides on its self entry — so every origin's
-            # payload in one FleetResult is uniform (a consumer never special-cases
-            # self vs remote for this op).
-            return await reload_gate.run(tai42_app.admin.reload_failed_mcps, reimports=False)
-        if op_name == "reprobe_failed_mcps":
-            # Runs on the serving loop: the pass takes the reload gate only to snapshot and to bind, never
-            # across its probe. Bare per-title list, matching the self-apply shape.
-            return await tai42_app.admin.reprobe_failed_mcps(_op_field(op, "titles"))
-        if op_name == "list_failed_mcps":
-            # Bare list, matching the self-apply shape — see reload_failed_mcps above.
-            return tai42_app.admin.list_failed_mcps()
-        if op_name in ("evict_template", "clear_template_cache"):
-            return self._apply_template_op(op)
-        if op_name == "recycle":
-            return await self._apply_recycle()
-        raise ValueError(f"unknown fleet op {op_name!r}")
+        match op:
+            case ReloadConfig():
+                return await reload_gate.run(tai42_app.admin.reload_config, reimports=True)
+            case ReloadMcp(title=title):
+                return await reload_gate.run(lambda: tai42_app.admin.reload_mcp(title), reimports=False)
+            case DeregisterMcp(title=title):
+                return await reload_gate.run(lambda: tai42_app.admin.deregister_mcp(title), reimports=False)
+            case ReloadTool(kind=kind, name=name):
+                return await tai42_app.admin.run_tool_reload(kind, "reload", name)
+            case RemoveTool(kind=kind, name=name):
+                return await tai42_app.admin.run_tool_reload(kind, "remove", name)
+            case ReloadFailedMcps() | ReprobeFailedMcps() | ListFailedMcps():
+                return await self._apply_failed_mcps_op(op)
+            case EvictTemplate() | ClearTemplateCache():
+                return self._apply_template_op(op)
+            case Recycle():
+                return await self._apply_recycle()
+            case _:
+                assert_never(op)
 
-    def _apply_template_op(self, op: dict[str, Any]) -> dict[str, Any]:
+    async def _apply_failed_mcps_op(self, op: ReloadFailedMcps | ReprobeFailedMcps | ListFailedMcps) -> Any:
+        """Apply a failed-MCP fleet op on this worker and return the bare list its self-apply returns too.
+
+        Every origin's payload in one FleetResult is then uniform: a consumer never special-cases
+        self vs remote for these ops.
+        """
+        match op:
+            case ReloadFailedMcps():
+                return await reload_gate.run(tai42_app.admin.reload_failed_mcps, reimports=False)
+            case ReprobeFailedMcps(titles=titles):
+                # Runs on the serving loop: the pass takes the reload gate only to snapshot and to bind, never
+                # across its probe.
+                return await tai42_app.admin.reprobe_failed_mcps(titles)
+            case ListFailedMcps():
+                return tai42_app.admin.list_failed_mcps()
+            case _:
+                assert_never(op)
+
+    def _apply_template_op(self, op: EvictTemplate | ClearTemplateCache) -> dict[str, Any]:
         """Apply a template-cache fleet op on this worker.
 
         Evict one rendered template (or a whole directory under a key) for ``evict_template``, else clear
         the entire compiled-template cache for ``clear_template_cache``.
         """
-        if op.get("op") == "evict_template":
-            # The template store was written on the origin worker; drop this worker's
-            # stale compilation so its next render reflects the new content. ``prefix``
-            # marks a directory delete (evict everything under the key).
-            resource_manager = tai42_app.storage.resource_manager
-            path = _op_field(op, "path")
-            if op.get("prefix"):
-                resource_manager.evict_dir(path)
-            else:
-                resource_manager.evict_compiled(path)
-            return {"evicted": path}
-        tai42_app.storage.resource_manager.clear_cache()
-        return {"cleared": True}
+        resource_manager = tai42_app.storage.resource_manager
+        if isinstance(op, ClearTemplateCache):
+            resource_manager.clear_cache()
+            return {"cleared": True}
+        # The template store was written on the origin worker; drop this worker's stale compilation
+        # so its next render reflects the new content. ``prefix`` marks a directory delete (evict
+        # everything under the key).
+        if op.prefix:
+            resource_manager.evict_dir(op.path)
+        else:
+            resource_manager.evict_compiled(op.path)
+        return {"evicted": op.path}
 
     async def _apply_recycle(self) -> dict[str, Any]:
         """Apply a targeted recycle op.

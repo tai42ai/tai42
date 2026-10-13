@@ -17,9 +17,9 @@ from typing import ClassVar, Final
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import Backend
 from tai42_contract.backend.runtime import (
-    POOL_TURNOVER_FLEET_OPS,
     BackendRuntime,
     ExecutionMode,
+    FleetOpApplied,
 )
 
 from tai42_kit.backend.conformance import OVERRIDDEN_LAUNCH_VERDICT, check_runtime_declarations
@@ -372,10 +372,11 @@ class ManagedBackend(Backend):
     # -- pool turnover -------------------------------------------------------
 
     def _install_turnover(self, runtime: BackendRuntime) -> None:
-        """Wire a pool turnover into every pool-turnover fleet op.
+        """Wire a pool turnover into every fleet op that changes what persisted workers hold.
 
         For a runtime whose workers hold a snapshot of this process's tool registry OR their own
-        compiled-template cache — both go stale under a bus op that reaches only bus members.
+        compiled-template cache — both go stale under a bus op that reaches only bus members, so any
+        op declaring an effect turns the pool over and one declaring none (a query, a recycle) does not.
 
         The handler runs inside the op's apply, before its terminal reply, so a
         raise makes that op report ``failed`` rather than a false ``applied``.
@@ -383,12 +384,12 @@ class ManagedBackend(Backend):
         if not runtime.pool_turnover_required:
             return
 
-        async def _on_fleet_op_applied(op_name: str, budget: float) -> None:
-            if op_name not in POOL_TURNOVER_FLEET_OPS:
+        async def _on_fleet_op_applied(applied: FleetOpApplied) -> None:
+            if not applied.effects:
                 return
             self._refresh_manifest_env()
             await runtime.turn_over_pool(
-                reason=op_name, budget=max(_TURNOVER_BUDGET_FLOOR, budget - _TURNOVER_BUDGET_MARGIN)
+                reason=applied.op, budget=max(_TURNOVER_BUDGET_FLOOR, applied.budget - _TURNOVER_BUDGET_MARGIN)
             )
 
         tai42_app.lifecycle.on_fleet_op_applied(_on_fleet_op_applied)

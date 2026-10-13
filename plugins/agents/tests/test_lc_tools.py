@@ -21,13 +21,12 @@ from langchain_core.tools import ToolException
 from tai42_contract.agent import PresetSpec
 from tai42_contract.interactions import (
     ChainedResume,
+    DeliveryAddress,
     ResumeBuffered,
     SuspendedInteraction,
     get_chained_resume,
     get_park_completion,
     get_resume_continuation_tool,
-    is_chained_park_key,
-    read_suspended_interaction_marker,
     reset_park_completion,
     reset_resume_continuation_tool,
     set_park_completion,
@@ -35,6 +34,8 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
 from tai42_contract.tools import AppTools, ClientToolError, UndeclaredPauseError
+from tai42_kit.interactions.park_adoption import is_chained_park_key
+from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 from tai42_kit.llm import ToolNameTooLongError
 from tests._client_tool import FakeClientTool, client_tool
 
@@ -316,8 +317,8 @@ def test_a_preset_nested_park_with_nothing_chained_is_refused_and_the_door_flows
 
     app = _NestedTools()
     adapted = asyncio.run(preset_structured_tool(_app(app), _preset()))
-    bound = ("conversation_deliver", {"thread_id": "bridge:acme:alice"})
-    token = set_park_completion(*bound)
+    bound = DeliveryAddress(tool="conversation_deliver", context=None, thread_id="bridge:acme:alice")
+    token = set_park_completion(bound.tool, thread_id=bound.thread_id)
     try:
         with pytest.raises(ToolException, match=r"^Tool 'my_preset' cannot be used inside this run"):
             asyncio.run(adapted.ainvoke({}))

@@ -14,6 +14,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.storage import Storage
 from tai42_contract.template import TemplatedText, TemplateEviction
 
+from tai42_skeleton.app.bus.ops import ClearTemplateCache, EvictTemplate
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
@@ -114,9 +115,9 @@ async def test_a_whole_clear_fires_one_eviction_for_every_template(manager, evic
 @pytest.mark.parametrize(
     ("op", "expected"),
     [
-        ({"op": "evict_template", "path": "a.j2"}, TemplateEviction(path="a.j2")),
-        ({"op": "evict_template", "path": "dir", "prefix": True}, TemplateEviction(path="dir", prefix=True)),
-        ({"op": "clear_template_cache"}, TemplateEviction(path=None)),
+        (EvictTemplate(op="evict_template", path="a.j2"), TemplateEviction(path="a.j2")),
+        (EvictTemplate(op="evict_template", path="dir", prefix=True), TemplateEviction(path="dir", prefix=True)),
+        (ClearTemplateCache(op="clear_template_cache"), TemplateEviction(path=None)),
     ],
 )
 async def test_the_bus_apply_fires_one_eviction(manager, evictions, op, expected):
