@@ -810,7 +810,7 @@ async def test_a_worker_draining_inside_the_drain_floor_answers_applied(wire_bus
     task, worker_id = await _spawn_subscriber(worker, draining)
     try:
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        result = await publisher.publish(_RELOAD, targets=None, local=local)
         by_name = {r.name: r for r in result.results}
         assert by_name[worker_id.name].outcome == OpOutcome.applied
         assert result.ok
