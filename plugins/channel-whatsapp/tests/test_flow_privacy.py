@@ -1,15 +1,15 @@
 """The published WhatsApp Flow artefact carries no personal data, and one Flow is
-reused across guests.
+reused across recipients.
 
 A form send creates and publishes a Flow on Meta (the create's ``{name, flow_json,
 endpoint_uri?}`` body is the artefact Meta stores). These guards assert that artefact
-depends only on the form's schema/pages/options/reactions — never on the guest it is
+depends only on the form's schema/pages/options/reactions — never on the recipient it is
 sent to:
 
-* REUSE — two sends of the SAME form to DIFFERENT guests resolve one cached Flow id,
+* REUSE — two sends of the SAME form to DIFFERENT recipients resolve one cached Flow id,
   so ``create_flow`` runs ONCE, not per send (covers the plain form ask, the ask-less
   notification, and the reacting/endpoint-driven form).
-* NO-PII — the published name and ``flow_json`` contain no guest phone number
+* NO-PII — the published name and ``flow_json`` contain no recipient phone number
   (the recipient ``wa_id``) and no correlation token (the ``interaction_id`` /
   ``flow_token``); the correlation token rides the send's runtime parameters only.
 """
@@ -44,7 +44,7 @@ _MESSAGES_URL = f"https://graph.facebook.com/v23.0/{PHONE_NUMBER_ID}/messages"
 
 # A form schema with a text field (a label/title), a choice field and a date field, so the
 # emitted ``flow_json`` carries component names, human-readable labels, a data-source and a
-# date control — the places a guest identifier could leak if any were derived from the send.
+# date control — the places a recipient identifier could leak if any were derived from the send.
 _SCHEMA = {
     "type": "object",
     "properties": {
@@ -88,11 +88,13 @@ def _form_delivery(**overrides):
     return make_delivery(**fields)
 
 
-# --- REUSE: one published Flow across guests, create runs once ----------------------
+# --- REUSE: one published Flow across recipients, create runs once ----------------------
 
 
-async def test_same_form_to_different_guests_publishes_one_flow(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    # Two form asks of the SAME form to DIFFERENT guests (different recipient wa_id and
+async def test_same_form_to_different_recipients_publishes_one_flow(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # Two form asks of the SAME form to DIFFERENT recipients (different recipient wa_id and
     # interaction id). The first is a cache miss (create + publish + send); the second a
     # cache hit (send only). create_flow must run exactly ONCE — never a new Flow per send.
     fake_httpx.responses.append(_flow_created("flow-1"))
@@ -108,11 +110,11 @@ async def test_same_form_to_different_guests_publishes_one_flow(waba_env, fake_r
     assert urls == [_FLOWS_URL, "https://graph.facebook.com/v23.0/flow-1/publish", _MESSAGES_URL, _MESSAGES_URL]
 
 
-async def test_notify_same_form_to_different_guests_publishes_one_flow(
+async def test_notify_same_form_to_different_recipients_publishes_one_flow(
     waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # The ask-less notification resolves the Flow through the same machinery: two notifies of
-    # the same form to different guests publish one Flow, then a send each.
+    # the same form to different recipients publish one Flow, then a send each.
     from tai42_contract.channels import ChannelNotification
 
     fake_httpx.responses.append(_flow_created("flow-nf"))
@@ -128,7 +130,7 @@ async def test_notify_same_form_to_different_guests_publishes_one_flow(
     assert urls == [_FLOWS_URL, "https://graph.facebook.com/v23.0/flow-nf/publish", _MESSAGES_URL, _MESSAGES_URL]
 
 
-# --- NO-PII: no guest phone / correlation token in the published artefact -----------
+# --- NO-PII: no recipient phone / correlation token in the published artefact -----------
 
 
 def _published_artefact(fake_httpx: FakeHttpx) -> str:
@@ -140,42 +142,42 @@ def _published_artefact(fake_httpx: FakeHttpx) -> str:
     return json.dumps(create_calls[0]["json"])
 
 
-async def test_published_flow_carries_no_guest_identifier(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    # Send a form ask to a known guest: the recipient wa_id (the guest's phone number) and the
+async def test_published_flow_carries_no_recipient_identifier(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # Send a form ask to a known recipient: the recipient wa_id (the recipient's phone number) and the
     # interaction id (the flow token). Neither may appear in the published Flow name or flow_json.
-    guest_phone = ALLOWED_A
+    recipient_phone = ALLOWED_A
     interaction_id = "int-1"
     fake_httpx.responses.append(_flow_created("flow-1"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.FORM"))
 
-    await WhatsAppChannel().deliver(_form_delivery(recipient=guest_phone, interaction_id=interaction_id))
+    await WhatsAppChannel().deliver(_form_delivery(recipient=recipient_phone, interaction_id=interaction_id))
 
     artefact = _published_artefact(fake_httpx)
-    assert guest_phone not in artefact  # the guest's phone number never reaches the published Flow
+    assert recipient_phone not in artefact  # the recipient's phone number never reaches the published Flow
     assert interaction_id not in artefact  # the correlation token is not baked into the artefact
     assert "wamid" not in artefact  # no message id of any kind
 
     # The published name is the schema-derived label only; the flow_json is byte-identical to the
-    # pure builder output, which the guest never touches.
+    # pure builder output, which the recipient never touches.
     flow_json, schema_hash = build_form_flow(_SCHEMA)
     create_body = json.loads(artefact)
     assert create_body["name"] == f"tai42-form-{schema_hash}"
-    assert guest_phone not in create_body["name"]
+    assert recipient_phone not in create_body["name"]
     assert json.loads(create_body["flow_json"]) == flow_json
 
     # The correlation token rides the SEND's runtime parameters only — proving it is sent at
     # runtime, not persisted in the published Flow.
     send = fake_httpx.calls[-1]["json"]
-    assert send["to"] == guest_phone
+    assert send["to"] == recipient_phone
     assert send["interactive"]["action"]["parameters"]["flow_token"] == interaction_id
 
 
-async def test_published_reacting_flow_carries_no_guest_identifier(
+async def test_published_reacting_flow_carries_no_recipient_identifier(
     waba_env, monkeypatch: pytest.MonkeyPatch, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # The reacting (endpoint-driven) Flow is published the same way, plus an endpoint_uri. The
-    # guest's phone number and the interaction id must be absent from that artefact too.
+    # recipient's phone number and the interaction id must be absent from that artefact too.
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
     from tai42_kit.settings import reset_all_settings
@@ -190,7 +192,7 @@ async def test_published_reacting_flow_carries_no_guest_identifier(
     monkeypatch.setenv("CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI", "https://app.example/api/channels/whatsapp/flow-data")
     reset_all_settings()
 
-    guest_phone = ALLOWED_A
+    recipient_phone = ALLOWED_A
     interaction_id = "int-1"
     reactions = FormReactions(field_changed=["tier"], submitted=True, choices=["tier"])
     fake_httpx.responses.append(_flow_created("flow-react"))
@@ -203,16 +205,16 @@ async def test_published_reacting_flow_carries_no_guest_identifier(
             schema=_REACT_SCHEMA,
             question="Pick a tier.",
             reactions=reactions,
-            recipient=guest_phone,
+            recipient=recipient_phone,
             interaction_id=interaction_id,
         )
     )
 
     artefact = _published_artefact(fake_httpx)
-    assert guest_phone not in artefact
+    assert recipient_phone not in artefact
     assert interaction_id not in artefact
     assert "wamid" not in artefact
-    # The artefact carries the data endpoint URI (not guest data) and the data-exchange version.
+    # The artefact carries the data endpoint URI (not recipient data) and the data-exchange version.
     create_body = json.loads(artefact)
     assert create_body["endpoint_uri"] == "https://app.example/api/channels/whatsapp/flow-data"
     assert json.loads(create_body["flow_json"])["data_api_version"] == "3.0"
@@ -265,29 +267,29 @@ async def test_notify_form_tag_rides_the_token_not_the_published_flow(
     assert segments[3] == "corr-xyzzy"
 
 
-async def test_published_flow_with_prefill_and_options_carries_no_guest_identifier(
+async def test_published_flow_with_prefill_and_options_carries_no_recipient_identifier(
     waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # Per-send prefill values and option lists ride the SEND's flow_action_payload.data, never
-    # the published Flow — so even a form carrying per-send data publishes a guest-free artefact.
+    # the published Flow — so even a form carrying per-send data publishes a recipient-free artefact.
     schema = {
         "type": "object",
         "properties": {"tier": {"type": "string", "enum": ["g", "s"]}, "note": {"type": "string"}},
     }
     data = FormData(values={"note": "prefill-xyzzy"}, options={"tier": [FormOption(value="g", label="Gold")]})
     pages = [FormPage(title="Plan", fields=["tier"]), FormPage(title="Say", fields=["note"])]
-    guest_phone = ALLOWED_A
+    recipient_phone = ALLOWED_A
     interaction_id = "int-1"
     fake_httpx.responses.append(_flow_created("flow-multi"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.ONE"))
 
     await WhatsAppChannel().deliver(
-        _form_delivery(schema=schema, data=data, pages=pages, recipient=guest_phone, interaction_id=interaction_id)
+        _form_delivery(schema=schema, data=data, pages=pages, recipient=recipient_phone, interaction_id=interaction_id)
     )
 
     artefact = _published_artefact(fake_httpx)
-    assert guest_phone not in artefact
+    assert recipient_phone not in artefact
     assert interaction_id not in artefact
     # The prefill value rides the send's data payload, not the published Flow.
     assert "prefill-xyzzy" not in artefact
