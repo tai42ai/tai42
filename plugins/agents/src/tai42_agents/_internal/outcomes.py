@@ -48,12 +48,13 @@ class RepromptCapError(Exception):
         super().__init__(f"structured-output re-prompt cap reached for {schema_name!r} after {attempts} attempts")
 
 
-def _schema_name_of(exc: Exception) -> str:
-    """The structured-output schema name a langchain structured-output error names.
+def _schema_name_of(exc: Exception, schema_name: str | None) -> str:
+    """The structured-output schema name a failure names.
 
     A :class:`~langchain.agents.structured_output.StructuredOutputValidationError` carries a
-    single ``tool_name``; a ``MultipleStructuredOutputsError`` carries ``tool_names``. Falls
-    back to a neutral label when neither is present.
+    single ``tool_name``; a ``MultipleStructuredOutputsError`` carries ``tool_names``. A
+    validation failure names neither, so the caller's ``schema_name`` is used, else a neutral
+    label.
     """
     single = getattr(exc, "tool_name", None)
     if isinstance(single, str) and single:
@@ -61,7 +62,7 @@ def _schema_name_of(exc: Exception) -> str:
     many = getattr(exc, "tool_names", None)
     if isinstance(many, list) and many:
         return ", ".join(str(name) for name in many)
-    return "response_format"
+    return schema_name or "response_format"
 
 
 class RepromptCounter:
@@ -109,8 +110,12 @@ def drive_reprompt_scope(counters: dict[int, RepromptCounter] | None = None) -> 
         _DRIVE_REPROMPT.reset(token)
 
 
-def build_reprompt_handler(cap: int, counter: Callable[[], RepromptCounter]) -> Callable[[Exception], str]:
+def build_reprompt_handler(
+    cap: int, counter: Callable[[], RepromptCounter], *, schema_name: str | None = None
+) -> Callable[[Exception], str]:
     """A ``ToolStrategy.handle_errors`` callable that caps re-prompts at ``cap``, counting on ``counter()``.
+
+    ``schema_name`` names the structured output in the cap outcome when the failure itself names none.
 
     Each non-conforming structured-output response calls this once. While the count is within
     ``cap`` it returns the SAME re-prompt message the default rail returns (so a capped run
@@ -123,7 +128,7 @@ def build_reprompt_handler(cap: int, counter: Callable[[], RepromptCounter]) -> 
         state.attempts += 1
         if state.attempts > cap:
             raise RepromptCapError(
-                schema_name=_schema_name_of(exc),
+                schema_name=_schema_name_of(exc, schema_name),
                 attempts=state.attempts,
                 error=str(mask_secrets(str(exc))),
             )

@@ -70,6 +70,7 @@ class _ToolCallModel(BaseChatModel):
 
     _args_seq: list[dict[str, Any]] = PrivateAttr(default_factory=list)
     _index: int = PrivateAttr(default=0)
+    _bound: list[list[dict[str, Any]]] = PrivateAttr(default_factory=list)
 
     def __init__(self, args_seq: Sequence[dict[str, Any]], **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -81,6 +82,7 @@ class _ToolCallModel(BaseChatModel):
 
     def bind_tools(self, tools: Any, *, tool_choice: Any = None, **kwargs: Any) -> Any:
         formatted = [convert_to_openai_tool(tool) for tool in tools]
+        self._bound.append(formatted)
         return self.bind(tools=formatted, tool_choice=tool_choice, **kwargs)
 
     def _generate(
@@ -164,11 +166,10 @@ def _run_graph(
     return out, strategy
 
 
-def test_graph_optional_field_binds_a_pydantic_model_and_yields_a_dict(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_graph_optional_field_binds_the_authored_dict_and_yields_a_dict(monkeypatch: pytest.MonkeyPatch) -> None:
     out, strategy = _run_graph(monkeypatch, _ToolCallModel([{"s": "hi"}]), _OPTIONAL_SCHEMA)
     assert isinstance(strategy, ToolStrategy)
-    assert isinstance(strategy.schema, type)
-    assert issubclass(strategy.schema, BaseModel)
+    assert strategy.schema == _OPTIONAL_SCHEMA
     response = out["structured_response"]
     assert response == {"s": "hi"}
     assert isinstance(response, dict)
@@ -220,3 +221,73 @@ def test_rail_normalizes_a_pydantic_structured_response_to_a_dict() -> None:
     omitted = ModelResponse(result=[AIMessage(content="")], structured_response=model_cls.model_validate({}))
     out2 = asyncio.run(_run_rail_success(rail, omitted))
     assert out2.structured_response == {}
+
+
+# --- the authored schema is what both doors bind -------------------------------
+
+_INT_SCHEMA = {"title": "Count", "type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]}
+
+
+def test_single_shot_keeps_an_extra_key_the_schema_allows(monkeypatch: pytest.MonkeyPatch) -> None:
+    _cap(monkeypatch, 3)
+    out = _single_shot(_ToolCallModel([{"value": 1, "note": "extra"}]), _INT_SCHEMA)
+    assert out == {"value": 1, "note": "extra"}
+
+
+def test_graph_keeps_an_extra_key_the_schema_allows(monkeypatch: pytest.MonkeyPatch) -> None:
+    out, _strategy = _run_graph(monkeypatch, _ToolCallModel([{"value": 1, "note": "extra"}]), _INT_SCHEMA)
+    assert out["structured_response"] == {"value": 1, "note": "extra"}
+
+
+def test_single_shot_reprompts_a_string_for_an_integer(monkeypatch: pytest.MonkeyPatch) -> None:
+    _cap(monkeypatch, 3)
+    model = _ToolCallModel([{"value": "7"}, {"value": 7}])
+    out = _single_shot(model, _INT_SCHEMA)
+    assert out == {"value": 7}
+    assert model._index == 2
+
+
+def test_graph_reprompts_a_string_for_an_integer(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = _ToolCallModel([{"value": "7"}, {"value": 7}])
+    out, _strategy = _run_graph(monkeypatch, model, _INT_SCHEMA)
+    assert out["structured_response"] == {"value": 7}
+    assert model._index == 2
+
+
+def test_both_doors_bind_the_same_parameters(monkeypatch: pytest.MonkeyPatch) -> None:
+    authored = {
+        "title": "Rich",
+        "type": "object",
+        "properties": {
+            "count": {"type": "integer", "description": "how many"},
+            "label": {"type": "string", "default": "none"},
+        },
+        "required": ["count"],
+    }
+    single = _ToolCallModel([{"count": 1}])
+    _cap(monkeypatch, 3)
+    _single_shot(single, authored)
+    graph = _ToolCallModel([{"count": 1}])
+    _run_graph(monkeypatch, graph, authored)
+
+    single_params = single._bound[0][0]["function"]["parameters"]
+    graph_params = graph._bound[0][0]["function"]["parameters"]
+    assert single_params == graph_params
+    # The authored schema reaches the model: no int64 bounds, the description and default kept.
+    assert single_params["properties"]["count"] == {"type": "integer", "description": "how many"}
+    assert single_params["properties"]["label"]["default"] == "none"
+
+
+def test_single_shot_refuses_a_fan_out_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_kit.llm.structured import StructuredOutputUnsupportedError
+
+    schema = {
+        "title": "Either",
+        "oneOf": [
+            {"title": "Left", "type": "object", "properties": {"l": {"type": "string"}}},
+            {"title": "Right", "type": "object", "properties": {"r": {"type": "integer"}}},
+        ],
+    }
+    _cap(monkeypatch, 3)
+    with pytest.raises(StructuredOutputUnsupportedError, match="single-call door binds one object schema"):
+        _single_shot(_ToolCallModel([{"l": "x"}]), schema)

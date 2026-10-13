@@ -145,7 +145,7 @@ class _Registry:
 
 
 class _ProviderSettings:
-    llm = "fake"
+    llm = "anthropic"
     checkpoint = "redis"
     checkpoint_conn_string = None
     store = "memory"

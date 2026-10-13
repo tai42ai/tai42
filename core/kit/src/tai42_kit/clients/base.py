@@ -334,6 +334,7 @@ class PooledClient[T]:
         try:
             yield cast("T", entry.client)
         except BaseException as e:
+            self._classify_error(e)
             # Only errors the predicate classifies as a disconnection evict the
             # client; everything else (including cancellation) re-raises untouched.
             if not self._is_disconnection_error(e):
@@ -354,6 +355,12 @@ class PooledClient[T]:
         finally:
             entry.leases -= 1
             await self._release_if_retired(loop, epoch, key, entry)
+
+    def _classify_error(self, exc: BaseException) -> None:
+        """Stamp an error raised inside a lease with what the client's transport declares about it.
+
+        A no-op here; a client whose driver signals its failures by value overrides it.
+        """
 
     def _detach(self, loop: AbstractEventLoop, epoch: int, key: str, entry: _ClientEntry) -> bool:
         """Mark the entry closing and drop it from its pool; return whether WE closed it.

@@ -26,7 +26,7 @@ from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import RunFailed
-from tai42_contract.tools import TOOL_META_PAUSES, ToolAlreadyRegisteredError
+from tai42_contract.tools import TOOL_META_HIDDEN, TOOL_META_PAUSES, ToolAlreadyRegisteredError
 from tai42_kit.interactions.park_adoption import terminal_chain_notice
 from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome, register_park_giveup_handler
 from tai42_kit.interactions.park_index import DriveInProgressError, ResolutionMissingError
@@ -86,7 +86,7 @@ def register_agent_resume_tool() -> None:
         tai42_app.tools.tool(
             name=AGENT_RESUME_TOOL_NAME,
             tags={"agents"},
-            meta={"tai42/hidden": True, TOOL_META_PAUSES: True},
+            meta={TOOL_META_HIDDEN: True, TOOL_META_PAUSES: True},
             force=True,
         )(agent_resume_tool)
     except ToolAlreadyRegisteredError:

@@ -182,3 +182,13 @@ class Sandbox(ABC):
     @abstractmethod
     async def reap(self) -> list[str]:
         """Destroy every session past its ``expires_at`` and return the destroyed ids."""
+
+    @property
+    @abstractmethod
+    def exec_default_timeout_seconds(self) -> float:
+        """The provider's configured default for one short exec; ``exec`` itself still requires ``timeout_seconds``."""
+
+    @property
+    @abstractmethod
+    def reap_interval_seconds(self) -> float:
+        """The provider's configured reap sweep cadence."""

@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 from fastmcp.exceptions import ToolError
-from tai42_contract.errors import ErrorKind, error_kind
+from tai42_contract.errors import ErrorKind, OperationError, UnavailableError, error_kind
 from tai42_contract.manifest import ApiToolsConfig
 
 from tai42_skeleton.exceptions.exceptions import TaiValidationError, TurnTimeoutError
@@ -26,11 +26,9 @@ from tai42_skeleton.operations.errors import (
     ForbiddenError,
     NotFoundError,
     NotSupportedError,
-    OperationError,
     OperationFailedError,
     PayloadTooLargeError,
     PermissionDeniedError,
-    UnavailableError,
     UpstreamError,
     ValidationRejectedError,
 )
@@ -111,3 +109,21 @@ def test_projected_tool_error_resolves_via_cause():
     # ...but the projected one carries the ConflictError as its cause.
     assert tool_error.__cause__ is not None
     assert error_kind(tool_error) is ErrorKind.CONFLICT
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        InteractionTimeoutError("unanswered"),
+        InteractionLimitError("limit"),
+        TurnTimeoutError("budget"),
+        UnavailableError("busy"),
+        NotSupportedError("nope"),
+    ],
+)
+def test_skeleton_timeouts_and_unavailables_are_not_transport_errors(exc: BaseException):
+    # Each keeps its TIMED_OUT/UNAVAILABLE kind and declares no transport marker.
+    from tai42_contract.errors import is_transport_error
+
+    assert error_kind(exc) in {ErrorKind.TIMED_OUT, ErrorKind.UNAVAILABLE}
+    assert is_transport_error(exc) is False

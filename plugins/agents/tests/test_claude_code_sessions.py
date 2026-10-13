@@ -55,6 +55,7 @@ from tai42_agents._internal.park import agent_resume, workspace_lease
 from tai42_agents._internal.park.errors import WorkspaceLeaseHeldError
 from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents._internal.sandbox_util import workspace_key_for
+from tai42_agents._internal.session_cred import SessionCredError
 from tai42_agents.claude_code.agent import ClaudeCodeAgent
 from tai42_agents.claude_code.errors import ClaudeCodeError
 from tai42_agents.claude_code.protocol import ProtocolError
@@ -205,7 +206,7 @@ def test_required_connection_cred_resolving_to_nothing_raises(monkeypatch: pytes
     app = build_local_app(resolver=lambda *_a: None)
     token = set_request_user_id("user-1")
     try:
-        with pytest.raises(Exception, match="resolved to nothing"):
+        with pytest.raises(SessionCredError, match="resolved to no usable credential for the current caller"):
             _run(app, user_message=TemplatedText(content="hi"), thread_id="t1")
     finally:
         reset_request_user_id(token)

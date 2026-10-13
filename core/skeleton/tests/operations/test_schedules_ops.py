@@ -38,15 +38,10 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import UnavailableError
 
 from tai42_skeleton.authz.resolver import OperationSurfaceUnsettledError
-from tai42_skeleton.operations import (
-    BadRequestError,
-    NotFoundError,
-    NotSupportedError,
-    OperationFailedError,
-    UnavailableError,
-)
+from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, OperationFailedError
 from tai42_skeleton.operations import schedules as schedules_ops
 from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.tools.binding import UnknownToolError

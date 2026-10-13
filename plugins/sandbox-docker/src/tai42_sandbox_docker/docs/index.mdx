@@ -31,9 +31,8 @@ client identity must never leak through; every other knob below is ordinary env.
 | `SANDBOX_DOCKER_DEFAULT_CPU` | unset | Fallback CPU cap (cores) applied only when a session spec leaves `cpu` unset. |
 | `SANDBOX_DOCKER_DEFAULT_MEMORY_MB` | unset | Fallback memory cap (MiB) applied only when a session spec leaves `memory_mb` unset. |
 | `SANDBOX_DOCKER_PULL_POLICY` | `missing` | `missing` pulls an image only when absent; `never` refuses to pull (airgapped) and a missing image raises. |
-| `SANDBOX_DOCKER_DEFAULT_TTL_SECONDS` | `3600` | Default reap deadline for an idle session. |
-| `SANDBOX_DOCKER_REAP_INTERVAL_SECONDS` | `300` | Sweep interval for reaping expired sessions. |
-| `SANDBOX_DOCKER_EXEC_DEFAULT_TIMEOUT_SECONDS` | `300` | Default per-`exec` timeout. |
+| `SANDBOX_DOCKER_REAP_INTERVAL_SECONDS` | `300` | Sweep interval of the platform reaper while this provider is bound. |
+| `SANDBOX_DOCKER_EXEC_DEFAULT_TIMEOUT_SECONDS` | `300` | Timeout bounding a consumer's short exec that names none (e.g. the deep agent's file operations). |
 | `SANDBOX_DOCKER_READINESS_PROBE_ENABLED` | `false` | Prove the engine's egress firewall is in force on every session create, and refuse the create loudly when it cannot. Opt-in — leave off for a `unix://` dev engine or a non-firewalled deployment. |
 | `SANDBOX_DOCKER_READINESS_PROBE_IMAGE` | `busybox:latest` | The throwaway probe container's image — a busybox-family image carrying `nc`. Ensured under `SANDBOX_DOCKER_PULL_POLICY`, so `never` refuses to pull an absent probe image. |
 | `SANDBOX_DOCKER_READINESS_PROBE_TIMEOUT_SECONDS` | `30.0` | Bound on the whole probe; on expiry the create is refused (the engine is not provably ready in time). |

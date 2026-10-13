@@ -1,4 +1,4 @@
-"""RollingCacheMarkMiddleware: keep only the newest ``cache_control`` breakpoint
+"""RollingCacheMarkMiddleware: keep only the newest prompt-caching breakpoint (here ``cache_control``)
 at the model call, stripping every older mark from replayed history.
 
 The transform is pinned directly and through the ``wrap_model_call`` /
@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMes
 from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware, roll_cache_marks
 
 _EPHEMERAL = {"type": "ephemeral"}
+_KEY = "cache_control"
 
 
 def _marked(text: str, msg_id: str) -> HumanMessage:
@@ -41,7 +42,7 @@ def test_multi_mark_keeps_only_the_last():
     reply = AIMessage(content="reply", id="2")
     newest = _marked("newest", "3")
 
-    rolled = roll_cache_marks([older, reply, newest])
+    rolled = roll_cache_marks([older, reply, newest], _KEY)
 
     assert rolled is not None
     # The older mark's single text block collapses to a plain string with no mark.
@@ -56,11 +57,11 @@ def test_multi_mark_keeps_only_the_last():
 def test_single_mark_is_inert():
     reply = AIMessage(content="reply", id="1")
     only = _marked("only", "2")
-    assert roll_cache_marks([reply, only]) is None
+    assert roll_cache_marks([reply, only], _KEY) is None
 
 
 def test_no_marks_is_inert():
-    assert roll_cache_marks([HumanMessage("hi", id="1"), AIMessage("there", id="2")]) is None
+    assert roll_cache_marks([HumanMessage("hi", id="1"), AIMessage("there", id="2")], _KEY) is None
 
 
 def test_non_text_blocks_are_untouched():
@@ -70,7 +71,7 @@ def test_non_text_blocks_are_untouched():
     older = HumanMessage(content=[image], id="1")
     newest = _marked("newest", "2")
 
-    rolled = roll_cache_marks([older, newest])
+    rolled = roll_cache_marks([older, newest], _KEY)
 
     assert rolled is not None
     # The image block is not a bare text block, so it stays a dict, mark removed.
@@ -92,7 +93,7 @@ def test_multi_block_marked_message_collapses_only_the_bare_text_block():
     )
     newest = _marked("newest", "2")
 
-    rolled = roll_cache_marks([older, newest])
+    rolled = roll_cache_marks([older, newest], _KEY)
 
     assert rolled is not None
     assert rolled[0].content == ["lead", {"type": "text", "text": "tail"}]
@@ -108,7 +109,7 @@ def test_mark_on_tool_and_ai_messages_is_rolled():
     ai = AIMessage(content=[{"type": "text", "text": "step", "cache_control": _EPHEMERAL}], id="2")
     newest = _marked("newest", "3")
 
-    rolled = roll_cache_marks([tool, ai, newest])
+    rolled = roll_cache_marks([tool, ai, newest], _KEY)
 
     assert rolled is not None
     assert rolled[0].content == "tool out"
@@ -117,7 +118,7 @@ def test_mark_on_tool_and_ai_messages_is_rolled():
 
 
 def test_wrap_model_call_strips_transiently_leaving_state_untouched():
-    mw = RollingCacheMarkMiddleware()
+    mw = RollingCacheMarkMiddleware(mark_key=_KEY)
     older = _marked("older", "1")
     newest = _marked("newest", "2")
     messages: list[AnyMessage] = [older, newest]
@@ -136,7 +137,7 @@ def test_wrap_model_call_strips_transiently_leaving_state_untouched():
 
 
 async def test_awrap_model_call_matches_the_sync_path():
-    mw = RollingCacheMarkMiddleware()
+    mw = RollingCacheMarkMiddleware(mark_key=_KEY)
     older = _marked("older", "1")
     newest = _marked("newest", "2")
     request = _request([older, newest])
@@ -155,7 +156,7 @@ async def test_awrap_model_call_matches_the_sync_path():
 
 
 def test_wrap_model_call_inert_passes_request_through():
-    mw = RollingCacheMarkMiddleware()
+    mw = RollingCacheMarkMiddleware(mark_key=_KEY)
     only = _marked("only", "1")
     request = _request([only])
 
@@ -165,3 +166,21 @@ def test_wrap_model_call_inert_passes_request_through():
     # Nothing to roll: the same request object flows to the handler untouched.
     assert seen[0] is request.messages
     assert seen[0][0] is only
+
+
+def test_rolls_the_given_key_and_leaves_other_keys_alone():
+    def _breakpoint(text: str, msg_id: str) -> HumanMessage:
+        return HumanMessage(
+            content=[
+                {"type": "text", "text": text, "prompt_cache_breakpoint": _EPHEMERAL, "cache_control": _EPHEMERAL}
+            ],
+            id=msg_id,
+        )
+
+    older = _breakpoint("older", "1")
+    newest = _breakpoint("newest", "2")
+    rolled = roll_cache_marks([older, newest], "prompt_cache_breakpoint")
+
+    assert rolled is not None
+    assert rolled[0].content == [{"type": "text", "text": "older", "cache_control": _EPHEMERAL}]
+    assert rolled[1] is newest

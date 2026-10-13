@@ -1,14 +1,15 @@
 """Durable-session acquisition for a ``langchain_deep_agent`` run.
 
-The ``StateBackend``→``SandboxSessionBackend`` swap gives every run/astream drive a
-live sandbox session. This module owns the run-door side of that: acquire the session BEFORE
-the graph compiles (the backend needs it), inject the operator's connection-reference SERVICE
-creds the SAME way the coding agent does (static ``delivery="env"`` values in the CLEAN
-session env at create; refreshable ``delivery="bearer"`` creds as per-turn credential-helper
-FILES under ``{ws}/.creds``, an adapter-controlled dir OUTSIDE the agent-writable
-``{ws}/project`` tree), serialize threaded turns on the shared cross-worker workspace lease,
-compute the workspace retention horizon that bounds a park, and — on a TERMINAL exit — scrub
-the bearer credential material (SKIPPED on a park-suspend, whose file stays for the resume).
+The ``StateBackend``→``SandboxSessionBackend`` swap gives every run/astream drive a live sandbox
+session. This module owns the run-door side of that: acquire the session BEFORE the graph
+compiles (the backend needs it), inject the operator's session creds by the one session-cred
+rule the coding agent also uses
+(:func:`~tai42_agents._internal.session_cred.materialize_session_creds`: ``env`` values in the
+CLEAN session env at create; bearer creds as per-turn credential-helper FILES under
+``{ws}/.creds``, an adapter-controlled dir OUTSIDE the agent-writable ``{ws}/project`` tree),
+serialize threaded turns on the shared cross-worker workspace lease, compute the workspace
+retention horizon that bounds a park, and — on a TERMINAL exit — scrub the bearer credential
+material (SKIPPED on a park-suspend, whose file stays for the resume).
 
 The MODEL credential is deliberately absent: the deep agent's LLM call runs SERVER-side via
 ``get_llm_async``, so ONLY service creds enter the session.
@@ -22,17 +23,14 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
-from pydantic import SecretStr
 from tai42_contract.app import tai42_app
 from tai42_contract.sandbox import SandboxSession
 
 from tai42_agents._internal.park.lease import LEASE_HEADROOM_SECONDS, workspace_lease
 from tai42_agents._internal.sandbox_util import build_policied_spec, workspace_key_for
+from tai42_agents._internal.session_cred import BearerCred, materialize_session_creds
 from tai42_agents.langchain_deep_agent.settings import (
-    ConnectionCred,
     LangchainDeepAgentSettings,
-    SessionCredSpec,
-    StaticCred,
     langchain_deep_agent_settings,
 )
 
@@ -95,7 +93,7 @@ class DeepAgentSession:
         settings: LangchainDeepAgentSettings,
         workspace_key: str,
         is_threaded: bool,
-        bearer_creds: list[tuple[ConnectionCred, dict[str, SecretStr]]],
+        bearer_creds: list[BearerCred],
     ) -> None:
         """Bind an acquired ``session`` with its ``settings``, ``workspace_key``, threaded flag, and bearer creds."""
         self.session = session
@@ -167,12 +165,12 @@ class DeepAgentSession:
         workspace_key = cls._resolve_workspace_key(thread_id, workspace_key)
         durability = "persistent" if is_threaded else "ephemeral"
 
-        env, bearer = await _resolve_creds(settings.creds)
+        material = await materialize_session_creds(settings.creds)
         spec, _policy = build_policied_spec(
             image=settings.session_image,
             workspace_key=workspace_key,
             durability=durability,
-            env=env,
+            env=material.env,
             cpu=settings.cpu,
             memory_mb=settings.memory_mb,
             ttl_seconds=settings.session_ttl_seconds,
@@ -185,7 +183,7 @@ class DeepAgentSession:
             settings=settings,
             workspace_key=workspace_key,
             is_threaded=is_threaded,
-            bearer_creds=bearer,
+            bearer_creds=material.bearer,
         )
         await drive._materialize_bearer_creds()
         return drive
@@ -225,73 +223,5 @@ class DeepAgentSession:
         token reaches a reused persistent session on the next turn. The material lands OUTSIDE
         ``{ws}/project`` (unreachable through the agent's file tools).
         """
-        for spec, resolved in self._bearer_creds:
-            body = _credential_helper_body(resolved)
-            await self.session.put_file(f"{_CREDS_DIR}/{spec.env_name}", body.encode("utf-8"))
-
-
-def _credential_helper_body(resolved: dict[str, SecretStr]) -> str:
-    """The credential-helper file body for one resolved bearer cred.
-
-    An ``Authorization: Bearer <token>`` line for the OAuth token, plus any transport-partitioned
-    static header lines injected alongside (never instead of the token).
-    """
-    lines = [f"{name}: {value.get_secret_value()}" for name, value in resolved.items()]
-    return "\n".join(lines) + "\n"
-
-
-async def _resolve_creds(
-    creds: list[SessionCredSpec],
-) -> tuple[dict[str, SecretStr], list[tuple[ConnectionCred, dict[str, SecretStr]]]]:
-    """Split the operator cred list into the create-time session ``env`` and the per-turn bearer files.
-
-    The ``env`` carries static + connection ``delivery="env"`` values; the bearer files are
-    materialized per turn.
-
-    Each connection-reference entry resolves PER-CALLER via
-    ``tai42_app.connectors.resolve_connection_auth`` (which RAISES on an identity-less door — the
-    seam fail-close — and takes ``connection_id`` from operator settings). A resolution yielding
-    nothing usable injects nothing; a ``required`` entry that resolves to nothing raises loudly.
-    """
-    env: dict[str, SecretStr] = {}
-    bearer: list[tuple[ConnectionCred, dict[str, SecretStr]]] = []
-    for spec in creds:
-        if isinstance(spec, StaticCred):
-            env[spec.env_name] = spec.value
-            continue
-
-        resolved = await tai42_app.connectors.resolve_connection_auth(
-            spec.connection_id, spec.provider_id, spec.sub_service
-        )
-        material = _collect_material(resolved)
-        if not material:
-            if spec.required:
-                raise RuntimeError(
-                    f"required session cred {spec.env_name!r} resolved to no usable credential "
-                    f"(connection {spec.connection_id!r})"
-                )
-            continue
-
-        if spec.delivery == "env":
-            # STATIC-only channel: bake the resolved values into the clean session env at create.
-            env.update(material)
-        else:
-            bearer.append((spec, material))
-    return env, bearer
-
-
-def _collect_material(resolved: object) -> dict[str, SecretStr]:
-    """Flatten a :class:`~tai42_contract.connectors.ResolvedConnectionAuth` into a ``{name: SecretStr}`` map.
-
-    Spans its three channels (``access_token`` → ``Authorization``, plus static ``env``/``headers``),
-    or an empty map when it injects nothing.
-    """
-    if resolved is None:
-        return {}
-    material: dict[str, SecretStr] = {}
-    token = getattr(resolved, "access_token", None)
-    if token is not None:
-        material["Authorization"] = SecretStr(f"Bearer {token.get_secret_value()}")
-    material.update(dict(getattr(resolved, "env", {})))
-    material.update(dict(getattr(resolved, "headers", {})))
-    return material
+        for cred in self._bearer_creds:
+            await self.session.put_file(f"{_CREDS_DIR}/{cred.env_name}", cred.file_body().encode("utf-8"))

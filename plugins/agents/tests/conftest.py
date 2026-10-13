@@ -25,10 +25,10 @@ through the handle:
   backed by the mutable ``templates`` map with the real manager's semantics: a
   :class:`~tai42_contract.template.TemplatedText` with inline ``content`` renders to
   itself, one with a stored ``id`` looks the id up in the map. An unknown id raises.
-  ``resource_manager.normalize_media`` records each call and returns an image
-  ``ContentPart`` (a URL passes through, an id becomes a data-URI), raising on a
-  resolvable non-image source like the real image-only guard. The
-  ``resource_manager`` fixture clears both per test.
+  ``resolve_image`` records each call and returns an ``ImageReference`` (a URL
+  passes through, an id becomes a data-URI), raising on a resolvable non-image
+  source like the real image-only guard. The ``resource_manager`` and ``storage``
+  fixtures clear the templates and the recorded calls per test.
 
 Facets a given agent does not use are simply left unconfigured; a test that
 needs different behavior monkeypatches the exact seam it calls.
@@ -52,7 +52,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.connectors import ResolvedConnectionAuth
 from tai42_contract.monitoring import TraceContext
 from tai42_contract.sandbox import Sandbox, SandboxPolicy, SandboxUnavailableError
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import ImageReference, TemplatedText
 from tai42_contract.tools import ClientTool
 from tai42_kit.llm import RunTrace
 from tai42_kit.monitoring.otel import OtelWriter
@@ -267,27 +267,10 @@ def _looks_like_image(source: str) -> bool:
 
 
 class RecordingResourceManager:
-    """A ``resource_manager`` stub for ``render_templated_text`` and
-    ``normalize_media``."""
+    """A ``resource_manager`` stub for ``render_templated_text``."""
 
     def __init__(self) -> None:
         self.templates: dict[str, str] = {}
-        self.media_calls: list[str | bytes] = []
-
-    async def normalize_media(self, source: str | bytes) -> dict[str, Any]:
-        """Record the call and return a model-ready image ``ContentPart``.
-
-        Mirrors the real ``ResourceManager.normalize_media`` branch without any
-        network or storage: a public ``http(s)`` URL passes through unchanged; a
-        storage id (or raw bytes) resolves to a stand-in base64 ``data:`` URI. So
-        an agent using this handle gets a deterministic, image-only content part.
-        """
-        self.media_calls.append(source)
-        if isinstance(source, str) and not _looks_like_image(source):
-            raise ValueError(f"normalize_media requires an image resource; resolved non-image mime for {source!r}")
-        if isinstance(source, str) and source.startswith(("http://", "https://")):
-            return {"type": "image_url", "image_url": {"url": source}}
-        return {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}}
 
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.content is not None:
@@ -307,6 +290,21 @@ class RecordingStorage:
 
     def __init__(self) -> None:
         self.resource_manager = RecordingResourceManager()
+        self.media_calls: list[str | bytes] = []
+
+    async def resolve_image(self, source: str | bytes) -> ImageReference:
+        """Record the call and return an addressable image.
+
+        Mirrors the real storage facet without any network or storage: a public
+        ``http(s)`` URL passes through unchanged; a storage id (or raw bytes)
+        resolves to a stand-in base64 ``data:`` URI. A resolvable non-image raises.
+        """
+        self.media_calls.append(source)
+        if isinstance(source, str) and not _looks_like_image(source):
+            raise ValueError(f"resolve_image requires an image resource; resolved non-image mime for {source!r}")
+        if isinstance(source, str) and source.startswith(("http://", "https://")):
+            return ImageReference(url=source, mime=mimetypes.guess_type(source)[0])
+        return ImageReference(url="data:image/png;base64,aGVsbG8=", mime="image/png")
 
 
 class RecordingSandboxes:
@@ -561,10 +559,16 @@ def app_interactions() -> RecordingInteractions:
 def resource_manager() -> Iterator[RecordingResourceManager]:
     """The bound app's ``resource_manager``, cleared before and after each test."""
     APP.storage.resource_manager.templates.clear()
-    APP.storage.resource_manager.media_calls.clear()
     yield APP.storage.resource_manager
     APP.storage.resource_manager.templates.clear()
-    APP.storage.resource_manager.media_calls.clear()
+
+
+@pytest.fixture
+def storage() -> Iterator[RecordingStorage]:
+    """The bound app's ``storage`` facet, its recorded image resolutions cleared before and after each test."""
+    APP.storage.media_calls.clear()
+    yield APP.storage
+    APP.storage.media_calls.clear()
 
 
 def bind_park_index(monkeypatch: pytest.MonkeyPatch, redis: Any, *, configured: bool = True) -> None:

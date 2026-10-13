@@ -11,7 +11,7 @@ provider over the shape :func:`~tai42_kit.llm.models.shape_native_schema` produc
 * ``native`` — the model declares native structured output, the kit has a binding
   for the provider, and the schema is representable. Grammar-enforced; the one path a
   model that refuses forced tool calls offers.
-* ``tool`` — the second tier: bounded pydantic-model tool-calling mechanics, taken when
+* ``tool`` — the second tier: tool-calling over the authored schema, taken when
   the model declares no native structured output (or the schema is not representable, or
   the kit has no native binding) and the model allows forced tool choice.
 * neither — refused loudly at compile with :class:`StructuredOutputUnsupportedError`,
@@ -28,16 +28,13 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.utils.json_schema import dereference_refs
 from pydantic import BaseModel
 
 from tai42_kit.llm.models import (
     native_representability_reason_for_provider,
     shape_native_schema,
     supports_native_structured_output,
-)
-from tai42_kit.utils.data.json_schema_util import (
-    inject_int64_bounds,
-    json_schema_to_pydantic_model,
 )
 
 
@@ -70,8 +67,8 @@ class StructuredOutputPlan:
     the authored schema verbatim where the provider binds it directly, otherwise the
     minimally-adapted native form. ``validation_schema`` is the ORIGINAL authored dict or pydantic
     class — what every door keeps validating produced output against, unchanged.
-    ``bound_typed_dict`` is the int64-tightened pydantic model the tool tier binds
-    (tool mode only).
+    ``tool_schema`` is what the tool tier binds: the authored dict with its local ``$ref``s
+    dereferenced, or the authored pydantic class (tool mode only).
     """
 
     mode: Literal["native", "tool"]
@@ -79,7 +76,7 @@ class StructuredOutputPlan:
     provider: str
     validation_schema: Any
     provider_schema: dict[str, Any] | None = None
-    bound_typed_dict: Any | None = None
+    tool_schema: dict[str, Any] | type[BaseModel] | None = None
 
 
 def _schema_dict_and_name(response_format: Any) -> tuple[dict[str, Any], str, Any]:
@@ -87,7 +84,7 @@ def _schema_dict_and_name(response_format: Any) -> tuple[dict[str, Any], str, An
 
     A JSON-Schema dict validates against itself; a pydantic ``BaseModel`` class
     validates against the class (``validate_structured_output`` re-inflates the parsed
-    dict) while its JSON schema drives the portable rewrite and the bounded TypedDict.
+    dict) while its JSON schema drives the native representability check.
     """
     if isinstance(response_format, dict):
         name = response_format.get("title") or "Response"
@@ -99,22 +96,34 @@ def _schema_dict_and_name(response_format: Any) -> tuple[dict[str, Any], str, An
     )
 
 
-def _bounded_typed_dict(schema_dict: dict[str, Any], name: str, validation_schema: Any) -> Any:
-    """The int64-tightened pydantic model the tool tier binds, or the authored class as a fallback.
+def _tool_schema(response_format: dict[str, Any] | type[BaseModel], name: str) -> dict[str, Any] | type[BaseModel]:
+    """What the tool tier binds for the authored ``response_format`` named ``name``.
 
-    A pydantic ``BaseModel`` class is what LangChain's tool-calling path handles natively
-    (``convert_to_openai_tool`` / ``PydanticToolsParser``), so the injected int64 bounds
-    ride on every integer value site and the parsed value is validated on the way out. If
-    the converter cannot express the schema (it raises ``ValueError``) and the authored
-    schema is itself a pydantic class, that class is bound instead; an integer outside the
-    storage range is then refused at the checkpoint write by the checkpoint serializer guard.
+    A pydantic class binds itself. A dict binds dereferenced (the shape the graph door sends
+    anyway), and its top level is judged after dereferencing, so a root ``$ref`` into
+    ``$defs`` (what a self-referencing pydantic model's JSON schema carries) is judged by the
+    schema it names: a top-level object as authored, a top-level ``oneOf`` of objects as
+    authored (one tool per variant), a top-level ``anyOf`` presented as a ``oneOf`` fan-out
+    whose untitled variants are named ``<name>_any<i>`` (presentation only: validation stays
+    against the authored ``anyOf``). Any other top level is refused with ``ValueError``.
     """
-    try:
-        return json_schema_to_pydantic_model(inject_int64_bounds(schema_dict), model_name=name)
-    except ValueError:
-        if isinstance(validation_schema, type) and issubclass(validation_schema, BaseModel):
-            return validation_schema
-        raise
+    if not isinstance(response_format, dict):
+        return response_format
+    resolved = dereference_refs(response_format)
+    if resolved.get("type") == "object" or "properties" in resolved or "oneOf" in resolved:
+        return resolved
+    if "anyOf" in resolved:
+        variants = [
+            {**variant, "title": variant.get("title") or f"{name}_any{index}"}
+            for index, variant in enumerate(resolved["anyOf"])
+        ]
+        fan_out = {key: value for key, value in resolved.items() if key != "anyOf"}
+        return {**fan_out, "title": name, "oneOf": variants}
+    kind = resolved.get("type", "schema without a type")
+    raise ValueError(
+        f"response_format {name!r}: the tool tier binds an object schema or a oneOf/anyOf of object schemas; "
+        f"got a top-level {kind}"
+    )
 
 
 def plan_structured_output(llm: BaseChatModel, provider: str, response_format: Any) -> StructuredOutputPlan:
@@ -156,7 +165,7 @@ def plan_structured_output(llm: BaseChatModel, provider: str, response_format: A
             name=name,
             provider=provider,
             validation_schema=validation_schema,
-            bound_typed_dict=_bounded_typed_dict(schema_dict, name, validation_schema),
+            tool_schema=_tool_schema(validation_schema, name),
         )
 
     if not native_declared:

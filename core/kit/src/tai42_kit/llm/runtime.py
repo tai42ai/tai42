@@ -1,6 +1,5 @@
 """Helpers for building an LLM run's system prompt, extracting its output, and validating it."""
 
-import json
 from typing import Any
 
 from langchain_core.messages import SystemMessage
@@ -13,13 +12,13 @@ def build_agent_input(*user_messages: str, user_content_kwargs: dict[str, Any] |
     """Build a LangGraph agent input (``{"messages": [...]}``) from raw text.
 
     Appends each of *user_messages* as a user turn, coercing each to ``str``. With
-    *user_content_kwargs* (e.g. ``cache_control`` for prompt caching) the LAST user
+    *user_content_kwargs* (e.g. the provider's prompt-caching breakpoint key) the LAST user
     turn becomes a single structured text block carrying those keys, earlier turns
     staying plain strings — a cache breakpoint marks the end of the stable prefix,
     so it belongs on the final block; with no messages to carry them it raises.
     On a checkpointed thread the model call keeps only the newest mark (older marks
-    are stripped), so per-turn marking stays within the provider's breakpoint cap
-    (Anthropic: 4).
+    are stripped), so per-turn marking stays within the provider's per-request
+    breakpoint cap.
     The system prompt is deliberately NOT part of the input: agent input becomes
     checkpointed conversation state, and the system prompt is per-run model
     configuration — build it with :func:`build_system_message` and hand it to the
@@ -41,7 +40,7 @@ def build_system_message(
 ) -> SystemMessage | None:
     """Build the per-run system prompt as a ``SystemMessage``, or ``None`` for an empty one.
 
-    With *system_content_kwargs* (e.g. ``cache_control`` for prompt caching) the
+    With *system_content_kwargs* (e.g. the provider's prompt-caching breakpoint key) the
     content is a single structured text block carrying those keys; otherwise it is
     the plain string. Hand the result to the graph factory
     (``create_agent(system_prompt=...)``), never into the input messages — the
@@ -59,43 +58,18 @@ def build_system_message(
 
 
 def build_user_output(state: dict[str, Any]) -> str:
-    """Extract the final message's text from an agent *state* as a plain string.
+    """The final message's reply text from an agent *state*: ``messages[-1].text``.
 
-    Returns the last message's ``content`` when it is a string; for list content,
-    joins string parts, or pulls the ``text``/``content`` key from each dict part
-    (stringifying unknown parts), serializing mixed content to JSON. Returns
-    ``""`` when there is no final message or it has no ``content``.
+    langchain-core's ``BaseMessage.text``: string content as is; for list content, its
+    string items and ``type: "text"`` blocks joined with ``""``. Every other block
+    (thinking, reasoning, tool use, an image, a server-tool result) is never reply text.
+    ``""`` when the state holds no messages; a last item that is not a message raises
+    ``AttributeError``.
     """
     messages = state.get("messages", [])
     if not messages:
         return ""
-
-    final_message = messages[-1]
-    if not hasattr(final_message, "content"):
-        return ""
-
-    content = final_message.content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        if all(isinstance(item, str) for item in content):
-            return "\n".join(content)
-        if all(isinstance(item, dict) for item in content):
-            # Pull the text out of each content dict, trying the common keys in order.
-            texts = []
-            for item in content:
-                if "text" in item:
-                    texts.append(item["text"])
-                elif "content" in item:
-                    texts.append(item["content"])
-                else:
-                    # No known text key; stringify the whole item.
-                    texts.append(str(item))
-            return "\n".join(texts)
-        # Mixed types: serialize to JSON
-        return json.dumps(content)
-    # Unknown type: coerce to string
-    return str(content)
+    return messages[-1].text
 
 
 def validate_structured_output(structured: Any, response_format: Any) -> Any:

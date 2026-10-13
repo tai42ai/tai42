@@ -13,7 +13,8 @@ from typing import Any
 from tai42_contract.app import tai42_app
 from tai42_contract.sandbox import SandboxSession
 
-from tai42_agents.claude_code.credentials import _CREDS_DIR, _SHORT_EXEC_TIMEOUT, _bearer_file, _BearerMaterial
+from tai42_agents._internal.session_cred import BearerCred
+from tai42_agents.claude_code.credentials import _CREDS_DIR, _SHORT_EXEC_TIMEOUT
 from tai42_agents.claude_code.errors import ClaudeCodeError
 from tai42_agents.claude_code.options import build_options_payload, credential_env_names
 from tai42_agents.claude_code.payload import runner_payload_files
@@ -30,7 +31,7 @@ async def materialize(
     *,
     ws: str,
     settings: ClaudeCodeSettings,
-    bearer: list[_BearerMaterial],
+    bearer: list[BearerCred],
     options_snapshot: dict[str, Any],
 ) -> None:
     """Author the hermetic workspace for one turn (idempotent, re-run every turn)."""
@@ -41,8 +42,8 @@ async def materialize(
         json.dumps(_settings_json(settings), indent=2).encode("utf-8"),
     )
     # RE-WRITE the bearer credential-helper files EVERY TURN from the fresh resolution.
-    for material in bearer:
-        await session.put_file(f"{_CREDS_DIR}/{material.env_name}", _bearer_file(material).encode("utf-8"))
+    for cred in bearer:
+        await session.put_file(f"{_CREDS_DIR}/{cred.env_name}", cred.file_body().encode("utf-8"))
     await sync_skills(
         session,
         skill_names=options_snapshot["skills"],

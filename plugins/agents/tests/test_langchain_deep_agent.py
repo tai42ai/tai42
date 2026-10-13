@@ -54,7 +54,7 @@ class _FakeRegistry:
 
 
 class _FakeProviderSettings:
-    llm = "fake"
+    llm = "anthropic"
     checkpoint = "memory"
     checkpoint_conn_string = None
     store = "memory"

@@ -28,16 +28,16 @@ from tai42_agents.retrieval_tools_agent.graph import RetrievalToolsGraph
 
 class TestAbuild:
     def test_abuild_raises_without_store(self) -> None:
-        agent = RetrievalToolsGraph(tools=[], llm=MagicMock(), store=None)
+        agent = RetrievalToolsGraph(provider="anthropic", tools=[], llm=MagicMock(), store=None)
         with pytest.raises(ValueError, match="requires a store"):
             asyncio.run(agent.abuild())
 
 
 class TestNamespace:
     def test_namespace_is_per_tool_set_and_deterministic(self) -> None:
-        g1 = RetrievalToolsGraph(tools=[_tool("a"), _tool("b")], llm=MagicMock())
-        g2 = RetrievalToolsGraph(tools=[_tool("b"), _tool("a")], llm=MagicMock())
-        g3 = RetrievalToolsGraph(tools=[_tool("a"), _tool("c")], llm=MagicMock())
+        g1 = RetrievalToolsGraph(provider="anthropic", tools=[_tool("a"), _tool("b")], llm=MagicMock())
+        g2 = RetrievalToolsGraph(provider="anthropic", tools=[_tool("b"), _tool("a")], llm=MagicMock())
+        g3 = RetrievalToolsGraph(provider="anthropic", tools=[_tool("a"), _tool("c")], llm=MagicMock())
 
         assert g1.namespace[0] == "tools"
         assert len(g1.namespace) == 2

@@ -1,7 +1,8 @@
 """The periodic sandbox reap loop.
 
 Started at app start ONLY when a sandbox provider is registered (a no-op door
-otherwise, so it is never spawned without a provider), cancelled cleanly on
+otherwise, so it is never spawned without a provider), ticking at the bound
+provider's own ``reap_interval_seconds``, cancelled cleanly on
 shutdown/reload — the same run-until-cancelled discipline as the interactions
 expiry reaper. Each tick reaps every session past its ``expires_at`` and logs the
 reaped ids at INFO. A reap-cycle exception is logged LOUDLY at ERROR with its full
@@ -15,17 +16,8 @@ import asyncio
 import logging
 
 from tai42_contract.app import tai42_app
-from tai42_kit.sandbox import SandboxDispatchSettings
 
 logger = logging.getLogger(__name__)
-
-
-def _reap_interval_seconds() -> float:
-    """The reap sweep interval — the kit-declared dispatch default.
-
-    Read from the kit default so the skeleton names no concrete provider.
-    """
-    return SandboxDispatchSettings().reap_interval_seconds
 
 
 async def run_sandbox_reap_loop() -> None:
@@ -37,7 +29,7 @@ async def run_sandbox_reap_loop() -> None:
     other per-tick error is logged loudly and the loop survives to the next tick — a
     silently dead reaper is the exact failure mode this task removes.
     """
-    interval = _reap_interval_seconds()
+    interval = tai42_app.sandboxes.require_sandbox().reap_interval_seconds
     while True:
         await asyncio.sleep(interval)
         try:

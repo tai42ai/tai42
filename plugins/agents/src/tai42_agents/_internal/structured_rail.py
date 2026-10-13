@@ -78,12 +78,12 @@ class StructuredOutputRailMiddleware(AgentMiddleware):
     parses the structured output.
     """
 
-    def __init__(self, validation_schema: object, cap: int) -> None:
-        """Carry the authored validation schema and the re-prompt handler counting per drive."""
+    def __init__(self, validation_schema: object, cap: int, *, schema_name: str | None = None) -> None:
+        """Carry the authored validation schema (named ``schema_name``) and the re-prompt handler counting per drive."""
         super().__init__()
         self.tools = []
         self._validation_schema = validation_schema
-        self._reprompt = build_reprompt_handler(cap, lambda: drive_reprompt_counter(self))
+        self._reprompt = build_reprompt_handler(cap, lambda: drive_reprompt_counter(self), schema_name=schema_name)
 
     async def awrap_model_call(
         self,

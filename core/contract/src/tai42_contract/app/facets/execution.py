@@ -11,6 +11,7 @@ from tai42_contract.backend import Backend
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.sandbox import Sandbox, SandboxPolicy
 from tai42_contract.storage import Storage
+from tai42_contract.template import ImageReference
 from tai42_contract.template.eviction import TemplateEviction
 
 _AgentT = TypeVar("_AgentT", bound=Agent)
@@ -28,8 +29,9 @@ class AppAgents(Protocol):
 
         ``tags`` are the run tool's native tags, set on its constructed tool object.
         ``meta`` is generic registration metadata threaded onto the same constructed
-        run-tool object (naming no consumer concept — a registrant attaches any generic
-        ``tai42/*`` key, e.g. a crash-resume flag the run-dispatch seam reads). The
+        run-tool object (naming no consumer concept — a registrant attaches any key of
+        :mod:`tai42_contract.tools.meta`, e.g. ``TOOL_META_CRASH_RESUME``, which the
+        run-dispatch seam reads). The
         decorator returns the class unchanged, so the decorated symbol keeps its
         concrete subclass type.
         """
@@ -125,6 +127,13 @@ class AppStorage(Protocol):
     @property
     def resource_manager(self) -> Any:
         """The active resource manager (impl type; loads/renders content over storage)."""
+        ...
+
+    async def resolve_image(self, source: str | bytes) -> ImageReference:
+        """Resolve a stored id, a data URI, raw bytes or a public URL to an addressable image with its asserted mime.
+
+        A non-image or a path outside the store raises ``ValueError``.
+        """
         ...
 
     def on_template_evicted(self, func: Callable[[TemplateEviction], Any]) -> Callable[[TemplateEviction], Any]:

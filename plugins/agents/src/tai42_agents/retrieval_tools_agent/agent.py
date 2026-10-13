@@ -159,7 +159,7 @@ class RetrievalToolsAgentInput(BaseModel):
             "Content-block keys merged into the user message's text block (e.g. cache_control "
             "for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors. "
             "On a checkpointed thread the model call keeps only the newest mark (older marks are "
-            "stripped), so per-turn marking stays within the provider's breakpoint cap (Anthropic: 4)."
+            "stripped), so per-turn marking stays within the provider's per-request breakpoint cap."
         ),
     )
     tools_limit: int = 10
@@ -267,6 +267,7 @@ class RetrievalToolsAgent(Agent):
         agent = await RetrievalToolsGraph(
             tools=resolved_tools,
             llm=llm,
+            provider=llm_provider,
             store=store,
             checkpoint=checkpointer,
             overwrite_store=overwrite_store,
@@ -443,7 +444,9 @@ class RetrievalToolsAgent(Agent):
         checkpointer = await checkpoint_registry().get_checkpointer(
             provider=checkpoint_provider, conn_string=provider_settings.checkpoint_conn_string
         )
-        return await RetrievalToolsGraph(tools=[], llm=llm, store=store, checkpoint=checkpointer).abuild()
+        return await RetrievalToolsGraph(
+            tools=[], llm=llm, provider=llm_provider, store=store, checkpoint=checkpointer
+        ).abuild()
 
     async def append_thread_messages(
         self,

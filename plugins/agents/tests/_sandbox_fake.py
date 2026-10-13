@@ -40,7 +40,7 @@ from tai42_contract.sandbox import (
     SandboxStreamChunk,
     SandboxStreamExit,
 )
-from tai42_kit.sandbox import ManagedSandbox, ManagedSandboxSession
+from tai42_kit.sandbox import ManagedSandbox, ManagedSandboxSession, SandboxDispatchSettings
 
 _READ_CHUNK = 65536
 # A fixed PATH base so a spawned subprocess never inherits the host environment.
@@ -304,6 +304,12 @@ class FakeSandbox(ManagedSandbox):
     def __init__(self) -> None:
         super().__init__()
         self._root = tempfile.mkdtemp(prefix="tai-agents-fake-sbx-")
+        # The dispatch knobs a test overrides (e.g. the default short-exec timeout).
+        self.dispatch = SandboxDispatchSettings()
+
+    def dispatch_settings(self) -> SandboxDispatchSettings:
+        """The settable dispatch knobs."""
+        return self.dispatch
 
     async def _create_session_resources(self, spec: SandboxSessionSpec) -> ManagedSandboxSession:
         if spec.durability == "persistent":

@@ -50,6 +50,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel, Field
 from tai42_contract.app.responses import OpaqueJson
+from tai42_contract.errors import OperationError, UnavailableError
 from tai42_kit.db import component_store_configured
 
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
@@ -92,10 +93,8 @@ from tai42_skeleton.operations import (
     ConflictError,
     NotFoundError,
     NotSupportedError,
-    OperationError,
     OperationFailedError,
     OperationResponse,
-    UnavailableError,
     UpstreamError,
     operation,
 )

@@ -64,7 +64,6 @@ from tai42_agents._internal.outcomes import (
     outcome_for_drive_error,
 )
 from tai42_agents._internal.park import bind_resume_per_step, detach_dead_chains, finalize_drive, park_step_binding
-from tai42_agents._internal.text import text_of
 from tai42_agents._internal.usage import usage_event
 
 
@@ -211,7 +210,7 @@ def _message_delta_text(chunk: Any) -> str | None:
         raise ValueError(f"messages-mode stream chunk is not a (message, metadata) pair: {chunk!r}")
     message_chunk, _metadata = chunk
     if isinstance(message_chunk, AIMessageChunk):
-        return text_of(message_chunk) or None
+        return message_chunk.text or None
     return None
 
 
@@ -330,7 +329,7 @@ def _project_update_events(update: dict[str, Any], projection: _Projection) -> I
         projection.structured_response = update["structured_response"]
     for message in _channel_value(update.get("messages")) or []:
         if isinstance(message, AIMessage):
-            text = text_of(message)
+            text = message.text
             if text:
                 projection.last_update_text = text
             yield from _ai_message_events(message, projection.structured_tools, projection.dedup)

@@ -59,7 +59,7 @@ class DeepAgentInput(BaseModel):
             "Content-block keys merged into the user message's text block (e.g. cache_control "
             "for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors. "
             "On a checkpointed thread the model call keeps only the newest mark (older marks are "
-            "stripped), so per-turn marking stays within the provider's breakpoint cap (Anthropic: 4)."
+            "stripped), so per-turn marking stays within the provider's per-request breakpoint cap."
         ),
     )
     llm_provider: str | None = None

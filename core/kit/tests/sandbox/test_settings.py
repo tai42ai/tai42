@@ -29,17 +29,16 @@ def _fields(name: str) -> dict[str, object]:
 
 def test_defaults_are_declared_once_for_every_provider() -> None:
     for settings in (_DockerSandboxSettings(), _LocalSandboxSettings()):
-        assert settings.default_ttl_seconds == 3600
         assert settings.reap_interval_seconds == 300
         assert settings.exec_default_timeout_seconds == 300
 
 
 def test_each_provider_keeps_its_own_env_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SANDBOX_DOCKER_DEFAULT_TTL_SECONDS", "60")
-    monkeypatch.setenv("SANDBOX_LOCAL_DEFAULT_TTL_SECONDS", "120")
+    monkeypatch.setenv("SANDBOX_DOCKER_EXEC_DEFAULT_TIMEOUT_SECONDS", "60")
+    monkeypatch.setenv("SANDBOX_LOCAL_EXEC_DEFAULT_TIMEOUT_SECONDS", "120")
 
-    assert _DockerSandboxSettings().default_ttl_seconds == 60
-    assert _LocalSandboxSettings().default_ttl_seconds == 120
+    assert _DockerSandboxSettings().exec_default_timeout_seconds == 60
+    assert _LocalSandboxSettings().exec_default_timeout_seconds == 120
 
 
 def test_the_mixin_itself_never_registers() -> None:
@@ -50,4 +49,46 @@ def test_the_mixin_itself_never_registers() -> None:
 
 def test_each_provider_registers_the_full_field_set() -> None:
     fields = _fields("_DockerSandboxSettings")
-    assert set(fields) == {"default_ttl_seconds", "reap_interval_seconds", "exec_default_timeout_seconds"}
+    assert set(fields) == {"reap_interval_seconds", "exec_default_timeout_seconds"}
+
+
+class _CustomDispatch(SandboxDispatchSettings):
+    model_config = SettingsConfigDict(env_prefix="SANDBOX_SYNTHETIC_")
+
+
+def test_a_managed_sandbox_exposes_its_dispatch_settings_as_the_contract_properties() -> None:
+    from tai42_kit.sandbox import ManagedSandbox
+
+    class _SyntheticSandbox(ManagedSandbox):
+        def dispatch_settings(self) -> SandboxDispatchSettings:
+            return _CustomDispatch(exec_default_timeout_seconds=42, reap_interval_seconds=9)
+
+        async def _create_session_resources(self, spec):  # type: ignore[no-untyped-def]
+            raise NotImplementedError
+
+        async def _destroy_session_resources(self, session, *, remove_workspace):  # type: ignore[no-untyped-def]
+            raise NotImplementedError
+
+        async def _list_orphan_resources(self):  # type: ignore[no-untyped-def]
+            raise NotImplementedError
+
+    sandbox = _SyntheticSandbox()
+    assert sandbox.exec_default_timeout_seconds == 42
+    assert sandbox.reap_interval_seconds == 9
+
+
+def test_a_managed_sandbox_without_dispatch_settings_cannot_be_instantiated() -> None:
+    from tai42_kit.sandbox import ManagedSandbox
+
+    class _Incomplete(ManagedSandbox):
+        async def _create_session_resources(self, spec):  # type: ignore[no-untyped-def]
+            raise NotImplementedError
+
+        async def _destroy_session_resources(self, session, *, remove_workspace):  # type: ignore[no-untyped-def]
+            raise NotImplementedError
+
+        async def _list_orphan_resources(self):  # type: ignore[no-untyped-def]
+            raise NotImplementedError
+
+    with pytest.raises(TypeError, match="dispatch_settings"):
+        _Incomplete()  # type: ignore[abstract]

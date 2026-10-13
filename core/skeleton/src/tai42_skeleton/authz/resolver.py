@@ -18,8 +18,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from tai42_contract.errors import UnavailableError
+
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE
-from tai42_skeleton.operations.errors import UnavailableError
 from tai42_skeleton.operations.registry import operation_registry
 
 if TYPE_CHECKING:

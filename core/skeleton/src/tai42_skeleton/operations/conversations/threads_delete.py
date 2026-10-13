@@ -9,9 +9,11 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+from tai42_contract.errors import UnavailableError
+
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
-from tai42_skeleton.operations.errors import ConflictError, NotSupportedError, UnavailableError
+from tai42_skeleton.operations.errors import ConflictError, NotSupportedError
 from tai42_skeleton.operations.response_models_group_a import PersonDeleteResult, ThreadDeleteResult
 
 from .backend import _person_routes, _require_backend, _thread_not_found

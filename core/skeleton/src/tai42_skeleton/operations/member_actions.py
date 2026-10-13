@@ -39,13 +39,13 @@ from tai42_contract.accounts.errors import (
     MemberActionNotFoundError,
 )
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import OperationError
 
 from tai42_skeleton.operations import (
     BadRequestError,
     ConflictError,
     ForbiddenError,
     NotFoundError,
-    OperationError,
     ValidationRejectedError,
     operation,
 )

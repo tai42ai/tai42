@@ -69,6 +69,10 @@ class LocalSandbox(ManagedSandbox):
         """
         return sandbox_local_settings()
 
+    def dispatch_settings(self) -> SandboxLocalSettings:
+        """The ``SANDBOX_LOCAL_`` group: its exec default and reap interval are this provider's."""
+        return self._settings()
+
     # -- create -------------------------------------------------------------------
 
     async def _create_session_resources(self, spec: SandboxSessionSpec) -> ManagedSandboxSession:

@@ -51,6 +51,7 @@ class TestSystemPromptPerRun:
         alpha_id = text_to_md5("alpha")
         return asyncio.run(
             RetrievalToolsGraph(
+                provider="anthropic",
                 tools=[alpha],
                 llm=llm,
                 store=StubStore([alpha_id]),
@@ -132,7 +133,7 @@ class TestRollingCacheMark:
         )
         graph = asyncio.run(
             RetrievalToolsGraph(
-                tools=[alpha], llm=llm, store=StubStore([alpha_id]), checkpoint=InMemorySaver()
+                provider="anthropic", tools=[alpha], llm=llm, store=StubStore([alpha_id]), checkpoint=InMemorySaver()
             ).abuild()
         )
         config = {"configurable": {"thread_id": "roll-t"}}
@@ -173,7 +174,9 @@ class TestStreamEvents:
                 ),
             ]
         )
-        graph = asyncio.run(RetrievalToolsGraph(tools=[alpha], llm=llm, store=StubStore([alpha_id])).abuild())
+        graph = asyncio.run(
+            RetrievalToolsGraph(provider="anthropic", tools=[alpha], llm=llm, store=StubStore([alpha_id])).abuild()
+        )
 
         messages = {"messages": [{"role": "user", "content": "do it"}]}
         config = {"configurable": {"thread_id": "t1"}}
@@ -208,7 +211,11 @@ class TestStreamEvents:
                 AIMessage(content=json.dumps({"status": "error", "message": "gave up", "result": None})),
             ]
         )
-        graph = asyncio.run(RetrievalToolsGraph(tools=[_tool("alpha", "a")], llm=llm, store=BoomStore([])).abuild())
+        graph = asyncio.run(
+            RetrievalToolsGraph(
+                provider="anthropic", tools=[_tool("alpha", "a")], llm=llm, store=BoomStore([])
+            ).abuild()
+        )
 
         events = asyncio.run(
             _collect(
@@ -246,7 +253,9 @@ class TestTerminalResultSurfacing:
                 AIMessage(content=json.dumps({"status": "success", "message": "done", "result": result})),
             ]
         )
-        return asyncio.run(RetrievalToolsGraph(tools=[alpha], llm=llm, store=StubStore([alpha_id])).abuild())
+        return asyncio.run(
+            RetrievalToolsGraph(provider="anthropic", tools=[alpha], llm=llm, store=StubStore([alpha_id])).abuild()
+        )
 
     def test_run_returns_terminal_result_not_the_envelope(self, monkeypatch: pytest.MonkeyPatch) -> None:
         agent = self._agent_over_graph(monkeypatch, self._two_step_graph("THE RESULT"))
@@ -275,7 +284,9 @@ class TestTerminalResultSurfacing:
                 AIMessage(content=json.dumps({"status": "success", "message": "done", "result": "FINAL ANSWER"})),
             ]
         )
-        graph = asyncio.run(RetrievalToolsGraph(tools=[alpha], llm=llm, store=StubStore([alpha_id])).abuild())
+        graph = asyncio.run(
+            RetrievalToolsGraph(provider="anthropic", tools=[alpha], llm=llm, store=StubStore([alpha_id])).abuild()
+        )
         agent = self._agent_over_graph(monkeypatch, graph)
         assert asyncio.run(agent.run(user_message=TemplatedText(content="x"))) == "FINAL ANSWER"
 

@@ -5,42 +5,15 @@ class declares the HTTP status the route adapter maps it to, and the tool
 projection surfaces the same message as a loud ``ToolError``. The classification
 (an unknown resource is a ``404``, a rejected body is a ``422``) lives on the
 operation as a typed raise, so the same decision serves the route, the CLI, and
-the projected tool.
+the projected tool. The base ``OperationError`` and its ``503`` member
+``UnavailableError`` are the contract's (``tai42_contract.errors``).
 """
 
 from __future__ import annotations
 
 from typing import ClassVar
 
-from tai42_contract.errors import ErrorKind
-
-
-class OperationError(Exception):
-    """Base class for every declared operation failure.
-
-    ``status`` is the HTTP status the route adapter answers with and the family
-    the projection reports; subclasses set it. The base itself carries ``500`` so
-    an operation raising the base (rather than a specific subclass) still maps to
-    a defined status rather than an unhandled crash.
-
-    ``__tai_error_kind__`` is the transport-neutral twin of ``status``: the same
-    failure named for a non-HTTP edge (an agent, the CLI, a projected tool).
-    Subclasses set it beside their ``status``; the base's ``500`` maps to an
-    upstream/internal fault.
-    """
-
-    status: ClassVar[int] = 500
-    # A bare operation failure (base 500) is an upstream/internal fault.
-    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UPSTREAM_ERROR
-
-    def __init__(self, message: str, *, extra: dict[str, object] | None = None) -> None:
-        """Build the error with ``message`` and optional ``extra`` fields merged into the error body."""
-        super().__init__(message)
-        self.message = message
-        # Additional fields merged into the ``{"error": …}`` body the adapter emits
-        # (e.g. a stable ``code`` a UI keys a dedicated error state on). Empty by
-        # default, so an error carries only ``{"error": …}`` unless a raiser opts in.
-        self.extra: dict[str, object] = extra or {}
+from tai42_contract.errors import ErrorKind, OperationError
 
 
 class ValidationRejectedError(OperationError):
@@ -162,14 +135,6 @@ class UpstreamError(OperationError):
     __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UPSTREAM_ERROR
 
 
-class UnavailableError(OperationError):
-    """A dependency the operation needs is temporarily unavailable."""
-
-    status: ClassVar[int] = 503
-    # A temporarily unavailable dependency.
-    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UNAVAILABLE
-
-
 class OperationFailedError(OperationError):
     """The operation was reached but failed while executing."""
 
@@ -184,11 +149,9 @@ __all__ = [
     "ForbiddenError",
     "NotFoundError",
     "NotSupportedError",
-    "OperationError",
     "OperationFailedError",
     "PayloadTooLargeError",
     "PermissionDeniedError",
-    "UnavailableError",
     "UpstreamError",
     "ValidationRejectedError",
 ]
