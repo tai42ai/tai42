@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import json
 
-from tai42_contract.conversations import ConversationAnswer
+from tai42_contract.conversations import ConversationAnswer, ThreadQueueOverflowError
 
-from tai42_skeleton.conversations.caps import AddressRateLimitedError, ThreadQueueOverflowError
+from tai42_skeleton.conversations.caps import AddressRateLimitedError
 from tai42_skeleton.conversations.turn import (
     ApiSubmitResult,
     ConversationRouteResolutionError,

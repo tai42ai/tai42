@@ -309,7 +309,14 @@ async def test_a_channel_delivery_suspended_in_its_send_holds_no_retired_setting
         )
         await delivery_module.deliver_with_retry(
             cast(Channel, _ParkedChannel()),
-            cast(ChannelDelivery, object()),
+            # Due at the window's deadline, so the dispatcher's expiry guard lets it reach the send.
+            ChannelDelivery(
+                interaction_id="i-1",
+                question="proceed?",
+                answer_format="text",
+                callback_url="https://h.example/api/interactions/callback/tk",
+                timeout_at=window.timeout_at,
+            ),
             InteractionStore("interactions:"),
             window,
             channel="chat-line",

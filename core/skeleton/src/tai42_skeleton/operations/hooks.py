@@ -44,7 +44,7 @@ from typing import Annotated, Any
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_contract.errors import OperationError
-from tai42_contract.hooks import HookParams, HookRegister, HookSubject
+from tai42_contract.hooks import HookParams, HookRegister, HookSubject, TopicVerifierBinding
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
 
@@ -77,13 +77,6 @@ class HookListQuery(BaseModel):
     topic: str | None = Field(
         default=None, description="Restrict the listing to hooks registered for this topic; omit for all hooks."
     )
-
-
-class TopicVerifierBinding(BaseModel):
-    """Bind a registered webhook ``verifier`` (with optional ``config``) to a hook topic for verification."""
-
-    verifier: str
-    config: dict[str, Any] = {}
 
 
 class TriggerLinkCreate(BaseModel):
@@ -158,7 +151,12 @@ async def list_hooks(topic: str | None = None) -> dict[str, Any]:
     # carrying a binding (one may be bound before any hook is registered on it).
     topics = {params.topic for params in hooks.values()} | set(topic_verifiers)
     trigger_auth = {name: webhook_trigger_auth(verifier_bound=name in topic_verifiers) for name in sorted(topics)}
-    return {"items": items, "total": len(items), "topic_verifiers": topic_verifiers, "trigger_auth": trigger_auth}
+    return {
+        "items": items,
+        "total": len(items),
+        "topic_verifiers": {name: binding.model_dump(mode="json") for name, binding in topic_verifiers.items()},
+        "trigger_auth": trigger_auth,
+    }
 
 
 # The jq-typed flat params carry the ``x-tai42-expression`` vendor annotation so the

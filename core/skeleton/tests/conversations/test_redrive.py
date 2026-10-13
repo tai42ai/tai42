@@ -6,6 +6,7 @@ import asyncio
 import time
 
 import pytest
+from tai42_contract.conversations import ThreadQueueOverflowError
 
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import records as records_module
@@ -48,7 +49,7 @@ async def test_thread_overflow_writes_no_state_so_the_provider_retry_succeeds(en
     await asyncio.wait_for(agent.entered.wait(), 2)
 
     # The thread's only slot is taken, so the next message is refused LOUDLY...
-    with pytest.raises(caps_module.ThreadQueueOverflowError):
+    with pytest.raises(ThreadQueueOverflowError):
         await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
     # ...with ZERO state written: the dedupe pair is unclaimed, so the refusal is
     # honestly retriable.

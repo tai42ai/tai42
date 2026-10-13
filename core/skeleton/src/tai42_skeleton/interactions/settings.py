@@ -157,6 +157,17 @@ INTERACTIONS_NOT_CONFIGURED_MESSAGE = (
 )
 
 
+def callback_url_prefix(settings: InteractionsSettings) -> str | None:
+    """The absolute prefix every minted callback URL starts with, or ``None`` with no public base.
+
+    The one owner of the callback URL's shape: the mint appends the ticket to it, and every
+    component that POSTs to a stored callback URL pins it against it.
+    """
+    if settings.public_base_url is None:
+        return None
+    return f"{settings.public_base_url.rstrip('/')}/api/interactions/callback/"
+
+
 def interactions_store_configured() -> bool:
     """Whether this deployment configures the interactions Redis store at all.
 

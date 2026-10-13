@@ -19,6 +19,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
+from tai42_contract.hooks import TopicVerifierBinding
 from tai42_identity_redis import redis_api_key_provider as provider_module
 from tai42_identity_redis.settings import redis_identity_settings
 from tai42_kit.utils.data.string_util import hash_api_key
@@ -75,10 +76,10 @@ class _Manager:
     async def on_event(self, topic: str, payload: dict, *, tool_kwargs_override: dict | None = None) -> None:
         return None
 
-    async def get_topic_verifier(self, topic: str) -> dict | None:
+    async def get_topic_verifier(self, topic: str) -> TopicVerifierBinding | None:
         return None
 
-    async def all_topic_verifiers(self) -> dict:
+    async def all_topic_verifiers(self) -> dict[str, TopicVerifierBinding]:
         return {}
 
     async def set_topic_verifier(self, topic: str, binding: dict) -> None:
@@ -243,12 +244,12 @@ class _LockedManager(_Manager):
     """A manager that binds the ``shared_secret`` verifier to the ``locked`` topic (every
     other topic is unbound) and treats every delivery id as fresh."""
 
-    async def get_topic_verifier(self, topic: str) -> dict | None:
+    async def get_topic_verifier(self, topic: str) -> TopicVerifierBinding | None:
         if topic == "locked":
-            return {
-                "verifier": "shared_secret",
-                "config": {"header": "X-Secret", "secret_env": "E2E_HOOK_SECRET", "id_header": "X-Id"},
-            }
+            return TopicVerifierBinding(
+                verifier="shared_secret",
+                config={"header": "X-Secret", "secret_env": "E2E_HOOK_SECRET", "id_header": "X-Id"},
+            )
         return None
 
     async def claim_webhook_delivery(self, topic: str, key: str, ttl_seconds: int) -> bool:

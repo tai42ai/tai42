@@ -138,6 +138,13 @@ keys it understands:
   `media_filename` / `media_voice` / `sticker_animated` — an inbound **media**
   message (image/document/audio/video/sticker) bridges with its caption as the
   turn text and its ingested identity in these params (see **Inbound media** below).
+
+Entry params are bounded at the door (at most 16 keys, each value at most 512 characters,
+the whole set at most 2048 bytes). Because Meta redelivers a failed webhook, this door
+**drops** rather than refuses: an over-cap value is dropped on its own, an over-bound set is
+dropped whole, and the participant's message still bridges. Every drop is logged at
+`WARNING` (naming the door and the bound, never a value) and counted on
+`tai_entry_params_dropped_total{door="whatsapp"}`.
 - `reaction_emoji` / `reaction_message_id` — an inbound emoji **reaction**.
 - `contacts_count` / `contacts` — shared **contact** card(s).
 

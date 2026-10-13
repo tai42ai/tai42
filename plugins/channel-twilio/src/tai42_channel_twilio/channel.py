@@ -51,8 +51,6 @@ conversation, bypassing the allowlist.
 
 from __future__ import annotations
 
-import math
-from datetime import UTC, datetime
 from typing import ClassVar
 
 from tai42_contract.channels import (
@@ -61,14 +59,12 @@ from tai42_contract.channels import (
     ChannelInputError,
     ChannelNotification,
 )
+from tai42_contract.interactions import CALLBACK_LINK_FORMATS
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_twilio.client import send_message
 from tai42_channel_twilio.correlation import release_pending, reserve_pending
 from tai42_channel_twilio.settings import TwilioSettings, require_delivery_setting, twilio_settings
-
-# Tier-1 answer formats resolve via the callback link, not an SMS reply.
-_TIER1_FORMATS = frozenset({"confirm", "external"})
 
 # The media kinds that ride as an MMS ``MediaUrl`` attachment — a renderable media bubble
 # Twilio fetches and delivers. A ``document`` is deliberately NOT here (its suggested
@@ -193,19 +189,11 @@ class TwilioChannel:
         from_number = require_delivery_setting(settings.from_number, "CHANNEL_TWILIO_FROM")
         target = _resolve_target(settings, delivery.recipient)
 
-        # Refuse a question whose answer budget is already spent, before any
-        # reservation or HTTP work.
-        if math.ceil((delivery.timeout_at - datetime.now(UTC)).total_seconds()) <= 0:
-            raise ChannelDeliveryError(
-                f"interaction {delivery.interaction_id} already timed out "
-                f"(timeout_at={delivery.timeout_at.isoformat()}); nothing was sent"
-            )
-
         # Resolve MMS media up front so a data: image is refused before any reservation
         # or send (a permanent input error, never a retryable delivery failure).
         media_urls = _media_urls(delivery.media)
 
-        if delivery.answer_format in _TIER1_FORMATS:
+        if delivery.answer_format in CALLBACK_LINK_FORMATS:
             # Tier-1: answered via the callback link, so no correlation is stored.
             await send_message(
                 to=target, from_number=from_number, body=_render_link(delivery), media_urls=media_urls or None

@@ -41,10 +41,11 @@ option). Keys, and where each is set:
   contacts            — the raw ``contacts`` array as a compact JSON string (dropped when it
                         exceeds the per-value transport cap; ``contacts_count`` still rides).
 
-All values are transport-bounded by the contract (:func:`validate_entry_params`); an
-individual value over ``ENTRY_PARAM_VALUE_MAX_CHARS`` is dropped at extraction and, in
-the rare event the aggregate still overflows a bound, the whole params set is dropped
-and the turn bridges without it — a participant message is never lost to a params bound.
+All values are transport-bounded by the contract through the kit's entry-params policy
+(``tai42_kit.conversations.entry_params``): an individual value over
+``ENTRY_PARAM_VALUE_MAX_CHARS`` is dropped at extraction (:func:`put_entry_param`, logged and
+counted) and, in the rare event the aggregate still overflows a bound, the whole params set is
+dropped and the turn bridges without it — a participant message is never lost to a params bound.
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from tai42_contract.conversations import ENTRY_PARAM_VALUE_MAX_CHARS
+from tai42_kit.conversations.entry_params import put_entry_param
 
 logger = logging.getLogger(__name__)
 
@@ -71,35 +72,18 @@ def _message_context_params(message: dict[str, Any]) -> dict[str, str]:
 
     ``referral`` is a click-to-WhatsApp / QR entry. Forwarded verbatim as strings,
     no interpretation. A missing/non-string/empty field is skipped, and a value over
-    the contract's per-value cap is dropped (the transport bound is enforced
-    end-to-end by :func:`~tai42_contract.conversations.validate_entry_params`); the
-    key vocabulary is the module's ``_REFERRAL_PARAM_KEYS`` plus
-    ``context_message_id``.
+    the contract's per-value cap is dropped (logged and counted); the key vocabulary is the
+    module's ``_REFERRAL_PARAM_KEYS`` plus ``context_message_id``.
     """
     params: dict[str, str] = {}
     referral = message.get("referral")
     if isinstance(referral, dict):
         for field, key in _REFERRAL_PARAM_KEYS.items():
-            _put_param(params, key, referral.get(field))
+            put_entry_param(params, key, referral.get(field), door="whatsapp")
     context = message.get("context")
     if isinstance(context, dict):
-        _put_param(params, "context_message_id", context.get("id"))
+        put_entry_param(params, "context_message_id", context.get("id"), door="whatsapp")
     return params
-
-
-def _put_param(params: dict[str, str], key: str, value: Any) -> None:
-    """Add ``key`` iff ``value`` is a non-empty string within the contract's per-value cap.
-
-    An over-cap opaque value is dropped (never truncated — truncation would
-    silently corrupt an opaque token); a debug line records the drop without ever
-    logging the value.
-    """
-    if not isinstance(value, str) or not value:
-        return
-    if len(value) > ENTRY_PARAM_VALUE_MAX_CHARS:
-        logger.debug("dropping whatsapp inbound param %r: value over the %d-char cap", key, ENTRY_PARAM_VALUE_MAX_CHARS)
-        return
-    params[key] = value
 
 
 def _merged_params(base: dict[str, str], extra: dict[str, str]) -> dict[str, str] | None:

@@ -13,7 +13,7 @@ import pytest
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
-from tai42_contract.hooks import HookParams
+from tai42_contract.hooks import HookParams, TopicVerifierBinding
 
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
@@ -82,8 +82,8 @@ class _FakeManager:
     async def on_event(self, topic: str, payload: dict) -> None:
         self.events.append((topic, payload))
 
-    async def get_topic_verifier(self, topic: str) -> dict | None:
-        return self._binding
+    async def get_topic_verifier(self, topic: str) -> TopicVerifierBinding | None:
+        return None if self._binding is None else TopicVerifierBinding.model_validate(self._binding)
 
     async def claim_webhook_delivery(self, topic: str, replay_key: str, ttl_seconds: int) -> bool:
         self.claims.append((topic, replay_key, ttl_seconds))
@@ -169,8 +169,8 @@ class _MgmtManager:
         self.unregistered.append(name)
         return name in self._hooks
 
-    async def all_topic_verifiers(self) -> dict[str, dict]:
-        return dict(self._verifiers)
+    async def all_topic_verifiers(self) -> dict[str, TopicVerifierBinding]:
+        return {topic: TopicVerifierBinding.model_validate(binding) for topic, binding in self._verifiers.items()}
 
     async def set_topic_verifier(self, topic: str, binding: dict) -> None:
         self._verifiers[topic] = binding
@@ -438,14 +438,13 @@ async def test_put_binding_malformed_body_400(monkeypatch: pytest.MonkeyPatch, r
 
 
 async def test_put_binding_empty_verifier_400_not_500(monkeypatch: pytest.MonkeyPatch, registry) -> None:
-    # An empty ``verifier`` name is a clean 400 (the router's non-empty check),
-    # never a 500 — nothing is stored. The contract model's ``min_length=1`` is
-    # the backing guarantee; the router surfaces it as a client error here.
+    # An empty ``verifier`` name is a clean 400 (the contract model's ``min_length=1``,
+    # surfaced by the router as a client error), never a 500 — nothing is stored.
     manager = _MgmtManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
     resp = await hooks.set_topic_verifier(cast(Request, _PutReq("events", {"verifier": "", "config": {}})))
     assert resp.status_code == 400
-    assert "non-empty 'verifier'" in _body(resp)["error"]
+    assert _body(resp)["error"] == "invalid verifier binding: String should have at least 1 character"
     assert manager._verifiers == {}
 
 

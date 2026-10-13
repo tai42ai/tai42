@@ -35,6 +35,7 @@ from tai42_contract.channels import (
     ChannelInputError,
     ChannelNotification,
 )
+from tai42_contract.interactions import CALLBACK_LINK_FORMATS
 from tai42_kit.settings import require, require_secret
 
 from tai42_channel_slack.blocks import (
@@ -54,7 +55,6 @@ from tai42_channel_slack.blocks import (
 from tai42_channel_slack.client import slack_http
 from tai42_channel_slack.correlation import (
     delete_form_record,
-    remaining_seconds,
     store_correlation,
     store_form_record,
 )
@@ -65,10 +65,6 @@ from tai42_channel_slack.forms import (
 )
 from tai42_channel_slack.forms import validate_form_schema as _validate_form_schema
 from tai42_channel_slack.settings import SlackSettings, slack_settings
-
-# Answered through the callback door directly (tappable plain link), never a typed
-# thread reply: confirm (door records a bool from the tap) and external (structured POST).
-_TIER1_FORMATS = frozenset({"confirm", "external"})
 
 
 def _require_for_delivery[T](value: T | None, env_name: str) -> T:
@@ -103,7 +99,7 @@ def _render_text(delivery: ChannelDelivery) -> str:
     answer is validated at the callback door.
     """
     lines = [delivery.question]
-    if delivery.answer_format in _TIER1_FORMATS:
+    if delivery.answer_format in CALLBACK_LINK_FORMATS:
         lines.append(f"Answer here: {delivery.callback_url}")
         lines.append(f"Deadline: {delivery.timeout_at.isoformat()}")
         return "\n".join(lines)
@@ -511,11 +507,6 @@ class SlackChannel:
         settings = slack_settings()
         token = _require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
         target = _resolve_recipient(settings, delivery.recipient)
-        if remaining_seconds(delivery.timeout_at) <= 0:
-            # Never post a question whose budget is already spent.
-            raise ChannelDeliveryError(
-                f"question budget already expired (timeout_at={delivery.timeout_at.isoformat()})"
-            )
         if delivery.answer_format == "form":
             await _deliver_form(token, target, delivery)
             return
@@ -524,12 +515,12 @@ class SlackChannel:
         # here, before the send. Tier-1 (confirm/external) carries no options — its
         # answer is the plain callback link, so its block body keeps the full rendered
         # text (link included) and only display media rides beneath it.
-        is_tier1 = delivery.answer_format in _TIER1_FORMATS
+        is_tier1 = delivery.answer_format in CALLBACK_LINK_FORMATS
         section_text = _render_text(delivery) if is_tier1 else delivery.question
         block_options = None if is_tier1 else delivery.options
         blocks = _display_blocks(section_text, delivery.media, block_options)
         body = await _post_message(token, target, _render_text(delivery), blocks=blocks)
-        if delivery.answer_format in _TIER1_FORMATS:
+        if delivery.answer_format in CALLBACK_LINK_FORMATS:
             # Tier-1 (confirm/external): the plain link IS the answer path — no
             # correlation entry, no threaded reply expected.
             return

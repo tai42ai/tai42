@@ -152,13 +152,24 @@ def _window(seconds: float) -> DeadlineWindow:
     )
 
 
+def _frame(window: DeadlineWindow) -> ChannelDelivery:
+    """A delivery frame due at the window's own deadline, so the dispatcher's expiry guard passes it."""
+    return ChannelDelivery(
+        interaction_id="i-1",
+        question="proceed?",
+        answer_format="text",
+        callback_url="https://h.example/api/interactions/callback/tk",
+        timeout_at=window.timeout_at,
+    )
+
+
 async def _deliver(
     monkeypatch: pytest.MonkeyPatch, channel_obj: Any, settings: InteractionsSettings, window: DeadlineWindow
 ) -> None:
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
     await delivery_module.deliver_with_retry(
         channel_obj,
-        cast(ChannelDelivery, object()),
+        _frame(window),
         cast(Any, object()),
         window,
         channel="synthetic",

@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelInputError
+from tai42_contract.hooks import TopicVerifierBinding
 from tai42_contract.interactions import (
     MEDIA_ROUTE_PREFIX,
     MediaItem,
@@ -436,7 +437,9 @@ async def test_channel_forbids_link_external(wired, fake_channel):
 async def test_channel_forbids_verifier(wired, fake_channel):
     # A channel's forward is unsigned — a bound verifier would 401 every reply.
     with pytest.raises(ValueError, match="verifier is forbidden when a channel is set"):
-        await ask("q", answer_format="external", channel="fake", verifier={"name": "github", "config": {}}, timeout=5)
+        await ask(
+            "q", answer_format="external", channel="fake", verifier=TopicVerifierBinding(verifier="github"), timeout=5
+        )
     assert _empty(wired.fake)
 
 

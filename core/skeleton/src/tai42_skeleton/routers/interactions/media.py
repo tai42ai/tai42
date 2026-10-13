@@ -8,7 +8,6 @@ consulted first, else the outbound Redis media store. The id IS the capability s
 from __future__ import annotations
 
 import logging
-import re
 import sys
 import time
 from typing import TYPE_CHECKING, cast
@@ -16,7 +15,7 @@ from typing import TYPE_CHECKING, cast
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import MediaKind
+from tai42_contract.interactions import MEDIA_ID_RE, MediaKind
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.app.http import http_surface
@@ -37,10 +36,6 @@ logger = logging.getLogger(__name__)
 # ``from tai42_skeleton.routers import interactions``, whose parent-attribute read is stale
 # mid-reload. The seam symbols are read through it at call time.
 _pkg = sys.modules["tai42_skeleton.routers.interactions"]
-
-# A stored-media id: 43 urlsafe-base64 chars (32 random bytes), the whole path
-# segment. Anything else is a malformed request, answered 400 before any store read.
-_MEDIA_ID_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 def _blob_provider() -> Storage | None:
@@ -125,7 +120,7 @@ async def media(request: Request) -> Response:
     # 501 that would oracle a store's absence). A HEAD serves the same headers, no body.
     head = request.method == "HEAD"
     media_id = request.path_params["media_id"]
-    if _MEDIA_ID_RE.fullmatch(media_id) is None:
+    if MEDIA_ID_RE.fullmatch(media_id) is None:
         return _error("invalid media id", 400, head=head)
     inbound = await _serve_inbound(media_id, head=head)
     if inbound is not None:

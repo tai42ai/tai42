@@ -28,6 +28,13 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import (
+    FieldChangedEvent,
+    FormReactionEvent,
+    FormReactionEventKind,
+    PageAdvancedEvent,
+    SubmittedEvent,
+)
 from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 from tai42_kit.settings import require_secret
 
@@ -39,9 +46,6 @@ from tai42_channel_whatsapp.flow_crypto import (
     load_private_key,
 )
 from tai42_channel_whatsapp.flows import (
-    _EVENT_FIELD_CHANGED,
-    _EVENT_PAGE_ADVANCED,
-    _EVENT_SUBMITTED,
     _REACTION_EVENT_KEY,
     _REACTION_FIELD_KEY,
     _REACTION_PAGE_KEY,
@@ -188,17 +192,17 @@ async def _handle_data_exchange(payload: dict[str, Any]) -> dict[str, Any]:
     return _translate_update(event, update or {}, screen, flow_token, schema, pages, values, options, partial)
 
 
-def _build_event(data: dict[str, Any]) -> dict[str, Any] | None:
+def _build_event(data: dict[str, Any]) -> FormReactionEvent | None:
     """The react EVENT a ``data_exchange`` payload names via its markers, or ``None`` when malformed."""
     kind = data.get(_REACTION_EVENT_KEY)
-    if kind == _EVENT_FIELD_CHANGED:
+    if kind == FormReactionEventKind.FIELD_CHANGED:
         field = data.get(_REACTION_FIELD_KEY)
-        return {"kind": _EVENT_FIELD_CHANGED, "field": field} if isinstance(field, str) else None
-    if kind == _EVENT_PAGE_ADVANCED:
+        return FieldChangedEvent(field=field) if isinstance(field, str) and field else None
+    if kind == FormReactionEventKind.PAGE_ADVANCED:
         page = data.get(_REACTION_PAGE_KEY)
-        return {"kind": _EVENT_PAGE_ADVANCED, "page": page} if isinstance(page, str) else None
-    if kind == _EVENT_SUBMITTED:
-        return {"kind": _EVENT_SUBMITTED}
+        return PageAdvancedEvent(page=page) if isinstance(page, str) and page else None
+    if kind == FormReactionEventKind.SUBMITTED:
+        return SubmittedEvent()
     return None
 
 
@@ -229,7 +233,7 @@ def _error_response(screen: str) -> dict[str, Any]:
 
 
 def _translate_update(
-    event: dict[str, Any],
+    event: FormReactionEvent,
     update: dict[str, Any],
     screen: str,
     flow_token: str,
@@ -254,9 +258,9 @@ def _translate_update(
     slots = slot_datanames(pages)
     errors = update.get("errors") or {}
 
-    if event["kind"] == _EVENT_SUBMITTED and not errors:
+    if isinstance(event, SubmittedEvent) and not errors:
         return _completion(flow_token, properties, labels, partial, update.get("values") or {})
-    if event["kind"] == _EVENT_PAGE_ADVANCED and not errors:
+    if isinstance(event, PageAdvancedEvent) and not errors:
         advanced = _advance_screen(screen, schema, pages, names, labels, slots, values, options, partial, update)
         if advanced is not None:
             return advanced

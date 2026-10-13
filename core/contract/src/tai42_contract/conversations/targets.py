@@ -6,13 +6,23 @@ the pairing errors name the distinct refusal reasons a pairing turn raises.
 
 from __future__ import annotations
 
+import re
 import string
+from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tai42_contract.conversation_target import ConversationTargetKind
 from tai42_contract.errors import ErrorKind
 from tai42_contract.states.binding import StateBinding
+
+#: A pair code is this prefix followed by :data:`PAIR_CODE_BODY_LENGTH` characters of :data:`PAIR_CODE_ALPHABET`.
+PAIR_CODE_PREFIX: Final = "LINK-"
+PAIR_CODE_BODY_LENGTH: Final = 8
+PAIR_CODE_ALPHABET: Final = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+#: A pair code matched as a whole token, so a longer alphanumeric run beside a valid-looking
+#: prefix is not mistaken for a code.
+PAIR_CODE_PATTERN: Final = re.compile(rf"\b{PAIR_CODE_PREFIX}[A-Z0-9]{{{PAIR_CODE_BODY_LENGTH}}}\b")
 
 
 class PairCodeInvalidError(Exception):

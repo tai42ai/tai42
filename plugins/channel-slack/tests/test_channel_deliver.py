@@ -5,7 +5,6 @@ correlation storage, and form delivery through modal blocks.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -225,15 +224,6 @@ async def test_transport_error_wraps_into_delivery_error(http_script, fake_redis
         await SlackChannel().deliver(make_delivery())
 
     assert isinstance(excinfo.value.__cause__, httpx.ConnectError)
-
-
-async def test_expired_budget_raises_before_any_request(http_script, fake_redis):
-    delivery = make_delivery(timeout_at=datetime.now(UTC) - timedelta(seconds=1))
-
-    with pytest.raises(ChannelDeliveryError, match="budget already expired"):
-        await SlackChannel().deliver(delivery)
-
-    assert http_script.requests == []
 
 
 async def test_unconfigured_token_raises_naming_env_var(http_script, fake_redis, monkeypatch):

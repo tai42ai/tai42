@@ -7,7 +7,6 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -323,14 +322,6 @@ async def test_deliver_rejects_a_blank_identity(fake_redis: FakeRedis):
 async def test_notify_trims_the_bridge_sender_identity(fake_redis: FakeRedis):
     await WebChannel().notify(make_notification(sender_identity=f" {IDENTITY} "))
     assert _TRANSCRIPT_KEY in fake_redis.streams
-
-
-async def test_deliver_refuses_expired_deadline_before_any_write(fake_redis: FakeRedis):
-    delivery = make_delivery(timeout_at=datetime.now(UTC) - timedelta(seconds=1))
-    with pytest.raises(ChannelDeliveryError, match="already timed out"):
-        await WebChannel().deliver(delivery)
-    assert not fake_redis.store
-    assert not fake_redis.streams
 
 
 async def test_deliver_requires_recipient(fake_redis: FakeRedis):

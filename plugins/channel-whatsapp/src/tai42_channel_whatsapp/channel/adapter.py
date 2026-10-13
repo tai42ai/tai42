@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 import logging
-import math
-from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 from pydantic import ValidationError
 from tai42_contract.channels import (
     ChannelDelivery,
-    ChannelDeliveryError,
     ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
 )
+from tai42_contract.interactions import CALLBACK_LINK_FORMATS
 
-from tai42_channel_whatsapp.channel.asks import _TIER1_FORMATS, _render_link, _send_question
+from tai42_channel_whatsapp.channel.asks import _render_link, _send_question
 from tai42_channel_whatsapp.channel.forms import _deliver_form, _send_form_notification
 from tai42_channel_whatsapp.channel.interactive import _INTERACTIVE_BODY_MAX_CHARS
 from tai42_channel_whatsapp.channel.media import _send_media_prelude
@@ -114,20 +112,12 @@ class WhatsAppChannel:
         )
         target = _require_recipient(delivery.recipient, _NO_DEFAULT_RECIPIENT)
 
-        # Refuse a question whose answer budget is already spent, before any
-        # reservation or HTTP work.
-        if math.ceil((delivery.timeout_at - datetime.now(UTC)).total_seconds()) <= 0:
-            raise ChannelDeliveryError(
-                f"interaction {delivery.interaction_id} already timed out "
-                f"(timeout_at={delivery.timeout_at.isoformat()}); nothing was sent"
-            )
-
         # Display media rides ahead of the question — sent before any reservation, so
         # a media failure raises with nothing reserved.
         if delivery.media:
             await _send_media_prelude(phone_number_id, target, list(delivery.media))
 
-        if delivery.answer_format in _TIER1_FORMATS:
+        if delivery.answer_format in CALLBACK_LINK_FORMATS:
             # Tier-1: answered via the callback link, so no correlation is stored.
             await send_message(phone_number_id=phone_number_id, to=target, body=_render_link(delivery))
             return

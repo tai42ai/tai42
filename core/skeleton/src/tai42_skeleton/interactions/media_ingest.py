@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, cast
 
 import filetype
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import InboundMediaKind, InboundRejectionReason
+from tai42_contract.conversations import InboundMediaKind
 from tai42_contract.interactions import (
     MEDIA_FILENAME_MAX_CHARS,
     MEDIA_ROUTE_PREFIX,
@@ -39,6 +39,7 @@ from tai42_contract.interactions.models.media_errors import (
     MediaTypeNotAllowedError,
 )
 from tai42_kit.interactions import MediaIngestCapSettings, media_ingest_cap_settings
+from tai42_kit.net.media_faults import media_rejection_reason
 
 from tai42_skeleton.channels.inbound import emit_inbound_media_ingested, emit_inbound_media_rejected
 from tai42_skeleton.conversations.cache import get_conversations_manager
@@ -262,14 +263,6 @@ async def _read_capped(
     return buffer, kind, effective_mime, digest.hexdigest()
 
 
-def _reason_for(exc: MediaIngestError) -> InboundRejectionReason:
-    if isinstance(exc, MediaTooLargeError):
-        return InboundRejectionReason.TOO_LARGE
-    if isinstance(exc, MediaTypeNotAllowedError):
-        return InboundRejectionReason.UNSUPPORTED_TYPE
-    return InboundRejectionReason.COULD_NOT_RECEIVE
-
-
 def _storage_provider():
     # The registered blob provider off the skeleton StorageFacet (the contract AppStorage Protocol
     # has no ``provider`` member), None while dead by default.
@@ -360,7 +353,7 @@ async def ingest_media(
             participant_identity=origin.participant_identity,
             message_id=origin.message_id,
             kind=_kind_hint_str(kind_hint),
-            reason=_reason_for(exc),
+            reason=media_rejection_reason(exc),
         )
         raise
 

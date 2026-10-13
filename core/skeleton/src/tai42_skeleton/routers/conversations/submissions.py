@@ -8,11 +8,16 @@ from collections.abc import Awaitable, Callable
 from fastapi import Request
 from pydantic import BaseModel, ValidationError
 from starlette.responses import JSONResponse, Response
-from tai42_contract.conversations import ConversationAnswer, ConversationEventSubmission, ConversationMessage
+from tai42_contract.conversations import (
+    ConversationAnswer,
+    ConversationEventSubmission,
+    ConversationMessage,
+    ThreadQueueOverflowError,
+)
 
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
-from tai42_skeleton.conversations.caps import AddressRateLimitedError, ThreadQueueOverflowError
+from tai42_skeleton.conversations.caps import AddressRateLimitedError
 from tai42_skeleton.conversations.settings import conversations_settings
 from tai42_skeleton.conversations.turn import (
     ApiSubmitResult,

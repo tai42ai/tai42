@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 from tai42_contract.app import tai42_app
@@ -47,10 +46,11 @@ from tai42_contract.channels import (
 from tai42_contract.conversations import BlankInboundTextError, InboundRejectionReason
 from tai42_contract.interactions.models import AnswerMismatchPolicy
 from tai42_kit.clients.impl.http import HttpxClient
+from tai42_kit.interactions import CallbackUrlRefusedError, pin_callback_url
 
 from tai42_skeleton.channels.send_span import send_span
 from tai42_skeleton.hooks import cache as hooks_cache
-from tai42_skeleton.interactions.settings import interactions_settings
+from tai42_skeleton.interactions.settings import callback_url_prefix, interactions_settings
 
 logger = logging.getLogger(__name__)
 
@@ -154,53 +154,38 @@ def _callback_pin_failure(callback_url: str, *, channel_id: str, interaction_id:
 
     ``None`` means the check passes and the answer may be forwarded.
     A correlation's ``callback_url`` is a bearer capability THIS platform minted from
-    ``INTERACTIONS_PUBLIC_BASE_URL`` (``helper.py`` builds it as
-    ``{public_base_url}/api/interactions/callback/{ticket}``). Before the handler POSTs a
-    participant's answer to it, the URL is re-checked against the current public base — a stored
-    entry that does not match must NEVER receive the answer, because that POST would ship
-    the participant's reply to a non-configured (possibly attacker-chosen) host. FAIL-CLOSED on
-    every non-match: a host mismatch (``"host_mismatch"``), an unset public base the check
-    cannot run against (``"public_base_unset"``), or a malformed stored/base URL — a bad
-    port raises ``ValueError`` from ``urlparse().port`` (``"malformed_url"``). The offending
-    host is logged loudly, never the full URL (it embeds the callback ticket).
+    ``INTERACTIONS_PUBLIC_BASE_URL``. Before the handler POSTs a participant's answer to it, the
+    URL is pinned against the platform's callback prefix: a stored entry that is not exactly the
+    minted shape must NEVER receive the answer, because that POST would ship the participant's
+    reply to a non-configured (possibly attacker-chosen) host or route. FAIL-CLOSED on every
+    non-match: an unset public base the pin cannot run against (``"public_base_unset"``), or the
+    pin's own refusal reason (``"host_mismatch"``, ``"path_mismatch"``, ``"malformed_url"``). The
+    offending host is logged loudly, never the full URL (it embeds the callback ticket).
     """
-    public_base = interactions_settings().public_base_url
-    if public_base is None:
+    prefix = callback_url_prefix(interactions_settings())
+    if prefix is None:
         logger.error(
-            "inbound: INTERACTIONS_PUBLIC_BASE_URL is unset; cannot host-pin the callback for interaction %s "
+            "inbound: INTERACTIONS_PUBLIC_BASE_URL is unset; cannot pin the callback for interaction %s "
             "on channel %r — discarding the stored callback and treating as no correlation (fail-closed)",
             interaction_id,
             channel_id,
         )
         return "public_base_unset"
     try:
-        base = urlparse(public_base)
-        target = urlparse(callback_url)
-        matches = (
-            target.scheme == base.scheme
-            and (target.hostname or "").lower() == (base.hostname or "").lower()
-            and target.port == base.port  # accessing .port validates the port; may raise ValueError
-        )
-        target_netloc, base_netloc = target.netloc, base.netloc
-    except ValueError:
-        logger.exception(
-            "inbound: correlation for interaction %s on channel %r carries a malformed callback URL "
-            "(unparseable host/port) — discarding it and treating as no correlation (fail-closed)",
-            interaction_id,
-            channel_id,
-        )
-        return "malformed_url"
-    if matches:
+        pin_callback_url(callback_url, prefix=prefix)
+    except CallbackUrlRefusedError as exc:
+        refused = exc
+    else:
         return None
     logger.error(
-        "inbound: correlation for interaction %s on channel %r carries a callback host %r that is not the "
-        "configured public base host %r — discarding it and treating as no correlation (possible poisoned store)",
+        "inbound: correlation for interaction %s on channel %r carries a callback URL refused by the pin "
+        "(%s, host %r) — discarding it and treating as no correlation (possible poisoned store)",
         interaction_id,
         channel_id,
-        target_netloc,
-        base_netloc,
+        refused.reason.value,
+        refused.target_host,
     )
-    return "host_mismatch"
+    return refused.reason.value
 
 
 async def _forward_answer(callback_url: str, answer: Any, params: dict[str, str] | None) -> httpx.Response:
@@ -354,7 +339,8 @@ async def _emit_callback_discarded(bridge: InboundBridge, *, interaction_id: str
     """Emit the ``interactions_callback_discarded`` event ONCE when the handler fail-closes on a stored callback.
 
     Fires instead of forwarding the answer to the callback.
-    ``reason`` is one of ``"host_mismatch"`` / ``"public_base_unset"`` / ``"malformed_url"``.
+    ``reason`` is one of ``"host_mismatch"`` / ``"path_mismatch"`` / ``"public_base_unset"`` /
+    ``"malformed_url"``.
     The payload deliberately carries NO ``callback_url`` (it embeds the bearer ticket) —
     only the channel, interaction, participant address and reason. Best-effort: a hooks-manager
     failure is logged and swallowed so it never fails the inbound webhook.

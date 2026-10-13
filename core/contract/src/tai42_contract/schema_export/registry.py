@@ -28,6 +28,7 @@ from tai42_contract.conversations import (
     TargetConversationConfig,
 )
 from tai42_contract.hooks.models import HookParams, HookRegister, HookSubject
+from tai42_contract.interactions.models import FormReactionEventBody
 from tai42_contract.presets.models import PresetBody, PresetSeed
 from tai42_contract.states.binding import StateAttach, StateBinding, StateInjection, StateUpdate
 from tai42_contract.states.models import StateDeclaration, StateTemplateDocument
@@ -55,6 +56,7 @@ SERVED_DOCUMENTS: dict[str, type[BaseModel]] = {
     "StateAttach": StateAttach,
     "StateBinding": StateBinding,
     "CallbackSchema": CallbackSchema,
+    "FormReactionEvent": FormReactionEventBody,
 }
 
 #: The bundle's committed location relative to the package root, and the JSON-schema

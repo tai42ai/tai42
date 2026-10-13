@@ -16,7 +16,7 @@ from tai42_contract.conversations import (
 )
 from tai42_contract.interactions.answer_check import QuestionFormat
 from tai42_contract.interactions.asker import Ask
-from tai42_contract.interactions.models import LocationElement, MediaItem
+from tai42_contract.interactions.models import FormReactionEvent, LocationElement, MediaItem
 from tai42_contract.interactions.visit import ParkedEntry, RunAnswer, Visit, VisitOutcome
 from tai42_contract.states import StateContext
 from tai42_contract.webhooks import WebhookVerifier
@@ -59,7 +59,9 @@ class AppInteractions(Protocol):
         """
         ...
 
-    async def react(self, interaction_id: str, event: dict[str, Any], partial_values: dict[str, Any]) -> dict[str, Any]:
+    async def react(
+        self, interaction_id: str, event: FormReactionEvent, partial_values: dict[str, Any]
+    ) -> dict[str, Any]:
         """Run an OPEN reacting form's handler for ``event`` with the partial values — the ONE reaction seam.
 
         A reacting form names a ``reaction_tool`` and declares its triggers in
@@ -109,6 +111,15 @@ class AppInteractions(Protocol):
         The continuation-due record ages out at it and the reaper caps its redelivery backoff at
         it, so no resume redelivery fires past it. A resuming driver derives its own
         resolution-record retention from this value rather than a hard-coded guess.
+        """
+        ...
+
+    def callback_url_prefix(self) -> str | None:
+        """The absolute URL prefix every callback URL this platform mints starts with.
+
+        ``{public base}/api/interactions/callback/``; ``None`` when the deployment configures no
+        public base. A component that POSTs an answer to a stored callback URL pins it against this
+        prefix first.
         """
         ...
 

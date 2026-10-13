@@ -31,8 +31,28 @@ class _NullTools:
         return record(func) if callable(func) else record
 
 
+class _FakeInteractions:
+    """Serves the platform's callback prefix; ``None`` stands for a deployment with no public base."""
+
+    def __init__(self) -> None:
+        self.prefix: str | None = None
+
+    def callback_url_prefix(self) -> str | None:
+        return self.prefix
+
+
+#: The one interactions facet every fake app here exposes; ``stripe_env(public_base=...)`` sets it.
+fake_interactions = _FakeInteractions()
+
+
+@pytest.fixture
+def interactions_facet() -> _FakeInteractions:
+    return fake_interactions
+
+
 class _NullApp:
     tools = _NullTools()
+    interactions = fake_interactions
 
 
 _null_app = _NullApp()
@@ -53,6 +73,7 @@ class _KitClients:
 
 class _ClientsApp:
     clients = _KitClients()
+    interactions = fake_interactions
 
 
 @pytest.fixture

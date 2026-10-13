@@ -38,8 +38,17 @@ import logging
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
+from pydantic import TypeAdapter, ValidationError
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import AnswerFormat, FormOption, FormReactions
+from tai42_contract.interactions import (
+    AnswerFormat,
+    FieldChangedEvent,
+    FormOption,
+    FormReactionEvent,
+    FormReactions,
+    PageAdvancedEvent,
+    SubmittedEvent,
+)
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -50,10 +59,7 @@ from tai42_skeleton.states.context import state_context
 
 logger = logging.getLogger(__name__)
 
-# The event kinds a reaction fires on, mirroring the contract ``FormReactions`` triggers.
-_FIELD_CHANGED = "field_changed"
-_PAGE_ADVANCED = "page_advanced"
-_SUBMITTED = "submitted"
+_EVENT_ADAPTER: TypeAdapter[FormReactionEvent] = TypeAdapter(FormReactionEvent)
 
 
 class FormReactionError(Exception):
@@ -135,27 +141,28 @@ def _declared_slots(payload: dict[str, Any]) -> set[str]:
 
 
 def _normalize_event(event: Any, reactions: FormReactions) -> dict[str, Any]:
-    # Validate the inbound event against the form's declared triggers and return the exact
+    # Validate the inbound event (a typed event in-process, its dict form at an HTTP door) against
+    # the contract event models and the form's declared triggers, and return the exact
     # ``{kind, field?|page?}`` the handler receives. An event kind or field/page that is not a
     # declared trigger is a caller bug, refused loudly.
-    if not isinstance(event, dict):
-        raise FormReactionRequestError("reaction event must be an object with a 'kind'")
-    kind = event.get("kind")
-    if kind == _FIELD_CHANGED:
-        field = event.get("field")
-        if not isinstance(field, str) or field not in reactions.field_changed:
-            raise FormReactionRequestError(f"field_changed event names {field!r}, not a declared field trigger")
-        return {"kind": kind, "field": field}
-    if kind == _PAGE_ADVANCED:
-        page = event.get("page")
-        if not isinstance(page, str) or page not in reactions.page_advanced:
-            raise FormReactionRequestError(f"page_advanced event names {page!r}, not a declared page trigger")
-        return {"kind": kind, "page": page}
-    if kind == _SUBMITTED:
-        if not reactions.submitted:
-            raise FormReactionRequestError("submitted is not a declared reaction trigger")
-        return {"kind": kind}
-    raise FormReactionRequestError(f"unknown reaction event kind {kind!r}")
+    try:
+        parsed = _EVENT_ADAPTER.validate_python(event)
+    except ValidationError as exc:
+        raise FormReactionRequestError(f"invalid reaction event: {_first_error(exc)}") from None
+    if isinstance(parsed, FieldChangedEvent) and parsed.field not in reactions.field_changed:
+        raise FormReactionRequestError(f"field_changed event names {parsed.field!r}, not a declared field trigger")
+    if isinstance(parsed, PageAdvancedEvent) and parsed.page not in reactions.page_advanced:
+        raise FormReactionRequestError(f"page_advanced event names {parsed.page!r}, not a declared page trigger")
+    if isinstance(parsed, SubmittedEvent) and not reactions.submitted:
+        raise FormReactionRequestError("submitted is not a declared reaction trigger")
+    return parsed.model_dump(mode="json")
+
+
+def _first_error(exc: ValidationError) -> str:
+    # The first validation fault as ``<location>: <message>``; the event carries no secret.
+    error = exc.errors()[0]
+    location = ".".join(str(part) for part in error["loc"])
+    return f"{location}: {error['msg']}" if location else error["msg"]
 
 
 def _validate_update_values(values: Any, schema: dict[str, Any], declared: set[str]) -> None:
@@ -292,7 +299,7 @@ async def enforce_submitted_check(
     reactions_raw = (format_payload or {}).get("reactions")
     if reactions_raw is None or not FormReactions.model_validate(reactions_raw).submitted:
         return
-    update = await react(interaction_id, {"kind": _SUBMITTED}, answer if isinstance(answer, dict) else {})
+    update = await react(interaction_id, SubmittedEvent(), answer if isinstance(answer, dict) else {})
     errors = update.get("errors")
     if errors:
         raise SubmittedCheckRejectedError(errors)

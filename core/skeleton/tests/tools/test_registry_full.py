@@ -49,11 +49,11 @@ def test_used_extensions_extracts_name_from_dict_element():
     reg = ToolRegistry(set(), {})
     reg.register_tool(
         "foo",
-        [[{"name": "ask_external", "config": {"verifier": {"name": "gh"}}}, "monitor"]],
+        [[{"name": "ask_external", "config": {"verifier": {"verifier": "gh"}}}, "monitor"]],
     )
     assert list(reg.tool_extensions_iterator("foo")) == [
         [],
-        [{"name": "ask_external", "config": {"verifier": {"name": "gh"}}}, "monitor"],
+        [{"name": "ask_external", "config": {"verifier": {"verifier": "gh"}}}, "monitor"],
     ]
     assert reg.used_extensions == frozenset({"ask_external", "monitor"})
 

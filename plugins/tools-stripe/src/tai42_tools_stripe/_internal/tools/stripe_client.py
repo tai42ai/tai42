@@ -3,7 +3,7 @@
 Speaks Stripe's REST API through tai42-kit's curl client (no ``stripe`` SDK): creates, expires and
 lists Checkout Sessions, creates, lists and deletes webhook endpoints, asserts a Stripe object's
 ``livemode`` against the configured key's mode, builds the whitelisted answer, and POSTs it to the
-interaction callback door under an exact-origin SSRF pin with a bounded transient retry.
+interaction callback door under the platform's callback pin with a bounded transient retry.
 
 Facts pinned here are read from Stripe's published docs (https://docs.stripe.com) and nowhere else:
 
@@ -28,13 +28,14 @@ import json
 import logging
 import random
 from typing import Any, cast
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlencode
 
 from curl_cffi import CurlError
 from pydantic import Field, SecretStr
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.app import tai42_app
 from tai42_kit.clients.impl.curl import CurlClient
+from tai42_kit.interactions import pin_callback_url
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 _logger = logging.getLogger(__name__)
@@ -45,12 +46,8 @@ _logger = logging.getLogger(__name__)
 # release. Read from Stripe's published API-version docs (docs.stripe.com/api/versioning).
 STRIPE_API_VERSION = "2026-06-24.dahlia"
 
-# The longest single wait a door-supplied Retry-After may buy. The callback door's limiter is a
-# FIXED-WINDOW counter and its Retry-After is the seconds left in that window -- at most 60 for the
-# per-minute window, at most 10 for the 10-second burst window. Waiting the window out is the only
-# thing that clears it, so a value shorter than the door asked for retries into a window that is
-# still closed and burns the attempt for nothing. 90 clears the door's own maximum with headroom
-# while still bounding a hostile or absurd header: beyond it the computed backoff applies instead.
+# The door answers 429 with a ``Retry-After`` in seconds; the client waits exactly that, capped at
+# ``RETRY_AFTER_MAX_SECONDS`` against a hostile or broken header.
 RETRY_AFTER_MAX_SECONDS = 90
 
 # The bounded transient-retry ladder for a callback-door POST: 5 attempts total, base delay 0.5s,
@@ -83,15 +80,6 @@ class StripeLivemodeMismatchError(Exception):
     """
 
 
-class CallbackTargetRefusedError(Exception):
-    """A callback URL failed the exact-origin SSRF pin.
-
-    Its own type because a refusal means the callback URLs the platform mints disagree with this
-    process's ``INTERACTIONS_PUBLIC_BASE_URL`` -- true of every session -- so a batch caller
-    collects it into ``failed`` and raises.
-    """
-
-
 class CallbackDoorError(Exception):
     """A non-2xx verdict from the interaction callback door, carrying the door's status and body.
 
@@ -120,7 +108,6 @@ class StripeSettings(TaiBaseSettings):
     request_timeout_seconds: float = 20
     reconcile_answer_interval_seconds: float = Field(default=1.2, ge=0)
     bridge_callback_secret: SecretStr | None = Field(default=None, validation_alias="TAI_BRIDGE_CALLBACK_SECRET")
-    interactions_public_base_url: str | None = Field(default=None, validation_alias="INTERACTIONS_PUBLIC_BASE_URL")
 
 
 @settings_cache
@@ -413,39 +400,6 @@ def build_answer_payload(session: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _effective_port(parsed: Any) -> int:
-    if parsed.port is not None:
-        return parsed.port
-    return 443 if parsed.scheme == "https" else 80
-
-
-def _assert_callback_target(callback_url: str) -> None:
-    """Pin the callback POST target to the platform's own callback door by EXACT origin match.
-
-    ``urlparse`` both sides and require equal scheme, hostname (parsed and lowercased, so userinfo
-    and port cannot spoof it) and effective port, plus a path prefix DERIVED from the base's own
-    path so a deployment mounted under a subpath still validates. Any ``..`` segment is rejected
-    outright -- curl normalizes it before dialing, so a prefix check alone is escapable. Anything
-    else raises ``CallbackTargetRefusedError``. The URL is used verbatim; the pin validates, it does
-    not reconstruct.
-    """
-    base = stripe_settings().interactions_public_base_url
-    if not base:
-        raise ValueError("INTERACTIONS_PUBLIC_BASE_URL is not set (missing or empty)")
-    target = urlparse(callback_url)
-    origin = urlparse(base)
-    required_prefix = origin.path.rstrip("/") + "/api/interactions/callback/"
-    if ".." in target.path.split("/"):
-        raise CallbackTargetRefusedError(f"callback URL path contains a '..' segment: {callback_url!r}")
-    if not (
-        target.scheme == origin.scheme
-        and (target.hostname or "").lower() == (origin.hostname or "").lower()
-        and _effective_port(target) == _effective_port(origin)
-        and target.path.startswith(required_prefix)
-    ):
-        raise CallbackTargetRefusedError(f"callback URL {callback_url!r} is not on the pinned origin {base!r}")
-
-
 def _computed_backoff(attempt: int) -> float:
     base = _RETRY_BASE_DELAY * (_RETRY_FACTOR**attempt)
     return base + _rng.random() * base * _RETRY_JITTER_FRACTION
@@ -469,9 +423,9 @@ def _parse_retry_after(value: str) -> float | None:
 def _transient_delay(status: int, resp_headers: dict[str, str], attempt: int) -> float:
     """The wait before the next attempt for a transient response.
 
-    A 429's ``Retry-After`` is honoured IN FULL when usable (a fixed-window limiter only clears by being waited
-    out); otherwise the computed backoff applies, and an unusable header is logged, never silently ignored and
-    never a raise.
+    A 429's ``Retry-After`` is honoured IN FULL when usable (a shorter wait retries before the door is
+    ready and burns the attempt); otherwise the computed backoff applies, and an unusable header is logged,
+    never silently ignored and never a raise.
     """
     if status == 429:
         raw = resp_headers.get("retry-after")
@@ -493,7 +447,7 @@ def _is_transient(status: int) -> bool:
 
 
 async def post_answer(callback_url: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """POST the answer JSON to the callback door under the exact-origin SSRF pin and a bounded transient retry.
+    """POST the answer JSON to the callback door under the platform's callback pin and a bounded transient retry.
 
     Sends the ``X-TAI-Bridge-Secret`` header.
     Missing and EMPTY ``TAI_BRIDGE_CALLBACK_SECRET`` are the same failure and both raise naming it:
@@ -503,7 +457,11 @@ async def post_answer(callback_url: str, payload: dict[str, Any]) -> dict[str, A
     response. After the attempt cap, RAISES naming the count and the last status/error -- never a
     swallowed failure or a ``None`` return.
     """
-    _assert_callback_target(callback_url)
+    prefix = tai42_app.interactions.callback_url_prefix()
+    if prefix is None:
+        raise ValueError("INTERACTIONS_PUBLIC_BASE_URL is not set; the platform mints no callback URL to pin against")
+    # Only the exact shape the platform mints passes; a refusal is a CallbackUrlRefusedError.
+    pin_callback_url(callback_url, prefix=prefix)
     secret = stripe_settings().bridge_callback_secret
     if not (secret and secret.get_secret_value()):
         raise ValueError("TAI_BRIDGE_CALLBACK_SECRET is not set (missing or empty)")

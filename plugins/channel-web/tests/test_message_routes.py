@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 from starlette.responses import StreamingResponse
-from tai42_contract.conversations import BlankInboundTextError
+from tai42_contract.conversations import BlankInboundTextError, ThreadQueueOverflowError
 from tai42_contract.interactions import MediaAlreadyBoundError, MediaKind, MediaNotFoundError
 from tai42_kit.conversations.inbound_media import inbound_media_placeholder
 
@@ -263,14 +263,27 @@ async def test_messages_unrouted_maps_to_404(web_env, stub_app, registered_sessi
 
 
 async def test_messages_thread_overflow_maps_to_503(web_env, stub_app, registered_session: FakeRedis):
-    class ThreadQueueOverflowError(Exception):
-        pass
-
     stub_app.conversations.accept_error = ThreadQueueOverflowError("thread queue full")
     resp = await _handler(stub_app, _MESSAGES)(
         build_request(json_body={"identity": IDENTITY, "text": "x"}, token=SESSION_TOKEN)
     )
     assert resp.status_code == 503
+    assert _body(resp)["error"] == "thread queue full"
+
+
+async def test_messages_an_unrelated_error_sharing_the_overflow_name_propagates(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    # The overflow is caught by its contract type; a same-named class from elsewhere is an
+    # ordinary failure and propagates.
+    class ThreadQueueOverflowError(Exception):
+        pass
+
+    stub_app.conversations.accept_error = ThreadQueueOverflowError("not the platform's overflow")
+    with pytest.raises(ThreadQueueOverflowError):
+        await _handler(stub_app, _MESSAGES)(
+            build_request(json_body={"identity": IDENTITY, "text": "x"}, token=SESSION_TOKEN)
+        )
 
 
 async def test_messages_mints_a_fresh_dedup_id_without_a_retry_key(web_env, stub_app, registered_session: FakeRedis):
@@ -772,7 +785,7 @@ async def test_media_params_overflowing_the_entry_param_cap_is_422_and_never_acc
     assert not fake_redis.streams
 
 
-@pytest.mark.parametrize("bad", ["", "short", "A" * 42, "A" * 44, "has/slash" + "A" * 34])
+@pytest.mark.parametrize("bad", ["", "short", "A" * 42, "A" * 44, "has/slash" + "A" * 34, "A" * 43 + "\n"])
 async def test_a_malformed_attachment_id_is_422(web_env, stub_app, registered_session: FakeRedis, bad: str):
     resp = await _handler(stub_app, _MESSAGES)(
         build_request(json_body={"identity": IDENTITY, "text": "x", "attachment_ids": [bad]}, token=SESSION_TOKEN)
@@ -1117,11 +1130,10 @@ async def test_forms_unrouted_maps_to_404(web_env, stub_app, registered_session:
 async def test_forms_thread_overflow_maps_to_503(web_env, stub_app, registered_session: FakeRedis):
     _seed_form(registered_session)
 
-    class ThreadQueueOverflowError(Exception): ...
-
     stub_app.conversations.accept_error = ThreadQueueOverflowError("queue full")
     resp = await _handler(stub_app, _FORMS)(_form_request())
     assert resp.status_code == 503
+    assert _body(resp)["error"] == "queue full"
 
 
 async def test_forms_no_frame_is_appended_when_accept_refuses(web_env, stub_app, registered_session: FakeRedis):

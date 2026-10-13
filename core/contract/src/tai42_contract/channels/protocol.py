@@ -132,7 +132,8 @@ class Channel(Protocol):
         signal. One send attempt only: retrying is the caller's decision, never
         an implicit loop here — the raised error's ``retryable`` and
         ``retry_after`` drive that decision, so a fault the medium can recover
-        from is classified rather than blind-retried here.
+        from is classified rather than blind-retried here. The dispatcher never
+        hands a delivery whose ``timeout_at`` has passed.
         """
         ...
 

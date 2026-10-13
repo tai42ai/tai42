@@ -166,6 +166,17 @@ ordering timestamp) on both the backlog replay and the live tail; the corruption
 logged at `WARNING`. This is distinct from the transient error banner shown when a
 frame fails to parse on the page itself.
 
+## Answer and reaction forwarding
+
+A web answer or a form reaction is forwarded server-side to the stored callback URL of
+the pending question. Before anything is sent, that stored URL is pinned against the
+callback prefix the platform mints under (`{INTERACTIONS_PUBLIC_BASE_URL}/api/interactions/callback/`):
+only that exact shape — the same scheme, host and port, no userinfo, query or fragment,
+one ticket segment — is accepted. A record outside it, or a deployment with no public
+base, is refused: an `ERROR` log names the interaction, the reason and the host (never
+the URL, which carries the ticket), the claimed question is not restored, nothing is
+sent, and the door answers `500`.
+
 ## Link parameters
 
 Query parameters on the chat page URL are **captured with the visitor's session**
@@ -179,7 +190,9 @@ https://<your deployment>/api/channels/web/chat/desk?topic=news&ref=abc
 
 Bounds are enforced at the door — **at most 16** parameters, each key matching
 `^[A-Za-z0-9_-]{1,64}$`, each value at most **512** characters, the whole set at
-most **2048** bytes — and a violation is a refused page, never a silent trim. The
+most **2048** bytes — and a violation is a refused page, never a silent trim: every
+web door (the page, messages, forms and answers) **refuses** an over-bound set, because
+each answers a waiting visitor. The
 names `tai_pair` and `tai_entry` are reserved and stripped before storage. A later
 navigation carrying parameters replaces the stored set; starting a new
 conversation clears it. Parameter values are never logged, and `params` is

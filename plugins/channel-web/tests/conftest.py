@@ -186,6 +186,20 @@ def make_ingested_media(
     return IngestedMedia(item=item, media_id=media_id, size=size, sha256=sha256, mime=mime, pending=False)
 
 
+#: The callback prefix the stub platform mints under; every test CALLBACK sits beneath it.
+CALLBACK_PREFIX = "https://app.example/api/interactions/callback/"
+
+
+class _StubInteractions:
+    """Serves the platform's callback prefix; a test sets ``prefix`` to ``None`` for an unset public base."""
+
+    def __init__(self) -> None:
+        self.prefix: str | None = CALLBACK_PREFIX
+
+    def callback_url_prefix(self) -> str | None:
+        return self.prefix
+
+
 class _StubApp:
     def __init__(self) -> None:
         self.channels = _StubChannels()
@@ -193,6 +207,7 @@ class _StubApp:
         self.http = _StubHttp()
         self.conversations = _StubConversations()
         self.media = _StubMedia()
+        self.interactions = _StubInteractions()
 
 
 _stub_app = _StubApp()
@@ -434,6 +449,7 @@ def stub_app() -> Iterator[_StubApp]:
     _stub_app.clients.ctx_kwargs.clear()
     _stub_app.conversations = _StubConversations()
     _stub_app.media = _StubMedia()
+    _stub_app.interactions = _StubInteractions()
 
 
 _ENV_VARS = (

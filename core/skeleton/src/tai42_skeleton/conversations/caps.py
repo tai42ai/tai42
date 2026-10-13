@@ -39,6 +39,7 @@ from enum import Enum, auto
 from threading import RLock
 
 from cachetools import LRUCache, TTLCache, cached
+from tai42_contract.conversations import ThreadQueueOverflowError
 from tai42_contract.errors import UnavailableError
 from tai42_kit.settings import register_settings_reset
 
@@ -55,10 +56,6 @@ _BUCKET_IDLE_SECONDS = 3600.0
 def _now() -> float:
     """Return the monotonic clock the caps read — one seam, so refill and cache expiry advance together."""
     return time.monotonic()
-
-
-class ThreadQueueOverflowError(UnavailableError):
-    """The per-thread FIFO is full — a loud, retriable 503 rather than an unbounded backlog."""
 
 
 class ThreadBusyError(UnavailableError):
@@ -375,7 +372,6 @@ __all__ = [
     "AddressAdmission",
     "AddressRateLimitedError",
     "ThreadBusyError",
-    "ThreadQueueOverflowError",
     "TurnCaps",
     "get_turn_caps",
 ]

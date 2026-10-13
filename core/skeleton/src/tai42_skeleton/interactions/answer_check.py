@@ -18,12 +18,9 @@ from typing import Any
 
 import jsonschema
 from tai42_contract.interactions import AnswerFormat, AnswerMismatchError, QuestionFormat
+from tai42_kit.interactions.form_vocabulary import hidden_fields
 
-from tai42_skeleton.interactions.form_schema import (
-    date_constraint_mismatch,
-    effective_answer_schema,
-    hidden_fields,
-)
+from tai42_skeleton.interactions.form_schema import date_constraint_mismatch, effective_answer_schema
 
 # The channel-form string formats, asserted by the answer door. python-jsonschema treats
 # ``format`` as a bare annotation unless a ``FormatChecker`` carrying a checker for that format
@@ -189,7 +186,8 @@ def _check_form(question: QuestionFormat, answer: Any) -> Any:
     choices = reactions.get("choices", []) if isinstance(reactions, dict) else []
     # A field hidden by its predicate (evaluated on the SUBMITTED values) is absent from the
     # answer the consumer receives; a value submitted for it is dropped, not an error.
-    hidden = hidden_fields(schema, answer)
+    properties = schema.get("properties")
+    hidden = hidden_fields(properties, answer) if isinstance(properties, dict) else set()
     answer = {name: value for name, value in answer.items() if name not in hidden}
     # Per-send option lists replace a property's enum for THIS send (so the answer is judged
     # against the choices the human was shown); a reaction-fed choice is typed-only. A hidden

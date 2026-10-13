@@ -139,7 +139,7 @@ def test_preset_body_round_trips_author_bound_config():
     from tai42_contract.presets import PresetBody
 
     combo: list[ExtensionElement] = [
-        {"name": "ask_external", "config": {"verifier": {"name": "github", "config": {"secret_env": "GH"}}}}
+        {"name": "ask_external", "config": {"verifier": {"verifier": "github", "config": {"secret_env": "GH"}}}}
     ]
     body = PresetBody(base_tool="sign", extensions=[combo])
     again = PresetBody(**body.model_dump())
