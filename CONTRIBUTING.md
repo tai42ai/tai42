@@ -65,7 +65,10 @@ Conventional Commits, scoped by package directory. release-please runs in
 manifest mode: one merged commit train, one release PR per changed package, tags
 `tai42-<name>-v<version>`. `fix:` → patch, `feat:` → minor, `feat!:` or a
 `BREAKING CHANGE:` footer → major; other types do not release. Non-conforming
-commits and PR titles fail the `commitlint` check. The `release-label` check
+commits and PR titles fail the `commitlint` check, as does a `<` that opens
+markup (followed by a letter, `/`, `!` or `?`) in a commit header, a
+`BREAKING CHANGE:` footer or the PR title: the release notes are parsed as
+HTML, so write placeholders without angle brackets. The `release-label` check
 projects the version each touched package would publish from the pull request's
 title and body and runs the release API-diff gate against it, so a breaking
 public-API change under a bump its label could not honestly carry is refused

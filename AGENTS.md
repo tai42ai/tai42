@@ -18,7 +18,10 @@ Conventional Commits, scoped by package directory. The type sets the release:
 
 release-please runs in manifest mode: it parses merged commits, raises one
 release PR, and on merge tags each changed package `tai42-<name>-v<version>` and
-publishes it. Non-conforming commits and PR titles fail the `commitlint` check.
+publishes it. Non-conforming commits and PR titles fail the `commitlint` check,
+as does a `<` that opens markup (followed by a letter, `/`, `!` or `?`) in a
+commit header, a `BREAKING CHANGE:` footer or the PR title: the release notes
+are parsed as HTML, so write placeholders without angle brackets.
 
 ## Build, test, lint
 
