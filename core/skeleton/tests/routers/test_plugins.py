@@ -19,8 +19,8 @@ from tai42_kit.registry import StagedSlot
 
 import tai42_skeleton.plugins.registry as reg
 import tai42_skeleton.routers.plugins as router
+from tai42_skeleton.app.error_envelope import not_found_handler
 from tai42_skeleton.app.raw_path_route import SpaFallbackRoute
-from tai42_skeleton.app.server import _not_found_handler
 from tai42_skeleton.plugins.registry import build_registry, set_current_registry
 
 
@@ -368,7 +368,7 @@ def _spa_matrix_client(studio_env) -> TestClient:
         SpaFallbackRoute("/{spa_path:path}", endpoint=router.serve_spa, methods=["GET"]),
     ]
     app = Starlette(routes=routes)
-    app.add_exception_handler(404, _not_found_handler)
+    app.add_exception_handler(404, not_found_handler)
     return TestClient(app)
 
 

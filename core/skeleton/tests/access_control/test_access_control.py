@@ -129,14 +129,16 @@ def test_spa_settings_defaults_are_canonical_and_valid():
     assert s.spa_shell_public is True
     assert s.reserved_operational_supplement == ("/openapi.json",)
     # The operational probes plus the public-by-declaration routes — the webhook ingress
-    # door, the trigger-link door, the OAuth client-identity document and the SPA shell
-    # catch-all — acknowledged by their REGISTERED (template) strings.
+    # door, the trigger-link door, the OAuth client-identity document, the MCP
+    # protected-resource metadata documents and the SPA shell catch-all — acknowledged
+    # by their REGISTERED (template) strings.
     assert s.acknowledged_public_routes == (
         "/health",
         "/ready",
         "/universal_webhook/{topic}",
         "/trigger/{token}",
         "/oauth/client-metadata.json",
+        "/.well-known/oauth-protected-resource/{endpoint_path:path}",
         "/{spa_path:path}",
     )
 

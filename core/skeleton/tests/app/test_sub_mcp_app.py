@@ -360,16 +360,23 @@ async def test_lifespan_scope_is_ignored():
     assert sent == []
 
 
+def _mounted_scope(path: str, *, host_prefix: str = "") -> dict:
+    """The scope a real Starlette mount of the router hands it: the full path, raw target
+    included, and a ``root_path`` carrying every mount up to and including the router's own."""
+    full = f"{host_prefix}{path}"
+    return {"type": "http", "path": full, "raw_path": full.encode(), "root_path": f"{host_prefix}{ROOT_PREFIX}"}
+
+
 async def test_missing_slug_is_404():
     r = _router()
-    sent = await _drive(r, {"type": "http", "path": "/app/"})
+    sent = await _drive(r, _mounted_scope("/app/"))
     assert sent[0]["status"] == 404
     assert sent[1]["body"] == b"Missing Slug"
 
 
 async def test_unknown_route_is_404():
     r = _router()
-    sent = await _drive(r, {"type": "http", "path": "/app/ghost/x"})
+    sent = await _drive(r, _mounted_scope("/app/ghost/x"))
     assert sent[0]["status"] == 404
     assert sent[1]["body"] == b"Unknown Route"
 
@@ -385,41 +392,42 @@ async def _register_with_fake_sub(r, slug, transport):
     return fake
 
 
-async def test_http_dispatch_rewrites_path_under_mount():
+@pytest.mark.parametrize("host_prefix", ["", "/host"], ids=["direct", "host-prefix"])
+@pytest.mark.parametrize("transport", ["http", "sse"])
+async def test_dispatch_hands_the_sub_app_the_path_relative_to_its_slug_mount(transport, host_prefix):
+    r = _router()
+    fake = await _register_with_fake_sub(r, "svc", transport)
+    # The slug is read from the path relative to the router's own mount, whatever host
+    # prefix the request arrived under; the sub-app is mounted at "<root_path>/<slug>"
+    # and serves the remainder, so an SSE sub-app announces a message address carrying
+    # every prefix.
+    sent = await _drive(r, _mounted_scope("/app/svc/foo", host_prefix=host_prefix))
+    assert sent[0]["status"] == 200
+    assert fake.scopes[0]["path"] == "/foo"
+    assert fake.scopes[0]["root_path"] == f"{host_prefix}/app/svc"
+
+
+@pytest.mark.parametrize("path", ["/app/svc", "/app/svc/"])
+async def test_dispatch_serves_the_slug_mount_itself_as_the_sub_app_root(path):
     r = _router()
     fake = await _register_with_fake_sub(r, "svc", "http")
-    # Under the real mount, starlette hands the router the FULL path plus a
-    # root_path already carrying the router's own "/app" mount. Only the slug
-    # segment is appended — the sub-app's root_path must be "/app/svc", never a
-    # doubled "/app/app/svc".
-    sent = await _drive(r, {"type": "http", "path": "/app/svc/foo", "root_path": "/app"})
-    assert sent[0]["status"] == 200
-    # Path stripped of the slug prefix; root_path carries the slug mount.
-    assert fake.scopes[0]["path"] == "/foo"
+    await _drive(r, _mounted_scope(path))
+    assert fake.scopes[0]["path"] == "/"
     assert fake.scopes[0]["root_path"] == "/app/svc"
 
 
-async def test_http_dispatch_path_not_under_mount_falls_back_to_root():
+@pytest.mark.parametrize(
+    "path",
+    ["/app//svc", "/app//svc/../../../api/login/claim", "/app/svc/./x", "/app/%73vc", "/app/svc/x/.."],
+)
+async def test_dispatch_answers_a_non_canonical_path_404_without_looking_up_the_slug(path):
     r = _router()
     fake = await _register_with_fake_sub(r, "svc", "http")
-    # Path lacks the mount prefix -> slug parsed from the bare suffix, sub path "/".
-    await _drive(r, {"type": "http", "path": "/svc"})
-    assert fake.scopes[0]["path"] == "/"
-
-
-async def test_sse_dispatch_keeps_path_under_mount():
-    r = _router()
-    fake = await _register_with_fake_sub(r, "sse_svc", "sse")
-    await _drive(r, {"type": "http", "path": "/app/sse_svc/sse"})
-    assert fake.scopes[0]["path"] == "/app/sse_svc/sse"
-    assert fake.scopes[0]["root_path"] == ""
-
-
-async def test_sse_dispatch_path_not_under_mount_is_prefixed():
-    r = _router()
-    fake = await _register_with_fake_sub(r, "sse_svc", "sse")
-    await _drive(r, {"type": "http", "path": "/sse_svc/sse"})
-    assert fake.scopes[0]["path"] == "/app/sse_svc/sse"
+    sent = await _drive(r, _mounted_scope(path))
+    assert sent[0]["status"] == 404
+    assert sent[1]["body"] == b"Unknown Route"
+    assert fake.scopes == []
+    assert "svc" not in r._server_cache
 
 
 async def test_unauthenticated_request_is_denied_by_the_real_resource_guard():
@@ -681,7 +689,7 @@ async def test_replace_during_build_serves_newest_and_closes_stale(monkeypatch):
     assert stale.lifespan_entered is True
     assert stale.lifespan_open is False
     # Dispatch agrees with GET-visible routes: the new app serves.
-    sent = await _drive(r, {"type": "http", "path": "/app/svc/x", "root_path": "/app"})
+    sent = await _drive(r, _mounted_scope("/app/svc/x"))
     assert sent[1]["body"] == b"new"
     assert r.routes["svc"].tools == ["new"]
 

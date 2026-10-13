@@ -5,8 +5,11 @@ from __future__ import annotations
 from tai42_contract.access_control.context import (
     caller_may_read_secrets,
     get_current_user_id,
+    get_request_resource,
+    reset_request_resource,
     reset_request_secret_capability,
     reset_request_user_id,
+    set_request_resource,
     set_request_secret_capability,
     set_request_user_id,
 )
@@ -50,8 +53,11 @@ __all__ = [
     "Verifier",
     "caller_may_read_secrets",
     "get_current_user_id",
+    "get_request_resource",
+    "reset_request_resource",
     "reset_request_secret_capability",
     "reset_request_user_id",
+    "set_request_resource",
     "set_request_secret_capability",
     "set_request_user_id",
 ]

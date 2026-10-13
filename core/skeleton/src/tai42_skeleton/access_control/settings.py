@@ -1,10 +1,12 @@
 """Access-control settings: the auth gate's Redis connection and policy configuration."""
 
+import ipaddress
 import re
 from re import Pattern
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_kit.access_control.registry import get_identity_provider_factory
@@ -22,6 +24,61 @@ def _prefix_overlaps(a: str, b: str) -> bool:
     ancestor of the other).
     """
     return under_prefix(a, b) or under_prefix(b, a)
+
+
+_PUBLIC_BASE_URL_SETTING = "ACCESS_CONTROL_PUBLIC_BASE_URL"
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+_PATH_CHARACTERS = re.compile(r"[A-Za-z0-9._~/-]*")
+
+
+def _refuse_public_base_url(value: str, reason: str) -> ValueError:
+    return ValueError(f"{_PUBLIC_BASE_URL_SETTING} {value!r} is refused: {reason}")
+
+
+def normalise_public_base_url(value: str) -> str:
+    """The normalised form of a public base URL, or ``ValueError`` naming the setting.
+
+    Absolute ``https`` (``http`` only on a loopback host), no query, fragment or userinfo;
+    scheme and host lower-cased, a default port dropped, a trailing slash stripped, the path
+    kept as typed. Refuses a value a URL library would rewrite further: a non-ASCII host, a
+    path character outside ``A-Z a-z 0-9 . _ ~ - /``, or a ``.``/``..``/empty path segment.
+    """
+    if "?" in value or "#" in value:
+        raise _refuse_public_base_url(value, "it must carry no query and no fragment")
+    parts = urlsplit(value)
+    scheme = parts.scheme.lower()
+    if "@" in parts.netloc:
+        raise _refuse_public_base_url(value, "it must carry no userinfo")
+    host = parts.hostname
+    if not host:
+        raise _refuse_public_base_url(value, "it must be an absolute URL with a host")
+    if not host.isascii():
+        raise _refuse_public_base_url(value, "write an internationalised host in its ASCII form")
+    if scheme != "https" and not (scheme == "http" and is_loopback_host(host)):
+        raise _refuse_public_base_url(value, "it must be https:// (http:// only on a loopback host)")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise _refuse_public_base_url(value, f"its port is invalid ({exc})") from exc
+    path = parts.path.removesuffix("/")
+    if not _PATH_CHARACTERS.fullmatch(path):
+        raise _refuse_public_base_url(value, "its path may hold only A-Z a-z 0-9 . _ ~ - /")
+    if path and any(segment in ("", ".", "..") for segment in path[1:].split("/")):
+        raise _refuse_public_base_url(value, "its path must have no '.', '..' or empty segment")
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None and port != _DEFAULT_PORTS[scheme]:
+        netloc = f"{netloc}:{port}"
+    return f"{scheme}://{netloc}{path}"
+
+
+def is_loopback_host(host: str) -> bool:
+    """Whether ``host`` names the local machine (``localhost`` or a loopback address)."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class AccessControlRedisSettings(RedisConnectionSettings):
@@ -181,8 +238,10 @@ class AccessControlSettings(TaiBaseSettings):
     # public-by-declaration routes are so acknowledged by default: the operational probes
     # (``/health``, ``/ready``), the webhook ingress door (``/universal_webhook/{topic}``),
     # the trigger-link door (``/trigger/{token}``), the OAuth client-identity document
-    # (``/oauth/client-metadata.json``), and the SPA history-fallback catch-all
-    # (``/{spa_path:path}``) that IS the public shell. A NEW such route halts boot until a
+    # (``/oauth/client-metadata.json``), the MCP protected-resource metadata documents MCP
+    # clients read before they sign in
+    # (``/.well-known/oauth-protected-resource/{endpoint_path:path}``), and the SPA
+    # history-fallback catch-all (``/{spa_path:path}``) that IS the public shell. A NEW such route halts boot until a
     # reviewer acknowledges it. Entries must be absolute and canonical; the boot audit refuses
     # one under a control-plane prefix (an acknowledged PUBLIC control-plane route is a
     # contradiction).
@@ -192,6 +251,7 @@ class AccessControlSettings(TaiBaseSettings):
         "/universal_webhook/{topic}",
         "/trigger/{token}",
         "/oauth/client-metadata.json",
+        "/.well-known/oauth-protected-resource/{endpoint_path:path}",
         "/{spa_path:path}",
     )
 
@@ -202,9 +262,28 @@ class AccessControlSettings(TaiBaseSettings):
     # table-derived id for that path dropped); a match under a reserved prefix grants nothing.
     always_public_route_patterns: tuple[str, ...] = ()
 
+    # The URL at which MCP clients reach this deployment: scheme, host, optional port, and
+    # the path prefix when the app is mounted under one. MCP client sign-in is advertised
+    # (the protected-resource metadata documents, the ``WWW-Authenticate`` pointer on a 401
+    # from an MCP endpoint, the request resource an identity provider binds a token to)
+    # only while this is set and an active identity provider declares an authorization
+    # server; nothing is ever derived from a request's own host or scheme. ``https`` (or
+    # ``http`` on a loopback host), no query, fragment or userinfo. Stored normalised the
+    # way a client normalises the value it sends back as ``resource``: scheme and host
+    # lower-cased, a default port dropped, a trailing slash stripped; the path is kept as
+    # typed. A value a URL library would rewrite further (a non-ASCII host, a path
+    # character outside ``A-Z a-z 0-9 . _ ~ - /``, a ``.``/``..`` or empty path segment)
+    # is refused at load.
+    public_base_url: str | None = None
+
     path_patterns: dict[str, str] = {}  # noqa: RUF012
     compiled_patterns: list[tuple[Pattern, str]] = []  # noqa: RUF012
     compiled_always_public_route_patterns: list[Pattern] = []  # noqa: RUF012
+
+    @field_validator("public_base_url")
+    @classmethod
+    def _normalise_public_base_url(cls, value: str | None) -> str | None:
+        return None if value is None else normalise_public_base_url(value)
 
     def model_post_init(self, __context):
         """Validate cross-field invariants and compile the path patterns after model init."""

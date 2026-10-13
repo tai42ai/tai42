@@ -21,7 +21,7 @@ from tai42_contract.plugins import PATH_SEGMENT_SLUG_RE
 from tai42_contract.sub_mcp import RouteConfig
 from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 
-from tai42_skeleton.access_control.path_canon import under_prefix
+from tai42_skeleton.access_control.path_canon import sent_path_is_canonical, strip_root_path
 from tai42_skeleton.app.epoch import boot_stateless_http
 from tai42_skeleton.app.transport_stream import (
     SessionCallAdmissionMiddleware,
@@ -37,6 +37,11 @@ from tai42_skeleton.sub_mcp.store import get_sub_mcp_store
 logger = logging.getLogger(__name__)
 
 ROOT_PREFIX = "/app"
+
+# The inner path segments of an SSE sub-MCP app, relative to its ``/app/{slug}`` mount: the
+# event stream and the message endpoint the stream announces.
+SSE_STREAM_SEGMENT = "sse"
+SSE_MESSAGES_SEGMENT = "messages"
 
 
 def sub_mcp_mount_url(slug: str) -> str:
@@ -61,6 +66,11 @@ def sub_mcp_access_pattern(slug: str) -> str:
 _VALID_TRANSPORTS = ("http", "sse", "stdio")
 
 
+def is_valid_slug(slug: str) -> bool:
+    """Whether ``slug`` is a well-formed sub-MCP slug: one lowercase-safe path segment."""
+    return PATH_SEGMENT_SLUG_RE.match(slug) is not None
+
+
 def validate_registration(slug: str, transport: str) -> None:
     """Reject a malformed slug or an unknown transport loudly.
 
@@ -69,10 +79,15 @@ def validate_registration(slug: str, transport: str) -> None:
     slug that would mint an unreachable/undeletable route, or a transport the build
     path cannot serve, is caught in exactly one place.
     """
-    if not PATH_SEGMENT_SLUG_RE.match(slug):
+    if not is_valid_slug(slug):
         raise ValueError(f"slug {slug!r} must match {PATH_SEGMENT_SLUG_RE.pattern} (one lowercase path segment)")
     if transport not in _VALID_TRANSPORTS:
         raise ValueError(f"transport {transport!r} must be one of {_VALID_TRANSPORTS}")
+
+
+async def _not_found(send: Callable[[dict[str, Any]], Awaitable[None]], body: bytes) -> None:
+    await send({"type": "http.response.start", "status": 404, "headers": []})
+    await send({"type": "http.response.body", "body": body})
 
 
 class InvocationSeamMiddleware(McpMiddleware):
@@ -526,23 +541,24 @@ class SubMcpAppRouter:
                 Middleware(TransportStreamDrainExemptMiddleware, stream_path=stream_path),
             ]
 
+        # The dispatcher hands every sub-app a scope relative to its ``/app/{slug}`` mount
+        # (see ``__call__``), so the sub-app's routes are relative paths.
         if config.transport == "sse":
-            clean_root = self.root_prefix.rstrip("/")
-            base_path = f"{clean_root}/{slug}"
-            sse_path = f"{base_path}/sse"
-            message_path = f"{base_path}/messages"
+            # The message endpoint is mounted and announced in the form that ends in a slash:
+            # the mount matches the announced address itself, so no message is redirected.
+            # The transport composes the announced address from the scope's ``root_path``, so
+            # it carries every prefix the stream request arrived under.
+            sse_path = f"/{SSE_STREAM_SEGMENT}"
+            message_path = f"/{SSE_MESSAGES_SEGMENT}/"
             sub_app = create_sse_app(
                 mcp, message_path=message_path, sse_path=sse_path, middleware=sub_middleware(sse_path)
             )
             # The mount's sessions end with the lifespan that owns it (its generation's close).
             bind_sse_session_ender(sub_app, message_path)
         else:
-            # Serve the streamable-HTTP endpoint at the sub-app ROOT. The
-            # dispatcher rewrites an ``/app/{slug}`` request to sub-app scope path
-            # ``/`` (see ``__call__``), so the endpoint must live at ``/`` — the
-            # FastMCP default of ``/mcp`` would leave the rewritten ``/`` request
-            # 404ing against the sub-app. It runs in the stateless mode the worker
-            # booted with, so a multi-worker deployment serves it like the main endpoint.
+            # The streamable-HTTP endpoint lives at the sub-app ROOT (an ``/app/{slug}``
+            # request is dispatched as ``/``), and runs in the stateless mode the worker booted
+            # with, so a multi-worker deployment serves it like the main endpoint.
             sub_app = mcp.http_app(path="/", middleware=sub_middleware("/"), stateless_http=boot_stateless_http())
 
         app_lifespan = SubAppLifespan(sub_app)
@@ -691,61 +707,41 @@ class SubMcpAppRouter:
                 await send({"type": "websocket.close", "code": 1008})
             return
 
-        # 1. PARSE PATH & FIND SLUG
-        original_path = scope["path"]
-        mount_clean = self.root_prefix.rstrip("/")
-
-        # Check if we are actually under the mount path. Segment-exact: "/apple"
-        # is NOT under "/app".
-        under_mount = under_prefix(original_path, mount_clean)
-        path_suffix = original_path if not under_mount else original_path[len(mount_clean) :]
-
-        # Extract slug from suffix: "/slug/..."
-        parts = path_suffix.strip("/").split("/")
-        if not parts or not parts[0]:
-            await send({"type": "http.response.start", "status": 404, "headers": []})
-            await send({"type": "http.response.body", "body": b"Missing Slug"})
+        # 1. SERVE ONLY THE PATH THE GATE DECIDED ON. The access-control gate decides on the
+        # canonical form of the path while the router delivers the path as sent, so a
+        # spelling with a dot or an empty segment could reach a sub-app under a path the
+        # gate judged as another route. Such a path is answered as an unknown route, before
+        # anything is looked up, built or dispatched.
+        if not sent_path_is_canonical(scope):
+            await _not_found(send, b"Unknown Route")
             return
 
-        slug = parts[0]
+        # 2. FIND THE SLUG in the path relative to this router's own mount (the mount's
+        # ``root_path`` removed, whatever host prefix it carries): "/<slug>/<rest>".
+        route_path = strip_root_path(scope["path"], scope.get("root_path", ""))
+        _, _, after_root = route_path.partition("/")
+        slug, separator, rest = after_root.partition("/")
+        if not slug:
+            await _not_found(send, b"Missing Slug")
+            return
 
-        # 2. GET CONFIG & SERVER
+        # 3. GET CONFIG & SERVER
         sub_server = await self._get_or_build_app(slug)
         if not sub_server:
-            await send({"type": "http.response.start", "status": 404, "headers": []})
-            await send({"type": "http.response.body", "body": b"Unknown Route"})
+            await _not_found(send, b"Unknown Route")
             return
 
         # A concurrent unregister may have dropped the route between the build
         # and here; a clean 404 beats a KeyError.
-        config = self._routes.get(slug)
-        if config is None:
-            await send({"type": "http.response.start", "status": 404, "headers": []})
-            await send({"type": "http.response.body", "body": b"Unknown Route"})
+        if self._routes.get(slug) is None:
+            await _not_found(send, b"Unknown Route")
             return
 
-        # 3. ROUTE DISPATCH (PREPARE SCOPE)
+        # The sub-app is mounted at "<root_path>/<slug>" and serves the remainder; an
+        # ``/app/{slug}`` request itself is the sub-app's root.
         sub_scope = scope.copy()
-        slug_prefix = f"{mount_clean}/{slug}"
-
-        if config.transport == "sse":
-            if not under_mount:
-                sub_scope["path"] = f"{mount_clean}{original_path}"
-            else:
-                sub_scope["path"] = original_path
-
-            sub_scope["root_path"] = ""
-        else:
-            if original_path.startswith(slug_prefix):
-                new_path = original_path[len(slug_prefix) :]
-                sub_scope["path"] = new_path or "/"
-                # Under the real mount, ``scope["root_path"]`` already carries the
-                # router's own mount ("/app"); only the slug segment is appended.
-                # Re-adding the full "/app/<slug>" prefix would yield
-                # "/app/app/<slug>" and break the sub-app's url_for / redirects.
-                sub_scope["root_path"] = scope.get("root_path", "").rstrip("/") + f"/{slug}"
-            else:
-                sub_scope["path"] = "/"
+        sub_scope["path"] = f"/{rest}" if separator else "/"
+        sub_scope["root_path"] = f"{scope.get('root_path', '').rstrip('/')}/{slug}"
 
         # 4. DISPATCH
         # fastmcp installs its auth middleware chain (token-verify + policy

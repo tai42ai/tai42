@@ -4,8 +4,8 @@ A session is driven by the pinned SDK's own MCP clients, and a single request is
 to the socket as given, so every request crosses the real ASGI stack — the access-control
 middleware, the router, the sub-MCP mount and the transports — exactly as a deployment
 serves it. The access-control gate is ON with the real verifier over in-memory stores: an
-administrator key is provisioned and no route row exists, so every transport path
-resolves only through the route registry's own records.
+administrator key and a viewer key are provisioned and no route row exists, so every
+transport path resolves only through the route registry's own records.
 
 A host application that mounts the platform under a prefix (the documented embed) is
 modelled by a Starlette app that mounts ``create_app`` and runs its lifespan.
@@ -19,6 +19,7 @@ import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -39,13 +40,16 @@ from tai42_kit.utils.data.string_util import hash_api_key
 from tai42_skeleton import asgi
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
+from tai42_skeleton.access_control.roles import viewer_jq
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.plugins import registry as studio_registry
 
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
 ADMIN_KEY = "admin-raw-key"
+VIEWER_KEY = "viewer-raw-key"
 
 # The tool every served manifest registers, so a session has something to list.
 TOOL_MANIFEST_ENTRY = {"title": "fxt", "module": "tests.app._fixtures.tools_a", "include": ["greet"]}
@@ -71,20 +75,44 @@ def _identity(raw_key: str, key_id: str, owner_id: str) -> tuple[str, dict[str, 
     return identity_key, {"user_id": key_id, "description": "d", "owner_user_id": owner_id}
 
 
-def install_access_control(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provision an administrator key over in-memory identity and policy stores.
+@dataclass
+class AccessControl:
+    """The in-memory identity and policy stores behind the real verifier."""
 
-    The admin's key and owner carry the universal scope with no condition. No route row is stored.
+    redis: FakeRedis
+    pg: FakeAccessControlPg
+
+
+def install_access_control(monkeypatch: pytest.MonkeyPatch) -> AccessControl:
+    """Provision an administrator key and a viewer key over in-memory identity and policy stores.
+
+    The admin's key and owner carry the universal scope with no condition; the viewer's owner
+    carries the seeded viewer condition. No route row is stored.
     """
-    fake = FakeRedis(hashes=dict([_identity(ADMIN_KEY, "ad-key", "ad-owner")]))
+    fake = FakeRedis(
+        hashes=dict([_identity(ADMIN_KEY, "ad-key", "ad-owner"), _identity(VIEWER_KEY, "vw-key", "vw-owner")])
+    )
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     pg = FakeAccessControlPg()
     pg.add_policy("ad-key", scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "ad-owner"})
     pg.add_policy("ad-owner", scopes=["*"])
+    pg.add_policy("vw-key", scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "vw-owner"})
+    pg.add_policy("vw-owner", scopes=["*"], condition={"content": viewer_jq()})
     ctx = make_client_ctx(fake)
     monkeypatch.setattr(policy_module, "client_ctx", ctx)
     monkeypatch.setattr(provider_module, "client_ctx", ctx)
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
+    return AccessControl(redis=fake, pg=pg)
+
+
+def studio_bundle(root: Path) -> Path:
+    """Write a minimal built Studio bundle (the shell and the vendor modules) and return its path."""
+    dist = root / "studio-dist"
+    (dist / "vendor").mkdir(parents=True)
+    for rel in studio_registry.VENDOR_MODULES.values():
+        (dist / rel).write_text("export {};\n", encoding="utf-8")
+    (dist / "index.html").write_text("<head><!--tai-importmap--></head><body>studio shell</body>", encoding="utf-8")
+    return dist
 
 
 def manifest(default_routers: str) -> dict[str, Any]:
@@ -174,6 +202,9 @@ class ResponseLog:
                 response.headers.get("content-type", ""),
             )
         )
+
+    def redirects(self) -> list[tuple[str, str, int, str]]:
+        return [entry for entry in self.entries if 300 <= entry[2] < 400]
 
     def get_streams(self) -> list[tuple[str, str, int, str]]:
         return [entry for entry in self.entries if entry[0] == "GET"]

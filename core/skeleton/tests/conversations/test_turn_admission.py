@@ -70,7 +70,7 @@ async def test_the_gate_released_admits(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_a_plugin_channel_door_answers_the_reload_503(reloading) -> None:
     """A neutral channel door that lets the refusal propagate answers the retriable 503."""
-    from tai42_skeleton.app.server import _install_error_handlers
+    from tai42_skeleton.app.error_envelope import install_error_handlers
 
     async def synthetic_inbound(request: Request) -> Response:
         try:
@@ -81,7 +81,7 @@ def test_a_plugin_channel_door_answers_the_reload_503(reloading) -> None:
         return JSONResponse({"status": "accepted"})
 
     app = Starlette(routes=[Route("/synthetic/inbound", synthetic_inbound, methods=["POST"])])
-    _install_error_handlers(app)
+    install_error_handlers(app)
     response = TestClient(app, raise_server_exceptions=False).post("/synthetic/inbound")
     assert response.status_code == 503
     assert response.headers["Retry-After"] == "5"

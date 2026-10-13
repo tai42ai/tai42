@@ -109,6 +109,25 @@ class IdentityProvider(ABC):
         """
         return ()
 
+    def authorization_servers(self) -> Sequence[str]:
+        """Issuer identifiers of the OAuth authorization servers whose access tokens this provider validates.
+
+        Synchronous, cheap and free of I/O: it is read on refused requests. Each value is the
+        issuer identifier a client should sign in at — an absolute ``https`` URL (``http`` only
+        on a loopback host) with no query, fragment or userinfo; the application refuses an
+        invalid value loudly when it builds the provider. The application publishes these
+        values to MCP clients and names no concrete provider.
+
+        A provider that declares a server is expected to accept a token only when its audience
+        is the protected resource the request addresses (:func:`get_request_resource
+        <tai42_contract.access_control.context.get_request_resource>`) — the audience rule of
+        the MCP authorization specification, which only the provider can check because only it
+        reads the token's claims.
+
+        Default: none — the provider validates no OAuth issuer's tokens.
+        """
+        return ()
+
 
 class ApiKeyIdentityProvider(IdentityProvider):
     """Provisioning interface for key-MINTING identity providers.

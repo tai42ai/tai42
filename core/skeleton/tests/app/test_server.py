@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastmcp.tools.function_tool import FunctionTool
+from starlette.routing import Mount
 from starlette.types import ASGIApp
 from tai42_contract.errors import OperationError
 from tai42_contract.extensions import ExtensionKind
@@ -28,6 +29,7 @@ from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 from tai42_contract.storage import Storage
 from tests.agent._memoryless import MemorylessTestAgent
 
+from tai42_skeleton.app import error_envelope
 from tai42_skeleton.app import server as server_module
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.server import TaiMCP
@@ -171,6 +173,13 @@ def test_run_backend_requires_configured_backend():
     assert launched == [["arg"]]
 
 
+def _assert_sub_mcp_mounted(base: MagicMock, a: TaiMCP) -> None:
+    """The sub-MCP router is the one ``Mount`` in the base app's route list, at its root prefix."""
+    router = a.sub_app.mcp_sub_app_router
+    mounts = [route for route in base.router.routes if isinstance(route, Mount)]
+    assert [(mount.path, mount.app) for mount in mounts] == [(router.root_prefix, router)]
+
+
 def test_finalize_app_setup_mounts_router_and_applies_middleware():
     a = _fresh()
 
@@ -183,6 +192,7 @@ def test_finalize_app_setup_mounts_router_and_applies_middleware():
 
     a.http.middleware(_PassThrough)
     base = MagicMock()
+    base.router.routes = []
     out = a._http_surface.finalize(base)
     # The sub-app router is mounted, then the finalize middleware stack wraps the
     # app. finalize applies only the always-on outer RateLimitMiddleware (which
@@ -190,8 +200,7 @@ def test_finalize_app_setup_mounts_router_and_applies_middleware():
     # wrapper — it is injected into the base app's own Starlette stack (inside that
     # app's ServerErrorMiddleware; see TaiMCP._base_middleware). So this test's
     # _PassThrough wraps RateLimit, which wraps the mounted base.
-    router = a.sub_app.mcp_sub_app_router
-    base.mount.assert_called_once_with(router.root_prefix, router)
+    _assert_sub_mcp_mounted(base, a)
     assert isinstance(out, _PassThrough)
     assert isinstance(out.inner, RateLimitMiddleware)
     assert out.inner.app is base
@@ -204,6 +213,7 @@ def test_finalize_app_setup_mounts_router_and_applies_middleware():
 def test_sse_app_builds_and_finalizes():
     a = _fresh()
     sentinel = MagicMock()
+    sentinel.router.routes = []
     with (
         patch.object(server_module, "create_sse_app", return_value=sentinel) as mk,
         patch.object(server_module, "bind_sse_session_ender") as bind,
@@ -211,7 +221,7 @@ def test_sse_app_builds_and_finalizes():
         result = a.sse_app()
     mk.assert_called_once()
     # The built app's sessions are ended through its message endpoint when its lifespan closes.
-    bind.assert_called_once_with(sentinel, "/messages")
+    bind.assert_called_once_with(sentinel, "/messages/")
     # The SSE app must carry the server's auth so /sse + /messages are gated when
     # access control is on (mirrors http_app); an unauthenticated SSE surface
     # would bypass it.
@@ -229,7 +239,7 @@ def test_sse_app_builds_and_finalizes():
     assert mk.call_args.kwargs["middleware"][2].kwargs == {"stream_path": "/sse"}
     # finalize mounts the sub-app router on the base, then wraps only the always-on
     # outer RateLimitMiddleware around it.
-    sentinel.mount.assert_called_once()
+    _assert_sub_mcp_mounted(sentinel, a)
     assert isinstance(result, RateLimitMiddleware)
     assert result.app is sentinel
 
@@ -237,6 +247,7 @@ def test_sse_app_builds_and_finalizes():
 def test_http_app_builds_and_finalizes():
     a = _fresh()
     sentinel = MagicMock()
+    sentinel.router.routes = []
     mcp = a._serving_core._fast_mcp = MagicMock()
     mcp.http_app.return_value = sentinel
     result = a.http_app(path="/mcp", transport="http")
@@ -249,7 +260,7 @@ def test_http_app_builds_and_finalizes():
         TransportStreamDrainExemptMiddleware,
     ]
     assert mcp.http_app.call_args.kwargs["middleware"][2].kwargs == {"stream_path": "/mcp"}
-    sentinel.mount.assert_called_once()
+    _assert_sub_mcp_mounted(sentinel, a)
     # finalize wraps only the always-on outer RateLimitMiddleware around the base.
     assert isinstance(result, RateLimitMiddleware)
     assert result.app is sentinel
@@ -259,10 +270,10 @@ def _assert_error_handlers_installed(sentinel: MagicMock) -> None:
     from tai42_skeleton.marketplace.compat import CorePluginBootError
     from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
-    sentinel.add_exception_handler.assert_any_call(Exception, server_module._internal_error_handler)
-    sentinel.add_exception_handler.assert_any_call(FleetBroadcastError, server_module._fleet_broadcast_error_handler)
-    sentinel.add_exception_handler.assert_any_call(CorePluginBootError, server_module._core_plugin_boot_error_handler)
-    sentinel.add_exception_handler.assert_any_call(404, server_module._not_found_handler)
+    sentinel.add_exception_handler.assert_any_call(Exception, error_envelope.internal_error_handler)
+    sentinel.add_exception_handler.assert_any_call(FleetBroadcastError, error_envelope.fleet_broadcast_error_handler)
+    sentinel.add_exception_handler.assert_any_call(CorePluginBootError, error_envelope.core_plugin_boot_error_handler)
+    sentinel.add_exception_handler.assert_any_call(404, error_envelope.not_found_handler)
 
 
 def test_sse_app_registers_error_handlers():
@@ -298,7 +309,7 @@ def test_internal_error_handler_mints_id_and_hides_detail():
 
     scope = {"type": "http", "method": "GET", "path": "/api/secret-path", "query_string": b"", "headers": []}
     exc = RuntimeError("host db://user:pw@internal boom")
-    resp = asyncio.run(server_module._internal_error_handler(Request(scope), exc))
+    resp = asyncio.run(error_envelope.internal_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert body["error"] == "Internal Server Error"
@@ -317,7 +328,7 @@ def test_core_plugin_boot_error_handler_surfaces_the_reason():
 
     scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
     exc = CorePluginBootError("tools plugin 'acme_tools' failed to import: No module named 'acme_tools'")
-    resp = asyncio.run(server_module._core_plugin_boot_error_handler(Request(scope), exc))
+    resp = asyncio.run(error_envelope.core_plugin_boot_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert body["error"] == "tools plugin 'acme_tools' failed to import: No module named 'acme_tools'"
@@ -339,7 +350,7 @@ def test_fleet_broadcast_error_surfaces_a_plugin_boot_cause():
     exc.__cause__ = cause  # the production raise sets this via ``from local_failure``
 
     scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
-    resp = asyncio.run(server_module._fleet_broadcast_error_handler(Request(scope), exc))
+    resp = asyncio.run(error_envelope.fleet_broadcast_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert body["error"] == "tools plugin 'acme_tools' failed to import: boom"
@@ -367,7 +378,7 @@ def test_fleet_broadcast_error_surfaces_a_route_collision_cause():
     exc.__cause__ = cause
 
     scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
-    resp = asyncio.run(server_module._fleet_broadcast_error_handler(Request(scope), exc))
+    resp = asyncio.run(error_envelope.fleet_broadcast_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert "remap the mount base to resolve" in body["error"]
@@ -390,7 +401,7 @@ def test_fleet_broadcast_error_masks_a_transport_cause():
     exc.__cause__ = cause
 
     scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
-    resp = asyncio.run(server_module._fleet_broadcast_error_handler(Request(scope), exc))
+    resp = asyncio.run(error_envelope.fleet_broadcast_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert body["error"] == "Internal Server Error"
@@ -413,7 +424,7 @@ def test_internal_error_handler_survives_unstampable_exception():
 
     scope = {"type": "http", "method": "GET", "path": "/api/x", "query_string": b"", "headers": []}
     exc = _UnstampableError("boom")
-    resp = asyncio.run(server_module._internal_error_handler(Request(scope), exc))
+    resp = asyncio.run(error_envelope.internal_error_handler(Request(scope), exc))
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert body == {"error": "Internal Server Error", "error_id": body["error_id"]}

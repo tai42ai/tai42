@@ -15,10 +15,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from tai42_contract.access_control.identity import IdentityProvider
 from tai42_kit.access_control.registry import get_identity_provider_factory_staged
 from tai42_kit.accounts.registry import iter_accounts_provider_factories_staged
 from tai42_kit.utils.worker_secret_capability import set_access_control_gate_state
 
+from tai42_skeleton.access_control.advertised import validate_declared_authorization_servers
 from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path, under_prefix
 from tai42_skeleton.access_control.settings import access_control_settings
 
@@ -43,8 +45,10 @@ async def probe_identity_provider() -> None:
     provider once against the access-control settings (whose ``admin`` services the
     freshly-built AuthAdapter has already installed), records it through
     ``app.record_auth_provider`` so a later request never re-instantiates it nor reads a
-    plugin module holder, then awaits
-    its ``healthcheck()``. A provider whose storage needs no boot probe inherits the
+    plugin module holder, validates the authorization servers each one declares (an invalid
+    declaration fails the build; a declaring provider on a deployment with no
+    ``ACCESS_CONTROL_PUBLIC_BASE_URL`` logs one warning), then awaits each provider's
+    ``healthcheck()``. A provider whose storage needs no boot probe inherits the
     contract's default no-op; a key-minting provider probes its own record store. ANY
     provider's failure propagates, so a deployment against a backend a provider cannot
     use fails LOUDLY at build time rather than on the first authenticated request. The
@@ -60,9 +64,13 @@ async def probe_identity_provider() -> None:
             "resolved auth-provider chain is empty, so no credential could ever authenticate. "
             "Register an identity provider in the manifest, or set ACCESS_CONTROL_AUTH_PROVIDERS"
         )
+    providers: list[tuple[str, IdentityProvider]] = []
     for name in chain:
         provider = get_identity_provider_factory_staged(name)(settings)
         app.record_auth_provider(name, provider)
+        providers.append((name, provider))
+    validate_declared_authorization_servers(providers)
+    for _name, provider in providers:
         await provider.healthcheck()
 
 

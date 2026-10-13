@@ -129,3 +129,20 @@ def test_settings_marker_names_no_backing_store_field():
     # provider's injected settings object satisfies the seam regardless of backing
     # store. The absence of a declared field is what keeps the contract store-agnostic.
     assert get_protocol_members(IdentityProviderSettings) == frozenset()
+
+
+def test_authorization_servers_default_is_empty():
+    # A provider that validates no OAuth issuer's tokens inherits the empty declaration.
+    assert tuple(_FakeProvider().authorization_servers()) == ()
+    assert tuple(_FullApiKeyProvider().authorization_servers()) == ()
+
+
+def test_authorization_servers_override_is_returned():
+    class _DeclaringProvider(_FakeProvider):
+        def authorization_servers(self) -> tuple[str, ...]:
+            return ("https://issuer.example", "https://second.example/tenant")
+
+    assert tuple(_DeclaringProvider().authorization_servers()) == (
+        "https://issuer.example",
+        "https://second.example/tenant",
+    )

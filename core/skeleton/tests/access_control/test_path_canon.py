@@ -15,6 +15,7 @@ from tai42_skeleton.access_control.path_canon import (
     MalformedPathError,
     canonicalize_path,
     request_canonical_path,
+    sent_path_is_canonical,
     under_prefix,
 )
 
@@ -155,3 +156,56 @@ def test_every_segment_prefix_site_agrees_with_under_prefix(path: str, prefix: s
     assert _under_prefixes(path, (prefix,)) is expected
     assert _under_prefixes(path, ("/elsewhere", prefix)) is expected
     assert _prefix_overlaps(path, prefix) is (under_prefix(path, prefix) or under_prefix(prefix, path))
+
+
+# -- sent_path_is_canonical ---------------------------------------------------
+
+
+def _scope(raw: str | None, path: str, root_path: str = "") -> dict:
+    scope: dict = {"type": "http", "path": path, "root_path": root_path}
+    if raw is not None:
+        scope["raw_path"] = raw.encode("ascii")
+    return scope
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["/mcp", "/mcp/", "/messages/", "/app/svc", "/app/svc/messages/", "/", "/api/states/a%2Fb", "/x%25y"],
+)
+def test_a_path_sent_in_canonical_form_is_canonical(raw: str) -> None:
+    assert sent_path_is_canonical(_scope(raw, raw)) is True
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "/api/storage/dirs/../../../mcp",
+        "/app//svc",
+        "/app/./svc",
+        "/app/svc/..",
+        "/app/%73vc",
+        "/app/svc%2f",
+        "/mcp//",
+        "//",
+        "/a/%2e%2e/mcp",
+    ],
+)
+def test_a_path_sent_in_another_spelling_is_not_canonical(raw: str) -> None:
+    assert sent_path_is_canonical(_scope(raw, raw)) is False
+
+
+def test_the_mounted_root_path_is_stripped_before_the_comparison() -> None:
+    assert sent_path_is_canonical(_scope("/host/app/svc/sse", "/host/app/svc/sse", root_path="/host/app")) is True
+    assert sent_path_is_canonical(_scope("/host/app//svc", "/host/app//svc", root_path="/host/app")) is False
+    # A request at the mount root itself is the canonical root.
+    assert sent_path_is_canonical(_scope("/host", "/host", root_path="/host")) is True
+
+
+def test_without_a_raw_target_the_decoded_path_is_compared() -> None:
+    assert sent_path_is_canonical(_scope(None, "/mcp")) is True
+    assert sent_path_is_canonical(_scope(None, "/a/../mcp")) is False
+
+
+def test_a_target_with_no_canonical_form_is_not_canonical() -> None:
+    assert sent_path_is_canonical(_scope("/a%00b", "/a\x00b")) is False
+    assert sent_path_is_canonical({"type": "http", "path": "/x", "raw_path": "/é".encode()}) is False

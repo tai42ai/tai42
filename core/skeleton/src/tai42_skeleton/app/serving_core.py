@@ -11,6 +11,7 @@ from fastmcp.server.auth import TokenVerifier
 
 from tai42_skeleton.agent.binding import AgentBinding
 from tai42_skeleton.app.http import HttpSurface
+from tai42_skeleton.app.mcp_endpoints import record_sse_pairing
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import MOUNT_METHODS, route_registry
 from tai42_skeleton.app.sessions import ReloadRejectionMiddleware, SessionRegistry, SessionTrackingMiddleware
@@ -90,10 +91,13 @@ def record_sse_surface(sse_path: str, message_path: str) -> None:
     """Record the SSE transport's surfaces as mounted, credential-gated ones.
 
     See :func:`record_streamable_http_surface`: the ``GET`` event stream, and the message
-    endpoint, a Starlette ``Mount`` that serves everything beneath its prefix — the client
-    posts to ``<prefix>?session_id=...`` or ``<prefix>/?session_id=...``. The bare prefix is
-    recorded too: the canonical path every access-control decision reads drops the trailing
-    slash, so both spellings reduce to it.
+    endpoint, a Starlette ``Mount`` that serves everything beneath its prefix. The transport
+    announces the message address in the form that ends in a slash
+    (``<prefix>/?session_id=...``), which the mount matches without a redirect. The bare
+    prefix is recorded too: the canonical path every access-control decision reads drops
+    the trailing slash, so ``<prefix>/`` and ``<prefix>`` both reduce to it. The message
+    endpoint is paired with its stream for the MCP endpoint map, which the registry's
+    independent records cannot express.
     """
     route_registry.record_mounted(
         path=sse_path,
@@ -102,6 +106,7 @@ def record_sse_surface(sse_path: str, message_path: str) -> None:
         summary="MCP SSE transport event stream",
     )
     prefix = message_path.rstrip("/")
+    record_sse_pairing(sse_path, prefix)
     route_registry.record_mounted(
         path=prefix,
         methods=MOUNT_METHODS,
