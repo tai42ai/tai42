@@ -42,8 +42,8 @@ reports hundreds of false positives. Always run it per package so that member's
 ## Comments and docs
 
 Terse, constraint-only, present tense. State the constraint and why it holds, not
-what changed. No history notes, no plan/ticket/mission references, no
-cross-repository references.
+what changed. No history notes, no references to external trackers or work
+items, no cross-repository references.
 
 ## Route target kinds
 
