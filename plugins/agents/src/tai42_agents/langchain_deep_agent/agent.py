@@ -227,13 +227,15 @@ class DeepAgent(Agent):
 
                 # The run face returns the park RECEIPT to its caller and resumes out of band, so
                 # it binds the resume continuation: an async ask this run drives parks through
-                # it. No completion tool is bound here, so a resumed run's final text is delivered
-                # nowhere — its side effects are the product; a caller needing the answer must
-                # invoke through a completion-bound door. A run carrying live tools, a non-durable
+                # it. The park entry captures the cross-driver chain routing an ancestor bound
+                # around this dispatch (read HERE, in the caller's context): a resumed run's
+                # terminal fires that chain's delivery tool and re-enters the waiting ancestor;
+                # unchained, the terminal fires nothing. A run carrying live tools, a non-durable
                 # checkpoint, an ephemeral (tool-face) workspace, or an unconfigured park index is
                 # not park-capable — build_park_identity returns None and the async ask refuses
                 # loudly pre-persist. The park's retention bound is min(checkpoint, workspace): the
                 # paused graph lives only as long as BOTH stores hold it.
+                completion_tool, completion_context = chain_routing_slots()
                 park = build_park_identity(
                     agent_name=self.tool_name,
                     config=config,
@@ -254,6 +256,8 @@ class DeepAgent(Agent):
                         workspace_key=drive.workspace_key,
                     ),
                     recursion_limit=recursion_limit,
+                    completion_tool=completion_tool,
+                    completion_context=completion_context,
                     bind=True,
                     extra_retention_horizon=drive.workspace_retention_horizon,
                 )
