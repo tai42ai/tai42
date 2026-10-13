@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import typer
@@ -27,7 +26,7 @@ def openapi(
     Redis, or live config services required. ``--check`` validates the spec
     against the OpenAPI 3.1 schema (for CI / pre-deploy) and writes nothing.
     """
-    from tai42_skeleton.cli.openapi import build_openapi_spec
+    from tai42_skeleton.cli.openapi import build_openapi_spec, openapi_json
 
     spec = build_openapi_spec()
 
@@ -42,10 +41,10 @@ def openapi(
         typer.echo("OpenAPI spec is valid.", err=True)
         return
 
-    document = json.dumps(spec, indent=2, sort_keys=True)
+    document = openapi_json(spec)
     if out is None:
-        typer.echo(document)
+        typer.echo(document, nl=False)
     else:
         target = Path(out)
-        target.write_text(document + "\n", encoding="utf-8")
+        target.write_text(document, encoding="utf-8")
         typer.echo(f"Wrote OpenAPI spec to {target}", err=True)

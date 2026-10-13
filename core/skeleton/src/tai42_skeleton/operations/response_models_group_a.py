@@ -19,13 +19,20 @@ from tai42_contract.app.responses import ApplyResponse, FanoutSummary
 from tai42_contract.conversations import (
     ApiConversationRouteCreate,
     ChannelConversationRouteCreate,
+    ConversationMode,
+    ConversationTargetKind,
     TargetConversationConfig,
 )
+from tai42_contract.plugins import PluginDelivery, RouteMethod
 from tai42_contract.template import TemplatedText
 from tai42_contract.versioning.models import DocumentVersion
 
 from tai42_skeleton.access_control.projection import PrincipalRef
-from tai42_skeleton.conversations.models import ConversationRecord
+from tai42_skeleton.app.route_registry import RouteAction
+from tai42_skeleton.conversations.mode import ModeSource
+from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
+from tai42_skeleton.conversations.record_pages import TranscriptOrder
+from tai42_skeleton.marketplace.compat import CompatState, UpgradeOutcome
 
 # ---------------------------------------------------------------------------
 # api_keys
@@ -74,7 +81,7 @@ class RouteMappingRow(BaseModel):
     mapped: str | None
     tags: list[str]
     summary: str
-    action: str | None
+    action: RouteAction | None
     declared_public: bool
 
 
@@ -269,7 +276,7 @@ class ThreadSummaryRow(BaseModel):
     client_address: str
     last_activity_at: float
     message_count: int
-    last_delivery_status: str
+    last_delivery_status: DeliveryStatus
 
 
 class ThreadSummaryEnvelope(BaseModel):
@@ -302,7 +309,7 @@ class TranscriptEnvelope(BaseModel):
     page: int
     page_size: int
     next_page: int | None
-    order: str
+    order: TranscriptOrder
     truncated: bool
     unreadable: int = 0
     person_id: str | None
@@ -379,8 +386,8 @@ class ThreadModeView(BaseModel):
     ``source`` is ``thread`` for a per-thread override or ``route`` for the route default.
     """
 
-    mode: str
-    source: str
+    mode: ConversationMode
+    source: ModeSource
 
 
 class ThreadModeSetResult(BaseModel):
@@ -388,8 +395,8 @@ class ThreadModeSetResult(BaseModel):
 
     route_name: str
     thread_id: str
-    mode: str
-    source: str
+    mode: ConversationMode
+    source: ModeSource
 
 
 class ConversationConfigListEnvelope(BaseModel):
@@ -408,7 +415,7 @@ class ConversationConfigSetResult(BaseModel):
     """The created/replaced per-target conversation config."""
 
     created: bool
-    target_kind: str
+    target_kind: ConversationTargetKind
     target_name: str
     config: TargetConversationConfig
 
@@ -417,7 +424,7 @@ class ConversationConfigDeleteResult(BaseModel):
     """A per-target conversation config removal."""
 
     removed: bool
-    target_kind: str
+    target_kind: ConversationTargetKind
     target_name: str
 
 
@@ -503,7 +510,7 @@ class McpStatusSnapshot(BaseModel):
 class CompatStatus(BaseModel):
     """An installed distribution's compatibility verdict against the running contract."""
 
-    status: str
+    status: CompatState
     reason: str | None
 
 
@@ -525,7 +532,7 @@ class InstalledRow(BaseModel):
     ref: str
     version: str
     source: str
-    delivery: str
+    delivery: PluginDelivery
     installed_at: str
     latest: str | None
     update_available: bool
@@ -558,7 +565,7 @@ class MountedRoute(BaseModel):
 
     item: str
     full_path: str
-    methods: list[str]
+    methods: list[RouteMethod]
     public: bool
 
 
@@ -567,7 +574,7 @@ class RouteCollision(BaseModel):
 
     item: str
     full_path: str
-    methods: list[str]
+    methods: list[RouteMethod]
     conflict_owner: str
     conflict_path: str
 
@@ -577,7 +584,7 @@ class PublicRouteRow(BaseModel):
 
     item: str
     full_path: str
-    methods: list[str]
+    methods: list[RouteMethod]
 
 
 class RequiredEnvVar(BaseModel):
@@ -592,7 +599,7 @@ class PreviewItemRoute(BaseModel):
 
     path: str
     full_path: str
-    methods: list[str]
+    methods: list[RouteMethod]
     public: bool
 
 
@@ -642,7 +649,7 @@ class InstallPreview(BaseModel):
     requires_public_acceptance: bool
     required_env: list[RequiredEnvVar]
     missing_env: list[str]
-    delivery: str
+    delivery: PluginDelivery
 
 
 class UninstallResult(BaseModel):
@@ -666,7 +673,7 @@ class UpgradeRow(BaseModel):
     """
 
     ref: str
-    outcome: str
+    outcome: UpgradeOutcome
     detail: str
 
 

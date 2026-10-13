@@ -5,11 +5,11 @@ Plus the option/section type adapters the send seam coerces raw dicts through.
 
 from __future__ import annotations
 
-from typing import Literal, get_args
-
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 from tai42_contract.channels import Option, OptionSection
 from tai42_contract.conversations import ConversationMode
+
+from tai42_skeleton.conversations.record_pages import TranscriptOrder
 
 # Coerces raw option dicts into the typed ``Option`` discriminated union once, so the send seam
 # and the AnswerPart validation both see typed models rather than raw dicts.
@@ -26,11 +26,6 @@ MAX_THREAD_PAGE_SIZE = 200
 #: index cannot be sliced at, which the backend answers with an error of its own; it is a
 #: malformed window and is refused as one here.
 MAX_THREAD_PAGE = 1_000_000
-
-#: The transcript orders the door serves: ``asc`` is the transcript order (oldest first),
-#: ``desc`` the live-tail order, where page 1 always holds the newest messages.
-TranscriptOrder = Literal["asc", "desc"]
-TRANSCRIPT_ORDERS = get_args(TranscriptOrder)
 
 
 class ThreadWindowQuery(BaseModel):

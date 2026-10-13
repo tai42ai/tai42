@@ -483,10 +483,10 @@ class ResourceList(BaseModel):
 
 
 class ResourceStat(BaseModel):
-    """One storage resource's inferred content type."""
+    """One storage resource's inferred content type; ``null`` when the provider cannot infer one."""
 
     id: str
-    content_type: str
+    content_type: str | None
 
 
 class ResourceStored(BaseModel):

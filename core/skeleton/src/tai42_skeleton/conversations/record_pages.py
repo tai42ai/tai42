@@ -6,8 +6,14 @@ Thread summaries, paged threads/records, and the pending-delivery view.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal, get_args
 
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
+
+#: The transcript orders the transcript door serves: ``asc`` is the transcript order (oldest first),
+#: ``desc`` the live-tail order, where page 1 always holds the newest messages.
+TranscriptOrder = Literal["asc", "desc"]
+TRANSCRIPT_ORDERS = get_args(TranscriptOrder)
 
 
 @dataclass(frozen=True)

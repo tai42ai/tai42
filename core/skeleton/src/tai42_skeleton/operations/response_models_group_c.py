@@ -18,15 +18,15 @@ import warnings
 from typing import Literal
 
 from pydantic import BaseModel, JsonValue, RootModel
-from tai42_contract.accounts.models import LoginMethod
+from tai42_contract.accounts.models import LoginCredentialKind, LoginMethod
 from tai42_contract.backup import BackupSectionReport
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
 from tai42_contract.interactions import RunAnswer
-from tai42_contract.interactions.models import LocationElement, MediaItem
+from tai42_contract.interactions.models import AnswerFormat, LocationElement, MediaItem
 
 from tai42_skeleton.app.kind_status import KindStatus
 from tai42_skeleton.plugins.registry import StudioPluginManifest
-from tai42_skeleton.routers.observability_support import RunSortKey
+from tai42_skeleton.routers.observability_support import MetricsGranularity, RunSortKey, RunStatus
 
 # --- Agents -----------------------------------------------------------------
 
@@ -172,7 +172,7 @@ class InteractionFrame(BaseModel):
     interaction_id: str
     group_id: str
     question: str
-    answer_format: str
+    answer_format: AnswerFormat
     format_payload: JsonValue
     created_at: str
     timeout_at: str
@@ -241,7 +241,7 @@ class SetupLogin(BaseModel):
     owner-login fields.
     """
 
-    kinds: list[str]
+    kinds: list[LoginCredentialKind]
 
 
 class LoginMethodsListing(BaseModel):
@@ -388,7 +388,7 @@ class MetricsResult(BaseModel):
     timeSeries: list[MetricsTimePoint]
     byModel: list[ModelUsageRow]
     byModelAvailable: bool = True
-    granularity: str
+    granularity: MetricsGranularity
 
 
 class ObservabilityRunView(BaseModel):
@@ -403,7 +403,7 @@ class ObservabilityRunView(BaseModel):
     traceId: str
     createdAt: str | None = None
     tags: list[str]
-    status: str
+    status: RunStatus
     cost: float | None = None
     latencyMs: int | None = None
     totalTokens: int | None = None

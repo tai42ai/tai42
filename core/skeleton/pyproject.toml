@@ -173,7 +173,7 @@ where = ["src"]
 include = ["tai42_skeleton*"]
 
 [tool.setuptools.package-data]
-tai42_skeleton = ["py.typed", "**/*.sql"]
+tai42_skeleton = ["py.typed", "**/*.sql", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 # importlib import mode + package-less test dirs (no tests/__init__.py): each test

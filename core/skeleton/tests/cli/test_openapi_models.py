@@ -15,6 +15,7 @@ from jsonschema import Draft202012Validator
 from openapi_spec_validator import validate
 from pydantic import BaseModel, RootModel, computed_field
 from tai42_cli import app as app_module
+from tai42_contract.interactions.models import AnswerFormat
 
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE
 from tai42_skeleton.app.route_registry import RouteMetadata, method_to_action
@@ -25,6 +26,7 @@ from tai42_skeleton.cli.openapi import (
     build_openapi_spec,
 )
 from tai42_skeleton.cli.openapi import _operation as _emit_operation
+from tai42_skeleton.conversations.models import DeliveryStatus
 
 from .conftest import _operation, schemas_for
 
@@ -627,3 +629,67 @@ def test_the_profile_apply_response_documents_an_optional_recycle_stop(spec: dic
     base = {"hot": [], "recycle": [], "fresh": [], "refused": [], "fanout": {"mode": "fleet"}}
     validator.validate(base)
     validator.validate({**base, "recycle_stopped": {"kind": "backend", "name": None, "detail": "bus unreachable"}})
+
+
+# -- closed response fields publish their values ------------------------------------
+
+_ROUTE_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+
+
+def _enum_of(spec: dict, schema: dict) -> list[str]:
+    """The values a property schema closes over: an inline ``enum``, a named enum component, or nullable either."""
+    if "$ref" in schema:
+        return _enum_of(spec, spec["components"]["schemas"][schema["$ref"].removeprefix("#/components/schemas/")])
+    if "anyOf" in schema:
+        (closed,) = [member for member in schema["anyOf"] if member.get("type") != "null"]
+        return _enum_of(spec, closed)
+    if schema.get("type") == "array":
+        return _enum_of(spec, schema["items"])
+    return schema["enum"]
+
+
+@pytest.mark.parametrize(
+    ("component", "field", "values"),
+    [
+        ("PublicRouteRow", "methods", _ROUTE_METHODS),
+        ("MountedRoute", "methods", _ROUTE_METHODS),
+        ("RouteCollision", "methods", _ROUTE_METHODS),
+        ("PreviewItemRoute", "methods", _ROUTE_METHODS),
+        ("InstalledRow", "delivery", ["package", "descriptor"]),
+        ("InstallPreview", "delivery", ["package", "descriptor"]),
+        ("CompatStatus", "status", ["compatible", "incompatible", "unknown"]),
+        ("UpgradeRow", "outcome", ["upgraded", "up-to-date", "no-compatible-version", "failed"]),
+        ("InteractionFrame", "answer_format", [answer_format.value for answer_format in AnswerFormat]),
+        ("SetupLogin", "kinds", ["password", "invite"]),
+        ("RouteMappingRow", "action", ["read", "write", "fenced", "secret"]),
+        ("ThreadModeView", "source", ["thread", "route"]),
+        ("ThreadModeSetResult", "source", ["thread", "route"]),
+        ("ThreadModeView", "mode", ["agent", "manual"]),
+        ("ThreadModeSetResult", "mode", ["agent", "manual"]),
+        ("TranscriptEnvelope", "order", ["asc", "desc"]),
+        ("FoldReport", "mode", ["switch", "merge"]),
+        ("MetricsResult", "granularity", ["hour", "day", "week"]),
+        ("ObservabilityRunView", "status", ["error", "success"]),
+        ("PrincipalRef", "kind", ["human", "service"]),
+        ("ThreadSummaryRow", "last_delivery_status", [status.value for status in DeliveryStatus]),
+        ("ConversationConfigSetResult", "target_kind", ["agent", "tool"]),
+        ("ConversationConfigDeleteResult", "target_kind", ["agent", "tool"]),
+    ],
+)
+def test_a_closed_response_field_publishes_its_values(
+    spec: dict, component: str, field: str, values: list[str]
+) -> None:
+    schema = spec["components"]["schemas"][component]["properties"][field]
+    assert sorted(_enum_of(spec, schema)) == sorted(values)
+
+
+def test_the_route_mapping_methods_stay_open_strings(spec: dict) -> None:
+    # The routes listing reads the live route table, which also holds routes the platform does not declare.
+    schema = spec["components"]["schemas"]["RouteMappingRow"]["properties"]["methods"]
+    assert schema["items"] == {"type": "string"}
+
+
+def test_a_storage_stat_publishes_its_nullable_content_type(spec: dict) -> None:
+    # A provider that cannot infer a type answers null (the contract's ObjectStat.content_type).
+    schema = spec["components"]["schemas"]["ResourceStat"]["properties"]["content_type"]
+    assert {"type": "null"} in schema["anyOf"]

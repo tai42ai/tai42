@@ -21,7 +21,7 @@ explicit operator thread delete (:meth:`ConversationRecordStore.drop_thread`) or
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import CONVERSATION_MODES, ConversationMode, ConversationRoute
@@ -40,6 +40,9 @@ if TYPE_CHECKING:
     from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
 
 _NO_BACKEND = "conversation thread mode requires the redis conversations backend"
+
+#: Where a thread's mode comes from: its own override (``thread``) or its route's default (``route``).
+ModeSource = Literal["thread", "route"]
 
 
 def _validate_mode(mode: str) -> ConversationMode:

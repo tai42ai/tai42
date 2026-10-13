@@ -56,7 +56,7 @@ from typing import Any
 from async_lru import alru_cache
 from pydantic import BaseModel, Field
 from starlette.authentication import AuthenticationError
-from tai42_contract.access_control import UNIVERSAL_SCOPE
+from tai42_contract.access_control import UNIVERSAL_SCOPE, PrincipalKind
 from tai42_contract.app import tai42_app
 from tai42_kit.settings import register_settings_reset
 
@@ -126,7 +126,7 @@ class PrincipalRef(BaseModel):
     """The principal a credential belongs to: the owner of a key, or the human of a session."""
 
     user_id: str
-    kind: str
+    kind: PrincipalKind
     display_name: str
 
 

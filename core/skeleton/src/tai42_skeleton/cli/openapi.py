@@ -32,6 +32,7 @@ emission must never need one.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable, Iterator, Mapping
 from importlib.metadata import version
@@ -61,7 +62,10 @@ _SERIALIZATION: JsonSchemaMode = "serialization"
 _ERROR_SCHEMA = "Error"
 _RELOADING_ERROR_SCHEMA = "ReloadingError"
 
-_PATH_PARAM = re.compile(r"\{([^}:]+)(?::[^}]+)?\}")
+_PATH_PARAM = re.compile(r"\{([^}:]+)(?::([^}]+))?\}")
+
+# The path-parameter extension naming a Starlette converter the spec template drops.
+_CONVERTER_EXTENSION = "x-tai42-converter"
 
 _NON_JSON_DESCRIPTIONS: dict[str, str] = {
     "text/event-stream": "Server-sent event stream.",
@@ -103,15 +107,24 @@ def _openapi_path(path: str) -> str:
 
 
 def _path_parameters(path: str) -> list[dict[str, Any]]:
-    return [
-        {
-            "name": name,
+    """One required string parameter per path placeholder.
+
+    A placeholder with Starlette's ``path`` converter matches across ``/`` separators; the
+    spec template drops the converter, so the parameter carries it as ``x-tai42-converter``
+    for a client building the path.
+    """
+    parameters: list[dict[str, Any]] = []
+    for match in _PATH_PARAM.finditer(path):
+        parameter: dict[str, Any] = {
+            "name": match.group(1),
             "in": "path",
             "required": True,
             "schema": {"type": "string"},
         }
-        for name in _PATH_PARAM.findall(path)
-    ]
+        if match.group(2) == "path":
+            parameter[_CONVERTER_EXTENSION] = "path"
+        parameters.append(parameter)
+    return parameters
 
 
 def _operation_id(method: str, path: str) -> str:
@@ -564,7 +577,10 @@ def build_openapi_spec() -> dict[str, Any]:
         "info": {
             "title": "tai42-skeleton API",
             "version": version("tai42-skeleton"),
-            "description": "The operator HTTP surface served under /api/*.",
+            "description": (
+                "The operator HTTP surface served under /api/*. "
+                "The platform's core routes. Plugin routes are published by each plugin."
+            ),
         },
         "paths": paths,
         "components": {
@@ -572,3 +588,58 @@ def build_openapi_spec() -> dict[str, Any]:
             "securitySchemes": {_SECURITY_SCHEME: {"type": "apiKey", "in": "header", "name": API_KEY_HEADER}},
         },
     }
+
+
+def openapi_json(spec: dict[str, Any]) -> str:
+    r"""The canonical on-disk form of a spec — sorted keys, two-space indent, non-ASCII un-escaped, trailing newline.
+
+    Raw UTF-8 rather than ``\\uXXXX`` escapes keeps the committed bytes identical to what the release
+    tooling's JSON version rewrite writes, so cutting a release touches only the ``info.version`` line.
+    """
+    return json.dumps(spec, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def openapi_drift(fresh: dict[str, Any], committed: dict[str, Any]) -> list[str]:
+    """The distinct reasons the committed artifact is stale against a fresh build, or empty when it is fresh.
+
+    ``info.version`` is the running package version, a SEPARATE equality, so a version-only bump is
+    reported as the version line and never as shape drift. The shape is compared with
+    ``info.version`` removed from both copies: each path and each component schema by name, and
+    any other difference (``openapi``, the rest of ``info``, the security schemes) as the envelope.
+    """
+    lines: list[str] = []
+    fresh_version = fresh.get("info", {}).get("version")
+    committed_version = committed.get("info", {}).get("version")
+    if committed_version != fresh_version:
+        lines.append(
+            f"info.version {committed_version!r} in the committed artifact does not match the running "
+            f"package version {fresh_version!r}"
+        )
+    lines.extend(_named_drift("path", fresh.get("paths", {}), committed.get("paths", {})))
+    fresh_components = fresh.get("components", {})
+    committed_components = committed.get("components", {})
+    lines.extend(
+        _named_drift("component", fresh_components.get("schemas", {}), committed_components.get("schemas", {}))
+    )
+    if _envelope(fresh) != _envelope(committed):
+        lines.append("the spec envelope changed")
+    return lines
+
+
+def _named_drift(kind: str, fresh: Mapping[str, Any], committed: Mapping[str, Any]) -> Iterator[str]:
+    """One line per name new in ``fresh``, removed from it, or reshaped, in name order."""
+    for name in sorted(set(fresh) | set(committed)):
+        if name not in committed:
+            yield f"{kind} {name!r} is new"
+        elif name not in fresh:
+            yield f"{kind} {name!r} was removed"
+        elif fresh[name] != committed[name]:
+            yield f"{kind} {name!r} changed shape"
+
+
+def _envelope(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """The spec without its paths, its component schemas and ``info.version``."""
+    envelope = {key: value for key, value in spec.items() if key != "paths"}
+    envelope["info"] = {key: value for key, value in spec.get("info", {}).items() if key != "version"}
+    envelope["components"] = {key: value for key, value in spec.get("components", {}).items() if key != "schemas"}
+    return envelope
