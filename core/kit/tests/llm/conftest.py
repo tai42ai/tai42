@@ -86,10 +86,10 @@ def install_fake_named_pool(monkeypatch) -> tuple[dict[str, Any], list[bool]]:
     assert the pool build (conninfo, sizes, name, per-connection kwargs) and its awaited
     fill without a live server.
 
-    The store/checkpoint factories now build their pool through
+    The store/checkpoint factories build their pool through
     ``tai42_kit.clients.impl.postgres._open_named_pool``, which probes the first
     connection with the real driver before it builds the pool. Faking the driver's
-    ``connect`` and ``AsyncConnectionPool`` on that module exercises the shared seam
+    ``connect`` and the kit pool class on that module exercises the shared seam
     (probe, ``wait=True`` fill, checkout-time check, close-on-failure) end to end.
 
     Returns the pool's captured build kwargs (including ``open_wait``) and a close log.
@@ -135,5 +135,5 @@ def install_fake_named_pool(monkeypatch) -> tuple[dict[str, Any], list[bool]]:
             closed.append(True)
 
     monkeypatch.setattr(pg.AsyncConnection, "connect", _fake_connect)
-    monkeypatch.setattr(pg, "AsyncConnectionPool", _FakePool)
+    monkeypatch.setattr(pg, "_CancelSurfacingPool", _FakePool)
     return captured, closed

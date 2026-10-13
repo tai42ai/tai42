@@ -768,7 +768,7 @@ async def test_pg_create_proves_connection_then_opens_pool_and_close(monkeypatch
             self.closed = True
 
     monkeypatch.setattr(pg_mod.AsyncConnection, "connect", _fake_connect)
-    monkeypatch.setattr(pg_mod, "AsyncConnectionPool", _FakePool)
+    monkeypatch.setattr(pg_mod, "_CancelSurfacingPool", _FakePool)
     pool = await pg_mod.PostgresClient()._create(dsn="postgresql://u@h/db", min_size=3, max_size=7)
     # The first connection is proven — with the SAME DSN, closed at once — BEFORE the pool is built.
     assert order == [("probe", "postgresql://u@h/db"), ("pool", None)]

@@ -47,14 +47,7 @@ async def sweep_pass() -> None:
 
 
 async def _sweep_loop(interval: float) -> None:
-    """Run a pass every ``interval`` seconds for the life of the generation; a failing pass is logged and counted.
-
-    The loop ends once its task has been cancelled, even when the pass absorbed the
-    cancellation and returned normally: the Postgres pool's checkout check catches a
-    ``CancelledError`` that lands while it validates a connection, discards that connection
-    and hands out another, so the pass completes as if no cancel had been requested.
-    """
-    task = asyncio.current_task()
+    """Run a pass every ``interval`` seconds for the life of the generation; a failing pass is logged and counted."""
     while True:
         await asyncio.sleep(interval)
         try:
@@ -62,8 +55,6 @@ async def _sweep_loop(interval: float) -> None:
         except Exception:
             outbox_metrics().sweep_errors.inc()
             logger.error("states outbox: sweep pass failed; retrying in %ss", interval, exc_info=True)
-        if task is not None and task.cancelling():
-            raise asyncio.CancelledError
 
 
 def _on_sweep_done(task: asyncio.Task[None]) -> None:

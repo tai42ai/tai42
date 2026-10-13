@@ -1,5 +1,6 @@
 """Pooled Postgres client built on ``psycopg_pool.AsyncConnectionPool``."""
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, Final
@@ -32,9 +33,37 @@ __all__ = [
 # connection, ``reset=`` on every connection returned to the pool).
 ConnectionCallback = Callable[[AsyncConnection[Any]], Awaitable[None]]
 
-# The pool's default connection type. Naming it lets the pooled-client generic
-# resolve concretely (the AsyncConnectionPool default hides ACT behind a cast).
-_Pool = AsyncConnectionPool[AsyncConnection[TupleRow]]
+
+class _CancelSurfacingPool(AsyncConnectionPool[AsyncConnection[TupleRow]]):
+    """The kit's Postgres pool: a cancellation requested during a checkout reaches the caller.
+
+    The checkout validates each connection with the ``check`` callback, and the pool treats a
+    ``CancelledError`` raised inside that check as a failed check: it returns the connection and
+    hands out another, so the cancelled task would carry on as if never cancelled. ``getconn``
+    (which ``connection()`` calls) compares the task's ``cancelling()`` count before and after
+    the checkout; a cancellation requested in between is re-raised whether the checkout returns
+    (once the connection is back in the pool) or fails (chained to the checkout's own error). A
+    cancellation delivered and handled before the checkout leaves the count unchanged, so that
+    task still gets its connection.
+
+    The type parameter is the pool's default connection type, so the pooled-client generic
+    resolves concretely.
+    """
+
+    async def getconn(self, timeout: float | None = None) -> AsyncConnection[TupleRow]:
+        task = asyncio.current_task()
+        cancelling_before = task.cancelling() if task is not None else 0
+        try:
+            conn = await super().getconn(timeout)
+        except Exception as exc:
+            if task is not None and task.cancelling() > cancelling_before:
+                raise asyncio.CancelledError from exc
+            raise
+        if task is not None and task.cancelling() > cancelling_before:
+            await self.putconn(conn)
+            raise asyncio.CancelledError
+        return conn
+
 
 # Connection kwargs a Postgres client accepts. ``dsn`` is the pool identity;
 # ``min_size``/``max_size`` are this database's deployment build options; and
@@ -140,7 +169,7 @@ async def _open_named_pool(
     connection_kwargs: dict | None = None,
     configure: ConnectionCallback | None = None,
     reset: ConnectionCallback | None = None,
-) -> _Pool:
+) -> _CancelSurfacingPool:
     """Prove the first connection, then build and fill a named pool.
 
     Prove the first connection with the driver itself BEFORE the pool is built and
@@ -165,7 +194,7 @@ async def _open_named_pool(
     async with await AsyncConnection.connect(dsn):
         pass
 
-    pool = AsyncConnectionPool(
+    pool = _CancelSurfacingPool(
         conninfo=dsn,
         min_size=min_size,
         max_size=max_size,
@@ -181,7 +210,7 @@ async def _open_named_pool(
         # otherwise get an OperationalError on the first query. This is what
         # lets a pooled caller ride out a transient Postgres outage without a
         # restart.
-        check=AsyncConnectionPool.check_connection,
+        check=_CancelSurfacingPool.check_connection,
     )
     # ``wait=True`` so the initial fill finishes HERE. Opened non-blocking, the
     # fill runs in background workers that outlive the caller: at loop shutdown
@@ -229,7 +258,7 @@ EXPLICIT_DSN_POOL_MAX_SIZE: Final = 20
 
 async def open_dedicated_pool(
     target: PostgresConnectionSettings | str, *, role: str, connection_kwargs: dict[str, Any] | None = None
-) -> _Pool:
+) -> _CancelSurfacingPool:
     """Open a dedicated (not shared) named pool for ``role``, its first connection proven and its fill awaited.
 
     A settings object supplies the DSN and the deployment's pool sizes; a DSN string gets
@@ -250,7 +279,7 @@ async def open_dedicated_pool(
     )
 
 
-class PostgresClient(PooledClient[_Pool]):
+class PostgresClient(PooledClient[_CancelSurfacingPool]):
     """Pooled ``psycopg_pool.AsyncConnectionPool``, one pool per DSN per loop.
 
     The pool is named ``<owner>@<host>/<db>``; ``min_size``/``max_size`` are this
@@ -271,7 +300,7 @@ class PostgresClient(PooledClient[_Pool]):
     def _describe_identity(self, **kwargs) -> str:
         return _mask_dsn_password(kwargs.get("dsn", ""))
 
-    async def _create(self, **kwargs) -> _Pool:
+    async def _create(self, **kwargs) -> _CancelSurfacingPool:
         if "dsn" not in kwargs:
             raise KeyError("Postgres client requires a 'dsn' kwarg")
         dsn = kwargs["dsn"]
@@ -289,7 +318,7 @@ class PostgresClient(PooledClient[_Pool]):
             reset=_restore_transactional,
         )
 
-    async def _close(self, client: _Pool):
+    async def _close(self, client: _CancelSurfacingPool):
         await client.close()
 
     def _disconnection_exceptions(self) -> tuple[type[Exception], ...]:

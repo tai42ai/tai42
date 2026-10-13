@@ -228,12 +228,12 @@ async def test_client_pools_restore_transactional_mode_and_pinned_pools_do_not(
 ) -> None:
     built: list[dict[str, Any]] = []
 
-    class _RecordingPool(pg.AsyncConnectionPool):
+    class _RecordingPool(pg._CancelSurfacingPool):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             built.append(kwargs)
             super().__init__(*args, **kwargs)
 
-    monkeypatch.setattr(pg, "AsyncConnectionPool", _RecordingPool)
+    monkeypatch.setattr(pg, "_CancelSurfacingPool", _RecordingPool)
 
     async with _one_connection_pool(real_pg_settings) as pool, pool.connection():
         pass
