@@ -133,10 +133,14 @@ class CheckpointSweepResult(BaseModel):
 
 
 class ExtensionView(BaseModel):
-    """One registered extension: its ``name`` and lowercase ``kind`` enum value."""
+    """One registered extension: ``name``, the lowercase ``kind`` value, and ``multiple``.
+
+    ``multiple`` says whether one tool may stack several extensions of that kind.
+    """
 
     name: str
     kind: str
+    multiple: bool
 
 
 class ExtensionListing(RootModel[list[ExtensionView]]):
@@ -247,12 +251,15 @@ class LoginMethodsListing(BaseModel):
     OMITTED, never ``null``. ``needs_setup`` is the one platform fact "no principal exists"
     (the login screen renders the setup entry instead of sign-in forms while true).
     ``setup_login`` names what the setup door can attach, or ``null`` when no login-attaching
-    provider is configured.
+    provider is configured. ``claim_fragment_key`` is the key a claim link carries its token
+    under in the login page's fragment (``HOSTED_UI_CLAIM_FRAGMENT_KEY``), so a client cuts the
+    token out of a pasted link.
     """
 
     methods: list[LoginMethod]
     needs_setup: bool
     setup_login: SetupLogin | None = None
+    claim_fragment_key: str
 
 
 class ClaimExchangeResult(BaseModel):

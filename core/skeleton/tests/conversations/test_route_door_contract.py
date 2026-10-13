@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import MessageFinal, StructuredFinal
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ChannelConversationRoute, ConversationRoute
 from tai42_contract.interactions import ParkedEntry, VisitOutcome
 from tai42_contract.template import TemplatedText
 from tests.agent._memoryless import MemorylessTestAgent
@@ -80,7 +80,7 @@ def _agent_route(
     resume_expr: str | None = None,
     extras_expr: str | None = None,
 ) -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name="chat",
         door="channel",
         target_kind="agent",

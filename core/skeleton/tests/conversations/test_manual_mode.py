@@ -11,7 +11,12 @@ from contextlib import asynccontextmanager
 import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
-from tai42_contract.conversations import ConversationRoute, TargetConversationConfig
+from tai42_contract.conversations import (
+    ApiConversationRoute,
+    ChannelConversationRoute,
+    ConversationRoute,
+    TargetConversationConfig,
+)
 from tai42_contract.template import TemplatedText
 from tests.agent._memoryless import MemorylessTestAgent
 
@@ -129,7 +134,7 @@ class _FakeChannels:
 
 
 def _channel_route(initial_mode: str = "agent", *, target_kind: str = "agent") -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name="line",
         door="channel",
         target_kind=target_kind,  # pyright: ignore[reportArgumentType]
@@ -145,7 +150,7 @@ def _channel_route(initial_mode: str = "agent", *, target_kind: str = "agent") -
 
 
 def _api_route(initial_mode: str = "manual") -> ConversationRoute:
-    return ConversationRoute(
+    return ApiConversationRoute(
         route_name="chat",
         door="api",
         target_kind="agent",
@@ -305,7 +310,7 @@ async def test_person_thread_manual_fold_to_a_memoryless_target_records_silent_n
         async def get_by_id(self, person_id: str):
             return person if person_id == "p9" else None
 
-    line_b = ConversationRoute(
+    line_b = ChannelConversationRoute(
         route_name="line-b",
         door="channel",
         target_kind="agent",

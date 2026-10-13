@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from fastmcp.tools import Tool
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ApiConversationRoute, ConversationRoute
 from tai42_contract.presets import PresetBody
 from tai42_contract.versioning.errors import DocumentNotFoundError
 
@@ -114,7 +114,7 @@ def wired_composing(monkeypatch):
         "q": PresetBody(base_tool="composer", description="d", fixed_kwargs={"tool_names": ["p"]}),
     }
     tools = {"p": _composer_tool("p"), "q": _composer_tool("q")}
-    route_q = ConversationRoute(
+    route_q = ApiConversationRoute(
         route_name="rq",
         door="api",
         target_kind="tool",

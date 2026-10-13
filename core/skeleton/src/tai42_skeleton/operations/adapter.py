@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, get_args
 
 from fastmcp.utilities.types import Audio, File, Image
 from pydantic import BaseModel, ValidationError
+from pydantic_core import ErrorDetails
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -119,13 +120,13 @@ def validate_body[M: BaseModel](model: type[M], body: object, what: str) -> M:
     ``body`` is any decoded JSON value: a value that is not an object is refused by the model's own
     rule ("Input should be a valid dictionary or instance of …"). Value-free: each refusal names the
     declared field path and the bound it violates (pydantic's ``msg``), never the input — a path
-    stops at the first part that is not a declared field (a mapping key or a list index the caller
-    chose).
+    steps through the tag of a root discriminated union's chosen variant and stops at the first part
+    that is not a declared field (a mapping key or a list index the caller chose).
     """
     try:
         return model.model_validate(body)
     except ValidationError as exc:
-        refusals = (_refusal(model, error["loc"], error["msg"]) for error in exc.errors())
+        refusals = (_refusal(model, error["loc"], _rule_text(error)) for error in exc.errors())
         raise BadRequestError(f"invalid {what}: " + "; ".join(refusals)) from exc
 
 
@@ -134,11 +135,29 @@ def _refusal(model: type[BaseModel], loc: tuple[int | str, ...], msg: str) -> st
     path: list[str] = []
     current: type[BaseModel] | None = model
     for part in loc:
-        if current is None or not isinstance(part, str) or part not in current.model_fields:
+        if current is None or not isinstance(part, str):
             break
+        if part not in current.model_fields:
+            # A discriminated union's location steps through the tag of the variant it chose.
+            current = _tagged_variant(current, part)
+            continue
         path.append(part)
         current = _model_of(current.model_fields[part].annotation)
     return f"{'.'.join(path)}: {msg}" if path else msg
+
+
+def _tagged_variant(model: type[BaseModel], tag: str) -> type[BaseModel] | None:
+    """The variant of a root discriminated union whose tag is ``tag``, else ``None``."""
+    root = model.model_fields.get("root")
+    if root is None or not isinstance(root.discriminator, str):
+        return None
+    for variant in get_args(root.annotation):
+        if not (isinstance(variant, type) and issubclass(variant, BaseModel)):
+            continue
+        tag_field = variant.model_fields.get(root.discriminator)
+        if tag_field is not None and tag in get_args(tag_field.annotation):
+            return variant
+    return None
 
 
 def _model_of(annotation: Any) -> type[BaseModel] | None:
@@ -147,6 +166,18 @@ def _model_of(annotation: Any) -> type[BaseModel] | None:
         return annotation
     models = [arg for arg in get_args(annotation) if isinstance(arg, type) and issubclass(arg, BaseModel)]
     return models[0] if len(models) == 1 else None
+
+
+def _rule_text(error: ErrorDetails) -> str:
+    """The violated rule of one pydantic error, without the input.
+
+    A discriminated union's unknown-tag message quotes the sent tag, so it is rendered from the
+    error's context: the discriminator and the expected tags.
+    """
+    if error["type"] == "union_tag_invalid":
+        ctx = error.get("ctx") or {}
+        return f"{ctx['discriminator']} must be one of the expected tags: {ctx['expected_tags']}"
+    return error["msg"]
 
 
 def request_with_body(request: Request, body: bytes) -> Request:

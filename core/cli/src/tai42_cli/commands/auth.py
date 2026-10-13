@@ -1,7 +1,8 @@
 """``tai auth`` — identity and capability introspection, plus member actions.
 
 Thin wrappers over the authed ``/api/auth/me`` route, the PUBLIC
-``/api/login/claim`` claim-exchange door (``claim`` runs credential-free), and the
+``/api/login/claim`` claim-exchange door (``claim`` runs credential-free, reading the
+claim-link fragment key from the public ``/api/login/methods``), and the
 admin-only member-actions doors (``tai auth member-actions list`` /
 ``tai auth member-actions invoke``) that list and invoke the accounts providers'
 declared member-admin actions by their opaque keys.
@@ -11,9 +12,11 @@ from __future__ import annotations
 
 import sys
 from typing import Annotated
+from urllib.parse import parse_qs, urlsplit
 
 import typer
 
+from tai42_cli.client import ApiClient
 from tai42_cli.commands._common import (
     app_context,
     covers,
@@ -28,20 +31,27 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-_CLAIM_FRAGMENT_MARKER = "#claim="
 
+def _extract_claim_token(value: str, client: ApiClient) -> str:
+    """The claim token from either a bare token or a full claim link.
 
-def _extract_claim_token(value: str) -> str:
-    """The claim token from either a bare token or a full claim URL/fragment.
-
-    The token rides the URL FRAGMENT (``…/login#claim=<token>``), so pasting the whole
-    link just works: take the tail after ``#claim=``. A bare token (no marker) is
-    returned as-is. The token is NEVER matched by its mint prefix — the server validates
-    it, and a prefix check here would add nothing.
+    A link carries its token in its URL fragment under the key the deployment declares, read
+    from the public ``GET /api/login/methods`` (``claim_fragment_key``); the fragment is parsed
+    as form-encoded pairs. A bare token (no ``#``) is returned as-is with no request. The token
+    is NEVER matched by its mint prefix — the server validates it.
     """
-    if _CLAIM_FRAGMENT_MARKER in value:
-        value = value.rsplit(_CLAIM_FRAGMENT_MARKER, 1)[1]
-    return value.strip()
+    value = value.strip()
+    if "#" not in value:
+        return value
+    key = client.get("/api/login/methods")["claim_fragment_key"]
+    tokens = parse_qs(urlsplit(value).fragment).get(key, [])
+    if not tokens:
+        raise typer.BadParameter(f"the pasted link carries no {key}= fragment", param_hint="TOKEN")
+    if len(tokens) > 1:
+        raise typer.BadParameter(
+            f"the pasted link carries {len(tokens)} {key}= fragments; exactly one is expected", param_hint="TOKEN"
+        )
+    return tokens[0]
 
 
 @app.command("whoami")
@@ -58,7 +68,7 @@ def whoami(ctx: typer.Context) -> None:
 
 
 @app.command("claim")
-@covers(("POST", "/api/login/claim"))
+@covers(("GET", "/api/login/methods"), ("POST", "/api/login/claim"))
 def claim(
     ctx: typer.Context,
     token: Annotated[
@@ -71,10 +81,11 @@ def claim(
 ) -> None:
     """Exchange a one-time claim link for its API key — runs WITHOUT a credential.
 
-    Pass the bare token or the whole claim URL; the token is taken from the ``#claim=``
-    fragment. Pass ``-`` to read the token (or claim URL) from stdin, stripped, keeping it
-    off the command line. The exchanged API key is printed ONCE — capture it now (there is
-    no second exchange; the link is single-use). A used/unknown/expired token answers the
+    Pass the bare token or the whole claim URL; the token is taken from the link's fragment,
+    under the key the server declares (``GET /api/login/methods``). Pass ``-`` to read the
+    token (or claim URL) from stdin, stripped, keeping it off the command line. The exchanged
+    API key is printed ONCE — capture it now (there is no second exchange; the link is
+    single-use). A used/unknown/expired token answers the
     same ``unknown or already used claim token``.
 
     Example: ``tai auth claim 'https://host/login#claim=<token>'``
@@ -82,10 +93,10 @@ def claim(
     ctx_obj = app_context(ctx)
     if token == "-":  # noqa: S105 constant identifier, not a secret value
         token = sys.stdin.read()
-    claim_token = _extract_claim_token(token)
-    # The caller has no key yet — this is the whole point — so the exchange runs over the
-    # no-credential client path; a stale/wrong credential is never sent to the public door.
+    # The caller has no key yet — this is the whole point — so both public calls run over the
+    # no-credential client path; a stale/wrong credential is never sent to a public door.
     with ctx_obj.client(anonymous=True) as client:
+        claim_token = _extract_claim_token(token, client)
         data = client.post("/api/login/claim", json={"token": claim_token})
     emit_result(ctx_obj, data)
 

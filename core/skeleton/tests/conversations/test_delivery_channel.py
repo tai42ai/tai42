@@ -15,7 +15,7 @@ import time
 
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, ChannelInputError
-from tai42_contract.conversations import AnswerPart, ConversationRoute, DeliveryReceipt
+from tai42_contract.conversations import AnswerPart, ChannelConversationRoute, ConversationRoute, DeliveryReceipt
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_skeleton.conversations import cache as cache_module
@@ -210,7 +210,7 @@ def _wire_channel(monkeypatch, channel) -> None:
 
 
 def _channel_route(error_reply_text: str | None = None) -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name="line",
         door="channel",
         target_kind="agent",

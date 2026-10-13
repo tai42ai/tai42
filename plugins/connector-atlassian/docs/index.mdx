@@ -61,6 +61,10 @@ Add this exact callback URL, where `{origin}` is your deployment's public origin
 {origin}/oauth-bridge.html
 ```
 
+The path is the deployment's declared OAuth callback page, `HOSTED_UI_OAUTH_CALLBACK_PATH`
+(default `/oauth-bridge.html`); a deployment that declares another path registers
+`{origin}` plus that path instead.
+
 Then set the client credentials on the API process:
 
 ```bash

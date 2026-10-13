@@ -36,6 +36,7 @@ from tai42_skeleton.operations.response_models_group_c import (
     LoginMethodsListing,
     LogoutResult,
 )
+from tai42_skeleton.plugins.settings import hosted_ui_settings
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,8 @@ async def login_methods() -> dict:
     (icon/autocomplete) is OMITTED, never ``null`` (the Studio's zod schemas accept absent but reject
     ``null``). ``needs_setup`` is the one platform fact "no principal exists"; ``setup_login``
     names what the setup door can attach (``kinds`` from a configured login-attaching
-    provider, ``null`` when none). Provider errors propagate (loud, never a silently empty
+    provider, ``null`` when none); ``claim_fragment_key`` the declared claim-link fragment key.
+    Provider errors propagate (loud, never a silently empty
     methods list).
     """
     methods: list[dict] = []
@@ -87,7 +89,12 @@ async def login_methods() -> dict:
             has_login_attaching = True
     needs_setup = not await management.any_principal_exists()
     setup_login = {"kinds": list(_SETUP_LOGIN_KINDS)} if has_login_attaching else None
-    return {"methods": methods, "needs_setup": needs_setup, "setup_login": setup_login}
+    return {
+        "methods": methods,
+        "needs_setup": needs_setup,
+        "setup_login": setup_login,
+        "claim_fragment_key": hosted_ui_settings().claim_fragment_key,
+    }
 
 
 @operation(

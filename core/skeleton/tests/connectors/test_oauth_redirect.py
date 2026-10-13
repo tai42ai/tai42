@@ -10,7 +10,7 @@ from starlette.requests import Request
 import tai42_skeleton.connectors.oauth.redirect as redirect_mod
 from tai42_skeleton.connectors.oauth.client import RedirectUriNotAllowedError
 from tai42_skeleton.connectors.oauth.redirect import (
-    CALLBACK_PATH,
+    callback_uri,
     compute_deployment_origin,
     compute_redirect_uri,
     validate_origin_allowed,
@@ -51,28 +51,28 @@ def engine_cfg(monkeypatch):
 # class (not a Protocol), so the structural stand-in is cast to it.
 def test_origin_header_preferred(engine_cfg):
     req = _FakeRequest(origin="https://app.example.com", base_url="https://api.x/")
-    assert compute_redirect_uri(cast(Request, req)) == f"https://app.example.com{CALLBACK_PATH}"
+    assert compute_redirect_uri(cast(Request, req)) == "https://app.example.com/oauth-bridge.html"
 
 
 def test_origin_trailing_slash_stripped(engine_cfg):
     req = _FakeRequest(origin="https://app.example.com/", base_url="https://api.x/")
-    assert compute_redirect_uri(cast(Request, req)) == f"https://app.example.com{CALLBACK_PATH}"
+    assert compute_redirect_uri(cast(Request, req)) == "https://app.example.com/oauth-bridge.html"
 
 
 def test_falls_back_to_base_url_when_no_origin(engine_cfg):
     req = _FakeRequest(origin=None, base_url="https://api.example.com/")
-    assert compute_redirect_uri(cast(Request, req)) == f"https://api.example.com{CALLBACK_PATH}"
+    assert compute_redirect_uri(cast(Request, req)) == "https://api.example.com/oauth-bridge.html"
 
 
 def test_falls_back_when_origin_not_http_scheme(engine_cfg):
     """A non-http(s) Origin (e.g. a file:// or null origin) is ignored."""
     req = _FakeRequest(origin="null", base_url="https://api.example.com/")
-    assert compute_redirect_uri(cast(Request, req)) == f"https://api.example.com{CALLBACK_PATH}"
+    assert compute_redirect_uri(cast(Request, req)) == "https://api.example.com/oauth-bridge.html"
 
 
 def test_falls_back_when_origin_blank(engine_cfg):
     req = _FakeRequest(origin="   ", base_url="https://api.example.com/")
-    assert compute_redirect_uri(cast(Request, req)) == f"https://api.example.com{CALLBACK_PATH}"
+    assert compute_redirect_uri(cast(Request, req)) == "https://api.example.com/oauth-bridge.html"
 
 
 # -- Central-bridge override -------------------------------------------------
@@ -83,20 +83,20 @@ def test_bridge_override_used_as_redirect_uri_when_set(engine_cfg):
     origin — NOT this deployment's request origin."""
     engine_cfg.oauth_bridge_url = "https://bridge.example.com"
     req = _FakeRequest(origin="https://app.example.com", base_url="https://api.x/")
-    assert compute_redirect_uri(cast(Request, req)) == f"https://bridge.example.com{CALLBACK_PATH}"
+    assert compute_redirect_uri(cast(Request, req)) == "https://bridge.example.com/oauth-bridge.html"
 
 
 def test_bridge_override_trailing_slash_stripped(engine_cfg):
     engine_cfg.oauth_bridge_url = "https://bridge.example.com/"
     req = _FakeRequest(origin="https://app.example.com", base_url="https://api.x/")
-    assert compute_redirect_uri(cast(Request, req)) == f"https://bridge.example.com{CALLBACK_PATH}"
+    assert compute_redirect_uri(cast(Request, req)) == "https://bridge.example.com/oauth-bridge.html"
 
 
 def test_unset_override_preserves_origin_behavior(engine_cfg):
     """An empty override is treated as unset — the request origin still wins."""
     engine_cfg.oauth_bridge_url = ""
     req = _FakeRequest(origin="https://app.example.com", base_url="https://api.x/")
-    assert compute_redirect_uri(cast(Request, req)) == f"https://app.example.com{CALLBACK_PATH}"
+    assert compute_redirect_uri(cast(Request, req)) == "https://app.example.com/oauth-bridge.html"
 
 
 # -- Deployment origin (signed into state) -----------------------------------
@@ -135,3 +135,20 @@ def test_validate_origin_allowed_rejects_when_allowlist_empty(engine_cfg):
     engine_cfg.redirect_uri_allowlist_origins = []
     with pytest.raises(RedirectUriNotAllowedError):
         validate_origin_allowed("https://app.example.com")
+
+
+def test_callback_uri_appends_the_default_callback_page():
+    assert callback_uri("https://app.example.com") == "https://app.example.com/oauth-bridge.html"
+
+
+def test_callback_uri_appends_the_declared_callback_path(monkeypatch):
+    monkeypatch.setenv("HOSTED_UI_OAUTH_CALLBACK_PATH", "/cb.html")
+    assert callback_uri("https://app.example.com") == "https://app.example.com/cb.html"
+
+
+def test_redirect_uri_follows_the_declared_callback_path_on_both_branches(engine_cfg, monkeypatch):
+    monkeypatch.setenv("HOSTED_UI_OAUTH_CALLBACK_PATH", "/cb.html")
+    req = _FakeRequest(origin="https://app.example.com", base_url="https://api.x/")
+    assert compute_redirect_uri(cast(Request, req)) == "https://app.example.com/cb.html"
+    engine_cfg.oauth_bridge_url = "https://bridge.example.net/"
+    assert compute_redirect_uri(cast(Request, req)) == "https://bridge.example.net/cb.html"

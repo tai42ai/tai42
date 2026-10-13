@@ -19,7 +19,7 @@ import logging
 
 import pytest
 from pydantic import BaseModel
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ChannelConversationRoute, ConversationRoute
 from tai42_contract.interactions import PARK_COMPLETION_SUCCEEDED
 
 from tai42_skeleton.conversations import cache as cache_module
@@ -71,7 +71,7 @@ class _FakeApp:
 
 
 def _channel_route() -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name="line",
         door="channel",
         target_kind="agent",

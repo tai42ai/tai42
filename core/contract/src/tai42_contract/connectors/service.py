@@ -118,7 +118,7 @@ class ConnectionService(Protocol):
         alias: str,
         enabled_sub_services: list[str],
         config_values: dict[str, str] | None = None,
-        return_url: str,
+        return_url: str | None,
         redirect_uri: str,
         origin: str,
     ) -> StartConnectResult | NoAuthConnectResult:
@@ -127,6 +127,7 @@ class ConnectionService(Protocol):
         OAuth provider: validates inputs, persists OAuthFlowState, returns the
         provider's authorize URL. No-auth provider: validates inputs +
         config_values, creates the connection immediately and returns its id.
+        A ``None`` ``return_url`` lands on the deployment's declared connectors page.
         """
         ...
 
@@ -135,7 +136,7 @@ class ConnectionService(Protocol):
         *,
         connection_id: str,
         enabled_sub_services: list[str],
-        return_url: str,
+        return_url: str | None,
         redirect_uri: str,
         origin: str,
     ) -> StartConnectResult:
@@ -176,7 +177,7 @@ class ConnectionService(Protocol):
         *,
         connection_id: str,
         desired: list[str],
-        return_url: str,
+        return_url: str | None,
         redirect_uri: str,
         origin: str,
     ) -> PatchResult:

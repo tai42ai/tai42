@@ -681,7 +681,7 @@ def test_started_app_tool_extension_agent_and_client_tools():
             # base + extension-branched tool both bound
             assert {"shout", "shout_loud"} <= set(tools)
             # extension listing
-            assert {"name": "loud", "kind": "wrapper"} in app.extensions.available_extensions()
+            assert {"name": "loud", "kind": "wrapper", "multiple": True} in app.extensions.available_extensions()
             # extension-branched run
             assert await app.tools.run_tool("shout_loud", {"text": "hi"}) == "HI"
             # agent + its synthesized run tool, driven to its final value

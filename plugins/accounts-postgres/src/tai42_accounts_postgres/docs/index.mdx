@@ -109,7 +109,8 @@ invite a user, send a new login link, cancel an invitation, change a member's ro
 access, and remove a member — through the platform's generic member-actions seam, and
 the Studio's own generic Members page renders them. There is no outbound email: inviting
 a user (or sending a new link) returns a one-time invite token and a `/login?invite=...`
-path relative to your origin, shown once on the action's result; the invitee sets a
+path relative to your origin (the deployment's declared login page and invite key,
+`HOSTED_UI_LOGIN_PATH` and `HOSTED_UI_INVITE_QUERY_KEY`), shown once on the action's result; the invitee sets a
 password through `POST /api/login/invite/accept`, which consumes the token and mints a
 session in one step. `role` names an existing access-control role template; an unknown
 name is rejected and no user is created. A member's role is read from the platform —

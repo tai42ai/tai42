@@ -137,6 +137,17 @@ async def test_create_then_exchange_round_trip(redis: FakeRedis, provider: _Fake
     assert exchanged == {"token": "sk-alice", "user_id": "alice"}
 
 
+async def test_claim_path_follows_the_declared_hosted_ui(
+    redis: FakeRedis, provider: _FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOSTED_UI_LOGIN_PATH", "/signin")
+    monkeypatch.setenv("HOSTED_UI_CLAIM_FRAGMENT_KEY", "token")
+    result = await create_claim_link(
+        api_key="sk-alice", caller_id="alice", caller_is_admin=False, caller_owner_claim=None, ttl_seconds=None
+    )
+    assert result["claim_path"] == f"/signin#token={result['token']}"
+
+
 async def test_second_exchange_is_404(redis: FakeRedis, provider: _FakeProvider) -> None:
     result = await create_claim_link(
         api_key="sk-alice", caller_id="alice", caller_is_admin=True, caller_owner_claim=None, ttl_seconds=None

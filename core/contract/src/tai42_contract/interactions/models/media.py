@@ -16,7 +16,7 @@ from enum import StrEnum
 from typing import Final
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 
 class MediaKind(StrEnum):
@@ -248,6 +248,8 @@ class MediaItem(BaseModel):
     ``filename`` is the document's suggested display name; it is meaningful ONLY for a
     ``document`` item and is refused on every other kind.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     kind: MediaKind
     url: str

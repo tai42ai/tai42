@@ -498,9 +498,8 @@ def test_notifications_notify_header_and_footer_ride_with_options(monkeypatch: p
 
 def test_notifications_notify_unknown_template_key_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
     # A channel-specific parameter key (``body_parameters``) belongs INSIDE the opaque
-    # ``parameters`` object, not at the top level of the template reference — it is not a
-    # ChannelTemplate field. The CLI rejects the stray top-level key LOUDLY rather than letting
-    # model_validate silently drop it — no request leaves and the accepted keys are named.
+    # ``parameters`` object, not at the top level of the template reference. The contract model
+    # refuses the stray key, so no request leaves.
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("no request must be made for an unknown template key")
 
@@ -518,13 +517,13 @@ def test_notifications_notify_unknown_template_key_raises_before_request(monkeyp
         ],
     )
     assert result.exit_code != 0
-    assert "body_parameters" in result.output.lower()
-    assert "parameters" in result.output.lower()
+    output = " ".join(result.output.split())
+    assert "invalid template" in output
+    assert "body_parameters" in output
+    assert "Extra inputs are not permitted" in output
 
 
 def test_notifications_notify_unknown_location_key_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    # An unknown --location key is rejected before any request — LocationElement has no
-    # extra="forbid", so the CLI guards its own seam.
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("no request must be made for an unknown location key")
 
@@ -542,8 +541,41 @@ def test_notifications_notify_unknown_location_key_raises_before_request(monkeyp
         ],
     )
     assert result.exit_code != 0
-    assert "location" in result.output.lower()
-    assert "altitude" in result.output.lower()
+    output = " ".join(result.output.split())
+    assert "invalid location" in output
+    assert "altitude" in output
+    assert "Extra inputs are not permitted" in output
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "label"),
+    [
+        ("--media", '[{"kind": "image", "url": "https://example.com/a.png", "alt": "x"}]', "invalid media item(s)"),
+        ("--options", '[{"kind": "reply", "text": "Yes", "colour": "red"}]', "invalid options"),
+        (
+            "--sections",
+            '[{"title": "Fruit", "rows": [{"kind": "reply", "text": "Apple"}], "subtitle": "x"}]',
+            "invalid sections",
+        ),
+        ("--pages", '[{"title": "You", "fields": ["name"], "hint": "x"}]', "invalid form pages"),
+    ],
+)
+def test_notifications_notify_unknown_key_in_a_list_option_raises_before_request(
+    monkeypatch: pytest.MonkeyPatch, flag: str, value: str, label: str
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request must be made for an unknown key")
+
+    extra = ["--schema", '{"type": "object", "properties": {"name": {"type": "string"}}}'] if flag == "--pages" else []
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["notifications", "notify", "hi", "--channel", "whatsapp", flag, value, *extra],
+    )
+    assert result.exit_code != 0
+    output = " ".join(result.output.split())
+    assert label in output
+    assert "Extra inputs are not permitted" in output
 
 
 def test_notifications_notify_invalid_sections_shape_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:

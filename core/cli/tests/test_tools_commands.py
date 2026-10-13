@@ -7,7 +7,7 @@ import json
 import httpx
 import pytest
 
-from .remote_harness import data_response, error_response, run_cli
+from .remote_harness import data_response, error_response, run_cli, visible
 
 
 def _parse_tool_call(request: httpx.Request) -> tuple[str, dict[str, object]]:
@@ -275,18 +275,18 @@ def test_tools_apply_rejects_empty_combo(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_tools_apply_rejects_empty_string_element(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A bare "" is not a valid extension name (parse_extension_element str branch)."""
+    """A bare "" is not a valid extension name."""
 
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
         return data_response({})
 
     result = run_cli(monkeypatch, handler, ["tools", "apply", "my_tool", "--combo", '[""]'])
     assert result.exit_code != 0
-    assert "an extension name must be a non-empty string" in result.output
+    assert "non-empty extension name" in visible(result.output)
 
 
 def test_tools_apply_rejects_object_without_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An object element missing 'name' (parse_extension_element dict/name branch)."""
+    """An object element missing 'name'."""
 
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
         return data_response({})
@@ -298,7 +298,7 @@ def test_tools_apply_rejects_object_without_name(monkeypatch: pytest.MonkeyPatch
 
 
 def test_tools_apply_rejects_object_with_extra_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An object element with keys beyond name/config (parse_extension_element extra branch)."""
+    """An object element with keys beyond name/config."""
 
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
         return data_response({})
@@ -311,14 +311,14 @@ def test_tools_apply_rejects_object_with_extra_keys(monkeypatch: pytest.MonkeyPa
 
 
 def test_tools_apply_rejects_non_element(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A non-string, non-object element (parse_extension_element fall-through branch)."""
+    """A non-string, non-object element."""
 
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
         return data_response({})
 
     result = run_cli(monkeypatch, handler, ["tools", "apply", "my_tool", "--combo", "[5]"])
     assert result.exit_code != 0
-    assert "must be an extension name or a" in result.output
+    assert "non-empty extension name" in visible(result.output)
 
 
 def test_tools_extensions_add_posts_add_side(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -413,11 +413,18 @@ def test_tools_runs_list_passes_tool_name(monkeypatch: pytest.MonkeyPatch) -> No
 def test_extensions_list(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/extensions"
-        return data_response([{"name": "chain", "kind": "wrapper"}])
+        return data_response(
+            [
+                {"name": "chain", "kind": "wrapper", "multiple": True},
+                {"name": "queue", "kind": "backend", "multiple": False},
+            ]
+        )
 
     result = run_cli(monkeypatch, handler, ["extensions", "list"])
     assert result.exit_code == 0, result.output
-    assert "chain" in result.output
+    header, _rule, *rows = result.output.splitlines()
+    assert header.split() == ["name", "kind", "multiple"]
+    assert [row.split() for row in rows] == [["chain", "wrapper", "true"], ["queue", "backend", "false"]]
 
 
 def test_unauthenticated_surfaces_clear_message(monkeypatch: pytest.MonkeyPatch) -> None:

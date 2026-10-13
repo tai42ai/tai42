@@ -7,10 +7,10 @@ delete one. A principal owns keys; deleting it revokes every key it owns.
 
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import Annotated
 
 import typer
+from tai42_contract.access_control import PrincipalKind
 
 from tai42_cli.commands._common import (
     app_context,
@@ -26,13 +26,6 @@ app = typer.Typer(
     help="Manage the deployment's principals.",
     no_args_is_help=True,
 )
-
-
-class PrincipalKind(StrEnum):
-    """The kinds of principal the platform recognizes."""
-
-    human = "human"
-    service = "service"
 
 
 @app.command("list")
@@ -64,7 +57,7 @@ def create_principal(
     Example: ``tai principals create --kind service --display-name 'CI runner' --role editor``
     """
     ctx_obj = app_context(ctx)
-    body = compact({"kind": kind.value, "display_name": display_name, "role": role, "user_id": user})
+    body = compact({"kind": kind, "display_name": display_name, "role": role, "user_id": user})
     with ctx_obj.client() as client:
         data = client.post("/api/auth/principals", json=body)
     emit_result(ctx_obj, data)

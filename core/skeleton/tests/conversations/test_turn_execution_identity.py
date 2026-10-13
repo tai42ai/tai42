@@ -15,7 +15,7 @@ import pytest
 from pydantic import BaseModel
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import ConversationRoute
+from tai42_contract.conversations import ChannelConversationRoute, ConversationRoute
 from tai42_contract.template import TemplatedText
 from tests.agent._memoryless import MemorylessTestAgent
 
@@ -113,7 +113,7 @@ class _FakeDeliveryApp:
 
 
 def _route(execution_key: str) -> ConversationRoute:
-    return ConversationRoute(
+    return ChannelConversationRoute(
         route_name="line",
         door="channel",
         target_kind="agent",

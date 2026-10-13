@@ -225,7 +225,7 @@ def test_presets_create_rejects_config_free_object_element(monkeypatch: pytest.M
 
 
 def test_presets_create_rejects_empty_string_element(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A bare "" element is not a valid extension name (parse_extension_element str branch)."""
+    """A bare "" element is not a valid extension name."""
 
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
         return data_response({})
@@ -236,11 +236,11 @@ def test_presets_create_rejects_empty_string_element(monkeypatch: pytest.MonkeyP
         ["presets", "create", "greet", "--base-tool", "echo", "--description", "d", "--extensions", '[[""]]'],
     )
     assert result.exit_code != 0
-    assert "an extension name must be a non-empty string" in result.output
+    assert "non-empty extension name" in visible(result.output)
 
 
 def test_presets_create_rejects_non_string_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An object element with a non-string 'name' (parse_extension_element dict/name branch)."""
+    """An object element with a non-string 'name'."""
 
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
         return data_response({})
@@ -265,7 +265,7 @@ def test_presets_create_rejects_non_string_name(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_presets_create_rejects_object_with_extra_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An object element with keys beyond name/config (parse_extension_element extra branch)."""
+    """An object element with keys beyond name/config."""
 
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
         return data_response({})
@@ -290,7 +290,7 @@ def test_presets_create_rejects_object_with_extra_keys(monkeypatch: pytest.Monke
 
 
 def test_presets_create_rejects_non_element(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A non-string, non-object element (parse_extension_element fall-through branch)."""
+    """A non-string, non-object element."""
 
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
         return data_response({})
@@ -301,7 +301,7 @@ def test_presets_create_rejects_non_element(monkeypatch: pytest.MonkeyPatch) -> 
         ["presets", "create", "greet", "--base-tool", "echo", "--description", "d", "--extensions", "[[5]]"],
     )
     assert result.exit_code != 0
-    assert "combo element must be an extension" in result.output
+    assert "non-empty extension name" in visible(result.output)
 
 
 def test_presets_delete(monkeypatch: pytest.MonkeyPatch) -> None:

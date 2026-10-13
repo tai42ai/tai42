@@ -29,7 +29,7 @@ app = typer.Typer(
 )
 
 _SUB_SERVICE_HELP = "An enabled sub-service (repeatable)."
-_RETURN_URL_HELP = "Where to return after the flow completes."
+_RETURN_URL_HELP = "Where to return after the flow completes (omitted: the deployment's connectors page)."
 _CONFIG_FILE_HELP = (
     "Read the provider config values from a file, or from stdin when the path is '-', which keeps provider secrets "
     "off the command line (a value on argv leaks via ps and shell history). Mutually exclusive with --config."
@@ -103,7 +103,7 @@ def connect(
         str | None, typer.Option("--config", help="Provider config values as a JSON object.")
     ] = None,
     config_file: Annotated[str | None, typer.Option("--config-file", help=_CONFIG_FILE_HELP)] = None,
-    return_url: Annotated[str, typer.Option("--return-url", help=_RETURN_URL_HELP)] = "/connectors",
+    return_url: Annotated[str | None, typer.Option("--return-url", help=_RETURN_URL_HELP)] = None,
 ) -> None:
     """Start a connection flow; prints the authorize URL (or the created connection).
 
@@ -116,8 +116,9 @@ def connect(
         "alias": alias,
         "enabled_sub_services": list(sub_service),
         "config_values": config if config is not None else {},
-        "return_url": return_url,
     }
+    if return_url is not None:
+        body["return_url"] = return_url
     with ctx_obj.client() as client:
         data = client.post("/api/connectors/connections/start", json=body)
     emit_result(ctx_obj, data)
@@ -142,14 +143,16 @@ def reconnect(
     ctx: typer.Context,
     connection_id: Annotated[str, typer.Argument(help="Connection id.")],
     sub_service: Annotated[list[str], typer.Option("--sub-service", help=_SUB_SERVICE_HELP)],
-    return_url: Annotated[str, typer.Option("--return-url", help=_RETURN_URL_HELP)] = "/connectors",
+    return_url: Annotated[str | None, typer.Option("--return-url", help=_RETURN_URL_HELP)] = None,
 ) -> None:
     """Start a reconnect (re-authorize) flow for an existing connection.
 
     Example: ``tai connectors reconnect conn_123 --sub-service gmail``
     """
     ctx_obj = app_context(ctx)
-    body = {"enabled_sub_services": list(sub_service), "return_url": return_url}
+    body: dict = {"enabled_sub_services": list(sub_service)}
+    if return_url is not None:
+        body["return_url"] = return_url
     with ctx_obj.client() as client:
         data = client.post(f"/api/connectors/connections/{seg(connection_id)}/reconnect", json=body)
     emit_result(ctx_obj, data)
@@ -164,15 +167,21 @@ def patch_sub_services(
         list[str], typer.Option("--sub-service", help="The desired enabled sub-service (repeatable).")
     ],
     return_url: Annotated[
-        str, typer.Option("--return-url", help="Where to return if consent is required.")
-    ] = "/connectors",
+        str | None,
+        typer.Option(
+            "--return-url",
+            help="Where to return if consent is required (omitted: the deployment's connectors page).",
+        ),
+    ] = None,
 ) -> None:
     """Change a connection's enabled sub-services.
 
     Example: ``tai connectors sub-services conn_123 --sub-service gmail --sub-service calendar``
     """
     ctx_obj = app_context(ctx)
-    body = {"enabled_sub_services": list(sub_service), "return_url": return_url}
+    body: dict = {"enabled_sub_services": list(sub_service)}
+    if return_url is not None:
+        body["return_url"] = return_url
     with ctx_obj.client() as client:
         data = client.patch(f"/api/connectors/connections/{seg(connection_id)}/sub-services", json=body)
     emit_result(ctx_obj, data)
