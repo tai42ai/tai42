@@ -53,6 +53,7 @@ class ExtensionRegistry(BaseRegistry):
         self._available_extensions: set[str] = set()
         self._requires_body_locality: dict[str, bool] = {}
         self._pauses: dict[str, bool] = {}
+        self._declares_output_schema: dict[str, bool] = {}
 
     def register_extension(
         self,
@@ -62,6 +63,7 @@ class ExtensionRegistry(BaseRegistry):
         *,
         requires_body_locality: bool = False,
         pauses: bool = False,
+        declares_output_schema: bool = False,
     ):
         """Register extension ``func`` under ``name`` with its ``kind``; a duplicate name raises."""
         # The registry is rebuilt fresh on every start/reload, so a name already
@@ -74,6 +76,7 @@ class ExtensionRegistry(BaseRegistry):
         self._kinds[name] = kind
         self._requires_body_locality[name] = requires_body_locality
         self._pauses[name] = pauses
+        self._declares_output_schema[name] = declares_output_schema
         self._available_extensions.add(name)
 
     def extension(
@@ -84,6 +87,7 @@ class ExtensionRegistry(BaseRegistry):
         name: str | None = None,
         requires_body_locality: bool = False,
         pauses: bool = False,
+        declares_output_schema: bool = False,
     ):
         """Decorator form of :meth:`register_extension` (the ``app.extensions`` facet body); bare or with arguments.
 
@@ -92,13 +96,25 @@ class ExtensionRegistry(BaseRegistry):
         require the extension to sit INSIDE any execution-relocating
         (``ExtensionKind.relocates_execution``) extension in a stacked combo.
         ``pauses`` marks an extension every branch of which can pause, whatever its base declares.
+        ``declares_output_schema`` marks an extension that declares the wrapped tool's output shape.
         """
         if f and callable(f):
-            return self.extension(kind=kind, name=name, requires_body_locality=requires_body_locality, pauses=pauses)(f)
+            return self.extension(
+                kind=kind,
+                name=name,
+                requires_body_locality=requires_body_locality,
+                pauses=pauses,
+                declares_output_schema=declares_output_schema,
+            )(f)
 
         def decorator(func):
             self.register_extension(
-                func, kind, name or func.__name__, requires_body_locality=requires_body_locality, pauses=pauses
+                func,
+                kind,
+                name or func.__name__,
+                requires_body_locality=requires_body_locality,
+                pauses=pauses,
+                declares_output_schema=declares_output_schema,
             )
             return func
 
@@ -129,6 +145,14 @@ class ExtensionRegistry(BaseRegistry):
         name = extension_name(element)
         try:
             return self._requires_body_locality[name]
+        except KeyError:
+            raise TaiValidationError(f"Extension '{name}' is not registered.") from None
+
+    def declares_output_schema(self, element: ExtensionElement) -> bool:
+        """Whether the extension registered with ``declares_output_schema=True`` (it declares the output shape)."""
+        name = extension_name(element)
+        try:
+            return self._declares_output_schema[name]
         except KeyError:
             raise TaiValidationError(f"Extension '{name}' is not registered.") from None
 

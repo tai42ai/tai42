@@ -233,7 +233,20 @@ def test_output_schema_field_and_extension_entry_conflict_rejected(pg):
                 extensions=[[{"name": "output_schema", "config": {"schema": _OBJ_SCHEMA}}]],
             )
             assert resp.status_code == 400
-            assert "conflicts with an explicit 'output_schema' extension entry" in _err(resp)
+            assert "conflicts with an explicit output-schema-declaring extension entry" in _err(resp)
+
+    asyncio.run(run())
+
+
+def test_an_extension_declaring_the_output_shape_conflicts_and_one_that_does_not_binds(pg):
+    # The clash is the extension's own registered declaration, not its name.
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            clash = await _create("shaped_cf", "weather", output_schema=_OBJ_SCHEMA, extensions=[["shaped"]])
+            assert clash.status_code == 400
+            assert "conflicts with an explicit output-schema-declaring extension entry" in _err(clash)
+            plain = await _create("plain_ok", "weather", output_schema=_OBJ_SCHEMA, extensions=[["exta"]])
+            assert plain.status_code == 200, _err(plain)
 
     asyncio.run(run())
 

@@ -14,11 +14,11 @@ from typing import Any
 import pytest
 from langchain_core.tools import StructuredTool
 from pydantic import ValidationError
-from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
 from tai42_contract.template import TemplatedText
 from tests._deep_agent_fakes import _client_tool
 from tests._delivery_scope import assert_delivery_scoped, probe_tool
 
+from tai42_agents._internal.subagent_spec import SubAgentSpec as NeutralSubAgentSpec
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 from tai42_agents.langchain_deep_agent.tool_spec import (
     DeepSubAgentSpec,

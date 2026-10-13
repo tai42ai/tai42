@@ -11,8 +11,8 @@ from typing import Any
 
 import pytest
 from pydantic import BaseModel
+from tests.agent._memoryless import MemorylessTestAgent
 
-from tai42_skeleton.agent import Agent
 from tai42_skeleton.operations import agents as agent_ops
 
 
@@ -20,7 +20,7 @@ class _Input(BaseModel):
     prompt: str
 
 
-class _FakeAgent(Agent):
+class _FakeAgent(MemorylessTestAgent):
     tool_name = "faker"
     tool_description = "A fake agent."
     ToolInput = _Input

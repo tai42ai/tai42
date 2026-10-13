@@ -1,7 +1,7 @@
-"""Duplicate tool/agent binds fail loud (``on_duplicate="error"``).
+"""Duplicate tool/agent binds fail loud.
 
-The FastMCP server is constructed with ``on_duplicate="error"``, so a second bind
-of an existing tool name raises instead of silently last-write-win; and the agent
+The tool surface refuses a second bind of an existing tool name with the contract's
+``ToolAlreadyRegisteredError`` instead of a silent last-write-win; and the agent
 registry raises on a duplicate agent name. Every legitimate rebind removes the
 name first, so an in-boot duplicate is always a genuine collision.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from tai42_contract.tools import ToolAlreadyRegisteredError
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -38,7 +39,7 @@ def test_duplicate_tool_name_bind_raises():
                 """First binding."""
                 return x
 
-            with pytest.raises(ValueError, match="already exists"):
+            with pytest.raises(ToolAlreadyRegisteredError, match="tool 'dup' is already registered"):
 
                 @app.tools.tool(force=True, name="dup")
                 def dup_again(x: int) -> int:

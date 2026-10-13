@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute, TargetConversationConfig
 from tai42_contract.template import TemplatedText
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations import cache as cache_module
@@ -46,7 +47,7 @@ class _EchoInput(BaseModel):
     user_message: str = ""
 
 
-class ManualAgent(Agent):
+class ManualAgent(MemorylessTestAgent):
     tool_name = "echo"
     ToolInput = _EchoInput
 
@@ -66,7 +67,7 @@ class ManualAgent(Agent):
         self.appended.append((thread_id, messages))
 
 
-class MemorylessAgent(Agent):
+class MemorylessAgent(MemorylessTestAgent):
     """An agent that leaves ``append_thread_messages`` the ABC default (raises
     ``NotImplementedError`` if ever called), so it holds no thread memory to feed."""
 
@@ -82,7 +83,7 @@ class MemorylessAgent(Agent):
         return f"echo: {text}"
 
 
-class ContextModeAgent(Agent):
+class ContextModeAgent(MemorylessTestAgent):
     """An agent that, mid-run, calls the ``set_conversation_mode`` feature body — exercising
     that the turn-scoped bridge context reaches an in-process tool call the agent makes. It
     holds thread memory (implements ``append_thread_messages``), so flipping itself to manual

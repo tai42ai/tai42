@@ -18,7 +18,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.messages import SystemMessage
-from langchain_core.tools import StructuredTool
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 from tai42_agents._internal import base_tool_agent as bta
@@ -26,15 +25,16 @@ from tai42_agents._internal import graph_cache
 from tai42_agents._internal.structured_rail import StructuredOutputRailMiddleware
 from tai42_agents._internal.usage import CallUsage
 
+from ._client_tool import FakeClientTool, client_tool
 from ._graph_support import build_agent_and_input, invoke_tools_agent, stream_tools_agent
 from .conftest import fake_run_trace
 
 
-def _tool(name: str) -> StructuredTool:
+def _tool(name: str) -> FakeClientTool:
     async def _run(**_: Any) -> str:
         return "ok"
 
-    return StructuredTool.from_function(func=None, coroutine=_run, name=name, description="d")
+    return client_tool(name, _run, description="d")
 
 
 def _patch_seams(
@@ -129,7 +129,7 @@ class TestBuildAgentAndInput:
         assert captured["llm_kwargs"] == {"temperature": 0}
         # create_agent wired with the resolved model, tools, checkpointer, middleware.
         assert captured["create"]["llm"] == "llm-obj"
-        # The run's tools are bound delivery-scoped (``resolve_tools``), one per input tool.
+        # The run's tools are bound through the one adapter (``resolve_tools``), one per input tool.
         assert [bound.name for bound in captured["create"]["tools"]] == [tool.name]
         assert captured["create"]["checkpointer"] == "checkpointer-obj"
         # The park hook leads (it is the loop's first before_model hook, so it recognizes an

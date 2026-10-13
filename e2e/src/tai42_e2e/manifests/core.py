@@ -214,9 +214,11 @@ def build_async_park_stack(res: StackResources, variants: Variants) -> StackConf
     interval is pinned to 1s so the expiry leg resumes promptly rather than on the 30s
     default. ``run_backend=False`` makes the module honestly ``backendless``. Auth off.
 
-    Carries the probe tools (the single-park driver + resume continuation, and the
-    multi-park super-step barrier driver + its shared continuation) plus the interactions
-    router (the ``/answer`` door) and the ``ask`` builtin."""
+    Carries the probe tools (the single-park driver + resume continuation, the multi-park
+    super-step barrier driver + its shared continuation, and the resume-buffered probe) plus
+    the interactions router (the ``/answer`` door), the ``ask`` builtin, and the presets,
+    states and runs routers a park spec declares a state-bound preset through and reads the
+    runs index back from."""
     manifest = {
         "default_routers": "none",
         "routers_modules": [
@@ -224,6 +226,9 @@ def build_async_park_stack(res: StackResources, variants: Variants) -> StackConf
             "tai42_skeleton.routers.tools",
             "tai42_skeleton.routers.config",
             "tai42_skeleton.routers.interactions",
+            "tai42_skeleton.routers.presets",
+            "tai42_skeleton.routers.states",
+            "tai42_skeleton.routers.runs",
         ],
         "extensions_modules": _EXTENSION_MODULES,
         "tools": [

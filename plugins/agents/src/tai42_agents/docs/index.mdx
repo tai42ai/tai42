@@ -93,11 +93,12 @@ nested run that async-parks, the agent parks on that **call** rather than blocki
 nested run reaches its terminal the agent's turn resumes with that terminal as the tool's
 result, and a non-success terminal comes back as a model-visible tool error.
 
-The parking agents' run tools (`tools_agent`, `langchain_deep_agent`, `claude_code`) and the
-hidden `agent_resume` and `deliver_chained_park` tools declare that they can pause
-(`meta={"tai42/pauses": True}`), so a caller's park recognition accepts the park they return. A tool an agent calls
-that returns a park signal without that declaration fails the agent's run with
-`UndeclaredPauseError` naming the tool; the model is not handed a tool error to retry around.
+The parking agents (`tools_agent`, `langchain_deep_agent`, `claude_code`) set `parks = True`,
+so the platform declares their run tools as tools that can pause; the hidden `agent_resume` and
+`deliver_chained_park` tools declare it themselves (`meta={"tai42/pauses": True}`). A caller's
+park recognition accepts the park they return. A tool an agent calls that returns a park signal
+without that declaration fails the agent's run with `UndeclaredPauseError` naming the tool; the
+model is not handed a tool error to retry around.
 
 ### Parking tools
 
@@ -140,6 +141,38 @@ Which faces carry it:
 | `langchain_deep_agent` | default at the model build (the mark rides the deep agent's per-run system message) |
 | `retrieval_tools_agent` | excluded — its graph prepends the system prompt into the message list it rolls to the newest breakpoint, so a system mark there is stripped by any later turn mark; use `user_content_kwargs` to mark the user turn |
 | `claude_code` | not applicable — the system prompt is handed to the Agent SDK verbatim, never as a content block |
+
+## Run keywords
+
+Each agent's `run` and `astream` declare the keywords that agent reads — the platform's four
+(`thread_id`, `user_message`, `tool_names`, `response_format`) plus the agent's own knobs, the
+fields of its tool input. A keyword an agent does not declare is refused with a `TypeError`
+naming it, never dropped; a platform key an agent cannot honor is refused with a `RuntimeError`
+naming the reason (the voting and refine agents take role-named messages instead of
+`user_message` and per-role configs instead of `thread_id`; the voting agent always produces
+its `VotingOutput`; the vqa agent runs one completion with no tools and no thread).
+
+| Agent | Keywords beyond the platform's four |
+| --- | --- |
+| `tools_agent` | `tools`, `presets`, `system_message`, `system_content_kwargs`, `user_content_kwargs`, `llm_provider`, `llm_kwargs`, `checkpoint_provider`, `resume`, `resume_checkpoint_id`, `recursion_limit`, `langgraph_config` |
+| `langchain_deep_agent` | `tools`, `subagents`, `skills`, `inline_skills`, `system_message`, `interrupt_on`, `user_content_kwargs`, `resume`, `recursion_limit`, `llm_provider`, `checkpoint_provider`, `store_provider`, `llm_kwargs`, `langgraph_config` |
+| `retrieval_tools_agent` | `tools`, `presets`, `system_message`, `embedding_provider`, `llm_provider`, `checkpoint_provider`, `store_provider`, `overwrite_store`, `tools_limit`, `embedding_kwargs`, `llm_kwargs`, `user_content_kwargs`, `resume_checkpoint_id`, `recursion_limit`, `langgraph_config` |
+| `refine_agent` | `evaluator_message`, `critic_message`, `max_iterations`, `evaluator_llm_provider`, `critic_llm_provider`, `checkpoint_provider`, `evaluator_llm_kwargs`, `critic_llm_kwargs`, `evaluator_langgraph_config`, `critic_langgraph_config`, `user_content_kwargs` |
+| `voting_agent` | `judge_tools`, `voter_tools`, `judge_message`, `voter_message`, `judge_llm_provider`, `checkpoint_provider`, `judge_llm_kwargs`, `voters`, `judge_langgraph_config`, `voter_langgraph_config`, `user_content_kwargs` |
+| `vqa_agent` | `image_url`, `query`, `llm_provider`, `llm_kwargs` |
+| `claude_code` | `system_message`, `skills`, `inline_skills`, `max_turns`, `subagents` |
+
+Live in-process `tools` are the platform's framework-neutral `ClientTool` handles (from
+`tai42_app.tools.get_client_tools`, or any object with `name`, `description`, `input_schema` and
+an async `invoke`); this plugin adapts each to its LangChain runtime, and every tool name the model
+is handed is held to the 64-character bound — a longer one is refused, never truncated. A preset is
+handed under its own name, so a short-named preset over a longer-named base tool binds.
+
+Each agent also reports the memory its run keywords address (`addressed_memory`): the thread and
+checkpoint ids its `langgraph_config` (or per-role configs) and `resume_checkpoint_id` carry, and
+the continuity keys (`resume`, `resume_checkpoint_id`, `checkpoint_provider`) it reads. The
+platform refuses an id in its reserved `bridge:` namespace from that answer, and a conversation
+route refuses a start that sets a continuity key.
 
 ## Tool-error resilience
 
@@ -215,7 +248,8 @@ resolves per-caller and fails closed on a door with no bound execution identity.
 
 **Adapter-proxied platform tools.** Granted `tool_names` run under the run's own execution
 identity through the same `run_tool` seam every agent uses — the session reaches no
-platform network surface and holds no key or MCP endpoint. A non-empty `tool_names` on a
+platform network surface and holds no key or MCP endpoint. The model sees each granted tool
+with its own description and argument schema. A non-empty `tool_names` on a
 door with no bound execution identity is refused loudly (fail-closed).
 
 **Stated residual (security is configuration).** The one injected model credential lives in

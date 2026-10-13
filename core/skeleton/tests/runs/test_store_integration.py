@@ -128,6 +128,26 @@ async def test_coalesce_interaction_is_first_set_wins(store: tuple[PostgresRunIn
     assert rows[f"{token}-plain"].interaction_id == f"{token}-park-id"
 
 
+async def test_coalesce_interaction_keeps_the_start_value_on_a_parked_write_with_no_id(
+    store: tuple[PostgresRunIndexStore, str],
+) -> None:
+    s, token = store
+    # A ``parked`` terminal write carrying no id keeps whatever START recorded: the resume origin
+    # of a continuation fire, else NULL.
+    origin = f"{token}-origin"
+    await _start(s, token, f"{token}-buffered-resume", interaction=origin)
+    await s.update_outcome(f"{token}-buffered-resume", "parked", _iso(1), interaction_id=None)
+    await _start(s, token, f"{token}-buffered-plain", interaction=None)
+    await s.update_outcome(f"{token}-buffered-plain", "parked", _iso(1), interaction_id=None)
+
+    rows = {r.run_id: r for r in await s.list(RunIndexFilter(preset=token), page=1, page_size=10)}
+    assert (rows[f"{token}-buffered-resume"].outcome, rows[f"{token}-buffered-resume"].interaction_id) == (
+        "parked",
+        origin,
+    )
+    assert (rows[f"{token}-buffered-plain"].outcome, rows[f"{token}-buffered-plain"].interaction_id) == ("parked", None)
+
+
 async def test_timestamptz_range_filter_is_inclusive(store: tuple[PostgresRunIndexStore, str]) -> None:
     s, token = store
     for i in range(5):

@@ -113,35 +113,6 @@
       "title": "PresetSeedToolMeta",
       "type": "object"
     },
-    "PresetSpec": {
-      "description": "A base tool bound to fixed kwargs, resolved into a ``StructuredTool`` at run time.\n\nSee ``resolve_tools``. A base tool that interprets its fixed kwargs as a nested document\ncarries that document opaquely here.",
-      "properties": {
-        "base_tool": {
-          "title": "Base Tool",
-          "type": "string"
-        },
-        "description": {
-          "default": "",
-          "title": "Description",
-          "type": "string"
-        },
-        "fixed_kwargs": {
-          "additionalProperties": true,
-          "title": "Fixed Kwargs",
-          "type": "object"
-        },
-        "name": {
-          "title": "Name",
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "base_tool"
-      ],
-      "title": "PresetSpec",
-      "type": "object"
-    },
     "StateAttach": {
       "additionalProperties": false,
       "description": "One state attached by a binding.\n\nCarries the ``state`` name, the ``templates`` to attach on it (attach-on-use, idempotent at save),\nthe ``subject_expr`` (a templated text rendering to a jq over the run input → a full subject object\nor the record KEY, its scope taken from the ambient door context and its kind from the state's\ndeclared subject kind), an optional ``scope_expr`` (a templated text rendering to a BOOLEAN predicate\nover the run input evaluated first — ``false`` skips this state for the run, a non-boolean is a loud\nerror, absent engages), and the ordered ``input_injections`` / ``updates``. Frozen.",
@@ -564,112 +535,6 @@
         }
       },
       "title": "StateUpdate",
-      "type": "object"
-    },
-    "SubAgentSpec": {
-      "description": "Neutral sub-agent descriptor — the in-process, live-tools shape.\n\nCarries name/description/system_prompt/tool_names/tools(live)/presets/skills/\ninline_skills/response_format/strategy/subagents — the fields a live sub-agent\n(e.g. the mcp-finder) needs. ``inline_skills`` items are plain dicts\n(``{\"name\", \"content\"}``). JSON callers use the richer ``DeepSubAgentSpec``\n(full field set) instead of this type.\n\n``tools`` is ``list[Any]`` in the contract (live ``StructuredTool`` objects in\nthe impl) — a vendor type cannot be a runtime pydantic field here.\n\n``response_format`` is a live pydantic class (in-process), the ``TemplatedText | dict``\nauthored-schema union (a JSON caller's forced-output schema — inline, or named by stored\n``id`` and rendered/parsed to its schema at the point of use), or unset.",
-      "properties": {
-        "description": {
-          "default": "",
-          "title": "Description",
-          "type": "string"
-        },
-        "inline_skills": {
-          "default": [],
-          "items": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "title": "Inline Skills",
-          "type": "array"
-        },
-        "name": {
-          "title": "Name",
-          "type": "string"
-        },
-        "presets": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/PresetSpec"
-          },
-          "title": "Presets",
-          "type": "array"
-        },
-        "response_format": {
-          "anyOf": [
-            {},
-            {
-              "$ref": "#/$defs/TemplatedText"
-            },
-            {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Response Format"
-        },
-        "skills": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Skills",
-          "type": "array"
-        },
-        "strategy": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Strategy"
-        },
-        "subagents": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/SubAgentSpec"
-          },
-          "title": "Subagents",
-          "type": "array"
-        },
-        "system_prompt": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TemplatedText"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "tool_names": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Tool Names",
-          "type": "array"
-        },
-        "tools": {
-          "default": [],
-          "items": {},
-          "title": "Tools",
-          "type": "array"
-        }
-      },
-      "required": [
-        "name"
-      ],
-      "title": "SubAgentSpec",
       "type": "object"
     },
     "TemplatedText": {
@@ -2188,7 +2053,7 @@
       "type": "object"
     },
     "PresetBody": {
-      "description": "The persisted body of a versioned preset.\n\n``base_tool`` is the tool the preset binds; ``description`` is the preset's\nhuman description; ``fixed_kwargs`` are the baked kwargs (each becomes a\nhidden, fixed constant on the bound tool). ``extensions`` is a list of\nextension COMBOS — the SAME shape as a manifest ``extensions`` map value,\neach combo element an extension name or a ``{\"name\", \"config\"}`` mapping\nbinding author config (e.g. an ``ask_external`` verifier) — fed unconverted\nto the structured runtime-attach API at register (an empty outer list means\nno extensions; an empty INNER combo is rejected by the validating view).\n``output_schema`` is an optional author-set OUTPUT JSON Schema (an object\nschema): on an AGENT base it is baked into the run tool's ``response_format``\nso the agent FORCES a structured output matching it; on a plain tool it is\nadvertised as the bound tool's output schema and every result is validated\nagainst it at run time. ``input_schema`` is an optional author-set INPUT JSON\nSchema: it becomes the exposed named tool's input contract, and the caller's\nvalidated object is routed into the base tool's declared payload argument (see\n:class:`PresetInputSchemaSupport`). Only a base tool that DECLARES input-schema\nsupport accepts one; otherwise a set ``input_schema`` is a loud authoring error.\n\nEach schema is the ``TemplatedText | dict`` union: an inline ``dict`` is the JSON\nSchema document itself; a :class:`~tai42_contract.template.TemplatedText` names a stored\nschema by ``id`` (or carries it inline as ``content``), rendered and parsed as JSON to the\nsame schema at the point of use and save.\n\nEvery field must survive carry-forward on a version save: dropping\n``extensions`` would make the branch tools vanish on reload, dropping\n``base_tool`` would break the bind, dropping ``description`` would strip the\ntool's description, dropping ``output_schema`` would silently un-enforce the\nstructured output, and dropping ``input_schema`` would silently un-enforce the\nstructured input.\n\nA ``fixed_kwargs`` scalar-string value written ``!ENV ${VAR}`` is a SECRET\nREFERENCE, not a credential: the server resolves it from the environment at bind\nand the store keeps only the reference — never the resolved value.",
+      "description": "The persisted body of a versioned preset.\n\n``base_tool`` is the tool the preset binds; ``description`` is the preset's\nhuman description; ``fixed_kwargs`` are the baked kwargs (each becomes a\nhidden, fixed constant on the bound tool). ``extensions`` is a list of\nextension COMBOS — the SAME shape as a manifest ``extensions`` map value,\neach combo element an extension name or a ``{\"name\", \"config\"}`` mapping\nbinding author config (e.g. an ``ask_external`` verifier) — fed unconverted\nto the structured runtime-attach API at register (an empty outer list means\nno extensions; an empty INNER combo is rejected by the validating view).\n``output_schema`` is an optional author-set OUTPUT JSON Schema (an object\nschema): on an AGENT base it is baked into the run tool's ``response_format``\nso the agent FORCES a structured output matching it; on a plain tool it is\nadvertised as the bound tool's output schema and every result is validated\nagainst it at run time — a park is a suspend signal, not a result, and passes.\n``input_schema`` is an optional author-set INPUT JSON\nSchema: it becomes the exposed named tool's input contract, and the caller's\nvalidated object is routed into the base tool's declared payload argument (see\n:class:`PresetInputSchemaSupport`). Only a base tool that DECLARES input-schema\nsupport accepts one; otherwise a set ``input_schema`` is a loud authoring error.\n\nEach schema is the ``TemplatedText | dict`` union: an inline ``dict`` is the JSON\nSchema document itself; a :class:`~tai42_contract.template.TemplatedText` names a stored\nschema by ``id`` (or carries it inline as ``content``), rendered and parsed as JSON to the\nsame schema at the point of use and save.\n\nEvery field must survive carry-forward on a version save: dropping\n``extensions`` would make the branch tools vanish on reload, dropping\n``base_tool`` would break the bind, dropping ``description`` would strip the\ntool's description, dropping ``output_schema`` would silently un-enforce the\nstructured output, and dropping ``input_schema`` would silently un-enforce the\nstructured input.\n\nA ``fixed_kwargs`` scalar-string value written ``!ENV ${VAR}`` is a SECRET\nREFERENCE, not a credential: the server resolves it from the environment at bind\nand the store keeps only the reference — never the resolved value.",
       "properties": {
         "base_tool": {
           "title": "Base Tool",
@@ -2911,9 +2776,6 @@
       },
       "title": "StateUpdate",
       "type": "object"
-    },
-    "SubAgentSpec": {
-      "$ref": "#/$defs/SubAgentSpec"
     },
     "TargetConversationConfig": {
       "description": "Per-target configuration for the conversation bridge, keyed by ``(target_kind, target_name)``.\n\nThe key names the agent or tool an inbound turn is routed to.\n``multichannel`` opts the target into person linking; ``greeting_template`` is the\nfirst-contact greeting, which may reference at most the ``{pairing_code}`` placeholder\n(minted at greeting time). The row carries no server-derived fields, so it IS its own\ncreate payload — no Create/stored split. An unknown ``{...}`` placeholder is refused so\na typo cannot render literally; a blank template string is refused, because ``None`` is\nthe explicit spelling for \"no greeting\". Frozen.",

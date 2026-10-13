@@ -7,8 +7,8 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel
-from tai42_contract.agent import Agent
 from tai42_contract.app import tai42_app
+from tests.agent._memoryless import MemorylessTestAgent
 
 
 class _BadInput(BaseModel):
@@ -16,7 +16,7 @@ class _BadInput(BaseModel):
 
 
 @tai42_app.agents.agent("bad_bakeable_agent")
-class BadBakeableAgent(Agent):
+class BadBakeableAgent(MemorylessTestAgent):
     tool_name = "bad_bakeable_agent"
     tool_description = "Declares a preset_bakeable field that is not on its ToolInput."
     ToolInput = _BadInput

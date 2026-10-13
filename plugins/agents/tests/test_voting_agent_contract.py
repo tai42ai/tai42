@@ -5,12 +5,10 @@ reject-unhonored guards, and the input/model validation.
 from __future__ import annotations
 
 import asyncio
-import inspect
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
-from tai42_contract.agent import Agent
 from tai42_contract.agent.events import (
     StructuredFinal,
 )
@@ -23,12 +21,10 @@ from tests._voting_agent_support import (
     _fake_full_judge_stream,
     _fake_voter_invoke,
     _install_reject_fakes,
-    _make_tool,
     _NotVotingOutput,
     script_voting_graphs,
 )
 
-from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents.voting_agent import agent as agent_module
 from tai42_agents.voting_agent.agent import VotingAgentInput
 from tai42_agents.voting_agent.model import VoterSpec, VotingOutput
@@ -101,211 +97,88 @@ def test_voting_output_response_format_is_accepted_on_both_faces(monkeypatch, ap
             judge_message=TemplatedText(content="decide"),
             voter_message=TemplatedText(content="answer"),
             judge_llm_provider="jp",
-            response_format=VotingOutput,
+            response_format=VotingOutput,  # type: ignore[arg-type]
         )
     )
     assert isinstance(result, VotingOutput)
 
 
-def test_astream_rejects_foreign_response_format(monkeypatch, app_tools, resource_manager) -> None:
-    """A ``response_format`` other than ``VotingOutput`` is rejected loudly on the
-    stream face rather than silently ignored."""
-    monkeypatch.setattr(agent_module, "ainvoke_tools_agent", _fake_voter_invoke([]))
-    monkeypatch.setattr(agent_module, "astream_tools_agent_events", _fake_full_judge_stream({}))
-
-    agent = tai42_app.agents.get_agent(AGENT_NAME)
-    with pytest.raises(RuntimeError, match=r"voting_agent\.astream does not support response_format"):
-        asyncio.run(
-            _collect(agent.astream(judge_message=TemplatedText(content="decide"), response_format=_NotVotingOutput))
-        )
-
-
-def test_run_rejects_foreign_response_format(monkeypatch, app_tools, resource_manager) -> None:
-    """A ``response_format`` other than ``VotingOutput`` is rejected loudly on the
-    run face rather than silently replaced by the constant drain format. The run-face
-    guard is load-bearing: dropping it would surface the ``astream`` token here."""
-    monkeypatch.setattr(agent_module, "ainvoke_tools_agent", _fake_voter_invoke([]))
-    monkeypatch.setattr(agent_module, "astream_tools_agent_events", _fake_full_judge_stream({}))
-
-    agent = tai42_app.agents.get_agent(AGENT_NAME)
-    with pytest.raises(RuntimeError, match=r"voting_agent\.run does not support response_format"):
-        asyncio.run(agent.run(judge_message=TemplatedText(content="decide"), response_format=_NotVotingOutput))
-
-
-def test_astream_rejects_unhonored_abc_param(monkeypatch, app_tools, resource_manager) -> None:
-    """An ABC ``Agent.run`` param the voting runtime has no seat for (``thread_id``)
-    is rejected loudly on the stream face, naming it and the exact ``astream`` face."""
-    monkeypatch.setattr(agent_module, "ainvoke_tools_agent", _fake_voter_invoke([]))
-    monkeypatch.setattr(agent_module, "astream_tools_agent_events", _fake_full_judge_stream({}))
-
-    agent = tai42_app.agents.get_agent(AGENT_NAME)
-    with pytest.raises(RuntimeError, match=r"voting_agent\.astream does not support .*\bthread_id\b"):
-        asyncio.run(_collect(agent.astream(judge_message=TemplatedText(content="decide"), thread_id="t1")))
-
-
-def test_run_rejects_unhonored_abc_param(monkeypatch, app_tools, resource_manager) -> None:
-    """An ABC ``Agent.run`` param the voting runtime has no seat for (``tools``) is
-    rejected loudly on the run face, naming it and the exact ``run`` face. The
-    run-face guard is load-bearing: dropping it would surface the ``astream`` token."""
-    monkeypatch.setattr(agent_module, "ainvoke_tools_agent", _fake_voter_invoke([]))
-    monkeypatch.setattr(agent_module, "astream_tools_agent_events", _fake_full_judge_stream({}))
-
-    agent = tai42_app.agents.get_agent(AGENT_NAME)
-    with pytest.raises(RuntimeError, match=r"voting_agent\.run does not support .*\btools\b"):
-        asyncio.run(agent.run(judge_message=TemplatedText(content="decide"), tools=[_make_tool("x")]))
-
-
-@pytest.mark.parametrize(("param", "value"), [("strategy", ""), ("resume", False), ("recursion_limit", 0)])
-def test_run_rejects_falsy_but_meaningful_abc_param(monkeypatch, app_tools, resource_manager, param, value) -> None:
-    """A falsy-but-meaningful scalar (``strategy=""`` / ``resume=False`` /
-    ``recursion_limit=0``) the voting runtime has no seat for still raises — a scalar
-    is set whenever it is not ``None``, so it never slips through a truthiness gate."""
-    monkeypatch.setattr(agent_module, "ainvoke_tools_agent", _fake_voter_invoke([]))
-    monkeypatch.setattr(agent_module, "astream_tools_agent_events", _fake_full_judge_stream({}))
-
-    agent = tai42_app.agents.get_agent(AGENT_NAME)
-    with pytest.raises(RuntimeError, match=rf"voting_agent\.run does not support .*\b{param}\b"):
-        # The base Agent.run signature types some of these non-optional, so the mismatch is expected.
-        asyncio.run(
-            agent.run(
-                judge_message=TemplatedText(content="decide"),
-                voter_message=TemplatedText(content="answer"),
-                **{param: value},
-            )
-        )  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize(
-    "param", ["thread_id", "resume", "recursion_limit", "strategy", "response_format", "llm_provider"]
-)
-def test_unhonored_none_passes_the_guard(monkeypatch, app_tools, resource_manager, param) -> None:
-    """The ABC's ``None`` "not requested" sentinel passes the guard rather than being
-    over-rejected: an explicit ``thread_id=None`` / ``response_format=None`` / … reaches
-    the voting flow and produces the terminal ``VotingOutput``, in parity with the other
-    agents. (``response_format=None`` is not the foreign-type case, which still raises.)"""
-    monkeypatch.setattr(agent_module, "ainvoke_tools_agent", _fake_voter_invoke([]))
-    monkeypatch.setattr(agent_module, "astream_tools_agent_events", _fake_full_judge_stream({}))
-
-    agent = tai42_app.agents.get_agent(AGENT_NAME)
-    # The base Agent.run signature types some of these non-optional, so the None mismatch is expected.
-    result = asyncio.run(
-        agent.run(
-            judge_message=TemplatedText(content="decide"),
-            voter_message=TemplatedText(content="answer"),
-            **{param: None},  # type: ignore[arg-type]
-        )
-    )
-    assert isinstance(result, VotingOutput)
-
-
-# Every key in ``_UNHONORED_REASONS`` paired with a representative SET value.
-# ``response_format`` folds into the same guard: a foreign type is an offender.
-# ``resume=False`` pins the falsy-but-present scalar case.
+# The contract keys the voting runtime cannot honor, each with a set value; a foreign
+# ``response_format`` is one of them (``VotingOutput`` is accepted).
 _UNHONORED_CASES = [
-    ("tools", [_make_tool("x")]),
     ("tool_names", ["x"]),
-    ("presets", [object()]),
-    ("subagents", [object()]),
-    ("system_message", "sys"),
     ("user_message", "usr"),
-    ("strategy", "vote"),
-    ("interrupt_on", {"tool": True}),
-    ("skills", ["s"]),
-    ("inline_skills", [{"name": "s", "content": "c"}]),
-    ("recursion_limit", 5),
     ("thread_id", "t1"),
-    ("resume", False),
-    ("resume_checkpoint_id", "cp"),
-    ("llm_provider", "openai"),
-    ("store_provider", "redis"),
-    ("llm_kwargs", {"model": "x"}),
     ("response_format", _NotVotingOutput),
+]
+
+# Keywords the voting runtime does not declare, refused by presence.
+_UNDECLARED_CASES = [
+    ("tools", [object()]),
+    ("system_message", "sys"),
+    ("strategy", ""),
+    ("resume", False),
+    ("recursion_limit", 0),
+    ("llm_provider", "openai"),
     ("system_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
 ]
 
 
 @pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
-def test_run_rejects_every_unhonored_param(monkeypatch, app_tools, resource_manager, param, value) -> None:
-    """run rejects every key in the guard's reasons map, naming it and the run face."""
+def test_both_faces_refuse_a_contract_key_they_cannot_honor(
+    monkeypatch, app_tools, resource_manager, param, value
+) -> None:
     _install_reject_fakes(monkeypatch)
     agent = tai42_app.agents.get_agent(AGENT_NAME)
-    with pytest.raises(RuntimeError, match=rf"voting_agent\.run does not support .*\b{param}\b"):
+    match = rf"voting_agent\.astream does not support .*\b{param}\b"
+    with pytest.raises(RuntimeError, match=match):
+        asyncio.run(_collect(agent.astream(judge_message=TemplatedText(content="decide"), **{param: value})))
+    with pytest.raises(RuntimeError, match=match):
         asyncio.run(agent.run(judge_message=TemplatedText(content="decide"), **{param: value}))
 
 
-@pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
-def test_astream_rejects_every_unhonored_param(monkeypatch, app_tools, resource_manager, param, value) -> None:
-    """astream rejects the same full set as run — parity — naming the astream face."""
+@pytest.mark.parametrize(("param", "value"), _UNDECLARED_CASES)
+def test_both_faces_refuse_an_undeclared_keyword(monkeypatch, app_tools, resource_manager, param, value) -> None:
     _install_reject_fakes(monkeypatch)
     agent = tai42_app.agents.get_agent(AGENT_NAME)
-    with pytest.raises(RuntimeError, match=rf"voting_agent\.astream does not support .*\b{param}\b"):
+    match = rf"voting_agent\.astream got unknown run keyword argument\(s\): {param}"
+    with pytest.raises(TypeError, match=match):
         asyncio.run(_collect(agent.astream(judge_message=TemplatedText(content="decide"), **{param: value})))
+    with pytest.raises(TypeError, match=match):
+        asyncio.run(agent.run(judge_message=TemplatedText(content="decide"), **{param: value}))
 
 
-def test_unhonored_cases_cover_the_full_reasons_map() -> None:
-    """Every key in the reasons map has a parametrized reject case; a key added without
-    a test fails here immediately."""
-    assert {param for param, _ in _UNHONORED_CASES} == set(agent_module._UNHONORED_REASONS)
-
-
-# The unhonored params whose ABC ``Agent.run`` default is an empty collection (``()`` /
-# ``""``), read from the contract signature — the independent source of truth for which
-# unhonored params are collection-typed. Intersected with this agent's reasons map it is
-# exactly the set ``_UNHONORED_COLLECTION_PARAMS`` must classify as collections. The
-# empty-collection test below parametrizes from HERE, not from the frozenset, so a member
-# dropped from the frozenset (reclassifying it as a scalar) turns a case red rather than
-# silently vanishing.
-_EMPTY_COLLECTION_ABC_DEFAULTS = frozenset(
-    name
-    for name, parameter in inspect.signature(Agent.run).parameters.items()
-    if isinstance(parameter.default, (tuple, list, str)) and not parameter.default
-)
-
-
-_COLLECTION_REJECT_PARAMS = sorted(agent_module._UNHONORED_REASONS.keys() & _EMPTY_COLLECTION_ABC_DEFAULTS)
-
-
-def test_collection_params_match_the_abc_collection_defaults() -> None:
-    """``_UNHONORED_COLLECTION_PARAMS`` is exactly this agent's unhonored params whose ABC
-    default is an empty collection: no scalar wrongly listed (which would let a meaningful
-    falsy value slip through), none dropped (which would over-reject the not-requested
-    empty default)."""
-    assert set(agent_module._UNHONORED_COLLECTION_PARAMS) == set(_COLLECTION_REJECT_PARAMS)
-
-
-@pytest.mark.parametrize("empty", [[], ""])
-@pytest.mark.parametrize("param", _COLLECTION_REJECT_PARAMS)
-def test_reject_unhonored_permits_empty_collection_param(param: str, empty: object) -> None:
-    """An empty collection is the ABC's "not requested" default for a collection parameter,
-    so the guard does not raise for it — in either falsy empty form (``[]`` / ``""``). Were
-    the parameter dropped from ``_UNHONORED_COLLECTION_PARAMS`` it would be classified as a
-    scalar (set whenever it is not ``None``) and this empty value would raise."""
-    reject_unhonored(
-        "voting_agent.run",
-        {param: empty},
-        agent_module._UNHONORED_REASONS,
-        collection_params=agent_module._UNHONORED_COLLECTION_PARAMS,
+def test_the_not_requested_sentinels_pass_the_guard(monkeypatch, app_tools, resource_manager) -> None:
+    _install_reject_fakes(monkeypatch)
+    agent = tai42_app.agents.get_agent(AGENT_NAME)
+    result = asyncio.run(
+        agent.run(
+            judge_message=TemplatedText(content="decide"),
+            voter_message=TemplatedText(content="answer"),
+            thread_id=None,
+            user_message=None,
+            tool_names=(),
+            response_format=None,
+        )
     )
+    assert isinstance(result, VotingOutput)
 
 
-def test_run_names_response_format_and_another_offender_at_once(monkeypatch, app_tools, resource_manager) -> None:
-    """A foreign ``response_format`` AND another unhonored param are named in ONE raise:
-    the response_format check folds into the shared guard, so the caller fixes both in a
-    single pass rather than one raise per run."""
+def test_a_contract_key_and_a_foreign_response_format_are_named_at_once(
+    monkeypatch, app_tools, resource_manager
+) -> None:
     _install_reject_fakes(monkeypatch)
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     with pytest.raises(RuntimeError) as excinfo:
-        # subagents is typed Sequence[SubAgentSpec]; the object() is deliberately wrong to exercise the guard.
         asyncio.run(
             agent.run(
                 judge_message=TemplatedText(content="decide"),
-                response_format=_NotVotingOutput,
-                subagents=[object()],  # type: ignore[list-item]
+                response_format=_NotVotingOutput,  # type: ignore[arg-type]
+                thread_id="t",
             )
         )
-    message = str(excinfo.value)
-    assert "response_format" in message
-    assert "subagents" in message
+    assert "response_format" in str(excinfo.value)
+    assert "thread_id" in str(excinfo.value)
 
 
 def test_run_raises_when_required_judge_message_slot_is_unset(monkeypatch, app_tools, resource_manager) -> None:

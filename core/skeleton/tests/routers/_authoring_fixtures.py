@@ -20,13 +20,14 @@ a real generic tools-agent without depending on any concrete implementation:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
-from tai42_contract.agent import Agent
+from tai42_contract.agent import AddressedMemory, Agent
 from tai42_contract.agent.events import MessageFinal, StreamEvent
 from tai42_contract.app import tai42_app
+from tests.agent._memoryless import MemorylessTestAgent
 
 
 class _AuthorableInput(BaseModel):
@@ -68,7 +69,7 @@ class _AuthorableInput(BaseModel):
 
 
 @tai42_app.agents.agent("authorable_agent")
-class AuthorableAgent(Agent):
+class AuthorableAgent(MemorylessTestAgent):
     tool_name = "authorable_agent"
     tool_description = "A fake authorable agent."
     ToolInput = _AuthorableInput
@@ -103,7 +104,7 @@ class _RoleInput(BaseModel):
 
 
 @tai42_app.agents.agent("role_agent")
-class RoleAgent(Agent):
+class RoleAgent(MemorylessTestAgent):
     tool_name = "role_agent"
     tool_description = "A fake code role-agent (not authorable)."
     ToolInput = _RoleInput
@@ -122,7 +123,7 @@ class _LockedInput(BaseModel):
 
 
 @tai42_app.agents.agent("locked_agent")
-class LockedAgent(Agent):
+class LockedAgent(MemorylessTestAgent):
     tool_name = "locked_agent"
     tool_description = "A fake non-spec-runnable agent that honors one baked field."
     ToolInput = _LockedInput
@@ -140,22 +141,19 @@ class LockedAgent(Agent):
 
 
 class _ConfigInput(BaseModel):
-    """Carries the LangGraph configs a run's ``thread_id``/``checkpoint_id`` ride in:
-    the plain one plus a voting agent's judge/voter pair."""
+    """Carries two option blobs whose ``scope`` holds a thread and a checkpoint id only the agent reads."""
 
     user_message: str = ""
-    langgraph_config: dict[str, Any] = {}
-    judge_langgraph_config: dict[str, Any] = {}
-    voter_langgraph_config: dict[str, Any] = {}
+    engine_options: dict[str, Any] = {}
+    role_options: dict[str, Any] = {}
 
 
 @tai42_app.agents.agent("config_agent")
 class ConfigAgent(Agent):
-    """Maps every config field straight through to a run kwarg, which is what the
-    bridge reservation guard scans."""
+    """Maps every field straight through to a run kwarg and reports the ids its option blobs carry."""
 
     tool_name = "config_agent"
-    tool_description = "A fake agent whose run kwargs carry LangGraph configs."
+    tool_description = "A fake agent whose run kwargs carry its own memory options."
     ToolInput = _ConfigInput
 
     def __init__(self) -> None:
@@ -164,6 +162,18 @@ class ConfigAgent(Agent):
     @classmethod
     def from_tool_input(cls, validated: BaseModel) -> dict[str, Any]:
         return {name: getattr(validated, name) for name in validated.model_fields_set}
+
+    @classmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        threads: set[str] = set()
+        checkpoints: set[str] = set()
+        for field in ("engine_options", "role_options"):
+            scope = (run_kwargs.get(field) or {}).get("scope") or {}
+            if "thread" in scope:
+                threads.add(scope["thread"])
+            if "checkpoint" in scope:
+                checkpoints.add(scope["checkpoint"])
+        return AddressedMemory(thread_ids=frozenset(threads), checkpoint_ids=frozenset(checkpoints))
 
     async def run(self, **kwargs: Any) -> Any:
         return await self._drain(self.astream(**kwargs))
@@ -174,7 +184,7 @@ class ConfigAgent(Agent):
 
 
 @tai42_app.agents.agent("aliased_agent")
-class AliasedAgent(Agent):
+class AliasedAgent(MemorylessTestAgent):
     # Registered under ``aliased_agent`` but declaring a DIFFERENT ``tool_name`` —
     # the two name sets the collision guard must union.
     tool_name = "aliased_tool_name"

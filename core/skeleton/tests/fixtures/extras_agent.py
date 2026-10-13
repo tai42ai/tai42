@@ -8,8 +8,8 @@ the shared visit's extras pre-check has an AGENT target to resolve declared keys
 from typing import Any, ClassVar
 
 from pydantic import BaseModel
-from tai42_contract.agent import Agent
 from tai42_contract.app import tai42_app
+from tests.agent._memoryless import MemorylessTestAgent
 
 
 class _ExtrasInput(BaseModel):
@@ -17,7 +17,7 @@ class _ExtrasInput(BaseModel):
 
 
 @tai42_app.agents.agent("extras_agent")
-class ExtrasAgent(Agent):
+class ExtrasAgent(MemorylessTestAgent):
     tool_name = "extras_agent"
     tool_description = "Declares one door-extras key."
     ToolInput = _ExtrasInput

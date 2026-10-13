@@ -34,14 +34,15 @@ leaf (``Any`` / ``object``) stays wrapped.
 
 An author-set ``output_schema`` (an object JSON Schema) dispatches on the base's
 kind. When the base is an AGENT run tool, the schema is baked into the run tool's
-``response_format`` (a hidden, fixed constant, with the preset ``name`` injected as
-its ``title`` when absent — the agent run seam requires a title, and the preset
-name is validated to the provider structured-output name charset) so the agent
+``response_format`` (a hidden, fixed constant; the contract's ``response_format`` rule
+requires a top-level ``title``, and the preset name — held to the preset-name law — is
+injected when absent) so the agent
 FORCES a structured output; the preset advertises the authored (title-free)
 schema. When the base is a plain tool, the schema is advertised as the bound
 tool's output schema and every result is validated against it at run time with
 tai42-kit's faithful draft-2020-12 validator, raising loudly on any mismatch — no
-forcing is possible for a non-LLM tool.
+forcing is possible for a non-LLM tool. A park is a suspend signal, not a result, and
+passes unvalidated (:func:`_is_park`).
 """
 
 from __future__ import annotations
@@ -52,7 +53,12 @@ from typing import TYPE_CHECKING, Any
 from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from fastmcp.tools import Tool
 from fastmcp.tools.tool_transform import ArgTransform, forward, forward_raw
-from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.interactions import (
+    ResumeBuffered,
+    SuspendedInteraction,
+    read_resume_buffered_marker,
+    read_suspended_interaction_marker,
+)
 from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue, unwrap_secrets
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.json_schema_util import (
@@ -63,7 +69,12 @@ from tai42_kit.utils.render import resolve_schema_body
 
 from tai42_skeleton.presets.secret_refs import resolve_secret_refs
 from tai42_skeleton.tools.binding.secret_arguments import reveal_for_validation
-from tai42_skeleton.tools.reveal_gate import secret_was_revealed, stowed_park, stowed_reveal_payload
+from tai42_skeleton.tools.reveal_gate import (
+    inprocess_reveal_gate,
+    secret_was_revealed,
+    stowed_park,
+    stowed_reveal_payload,
+)
 
 if TYPE_CHECKING:
     from mcp.types import ToolAnnotations
@@ -147,6 +158,25 @@ def _hints_of(base: Tool) -> ToolAnnotations | None:
     return base.annotations.model_copy(update={"title": None})
 
 
+def _is_park(result: Any) -> bool:
+    """Whether a preset's forwarded ``result`` is a park signal rather than the tool's output.
+
+    In process the dispatch's reveal gate is armed: it stows the park object (a
+    ``SuspendedInteraction`` or a ``ResumeBuffered``) and ``result`` is only its flattened
+    projection, so the park is read off the gate by TYPE alone, and a result that merely looks
+    like a marker is the tool's output. On the MCP edge no gate is armed and the park rides
+    ``result.structured_content`` as its reserved marker. Either way the park is passed through
+    unvalidated: the run's real answer is validated when it resumes.
+    """
+    if inprocess_reveal_gate.get() is not None:
+        has_park, park = stowed_park()
+        return has_park and isinstance(park, (SuspendedInteraction, ResumeBuffered))
+    structured = getattr(result, "structured_content", None)
+    return (
+        read_suspended_interaction_marker(structured) is not None or read_resume_buffered_marker(structured) is not None
+    )
+
+
 def _bind_plain(base: Tool, name: str, description: str, transform_args: dict[str, ArgTransform]) -> Tool:
     """Transform ``base`` baking the hidden constants, with NO output schema.
 
@@ -171,8 +201,8 @@ def _bind_agent_forced(
 ) -> Tool:
     """Force structured output by baking ``response_format`` from the authored schema.
 
-    The agent run seam requires a top-level ``title``; when the author left it off,
-    inject the preset name. The advertised output schema stays the authored
+    The contract's ``response_format`` rule requires a top-level ``title``; when the author
+    left it off, the preset name is injected. The advertised output schema stays the authored
     (title-free) value; the agent's own drain validates the forced result, so no
     second validation wrapper is attached.
     """
@@ -201,7 +231,8 @@ def _bind_validated(
 
     A secret-bearing failure is redacted. The plain-tool declare-and-validate path: a non-LLM
     tool cannot be forced, so every result is validated against ``output_schema`` at run time,
-    raising loudly on any mismatch.
+    raising loudly on any mismatch — a park is a suspend signal, not a result, and passes
+    (:func:`_is_park`).
     """
 
     def _raise_redacted(caught: JsonSchemaValidationError) -> None:
@@ -219,15 +250,9 @@ def _bind_validated(
 
     async def _enforce_output_schema(**kwargs: Any) -> Any:
         result = await forward(**kwargs)
-        # A park sentinel is a SUSPEND signal, not the tool's output: an async
-        # ask parked the caller and the dispatch's reveal gate stowed the
-        # ``SuspendedInteraction`` RAW (the value that flowed back through the
-        # transform is its flattened ToolResult). Output-schema validation must NOT
-        # apply to the park — recognized on the gate by TYPE, it passes through
-        # untouched so the dispatch returns the sentinel object intact, exactly as
-        # the other dispatch paths preserve it; the real ANSWER is validated on resume.
-        has_park, park = stowed_park()
-        if has_park and isinstance(park, SuspendedInteraction):
+        # A park is a SUSPEND signal, not the tool's output: it passes through
+        # unvalidated so the dispatch hands back the park intact on every door.
+        if _is_park(result):
             return result
         # Under the armed in-process reveal gate a secret-bearing return is stowed
         # RAW while ``result.structured_content`` carries only the masked projection;
@@ -428,14 +453,9 @@ def _bind_with_input_schema(
             result = await forward_raw(**{**fixed_kwargs, payload_arg: merged})
         else:
             result = await forward_raw(**{payload_arg: caller_object, **fixed_kwargs})
-        # A park sentinel is a SUSPEND signal, not the tool's output: a suspending
-        # call parked the caller and the dispatch's reveal gate stowed the
-        # ``SuspendedInteraction`` RAW. Output-schema validation must NOT apply to
-        # the park — recognized on the gate by TYPE, the flattened result passes
-        # through so the dispatch returns the sentinel intact; the real result is
-        # validated on resume. Non-parking results are still validated below.
-        has_park, park = stowed_park()
-        if has_park and isinstance(park, SuspendedInteraction):
+        # A park is a SUSPEND signal, not the tool's output: it passes through
+        # unvalidated on every door. Non-parking results are still validated below.
+        if _is_park(result):
             return result
         if output_schema is not None:
             validate_against_json_schema(result.structured_content, output_schema)

@@ -6,6 +6,7 @@ from functools import lru_cache
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
+from tai42_contract.agent import TOOL_NAME_MAX_LEN
 
 from tai42_kit.llm._secret_kwargs import KwargsCacheKey, unwrap_secret_kwargs
 from tai42_kit.utils.data.json_schema_util import (
@@ -23,6 +24,22 @@ from tai42_kit.utils.data.json_schema_util import (
     iter_schema_nodes,
     native_representability_reason,
 )
+
+
+class ToolNameTooLongError(ValueError):
+    """A tool name is longer than a bound tool name may be."""
+
+
+def check_tool_name(name: str) -> None:
+    """Refuse a tool name longer than :data:`~tai42_contract.agent.TOOL_NAME_MAX_LEN`.
+
+    The bound is the strictest among the providers a bound tool is sent to; a longer name is
+    refused, never truncated (a truncated name would name a different tool).
+    """
+    if len(name) > TOOL_NAME_MAX_LEN:
+        raise ToolNameTooLongError(
+            f"tool name {name!r} is {len(name)} characters; a bound tool name may be at most {TOOL_NAME_MAX_LEN}"
+        )
 
 
 async def get_llm_async(provider: str, **kwargs) -> BaseChatModel:

@@ -306,7 +306,13 @@ async def test_mcp_edge_park_defers_door_updates_to_the_real_terminal(monkeypatc
                 # wire marker the edge recognises.
                 suspended = await parker(**message.arguments)
                 return ToolResult(
-                    structured_content=suspended_interaction_marker(suspended.interaction_id, suspended.expiry_at)
+                    structured_content=suspended_interaction_marker(
+                        suspended.interaction_id,
+                        suspended.expiry_at,
+                        None,
+                        interaction_ids=[suspended.interaction_id],
+                        caller_interaction_ids=[],
+                    )
                 )
 
             tokens = _bind_driver()

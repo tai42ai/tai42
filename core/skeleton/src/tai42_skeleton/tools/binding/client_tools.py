@@ -1,331 +1,221 @@
-"""Builds langchain client tools over bound tools for in-process agent dispatch."""
+"""Binds registered tools as framework-neutral :class:`~tai42_contract.tools.ClientTool` handles.
+
+An in-process agent engine drives a bound tool through its handle: the handle carries the full
+registered name, the description and the argument schema the MCP edge advertises, and its
+``invoke`` runs the tool body directly (never the ``run_tool`` seam) with the platform's work done
+here — the tier fence, the execution-identity gate, argument validation, the undeclared-park
+refusal, the encoding refusal and secret masking. The adaptation to any one engine's tool type
+lives with that engine.
+"""
 
 import inspect
 import logging
-import warnings
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, cast
 
 from fastmcp.server.dependencies import without_injected_parameters
 from fastmcp.tools.base import Tool
-from fastmcp.tools.function_tool import FunctionTool
-from langchain_core.tools import StructuredTool, ToolException, tool
-from tai42_contract.interactions import (
-    NestedParkOwnershipError,
-    ResumeBuffered,
-    RunTerminalFailed,
-    SuspendedInteraction,
-    failed_outcome_text,
-    resolve_park_adoption,
-    suspended_interaction_marker,
-)
+from fastmcp.utilities.types import get_cached_typeadapter
+from makefun import create_function
+from pydantic import ValidationError
+from tai42_contract.interactions import ResumeBuffered, RunTerminalFailed, SuspendedInteraction, failed_outcome_text
 from tai42_contract.secrets import mask_secrets
-from tai42_contract.tools import UndeclaredPauseError, tool_call_frame
+from tai42_contract.tools import ClientTool, ClientToolError, UndeclaredPauseError, tool_call_frame
+from tai42_kit.llm.models import check_tool_name
+from tai42_kit.utils.data import makefun_func_name
 
-from tai42_skeleton.agent.binding import _UNSET
-from tai42_skeleton.tools.binding.arguments import _named_call_arguments
+from tai42_skeleton.agent.unset import _UNSET
 from tai42_skeleton.tools.binding.branch import _BranchBindingMixin
 from tai42_skeleton.tools.binding.errors import UnknownToolError
 from tai42_skeleton.tools.binding.resolution import _ResolutionMixin
 from tai42_skeleton.tools.binding.result import UnencodableLeafError, _serialize_result, find_lone_surrogate
-from tai42_skeleton.tools.binding.schema import _VAR_PARAM_KINDS
+from tai42_skeleton.tools.binding.schema import _VAR_PARAM_KINDS, _resolved_signature
 from tai42_skeleton.tools.context_bridge import bridge_context
 from tai42_skeleton.tools.tier import enforce_run_tier
 
 logger = logging.getLogger(__name__)
 
-# Model providers cap a LangChain client tool's function name at 64 characters;
-# a client-facing tool name is truncated to this length, and a post-truncation
-# collision is a hard error.
-CLIENT_TOOL_NAME_MAX_LEN = 64
+
+@dataclass(frozen=True)
+class BoundClientTool:
+    """A registered tool bound for in-process use; implements :class:`~tai42_contract.tools.ClientTool`."""
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    _call: Callable[[Mapping[str, Any]], Awaitable[Any]] = field(repr=False)
+
+    async def invoke(self, arguments: Mapping[str, Any]) -> Any:
+        """Run the tool once with ``arguments``."""
+        return await self._call(arguments)
+
+
+def _is_permissive(signature: inspect.Signature) -> bool:
+    """Whether a body takes the supplied keys as they are rather than a validated argument set.
+
+    A bare ``*args``/``**kwargs`` passthrough validates nothing of its own, and a synthesized agent
+    run tool defaults every optional parameter to the :data:`_UNSET` sentinel so its body sees only
+    the keys the caller supplied (its own ``ToolInput`` validates them).
+    """
+    params = list(signature.parameters.values())
+    all_var = bool(params) and all(p.kind in _VAR_PARAM_KINDS for p in params)
+    return all_var or any(p.default is _UNSET for p in params)
+
+
+@lru_cache(maxsize=2048)
+def _argument_validator(resolved_fn: Callable[..., Any]) -> Callable[..., dict[str, Any]]:
+    """A stable wrapper presenting ``resolved_fn``'s signature that returns the validated arguments.
+
+    Validated through fastmcp's process-global ``get_cached_typeadapter`` over the same resolved
+    signature the ``run_tool`` seam validates against, so a call is accepted or refused exactly as
+    there. Keyed on ``resolved_fn`` (fastmcp's process-cached ``without_injected_parameters`` wrapper,
+    or a preset's cached baked partial), so one wrapper serves every call.
+    """
+
+    def collect(**kwargs: Any) -> dict[str, Any]:
+        return kwargs
+
+    return create_function(
+        _resolved_signature(resolved_fn),
+        cast(Callable[[Any], Any], collect),
+        func_name=makefun_func_name(resolved_fn.__name__),
+    )
+
+
+def _validated_arguments(tool_name: str, target: Callable[..., Any], arguments: dict[str, Any]) -> dict[str, Any]:
+    """``arguments`` validated against ``target``'s signature; a refusal is the model-visible error."""
+    try:
+        return get_cached_typeadapter(_argument_validator(target)).validate_python(arguments)
+    except ValidationError as exc:
+        raise ClientToolError(tool_name, f"Error calling tool {tool_name!r}: invalid arguments: {exc}") from exc
 
 
 def _refuse_unencodable_client_result(tool_name: str, result: Any) -> None:
-    """Raise a model-visible ``ToolException`` if ``result`` cannot be JSON-encoded.
+    """Raise a model-visible :class:`ClientToolError` if ``result`` cannot be JSON-encoded.
 
     The RAW return is reduced FIRST (so a pydantic/dataclass return cannot slip a surrogate
     through un-walked) and walked for a lone UTF-16 surrogate; on a hit the model receives a
-    named tool error identifying the tool and the JSON path, never a crash when the langchain
-    layer later encodes the value. A leaf the reduction cannot render at all (an un-encodable
-    model/dataclass) surfaces as ``UnencodableLeafError`` carrying that leaf's path — the same
-    named refusal, never a raw reduction crash.
+    named tool error identifying the tool and the JSON path, never a crash when an engine later
+    encodes the value. A leaf the reduction cannot render at all surfaces as
+    ``UnencodableLeafError`` carrying that leaf's path — the same named refusal.
     """
     try:
         offending_path = find_lone_surrogate(_serialize_result(result))
     except UnencodableLeafError as exc:
         offending_path = exc.path
     if offending_path is not None:
-        raise ToolException(f"tool {tool_name!r} produced a result that cannot be JSON-encoded at {offending_path}")
+        raise ClientToolError(
+            tool_name, f"tool {tool_name!r} produced a result that cannot be JSON-encoded at {offending_path}"
+        )
 
 
-async def _invoke_tool_body(
-    target: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any], tool_name: str
-) -> Any:
-    """Invoke the tool BODY and map its OWN failure to a model-visible ``ToolException``.
+async def _invoke_tool_body(target: Callable[..., Any], kwargs: dict[str, Any], tool_name: str) -> Any:
+    """Invoke the tool BODY and map its OWN failure to a model-visible :class:`ClientToolError`.
 
-    A driver's FAILED terminal RAISES :class:`RunTerminalFailed` carrying the outcome WHOLE: the
+    A driver's FAILED terminal RAISES :class:`RunTerminalFailed` carrying the outcome WHOLE: an
     agent loop reads a tool failure as TEXT, so the whole opaque outcome is rendered as JSON text
-    (the contract helper, reading no key inside it, naming no engine) onto the ``ToolException`` the
-    recovery middleware turns into the model's error ``ToolMessage`` — not the bare contract message
-    the generic arm would collapse it to. Any other body failure becomes the generic named tool
-    error. Only the body's own failure is caught here; ``CancelledError``/``BaseException`` pass
-    through untouched, and a caller's surrounding machinery (identity gate, park adoption, masking)
-    is never mislabeled as a tool that failed. An undeclared park refused by a dispatch inside the
-    body propagates raw, never as a tool error.
+    (the contract helper, reading no key inside it, naming no engine). Any other body failure
+    becomes the generic named tool error. Only the body's own failure is caught here;
+    ``CancelledError``/``BaseException`` pass through untouched, and the surrounding machinery
+    (identity gate, validation, park refusal, masking) is never mislabeled as a tool that failed.
+    An undeclared park refused by a dispatch inside the body propagates raw, never as a tool error.
     """
     try:
-        result = target(*args, **kwargs)
+        result = target(**kwargs)
         if inspect.isawaitable(result):
             result = await result
     except UndeclaredPauseError:
         raise
     except RunTerminalFailed as exc:
-        raise ToolException(failed_outcome_text(exc.outcome)) from exc
+        raise ClientToolError(tool_name, failed_outcome_text(exc.outcome)) from exc
     except Exception as exc:
         logger.warning("in-process tool %r failed: %s", tool_name, exc, exc_info=exc)
-        raise ToolException(f"Error calling tool {tool_name!r}: {exc}") from exc
+        raise ClientToolError(tool_name, f"Error calling tool {tool_name!r}: {exc}") from exc
     return result
 
 
 class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
-    """Exposes bound tools as langchain ``StructuredTool``s an in-process agent invokes.
+    """Binds registered tools as framework-neutral handles an in-process agent engine invokes."""
 
-    Gates each dispatch on the execution identity and masks secrets.
-    """
+    async def get_client_tools(self, names: list[str] | None = None) -> list[ClientTool]:
+        """The framework-neutral handles of the tools named in ``names`` (all when ``None``).
 
-    async def get_client_tools(self, names: list[str] | None = None) -> list[StructuredTool]:
+        An unknown name raises :class:`UnknownToolError`; a name longer than a bound tool name may be
+        raises ``ToolNameTooLongError`` (never truncated). Each handle advertises the tool's
+        ``parameters`` — the schema the MCP edge advertises, injected Context/``Depends`` parameters
+        stripped — and its description.
+        """
         tools = await self.get_tools()
         for name in names or []:
             if name not in tools:
                 raise UnknownToolError(name)
-
-        selected = {name: t for name, t in tools.items() if not names or name in names}
-        truncated: dict[str, str] = {}
-        for name in selected:
-            key = name[:CLIENT_TOOL_NAME_MAX_LEN]
-            if key in truncated:
-                raise ValueError(
-                    f"Tool names {truncated[key]!r} and {name!r} collide after "
-                    f"{CLIENT_TOOL_NAME_MAX_LEN}-char truncation."
+        handles: list[ClientTool] = []
+        for name, tool_obj in tools.items():
+            if names and name not in names:
+                continue
+            check_tool_name(name)
+            handles.append(
+                BoundClientTool(
+                    name=name,
+                    description=tool_obj.description or "",
+                    input_schema=tool_obj.parameters,
+                    _call=self._client_call(tool_obj),
                 )
-            truncated[key] = name
-
-        client_tools: list[StructuredTool] = []
-        for name, t in selected.items():
-            # An opaque-signature tool (an agent run tool's ``**arguments`` body)
-            # cannot have its input schema inferred from the signature — that
-            # advertises NO fields — so pass its explicit ``.parameters`` schema and
-            # its own description (langchain does not fall back to the impl's
-            # docstring once a dict ``args_schema`` is given, and the ``**arguments``
-            # body carries none). A normal tool gets neither: langchain infers the
-            # schema from the presented signature and reads the description from the
-            # runnable's docstring.
-            explicit_schema = self._client_args_schema(t)
-            extra_kwargs: dict[str, Any] = (
-                {"args_schema": explicit_schema, "description": t.description} if explicit_schema is not None else {}
             )
-            # langchain's overloaded ``tool`` is typed to return ``BaseTool | Callable``
-            # and to want a ``Runnable`` for ``runnable``; this call shape (name + a
-            # plain callable) always builds a ``StructuredTool`` at runtime.
-            with warnings.catch_warnings():
-                # Inferring a client tool's schema rebuilds a pydantic model from the
-                # presented signature, so an operation carrying a field named ``schema``
-                # (a wire key mapped by FIELD NAME, whose name shadows pydantic's
-                # deprecated ``BaseModel.schema()`` alias) re-emits the shadowing warning
-                # here — outside the model definition site that suppresses it. Suppressed
-                # narrowly at this rebuild site, matching the message the operation and
-                # contract models suppress at their own definition.
-                warnings.filterwarnings("ignore", message='Field name "schema"', category=UserWarning)
-                built = cast(
-                    StructuredTool,
-                    tool(
-                        name_or_callable=name[:CLIENT_TOOL_NAME_MAX_LEN],
-                        runnable=cast(Any, self._client_runnable(t)),
-                        **extra_kwargs,
-                    ),
-                )
-            client_tools.append(built)
-        return client_tools
+        return handles
 
-    def _client_args_schema(self, tool_obj: Tool) -> dict[str, Any] | None:
-        """The explicit input JSON schema a client tool must advertise, or ``None`` to use langchain inference.
+    def _client_call(self, tool_obj: Tool) -> Callable[[Mapping[str, Any]], Awaitable[Any]]:
+        """The call one handle's ``invoke`` runs.
 
-        Needed when the tool's fn signature cannot be round-tripped through langchain's inferred args model;
-        otherwise ``None`` (langchain infers the schema from the presented signature).
-        Two signature shapes need the explicit ``.parameters`` instead of
-        inference:
+        Resolves the tool's typed callable via ``_branch_base_callable`` (``FunctionTool`` →
+        ``fn``; a preset ``TransformedTool`` → its baked partial; anything else raises) and strips
+        the fastmcp-injected Context/``Depends`` params, so the arguments validate against the real
+        user parameters and the injected ones resolve at call time.
 
-        * a bare ``*args``/``**kwargs`` passthrough — inference advertises NO
-          fields, hiding every input from the LLM;
-        * a synthesized agent run tool, whose concrete per-field signature carries
-          the non-JSON-serializable :data:`_UNSET` sentinel as the default of every
-          optional parameter (so the body can forward set fields only). Building a
-          langchain args model over that signature would materialize and then fail
-          to serialize the sentinel, so the tool advertises its explicit
-          ``.parameters`` (the agent's exact ``ToolInput`` schema) and is invoked
-          through a permissive runnable (:meth:`_client_runnable`).
+        The call opens this tool's own call frame (a PUSH of its name, so an ask it raises records
+        it in ``asked_by``), enforces the run-time tier fence through the SAME ``enforce_run_tier``
+        the ``run_tool`` seam uses, and gates on the execution identity under the tool's registered
+        name. Under a bound identity the body is re-resolved from the name LIVE, so the registration
+        decided about is the one that runs — a handle outlives an agent turn, and a preset re-based
+        or deleted mid-turn would otherwise run its stale baked body; a vanished registration fails
+        loudly as an unknown tool. The body runs under ``bridge_context`` so an injected
+        ``ctx.elicit()`` / ``ctx.sample()`` resolves through the platform bridges.
 
-        A tool with an ordinary concrete signature returns ``None`` and keeps the
-        signature-inference path (injected Context/``Depends`` stripping included)
-        unchanged.
+        The body path is the direct body path by design: no ``run_tool`` seam, no retry policy and
+        no dispatch-scope row, because the agent run tool that drives the engine is itself the
+        recorded dispatch.
         """
-        if not isinstance(tool_obj, FunctionTool):
-            return None
-        resolved = without_injected_parameters(tool_obj.fn)
-        params = list(inspect.signature(resolved).parameters.values())
-        all_var = bool(params) and all(p.kind in _VAR_PARAM_KINDS for p in params)
-        has_unset_default = any(p.default is _UNSET for p in params)
-        if all_var or has_unset_default:
-            return tool_obj.parameters
-        return None
+        resolved = without_injected_parameters(self._branch_base_callable(tool_obj))
+        resolved_permissive = _is_permissive(inspect.signature(resolved))
+        name = tool_obj.name
 
-    def _client_runnable(self, tool_obj: Tool) -> Callable[..., Any]:
-        """The callable langchain builds a client tool over, for an in-process agent to invoke.
-
-        Resolves the tool's typed callable via ``_branch_base_callable``
-        (``FunctionTool`` → ``fn``; a preset ``TransformedTool`` → its baked
-        partial; anything else raises), then strips the fastmcp-injected
-        Context/``Depends`` params with ``without_injected_parameters`` so the
-        schema langchain infers advertises only the real user args — never a
-        ``Context`` the LLM would be asked to supply. The returned closure carries
-        that stripped ``__signature__``/``__name__`` (langchain infers the args
-        schema via ``inspect.signature``, which honors ``__signature__``) and runs
-        the call under ``bridge_context`` so an injected ``ctx.elicit()`` /
-        ``ctx.sample()`` resolves through the platform bridges, exactly as
-        ``run_tool`` does.
-
-        When the tool advertises an explicit ``args_schema`` (:meth:`_client_args_schema`
-        returns a schema — an all-VAR passthrough or a synthesized agent run tool
-        with :data:`_UNSET` sentinel defaults), the runnable is left PERMISSIVE (its
-        native ``*args``/``**kwargs`` signature): the LLM-facing schema rides on the
-        explicit ``args_schema``, and forwarding only the caller-supplied kwargs
-        keeps ``from_tool_input``'s set-fields-only contract intact — never
-        materializing (and failing to serialize) the sentinel defaults.
-
-        The closure gates on the execution identity exactly as ``run_tool`` does, under
-        the tool's FULL registered name (the client-facing truncation is only a label).
-        With no identity bound the call forwards straight through to the snapshot's
-        callable.
-
-        Under a fire the body is re-resolved from the name LIVE, so the registration
-        decided about is the one that runs — a client-tool snapshot outlives an agent
-        turn, and a preset re-based or deleted mid-turn would otherwise run its stale
-        baked body; a vanished registration fails loudly as an unknown tool.
-        """
-        base_callable = self._branch_base_callable(tool_obj)
-        resolved = without_injected_parameters(base_callable)
-        resolved_sig = inspect.signature(resolved)
-
-        async def invoke(*args, **kwargs):
-            # Run-time tier fence: this agent tool-dispatch door reaches the tool BODY
-            # directly (never the ``run_tool`` seam), so it enforces the same admin fence for
-            # a ``fenced``/``secret`` tool here — through the SAME ``enforce_run_tier`` the
-            # seam uses, resolving a preset/branch to its base tool identically, so the two
-            # doors cannot drift. A non-fenced tool resolves no caller (a dict read).
-            await enforce_run_tier(self._app, tool_obj.name)
-            target, target_sig = resolved, resolved_sig
-            execution_identity = self._bound_execution_identity()
-            if execution_identity is not None:
-                target = without_injected_parameters(
-                    self._branch_base_callable(await self._resolve_run_target(tool_obj.name))
-                )
-                target_sig = inspect.signature(target)
-                await self._authorize_execution_dispatch(
-                    execution_identity, tool_obj.name, _named_call_arguments(target_sig, args, kwargs)
-                )
-            with bridge_context(self._app.fastmcp):
-                # Only the tool BODY's own failure becomes a model-visible tool error; the machinery
-                # above (identity gate, live re-resolution, bridge setup) AND the park-adoption/masking
-                # below stay a raw abort. So the body invocation + its error mapping live in
-                # ``_invoke_tool_body`` ALONE — a bug in the adoption check, marker build, or secret
-                # masking is not mislabeled as a tool that failed.
-                result = await _invoke_tool_body(target, args, kwargs, tool_obj.name)
-                # Only a tool that declares it can pause may return a park signal. Refused RAW,
-                # never a ToolException: an undeclared park is a registration fault the model
-                # must not retry around (a retry would fire the body a second time).
-                if isinstance(result, (SuspendedInteraction, ResumeBuffered)) and not await self.pauses(tool_obj.name):
-                    raise UndeclaredPauseError(tool_obj.name)
-                if isinstance(result, SuspendedInteraction):
-                    # An async ask parked the caller and returned this sentinel. Inside a
-                    # graph the tool task must COMPLETE (so ask runs exactly once, never
-                    # replayed on resume), so convert the sentinel to the reserved contract
-                    # marker: the ToolMessage commits carrying it, and the in-graph park
-                    # middleware recognizes the park by this RESULT shape (never a tool name) and
-                    # interrupts once for the whole super-step.
-                    #
-                    # WHICH park this run records is the ownership question: its own
-                    # interaction when the ask was raised under this run's binding, or —
-                    # when the caller CHAINED this dispatch — the chained key naming the
-                    # CALL, owned by this run's own resume continuation, so the nested run
-                    # keeps its park while its terminal re-enters this run through the
-                    # chain's delivery tool. A nested run's park is never ADOPTED:
-                    # unchained, the sentinel is refused here as a model-visible tool
-                    # error rather than suspending this run behind a resume fired only at
-                    # the nested run.
-                    #
-                    # The park deadline rides through unchanged, so a chained park
-                    # INHERITS the horizon of the ask it is waiting on.
-                    try:
-                        park_key, park_owner = resolve_park_adoption(
-                            result.resume_owner, interaction_id=result.interaction_id, tool_name=tool_obj.name
-                        )
-                    except NestedParkOwnershipError as exc:
-                        # A DELIBERATE refusal, not a tool that failed: it is already worded for
-                        # the model and already names the tool, so it is re-raised as its own
-                        # message — no second "Error calling tool" prefix, and no traceback-bearing
-                        # WARNING for a decision this seam made on purpose.
-                        logger.info("in-process tool %r returned a park this run does not own: %s", tool_obj.name, exc)
-                        raise ToolException(str(exc)) from exc
-                    # The owner rides the WIRE form too: the driver that later claims this park
-                    # reads it off the serialized ToolMessage, never off the sentinel. The per-ask
-                    # id lists ride it as well so a driver surfacing a whole step can merge them.
-                    return suspended_interaction_marker(
-                        park_key,
-                        result.expiry_at,
-                        park_owner,
-                        interaction_ids=result.interaction_ids,
-                        caller_interaction_ids=result.caller_interaction_ids,
+        async def call(arguments: Mapping[str, Any]) -> Any:
+            supplied = {key: value for key, value in arguments.items() if value is not _UNSET}
+            with tool_call_frame(name=name):
+                await enforce_run_tier(self._app, name)
+                target, permissive = resolved, resolved_permissive
+                execution_identity = self._bound_execution_identity()
+                if execution_identity is not None:
+                    target = without_injected_parameters(
+                        self._branch_base_callable(await self._resolve_run_target(name))
                     )
-                # Refuse a return no JSON encoder can render (a lone UTF-16 surrogate) so the model
-                # receives a named tool error, never a crash when the langchain layer later encodes
-                # it. A deliberate model-visible refusal, so — like the park-adoption refusal above —
-                # it is raised as its own ToolException.
-                _refuse_unencodable_client_result(tool_obj.name, result)
-                # The model never sees a secret value: this adapter feeds the langchain layer (the
-                # model, the checkpoint, the callback trace), so a wrapped secret is masked before
-                # it leaves here.
+                    permissive = _is_permissive(inspect.signature(target))
+                    await self._authorize_execution_dispatch(execution_identity, name, supplied)
+                with bridge_context(self._app.fastmcp):
+                    kwargs = supplied if permissive else _validated_arguments(name, target, supplied)
+                    result = await _invoke_tool_body(target, kwargs, name)
+                # Only a tool that declares it can pause may return a park signal. Refused RAW,
+                # never a ClientToolError: an undeclared park is a registration fault the model
+                # must not retry around (a retry would fire the body a second time).
+                if isinstance(result, (SuspendedInteraction, ResumeBuffered)):
+                    if not await self.pauses(name):
+                        raise UndeclaredPauseError(name)
+                    return result
+                _refuse_unencodable_client_result(name, result)
+                # The model never sees a secret value: the engine feeds a result to the model, its
+                # checkpoint and its trace, so a wrapped secret is masked before it leaves here.
                 return mask_secrets(result)
 
-        async def runnable(*args, **kwargs):
-            # This in-process agent tool-dispatch door reaches the tool body directly (never the
-            # ``run_tool`` seam that opens the frame), so it opens the call frame itself: a PUSH of
-            # this tool's own name, so an ask this dispatch raises records it in ``asked_by``. In an
-            # agent drive the outer frame is already open (a non-empty prior chain), so this pushes
-            # rather than re-mints the run-delivery context.
-            with tool_call_frame(name=tool_obj.name):
-                return await invoke(*args, **kwargs)
-
-        runnable.__name__ = resolved.__name__
-        # langchain reads the runnable's docstring for the client tool's
-        # description (it raises without one), so carry the resolved callable's.
-        runnable.__doc__ = resolved.__doc__
-
-        if self._client_args_schema(tool_obj) is not None:
-            # Explicit args_schema advertised: keep the permissive signature so
-            # langchain forwards only the supplied kwargs to the concrete body.
-            return runnable
-
-        runnable.__signature__ = resolved_sig  # type: ignore[attr-defined]
-        # langchain infers the args schema via pydantic, which reads BOTH the
-        # signature AND ``get_type_hints`` (i.e. ``__annotations__``). Carry the
-        # presented signature's annotations so every advertised param has a type;
-        # a bare ``**kwargs`` closure otherwise raises a ``KeyError`` at inference.
-        annotations = {
-            pname: p.annotation
-            for pname, p in resolved_sig.parameters.items()
-            if p.annotation is not inspect.Parameter.empty
-        }
-        if resolved_sig.return_annotation is not inspect.Signature.empty:
-            annotations["return"] = resolved_sig.return_annotation
-        runnable.__annotations__ = annotations
-        return runnable
+        return call

@@ -20,6 +20,8 @@ through :func:`assert_delivery_scoped`.
 
 from __future__ import annotations
 
+import asyncio
+
 from langchain_core.tools import StructuredTool
 from tai42_contract.interactions import (
     ChainedResume,
@@ -28,20 +30,21 @@ from tai42_contract.interactions import (
     reset_park_completion,
     set_park_completion,
 )
+from tests._client_tool import FakeClientTool, client_tool
 
 # A bound completion standing in for what the conversation door binds around an agent turn.
 BOUND_COMPLETION: tuple[str, dict[str, str]] = ("conversation_deliver", {"thread_id": "bridge:acme:alice"})
 
 
-def probe_tool(name: str = "probe") -> tuple[StructuredTool, list[ChainedResume | None]]:
-    """A tool whose body records the chain routing it can see, plus the recording list."""
+def probe_tool(name: str = "probe") -> tuple[FakeClientTool, list[ChainedResume | None]]:
+    """A client-tool handle whose body records the chain routing it can see, plus the recording list."""
     seen: list[ChainedResume | None] = []
 
     def _peek() -> str:
         seen.append(get_chained_resume())
         return "peeked"
 
-    return StructuredTool.from_function(func=_peek, name=name, description="a probe tool"), seen
+    return client_tool(name, _peek, description="a probe tool"), seen
 
 
 def assert_delivery_scoped(handed: StructuredTool, seen: list[ChainedResume | None]) -> None:
@@ -53,8 +56,7 @@ def assert_delivery_scoped(handed: StructuredTool, seen: list[ChainedResume | No
     """
     token = set_park_completion(*BOUND_COMPLETION)
     try:
-        assert handed.func is not None
-        handed.func()
+        assert asyncio.run(handed.ainvoke({})) == "peeked"
         assert get_park_completion() == BOUND_COMPLETION
     finally:
         reset_park_completion(token)

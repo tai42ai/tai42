@@ -21,6 +21,7 @@ from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils import render as door_contract_module
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.app.conversations_facet import ConversationsFacet
 from tai42_skeleton.authz.identity import CallerIdentity
@@ -223,7 +224,7 @@ class _AgentInput(BaseModel):
     user_message: str = ""
 
 
-class _MemoryAgent(Agent):
+class _MemoryAgent(MemorylessTestAgent):
     """An agent that holds thread memory — implements ``append_thread_messages``, so it can
     serve manual mode."""
 
@@ -237,7 +238,7 @@ class _MemoryAgent(Agent):
         return None
 
 
-class _MemorylessAgent(Agent):
+class _MemorylessAgent(MemorylessTestAgent):
     """An agent that leaves ``append_thread_messages`` the ABC default, so it cannot serve
     manual mode."""
 
@@ -248,7 +249,7 @@ class _MemorylessAgent(Agent):
         return ""
 
 
-class _AskingAgent(Agent):
+class _AskingAgent(MemorylessTestAgent):
     """An agent whose declared ``tool_names`` include ``ask``, so it can ask its caller mid-run
     and the platform bind validator requires the route's reply/resume path."""
 
@@ -494,7 +495,7 @@ class _EchoInput(BaseModel):
     user_message: str = ""
 
 
-class EchoAgent(Agent):
+class EchoAgent(MemorylessTestAgent):
     tool_name = "echo"
     ToolInput = _EchoInput
 
@@ -821,7 +822,7 @@ def _completion_warnings(caplog, completion_id: str) -> list[str]:
     ]
 
 
-class MemoryAgent(Agent):
+class MemoryAgent(MemorylessTestAgent):
     """An agent that accumulates the messages it has seen per ``thread_id`` and answers
     with the running history — so a second turn on the same thread proves the bridge
     handed it the SAME ``thread_id`` (the memory key)."""
@@ -854,7 +855,7 @@ _BASELINE_CHANNEL_PAYLOAD = {
 }
 
 
-class BlockingAgent(Agent):
+class BlockingAgent(MemorylessTestAgent):
     """An agent that holds its turn open until released, so a second message for the same
     thread meets a genuinely full per-thread FIFO."""
 

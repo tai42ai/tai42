@@ -50,6 +50,7 @@ import pytest
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from tai42_contract.access_control.identity import IdentityProvider
+from tai42_contract.agent import PresetSpec
 from tai42_contract.agent.events import MessageFinal, StructuredFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import ParkResumeUnauthorizedError
@@ -65,6 +66,7 @@ from tai42_kit.settings import reset_all_settings
 from tai42_skeleton.app import instance, lifecycle
 from tai42_skeleton.manifest import Manifest
 
+from tai42_agents._internal.lc_tools import resolve_tools
 from tai42_agents._internal.park.chain import CHAINED_PARK_DELIVERY_TOOL_NAME
 from tai42_agents._internal.park.resume import AGENT_RESUME_TOOL_NAME
 
@@ -513,3 +515,55 @@ def test_hidden_continuation_tools_dispatch_through_the_registry_and_refuse_with
                 )
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("key", ["thread_id", "resume", "resume_checkpoint_id", "checkpoint_provider"])
+def test_the_conversation_door_refuses_a_route_owned_key_on_the_real_tools_agent(key: str) -> None:
+    # The route owns the run's thread and continuity: a ``start_expr`` naming one is refused with
+    # the door's own text, read off the real agent's ``addressed_memory`` before any validation.
+    from tai42_skeleton.conversations.turn.agent_turn import _agent_run_kwargs
+
+    from tai42_agents.tools_agent import ToolsAgent
+
+    with pytest.raises(ValueError, match=rf"must not set the route-owned key\(s\) \['{key}'\]"):
+        _agent_run_kwargs(ToolsAgent(), "hi", {"user_message": {"content": "hi"}, key: "x"})
+
+
+def test_the_conversation_door_drives_a_voting_role_config_carrying_a_thread() -> None:
+    # A role's own config is not the run's identity: a voting start carrying a judge thread is
+    # driven (not refused) at this door.
+    from tai42_skeleton.conversations.turn.agent_turn import _agent_run_kwargs
+
+    from tai42_agents.voting_agent.agent import VotingAgent
+
+    start = {"judge_message": {"content": "decide"}, "judge_langgraph_config": {"configurable": {"thread_id": "t-1"}}}
+    run_kwargs, starts = _agent_run_kwargs(VotingAgent(), "hi", start)
+    assert starts is True
+    assert run_kwargs["judge_langgraph_config"] == {"configurable": {"thread_id": "t-1"}}
+
+
+def test_a_short_named_preset_binds_over_a_base_tool_whose_name_passes_the_bound(skeleton: Any) -> None:
+    """The bound tool-name length governs the name the model is handed: an inline preset with a short
+    name over a registered tool whose own name is longer than a bound name may be binds under its
+    short name, and its call runs the base tool under the base's full name."""
+    long_name = "a_registered_tool_whose_own_name_is_longer_than_a_bound_name_may_be"
+    assert len(long_name) > 64
+
+    async def run() -> tuple[list[str], Any, Any]:
+        async with instance.app.app_context(Manifest.model_validate(_MANIFEST)):
+
+            @tai42_app.tools.tool(name=long_name, force=True)
+            async def _long_named(query: str, fixed: str) -> dict[str, str]:
+                """Echo the arguments."""
+                return {"query": query, "fixed": fixed}
+
+            preset = PresetSpec(name="short_preset", base_tool=long_name, fixed_kwargs={"fixed": "z"})
+            [adapted] = await resolve_tools(tai42_app.tools, [], [], [preset])
+            return [adapted.name], adapted.args_schema, await adapted.ainvoke({"query": "hi"})
+
+    names, schema, answer = asyncio.run(run())
+    assert names == ["short_preset"]
+    assert isinstance(schema, dict)
+    assert list(schema["properties"]) == ["query"]
+    assert schema["required"] == ["query"]
+    assert answer == {"query": "hi", "fixed": "z"}

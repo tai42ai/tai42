@@ -15,7 +15,7 @@ through the handle:
 * ``monitoring`` (``AppMonitoring``) — ``active`` exposes a backend whose writer is
   the kit's real OpenTelemetry writer over an in-memory exporter, so a test reads back
   the records an agent run produced with no live backend.
-* ``tools`` (``AppTools``) — ``get_client_tools`` / ``run_tool`` are backed by the
+* ``tools`` (``AppTools``) — ``get_client_tools`` / ``get_tool`` / ``run_tool`` are backed by the
   mutable ``client_tools`` / ``tool_runners`` maps. A test populates the map it
   needs; an unknown name raises a ``RuntimeError`` carrying the name — the
   ``AppTools`` contract prescribes no exception type, so that is the fake's own
@@ -44,7 +44,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
-from langchain_core.tools import StructuredTool
+from fastmcp.tools import Tool
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from tai42_contract.agent import Agent
@@ -53,6 +53,7 @@ from tai42_contract.connectors import ResolvedConnectionAuth
 from tai42_contract.monitoring import TraceContext
 from tai42_contract.sandbox import Sandbox, SandboxPolicy, SandboxUnavailableError
 from tai42_contract.template import TemplatedText
+from tai42_contract.tools import ClientTool
 from tai42_kit.llm import RunTrace
 from tai42_kit.monitoring.otel import OtelWriter
 from tai42_kit.monitoring.testing import InMemoryOtelReader
@@ -143,7 +144,7 @@ class RecordingMonitoringFacet:
         return self._backend
 
 
-class _SurfaceMap(dict[str, StructuredTool]):
+class _SurfaceMap(dict[str, ClientTool]):
     """A name-to-tool map that counts its own mutations, so the double's surface generation moves on each."""
 
     mutations = 0
@@ -151,7 +152,7 @@ class _SurfaceMap(dict[str, StructuredTool]):
     def _moved(self) -> None:
         self.mutations += 1
 
-    def __setitem__(self, key: str, value: StructuredTool) -> None:
+    def __setitem__(self, key: str, value: ClientTool) -> None:
         super().__setitem__(key, value)
         self._moved()
 
@@ -176,16 +177,16 @@ class _SurfaceMap(dict[str, StructuredTool]):
 class RecordingTools:
     """An ``AppTools`` impl backed by mutable maps a test populates.
 
-    ``client_tools`` maps a name to a live ``StructuredTool`` returned by
-    ``get_client_tools``; ``tool_runners`` maps a base-tool name to a callable
-    invoked by ``run_tool`` (used by preset binding). An unknown name raises a
-    ``RuntimeError`` carrying the tool name: the ``AppTools`` contract declares no
-    exception type for these calls, so this is the fake's own unknown-tool signal
+    ``client_tools`` maps a name to the :class:`~tai42_contract.tools.ClientTool` handle
+    ``get_client_tools`` returns (``tests._client_tool.client_tool`` builds one) and ``get_tool`` reads;
+    ``tool_runners`` maps a base-tool name to a callable invoked by ``run_tool`` (used by
+    preset binding). An unknown name raises a ``RuntimeError`` carrying the tool name: the
+    ``AppTools`` contract declares no exception type for these calls, so this is the fake's own unknown-tool signal
     and tests assert against it, not against any app-side exception hierarchy.
     """
 
     def __init__(self) -> None:
-        self.client_tools: dict[str, StructuredTool] = _SurfaceMap()
+        self.client_tools: dict[str, ClientTool] = _SurfaceMap()
         self._registrations = 0
         self.tool_runners: dict[str, Callable[..., Any]] = {}
         self.registered_tools: dict[str, Callable[..., Any]] = {}
@@ -220,13 +221,20 @@ class RecordingTools:
         mutations = client_tools.mutations if isinstance(client_tools, _SurfaceMap) else 0
         return self._registrations + mutations
 
-    async def get_client_tools(self, names: list[str] | None = None) -> list[StructuredTool]:
+    async def get_client_tools(self, names: list[str] | None = None) -> list[ClientTool]:
         if names is None:
             return list(self.client_tools.values())
         missing = [name for name in names if name not in self.client_tools]
         if missing:
             raise RuntimeError(f"unknown client tools: {missing}")
         return [self.client_tools[name] for name in names]
+
+    async def get_tool(self, key: str) -> Tool:
+        """The registered tool ``key`` built from its handle's name, description and argument schema."""
+        if key not in self.client_tools:
+            raise RuntimeError(f"unknown tool: {key}")
+        handle = self.client_tools[key]
+        return Tool(name=handle.name, description=handle.description, parameters=handle.input_schema)
 
     async def run_tool(
         self,

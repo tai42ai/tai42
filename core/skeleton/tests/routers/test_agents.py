@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from typing import Any
 
 import httpx
@@ -34,8 +34,10 @@ from tai42_contract.agent.events import (
 )
 from tai42_contract.interactions import ParkedEntry
 from tai42_contract.tools import current_call_chain, get_run_delivery_id
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.agent import (
+    AddressedMemory,
     Agent,
     MessageDelta,
     MessageFinal,
@@ -68,7 +70,7 @@ class _FakeInput(BaseModel):
     count: int = 1
 
 
-class _FakeAgent(Agent):
+class _FakeAgent(MemorylessTestAgent):
     """A streaming agent that replays a scripted event sequence. It records the
     kwargs its ``astream`` received (to pin the ``from_tool_input`` mapping) and
     sets ``cancelled`` when a disconnect cancels it mid-run."""
@@ -122,24 +124,33 @@ class _RenamingAgent(_FakeAgent):
 
 
 class _ConfigInput(BaseModel):
-    """Carries the LangGraph configs a run's ``thread_id``/``checkpoint_id`` ride in:
-    the plain one plus a voting agent's judge/voter pair."""
+    """Carries two option blobs whose ``scope`` holds a thread and a checkpoint id only the agent reads."""
 
     prompt: str = "hi"
-    langgraph_config: dict[str, Any] = {}
-    judge_langgraph_config: dict[str, Any] = {}
-    voter_langgraph_config: dict[str, Any] = {}
+    engine_options: dict[str, Any] = {}
+    role_options: dict[str, Any] = {}
 
 
 class _ConfigAgent(_FakeAgent):
-    """Maps every config field straight through to a run kwarg, which is what the
-    bridge reservation guard scans."""
+    """Maps every field straight through to a run kwarg and reports the ids its option blobs carry."""
 
     ToolInput = _ConfigInput
 
     @classmethod
     def from_tool_input(cls, validated: BaseModel) -> dict[str, Any]:
         return {name: getattr(validated, name) for name in validated.model_fields_set}
+
+    @classmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        threads: set[str] = set()
+        checkpoints: set[str] = set()
+        for field in ("engine_options", "role_options"):
+            scope = (run_kwargs.get(field) or {}).get("scope") or {}
+            if "thread" in scope:
+                threads.add(scope["thread"])
+            if "checkpoint" in scope:
+                checkpoints.add(scope["checkpoint"])
+        return AddressedMemory(thread_ids=frozenset(threads), checkpoint_ids=frozenset(checkpoints))
 
 
 # -- request builders --------------------------------------------------------
@@ -551,29 +562,28 @@ async def test_run_from_tool_input_valueerror_400(one_agent):
 # Any caller config steering a run into the reserved ``bridge:`` thread namespace —
 # top-level or per judge/voter, on ``thread_id`` or ``checkpoint_id`` — is a loud 400.
 _RESERVED_CONFIGS = [
-    ("langgraph_config", "thread_id"),
-    ("langgraph_config", "checkpoint_id"),
-    ("judge_langgraph_config", "thread_id"),
-    ("voter_langgraph_config", "checkpoint_id"),
+    ("engine_options", "thread", "thread_id"),
+    ("engine_options", "checkpoint", "checkpoint_id"),
+    ("role_options", "thread", "thread_id"),
+    ("role_options", "checkpoint", "checkpoint_id"),
 ]
 
 
-@pytest.mark.parametrize(("config_field", "key"), _RESERVED_CONFIGS)
-async def test_run_rejects_caller_supplied_bridge_namespace(one_agent, config_field, key):
+@pytest.mark.parametrize(("config_field", "key", "named"), _RESERVED_CONFIGS)
+async def test_run_rejects_caller_supplied_bridge_namespace(one_agent, config_field, key, named):
     one_agent(_ConfigAgent([MessageFinal(text="x")]))
-    body = json.dumps({"prompt": "hi", config_field: {"configurable": {key: "bridge:route:1.2.3.4"}}}).encode()
+    body = json.dumps({"prompt": "hi", config_field: {"scope": {key: "bridge:route:1.2.3.4"}}}).encode()
     resp = await router.run_agent(_make_run_request("faker", body))
     assert resp.status_code == 400
     error = json.loads(bytes(resp.body))["error"]
-    assert key in error
-    assert "bridge:" in error
+    assert error == f"{named} may not use the reserved 'bridge:' namespace"
 
 
 async def test_run_allows_a_normal_thread_id(one_agent):
-    # A thread_id outside the reserved namespace is not the bridge's to protect — the
+    # A thread id outside the reserved namespace is not the bridge's to protect — the
     # run streams as usual.
     one_agent(_ConfigAgent([MessageFinal(text="ok")]))
-    body = json.dumps({"prompt": "hi", "langgraph_config": {"configurable": {"thread_id": "user-42"}}}).encode()
+    body = json.dumps({"prompt": "hi", "engine_options": {"scope": {"thread": "user-42"}}}).encode()
     resp = await router.run_agent(_make_run_request("faker", body))
     frames = _data_frames(await _collect(resp))
     assert frames[-1] == {"type": "stream.end"}
@@ -690,6 +700,16 @@ async def test_run_caller_ask_emits_the_asks_frame(one_agent, monkeypatch):
     assert [f["type"] for f in frames] == ["asks_final", "stream.end"]
     asks = AsksFinal.model_validate(frames[0]).asks
     assert [a["id"] for a in asks] == ["i1"]
+
+
+async def test_run_caller_ask_classifies_from_the_park_itself_with_no_store(one_agent, monkeypatch):
+    # The caller subset rides the park itself (``SuspendedFinal.caller_interaction_ids``), so the door
+    # classifies a caller ask with the interaction store OFF — no parked-list read decides it.
+    monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    one_agent(_FakeAgent([SuspendedFinal(interaction_ids=["i1"], caller_interaction_ids=["i1"], thread_id="t1")]))
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    frames = _data_frames(await _collect(resp))
+    assert [f["type"] for f in frames] == ["asks_final", "stream.end"]
 
 
 async def test_run_interrupt_streams_and_ends_with_no_extra_terminal_frame(one_agent):

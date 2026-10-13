@@ -17,13 +17,13 @@ fed the negotiation history explicitly on a fresh thread, surfaced as a terminal
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from langchain.agents import create_agent
 from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from tai42_contract.agent import Agent
+from tai42_contract.agent import AddressedMemory, Agent
 from tai42_contract.agent.events import (
     RecursionLimitFinal,
     StreamEvent,
@@ -44,12 +44,18 @@ from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.logging.settings import logging_settings
 
 from tai42_agents._internal.cache_mark import default_system_cache_mark
-from tai42_agents._internal.config_util import init_langgraph_config, start_run_thread, with_run_trace_lineage
-from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
+from tai42_agents._internal.config_util import (
+    config_addressed,
+    init_langgraph_config,
+    start_run_thread,
+    with_run_trace_lineage,
+)
+from tai42_agents._internal.lc_tools import structured_tools
 from tai42_agents._internal.outcomes import outcome_for_drive_error
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
-from tai42_agents._internal.reject import reject_unhonored, resolve_response_format
+from tai42_agents._internal.reject import resolve_response_format
 from tai42_agents._internal.render import render_message
+from tai42_agents._internal.run_kwargs import guard_run_kwargs
 from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents.refine_agent.prompt import (
@@ -64,48 +70,19 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
 
-# Contract ``Agent.run`` parameters the refine loop has no seat for, mapped to the
-# reason named in the raised error (the keys define this agent's unhonored set). The
-# loop drives its Evaluator↔Critic negotiation through role-named parameters
-# (evaluator_/critic_) and resolves tools from ``tool_names``. Honored params
-# (``tool_names``, ``checkpoint_provider``, ``response_format``) are absent here.
+# The contract ``Agent.run`` keys the refine loop has no seat for, mapped to the reason named in the
+# raised error. The loop drives its Evaluator↔Critic negotiation through role-named parameters
+# (evaluator_/critic_) and resolves tools from ``tool_names``.
 _UNHONORED_REASONS: dict[str, str] = {
-    "tools": "the loop resolves tools from tool_names, not caller-supplied live tools",
-    "presets": "the loop resolves tools from tool_names and exposes no preset tools",
-    "subagents": "the loop runs no sub-agent machinery",
-    "strategy": "it applies no composition strategy and will not silently ignore one",
-    "system_message": "the loop uses role-named evaluator_/critic_ messages and takes no system_message",
     "user_message": "the loop uses role-named evaluator_/critic_ messages and takes no user_message",
-    "interrupt_on": "its evaluator/critic graphs never pause for external input",
-    "skills": "it loads no skills backend",
-    "inline_skills": "it loads no skills backend",
-    "recursion_limit": (
-        "recursion_limit is per-role RunnableConfig content set via evaluator_/critic_ "
-        "langgraph_config; a single global value would mask the per-role setting"
-    ),
     "thread_id": (
         "thread_id is per-role RunnableConfig content set via evaluator_/critic_ langgraph_config's configurable; "
         "a single global thread_id would collide the two role graphs' checkpoint namespaces"
     ),
-    "resume": "its graphs never interrupt, so there is no paused run to resume",
-    "resume_checkpoint_id": (
-        "resume_checkpoint_id is per-role RunnableConfig content set via evaluator_/critic_ langgraph_config's "
-        "configurable; a single global checkpoint would collide the two role graphs' checkpoint namespaces"
-    ),
-    "llm_provider": "the loop uses role-named evaluator_llm_provider/critic_llm_provider",
-    "store_provider": "it wires no long-term store",
-    "llm_kwargs": "the loop uses role-named evaluator_llm_kwargs/critic_llm_kwargs",
-    "system_content_kwargs": (
-        "its evaluator/critic system prompts take the server-wide cache mark at the build seam, so a "
-        "per-node system content key has no seat; toggle it with the server setting, or use "
-        "user_content_kwargs to mark the evaluator's first user turn"
-    ),
 }
-# The unhonored parameters whose unset default is an empty sequence — a truthy
-# value is a rejected request. Every other unhonored parameter defaults to ``None``
-# and is set when it is not ``None`` (so ``response_format=None`` passes but a
-# falsy-but-meaningful ``strategy=""`` or ``resume=False`` still raises).
-_UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset({"tools", "presets", "subagents", "skills", "inline_skills"})
+
+# The run kwarg that steers the run's own checkpoint continuity.
+_CONTINUITY_KEYS = frozenset({"checkpoint_provider"})
 
 
 def _final_evaluator_input() -> dict[str, Any]:
@@ -378,8 +355,23 @@ class RefineAgent(Agent):
     )
     ToolInput: ClassVar[type[BaseModel]] = RefineAgentInput
 
-    async def run(self, **kwargs: Any) -> Any:
-        """Reject the unseated contract parameters, then run the loop and drain the final answer.
+    @classmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        """The checkpoint provider when present, and the ids the evaluator and critic configs carry."""
+        threads: set[str] = set()
+        checkpoints: set[str] = set()
+        for key in ("evaluator_langgraph_config", "critic_langgraph_config"):
+            role_threads, role_checkpoints = config_addressed(run_kwargs.get(key))
+            threads |= role_threads
+            checkpoints |= role_checkpoints
+        return AddressedMemory(
+            keys=frozenset(_CONTINUITY_KEYS & set(run_kwargs)),
+            thread_ids=frozenset(threads),
+            checkpoint_ids=frozenset(checkpoints),
+        )
+
+    async def run(self, *, response_format: Any = None, **kwargs: Any) -> Any:
+        """Run the loop and drain the final answer; ``astream``'s guard refuses an undeclared keyword.
 
         Returns the final approved answer by draining :meth:`astream`.
 
@@ -387,9 +379,8 @@ class RefineAgent(Agent):
         ``"title"``, and the drain returns the validated structured object the final
         approved pass forces, raising loudly if the run produced none.
         """
-        reject_unhonored("refine_agent.run", kwargs, _UNHONORED_REASONS, collection_params=_UNHONORED_COLLECTION_PARAMS)
-        response_format = await resolve_response_format("refine_agent", kwargs.get("response_format"))
-        return await self._drain(self.astream(**kwargs), response_format=response_format)
+        resolved = await resolve_response_format("refine_agent", response_format)
+        return await self._drain(self.astream(response_format=response_format, **kwargs), response_format=resolved)
 
     async def astream(
         self,
@@ -407,7 +398,9 @@ class RefineAgent(Agent):
         critic_langgraph_config: dict[str, Any] | None = None,
         user_content_kwargs: dict[str, Any] | None = None,
         response_format: Any = None,
-        **kwargs: Any,
+        thread_id: str | None = None,
+        user_message: TemplatedText | None = None,
+        **unknown: Any,
     ) -> AsyncIterator[StreamEvent]:
         """Stream the final evaluator pass; the Evaluator↔Critic loop runs silently until approval.
 
@@ -417,25 +410,28 @@ class RefineAgent(Agent):
         ``user_content_kwargs`` are the honored contract parameters;
         ``user_content_kwargs`` merges content-block keys (e.g. ``cache_control``)
         onto the evaluator's first user turn, a provider-unknown key surfacing as a
-        loud provider error. Every other :class:`~tai42_contract.agent.Agent`
-        parameter has no seat in the role-named loop and is rejected loudly (see
-        :data:`_UNHONORED_REASONS`), including ``system_content_kwargs`` — the
-        evaluator/critic system messages are internal fixed prompts.
+        loud provider error. A set ``thread_id`` / ``user_message`` has no seat in the
+        role-named loop and is refused loudly (see :data:`_UNHONORED_REASONS`), as is a
+        keyword this face does not declare.
 
         With a ``response_format`` set, only the final approved answer is forced into
         the schema, surfaced as a terminal
         :class:`~tai42_contract.agent.events.StructuredFinal`; a final pass producing
         none raises loudly after the stream drains.
         """
-        reject_unhonored(
-            "refine_agent.astream", kwargs, _UNHONORED_REASONS, collection_params=_UNHONORED_COLLECTION_PARAMS
+        guard_run_kwargs(
+            "refine_agent.astream",
+            unknown,
+            {
+                "thread_id": thread_id,
+                "user_message": user_message,
+                "tool_names": tool_names or (),
+                "response_format": response_format,
+            },
+            _UNHONORED_REASONS,
         )
         response_format = await resolve_response_format("refine_agent", response_format)
-        # Delivery-scoped: a tool this loop dispatches must not capture the completion binding
-        # addressing the agent's OWN deferred answer (see ``_internal.nested_dispatch``).
-        resolved_tools = scope_nested_dispatch_all(
-            await tai42_app.tools.get_client_tools(tool_names) if tool_names else []
-        )
+        resolved_tools = structured_tools(await tai42_app.tools.get_client_tools(tool_names) if tool_names else [])
         try:
             # The loop mints the structured-output strategy at the final evaluator pass
             # (keyed on its model) and returns it; the same object is bound into both the

@@ -18,20 +18,18 @@ that produces none raises rather than silently omitting it.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar
 
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 from pydantic import BaseModel
-from tai42_contract.agent import Agent, RecursionLimitFinal, StructuredOutputUnresolvedFinal
-from tai42_contract.agent.base import PresetSpec
-from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
+from tai42_contract.agent import AddressedMemory, Agent, RecursionLimitFinal, StructuredOutputUnresolvedFinal
 from tai42_contract.agent.events import InterruptFinal, StreamEvent, StructuredFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
-from tai42_contract.tools import TOOL_META_PAUSES
+from tai42_contract.tools import ClientTool
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_system_message, build_user_output, extract_structured_output
@@ -40,8 +38,8 @@ from tai42_kit.llm.store.store_registry import store_registry
 
 from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
 from tai42_agents._internal.cache_mark import default_system_cache_mark
-from tai42_agents._internal.config_util import build_run_config, mark_minted_thread_finished
-from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
+from tai42_agents._internal.config_util import build_run_config, config_addressed, mark_minted_thread_finished
+from tai42_agents._internal.lc_tools import structured_tools
 from tai42_agents._internal.park import (
     ParkIdentity,
     bind_resume_per_step,
@@ -58,21 +56,15 @@ from tai42_agents._internal.park import (
 )
 from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
-from tai42_agents._internal.reject import (
-    reject_blank_memory_keys,
-    reject_unhonored,
-    resolve_response_format,
-)
+from tai42_agents._internal.reject import reject_blank_memory_keys, resolve_response_format
 from tai42_agents._internal.render import render_message
+from tai42_agents._internal.run_kwargs import guard_run_kwargs
 from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import structured_output_stack
+from tai42_agents._internal.subagent_spec import SubAgentSpec as NeutralSubAgentSpec
 from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
 from tai42_agents.langchain_deep_agent.park_identity import build_astream_park, build_rebuild_kwargs
-from tai42_agents.langchain_deep_agent.run_input import (
-    _UNHONORED_COLLECTION_PARAMS,
-    _UNHONORED_REASONS,
-    DeepAgentInput,
-)
+from tai42_agents.langchain_deep_agent.run_input import DeepAgentInput
 from tai42_agents.langchain_deep_agent.run_thread import end_streamed_run, start_run_config
 from tai42_agents.langchain_deep_agent.session import DeepAgentSession
 from tai42_agents.langchain_deep_agent.settings import langchain_deep_agent_crash_resume
@@ -99,7 +91,7 @@ register_chained_park_tool()
 @tai42_app.agents.agent(
     "langchain_deep_agent",
     tags={"agents"},
-    meta={"tai42/crash_resume": langchain_deep_agent_crash_resume(), TOOL_META_PAUSES: True},
+    meta={"tai42/crash_resume": langchain_deep_agent_crash_resume()},
 )
 class DeepAgent(Agent):
     """A LangChain deep agent: planning, subagents, skills, and a filesystem."""
@@ -112,13 +104,26 @@ class DeepAgent(Agent):
         "if the agent produces none."
     )
     ToolInput: ClassVar[type[BaseModel]] = DeepAgentInput
+    parks: ClassVar[bool] = True
+
+    @classmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        """The continuity keys present, and the ids ``resume_checkpoint_id`` and ``langgraph_config`` carry."""
+        threads, checkpoints = config_addressed(run_kwargs.get("langgraph_config"))
+        resume_checkpoint_id = run_kwargs.get("resume_checkpoint_id")
+        if resume_checkpoint_id is not None:
+            checkpoints.add(str(resume_checkpoint_id))
+        return AddressedMemory(
+            keys=frozenset({"resume", "resume_checkpoint_id", "checkpoint_provider"} & set(run_kwargs)),
+            thread_ids=frozenset(threads),
+            checkpoint_ids=frozenset(checkpoints),
+        )
 
     async def run(
         self,
         *,
-        tools: Sequence[StructuredTool] = (),
+        tools: Sequence[ClientTool] = (),
         tool_names: Sequence[str] = (),
-        presets: Sequence[PresetSpec] | None = None,
         subagents: list[DeepSubAgentSpec] | None = None,
         skills: list[str] | None = None,
         inline_skills: list[InlineSkill] | None = None,
@@ -126,19 +131,16 @@ class DeepAgent(Agent):
         user_message: TemplatedText | None = None,
         interrupt_on: dict[str, Any] | None = None,
         response_format: Any = None,
-        strategy: str | None = None,
-        system_content_kwargs: dict[str, Any] | None = None,
         user_content_kwargs: dict[str, Any] | None = None,
         thread_id: str | None = None,
         resume: Any = None,
-        resume_checkpoint_id: str | None = None,
         recursion_limit: int | None = None,
         llm_provider: str | None = None,
         checkpoint_provider: str | None = None,
         store_provider: str | None = None,
         llm_kwargs: dict[str, Any] | None = None,
         langgraph_config: dict[str, Any] | None = None,
-        **_: Any,
+        **unknown: Any,
     ) -> Any:
         """Resolve the JSON tool inputs and drain the streaming core to a value.
 
@@ -150,25 +152,22 @@ class DeepAgent(Agent):
         :class:`~tai42_contract.agent.base.AgentInterruptedError`.
 
         Provide exactly one of ``user_message`` (a fresh turn) or ``resume``
-        (answering a prior interrupt); ``resume_checkpoint_id`` forks past an aborted
-        turn. A ``response_format`` must be a JSON Schema with a top-level ``title``.
+        (answering a prior interrupt). A ``response_format`` must be a JSON Schema with
+        a top-level ``title``.
 
         ``user_content_kwargs`` merges content-block keys (e.g. ``cache_control``)
         onto the user message's text block; a provider-unknown key surfaces as a loud
-        provider error. ``presets``, ``strategy`` and ``system_content_kwargs`` are
-        not honored here; each raises (the system prompt never becomes a content
-        block through ``build_system_message``).
+        provider error. A keyword this face does not declare raises ``TypeError``.
         """
-        reject_unhonored(
+        guard_run_kwargs(
             "langchain_deep_agent.run",
+            unknown,
             {
-                "presets": presets,
-                "strategy": strategy,
-                "system_content_kwargs": system_content_kwargs,
-                "resume_checkpoint_id": resume_checkpoint_id,
+                "thread_id": thread_id,
+                "user_message": user_message,
+                "tool_names": tool_names,
+                "response_format": response_format,
             },
-            _UNHONORED_REASONS,
-            collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
         reject_blank_memory_keys("langchain_deep_agent.run", thread_id=thread_id, resume_checkpoint_id=None)
         response_format = await resolve_response_format("langchain_deep_agent", response_format)
@@ -188,9 +187,7 @@ class DeepAgent(Agent):
         rendered_system = await render_message(system_message)
 
         client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
-        # Delivery-scoped: a tool this agent dispatches must not capture the completion binding
-        # addressing the agent's OWN deferred answer (see ``_internal.nested_dispatch``).
-        resolved_tools = scope_nested_dispatch_all([*tools, *client_tools])
+        resolved_tools = structured_tools([*tools, *client_tools])
         internal_subagents = await resolve_subagent_specs(subagents)
         coerced_inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (inline_skills or [])]
 
@@ -337,29 +334,25 @@ class DeepAgent(Agent):
     async def astream(
         self,
         *,
-        tools: Sequence[StructuredTool] = (),
+        tools: Sequence[ClientTool] = (),
         tool_names: Sequence[str] = (),
-        presets: Sequence[PresetSpec] | None = None,
         subagents: Sequence[NeutralSubAgentSpec | DeepSubAgentSpec] | None = None,
         skills: list[str] | None = None,
         inline_skills: Sequence[dict[str, Any]] | None = None,
         system_message: TemplatedText | None = None,
         user_message: TemplatedText | None = None,
         response_format: Any = None,
-        strategy: str | None = None,
-        system_content_kwargs: dict[str, Any] | None = None,
         user_content_kwargs: dict[str, Any] | None = None,
         interrupt_on: dict[str, Any] | None = None,
         thread_id: str | None = None,
         resume: Any = None,
-        resume_checkpoint_id: str | None = None,
         llm_provider: str | None = None,
         checkpoint_provider: str | None = None,
         store_provider: str | None = None,
         llm_kwargs: dict[str, Any] | None = None,
         recursion_limit: int | None = None,
         langgraph_config: dict[str, Any] | None = None,
-        **_: Any,
+        **unknown: Any,
     ) -> AsyncIterator[StreamEvent]:
         """Run one turn and yield the platform event stream, then one :class:`InterruptFinal` per interrupt.
 
@@ -371,25 +364,23 @@ class DeepAgent(Agent):
 
         ``langgraph_config`` is the base run config (built through :func:`start_run_config`
         as :meth:`run`): a ``configurable.thread_id`` / ``checkpoint_id`` it carries
-        pins checkpointed memory, and ``thread_id`` / ``resume_checkpoint_id`` /
-        ``recursion_limit`` overlay it.
+        pins checkpointed memory, and ``thread_id`` / ``recursion_limit`` overlay it.
 
         A requested ``response_format`` that produces no structured result raises
         after the stream drains rather than silently omitting it. ``user_content_kwargs``
         merges content-block keys (e.g. ``cache_control``) onto the user message's text
-        block; a provider-unknown key surfaces as a loud provider error. ``presets``,
-        ``strategy`` and ``system_content_kwargs`` are not honored here; each raises.
+        block; a provider-unknown key surfaces as a loud provider error. A keyword this
+        face does not declare raises ``TypeError``.
         """
-        reject_unhonored(
+        guard_run_kwargs(
             "langchain_deep_agent.astream",
+            unknown,
             {
-                "presets": presets,
-                "strategy": strategy,
-                "system_content_kwargs": system_content_kwargs,
-                "resume_checkpoint_id": resume_checkpoint_id,
+                "thread_id": thread_id,
+                "user_message": user_message,
+                "tool_names": tool_names,
+                "response_format": response_format,
             },
-            _UNHONORED_REASONS,
-            collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
         reject_blank_memory_keys("langchain_deep_agent.astream", thread_id=thread_id, resume_checkpoint_id=None)
         response_format = await resolve_response_format("langchain_deep_agent", response_format)
@@ -405,8 +396,7 @@ class DeepAgent(Agent):
         )
 
         client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
-        # Delivery-scoped, as in ``run`` above.
-        scoped_tools = scope_nested_dispatch_all([*tools, *client_tools])
+        scoped_tools = structured_tools([*tools, *client_tools])
         internal_subagents = [await _to_internal(spec) for spec in (subagents or [])]
         coerced_inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (inline_skills or [])]
 
@@ -692,7 +682,7 @@ class DeepAgent(Agent):
         response_format = validated.response_format
         interrupt_on = validated.interrupt_on
 
-        client_tools = scope_nested_dispatch_all(
+        client_tools = structured_tools(
             await tai42_app.tools.get_client_tools(list(validated.tool_names)) if validated.tool_names else []
         )
         internal_subagents = await resolve_subagent_specs(validated.subagents)

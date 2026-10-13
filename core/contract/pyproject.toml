@@ -47,9 +47,9 @@ dev = [
     "ruff>=0.6",
     "pyright>=1.1.389",
     "fastmcp>=3.4.7",
-    "langchain-core>=1",
     "starlette>=0.40",
     "mcp>=1",
+    "jsonschema>=4",
 ]
 
 [tool.setuptools]

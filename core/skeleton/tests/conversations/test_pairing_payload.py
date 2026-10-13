@@ -14,6 +14,7 @@ from tai42_contract.agent.events import InterruptFinal, StructuredFinal, Suspend
 from tai42_contract.conversations import ConversationRoute, ConversationTargetKind, TargetConversationConfig
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils import render as door_contract_module
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations import cache as cache_module
@@ -50,7 +51,7 @@ class _EchoInput(BaseModel):
     user_message: str = ""
 
 
-class EchoAgent(Agent):
+class EchoAgent(MemorylessTestAgent):
     tool_name = "echo"
     ToolInput = _EchoInput
 
@@ -435,7 +436,7 @@ async def test_api_door_concurrent_double_redeem_has_exactly_one_winner(env, mon
     assert len(invalid) == 1
 
 
-class _StreamAgent(Agent):
+class _StreamAgent(MemorylessTestAgent):
     """An agent whose ``astream`` yields exactly the events a test hands it — so the drain's
     structured/interrupt/empty branches are exercised directly."""
 

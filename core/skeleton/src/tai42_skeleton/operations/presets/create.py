@@ -10,6 +10,7 @@ import logging
 import sys
 from typing import Any
 
+from tai42_contract.agent import PRESET_NAME_PATTERN
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.presets import PresetBody, PresetSeed
@@ -77,7 +78,7 @@ async def _check_create_name(name: str, mgr: Any) -> None:
     # tool-name-safe (a slash-bearing name would never match the routes; an
     # over-long one collides after client-tool truncation).
     if not is_valid_preset_name(name):
-        raise BadRequestError(f"invalid preset name {name!r}: must match ^[A-Za-z0-9_-]{{1,64}}$")
+        raise BadRequestError(f"invalid preset name {name!r}: must match {PRESET_NAME_PATTERN}")
     if mgr.is_quarantined(name):
         raise ConflictError(f"a quarantined preset {name!r} exists — delete the quarantined record first")
     if await mgr.name_conflicts(name):

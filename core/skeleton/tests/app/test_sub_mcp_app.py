@@ -585,6 +585,8 @@ class _FakeBuiltApp:
         # stamps it after construction), so a test can pin that the builder mounts
         # the streamable-HTTP endpoint at the sub-app root ("/").
         self.http_path: str | None = None
+        # The middleware of the server the app was built from (stamped by the fake FastMCP).
+        self.server_middleware: list[object] = []
 
     def lifespan(self, app):
         @asynccontextmanager
@@ -627,6 +629,7 @@ def _install_fake_fastmcp(monkeypatch) -> list[_FakeBuiltApp]:
             # dispatcher's ``/`` rewrite), and the boot's stateless mode.
             app = _FakeBuiltApp(self._tools)
             app.http_path = path
+            app.server_middleware = list(self._middleware)
             built.append(app)
             return app
 
@@ -872,6 +875,25 @@ async def test_build_propagates_a_lifespan_enter_failure(monkeypatch):
     await r.register_sub_mcp_app("svc", ["t"], transport="http")
     with pytest.raises(RuntimeError, match="lifespan boom"):
         await r._get_or_build_app("svc")
+
+
+async def test_every_built_sub_mcp_server_carries_the_dispatch_scope_middleware(monkeypatch):
+    # Each sub-MCP mount builds its own FastMCP; the dispatch-scope middleware rides every one, so
+    # the mount reads the park marker on ``tools/call`` and advertises it on ``tools/list`` exactly
+    # as the main server does.
+    from tai42_skeleton.tools.dispatch_scope import DispatchScopeMiddleware
+
+    built_apps = _install_fake_fastmcp(monkeypatch)
+    r = _router()
+    r._owner_loop = asyncio.get_running_loop()
+    r._app.tools = SimpleNamespace(get_tool=_passthrough_get_tool)
+
+    await r.register_sub_mcp_app("svc", ["t"], transport="http")
+    await r._get_or_build_app("svc")
+
+    assert [type(m) for m in built_apps[0].server_middleware if isinstance(m, DispatchScopeMiddleware)] == [
+        DispatchScopeMiddleware
+    ]
 
 
 def test_log_teardown_result_ignores_a_cancelled_future():

@@ -9,9 +9,9 @@ from datetime import UTC, datetime
 
 import pytest
 from pydantic import BaseModel
-from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
 from tai42_contract.template import TemplatedText
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations import mode as mode_module
@@ -89,7 +89,7 @@ class _AgentInput(BaseModel):
     user_message: str = ""
 
 
-class _MemoryAgent(Agent):
+class _MemoryAgent(MemorylessTestAgent):
     tool_name = "echo"
     ToolInput = _AgentInput
 

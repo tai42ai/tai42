@@ -99,6 +99,22 @@ async def test_resume_origin_captured_at_start_wins_over_a_later_park(pg, store)
     assert row.interaction_id == "i-origin"
 
 
+async def test_parked_terminal_write_without_an_id_keeps_the_resume_origin(pg, store):
+    # A continuation fire that ends parked with no id of its own (a resume that left sibling asks
+    # open) writes ``parked`` with ``interaction_id=None``: the START's origin stays.
+    await _seed(store, pg, "r3", interaction="i-origin")
+    await store.update_outcome("r3", "parked", _iso(1), interaction_id=None)
+    [row] = await store.list(RunIndexFilter(), page=1, page_size=10)
+    assert (row.outcome, row.interaction_id) == ("parked", "i-origin")
+
+
+async def test_parked_terminal_write_without_an_id_leaves_a_fresh_row_null(pg, store):
+    await _seed(store, pg, "r4")
+    await store.update_outcome("r4", "parked", _iso(1), interaction_id=None)
+    [row] = await store.list(RunIndexFilter(), page=1, page_size=10)
+    assert (row.outcome, row.interaction_id) == ("parked", None)
+
+
 async def test_lifecycle_rows_are_joinable_by_one_interaction_query(pg, store):
     # The standard park lifecycle: the parked dispatch's row and the later resume
     # dispatch's row share the interaction id — one equality filter returns both.

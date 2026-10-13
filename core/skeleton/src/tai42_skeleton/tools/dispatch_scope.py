@@ -17,12 +17,19 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from fastmcp.server.middleware import Middleware
-from tai42_contract.interactions import SuspendedInteraction, read_suspended_interaction_marker
+from tai42_contract.interactions import (
+    RESUME_BUFFERED_MARKER_SCHEMA,
+    SUSPENDED_INTERACTION_MARKER_SCHEMA,
+    ResumeBuffered,
+    SuspendedInteraction,
+    read_resume_buffered_marker,
+    read_suspended_interaction_marker,
+)
 from tai42_contract.monitoring import RunAttribution
 from tai42_contract.tools import (
     ToolInvocation,
@@ -50,9 +57,10 @@ from tai42_skeleton.tools.state_binding import (
 from tai42_skeleton.tools.turn_budget import turn_budget
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
 
     from fastmcp.server.middleware import MiddlewareContext
+    from fastmcp.tools import Tool
     from tai42_contract.states import StateSubject
 
     from tai42_skeleton.app.server import TaiMCP
@@ -115,18 +123,66 @@ def _refuse_unencodable_mcp_result(name: str, result: Any) -> None:
         raise ToolError(f"tool {name!r} produced a result that cannot be JSON-encoded at {path}")
 
 
+# fastmcp's result-wrap flag: a declared schema carrying it wraps a non-object return under
+# ``properties.result``, and fastmcp's client unwraps by reading this flag and that property at the
+# schema ROOT.
+_FASTMCP_WRAP_RESULT_KEY = "x-fastmcp-wrap-result"
+
+
+def park_admitting_output_schema(declared: dict[str, Any]) -> dict[str, Any]:
+    """The output schema an MCP edge advertises for a tool that can pause and declares ``declared``.
+
+    ``anyOf`` the declared schema and the two park markers (the suspended interaction and the
+    resume-buffered partial), so an MCP client that validates ``structuredContent`` against the
+    advertised schema accepts a park as well as the tool's result, and still refuses a result that
+    matches neither. ``$defs`` sit at the composed root, since a ``$ref`` resolves against the
+    root. fastmcp's wrap flag and the wrapped ``result`` property are restated at the root, where
+    fastmcp's client reads them to unwrap a wrapped result. Nothing else is hoisted, and
+    ``declared`` is never mutated.
+    """
+    branch = {key: value for key, value in declared.items() if key != "$defs"}
+    composed: dict[str, Any] = {"anyOf": [branch, SUSPENDED_INTERACTION_MARKER_SCHEMA, RESUME_BUFFERED_MARKER_SCHEMA]}
+    if "$defs" in declared:
+        composed["$defs"] = declared["$defs"]
+    if declared.get(_FASTMCP_WRAP_RESULT_KEY):
+        composed[_FASTMCP_WRAP_RESULT_KEY] = True
+        composed["properties"] = {"result": declared["properties"]["result"]}
+    return composed
+
+
+# Armed for the span of an in-process tool listing (``ToolBinding.get_tools``). The listing runs
+# the server's whole middleware chain, so every in-process reader sees each tool's schema shaped
+# as the server shapes it for any client (``$ref`` inlined); the park markers are added to a
+# pausing tool's output schema only on a listing that is NOT armed — an MCP ``tools/list``.
+_declared_schema_listing: ContextVar[bool] = ContextVar("tai42_declared_schema_listing", default=False)
+
+
+@contextmanager
+def declared_schema_listing() -> Iterator[None]:
+    """Arm, for its span, a tool listing that keeps every pausing tool's declared output schema.
+
+    :class:`DispatchScopeMiddleware` adds no park markers to a listing made inside this span.
+    """
+    token = _declared_schema_listing.set(True)
+    try:
+        yield
+    finally:
+        _declared_schema_listing.reset(token)
+
+
 class DispatchScope:
     """The handle a dispatch entrance drives to record the run's terminal outcome.
 
     Invariant both dispatch doors share: binding UPDATES apply ONLY on a real output. A
-    park — an async-suspend ``SuspendedInteraction`` returned up through the in-process
-    door, or the equivalent wire marker at the MCP edge — is NOT a clean output, so it
-    applies no updates (its injections, which ran before the dispatch, still stand).
-    :meth:`observe` takes the raw in-process result and treats a ``SuspendedInteraction``
-    as a park by TYPE; :meth:`observe_park` records a park recognized from the MCP wire
-    marker by its interaction id. Both record the park on the runs-index row and no-op
-    when no row was opened — a non-preset/draft dispatch, a nested sub-preset dispatch, or
-    the store OFF.
+    park signal — an async-suspend ``SuspendedInteraction`` or a ``ResumeBuffered`` (a resume
+    that left sibling asks open) returned up through the in-process door, or their wire
+    markers at the MCP edge — is NOT a clean output, so it applies no updates (its
+    injections, which ran before the dispatch, still stand). :meth:`observe` takes the raw
+    in-process result and treats either park signal as a park by TYPE (the MCP edge observes
+    a resume-buffered marker as the ``ResumeBuffered`` it carries); :meth:`observe_park`
+    records a suspended park recognized from the MCP wire marker by its interaction id. Both
+    record the park on the runs-index row and no-op when no row was opened — a
+    non-preset/draft dispatch, a nested sub-preset dispatch, or the store OFF.
     """
 
     def __init__(self) -> None:
@@ -142,10 +198,11 @@ class DispatchScope:
     def observe(self, result: object) -> None:
         """Record the in-process ``result`` and whether it was a clean (non-park) success."""
         self._result = result
-        # A park (a ``SuspendedInteraction`` return) is not a clean output — no updates apply.
-        # Mirrors ``RunRecord.observe``, so the in-process door and the MCP edge (via
-        # ``observe_park``) share one invariant: updates run ONLY on a real output.
-        self._succeeded = not isinstance(result, SuspendedInteraction)
+        # A park signal (a ``SuspendedInteraction`` or a ``ResumeBuffered`` return) is not a
+        # clean output — no updates apply. Mirrors ``RunRecord.observe``, so the in-process door
+        # and the MCP edge (via ``observe_park``) share one invariant: updates run ONLY on a real
+        # output.
+        self._succeeded = not isinstance(result, (SuspendedInteraction, ResumeBuffered))
         if self._run is not None:
             self._run.observe(result)
 
@@ -290,7 +347,14 @@ async def _refuse_undeclared_mcp_park(app: TaiMCP, name: str) -> None:
 
 
 class DispatchScopeMiddleware(Middleware):
-    """Enter the shared :func:`dispatch_scope` at the MCP ``tools/call`` edge.
+    """Enter the shared :func:`dispatch_scope` at the MCP ``tools/call`` edge, and advertise the park on ``tools/list``.
+
+    This edge owns the park on the MCP wire: it reads the park markers off a ``tools/call``
+    result, and on ``tools/list`` it advertises them beside the declared output schema of every
+    tool that can pause (:func:`park_admitting_output_schema`), so an MCP client's schema
+    validation accepts a park. The advertisement is a copy of the listed tool; an in-process
+    listing (:func:`declared_schema_listing`) gets no advertisement, so every in-process reader
+    sees the tool's declared schema.
 
     An MCP ``tools/call`` reaches ``Tool.run`` through the FastMCP middleware chain,
     never the ``ToolBinding.run_tool`` seam, so this edge arms the run lifecycle itself
@@ -315,6 +379,58 @@ class DispatchScopeMiddleware(Middleware):
         """Bind the app whose ``tools/call`` edge this middleware arms the run scope on."""
         self._app = app
 
+    async def on_list_tools(
+        self,
+        context: MiddlewareContext[Any],
+        call_next: Callable[[MiddlewareContext[Any]], Awaitable[Sequence[Tool]]],
+    ) -> Sequence[Tool]:
+        """Advertise the park markers beside the declared output schema of every listed tool that can pause.
+
+        A tool that can pause but declares no output schema is listed unchanged: nothing validates
+        its structured content, so its park needs no advertisement. An in-process listing
+        (:func:`declared_schema_listing`) is passed through unchanged.
+        """
+        if _declared_schema_listing.get():
+            return await call_next(context)
+        pausing = self._app._tool_pause_registry
+        return [
+            tool.model_copy(update={"output_schema": park_admitting_output_schema(tool.output_schema)})
+            if tool.output_schema is not None and tool.name in pausing
+            else tool
+            for tool in await call_next(context)
+        ]
+
+    async def _observe_mcp_result(self, scope: DispatchScope, name: str, result: Any) -> None:
+        """Record a ``tools/call`` result on ``scope``: a park by its wire marker, else the tool's reduced output.
+
+        PARK recognition is explicit, never defaulted: a parked call returns the reserved
+        suspended-interaction marker in its structured content and records ``park`` with its
+        interaction id; a resume that left sibling asks open returns the reserved resume-buffered
+        marker. A well-formed non-park result records ``success``. A park that instead surfaced as
+        a raised error is recorded ``error`` by the chokepoint's exception path, so a park is never
+        silently recorded as success.
+        """
+        from tai42_skeleton.tools.binding.result import _tool_result_value
+
+        structured = getattr(result, "structured_content", None)
+        marker = read_suspended_interaction_marker(structured)
+        buffered = read_resume_buffered_marker(structured) if marker is None else None
+        if marker is not None or buffered is not None:
+            # Only a tool that declares it can pause may park: the refusal is the edge's own tool
+            # error carrying the refusal text, raised inside the scope so the row records ``error``.
+            await _refuse_undeclared_mcp_park(self._app, name)
+        if marker is not None:
+            scope.observe_park(marker["interaction_id"])
+        elif buffered is not None:
+            # A resume-buffered partial is observed as the object the in-process door observes,
+            # so both doors record it alike.
+            scope.observe(ResumeBuffered(remaining_ids=buffered["remaining_ids"]))
+        else:
+            # Observe the tool's REDUCED output, not the opaque ``ToolResult`` wrapper, so the
+            # binding's update jq runs over the same value the in-process door observes (its raw
+            # return); the wrapper carries no tool field and is not even JSON-serializable.
+            scope.observe(_tool_result_value(result))
+
     async def on_call_tool(
         self,
         context: MiddlewareContext[Any],
@@ -331,7 +447,6 @@ class DispatchScopeMiddleware(Middleware):
         from tai42_skeleton.interactions.terminal_failure import FAILED_TERMINAL_MESSAGE, failed_outcome_detail
         from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
         from tai42_skeleton.tools.binding import ToolResultEncodingError, find_lone_surrogate
-        from tai42_skeleton.tools.binding.result import _tool_result_value
 
         name = context.message.name
         # The MCP call's arguments, mutated in place by any binding injection so the edge
@@ -363,25 +478,7 @@ class DispatchScopeMiddleware(Middleware):
                         # would throw. Both the structured content and every content block's
                         # JSON-reduced form are walked, since either carries the reduced return.
                         _refuse_unencodable_mcp_result(name, result)
-                        # PARK recognition (explicit — never defaulted): a parked call returns
-                        # the reserved suspended-interaction marker in its structured content;
-                        # record ``park`` with its interaction id. A well-formed non-park result
-                        # records ``success``. A park that instead surfaced as a raised error is
-                        # recorded ``error`` by the chokepoint's exception path — a park is never
-                        # silently recorded as success.
-                        marker = read_suspended_interaction_marker(getattr(result, "structured_content", None))
-                        if marker is not None:
-                            # Only a tool that declares it can pause may park: the refusal is the
-                            # edge's own tool error carrying the refusal text, raised inside the
-                            # scope so the row records ``error``.
-                            await _refuse_undeclared_mcp_park(self._app, name)
-                            scope.observe_park(marker["interaction_id"])
-                        else:
-                            # Observe the tool's REDUCED output, not the opaque ``ToolResult`` wrapper,
-                            # so the binding's update jq runs over the same value the in-process door
-                            # observes (its raw return) — the edge otherwise feeds the wrapper to jq,
-                            # which carries no tool field and is not even JSON-serializable.
-                            scope.observe(_tool_result_value(result))
+                        await self._observe_mcp_result(scope, name, result)
                         return result
                 except ToolError as exc:
                     # A driver's FAILED terminal RAISES ``RunTerminalFailed`` in the tool body;

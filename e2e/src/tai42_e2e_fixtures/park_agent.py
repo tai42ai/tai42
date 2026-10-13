@@ -13,14 +13,13 @@ carry the baked tool names). Nothing here participates in the resume.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field
-from tai42_contract.agent import Agent
+from tai42_contract.agent import AddressedMemory, Agent
 from tai42_contract.agent.events import StreamEvent
 from tai42_contract.app import tai42_app
-from tai42_contract.tools import TOOL_META_PAUSES
 
 AGENT_NAME = "e2e_park_agent"
 
@@ -37,7 +36,7 @@ class _ParkAgentInput(BaseModel):
     thread_id: str | None = Field(default=None, description="The conversation thread the turn runs on.")
 
 
-@tai42_app.agents.agent(AGENT_NAME, tags={"e2e"}, meta={TOOL_META_PAUSES: True})
+@tai42_app.agents.agent(AGENT_NAME, tags={"e2e"})
 class E2eParkAgent(Agent):
     """A ``tools_agent`` with :data:`BAKED_TOOL_NAMES` baked in, registered under its own name so
     a conversation route can target it."""
@@ -48,6 +47,12 @@ class E2eParkAgent(Agent):
         "agent-route turn can park on an async ask and deliver its resumed answer out of band."
     )
     ToolInput: ClassVar[type[BaseModel]] = _ParkAgentInput
+    parks: ClassVar[bool] = True
+
+    @classmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        """The memory the delegate ``tools_agent`` reports for the same run kwargs."""
+        return type(tai42_app.agents.get_agent("tools_agent")).addressed_memory(run_kwargs)
 
     async def run(self, **kwargs: Any) -> Any:
         return await self._delegate().run(tool_names=list(BAKED_TOOL_NAMES), **kwargs)

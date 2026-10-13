@@ -38,6 +38,7 @@ class _NullExtensions:
         name: str | None = None,
         requires_body_locality: bool = False,
         pauses: bool = False,
+        declares_output_schema: bool = False,
     ) -> Any:
         if callable(f):
             return f
@@ -61,6 +62,8 @@ class CapturingExtensions:
         self.registered: list[tuple[str, ExtensionKind, bool]] = []
         # Each registered extension's ``pauses`` flag, by name.
         self.pauses: dict[str, bool] = {}
+        # Each registered extension's ``declares_output_schema`` flag, by name.
+        self.declares_output_schema: dict[str, bool] = {}
 
     def extension(
         self,
@@ -70,10 +73,12 @@ class CapturingExtensions:
         name: str | None = None,
         requires_body_locality: bool = False,
         pauses: bool = False,
+        declares_output_schema: bool = False,
     ) -> Any:
         def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
             self.registered.append((name or fn.__name__, kind, requires_body_locality))
             self.pauses[name or fn.__name__] = pauses
+            self.declares_output_schema[name or fn.__name__] = declares_output_schema
             return fn
 
         if callable(f):

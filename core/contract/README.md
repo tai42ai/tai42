@@ -7,8 +7,9 @@ models, and enums every other package builds against. At runtime this package
 imports nothing but `pydantic`, and its behaviour is limited to a narrow
 whitelisted surface — the `tai42_app` forwarding handle, model-level
 validators/normalizers, the storage path guard, and `Agent`'s default
-`astream`/terminal-drain; everything else is a pydantic model, Protocol, ABC, or
-enum. Vendor types (fastmcp, langchain, starlette, mcp) appear only inside
+`astream`/terminal-drain with its park conversion `SuspendedFinal.to_suspended_interaction`;
+everything else is a pydantic model, Protocol, ABC, or
+enum. Vendor types (fastmcp, starlette, mcp) appear only inside
 `TYPE_CHECKING` blocks, so they are never loaded when the code runs.
 
 ## Position in the ecosystem

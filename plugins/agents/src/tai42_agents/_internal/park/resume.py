@@ -41,7 +41,6 @@ from tai42_agents._internal.park.errors import (
     AgentResumeParkEntryNotFoundError,
     WorkspaceLeaseHeldError,
 )
-from tai42_agents._internal.park.middleware import resuming_park_interaction_ids
 from tai42_agents._internal.park.park_binding import agents_park_index
 
 logger = logging.getLogger(__name__)
@@ -185,7 +184,7 @@ async def _drive_superstep(entry: Mapping[str, Any], thread_id: str, superstep_i
         members = list(barrier.expected)
         resume_park, resume_map = await _prepare_resume(entry, barrier)
         routing = chained_resume_from_entry(entry)
-        resumed = await _run_resumed(entry, barrier, routing, resume_park, resume_map)
+        resumed = await _run_resumed(entry, routing, resume_park, resume_map)
 
         if resumed.failed is not None:
             epilogue = _fire_failed_terminal(entry, lease, members, resumed.failed, aborted=resumed.aborted)
@@ -218,7 +217,6 @@ async def _drive_superstep(entry: Mapping[str, Any], thread_id: str, superstep_i
 
 async def _run_resumed(
     entry: Mapping[str, Any],
-    barrier: Barrier,
     routing: ChainedResume | None,
     resume_park: Callable[..., Awaitable[Any]],
     resume_map: dict[str, dict[str, Any]],
@@ -234,12 +232,9 @@ async def _run_resumed(
     """
     chain_token = set_chained_resume(routing)
     try:
-        # Name the interactions being resumed so the graph's claim check adopts the parks this
-        # resume answers.
-        with resuming_park_interaction_ids(frozenset(barrier.expected)):
-            result = await resume_park(
-                rebuild_kwargs=entry["rebuild_kwargs"], thread_id=entry["thread_id"], resume_map=resume_map
-            )
+        result = await resume_park(
+            rebuild_kwargs=entry["rebuild_kwargs"], thread_id=entry["thread_id"], resume_map=resume_map
+        )
     except (LeaseLostError, WorkspaceLeaseHeldError):
         raise
     except asyncio.CancelledError as exc:

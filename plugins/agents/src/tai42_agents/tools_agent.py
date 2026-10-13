@@ -3,7 +3,7 @@
 The plain/advanced LangGraph tools agent. Its three tool inputs are uniform —
 ``tool_names`` (client tools resolved through the app registry), live ``tools``,
 and ``presets`` (a base tool bound to fixed kwargs, exposed as a callable tool) —
-and are resolved together by :func:`resolve_tools`. A preset is any base tool bound to
+and are resolved together by :func:`~tai42_agents._internal.lc_tools.resolve_tools`. A preset is any base tool bound to
 fixed kwargs, e.g. ``base_tool="example_tool"`` with ``fixed_kwargs={"config": ...}``.
 
 Two faces:
@@ -32,15 +32,14 @@ no resume path bound an async ask refuses loudly pre-persist.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar
 
-from langchain_core.tools import StructuredTool
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from tai42_contract.agent import Agent
-from tai42_contract.agent.base import PresetSpec, SubAgentSpec
+from tai42_contract.agent import AddressedMemory, Agent
+from tai42_contract.agent.base import PresetSpec
 from tai42_contract.agent.events import (
     RecursionLimitFinal,
     StreamEvent,
@@ -50,17 +49,21 @@ from tai42_contract.agent.events import (
 )
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
-from tai42_contract.tools import TOOL_META_PAUSES, get_run_delivery_id
+from tai42_contract.tools import ClientTool, get_run_delivery_id
 from tai42_kit.llm.runtime import build_user_output, extract_structured_output
 
 from tai42_agents._internal.append import require_thread_id, to_thread_messages
 from tai42_agents._internal.base_tool_agent import (
     ParkBuilder,
-    _suspended_receipt,
     aappend_tools_agent_messages,
     ainvoke_tools_agent,
 )
-from tai42_agents._internal.config_util import build_run_config, init_langgraph_config, unmark_caller_thread
+from tai42_agents._internal.config_util import (
+    build_run_config,
+    config_addressed,
+    init_langgraph_config,
+    unmark_caller_thread,
+)
 from tai42_agents._internal.graph_cache import ToolsAgentGraphSpec, tools_agent_graph
 from tai42_agents._internal.outcomes import RepromptCapError, drive_reprompt_scope, outcome_for_drive_error
 from tai42_agents._internal.park import (
@@ -75,43 +78,13 @@ from tai42_agents._internal.park import (
 )
 from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
-from tai42_agents._internal.reject import (
-    reject_blank_memory_keys,
-    reject_unhonored,
-    resolve_response_format,
-)
+from tai42_agents._internal.reject import reject_blank_memory_keys, resolve_response_format
 from tai42_agents._internal.render import render_message
+from tai42_agents._internal.run_kwargs import guard_run_kwargs
 from tai42_agents._internal.stream_events import astream_tools_agent_events
 
-# ABC ``run`` parameters this agent's runtime cannot honor, mapped to the reason
-# named in the raised error (the keys also define this agent's unhonored set).
-# ``tools_agent`` runs a single LangGraph tools agent: no sub-agents, no
-# composition strategy, no skill backend, no HITL approval interrupt, and no
-# long-term store. ``response_format`` is NOT here — it forces the run's structured
-# output through ``create_agent`` and is honored on both faces. ``recursion_limit``
-# is NOT here either — it is a standard ``RunnableConfig`` key the compiled graph
-# reads, so it is honored (overlaid onto the run config) rather than rejected.
-# ``resume`` is NOT here either — an async ``ask`` park makes a run resumable,
-# so a caller-driven ``Command(resume=...)`` is honored (the park itself resumes out
-# of band through the ``agent_resume`` continuation).
-_UNHONORED_REASONS: dict[str, str] = {
-    "subagents": (
-        "sub-agent delegation is langchain_deep_agent's domain; this agent never exposes sub-agents as callable tools"
-    ),
-    "strategy": "it applies no composition strategy and will not silently ignore one",
-    "skills": "skill backends are langchain_deep_agent's domain; this agent loads none",
-    "inline_skills": "skill backends are langchain_deep_agent's domain; this agent loads none",
-    "interrupt_on": (
-        "HITL approval interrupts are langchain_deep_agent's domain; this agent's create_agent runtime wires none "
-        "(an async ask parks instead, resumed by id)"
-    ),
-    "store_provider": "this agent wires no long-term store",
-}
-
-# The unhonored parameters whose unset default is an empty sequence — a non-empty
-# value is set. Every other unhonored parameter defaults to ``None`` and is set
-# when not ``None`` (so a falsy-but-present value like ``resume=False`` still raises).
-_UNHONORED_COLLECTION_PARAMS = frozenset({"subagents", "skills", "inline_skills"})
+# The run kwargs that steer THIS run's own thread or checkpoint continuity.
+_CONTINUITY_KEYS = frozenset({"resume", "resume_checkpoint_id", "checkpoint_provider"})
 
 
 class ToolsAgentInput(BaseModel):
@@ -130,7 +103,7 @@ class ToolsAgentInput(BaseModel):
     (``subagents``, ``strategy``) are absent from the schema, and
     ``extra="forbid"`` rejects them — and any other unknown key — loudly at
     validation rather than silently ignoring them. :meth:`ToolsAgent.run` /
-    :meth:`ToolsAgent.astream` carry a matching defense-in-depth raise for
+    :meth:`ToolsAgent.astream` refuse an undeclared keyword the same way for
     in-process callers that bypass this validation.
 
     ``response_format`` is a JSON-Schema dict with a required top-level ``"title"``
@@ -208,7 +181,7 @@ register_agent_resume_tool()
 register_chained_park_tool()
 
 
-@tai42_app.agents.agent("tools_agent", tags={"agents"}, meta={TOOL_META_PAUSES: True})
+@tai42_app.agents.agent("tools_agent", tags={"agents"})
 class ToolsAgent(Agent):
     """A LangGraph tools agent: loads tools by name (and optional presets) and runs system/user messages."""
 
@@ -219,6 +192,20 @@ class ToolsAgent(Agent):
     )
     ToolInput: ClassVar[type[BaseModel]] = ToolsAgentInput
     spec_runnable: ClassVar[bool] = True
+    parks: ClassVar[bool] = True
+
+    @classmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        """The continuity keys present, and the ids ``resume_checkpoint_id`` and ``langgraph_config`` carry."""
+        threads, checkpoints = config_addressed(run_kwargs.get("langgraph_config"))
+        resume_checkpoint_id = run_kwargs.get("resume_checkpoint_id")
+        if resume_checkpoint_id is not None:
+            checkpoints.add(str(resume_checkpoint_id))
+        return AddressedMemory(
+            keys=frozenset(_CONTINUITY_KEYS & set(run_kwargs)),
+            thread_ids=frozenset(threads),
+            checkpoint_ids=frozenset(checkpoints),
+        )
 
     @classmethod
     def from_tool_input(cls, validated: BaseModel) -> dict[str, Any]:
@@ -248,18 +235,12 @@ class ToolsAgent(Agent):
     async def run(
         self,
         *,
-        tools: Sequence[StructuredTool] = (),
+        tools: Sequence[ClientTool] = (),
         tool_names: Sequence[str] = (),
         presets: Sequence[PresetSpec] | None = None,
-        subagents: Sequence[SubAgentSpec] | None = None,
-        strategy: str | None = None,
         response_format: Any = None,
-        interrupt_on: dict[str, Any] | None = None,
-        skills: Sequence[str] = (),
-        inline_skills: Sequence[dict[str, Any]] = (),
         recursion_limit: int | None = None,
         resume: Any = None,
-        store_provider: str | None = None,
         system_message: TemplatedText | None = None,
         user_message: TemplatedText | None = None,
         system_content_kwargs: dict[str, Any] | None = None,
@@ -270,7 +251,7 @@ class ToolsAgent(Agent):
         thread_id: str | None = None,
         resume_checkpoint_id: str | None = None,
         langgraph_config: dict[str, Any] | None = None,
-        **_: Any,
+        **unknown: Any,
     ) -> Any:
         """Resolve tools, render the messages, run once, return the final value.
 
@@ -294,13 +275,8 @@ class ToolsAgent(Agent):
         the graph. ``system_content_kwargs`` / ``user_content_kwargs`` merge
         content-block keys (e.g. ``cache_control``) onto the system message and the
         last user message; a key the provider does not know surfaces as a loud
-        provider error rather than a silent drop. The ABC ``run`` parameters this
-        agent's runtime cannot honor are rejected loudly rather than silently
-        dropped: ``subagents`` (sub-agent delegation is langchain_deep_agent's domain —
-        tools_agent never exposes them as callable tools), ``strategy`` (no
-        composition strategy is applied), ``skills`` / ``inline_skills`` (skill
-        backends are langchain_deep_agent's domain), ``interrupt_on`` (no HITL approval
-        interrupt is wired), and ``store_provider`` (no long-term store is wired).
+        provider error rather than a silent drop. A keyword this face does not declare
+        raises ``TypeError``.
 
         Provide exactly one of ``user_message`` (a fresh turn) or ``resume``
         (answering a prior async-ask park with ``Command(resume=...)``). A run that
@@ -318,18 +294,15 @@ class ToolsAgent(Agent):
         checkpoint, or an unconfigured park index is not park-capable and its async
         ask refuses loudly pre-persist.
         """
-        reject_unhonored(
+        guard_run_kwargs(
             "tools_agent.run",
+            unknown,
             {
-                "subagents": subagents,
-                "strategy": strategy,
-                "interrupt_on": interrupt_on,
-                "skills": skills,
-                "inline_skills": inline_skills,
-                "store_provider": store_provider,
+                "thread_id": thread_id,
+                "user_message": user_message,
+                "tool_names": tool_names,
+                "response_format": response_format,
             },
-            _UNHONORED_REASONS,
-            collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
         reject_blank_memory_keys("tools_agent.run", thread_id=thread_id, resume_checkpoint_id=resume_checkpoint_id)
         response_format = await resolve_response_format("tools_agent", response_format)
@@ -421,18 +394,12 @@ class ToolsAgent(Agent):
     async def astream(
         self,
         *,
-        tools: Sequence[StructuredTool] = (),
+        tools: Sequence[ClientTool] = (),
         tool_names: Sequence[str] = (),
         presets: Sequence[PresetSpec] | None = None,
-        subagents: Sequence[SubAgentSpec] | None = None,
-        strategy: str | None = None,
         response_format: Any = None,
-        interrupt_on: dict[str, Any] | None = None,
-        skills: Sequence[str] = (),
-        inline_skills: Sequence[dict[str, Any]] = (),
         recursion_limit: int | None = None,
         resume: Any = None,
-        store_provider: str | None = None,
         system_message: TemplatedText | None = None,
         user_message: TemplatedText | None = None,
         system_content_kwargs: dict[str, Any] | None = None,
@@ -443,7 +410,7 @@ class ToolsAgent(Agent):
         thread_id: str | None = None,
         resume_checkpoint_id: str | None = None,
         langgraph_config: dict[str, Any] | None = None,
-        **_: Any,
+        **unknown: Any,
     ) -> AsyncIterator[StreamEvent]:
         """Run one turn and yield the contract event stream.
 
@@ -475,13 +442,8 @@ class ToolsAgent(Agent):
         ``user_content_kwargs`` merge content-block keys (e.g. ``cache_control``)
         onto the system message and the last user message, in parity with
         :meth:`run`; a key the provider does not know surfaces as a loud provider
-        error rather than a silent drop. The ABC parameters this agent's
-        runtime cannot honor are rejected loudly here too — in parity with
-        :meth:`run` — rather than silently dropped: ``subagents`` (delegation is
-        langchain_deep_agent's domain), ``strategy`` (no composition strategy is applied),
-        ``skills`` / ``inline_skills`` (skill backends are langchain_deep_agent's domain),
-        ``interrupt_on`` (no HITL approval interrupt is wired), and
-        ``store_provider`` (no long-term store is wired).
+        error rather than a silent drop. A keyword this face does not declare raises
+        ``TypeError``, in parity with :meth:`run`.
 
         This streaming face binds a resume path — and so lets an async ``ask``
         park — whenever the run is driven under a run-delivery context (the door that
@@ -492,18 +454,15 @@ class ToolsAgent(Agent):
         ask refuses loudly pre-persist. ``resume`` drives ``Command(resume=...)`` —
         answering a prior park — in place of a fresh ``user_message``.
         """
-        reject_unhonored(
+        guard_run_kwargs(
             "tools_agent.astream",
+            unknown,
             {
-                "subagents": subagents,
-                "strategy": strategy,
-                "interrupt_on": interrupt_on,
-                "skills": skills,
-                "inline_skills": inline_skills,
-                "store_provider": store_provider,
+                "thread_id": thread_id,
+                "user_message": user_message,
+                "tool_names": tool_names,
+                "response_format": response_format,
             },
-            _UNHONORED_REASONS,
-            collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
         reject_blank_memory_keys("tools_agent.astream", thread_id=thread_id, resume_checkpoint_id=resume_checkpoint_id)
         response_format = await resolve_response_format("tools_agent", response_format)
@@ -630,7 +589,7 @@ class ToolsAgent(Agent):
         self,
         *,
         tool_names: Sequence[str],
-        tools: Sequence[StructuredTool],
+        tools: Sequence[ClientTool],
         presets: Sequence[PresetSpec] | None,
         rendered_system: str,
         system_content_kwargs: dict[str, Any] | None,
@@ -778,7 +737,7 @@ class ToolsAgent(Agent):
             events = await finalize_drive(agent, config, None, park)
         for event in events:
             if isinstance(event, SuspendedFinal):
-                return _suspended_receipt(event)
+                return event.to_suspended_interaction()
         if resolved_response_format is not None:
             return extract_structured_output(state, resolved_response_format)
         return build_user_output(state)

@@ -8,8 +8,8 @@ synthesize a real default, and a nested model must reach ``run`` as an instance)
 """
 
 from pydantic import BaseModel, Field
-from tai42_contract.agent import Agent
 from tai42_contract.app import tai42_app
+from tests.agent._memoryless import MemorylessTestAgent
 
 
 class DummyItem(BaseModel):
@@ -24,7 +24,7 @@ class DummyInput(BaseModel):
 
 
 @tai42_app.agents.agent("dummy_agent")
-class DummyAgent(Agent):
+class DummyAgent(MemorylessTestAgent):
     tool_name = "dummy_agent"
     tool_description = "Echo text a number of times."
     ToolInput = DummyInput

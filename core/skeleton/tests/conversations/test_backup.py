@@ -11,8 +11,8 @@ from typing import ClassVar
 
 import pytest
 from pydantic import BaseModel
-from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError
 from tai42_skeleton.authz.token_free import TokenFreeConditionError
@@ -366,7 +366,7 @@ class _AskerInput(BaseModel):
     user_message: str = ""
 
 
-class _AskingAgent(Agent):
+class _AskingAgent(MemorylessTestAgent):
     """An agent whose declared ``tool_names`` include ``ask`` — the platform bind rule needs a reply/resume path."""
 
     tool_name = "asker"
@@ -420,7 +420,7 @@ async def test_import_rejects_a_row_whose_target_fails_the_bind_check(wired, mon
 # -- the route write service on restore: per-row refusals, canonical claims, section failure ----
 
 
-class _PlainRelayAgent(Agent):
+class _PlainRelayAgent(MemorylessTestAgent):
     """A non-asking agent: the platform's own bind rule makes no claim on it."""
 
     tool_name = "relay"

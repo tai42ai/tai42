@@ -11,10 +11,12 @@ dispatch's caller BY VALUE rather than being flattened into a ``ToolResult``:
   preset's output-schema guard reads the same stowed value so it validates the
   REVEALED result rather than the masked projection that flows back through the
   transform;
-* an async-park sentinel (``SuspendedInteraction``), which the turn engine recognizes
-  by TYPE — ``convert_result`` stows it on the park slot so the dispatch returns the
-  object unflattened, exactly as the direct-run path preserves it, and a later answer
-  is never stranded on a lost park.
+* a park signal (a ``SuspendedInteraction``, or a ``ResumeBuffered`` that left sibling asks
+  open), which the turn engine recognizes by TYPE — ``convert_result`` stows it on the park
+  slot so the dispatch returns the object unflattened, exactly as the direct-run path
+  preserves it, and a later answer is never stranded on a lost park. While the gate is
+  armed the park slot is the only place a park is read: a result that merely looks like a
+  park marker is the tool's output.
 """
 
 from __future__ import annotations

@@ -15,8 +15,9 @@ hands its caller the raw marker. The ownership check is a NESTING discriminator 
 park that crossed a nested run's face, which carries no owner), NOT an authenticity token: the
 resume owner is a public continuation name, so it does not by itself defend against content a
 model shaped to name the bound continuation. What this hook does defend is shape — a malformed
-"marker" is not read as a park at all (:func:`~tai42_contract.interactions.read_suspended_interaction_marker`
-returns ``None``) — and this before-model hook holds no interactions-store handle, so
+"marker" is never read as a park (:func:`~tai42_contract.interactions.read_suspended_interaction_marker`
+returns ``None`` for one naming no interaction and raises for one lacking its id lists, which is
+answered with a model-visible error) — and this before-model hook holds no interactions-store handle, so
 store-authoritative existence checks are not applied here.
 
 On resume, an answer may itself say the awaited outcome FAILED (a chained call whose nested
@@ -37,9 +38,7 @@ construction; a wiring test pins that.
 
 from __future__ import annotations
 
-import contextlib
-from collections.abc import Iterator
-from contextvars import ContextVar
+import logging
 from typing import Any, Final, cast
 
 from langchain.agents.middleware import AgentMiddleware
@@ -47,12 +46,15 @@ from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 from langgraph.prebuilt.tool_node import msg_content_output
 from langgraph.types import interrupt
 from tai42_contract.interactions import (
+    MalformedParkMarkerError,
     NestedParkOwnershipError,
     assert_park_adoptable,
     read_suspended_interaction_marker,
 )
 
 from tai42_agents._internal.park.errors import AgentParkMarkerError
+
+logger = logging.getLogger(__name__)
 
 # The reserved key a park interrupt's VALUE carries, so the drive wrapper recognizes a
 # park interrupt by its value shape (never a name). Internal to the agents plugin — the
@@ -88,33 +90,6 @@ def read_park_error_answer(answer: Any) -> str | None:
     return None
 
 
-# The interaction ids the driver is resuming into THIS graph right now. The resume driver binds
-# it around the ``Command(resume=...)`` drive; the claim check reads it so an in-flight park is
-# claimable while it is being resumed even when its wire marker predates the ``resume_owner``
-# field. Empty (the default) on an initial park pass and any code outside a driver resume.
-_resuming_park_interaction_ids: ContextVar[frozenset[str]] = ContextVar(
-    "tai42_resuming_park_interaction_ids", default=frozenset()
-)
-
-
-@contextlib.contextmanager
-def resuming_park_interaction_ids(interaction_ids: frozenset[str]) -> Iterator[None]:
-    """Bind the interaction ids a driver is resuming into this graph, for the drive's duration.
-
-    The resume driver knows exactly which interactions it is delivering answers for (the
-    super-step it drives), so it names them here around the ``Command(resume=...)`` drive. The
-    claim check treats a park whose id is in this set as claimable regardless of the marker's
-    ``resume_owner``: a resume is fired only for a park THIS run owns, so an in-flight park stays
-    resumable even when its persisted wire marker carries no owner (a park written by a released
-    predecessor and upgraded mid-flight). Set and reset around the drive.
-    """
-    token = _resuming_park_interaction_ids.set(interaction_ids)
-    try:
-        yield
-    finally:
-        _resuming_park_interaction_ids.reset(token)
-
-
 def _trailing_tool_messages(messages: list[AnyMessage]) -> list[ToolMessage]:
     """The ToolMessages produced since the last AIMessage — the current super-step's tool results.
 
@@ -132,44 +107,52 @@ def _trailing_tool_messages(messages: list[AnyMessage]) -> list[ToolMessage]:
     return trailing
 
 
-def _scan_parks(messages: list[AnyMessage]) -> list[dict[str, Any]]:
-    """Every parked ToolMessage in the current super-step, as a marker dict.
+def _scan_parks(messages: list[AnyMessage]) -> tuple[list[dict[str, Any]], list[ToolMessage]]:
+    """Every parked ToolMessage in the current super-step as a marker dict, and refusals of malformed ones.
 
-    Each entry is ``{message_id, tool_call_id, name, interaction_id, expiry_at, resume_owner}``.
-    Empty when no park marker is present (the common, non-parking case).
-
-    ``resume_owner`` is read off the marker with ``.get``: a marker that carries no such key —
-    an older wire form, or content a model shaped without one — yields ``None``, which
-    :func:`assert_park_adoptable` refuses as a nested/foreign park. Nothing here decides
-    adoptability; it only surfaces what the claim check needs. The marker's SHAPE was already
-    validated upstream (:func:`read_suspended_interaction_marker` returns ``None`` for anything
-    that is not a well-formed marker), so every entry here carries a real ``interaction_id``.
+    Each entry is ``{message_id, tool_call_id, name, interaction_id, expiry_at, resume_owner,
+    caller_interaction_ids}``. Nothing here decides adoptability; it only surfaces what the claim
+    check needs. A ToolMessage whose content names an interaction under the reserved key but lacks
+    a valid id list (:class:`~tai42_contract.interactions.MalformedParkMarkerError`) is never a
+    park: it is logged and answered with a model-visible error ToolMessage, the treatment a refused
+    park takes — tool-result content a model can shape must not abort the run.
     """
     parks: list[dict[str, Any]] = []
+    refusals: list[ToolMessage] = []
     for message in _trailing_tool_messages(messages):
-        marker = read_suspended_interaction_marker(message.content)
+        try:
+            marker = read_suspended_interaction_marker(message.content)
+        except MalformedParkMarkerError as exc:
+            logger.exception("refusing a malformed park marker on tool call %s", message.tool_call_id)
+            refusals.append(_error_message(_message_slot(message), str(exc)))
+            continue
         if marker is None:
             continue
-        if message.id is None:
-            # Every checkpointed message has a stable id (LangGraph stamps it before
-            # persistence); a marked message with none could not be replaced in place on
-            # resume, so refuse loudly rather than substitute the wrong message.
-            raise AgentParkMarkerError("a parked ToolMessage has no id to resume against")
         parks.append(
             {
-                "message_id": message.id,
-                "tool_call_id": message.tool_call_id,
-                "name": message.name,
+                **_message_slot(message),
                 "interaction_id": marker["interaction_id"],
                 "expiry_at": marker.get("expiry_at"),
+                # A marker naming no owner (content a model shaped) yields ``None``, which the
+                # claim check refuses as a nested/foreign park.
                 "resume_owner": marker.get("resume_owner"),
                 # The caller subset the ask's marker carries (``[id]`` for a ``to="caller"`` ask,
                 # empty for a user ask) — surfaced so the super-step's park receipt partitions
                 # caller from user asks for the platform's ``visit`` normalisation.
-                "caller_interaction_ids": marker.get("caller_interaction_ids") or [],
+                "caller_interaction_ids": marker["caller_interaction_ids"],
             }
         )
-    return parks
+    return parks, refusals
+
+
+def _message_slot(message: ToolMessage) -> dict[str, Any]:
+    """The identity of a marked ToolMessage a replacement message is written against."""
+    if message.id is None:
+        # Every checkpointed message has a stable id (LangGraph stamps it before persistence); a
+        # marked message with none could not be replaced in place, so refuse loudly rather than
+        # substitute the wrong message.
+        raise AgentParkMarkerError("a parked ToolMessage has no id to resume against")
+    return {"message_id": message.id, "tool_call_id": message.tool_call_id, "name": message.name}
 
 
 def _error_message(park: dict[str, Any], reason: str) -> ToolMessage:
@@ -198,20 +181,10 @@ def _partition_claimable(parks: list[dict[str, Any]]) -> tuple[list[dict[str, An
     crossed a tool face. A park reaches this scan as wire content, so a run that never saw the
     sentinel (a non-park-capable middle agent handed its caller the raw marker) is still
     stopped from claiming a park it does not own.
-
-    An interaction the driver is resuming RIGHT NOW (in :func:`resuming_park_interaction_ids`) is
-    claimable regardless of the marker's owner: a resume is fired only for a park this run owns,
-    so an in-flight park stays resumable even when its persisted wire marker predates the
-    ``resume_owner`` field (a park written by a released predecessor, upgraded mid-flight). Its
-    ownerless marker would otherwise be refused here and the operator's delivered answer dropped.
     """
-    resuming = _resuming_park_interaction_ids.get()
     claimable: list[dict[str, Any]] = []
     refusals: list[ToolMessage] = []
     for park in parks:
-        if park["interaction_id"] in resuming:
-            claimable.append(park)
-            continue
         try:
             assert_park_adoptable(
                 park["resume_owner"], interaction_id=park["interaction_id"], tool_name=park["name"] or "<unnamed>"
@@ -252,11 +225,12 @@ def _park_or_resume(messages: list[AnyMessage]) -> dict[str, Any] | None:
     interaction id is absent from the answers map is a partial resume and raises loudly —
     never a silent substitution.
     """
-    parks = _scan_parks(messages)
+    parks, malformed = _scan_parks(messages)
     if not parks:
-        return None
+        return {"messages": malformed} if malformed else None
 
     claimable, refusals = _partition_claimable(parks)
+    refusals = malformed + refusals
     if not claimable:
         # Nothing of this super-step is this run's to park on. Answer the tool_calls with the
         # refusals and let the loop run on — never interrupt on another run's park. The drive
