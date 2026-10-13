@@ -13,6 +13,7 @@ from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.caps import AddressAdmission, AddressRateLimitedError, get_turn_caps
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
+from tai42_skeleton.conversations.turn.admission import refuse_turn_while_reloading
 from tai42_skeleton.conversations.turn.api_wait import ApiSubmitResult, _api_wait_or_callback
 from tai42_skeleton.conversations.turn.errors import (
     ConversationRouteResolutionError,
@@ -119,6 +120,9 @@ async def submit_event(
     connected — a hung-up caller's answer falls to the callback or its terminal poll record).
     It never mints a thread and never runs an agent target.
 
+    While a config reload holds the reload gate it refuses first with
+    :class:`~tai42_contract.errors.ServerReloadingError` (retriable), before any read or write.
+
     ``caller_principal`` is MANDATORY: it is the accountable party the rate cap buckets on
     and the authorizing principal recorded on the event (``submitted_by``). Admission runs
     in the channel door's order — a cheap owner read-check, the rate cap, the thread slot,
@@ -127,6 +131,7 @@ async def submit_event(
     redelivery of a rate-capped event runs cleanly, and a redelivery of an ACCEPTED one
     returns the original turn's ``message_id`` (``202``) and starts no second turn.
     """
+    refuse_turn_while_reloading()
     if caller_principal is None or not caller_principal.strip():
         raise UnauthenticatedApiCallerError(
             f"event conversation route {route_name!r} needs an accountable caller principal and this "
@@ -150,7 +155,7 @@ async def submit_event(
     caps = get_turn_caps()
     admission = caps.admit_address(_api_bucket_key(route.route_name, caller_principal), route.turns_per_hour_override)
     if admission is not AddressAdmission.ADMIT:
-        effective_rate = route.turns_per_hour_override or caps.settings.per_address_turns_per_hour
+        effective_rate = caps.effective_rate(route.turns_per_hour_override)
         raise AddressRateLimitedError(
             f"caller {caller_principal!r} is over its rate cap of "
             f"{effective_rate}/hour on route {route.route_name!r}; "
@@ -208,5 +213,5 @@ async def submit_event(
         # A channel-target event delivers to the thread's address on completion, exactly as
         # the channel door does; the caller gets the accepted id back.
         return ApiSubmitResult(message_id=message_id, thread_id=thread_id, answer=None)
-    wait_seconds = min(submission.wait_seconds, caps.settings.sync_wait_max_seconds)
+    wait_seconds = caps.clamp_sync_wait(submission.wait_seconds)
     return await _api_wait_or_callback(task, message_id, thread_id, wait_seconds, client_connected)

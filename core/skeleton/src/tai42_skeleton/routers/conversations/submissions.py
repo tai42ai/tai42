@@ -6,7 +6,7 @@ import sys
 from collections.abc import Awaitable, Callable
 
 from fastapi import Request
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from starlette.responses import JSONResponse, Response
 from tai42_contract.conversations import (
     ConversationAnswer,
@@ -18,19 +18,19 @@ from tai42_contract.conversations import (
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.conversations.caps import AddressRateLimitedError
-from tai42_skeleton.conversations.settings import conversations_settings
 from tai42_skeleton.conversations.turn import (
     ApiSubmitResult,
     ConversationRouteResolutionError,
     EventTargetNotToolError,
     ThreadNotFoundError,
 )
-from tai42_skeleton.operations.errors import NotSupportedError
+from tai42_skeleton.operations.adapter import read_json_object, validate_body
+from tai42_skeleton.operations.errors import BadRequestError, NotSupportedError
 
 # This submodule's OWN package object (the one it was imported as part of), captured at
 # import time from ``sys.modules`` — NOT ``from tai42_skeleton.routers import conversations``,
 # whose parent-attribute read is stale mid-reload. The seam symbols
-# (``get_current_user_id``/``reload_gate``) are read through it at call time, so a test's
+# (``get_current_user_id``) are read through it at call time, so a test's
 # patch on this package alias is the single point the submission doors read.
 _pkg = sys.modules["tai42_skeleton.routers.conversations"]
 
@@ -152,7 +152,7 @@ async def send_conversation_message(request: Request) -> Response:
     execution key, not the caller. Default answer is ``202 {message_id, thread_id}``; the
     answer is then delivered later by signed callback when the route declares a
     ``callback_url``, and otherwise read back from the poll door
-    (``GET .../messages/{message_id}``). With a ``wait_seconds`` body field (clamped here to
+    (``GET .../messages/{message_id}``). With a ``wait_seconds`` body field (clamped to
     ``sync_wait_max_seconds``) a turn finishing in time answers ``200`` inline — an
     answered/error turn with the answer, a silent turn with the silent marker (status
     ``silent``, no answer text) — and any callback (which otherwise carries
@@ -162,26 +162,13 @@ async def send_conversation_message(request: Request) -> Response:
     answer by the route's signed callback (or its terminal poll record), never a write to a
     closed socket.
     """
-    if _pkg.reload_gate.locked:
-        return _pkg.reload_gate.reject_response()
     route_name = request.path_params["route_name"]
     try:
-        body = await request.json()
-    except ValueError:
-        return _error("invalid JSON body", 400)
-    if not isinstance(body, dict):
-        return _error("body must be a JSON object", 400)
-    try:
-        message = ConversationMessage.model_validate(body)
-    except ValidationError as exc:
-        # VALUE-FREE: a params failure's pydantic error dict embeds ``input_value``, so the
-        # body renders each error's ``msg`` only (which names the violated bound, never the
-        # value) — never ``str(exc)`` or the error dicts, both of which reflect the input.
-        detail = "; ".join(error["msg"] for error in exc.errors())
-        return _error(f"invalid conversation message: {detail}", 400)
+        message = validate_body(ConversationMessage, await read_json_object(request), "conversation message")
+    except BadRequestError as exc:
+        return _error(exc.message, 400)
 
-    cap = conversations_settings().sync_wait_max_seconds
-    wait_seconds = 0 if message.wait_seconds is None else min(message.wait_seconds, cap)
+    wait_seconds = 0 if message.wait_seconds is None else message.wait_seconds
 
     from tai42_skeleton.conversations import submit_api_message
 
@@ -245,22 +232,11 @@ async def send_conversation_event(request: Request) -> Response:
     of the route by ``thread_id`` (a channel participant's included), so a deployment grants its
     write action to service principals, not to low-trust API keys.
     """
-    if _pkg.reload_gate.locked:
-        return _pkg.reload_gate.reject_response()
     route_name = request.path_params["route_name"]
     try:
-        body = await request.json()
-    except ValueError:
-        return _error("invalid JSON body", 400)
-    if not isinstance(body, dict):
-        return _error("body must be a JSON object", 400)
-    try:
-        submission = ConversationEventSubmission.model_validate(body)
-    except ValidationError as exc:
-        # VALUE-FREE: render each error's ``msg`` (which names the violated bound, never the
-        # value), never ``str(exc)`` or the error dicts — both reflect the opaque input.
-        detail = "; ".join(error["msg"] for error in exc.errors())
-        return _error(f"invalid conversation event: {detail}", 400)
+        submission = validate_body(ConversationEventSubmission, await read_json_object(request), "conversation event")
+    except BadRequestError as exc:
+        return _error(exc.message, 400)
 
     from tai42_skeleton.conversations import submit_event
 

@@ -19,15 +19,14 @@ here only parses the request body, preserving the door's hand-authored malformed
 
 from __future__ import annotations
 
-from json import JSONDecodeError
 from typing import Any
 
-from pydantic import ValidationError
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object, validate_body
 from tai42_skeleton.operations.templates import clear_templates_cache as _clear_templates_cache_op
 from tai42_skeleton.operations.templates import delete_template as _delete_template_op
 from tai42_skeleton.operations.templates import delete_template_dir as _delete_template_dir_op
@@ -37,29 +36,18 @@ from tai42_skeleton.operations.templates import render_template as _render_templ
 from tai42_skeleton.operations.templates import upload_template as _upload_template_op
 
 
-async def _json_body(request: Request) -> dict:
-    """Parse a JSON-object body, preserving the door's hand-authored ``400``s."""
-    try:
-        body = await request.json()
-    except (JSONDecodeError, ValueError) as exc:
-        raise BadRequestError(f"invalid JSON body: {exc}") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("request body must be a JSON object")
-    return body
-
-
 async def _extract_fetch(request: Request) -> dict[str, Any]:
-    body = await _json_body(request)
+    body = await read_json_object(request)
     return {"template_id": body.get("template_id")}
 
 
 async def _extract_upload(request: Request) -> dict[str, Any]:
-    body = await _json_body(request)
+    body = await read_json_object(request)
     return {"path": body.get("path"), "content": body.get("content")}
 
 
 async def _extract_delete(request: Request) -> dict[str, Any]:
-    body = await _json_body(request)
+    body = await read_json_object(request)
     return {"path": body.get("path")}
 
 
@@ -72,14 +60,11 @@ def _req_templated_text(body: dict, key: str) -> TemplatedText:
     value = body.get(key)
     if not isinstance(value, dict):
         raise BadRequestError(f"{key!r} must be a templated-text JSON object with 'content' or 'id'")
-    try:
-        return TemplatedText.model_validate(value)
-    except ValidationError as exc:
-        raise BadRequestError(f"{key!r} is not a valid templated text: {exc}") from exc
+    return validate_body(TemplatedText, value, f"templated text {key!r}")
 
 
 async def _extract_render(request: Request) -> dict[str, Any]:
-    body = await _json_body(request)
+    body = await read_json_object(request)
     return {"text": _req_templated_text(body, "text")}
 
 

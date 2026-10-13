@@ -15,10 +15,14 @@ or that matches no registered route at all, is not the limiter's business.
 Doors are grouped into FAMILIES so their counters stay disjoint and a flood on one
 public door cannot exhaust another's budget. A family is the door's path stem
 (:func:`family_of`): ``/trigger/{token}`` and ``/universal_webhook/{topic}`` are
-their own families, the six ``/api/channels/web/*`` doors share one. Every family
-is charged the ``TAI_RATE_LIMIT_DEFAULT_*`` budget unless a shipped or operator
-override tunes it (see :mod:`tai42_skeleton.settings.rate_limit`), so an override
-tunes a door, it never decides whether the door is covered.
+their own families, the six ``/api/channels/web/*`` doors share one. A route may
+name its family and its family's default budget itself
+(``DeclaredRouteMetadata.rate_limit_family`` / ``rate_limit_budget``); every public
+route of one family declares the same budget (:func:`family_budgets`). A family
+whose routes declare none is charged the ``TAI_RATE_LIMIT_DEFAULT_*`` budget, and
+an operator override tunes any family field by field (see
+:mod:`tai42_skeleton.settings.rate_limit`), so a budget tunes a door, it never
+decides whether the door is covered.
 
 Keying and window semantics: a fixed-window Redis counter per client bucket,
 INCR + EXPIRE issued in one pipeline (a pipeline cannot branch on INCR's result;
@@ -41,13 +45,17 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Final
 
 from redis.asyncio import Redis as AsyncRedis
 from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
+from tai42_contract.app import RateLimitBudget
+from tai42_contract.errors import ErrorKind
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.utils.client_address import (
@@ -64,6 +72,11 @@ from tai42_skeleton.settings.audit_log import audit_log_settings
 from tai42_skeleton.settings.rate_limit import RateLimitSettings, rate_limit_settings
 
 logger = logging.getLogger(__name__)
+
+# The budget the skeleton's own single-request public doors declare: one request buys real
+# work (a webhook fan-out, a ticket redemption, a tool run per trigger), so they are held
+# tighter than the app-wide default.
+SKELETON_DOOR_BUDGET: Final = RateLimitBudget(limit=60, burst=10)
 
 # How many leading STATIC path segments name a door family. Two is what keeps the
 # families a deployment actually runs disjoint without splitting one door's own
@@ -172,6 +185,62 @@ def _project_family(meta: RouteMetadata) -> _DoorFamily:
     return _DoorFamily(authed=meta.authed, family=meta.rate_limit_family or family_of(meta.path))
 
 
+class RateLimitFamilyConflictError(RuntimeError):
+    """Two public routes of one rate-limit family declare different budgets."""
+
+    __tai_error_kind__ = ErrorKind.CONFLICT
+
+
+def family_budgets(routes: Iterable[RouteMetadata]) -> dict[str, RateLimitBudget | None]:
+    """Each rate-limit family's declared budget, over the PUBLIC routes of ``routes``.
+
+    An authed route is never charged (the limiter passes it through), so it takes no part.
+    Every public route of one family must carry the same ``rate_limit_budget``, ``None``
+    counted as a value — a route that forgets to declare in a declaring family is a
+    conflict, never a silently cheaper door. Raises :class:`RateLimitFamilyConflictError`
+    naming every route of a disagreeing family.
+    """
+    declared: dict[str, dict[str, RateLimitBudget | None]] = {}
+    for meta in routes:
+        if meta.authed:
+            continue
+        family = meta.rate_limit_family or family_of(meta.path)
+        declared.setdefault(family, {})[f"{'/'.join(meta.methods)} {meta.path}"] = meta.rate_limit_budget
+    budgets: dict[str, RateLimitBudget | None] = {}
+    for family, by_route in declared.items():
+        values = set(by_route.values())
+        if len(values) > 1:
+            raise RateLimitFamilyConflictError(
+                f"rate-limit family {family!r}: routes declare different budgets: "
+                + "; ".join(f"{route} {budget}" for route, budget in sorted(by_route.items()))
+            )
+        budgets[family] = values.pop()
+    return budgets
+
+
+def check_rate_limit_families() -> None:
+    """Refuse a generation whose public routes disagree on a family budget.
+
+    Reads the generation being built (the staged one during a reload, the committed one at
+    boot), so a conflicting reload fails before the swap and the previous epoch keeps serving.
+    """
+    family_budgets(route_registry.pending_routes())
+
+
+# The family budgets of the committed generation, memoized against the registry version that
+# produced them (a reload commits a new generation and bumps it).
+_family_budgets_memo: tuple[int, dict[str, RateLimitBudget | None]] | None = None
+
+
+def _live_family_budgets() -> dict[str, RateLimitBudget | None]:
+    """The committed generation's family budgets, rebuilt when the registry version moves."""
+    global _family_budgets_memo
+    version = route_registry.version
+    if _family_budgets_memo is None or _family_budgets_memo[0] != version:
+        _family_budgets_memo = (version, family_budgets(route_registry.live_routes()))
+    return _family_budgets_memo[1]
+
+
 # The compiled door table, memoized against the registry version that produced it: a
 # reload re-records the route surface and bumps that version, so the next request
 # rebuilds instead of matching against the previous deployment's doors.
@@ -195,9 +264,12 @@ def _reset_door_table_cache() -> None:
     """Drop the memoized table so the next request recompiles it.
 
     Production invalidation rides the registry version; this is for a test that swaps the
-    route surface underneath the middleware without recording into the live registry.
+    route surface underneath the middleware without recording into the live registry. The
+    memoized family budgets drop with it.
     """
+    global _family_budgets_memo
     _door_table_obj.reset()
+    _family_budgets_memo = None
 
 
 async def _retry_after(r: AsyncRedis, prefix: str, family: str, bucket: str, limit: int, burst: int) -> int | None:
@@ -253,7 +325,8 @@ async def _refusal(scope: Scope) -> JSONResponse | None:
     # public door. Neither is this limiter's business.
     if door is None or door.payload.authed:
         return None
-    budget = settings.budget_for(door.payload.family)
+    family = door.payload.family
+    budget = settings.budget_for(family, declared=_live_family_budgets().get(family))
     # A disabled family means pass through, not block: an off switch opens the
     # door it names, it never closes it.
     if not budget.enabled:

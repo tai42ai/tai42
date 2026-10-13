@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from tai42_contract.conversations import ConversationTargetKind
 from tai42_contract.interactions.door_contract import ParkableDoorMixin
+from tai42_contract.plugins.routes import PATH_SEGMENT_SLUG_RE
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.states.models import SUBJECT_KIND_RE
 from tai42_contract.template import ConditionMixin, TemplatedText
@@ -17,10 +17,7 @@ from tai42_contract.template import ConditionMixin, TemplatedText
 # (``/universal_webhook/{topic}``), and its ``name`` addresses the hook on every
 # management/delete door. A ``/`` (or a trailing newline) in either would mint a
 # record no webhook delivery can ever route to and no door can address — so the
-# charset is bounded to a single lowercase path segment, mirroring the sub-MCP
-# slug rule. ``\Z`` (not ``$``) anchors the true end of string so a trailing
-# ``\n`` cannot slip through.
-_SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
+# charset is bounded to a single lowercase path segment (``PATH_SEGMENT_SLUG_RE``).
 
 
 class TopicVerifierBinding(BaseModel):
@@ -86,9 +83,10 @@ class HookRegister(ConditionMixin, ParkableDoorMixin):
     @field_validator("name", "topic")
     @classmethod
     def _require_url_safe_segment(cls, value: str, info: ValidationInfo) -> str:
-        if not _SEGMENT_RE.match(value):
+        if not PATH_SEGMENT_SLUG_RE.match(value):
             raise ValueError(
-                f"{info.field_name} {value!r} must match {_SEGMENT_RE.pattern} (one lowercase URL path segment)"
+                f"{info.field_name} {value!r} must match {PATH_SEGMENT_SLUG_RE.pattern} "
+                "(one lowercase URL path segment)"
             )
         return value
 

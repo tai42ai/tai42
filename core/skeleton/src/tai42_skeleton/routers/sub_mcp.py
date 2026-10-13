@@ -27,47 +27,31 @@ rather than by the adapter's plain request-model parse. Success bodies are
 
 from __future__ import annotations
 
-import re
-
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 
-from tai42_skeleton.app.sub_mcp_app import _VALID_TRANSPORTS
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object
 from tai42_skeleton.operations.sub_mcp import list_sub_mcp as _list_sub_mcp_op
 from tai42_skeleton.operations.sub_mcp import register_sub_mcp as _register_sub_mcp_op
 from tai42_skeleton.operations.sub_mcp import unregister_sub_mcp as _unregister_sub_mcp_op
-
-# A slug is extracted as ONE path segment by the dispatcher, so it must be a
-# single lowercase-safe segment: a ``/`` (or a trailing newline) would register a
-# route that is unreachable and undeletable. ``\Z`` (not ``$``) anchors the true
-# end of string so a trailing ``\n`` cannot slip through and mint a phantom entry.
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
 
 
 async def _extract_registration(request: Request) -> dict:
     """Parse + structurally validate the registration body into the operation's flat arguments.
 
-    Yields the ``slug``/``tools``/``transport`` arguments, rejecting a malformed body before the operation
-    runs (the adapter's plain parse would yield 422; this preserves the explicit 400 surface).
+    Yields the ``slug``/``tools``/``transport`` arguments, rejecting a malformed body shape before the
+    operation runs (the adapter's plain parse would yield 422; this preserves the explicit 400 surface). The
+    slug and transport rules are the operation's, so the projected MCP tool refuses them the same way.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object") from None
+    body = await read_json_object(request)
     slug = body.get("slug")
     tools = body.get("tools")
     if not isinstance(slug, str) or not slug:
         raise BadRequestError("body must contain a non-empty string 'slug'") from None
-    if not _SLUG_RE.match(slug):
-        raise BadRequestError(f"slug must match {_SLUG_RE.pattern} (one lowercase path segment)") from None
     if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
         raise BadRequestError("body must contain a list of tool-name strings 'tools'") from None
     transport = body.get("transport", "http")
-    if transport not in _VALID_TRANSPORTS:
-        raise BadRequestError(f"'transport' must be one of {list(_VALID_TRANSPORTS)}") from None
     return {"slug": slug, "tools": tools, "transport": transport}
 
 

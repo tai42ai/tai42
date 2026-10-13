@@ -18,7 +18,6 @@ from tai42_contract.conversations import (
     TargetConversationConfig,
 )
 
-from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import persons as persons_module
@@ -26,6 +25,7 @@ from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.caps import AddressAdmission
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.thread_ids import PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import keys as keys_module
 from tai42_skeleton.conversations.turn import pairing as pairing_module

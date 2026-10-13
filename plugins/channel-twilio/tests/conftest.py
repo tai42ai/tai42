@@ -111,6 +111,8 @@ class _StubHttp:
         action: str | None = None,
         declared: Any = None,
         no_body_reason: str | None = None,
+        enveloped: bool = True,
+        success_media_types: Any = None,
     ) -> Callable[[Any], Any]:
         def decorator(fn: Any) -> Any:
             self.routes.append(

@@ -14,13 +14,14 @@ from __future__ import annotations
 from importlib.metadata import version
 
 from tai42_contract.agent import Agent
-from tai42_contract.app import DeclaredRouteMetadata, RouteAction, TaiApp, tai42_app
+from tai42_contract.app import DeclaredRouteMetadata, RateLimitBudget, RouteAction, TaiApp, tai42_app
 from tai42_contract.backend import Backend
 from tai42_contract.errors import (
     ERROR_KIND_ATTR,
     ClientConnectError,
     ClientDisconnectedError,
     ErrorKind,
+    ServerReloadingError,
     error_kind,
     register_error_kind,
 )
@@ -40,7 +41,9 @@ __all__ = [
     "DeclaredRouteMetadata",
     "ErrorKind",
     "Manifest",
+    "RateLimitBudget",
     "RouteAction",
+    "ServerReloadingError",
     "SetupRequest",
     "SetupResult",
     "Storage",

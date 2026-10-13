@@ -651,7 +651,7 @@ async def test_update_manifest_invalid_body_400(fake_full):
 async def test_update_manifest_non_object_body_400(fake_full):
     resp = await router.update_manifest(_req(["not", "an", "object"]))
     assert resp.status_code == 400
-    assert _data(resp)["error"] == "request body must be a JSON object"
+    assert _data(resp)["error"] == "body must be a JSON object"
 
 
 async def test_list_failed_mcps_route(fake_full):
@@ -688,7 +688,8 @@ async def test_mcp_config_malformed_json_400(fake):
     req = cast(Request, SimpleNamespace(json=_raise, path_params={}, query_params={}))
     resp = await router.set_mcp_config(req)
     assert resp.status_code == 400
-    assert "Expecting value" in _data(resp)["error"]
+    # The decoder's text is not echoed: the shared parser's one refusal.
+    assert _data(resp)["error"] == "invalid JSON body"
 
 
 async def test_deregister_mcp_route_malformed_body_is_400_not_whole_fleet(fake_full):
@@ -702,7 +703,7 @@ async def test_deregister_mcp_route_malformed_body_is_400_not_whole_fleet(fake_f
 async def test_deregister_mcp_route_non_object_body_is_400(fake_full):
     resp = await router.deregister_mcp(_raw_body_req(b'["w1", "w2"]', title="gh"))
     assert resp.status_code == 400
-    assert _data(resp)["error"] == "request body must be a JSON object"
+    assert _data(resp)["error"] == "body must be a JSON object"
 
 
 async def test_reload_mcp_route_non_string_targets_is_400(fake_full):

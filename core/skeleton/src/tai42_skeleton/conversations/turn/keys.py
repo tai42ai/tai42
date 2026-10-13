@@ -1,7 +1,8 @@
-"""Deterministic thread, address, rate-bucket and throttle-source key derivation.
+"""Deterministic address, rate-bucket and throttle-source key derivation.
 
 Pure string functions: every conversation key a door computes is derived here, so the
-thread, the rate bucket and the redeem-throttle scope stay one canonical shape.
+rate bucket and the redeem-throttle scope stay one canonical shape. Thread ids are built
+in :mod:`tai42_skeleton.conversations.thread_ids`.
 """
 
 from __future__ import annotations
@@ -10,16 +11,6 @@ import json
 from urllib.parse import quote
 
 from tai42_contract.conversations import ConversationDoor
-
-from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
-
-
-def _thread_id(route_name: str, client_address: str) -> str:
-    return f"{BRIDGE_THREAD_PREFIX}{route_name}:{client_address}"
-
-
-def _person_thread_id(person_id: str) -> str:
-    return f"{PERSON_THREAD_PREFIX}{person_id}"
 
 
 def _api_client_address(caller_principal: str, address: str) -> str:

@@ -4,27 +4,30 @@ An adapter route is declarative: this helper registers the HTTP surface over
 :meth:`HttpSurface.custom_route`, and the generated handler parses/validates the
 flat typed parameters, calls the operation, wraps the success payload in the
 ``{"data": ...}`` envelope, and maps the operation's declared errors to statuses.
-It honors the reload gate per the operation's metadata and NEVER performs
+Its reload gate is declared from the operation's metadata and enforced by the
+route surface. It NEVER performs
 authorization — that is a separate consumer (the HTTP middleware at the route
 edge, ``AuthzMiddleware`` at the tool edge).
 """
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
 from fastmcp.utilities.types import Audio, File, Image
 from pydantic import BaseModel, ValidationError
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.types import Message
 from tai42_contract.errors import OperationError
 
-from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata, RouteAction
+from tai42_skeleton.operations.errors import BadRequestError
 
 if TYPE_CHECKING:
     from tai42_skeleton.operations.registry import OperationMetadata
@@ -75,6 +78,94 @@ def validation_error_fields(exc: ValidationError) -> list[dict[str, Any]]:
     client learns WHICH field failed and HOW, never WHAT was sent.
     """
     return [{"loc": list(error["loc"]), "type": error["type"]} for error in exc.errors(include_url=False)]
+
+
+# A body that does not parse: ``json.JSONDecodeError`` (and an undecodable byte sequence) is a
+# ``ValueError``; a deeply nested body raises ``RecursionError`` out of the decoder. Any other
+# exception is a server bug and propagates.
+JSON_PARSE_ERRORS = (ValueError, RecursionError)
+
+
+def _json_object(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise BadRequestError("body must be a JSON object")
+    return body
+
+
+async def read_json_object(request: Request) -> dict[str, Any]:
+    """The request body as a JSON object; ``BadRequestError`` for a malformed body or a non-object one.
+
+    The refusal texts carry nothing of the input.
+    """
+    try:
+        body = await request.json()
+    except JSON_PARSE_ERRORS as exc:
+        raise BadRequestError("invalid JSON body") from exc
+    return _json_object(body)
+
+
+def parse_json_object(raw: bytes) -> dict[str, Any]:
+    """``raw`` — body bytes a door already read under its own bound — as a JSON object, by the same rule."""
+    try:
+        body = json.loads(raw)
+    except JSON_PARSE_ERRORS as exc:
+        raise BadRequestError("invalid JSON body") from exc
+    return _json_object(body)
+
+
+def validate_body[M: BaseModel](model: type[M], body: object, what: str) -> M:
+    """``body`` validated as ``model``; ``BadRequestError("invalid <what>: <field>: <rule>; …")``.
+
+    ``body`` is any decoded JSON value: a value that is not an object is refused by the model's own
+    rule ("Input should be a valid dictionary or instance of …"). Value-free: each refusal names the
+    declared field path and the bound it violates (pydantic's ``msg``), never the input — a path
+    stops at the first part that is not a declared field (a mapping key or a list index the caller
+    chose).
+    """
+    try:
+        return model.model_validate(body)
+    except ValidationError as exc:
+        refusals = (_refusal(model, error["loc"], error["msg"]) for error in exc.errors())
+        raise BadRequestError(f"invalid {what}: " + "; ".join(refusals)) from exc
+
+
+def _refusal(model: type[BaseModel], loc: tuple[int | str, ...], msg: str) -> str:
+    """``<declared field path>: <rule>``, or the rule alone when the path names no declared field."""
+    path: list[str] = []
+    current: type[BaseModel] | None = model
+    for part in loc:
+        if current is None or not isinstance(part, str) or part not in current.model_fields:
+            break
+        path.append(part)
+        current = _model_of(current.model_fields[part].annotation)
+    return f"{'.'.join(path)}: {msg}" if path else msg
+
+
+def _model_of(annotation: Any) -> type[BaseModel] | None:
+    """The one pydantic model an annotation holds (``M`` or ``M | None``), else ``None``."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    models = [arg for arg in get_args(annotation) if isinstance(arg, type) and issubclass(arg, BaseModel)]
+    return models[0] if len(models) == 1 else None
+
+
+def request_with_body(request: Request, body: bytes) -> Request:
+    """A request over the same ASGI scope whose body stream yields ``body`` once — the bytes a door already read.
+
+    Built through Starlette's public constructor, so a parser reading ``json()``, ``form()`` or
+    ``body()`` of it sees exactly the bytes the door bounded; after the one body message the
+    stream reports a disconnect.
+    """
+    sent = False
+
+    async def receive() -> Message:
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request(request.scope, receive)
 
 
 def _declared_metadata(
@@ -189,11 +280,8 @@ def _build_handler(
     reads_body = method in _BODY_METHODS
 
     async def handler(request: Request) -> Response:
-        # An adapter route racing a registry teardown answers a retriable
-        # 503 — the reload gate is honored on the route edge.
-        if op.reload_gated and reload_gate.locked:
-            return reload_gate.reject_response()
-
+        # A ``reload_gated`` operation's 503 is the route surface's: ``custom_route`` wraps
+        # this handler from the declared metadata.
         try:
             kwargs = await _read_operation_kwargs(request, path_params, context_extractor, request_model, reads_body)
             result = await op.func(**kwargs)

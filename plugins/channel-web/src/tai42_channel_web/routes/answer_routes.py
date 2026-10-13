@@ -11,13 +11,14 @@ from typing import Any
 import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from tai42_contract.app import tai42_app
+from tai42_contract.app import DeclaredRouteMetadata, tai42_app
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
 
 from tai42_channel_web.routes.callback_pin import pin_stored_callback
 from tai42_channel_web.routes.dtos import AnswerResultResponse, _answer_refusal
 from tai42_channel_web.routes.envelope import _error, _json_body, _ok
+from tai42_channel_web.routes.limits import CHAT_RATE_LIMIT_BUDGET, CHAT_RATE_LIMIT_FAMILY
 from tai42_channel_web.routes.session_access import (
     _CROSS_ORIGIN,
     _CROSS_ORIGIN_CODE,
@@ -174,6 +175,14 @@ async def _apply_forward_result(
     summary="Answer a pending web chat question",
     tags=["channels"],
     response_model=AnswerResultResponse,
+    declared=DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=True,
+        error_statuses=(400, 401, 403, 404, 409, 413, 422, 500, 501),
+        success_status=200,
+        rate_limit_family=CHAT_RATE_LIMIT_FAMILY,
+        rate_limit_budget=CHAT_RATE_LIMIT_BUDGET,
+    ),
 )
 async def web_answer(request: Request) -> Response:
     """Forward an answer to a pending web question's interactions callback.

@@ -26,7 +26,6 @@ from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.agent.session_thread import get_agent_session_thread
 from tai42_skeleton.agent.thread_reservation import (
-    BRIDGE_THREAD_PREFIX,
     ReservedThreadNamespaceError,
     run_kwargs_from_tool_input,
 )
@@ -258,6 +257,9 @@ class AgentBinding:
                 type(agent).addressed_memory(run_kwargs).thread_ids
             )
             if session_thread is not None and not caller_pinned_thread:
+                # Function-local: the conversations package imports this module.
+                from tai42_skeleton.conversations.thread_ids import BRIDGE_THREAD_PREFIX
+
                 if session_thread.startswith(BRIDGE_THREAD_PREFIX):
                     raise ReservedThreadNamespaceError(
                         f"thread_id may not use the reserved {BRIDGE_THREAD_PREFIX!r} namespace"

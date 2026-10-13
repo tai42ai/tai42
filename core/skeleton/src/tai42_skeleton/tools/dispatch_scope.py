@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager, contextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
@@ -28,7 +28,6 @@ from tai42_contract.interactions import (
     ResumeBuffered,
     SuspendedInteraction,
 )
-from tai42_contract.monitoring import RunAttribution
 from tai42_contract.tools import (
     ToolInvocation,
     current_tool_invocation,
@@ -42,7 +41,6 @@ from tai42_skeleton.runs.chokepoint import RunRecord, record_outermost_preset_ru
 from tai42_skeleton.states.outbox.drain import run_entry_drain
 from tai42_skeleton.tools.attribution import (
     preset_attribution_armed,
-    run_attribution,
     stamp_preset_attribution,
     stamp_run_attribution,
 )
@@ -444,8 +442,7 @@ class DispatchScopeMiddleware(Middleware):
 
         from tai42_skeleton.access_control.user import request_identity
         from tai42_skeleton.interactions.terminal_failure import FAILED_TERMINAL_MESSAGE, failed_outcome_detail
-        from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
-        from tai42_skeleton.tools.binding import ToolResultEncodingError, find_lone_surrogate
+        from tai42_skeleton.states.api_context import live_door_scope, unencodable_outcome
 
         name = context.message.name
         # The MCP call's arguments, mutated in place by any binding injection so the edge
@@ -460,63 +457,56 @@ class DispatchScopeMiddleware(Middleware):
             context.message.arguments = binding_args
         user_id, _restricted = request_identity()
         subject = _mcp_call_subject(context)
-        attribution = run_attribution(RunAttribution(user_id=user_id)) if user_id is not None else nullcontext()
-        # Bind the caller's own execution identity (so a parking tool can rebind its continuation)
-        # and deposit the ``door="api"`` subject context (so the park indexes under the caller's
-        # named subject), then arm the shared dispatch scope — the same treatment the direct
-        # run-tool door gives a synchronous call.
-        async with caller_execution_identity(user_id):
-            with attribution, api_state_context(subject, user_id):
-                try:
-                    async with dispatch_scope(self._app, name, binding_args) as scope:
-                        policy = await self._app._tool_binding.resolve_retry_policy(name)
-                        result = await dispatch_with_retry(name, policy, lambda: call_next(context))
-                        # Refuse a result no JSON encoder can render (a lone UTF-16 surrogate) BEFORE
-                        # fastmcp serializes the ``ToolResult`` to the wire, so the ``tools/call``
-                        # answers a loud, named tool error instead of the transport 500 that encode
-                        # would throw. Both the structured content and every content block's
-                        # JSON-reduced form are walked, since either carries the reduced return.
-                        _refuse_unencodable_mcp_result(name, result)
-                        await self._observe_mcp_result(scope, name, result)
-                        return result
-                except ToolError as exc:
-                    # A driver's FAILED terminal RAISES ``RunTerminalFailed`` in the tool body;
-                    # fastmcp's ``call_tool`` core wraps any body raise into a ``ToolError``
-                    # (``raise ToolError(...) from e``) BEFORE this middleware's ``call_next``
-                    # returns, so the terminal failure arrives here as a ``ToolError`` whose
-                    # ``__cause__`` is the ``RunTerminalFailed``. The CAUSE is read, never the
-                    # message: under ``mask_error_details`` the message is generic, but the chained
-                    # cause is preserved regardless. This ``except`` sits OUTSIDE ``dispatch_scope``
-                    # on purpose — the raise first unwinds the runs-index chokepoint, which records
-                    # the run's terminal as ``error``; only after that is the failure turned into a
-                    # delivered result here. Every other ``ToolError`` — a plain tool failure, or the
-                    # unencodable-result refusal raised just above — re-raises unchanged.
-                    cause = exc.__cause__
-                    if not isinstance(cause, RunTerminalFailed):
-                        raise
-                    outcome = cause.outcome
-                    # This is the STRUCTURED MCP edge, so the opaque outcome is delivered WHOLE as
-                    # structured data — never a key read out of it, never the capped text render. An
-                    # outcome a JSON encoder cannot render (a lone UTF-16 surrogate the contract's
-                    # plain-mapping promise forbids) is refused LOUDLY through the edge's OWN named
-                    # path — a ``ToolError`` naming the tool and the offending JSON path — before it
-                    # could reach the wire serialize as an unnamed transport error.
-                    offending_path = find_lone_surrogate(outcome)
-                    if offending_path is not None:
-                        logger.warning(
-                            "MCP tools/call: %r failed with an outcome that cannot be JSON-encoded at %s",
-                            name,
-                            offending_path,
-                        )
-                        raise ToolError(str(ToolResultEncodingError(name, offending_path))) from exc
-                    # The SERVER-SIDE record keeps the capped detail; only the caller delivery is whole.
-                    logger.exception("MCP tools/call %r failed on a terminal: %s", name, failed_outcome_detail(outcome))
-                    return ToolResult(
-                        content=[TextContent(type="text", text=FAILED_TERMINAL_MESSAGE)],
-                        structured_content={"error": FAILED_TERMINAL_MESSAGE, "outcome": outcome},
-                        is_error=True,
-                    )
-                except (StatePendingSaveFailedError, StatePendingSaveTimeoutError) as exc:
-                    # The run entry's drain refused before the tool ran (a held subject, or a save
-                    # that did not finish in time): the client reads the message as a named refusal.
-                    raise ToolError(str(exc)) from exc
+        # Bind the caller's own execution identity (so a parking tool can rebind its continuation),
+        # attribute the run to the caller and deposit the ``door="api"`` subject context (so the park
+        # indexes under the caller's named subject), then arm the shared dispatch scope — the same
+        # treatment the direct run-tool door gives a synchronous call.
+        async with live_door_scope(subject, user_id, attribute=True):
+            try:
+                async with dispatch_scope(self._app, name, binding_args) as scope:
+                    policy = await self._app._tool_binding.resolve_retry_policy(name)
+                    result = await dispatch_with_retry(name, policy, lambda: call_next(context))
+                    # Refuse a result no JSON encoder can render (a lone UTF-16 surrogate) BEFORE
+                    # fastmcp serializes the ``ToolResult`` to the wire, so the ``tools/call``
+                    # answers a loud, named tool error instead of the transport 500 that encode
+                    # would throw. Both the structured content and every content block's
+                    # JSON-reduced form are walked, since either carries the reduced return.
+                    _refuse_unencodable_mcp_result(name, result)
+                    await self._observe_mcp_result(scope, name, result)
+                    return result
+            except ToolError as exc:
+                # A driver's FAILED terminal RAISES ``RunTerminalFailed`` in the tool body;
+                # fastmcp's ``call_tool`` core wraps any body raise into a ``ToolError``
+                # (``raise ToolError(...) from e``) BEFORE this middleware's ``call_next``
+                # returns, so the terminal failure arrives here as a ``ToolError`` whose
+                # ``__cause__`` is the ``RunTerminalFailed``. The CAUSE is read, never the
+                # message: under ``mask_error_details`` the message is generic, but the chained
+                # cause is preserved regardless. This ``except`` sits OUTSIDE ``dispatch_scope``
+                # on purpose — the raise first unwinds the runs-index chokepoint, which records
+                # the run's terminal as ``error``; only after that is the failure turned into a
+                # delivered result here. Every other ``ToolError`` — a plain tool failure, or the
+                # unencodable-result refusal raised just above — re-raises unchanged.
+                cause = exc.__cause__
+                if not isinstance(cause, RunTerminalFailed):
+                    raise
+                outcome = cause.outcome
+                # This is the STRUCTURED MCP edge, so the opaque outcome is delivered WHOLE as
+                # structured data — never a key read out of it, never the capped text render. An
+                # outcome a JSON encoder cannot render (a lone UTF-16 surrogate the contract's
+                # plain-mapping promise forbids) is refused LOUDLY through the edge's OWN named
+                # path — a ``ToolError`` naming the tool and the offending JSON path — before it
+                # could reach the wire serialize as an unnamed transport error.
+                refusal = unencodable_outcome(name, outcome)
+                if refusal is not None:
+                    raise ToolError(str(refusal)) from exc
+                # The SERVER-SIDE record keeps the capped detail; only the caller delivery is whole.
+                logger.exception("MCP tools/call %r failed on a terminal: %s", name, failed_outcome_detail(outcome))
+                return ToolResult(
+                    content=[TextContent(type="text", text=FAILED_TERMINAL_MESSAGE)],
+                    structured_content={"error": FAILED_TERMINAL_MESSAGE, "outcome": outcome},
+                    is_error=True,
+                )
+            except (StatePendingSaveFailedError, StatePendingSaveTimeoutError) as exc:
+                # The run entry's drain refused before the tool ran (a held subject, or a save
+                # that did not finish in time): the client reads the message as a named refusal.
+                raise ToolError(str(exc)) from exc

@@ -9,9 +9,11 @@ helper must not sit in one.
 
 from __future__ import annotations
 
-from pydantic import ValidationError
 from starlette.requests import Request
 from tai42_contract.states import StateSubject
+
+from tai42_skeleton.operations.adapter import read_json_object, validate_body
+from tai42_skeleton.operations.errors import BadRequestError
 
 
 class ToolCallRequestError(Exception):
@@ -39,11 +41,9 @@ async def read_tool_call(request: Request) -> tuple[str, dict[str, object], Stat
     it to the same loud 4xx both doors share.
     """
     try:
-        body = await request.json()
-    except ValueError as exc:
-        raise ToolCallRequestError("invalid JSON body", 400) from exc
-    if not isinstance(body, dict):
-        raise ToolCallRequestError("body must be a JSON object", 400)
+        body = await read_json_object(request)
+    except BadRequestError as exc:
+        raise ToolCallRequestError(exc.message, 400) from exc
     name = body.get("tool_name", "")
     if not isinstance(name, str) or not name:
         raise ToolCallRequestError("body must contain a non-empty 'tool_name'", 400)
@@ -67,6 +67,6 @@ def _read_subject(raw: object) -> StateSubject | None:
     if raw is None:
         return None
     try:
-        return StateSubject.model_validate(raw)
-    except ValidationError as exc:
-        raise ToolCallRequestError(f"invalid 'subject': {exc}", 400) from exc
+        return validate_body(StateSubject, raw, "'subject'")
+    except BadRequestError as exc:
+        raise ToolCallRequestError(exc.message, 400) from exc

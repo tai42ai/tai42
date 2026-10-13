@@ -38,7 +38,6 @@ secrets — only the stored, non-secret record fields.
 
 from __future__ import annotations
 
-from json import JSONDecodeError
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, RootModel, ValidationError
@@ -66,7 +65,7 @@ from tai42_skeleton.connectors.oauth.redirect import compute_deployment_origin, 
 from tai42_skeleton.connectors.service import connection_service
 from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
-from tai42_skeleton.operations.adapter import validation_error_fields
+from tai42_skeleton.operations.adapter import read_json_object, validation_error_fields
 from tai42_skeleton.operations.connector_providers import add_connector_provider as _add_connector_provider_op
 from tai42_skeleton.operations.connector_providers import discover_connector_server as _discover_connector_server_op
 from tai42_skeleton.operations.connector_providers import remove_connector_provider as _remove_connector_provider_op
@@ -79,10 +78,6 @@ from tai42_skeleton.operations.connectors import patch_sub_services as _patch_su
 from tai42_skeleton.operations.connectors import reconnect as _reconnect_op
 from tai42_skeleton.operations.connectors import reencrypt_connector_tokens as _reencrypt_connector_tokens_op
 from tai42_skeleton.operations.connectors import start_connect as _start_connect_op
-
-
-class _BadRequestError(ValueError):
-    """A malformed request body — surfaced as a 400."""
 
 
 class OAuthComplete(BaseModel):
@@ -156,16 +151,6 @@ def _error(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
 
 
-async def _json_body(request: Request) -> dict:
-    try:
-        body = await request.json()
-    except (JSONDecodeError, ValueError) as exc:
-        raise _BadRequestError(f"invalid JSON body: {exc}") from exc
-    if not isinstance(body, dict):
-        raise _BadRequestError("request body must be a JSON object")
-    return body
-
-
 # -- HTTP-edge extractors (validate the body; compute request-derived args) ---
 
 
@@ -189,11 +174,9 @@ async def _extract_list_connections(request: Request) -> dict:
 
 
 async def _extract_start_connect(request: Request) -> dict:
+    body = await read_json_object(request)
     try:
-        body = await _json_body(request)
         req = StartConnectRequest.model_validate(body)
-    except _BadRequestError as exc:
-        raise BadRequestError(str(exc)) from exc
     except ValidationError as exc:
         # Never echo the rejected values (config_values can hold secrets): the body
         # carries only the failing field paths + error types.
@@ -210,11 +193,9 @@ async def _extract_start_connect(request: Request) -> dict:
 
 
 async def _extract_reconnect(request: Request) -> dict:
+    body = await read_json_object(request)
     try:
-        body = await _json_body(request)
         req = StartReconnectRequest.model_validate(body)
-    except _BadRequestError as exc:
-        raise BadRequestError(str(exc)) from exc
     except ValidationError as exc:
         # Field paths + error types only — never the rejected input values.
         raise BadRequestError("invalid request body", extra={"fields": validation_error_fields(exc)}) from exc
@@ -227,11 +208,9 @@ async def _extract_reconnect(request: Request) -> dict:
 
 
 async def _extract_patch_sub_services(request: Request) -> dict:
+    body = await read_json_object(request)
     try:
-        body = await _json_body(request)
         req = PatchSubServicesRequest.model_validate(body)
-    except _BadRequestError as exc:
-        raise BadRequestError(str(exc)) from exc
     except ValidationError as exc:
         # Field paths + error types only — never the rejected input values.
         raise BadRequestError("invalid request body", extra={"fields": validation_error_fields(exc)}) from exc
@@ -252,11 +231,7 @@ def _parse_body[M: BaseModel](request_body: dict, model: type[M]) -> M:
 
 
 async def _body_of[M: BaseModel](request: Request, model: type[M]) -> M:
-    try:
-        body = await _json_body(request)
-    except _BadRequestError as exc:
-        raise BadRequestError(str(exc)) from exc
-    return _parse_body(body, model)
+    return _parse_body(await read_json_object(request), model)
 
 
 async def _extract_discover(request: Request) -> dict:
@@ -462,9 +437,9 @@ async def oauth_complete(request: Request) -> Response:
     if not component_store_configured(SKELETON_COMPONENT):
         return JSONResponse({"data": {"kind": "not_configured"}}, status_code=400)
     try:
-        body = await _json_body(request)
-    except _BadRequestError as exc:
-        return _error(str(exc), 400)
+        body = await read_json_object(request)
+    except BadRequestError as exc:
+        return _error(exc.message, 400)
 
     parsed = _parse_completion(body)
     if isinstance(parsed, Response):

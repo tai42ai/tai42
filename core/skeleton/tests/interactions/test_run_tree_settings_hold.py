@@ -333,9 +333,24 @@ async def test_a_channel_delivery_suspended_in_its_send_holds_no_retired_setting
 @pytest.mark.parametrize(
     ("door", "owner", "first_await", "value"),
     [
-        (lambda: helper_module.cancel_parks_for_thread("th-1"), InteractionStore, "thread_park_members", []),
-        (lambda: helper_module.cancel_parks_for_person("p-1"), InteractionStore, "thread_park_members", []),
-        (lambda: helper_module.rekey_parks_for_merge("p-1", "p-2"), InteractionStore, "rekey_subject", []),
+        (
+            lambda: helper_module.cancel_parks_for_thread("th-1", reason="thread_deleted"),
+            InteractionStore,
+            "thread_park_members",
+            [],
+        ),
+        (
+            lambda: helper_module.cancel_parks_for_thread("th-1", also_subjects=[("person", "p-1")], reason="erased"),
+            InteractionStore,
+            "thread_park_members",
+            [],
+        ),
+        (
+            lambda: helper_module.rekey_park_subjects([("person", "p-1", "p-2")]),
+            InteractionStore,
+            "rekey_subject",
+            [],
+        ),
         (
             lambda: kill_module.kill_parks_for_subject("person", "p-1", reason="erased"),
             InteractionStore,
@@ -388,8 +403,8 @@ async def test_a_channel_delivery_suspended_in_its_send_holds_no_retired_setting
     ],
     ids=[
         "cancel_parks_for_thread",
-        "cancel_parks_for_person",
-        "rekey_parks_for_merge",
+        "cancel_parks_for_thread_also_subjects",
+        "rekey_park_subjects",
         "kill_parks_for_subject",
         "react",
         "stored_run_delivery_id",

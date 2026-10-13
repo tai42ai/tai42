@@ -532,6 +532,7 @@ def test_http_facet_forwarding():
         declared=None,
         no_body_reason=None,
         enveloped=True,
+        success_media_types=None,
     )
 
 

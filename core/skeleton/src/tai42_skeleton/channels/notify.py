@@ -53,6 +53,7 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import clamp_write_audience
+from tai42_skeleton.channels.capabilities import unsupported_capability
 from tai42_skeleton.channels.notifications_sink import record_notification
 from tai42_skeleton.channels.send_receipts import index_send
 from tai42_skeleton.channels.send_span import active_trace_id, send_span
@@ -100,26 +101,23 @@ def _guard_channel_capabilities(
 ) -> None:
     """Central capability gate — a channel that does not advertise the matching flag is refused the field.
 
-    The flags are OPTIONAL class attributes (absent = False), read defensively so
-    a text-only sibling channel is a valid target and never forced to declare
-    them. Raises ``NotImplementedError`` naming the field for any
-    advertised-capability miss. Runs BEFORE any feed write so a refused rich send
-    leaves no phantom feed entry. A sectioned list IS an interactive choice
-    surface (the SAME flag flat options ride); ``header``/``footer`` ride that
-    already-gated choice surface, so they carry NO gate of their own.
+    The flags and the fields they gate are :data:`RICH_CAPABILITIES`. Raises
+    ``NotImplementedError`` naming the capability for any advertised-capability miss. Runs BEFORE
+    any feed write so a refused rich send leaves no phantom feed entry.
     """
-    if media is not None and not getattr(channel_obj, "supports_media_notifications", False):
-        raise NotImplementedError(f"channel {channel!r} does not support media notifications")
-    if location is not None and not getattr(channel_obj, "supports_location_notifications", False):
-        raise NotImplementedError(f"channel {channel!r} does not support location notifications")
-    if template is not None and not getattr(channel_obj, "supports_template_notifications", False):
-        raise NotImplementedError(f"channel {channel!r} does not support template notifications")
-    if options is not None and not getattr(channel_obj, "supports_interactive_notifications", False):
-        raise NotImplementedError(f"channel {channel!r} does not support interactive notifications")
-    if sections is not None and not getattr(channel_obj, "supports_interactive_notifications", False):
-        raise NotImplementedError(f"channel {channel!r} does not support interactive notifications")
-    if schema is not None and not getattr(channel_obj, "supports_form_notifications", False):
-        raise NotImplementedError(f"channel {channel!r} does not support form notifications")
+    missing = unsupported_capability(
+        channel_obj,
+        {
+            "media": media,
+            "location": location,
+            "template": template,
+            "options": options,
+            "sections": sections,
+            "schema": schema,
+        },
+    )
+    if missing is not None:
+        raise NotImplementedError(f"channel {channel!r} does not support {missing[1]} notifications")
 
 
 def _validate_channel_template(channel_obj: Channel, template: ChannelTemplate) -> None:

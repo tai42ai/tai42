@@ -127,6 +127,7 @@ list_studio_plugins = register_operation_route(
     tags=["plugins"],
     response_model=None,
     no_body_reason="Studio plugin asset: raw bytes",
+    success_media_types={"GET": ("application/octet-stream",)},
     authed=False,
     declared=DeclaredRouteMetadata(
         reload_gated=False,

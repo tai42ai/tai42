@@ -8,7 +8,7 @@ from stat import S_ISREG
 from anyio.to_thread import run_sync
 from starlette.requests import Request
 from starlette.responses import FileResponse, Response
-from tai42_contract.app import tai42_app
+from tai42_contract.app import DeclaredRouteMetadata, tai42_app
 from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
 
 from tai42_channel_web.page import (
@@ -24,6 +24,7 @@ from tai42_channel_web.page import (
 from tai42_channel_web.routes.dtos import _clean_identity
 from tai42_channel_web.routes.entry_admission import _ENTRY_REFUSED_CODE, _ENTRY_REFUSED_MESSAGE, _entry_gate_outcome
 from tai42_channel_web.routes.envelope import _NO_STORE, _NOSNIFF, _REFERRER_POLICY, _error, _refusal_page
+from tai42_channel_web.routes.limits import CHAT_RATE_LIMIT_BUDGET, CHAT_RATE_LIMIT_FAMILY
 from tai42_channel_web.routes.session_access import (
     _STORE_OFF_CODE,
     _mint_session,
@@ -132,6 +133,15 @@ async def _entry_gate_refusal(request: Request, identity: str, entry_code: str |
     tags=["channels"],
     response_model=None,
     no_body_reason="Chat HTML page: text/html document, not a JSON body",
+    success_media_types={"GET": ("text/html",)},
+    declared=DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=False,
+        error_statuses=(400, 403, 500, 501),
+        success_status=200,
+        rate_limit_family=CHAT_RATE_LIMIT_FAMILY,
+        rate_limit_budget=CHAT_RATE_LIMIT_BUDGET,
+    ),
 )
 async def web_chat_page(request: Request) -> Response:
     """Serve the visitor-facing chat page and (re)establish the session.
@@ -223,6 +233,15 @@ async def web_chat_page(request: Request) -> Response:
     tags=["channels"],
     response_model=None,
     no_body_reason="Static asset FileResponse: raw bytes",
+    success_media_types={"GET": ("application/octet-stream",)},
+    declared=DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=False,
+        error_statuses=(404, 500),
+        success_status=200,
+        rate_limit_family=CHAT_RATE_LIMIT_FAMILY,
+        rate_limit_budget=CHAT_RATE_LIMIT_BUDGET,
+    ),
 )
 async def web_asset(request: Request) -> Response:
     """Serve one file of the built chat bundle.

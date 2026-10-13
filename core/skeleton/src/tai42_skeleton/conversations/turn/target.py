@@ -17,11 +17,11 @@ from tai42_contract.conversations import (
 )
 from tai42_contract.interactions import LocationElement, MediaItem
 
-from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.mode import effective_mode, supports_thread_append
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.pairing import Passthrough, classify
+from tai42_skeleton.conversations.thread_ids import person_id_of
 from tai42_skeleton.conversations.turn import accessors, agent_turn, pairing, tool_turn
 from tai42_skeleton.conversations.turn.context import _conversation_attribution, _conversation_state_context
 from tai42_skeleton.conversations.turn.outcome import _SilentOutcome, _tool_error, _ToolOutcome
@@ -160,8 +160,9 @@ async def _resolve_event_person(
     route reads it by the sending address. An event NEVER mints identity, so a thread with no
     such person carries no person fields — exactly like a plain, non-multichannel thread.
     """
-    if intake.thread_id.startswith(PERSON_THREAD_PREFIX):
-        return await cache.get_conversations_manager().persons.get_by_id(intake.thread_id[len(PERSON_THREAD_PREFIX) :])
+    person_id = person_id_of(intake.thread_id)
+    if person_id is not None:
+        return await cache.get_conversations_manager().persons.get_by_id(person_id)
     if multichannel is None:
         return None
     return await cache.get_conversations_manager().persons.get_person(

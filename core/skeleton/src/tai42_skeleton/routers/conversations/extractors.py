@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import Request
-from pydantic import ValidationError
 from tai42_contract.conversations import ConversationRouteCreate, TargetConversationConfig
 
 from tai42_skeleton.operations import BadRequestError
+from tai42_skeleton.operations.adapter import read_json_object, validate_body
 
 # The operator-send optional rich fields, each ``(field, expected type, 400 message)``.
 # ``schema``/``template``/``location``/``header`` are objects, ``media``/``options``/
@@ -46,22 +46,13 @@ async def _extract_route_create(request: Request) -> dict:
     param before validation — a body that also carries a ``route_name`` disagreeing with
     the path is rejected rather than silently overriding either.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object of route params") from None
+    body = await read_json_object(request)
     path_route_name = request.path_params["route_name"]
     body_route_name = body.get("route_name")
     if body_route_name is not None and body_route_name != path_route_name:
         raise BadRequestError("route_name in the body must match the route_name in the path") from None
     body = {**body, "route_name": path_route_name}
-    try:
-        create = ConversationRouteCreate.model_validate(body)
-    except ValidationError as exc:
-        raise BadRequestError(f"invalid conversation route: {exc}") from exc
-    return create.model_dump()
+    return validate_body(ConversationRouteCreate, body, "conversation route").model_dump()
 
 
 async def _extract_page_window(request: Request) -> dict:
@@ -149,12 +140,7 @@ async def _extract_person_locale_body(request: Request) -> dict:
     A non-object body or a ``locale`` that is neither a string nor ``null`` is a loud 400
     here; the operation validates the tag itself. ``null`` clears the stored locale.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object of {locale}") from None
+    body = await read_json_object(request)
     locale = body.get("locale")
     if locale is not None and not isinstance(locale, str):
         raise BadRequestError("locale must be a BCP 47 string or null") from None
@@ -175,15 +161,7 @@ async def _extract_thread_message(request: Request) -> dict:
     ``thread_id`` rides the body, not the path: it carries the api door's percent-encoded
     ``{principal}/{end user}`` address, which no path spelling round-trips.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError(
-            "body must be a JSON object of {thread_id, text, address, media?, template?, options?, "
-            "schema?, location?, sections?, header?, footer?}"
-        ) from None
+    body = await read_json_object(request)
     thread_id = body.get("thread_id")
     if not isinstance(thread_id, str) or not thread_id.strip():
         raise BadRequestError("thread_id is required and must be a non-blank string") from None
@@ -221,12 +199,7 @@ async def _extract_thread_mode_body(request: Request) -> dict:
     A non-object body, a missing/blank ``thread_id`` or a non-string ``mode`` is a loud
     400 here; the operation validates the mode vocabulary and the thread-belongs guard.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object of {thread_id, mode}") from None
+    body = await read_json_object(request)
     thread_id = body.get("thread_id")
     if not isinstance(thread_id, str) or not thread_id.strip():
         raise BadRequestError("thread_id is required and must be a non-blank string") from None
@@ -246,22 +219,14 @@ async def _extract_target_config(request: Request) -> dict:
     injected from the path params before validation — a body that also carries either,
     disagreeing with the path, is rejected rather than silently overriding either.
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object of config params") from None
+    body = await read_json_object(request)
     for field in ("target_kind", "target_name"):
         path_value = request.path_params[field]
         body_value = body.get(field)
         if body_value is not None and body_value != path_value:
             raise BadRequestError(f"{field} in the body must match the {field} in the path") from None
         body = {**body, field: path_value}
-    try:
-        config = TargetConversationConfig.model_validate(body)
-    except ValidationError as exc:
-        raise BadRequestError(f"invalid conversation config: {exc}") from exc
+    config = validate_body(TargetConversationConfig, body, "conversation config")
     flat = config.model_dump()
     # ``model_dump`` lowers the binding to a plain dict, but the operation's
     # ``state_binding`` parameter (and its attach-on-use) needs the parsed model — pass the

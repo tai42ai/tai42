@@ -14,15 +14,6 @@ from typing import Any
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
 
-# The reserved thread namespace the messaging bridge alone writes.
-BRIDGE_THREAD_PREFIX = "bridge:"
-
-# The sub-namespace a LINKED person's aggregated thread is keyed under:
-# ``bridge:@person:{person_id}``. ``@person`` can never be a route name
-# (``ROUTE_NAME_RE = ^[a-z0-9-]+$``), so this form can never collide with a
-# route-keyed ``bridge:{route_name}:{address}`` thread.
-PERSON_THREAD_PREFIX = f"{BRIDGE_THREAD_PREFIX}@person:"
-
 
 class ReservedThreadNamespaceError(ValueError):
     """A caller steered an agent run at the reserved ``bridge:`` thread namespace."""
@@ -35,6 +26,10 @@ def reserved_thread_namespace_error(agent: type[Agent], run_kwargs: Mapping[str,
     the one ``agent`` reports its run kwargs address (:meth:`~tai42_contract.agent.Agent.addressed_memory`),
     however nested in the agent's own input shape.
     """
+    # Function-local: the conversations package imports this module, so a module-level import
+    # of its grammar would cycle.
+    from tai42_skeleton.conversations.thread_ids import BRIDGE_THREAD_PREFIX
+
     thread_id = run_kwargs.get("thread_id")
     if isinstance(thread_id, str) and thread_id.startswith(BRIDGE_THREAD_PREFIX):
         return f"thread_id may not use the reserved {BRIDGE_THREAD_PREFIX!r} namespace"
@@ -61,8 +56,6 @@ def run_kwargs_from_tool_input(agent: Agent, validated: BaseModel) -> dict[str, 
 
 
 __all__ = [
-    "BRIDGE_THREAD_PREFIX",
-    "PERSON_THREAD_PREFIX",
     "ReservedThreadNamespaceError",
     "reserved_thread_namespace_error",
     "run_kwargs_from_tool_input",

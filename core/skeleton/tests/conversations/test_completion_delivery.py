@@ -432,4 +432,7 @@ async def test_completion_unresolvable_thread_raises(env, monkeypatch):
     # A route-keyed thread whose route no longer exists.
     with pytest.raises(CompletionDeliveryError, match="no longer exists"):
         await _fire("bridge:gone:+15550002222", "hi", "cmpl-bad-2")
+    # A bridge thread outside the grammar (an empty address).
+    with pytest.raises(CompletionDeliveryError, match="not a route-keyed bridge thread"):
+        await _fire("bridge:line:", "hi", "cmpl-bad-3")
     assert channel.sends == []

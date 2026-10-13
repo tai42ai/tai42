@@ -34,6 +34,7 @@ from tai42_contract.app import tai42_app
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import read_json_object
 from tai42_skeleton.operations.backup import _DOCUMENT_VERSION, _maybe_await, _registered_section_names
 from tai42_skeleton.operations.backup import import_backup as _import_backup_op
 from tai42_skeleton.operations.backup import list_sections as _list_sections_op
@@ -104,11 +105,9 @@ async def export_backup(request: Request) -> Response:
     malformed request body or an unknown section name is a loud 400.
     """
     try:
-        body = await request.json()
-    except ValueError:
-        return _error("invalid JSON body", 400)
-    if not isinstance(body, dict):
-        return _error("body must be a JSON object", 400)
+        body = await read_json_object(request)
+    except BadRequestError as exc:
+        return _error(exc.message, 400)
     requested = _require_string_list(body.get("sections"))
     if requested is None:
         return _error("body must contain a list of section-name strings 'sections'", 400)
@@ -146,12 +145,7 @@ async def _extract_import(request: Request) -> dict:
     Yields the ``document``/``sections``/``mode`` arguments, rejecting a malformed envelope with a
     loud 400 (the document CONTENT is the operation's own validation).
     """
-    try:
-        body = await request.json()
-    except ValueError as exc:
-        raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object") from None
+    body = await read_json_object(request)
     document = body.get("document")
     if not isinstance(document, dict):
         raise BadRequestError("body must contain the export document object 'document'") from None

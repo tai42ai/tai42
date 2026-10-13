@@ -101,7 +101,10 @@ def test_a_reload_locked_door_rejects_before_the_turn(monkeypatch):
 
             return JSONResponse({"error": "reloading"}, status_code=503)
 
-    monkeypatch.setattr(router, "reload_gate", _Locked())
+    # The door is declared ``reload_gated``; the route surface's wrapper reads the gate.
+    from tai42_skeleton.app import http as app_http
+
+    monkeypatch.setattr(app_http, "reload_gate", _Locked())
     routes = [Route("/api/conversations/{route_name}/messages", router.send_conversation_message, methods=["POST"])]
     response = TestClient(Starlette(routes=routes)).post(_PATH, json={"external_user_id": "u", "text": "hi"})
     assert response.status_code == 503
@@ -170,11 +173,12 @@ def test_a_below_cap_wait_seconds_passes_through_unclamped(monkeypatch):
     assert engine.calls[0][4] == 5
 
 
-def test_an_oversized_wait_seconds_clamps_to_the_settings_max(monkeypatch):
+def test_an_oversized_wait_seconds_reaches_the_engine_which_owns_the_clamp(monkeypatch):
+    # The door hands the raw value on: ``submit_api_message`` clamps it through ``TurnCaps``.
     engine = _Engine()
     client = _client(monkeypatch, engine)
     client.post(_PATH, json={"external_user_id": "u-7", "text": "hi", "wait_seconds": 99999})
-    assert engine.calls[0][4] == 120  # ConversationsSettings().sync_wait_max_seconds default
+    assert engine.calls[0][4] == 99999
 
 
 # -- the typed-error status mappings -------------------------------------------

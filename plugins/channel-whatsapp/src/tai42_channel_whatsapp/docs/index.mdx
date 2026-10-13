@@ -43,8 +43,8 @@ delivery statuses (configured in the Meta App dashboard):
 - Callback URL → `{public base URL}/api/channels/whatsapp/inbound`
 - Verify token → the value of `CHANNEL_WHATSAPP_VERIFY_TOKEN`
 
-On subscribe, Meta sends a `GET` with `hub.challenge`; the door echoes it only
-when the verify token matches. Inbound messages and delivery statuses then arrive
+On subscribe, Meta sends a `GET` with `hub.challenge`; the door echoes it as a
+`text/plain` body only when the verify token matches. Inbound messages and delivery statuses then arrive
 as signed `POST`s on the same URL. A delivery status for a **bridge** message
 updates its answer record (a `failed` ends it `failed`); a status for a **flow
 send** (`notify_user`, which runs no bridge record) is instead posted as a
@@ -96,7 +96,8 @@ hidden client-side.
 
 A form that **reacts while open** (its ask declares reaction triggers) publishes as
 an endpoint-driven Flow whose controls call this plugin's encrypted Flow **data
-endpoint** (`/api/channels/whatsapp/flow-data`); it needs the business key material
+endpoint** (`/api/channels/whatsapp/flow-data`, which answers the encrypted reply as a
+`text/plain` body); it needs the business key material
 (`CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY` + `CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI`, and the
 public key registered for the sending number) and refuses loudly without it. See the
 plugin README for the provisioning steps.

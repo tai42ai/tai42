@@ -86,3 +86,52 @@ async def test_caller_execution_identity_degrades_when_rebuild_raises(monkeypatc
     async with caller_execution_identity("alice"):
         assert get_execution_identity() is None
     assert get_execution_identity() is None
+
+
+async def test_live_door_scope_binds_attributes_and_deposits_in_order(monkeypatch) -> None:
+    from tai42_skeleton.authz import execution
+    from tai42_skeleton.authz.execution_identity import get_execution_identity
+    from tai42_skeleton.states.api_context import live_door_scope
+    from tai42_skeleton.tools.attribution import get_run_attribution
+
+    sentinel = object()
+
+    async def _fake_rebuild(key: str):
+        return sentinel
+
+    monkeypatch.setattr(execution, "rebuild_execution_identity", _fake_rebuild)
+    subject = StateSubject(target_kind="tool", target_name="n", kind="thread", key="k")
+    async with live_door_scope(subject, "alice", attribute=True):
+        assert get_execution_identity() is sentinel
+        attribution = get_run_attribution()
+        assert attribution is not None
+        assert attribution.user_id == "alice"
+        ctx = current_state_context()
+        assert ctx is not None
+        assert ctx.actor == "alice"
+    assert get_execution_identity() is None
+    assert get_run_attribution() is None
+    assert current_state_context() is None
+
+
+async def test_live_door_scope_without_attribution_leaves_it_unset() -> None:
+    from tai42_skeleton.states.api_context import live_door_scope
+    from tai42_skeleton.tools.attribution import get_run_attribution
+
+    async with live_door_scope(None, None, attribute=True):
+        assert get_run_attribution() is None
+    async with live_door_scope(None, "alice", attribute=False):
+        assert get_run_attribution() is None
+
+
+def test_unencodable_outcome_names_the_tool_and_path(caplog) -> None:
+    import logging
+
+    from tai42_skeleton.states.api_context import unencodable_outcome
+
+    assert unencodable_outcome("probe", {"text": "fine"}) is None
+    with caplog.at_level(logging.WARNING, logger="tai42_skeleton.states.api_context"):
+        refusal = unencodable_outcome("probe", {"text": "bad \ud800"})
+    assert refusal is not None
+    assert (refusal.tool_name, refusal.json_path) == ("probe", "$.text")
+    assert any("cannot be JSON-encoded at $.text" in record.getMessage() for record in caplog.records)
