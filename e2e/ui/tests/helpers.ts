@@ -332,65 +332,108 @@ export async function fillFixedKwargs(scope: Locator, kwargs: unknown): Promise<
  * Without it, Firefox would wait a full keepalive interval (~15s) for the periodic
  * `: keepalive` comment.
  *
- * MECHANISM (correct on BOTH engines, and regardless of connect latency): the base GET and
- * the stream share `/api/interactions` (the stream is its `/stream` child). We track base
- * GETs by request lifecycle and the moment a stream response first arrives (`streamUpAt`),
- * then settle once the stream is up, NO base GET is in flight, and EITHER:
- *   - a base GET has FINISHED after the stream came up — a separate connect-time resync
- *     that the initial load did not absorb; OR
- *   - on the engine/timing where the stream resolves DURING the initial load, `refetchQueries`
- *     dedupes into it and no separate GET is issued — the initial load finishing after the
- *     stream response IS that resync landing; OR
- *   - a short grace has elapsed since the stream came up with no base GET in flight —
- *     the pure safety net for the rare case where the initial load finished before the
- *     stream response, so no base GET finishes afterward and none is coming.
- * The "no base GET in flight" gate is what preserves the guarantee: the resync is dispatched
- * synchronously when the stream response resolves, so it is in flight well within the grace
- * window and blocks the grace path until it lands — grace can only fire when there is
- * genuinely no resync coming (the dedup case).
+ * MECHANISM (correct on BOTH engines, and regardless of connect latency): a page may open
+ * more than one interactions stream — every consumer of the inbox (the nav badge and the
+ * inbox page) opens its own — and each carries only the events after it connects, so an
+ * answer posted between two streams' connects reaches the first and not the second, whose
+ * connect-time refetch then drops the card. Readiness is therefore the LAST stream's first
+ * response plus a pending-list refetch after it (see `trackInboxResync`). The settle polls
+ * the tracker and resolves once it reports nothing outstanding.
  *
  * The 30s poll budget is a DEFENSIVE CEILING, not a live dependency: against the fixed
  * server both engines settle in ~1-3s. It stays generous so the suite also passes against an
  * UNFIXED older server (whose stream still withholds its first byte until the ~15s keepalive,
  * the old Firefox path) — two keepalive intervals of headroom — while a genuinely dead stream
- * still fails loudly, just later. It never settles before the resync it must wait for.
+ * still fails loudly, just later, with the tracker's account of what never arrived as the
+ * last polled value.
  */
 export function armInboxResynced(page: Page): () => Promise<void> {
-  // The grace path is the rare-case safety net only (see below): on both engines the
-  // routine settle is via `baseFinishedAfterStream`, so a generous window costs nothing
-  // in practice while giving the Firefox resync ample room to appear before grace.
+  const tracker = trackInboxResync(page);
+  return async () => {
+    // `finally` so the listeners are detached even when the poll times out (throws) —
+    // otherwise a failing settle would leak four page listeners into the rest of the test.
+    try {
+      await expect
+        .poll(() => tracker.waiting() ?? 'resynced', {
+          message: 'the inbox never resynced (the last polled value names what never arrived)',
+          // A defensive ceiling, not a live dependency (see the doc comment above): the
+          // fixed server settles in ~1-3s; this also covers an unfixed server's ~15s path.
+          timeout: 30_000,
+        })
+        .toBe('resynced');
+    } finally {
+      tracker.detach();
+    }
+  };
+}
+
+/** What `trackInboxResync` reports: what the inbox still waits for, and the detach. */
+export interface InboxResyncTracker {
+  /** What has not arrived yet, or `undefined` once the inbox is resynced as of `now`. */
+  waiting(now?: number): string | undefined;
+  /** Remove the page listeners the tracker added. */
+  detach(): void;
+}
+
+/**
+ * Track a page's interactions streams and pending-list requests from their request
+ * lifecycle events. The inbox is resynced once:
+ *   - at least one stream has responded and every stream request the page opened has
+ *     responded (a stream that fails before any response never connects, so it is not
+ *     waited on);
+ *   - no pending-list GET is in flight; and
+ *   - EITHER a pending-list GET finished after the last stream response — the connect-time
+ *     refetch, or (when the engine resolves the stream during the initial load and
+ *     `refetchQueries` dedupes into it) the initial load finishing after that response —
+ *     OR a short grace has passed since that response with no pending-list GET in flight:
+ *     the safety net for an initial load that finished before the stream responded, when
+ *     no refetch is coming. The refetch is dispatched synchronously when the stream
+ *     response resolves, so it is in flight well within the grace and blocks that path
+ *     until it lands.
+ * Each new stream response restarts the refetch requirement: a refetch that finished
+ * before the last stream connected does not cover that stream.
+ */
+export function trackInboxResync(page: Page): InboxResyncTracker {
+  // The grace path is the rare-case safety net only: the routine settle is a refetch
+  // finishing after the last stream response, so a generous window costs nothing in
+  // practice while giving the Firefox resync ample room to appear before grace.
   const GRACE_MS = 1_000;
-  let streamUpAt: number | null = null;
+  let lastStreamUpAt: number | null = null;
   let baseFinishedAfterStream = false;
   const inFlightBase = new Set<Request>();
+  const inFlightStreams = new Set<Request>();
   // The paged base is `GET /api/interactions` — the collection endpoint itself, matched by
   // its path ending exactly there followed by a query string (`?…`, how the app pages it
   // today) OR end-of-URL (a bare `GET /api/interactions`, so tracking never goes blind if
   // the frontend ever drops the query). A following `/` segment (`/stream`, `/media/…`,
-  // `/{id}/answer`) is deliberately NOT the base and must not match — the `(?:\?|$)` anchor
-  // is what excludes them. COUPLING: this pattern IS the "which GET is the base refetch"
-  // contract; if the base door ever moves off `/api/interactions`, update it here or the
-  // settle silently degrades to the 1s grace and the answer-race reopens.
+  // `/{id}/answer`) is NOT the base and must not match — the `(?:\?|$)` anchor excludes
+  // them. COUPLING: these patterns ARE the "which GET is the base refetch / a stream"
+  // contract; if either door moves, update it here or the settle waits on the wrong
+  // requests and fails at its ceiling.
   const isBaseGet = (request: Request): boolean =>
     request.method() === 'GET' && /\/api\/interactions(?:\?|$)/.test(request.url());
+  const isStreamGet = (request: Request): boolean =>
+    request.method() === 'GET' && /\/api\/interactions\/stream(?:\?|$)/.test(request.url());
 
   const onRequest = (request: Request) => {
     if (isBaseGet(request)) inFlightBase.add(request);
+    else if (isStreamGet(request)) inFlightStreams.add(request);
   };
   const onResponse = (response: Response) => {
-    if (streamUpAt === null && response.url().includes('/api/interactions/stream')) {
-      streamUpAt = Date.now();
-    }
+    if (!inFlightStreams.delete(response.request())) return;
+    lastStreamUpAt = Date.now();
+    baseFinishedAfterStream = false;
   };
-  // requestfinished fires when the body fully lands (a real resync); requestfailed
-  // fires for an aborted/superseded refetch — that only clears the in-flight tracker,
-  // it is not a landed resync.
+  // requestfinished fires when the body fully lands (a real resync); requestfailed fires
+  // for an aborted/superseded request — that only clears the in-flight trackers, it is
+  // not a landed resync.
   const onFinished = (request: Request) => {
     if (!inFlightBase.delete(request)) return;
-    if (streamUpAt !== null) baseFinishedAfterStream = true;
+    if (lastStreamUpAt !== null) baseFinishedAfterStream = true;
   };
   const onFailed = (request: Request) => {
     inFlightBase.delete(request);
+    inFlightStreams.delete(request);
   };
 
   page.on('request', onRequest);
@@ -398,27 +441,26 @@ export function armInboxResynced(page: Page): () => Promise<void> {
   page.on('requestfinished', onFinished);
   page.on('requestfailed', onFailed);
 
-  return async () => {
-    // `finally` so the listeners are detached even when the poll times out (throws) —
-    // otherwise a failing settle would leak four page listeners into the rest of the test.
-    try {
-      await expect
-        .poll(
-          () =>
-            streamUpAt !== null &&
-            inFlightBase.size === 0 &&
-            (baseFinishedAfterStream || Date.now() - streamUpAt >= GRACE_MS),
-          // A defensive ceiling, not a live dependency (see the doc comment above): the
-          // fixed server settles in ~1-3s; this also covers an unfixed server's ~15s path.
-          { timeout: 30_000 },
-        )
-        .toBe(true);
-    } finally {
+  return {
+    waiting(now: number = Date.now()): string | undefined {
+      if (inFlightStreams.size > 0) {
+        return `${String(inFlightStreams.size)} interactions stream(s) opened without a response yet`;
+      }
+      if (lastStreamUpAt === null) return 'no interactions stream has been opened';
+      if (inFlightBase.size > 0) {
+        return `${String(inFlightBase.size)} pending-list request(s) still in flight`;
+      }
+      if (!baseFinishedAfterStream && now - lastStreamUpAt < GRACE_MS) {
+        return 'no pending-list refetch has finished since the last stream response';
+      }
+      return undefined;
+    },
+    detach(): void {
       page.off('request', onRequest);
       page.off('response', onResponse);
       page.off('requestfinished', onFinished);
       page.off('requestfailed', onFailed);
-    }
+    },
   };
 }
 
