@@ -86,3 +86,7 @@ provides:
           methods:
             - DELETE
           public: false
+  - kind: studio-plugin
+    name: web
+    module: tai42_channel_web
+    description: The entry-gate panel on a web route's drill-in.

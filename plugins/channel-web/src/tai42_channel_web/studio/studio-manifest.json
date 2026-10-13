@@ -1,0 +1,18 @@
+{
+  "name": "tai42_channel_web",
+  "version": "7.0.1",
+  "api_version": 1,
+  "entry": "tai42-channel-web-BPPYAwfD.js",
+  "integrity": {
+    "tai42-channel-web-BPPYAwfD.js": "sha384-VZ4u/Y7cEpxlj7KfP26OC8OiTo8Mm/LkH/9BsxhBgBiD38XYb5NAEJODcDxEEsGo"
+  },
+  "contributions": {
+    "tool_panels": {},
+    "pages": [],
+    "settings_tabs": [],
+    "nav_entries": [],
+    "route_panels": [
+      "web"
+    ]
+  }
+}

@@ -15,7 +15,7 @@ const UNUSED_IGNORE = {
 export default tseslint.config(
   { ignores: ["dist/**", "node_modules/**", "coverage/**", "scripts/**", "*.config.*"] },
   {
-    files: ["public-src/**/*.{ts,tsx}"],
+    files: ["public-src/**/*.{ts,tsx}", "studio-src/**/*.{ts,tsx}"],
     extends: [
       js.configs.recommended,
       ...tseslint.configs.recommendedTypeChecked,
@@ -40,7 +40,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["public-src/**/*.tsx"],
+    files: ["public-src/**/*.tsx", "studio-src/**/*.tsx"],
     rules: {
       "max-lines-per-function": ["error", { max: 150, skipBlankLines: true, skipComments: true }],
     },
@@ -48,6 +48,8 @@ export default tseslint.config(
   {
     files: [
       "public-src/**/*.{test,spec}.{ts,tsx}",
+      "studio-src/**/*.{test,spec}.{ts,tsx}",
+      "studio-src/test-utils.tsx",
       "public-src/**/*.stories.{ts,tsx}",
       "public-src/test-setup.ts",
     ],
