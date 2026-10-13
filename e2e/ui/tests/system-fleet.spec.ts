@@ -64,7 +64,7 @@ test('system (admin): worker census + enabled fleet-reload → reload-framed con
 
   // The request stays PENDING (the dialog's Reload button spins) until the fan-out converges:
   // the publisher awaits every sibling's terminal reload reply up to the bus apply_timeout
-  // (TAI_BUS_APPLY_TIMEOUT, 30s). The banner is driven by that response, so observe the
+  // (TAI_BUS_APPLY_TIMEOUT, 90s by default). The banner is driven by that response, so observe the
   // response rather than polling the repaint against a fixed budget the fan-out can outrun.
   // Armed before the click so a fast reload cannot land first.
   const reloaded = awaitMutation(

@@ -75,6 +75,7 @@ async def _profile_from_stored(stack: TaiStack, changes: dict[str, str], name: s
     "topology:supervised",
     "setting:TAI_SUPERVISED=harness",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
+    "setting:TAI_BUS_APPLY_TIMEOUT=330",
 )
 async def test_recycle_apply_rolls_the_fleet_and_self_defers_applier(
     recycle_stack: TaiStack, uniq: Callable[[str], str]
@@ -348,6 +349,7 @@ async def _assert_roll_converged_and_writer_respawns(
     "topology:supervised",
     "setting:TAI_SUPERVISED=harness",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
+    "setting:TAI_BUS_APPLY_TIMEOUT=330",
 )
 async def test_an_env_write_of_a_recycle_class_key_rolls_the_fleet_and_self_defers_the_writer(
     recycle_stack: TaiStack, uniq: Callable[[str], str], tmp_path: Path
@@ -396,6 +398,7 @@ _SUPERVISED_RECYCLE_NEEDS = (
     "topology:supervised",
     "setting:TAI_SUPERVISED=harness",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
+    "setting:TAI_BUS_APPLY_TIMEOUT=330",
 )
 
 
@@ -474,8 +477,7 @@ def _read_log(stack: TaiStack, name: str) -> str:
 def _assert_no_forbidden_lines(stack: TaiStack, offsets: dict[str, int]) -> None:
     for name, offset in offsets.items():
         text = _read_log(stack, name)
-        written = text[offset:] if len(text) >= offset else text
-        for line in written.splitlines():
+        for line in text[offset:].splitlines():
             assert not any(marker in line for marker in _FORBIDDEN_LINES), f"{name} logged: {line}"
 
 
@@ -511,10 +513,20 @@ async def test_an_env_write_run_as_a_backend_job_recycles_the_backend_worker_tha
     written = _tool_map(await _backend_job_result(recycle_stack, task_id))
 
     assert written["awaiting_respawn"] == [], written
+    _assert_every_worker_applied(written["fanout"])
     roll = written["recycle"]
     await _assert_the_backend_worker_wrote_and_recycles(
         recycle_stack, roll["recycle"], roll["recycle_stopped"], before_backend, before_serve, offsets
     )
+
+
+def _assert_every_worker_applied(fanout: dict[str, Any]) -> None:
+    """The reload fan-out a backend job published reached the whole fleet, every worker ``applied`` —
+    the worker running the job included, whose pool turnover does not wait for that job."""
+    assert fanout["mode"] == "fleet", fanout
+    assert fanout["results"], fanout
+    for row in fanout["results"]:
+        assert row["outcome"] == "applied", f"{row} in {fanout}"
 
 
 async def _assert_the_backend_worker_wrote_and_recycles(
@@ -596,6 +608,7 @@ async def test_a_profile_apply_run_as_a_backend_job_recycles_the_fleet_and_the_b
 
     assert applied["refused"] == [], applied
     assert applied["awaiting_respawn"] == [], applied
+    _assert_every_worker_applied(applied["fanout"])
     await _assert_the_backend_worker_wrote_and_recycles(
         recycle_stack, applied["recycle"], applied["recycle_stopped"], before_backend, before_serve, offsets
     )

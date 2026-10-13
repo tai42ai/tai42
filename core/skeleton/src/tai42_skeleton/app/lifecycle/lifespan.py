@@ -8,7 +8,11 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from tai42_skeleton.app import lifecycle as _lifecycle
-from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_shared_config
+from tai42_skeleton.app.boot_rules import (
+    require_apply_window_covers_drain,
+    require_bus_for_backend,
+    require_bus_for_shared_config,
+)
 from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.app.graceful_exit import request_graceful_exit
 from tai42_skeleton.app.lifecycle.state import LifecycleState
@@ -34,6 +38,9 @@ class LifespanMixin(LifecycleState):
         # serve stale config after a reload. Refuse loudly before the app starts.
         require_bus_for_shared_config()
         require_bus_for_backend(manifest)
+        # A bus-enabled process's fleet apply window must cover the retire's drain floor, so
+        # a worker draining real work answers inside it.
+        require_apply_window_covers_drain()
         # A supervised marker must arrive with the deployment's pinned set, so the recycle
         # refusal never runs on a guessed list.
         require_supervision_declared()

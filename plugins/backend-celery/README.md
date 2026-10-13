@@ -150,32 +150,26 @@ Settings are read from the `CELERY_` environment group (see `CelerySettings`):
 | `CELERY_TOOL_NAME_ARG` | `backend_tool_name` | Kwarg name the dispatch injects the target tool into |
 | `CELERY_TASK_TIMEOUT` | `300` | Seconds a `sync_task` branch waits for the result |
 | `CELERY_MANIFEST_KEY` | `MANIFEST_KEY` | Env var carrying the live manifest JSON (prefork inheritance) |
-| `CELERY_WORKER_CONCURRENCY` | `1` | Prefork pool size — capped at one child by default (see below) |
+| `CELERY_WORKER_CONCURRENCY` | `1` | Prefork pool size — one child by default |
 
 ### Live reload and the prefork pool
 
 After the worker bus applies a MUTATING op in this process, the backend re-forks
 this worker's prefork pool so its children re-inherit the parent's updated tool
-registry, and it CONFIRMS the restart rather than assuming it: it polls `stats`
-until every pre-restart child PID is gone and the pool is back to full size. A pool
-that does not fully re-fork fails the op loudly, naming the worker — turning this
-worker's bus reply into `failed` rather than reporting an applied op behind stale
-children. The query op `list_failed_mcps` never re-forks the pool.
-
-The cap of **one pool child** is what makes that confirmation achievable. Celery's
-`pool_restart` is a *soft* restart: it arms a per-child restart sentinel and returns
-as soon as the restart is armed, before the pool has finished re-forking. Billiard's
-idle children recycle on their ~1s poll wakeup, but a child that is *busy* (mid-task)
-cannot recycle until its task completes — so a wider pool under load can leave children
-un-recycled past the confirmation budget. The `on_fleet_op_applied` successor confirms
-turnover (all pre-restart PIDs gone and the pool back to full size) and raises
-otherwise, which is what a single child keeps fully confirmable. Raise
-`CELERY_WORKER_CONCURRENCY` only if you do not live-reload; a pool that is both wide and
-live-reloadable needs a non-forking pool (`threads`/`gevent`) or a full worker-process
-respawn on reload.
+registry, and it CONFIRMS the restart rather than assuming it: it polls `stats` and
+`active` until every idle pre-restart child PID is gone and the pool is back to full
+size. Celery's `pool_restart` arms a per-child restart sentinel, and a child checks it
+before taking each task: an idle child recycles on its ~1s poll wakeup, while a child
+busy with a task finishes that task, exits after it and takes no new one, so it is not
+waited for (the confirmation logs its PID at INFO). That includes a task that published
+the very op being applied, which is itself waiting on this worker's reply. A pool whose
+idle pre-restart children do not leave, or that does not refill, fails the op loudly,
+naming the worker — turning this worker's bus reply into `failed` rather than
+reporting an applied op behind stale children. The query op `list_failed_mcps` never
+re-forks the pool.
 
 The turnover runs inside the op apply, before this worker's terminal reply is sent, and
-the publisher waits only its bus apply window (`TAI_BUS_APPLY_TIMEOUT`, default `30s`) for
+the publisher waits only its bus apply window (`TAI_BUS_APPLY_TIMEOUT`, default `90s`) for
 that reply. The host hands the fleet-op handler what is left of that window, measured from
 this worker's receipt of the op, and the confirmation budget sits a small margin under it:
 the confirm or raise reaches the publisher before its report cut, so a stalled turnover is

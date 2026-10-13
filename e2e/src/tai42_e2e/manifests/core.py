@@ -353,6 +353,10 @@ def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
     # orchestrator's per-step budget (``shutdown_drain_seconds``); a fresh process boot is far
     # slower than the 10s default, so widen it for this leg.
     env["TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS"] = "90"
+    # The fleet apply window covers the retire's drain floor at that budget (3 x 90 s) plus
+    # the same 60 s of the reload's own time the platform default leaves above three default
+    # drains (the fork quiesce, the probes, the post-apply hook and the rebuild).
+    env["TAI_BUS_APPLY_TIMEOUT"] = "330"
     return StackConfig(
         name="recycle",
         topology=Topology.MULTIWORKER,

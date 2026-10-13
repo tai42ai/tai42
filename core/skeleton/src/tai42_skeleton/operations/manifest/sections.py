@@ -12,7 +12,7 @@ from typing import Any
 
 from tai42_contract.app.responses import ApplyResponse
 
-from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
+from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write
@@ -40,7 +40,7 @@ async def set_mcp_config(mcp: list[Any]) -> dict:
     def mutator(document: dict[str, Any]) -> None:
         document["mcp"] = mcp
 
-    with translate_orphan_env_write(), translate_backend_needs_bus(BadRequestError):
+    with translate_orphan_env_write(), translate_config_invariants(BadRequestError):
         try:
             result = await ConfigService.from_app().apply_change(mutator)
         except ValueError as exc:
@@ -95,7 +95,7 @@ def _without_entry(current: list[Any], title: str) -> list[Any]:
 async def _apply_entries_add(section: str, entries: list[Any], replace: bool) -> dict:
     # Empty ``entries`` is refused INSIDE the try (op-level, so the projection path is
     # refused identically) — a guard above the try would escape as a 500.
-    with translate_orphan_env_write(), translate_backend_needs_bus(BadRequestError):
+    with translate_orphan_env_write(), translate_config_invariants(BadRequestError):
         try:
             if not entries:
                 raise ValueError("entries must be a non-empty list")  # noqa: TRY301 in-try so the except maps it to a 400 identically on the projection path
@@ -110,7 +110,7 @@ async def _apply_entries_add(section: str, entries: list[Any], replace: bool) ->
 
 
 async def _apply_entry_remove(section: str, title: str) -> dict:
-    with translate_orphan_env_write(), translate_backend_needs_bus(BadRequestError):
+    with translate_orphan_env_write(), translate_config_invariants(BadRequestError):
         try:
 
             def mutator(document: dict[str, Any]) -> None:

@@ -64,7 +64,8 @@ _MCP_TOOL = "fleetmcp_ping"
 # must exceed the task runtime so a fleet op fired mid-task still observes the backend
 # worker confirming ``applied`` rather than the report cutting to ``missing``.
 _TASK_SECONDS = 4.0
-_APPLY_TIMEOUT = "20"
+# Also at the retire's drain floor under the default 10 s drain budget (three budgets).
+_APPLY_TIMEOUT = "30"
 
 
 def _build_fleet_mcp_stack(res: StackResources, variants: Variants) -> StackConfig:
@@ -207,7 +208,7 @@ async def _normalize(stack: TaiStack) -> None:
 # REST (15 gate poll + 60 HTTP) + the census poll (20) + the in-flight marker poll (15) + the
 # fleet reload (15 + 60) + the in-flight task's own answer (20).
 @pytest.mark.timeout(330)
-@pytest.mark.needs("probe-tools", "setting:extension:sync_task", "setting:TAI_BUS_APPLY_TIMEOUT=20")
+@pytest.mark.needs("probe-tools", "setting:extension:sync_task", "setting:TAI_BUS_APPLY_TIMEOUT=30")
 async def test_fleet_op_reaches_backend_worker_under_load(
     fleet_mcp_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

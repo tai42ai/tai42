@@ -21,10 +21,11 @@ pytestmark = pytest.mark.needs(
 )
 
 
-# The MCP reload call may run to the harness read bound (150 s), so the per-test bound sits
-# above it: the stack boot inside the first test's timer (120) + the reload call's read
-# bound (150) + a session re-init (15) + the delete's reload-gate wait (10).
-@pytest.mark.timeout(300)
+# The MCP reload call may run to the harness read bound (210 s: the 90 s default apply window +
+# the 120 s boot bound), so the per-test bound sits above it: the stack boot inside the first
+# test's timer (120) + the reload call's read bound (210) + a session re-init (15) + the
+# delete's reload-gate wait (10).
+@pytest.mark.timeout(360)
 async def test_reload_over_a_mount_answers_with_the_fleet_report(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

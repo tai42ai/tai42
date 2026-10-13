@@ -380,6 +380,9 @@ async def test_mutation_during_outage_reports_and_fleet_recovers(
 # cores took 50.1s, so 2/3 of the TTL is twice that.
 _SHORT_ACK_TIMEOUT = "2"
 _SHORT_APPLY_TIMEOUT = "3"
+# The apply window covers the retire's drain floor (three drain budgets), so the short window
+# runs with a one-second drain budget; nothing drains on these backendless replicas.
+_SHORT_DRAIN_BUDGET = "1"
 _SILENT_WORKER_TTL = "155"
 
 
@@ -395,6 +398,7 @@ def build_silent_worker_stack(res: StackResources, variants: Variants) -> StackC
         "PYTHONHASHSEED": "0",
         "TAI_BUS_ACK_TIMEOUT": _SHORT_ACK_TIMEOUT,
         "TAI_BUS_APPLY_TIMEOUT": _SHORT_APPLY_TIMEOUT,
+        "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": _SHORT_DRAIN_BUDGET,
         "TAI_BUS_HEARTBEAT_TTL": _SILENT_WORKER_TTL,
     }
     return replace(
@@ -446,6 +450,7 @@ async def _replicas_converged(stack: TaiStack, *, deadline: float = 60.0, differ
     "setting:PYTHONHASHSEED=0",
     "setting:TAI_BUS_ACK_TIMEOUT=2",
     "setting:TAI_BUS_APPLY_TIMEOUT=3",
+    "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=1",
     "setting:TAI_BUS_HEARTBEAT_TTL=155",
 )
 async def test_silent_worker_reports_missing_then_converges(
@@ -525,6 +530,7 @@ def build_stale_stack(res: StackResources, variants: Variants) -> StackConfig:
         "PYTHONHASHSEED": "0",
         "TAI_BUS_ACK_TIMEOUT": _SHORT_ACK_TIMEOUT,
         "TAI_BUS_APPLY_TIMEOUT": _SHORT_APPLY_TIMEOUT,
+        "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": _SHORT_DRAIN_BUDGET,
         "TAI_BUS_HEARTBEAT_TTL": _STALE_TTL,
     }
     return replace(
@@ -546,6 +552,7 @@ def build_stale_stack(res: StackResources, variants: Variants) -> StackConfig:
     "setting:PYTHONHASHSEED=0",
     "setting:TAI_BUS_ACK_TIMEOUT=2",
     "setting:TAI_BUS_APPLY_TIMEOUT=3",
+    "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=1",
     "setting:TAI_BUS_HEARTBEAT_TTL=30",
 )
 async def test_stale_worker_flag_flips_and_broadcast_reports_stale(fresh_stack: Callable[..., TaiStack]) -> None:

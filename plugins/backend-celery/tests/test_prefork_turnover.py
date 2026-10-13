@@ -30,21 +30,28 @@ _BUDGET = 5.0
 
 
 class _FakeInspect:
-    def __init__(self, stats: Any) -> None:
+    def __init__(self, stats: Any, control: _FakeControl) -> None:
         self._stats = stats
+        self._control = control
 
     def stats(self) -> Any:
         return self._stats
 
+    def active(self) -> Any:
+        return self._control.next_active()
+
 
 class _FakeControl:
-    """Models ``inspect().stats()`` (a scripted sequence of pool snapshots) and
-    ``broadcast('pool_restart')`` (an arm reply, an error to raise, or — with
+    """Models ``inspect().stats()`` (a scripted sequence of pool snapshots),
+    ``inspect().active()`` (a scripted sequence of the children's running jobs, none by
+    default) and ``broadcast('pool_restart')`` (an arm reply, an error to raise, or — with
     ``wedge`` set — a propagation that never returns, the billiard deadlock)."""
 
-    def __init__(self, stats_sequence: list[Any]) -> None:
+    def __init__(self, stats_sequence: list[Any], active_sequence: list[Any] | None = None) -> None:
         self._stats_sequence = stats_sequence
         self._last: Any = {}
+        self._active_sequence = active_sequence or []
+        self._last_active: Any = {}
         self.broadcasts: list[tuple[str, Any]] = []
         self.connections: list[Any] = []
         self.restart_reply: Any = [{_HOST: {"ok": "pool restart"}}]
@@ -58,7 +65,12 @@ class _FakeControl:
         self.connections.append(connection)
         if self._stats_sequence:
             self._last = self._stats_sequence.pop(0)
-        return _FakeInspect(self._last)
+        return _FakeInspect(self._last, self)
+
+    def next_active(self) -> Any:
+        if self._active_sequence:
+            self._last_active = self._active_sequence.pop(0)
+        return self._last_active
 
     def broadcast(
         self,
@@ -93,8 +105,15 @@ def _worker_up(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     prefork._worker_ready.clear()
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, stats_sequence: list[Any]) -> _FakeControl:
-    control = _FakeControl(stats_sequence)
+def _busy(*pids: int) -> dict[str, Any]:
+    """An ``active()`` reply: each pid's child is running one job."""
+    return {_HOST: [{"id": f"job-{pid}", "worker_pid": pid} for pid in pids]}
+
+
+def _install(
+    monkeypatch: pytest.MonkeyPatch, stats_sequence: list[Any], active_sequence: list[Any] | None = None
+) -> _FakeControl:
+    control = _FakeControl(stats_sequence, active_sequence)
     monkeypatch.setattr(prefork.celery_app, "control", control)
     return control
 
@@ -187,13 +206,36 @@ def test_the_whole_turnover_is_spent_inside_the_caller_s_budget(monkeypatch: pyt
 
 
 def test_old_child_still_present_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The pre-restart child (111) never leaves — a stale child would keep serving
-    # the old registry, so the turnover must fail loudly.
+    # The pre-restart child (111) never leaves and runs no job — an idle stale child
+    # would take new work on the old registry, so the turnover must fail loudly.
     control = _install(monkeypatch, [_pool([111]), _pool([111, 222])])
     monkeypatch.setattr(prefork, "_POOL_RECYCLE_POLL_INTERVAL", 0.0)
-    with pytest.raises(RuntimeError, match="old children still present"):
+    with pytest.raises(RuntimeError, match="idle pre-restart children still present: \\[111\\]"):
         prefork._confirm_turnover(_HOST, ({111}, 1), timeout=0.05)
     assert control.broadcasts == []  # confirm-only helper does not restart
+
+
+def test_a_pre_restart_child_busy_with_a_job_is_not_waited_for(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The pre-restart child (111) is running a job — possibly the very job that published
+    # the op this turnover applies. It checks the restart before taking its next job, so it
+    # finishes this one and exits after it: the pool at size with no idle survivor is turned
+    # over on the first poll.
+    control = _install(monkeypatch, [_pool([111])], [_busy(111)])
+    monkeypatch.setattr(prefork, "_POOL_RECYCLE_POLL_INTERVAL", 0.0)
+    with caplog.at_level(logging.INFO, logger=prefork.logger.name):
+        prefork._confirm_turnover(_HOST, ({111}, 1), timeout=5.0)
+    assert len(control.connections) == 1
+    assert any("111" in r.getMessage() and "exit after" in r.getMessage() for r in caplog.records)
+
+
+def test_a_busy_pre_restart_child_still_waits_for_the_pool_to_refill(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The busy child is exempt from "gone", never from the pool's size: a two-child pool
+    # holding only the busy pre-restart child is confirmed once the second child is forked.
+    control = _install(monkeypatch, [_pool([111], max_conc=2), _pool([111, 222], max_conc=2)], [_busy(111)])
+    prefork._confirm_turnover(_HOST, ({111, 112}, 2), timeout=5.0)
+    assert len(control.connections) == 2
 
 
 def test_pool_came_back_short_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,7 +297,7 @@ def test_wedged_restart_that_cannot_respawn_fails_loudly(
         prefork._restart_pool_and_confirm(_HOST, ({111}, 1), budget=0.2)
     assert kills == [(111, signal.SIGKILL)]
     assert "wedged inside billiard (_putlock)" in str(excinfo.value)
-    assert "old children still present: [111]" in str(excinfo.value)
+    assert "idle pre-restart children still present: [111]" in str(excinfo.value)
 
 
 def test_confirm_failure_after_a_healthy_restart_is_not_blamed_on_a_wedge(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -268,7 +310,7 @@ def test_confirm_failure_after_a_healthy_restart_is_not_blamed_on_a_wedge(monkey
     assert control.broadcasts == [("pool_restart", [_HOST])]
     assert kills == []
     assert "wedged" not in str(excinfo.value)
-    assert "old children still present: [111]" in str(excinfo.value)
+    assert "idle pre-restart children still present: [111]" in str(excinfo.value)
 
 
 def test_restart_propagation_bound_fits_inside_the_turnover_budget() -> None:

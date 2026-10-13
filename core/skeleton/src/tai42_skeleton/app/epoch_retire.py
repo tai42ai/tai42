@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from tai42_kit.clients import drain_epoch
 from tai42_kit.settings import reset_all_settings
@@ -35,6 +35,22 @@ if TYPE_CHECKING:
     from tai42_skeleton.app.epoch import Epoch
 
 logger = logging.getLogger(__name__)
+
+# The drains of real work a retire runs in sequence, each bounded by the drain budget.
+RETIRE_DRAIN_STEPS: Final = 3
+
+
+def retire_drain_floor_seconds(budget: float) -> float:
+    """The longest a retire may legally spend draining real work, for the drain budget ``budget``.
+
+    The retire drains the generation's in-flight requests, then its supervisors' terminal
+    writes, then its retired client pools' leases, in sequence, each bounded by the one drain
+    budget — so a retire whose work all finishes legally may spend three budgets. The
+    periodic-loop cancels that precede the drains are bounded as a guard against a wedged loop
+    (an overrun is logged as abandoning it) and are not drain.
+    """
+    return RETIRE_DRAIN_STEPS * budget
+
 
 # Strong references to the deferred retire tails, so the loop does not GC a still-running
 # one; each removes itself on completion.

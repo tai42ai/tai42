@@ -24,7 +24,7 @@ from tai42_contract.app.responses import ApplyResponse
 from tai42_contract.manifest import ExtensionElement, ExtensionsConfigMixin
 
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
+from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.manifest import Manifest
@@ -251,7 +251,7 @@ async def set_tool_extensions(name: str, combos: list[list[ExtensionElement]]) -
 
     # ConfigService validates the whole document with the new map BEFORE persisting,
     # so a malformed entry rejects loudly (400) instead of corrupting the store.
-    with translate_backend_needs_bus(BadRequestError):
+    with translate_config_invariants(BadRequestError):
         try:
             result = await ConfigService.from_app().apply_change(mutator)
         except ValueError as exc:
@@ -324,7 +324,7 @@ async def modify_tool_extension_combos(
         if not _apply_combos(document, owner, name, merged):
             raise BadRequestError(f"providing config for tool {name!r} not found in the manifest")
 
-    with translate_backend_needs_bus(BadRequestError):
+    with translate_config_invariants(BadRequestError):
         try:
             await ConfigService.from_app().apply_change(mutator)
         except ValueError as exc:

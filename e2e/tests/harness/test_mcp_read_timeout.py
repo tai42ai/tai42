@@ -33,7 +33,7 @@ def test_the_read_bound_is_the_stacks_apply_timeout_plus_the_boot_bound() -> Non
 
 
 def test_the_platform_apply_timeout_is_the_bus_settings_default() -> None:
-    assert platform_apply_timeout() == 30.0
+    assert platform_apply_timeout() == 90.0
 
 
 @asynccontextmanager

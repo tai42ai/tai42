@@ -434,6 +434,31 @@ async def test_apply_refuses_recycle_class_diff_on_bare_shape(monkeypatch: pytes
     assert "env" not in calls
 
 
+async def test_apply_refuses_a_drain_budget_past_the_apply_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_kit.settings import reset_all_settings
+
+    from tai42_skeleton.app.boot_rules import ApplyWindowBelowDrainError
+
+    monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("TAI_BUS_APPLY_TIMEOUT", "90")
+    monkeypatch.delenv("TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS", raising=False)
+    reset_all_settings()
+    store = FakeConfigStore(env={})
+    spy, calls = _swap_spy()
+    prev = _PrevSpy()
+    try:
+        with pytest.raises(ApplyWindowBelowDrainError, match="270"):
+            await _service(store).apply_replace_env(
+                {"TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "90"}, save_previous=prev, build_and_swap=spy
+            )
+    finally:
+        reset_all_settings()
+    # Refused before the @previous snapshot, the build and the persist.
+    assert store.env_writes == []
+    assert prev.saved is None
+    assert "env" not in calls
+
+
 # ---------------------------------------------------------------------------
 # NAMES-ONLY — a sentinel secret VALUE never reaches the report
 # ---------------------------------------------------------------------------

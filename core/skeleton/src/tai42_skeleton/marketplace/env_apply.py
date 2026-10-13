@@ -18,7 +18,7 @@ from pydantic import ValidationError
 from tai42_contract.plugins import PluginSpec
 from tai42_kit.plugins import accepts_env, required_env_for_spec
 
-from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
+from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.config.service import ApplyResult, ConfigService
 from tai42_skeleton.marketplace.errors import InstallEnvError, InstallStateError
 from tai42_skeleton.marketplace.manifest_apply import apply_composed, composed_manifest_invalid
@@ -147,7 +147,7 @@ async def apply_provides_change(
             env_restore[key] = stored.get(key, "")
         return changes, mutator
 
-    with translate_backend_needs_bus(composed_manifest_invalid):
+    with translate_config_invariants(composed_manifest_invalid):
         try:
             return await svc.apply_env_and_change(prepare, manifest_pointer=manifest_pointer)
         except ValidationError as exc:

@@ -801,6 +801,30 @@ async def test_live_but_slow_apply_is_timed_out(wire_bus_client: None) -> None:
         await _stop(task)
 
 
+async def test_a_worker_draining_inside_the_drain_floor_answers_applied(wire_bus_client: None) -> None:
+    # A window at the retire's drain floor covers a worker whose reload drains real work
+    # for 2.5 drain budgets: it answers inside the window and is reported applied.
+    from tai42_skeleton.app.epoch_retire import retire_drain_floor_seconds
+
+    budget = 1.0
+    window = retire_drain_floor_seconds(budget)
+    publisher = make_bus(ack_timeout=0.05, apply_timeout=window, heartbeat_ttl=5.0)
+    worker = make_bus(ack_timeout=0.05, apply_timeout=window, heartbeat_ttl=5.0)
+
+    async def draining(_op: dict, *, deadline: float) -> None:
+        await asyncio.sleep(2.5 * budget)
+
+    task, worker_id = await _spawn_subscriber(worker, draining)
+    try:
+        local = LocalApplyResult(outcome=OpOutcome.applied)
+        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        by_name = {r.name: r for r in result.results}
+        assert by_name[worker_id.name].outcome == OpOutcome.applied
+        assert result.ok
+    finally:
+        await _stop(task)
+
+
 # -- presence re-check degrade branches --------------------------------------
 
 
