@@ -113,6 +113,10 @@ class RouteMetadata:
     # route, ``plugin`` for a declared plugin route. The cross-owner collision check
     # keys on it.
     owner: RouteOwner = CORE_OWNER
+    # The resolved absolute base (``/api/<base>``) a plugin route's item is mounted under on
+    # this registration pass, ``None`` for a core route. A studio plugin reads its own items'
+    # bases off the committed generation through it (``mount_map.package_mounts``).
+    mount_base: str | None = None
     # Whether the route answers UNAUTHENTICATED — the negation of ``authed``, kept as
     # the explicit declared flag the verifier's declared-public tier reads to grant the
     # public resource id regardless of owner.

@@ -184,11 +184,13 @@ class HttpSurface:
             resolved_authed = not decl.public
             resolved_public = decl.public
             owner = plugin_owner(binding)
+            mount_base: str | None = binding.resolved_path("")
         else:
             resolved_path = path
             resolved_authed = True if authed is None else authed
             resolved_public = not resolved_authed
             owner = CORE_OWNER
+            mount_base = None
         if pre_auth and not resolved_public:
             raise ValueError(f"route {resolved_path!r} declares pre_auth=True but is authenticated")
         if any_authenticated and resolved_public:
@@ -215,6 +217,7 @@ class HttpSurface:
                 pre_auth=pre_auth,
                 declared=declared,
                 owner=owner,
+                mount_base=mount_base,
                 public=resolved_public,
                 no_body_reason=no_body_reason,
                 enveloped=enveloped,
