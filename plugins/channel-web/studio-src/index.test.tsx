@@ -4,10 +4,11 @@
  * no mount it still registers the panel (no capability: full projection only), and the panel
  * then shows its unavailable card with no request made.
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import type { PluginContext, RoutePanelContribution } from '@tai42/studio-sdk';
 import { screen } from '@testing-library/react';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 import { getGateBase } from './gate-base';
@@ -65,9 +66,7 @@ describe('register', () => {
 
 describe('the built studio manifest', () => {
   it('declares the web route panel', () => {
-    const path = fileURLToPath(
-      new URL('../src/tai42_channel_web/studio/studio-manifest.json', import.meta.url),
-    );
+    const path = resolve(process.cwd(), 'src/tai42_channel_web/studio/studio-manifest.json');
     const manifest = JSON.parse(readFileSync(path, 'utf8')) as {
       name: string;
       contributions: { route_panels: string[] };
