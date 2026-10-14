@@ -349,6 +349,13 @@ async def test_spa_csp_declares_worker_src_self(studio_env):
     assert "worker-src 'self'" in csp
 
 
+async def test_spa_csp_declares_media_src_self(studio_env):
+    # The shell's audio/video players load the same-origin served-media route.
+    resp = await router.serve_spa(_req(spa_path="tools"))
+    directives = [directive.strip() for directive in resp.headers["content-security-policy"].split(";")]
+    assert "media-src 'self'" in directives
+
+
 # -- the unknown-path 404 contract, at the routing layer + the base-app handler --------
 
 _HTTP_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")

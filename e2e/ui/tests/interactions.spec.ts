@@ -228,10 +228,14 @@ test('a media-bearing question renders images + links in the inbox and still ans
   expect(JSON.stringify(body.data.result)).toContain(answer);
 });
 
-test('the served SPA response pins the media img-src CSP directive', async ({ request }) => {
+test('the served SPA response pins the media img-src and media-src CSP directives', async ({
+  request,
+}) => {
   // The one place the whole ecosystem pins the DEPLOYED header: the served SPA
   // document must carry `img-src 'self' data: https:` so the inbox may render
-  // remote https images and inline data: images (and only those).
+  // remote https images and inline data: images (and only those), and
+  // `media-src 'self'` so its audio/video players load the same-origin
+  // served-media route (and nothing else).
   const res = await request.get('/');
   expect(res.status(), await res.text()).toBe(200);
   const csp = res.headers()['content-security-policy'];
@@ -241,6 +245,7 @@ test('the served SPA response pins the media img-src CSP directive', async ({ re
   // different token and fails, proving these origins are admitted AND ONLY these.
   const directives = csp.split(';').map((directive) => directive.trim());
   expect(directives).toContain("img-src 'self' data: https:");
+  expect(directives).toContain("media-src 'self'");
 });
 
 test('answering a nonexistent interaction is a loud 404', async ({ request }) => {
