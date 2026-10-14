@@ -642,7 +642,9 @@ class _ClosingSupervisor:
 _DEFERRED_DRAIN_BUDGET_S = 5.0
 # How long the deferred tail may take once its driver answered: twice the drain budget, the one
 # phase of the tail that can wait (the gate turnover, the wait on the finished driver and the
-# close do not). A tail that never ends (a driver or gate waiter never released) fails here.
+# close do not). The tail's slowest run measures 5.8 s with the host at load 200; the bound
+# leaves a margin for a loaded CI runner. A tail that never ends (a driver or gate waiter never
+# released) fails here.
 _DEFERRED_TAIL_BOUND_S = 2 * _DEFERRED_DRAIN_BUDGET_S
 
 
