@@ -201,7 +201,11 @@ async def agent_park_giveup_handler(interaction_id: str, failed_outcome: Mapping
         if barrier is None:
             raise AgentResumeBarrierNotFoundError(thread_id, superstep_id)
         outcome = await _fire_failed_terminal(
-            entry, lease, list(barrier.expected), RunFailed(outcome=dict(failed_outcome)), aborted=False
+            lease,
+            list(barrier.expected),
+            RunFailed(outcome=dict(failed_outcome)),
+            chained_resume_from_entry(entry),
+            aborted=False,
         )
     return ParkGiveUpOutcome(to_contract_outcome(outcome, raise_failed=False))
 

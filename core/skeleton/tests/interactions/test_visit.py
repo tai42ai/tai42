@@ -261,6 +261,43 @@ async def test_asks_outcome_sentinel_keeps_an_earlier_deadline_the_run_reported(
     assert outcome.suspended.expiry_at == now + timedelta(minutes=10)
 
 
+async def test_asks_outcome_sentinel_keeps_the_resume_owner_the_run_reported(store, fake_redis):
+    # A holder chain three levels deep (an outer holder over a middle holder over an agent): the open ask was
+    # stored by the INNERMOST run under its own continuation, but the run reporting the step is the
+    # MIDDLE holder, which owns the re-park under its own resume continuation. The re-park sentinel
+    # must keep the owner the run reported, so a holder above it adopts rather than chains.
+    await _seed_caller(store, fake_redis, "c1", continuation_tool="inner_agent_resume")
+
+    async def _start(extras):
+        return SuspendedInteraction(
+            interaction_id="c1",
+            interaction_ids=["c1"],
+            caller_interaction_ids=["c1"],
+            resume_owner="middle_flow_resume",
+        )
+
+    with state_context(_context(_candidates())):
+        outcome = await visit_module.visit(target_name="t", cancel=[], resume=[], start=_start, extras={})
+    assert outcome.kind == "asks"
+    assert outcome.suspended is not None
+    assert outcome.suspended.resume_owner == "middle_flow_resume"
+
+
+async def test_asks_outcome_sentinel_derives_the_owner_when_the_run_reported_none(store, fake_redis):
+    # A run that reports no owner on its sentinel falls back to the continuation stored on the open
+    # asks (one step shares one), so the common two-level case keeps working.
+    await _seed_caller(store, fake_redis, "c1")
+
+    async def _start(extras):
+        return SuspendedInteraction(interaction_id="c1", interaction_ids=["c1"], caller_interaction_ids=["c1"])
+
+    with state_context(_context(_candidates())):
+        outcome = await visit_module.visit(target_name="t", cancel=[], resume=[], start=_start, extras={})
+    assert outcome.kind == "asks"
+    assert outcome.suspended is not None
+    assert outcome.suspended.resume_owner == "resume_tool"
+
+
 async def test_asks_outcome_sentinel_raises_on_differing_resume_owners(store, fake_redis):
     # One super-step has one resume owner; differing owners across its open ids is a corrupt step.
     await _seed_caller(store, fake_redis, "c1")

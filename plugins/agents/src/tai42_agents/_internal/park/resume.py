@@ -28,10 +28,12 @@ from tai42_contract.interactions import (
     RunFailed,
     RunTerminalFailed,
     SuspendedInteraction,
+    get_chained_resume,
+    get_resume_continuation_tool,
     reset_chained_resume,
     set_chained_resume,
 )
-from tai42_kit.interactions.park_adoption import terminal_chain_notice
+from tai42_kit.interactions.park_adoption import supersede_chain_notice, terminal_chain_notice
 from tai42_kit.interactions.park_index import Barrier, BarrierNotFoundError, DriveLease, LeaseLostError
 
 from tai42_agents._internal.park.capability import chained_resume_from_entry
@@ -175,7 +177,14 @@ class _ResumedRun:
 
 
 async def _drive_superstep(entry: Mapping[str, Any], thread_id: str, superstep_id: str) -> Any:
-    """Drive a completed super-step once under its drive lease and record how it resolved."""
+    """Drive a completed super-step once under its drive lease and record how it resolved.
+
+    The drive runs under the routing the park captured, so its re-park carries it forward and its
+    terminal re-enters the same ancestor — unless an inline resumer of a DIFFERENT driver chains
+    the run (:func:`_resumer_takeover`): then the drive runs under the resumer's routing, its
+    re-park and terminal reach the resumer, and the routing the park captured is fired ``failed``
+    so a caller still parked on it ends loudly instead of waiting on a key this run no longer fires.
+    """
     index = agents_park_index()
     async with index.claim(thread_id, superstep_id) as lease:
         barrier = await index.read_barrier(thread_id, superstep_id)
@@ -183,16 +192,29 @@ async def _drive_superstep(entry: Mapping[str, Any], thread_id: str, superstep_i
             raise AgentResumeBarrierNotFoundError(thread_id, superstep_id)
         members = list(barrier.expected)
         resume_park, resume_map = await _prepare_resume(entry, barrier)
-        routing = chained_resume_from_entry(entry)
-        resumed = await _run_resumed(entry, routing, resume_park, resume_map)
+        stored = chained_resume_from_entry(entry)
+        takeover = _resumer_takeover(stored)
+        drive_routing = takeover if takeover is not None else stored
+        resumed = await _run_resumed(entry, drive_routing, resume_park, resume_map)
+
+        # On a take-over the resumer is waiting INLINE on this very drive (it holds no park on its
+        # own key yet), so the run's terminal is RETURNED to it rather than fired; and the routing
+        # the park captured is superseded — ended ``failed`` so a caller still parked on it ends
+        # loudly. Otherwise the drive's own captured routing carries the terminal, as before.
+        if takeover is not None:
+            if stored is not None:
+                await _fire_supersede(stored)
+            terminal_routing: ChainedResume | None = None
+        else:
+            terminal_routing = drive_routing
 
         if resumed.failed is not None:
-            epilogue = _fire_failed_terminal(entry, lease, members, resumed.failed, aborted=resumed.aborted)
+            epilogue = _fire_failed_terminal(lease, members, resumed.failed, terminal_routing, aborted=resumed.aborted)
             if resumed.cancelled is not None:
                 await asyncio.shield(epilogue)
                 raise resumed.cancelled
             outcome = await epilogue
-            if routing is None:
+            if terminal_routing is None:
                 raise RunTerminalFailed(resumed.failed.outcome)
             return outcome
 
@@ -206,13 +228,39 @@ async def _drive_superstep(entry: Mapping[str, Any], thread_id: str, superstep_i
             # The run parked again: this super-step resolves ``suspended`` and no cascade fires.
             await index.finalize(lease, member_ids=members, resolution="suspended", value=result)
             return result
-        if routing is not None:
+        if terminal_routing is not None:
             # A NESTED run's terminal re-enters the waiting ancestor; the fire's return IS the
             # outermost outcome, stored so a redrive replays it.
-            tool, payload = terminal_chain_notice(routing, result)
-            result = await tai42_app.tools.run_tool(tool, payload, continues_chain=routing.asked_by)
+            tool, payload = terminal_chain_notice(terminal_routing, result)
+            result = await tai42_app.tools.run_tool(tool, payload, continues_chain=terminal_routing.asked_by)
         await index.finalize(lease, member_ids=members, resolution="terminal", value=result)
         return result
+
+
+def _resumer_takeover(stored: ChainedResume | None) -> ChainedResume | None:
+    """The resumer's chain routing when an inline resume by a DIFFERENT driver takes the call over.
+
+    A caller that resumes this run INLINE under its OWN resume continuation (not the agents' own
+    ``agent_resume``) and a chain routing of its own — one whose key differs from the routing the
+    park captured — takes the call over. Returns that routing, or ``None`` for this run's own
+    out-of-band resume (nothing ambient is bound) or a same-driver resume (an adopter the engine
+    links through its own parent list, which changes nothing here).
+    """
+    ambient = get_chained_resume()
+    if ambient is None:
+        return None
+    if get_resume_continuation_tool() == AGENT_RESUME_TOOL_NAME:
+        return None
+    stored_key = stored.chain_key if stored is not None else None
+    if ambient.chain_key == stored_key:
+        return None
+    return ambient
+
+
+async def _fire_supersede(routing: ChainedResume) -> None:
+    """Fire the routing a take-over superseded ``failed``, so a caller still parked on it ends loudly."""
+    tool, payload = supersede_chain_notice(routing)
+    await tai42_app.tools.run_tool(tool, payload, continues_chain=routing.asked_by)
 
 
 async def _run_resumed(
@@ -257,10 +305,10 @@ async def _run_resumed(
 
 
 async def _fire_failed_terminal(
-    entry: Mapping[str, Any],
     lease: DriveLease,
     member_ids: Sequence[str],
     failed: RunFailed,
+    routing: ChainedResume | None,
     *,
     aborted: bool,
 ) -> Any:
@@ -268,17 +316,17 @@ async def _fire_failed_terminal(
 
     Fires only while ``lease`` still holds the super-step — a whole-chain kill that reclaimed it
     has already fired ``aborted`` and finalized, so firing again would race it (raises the kit
-    ``LeaseLostError``). A CHAINED park fires its captured routing ``failed`` with ``failed``'s
-    outcome; the waiting ancestor's chain-delivery face resumes it with the failure and returns
-    the outermost outcome (a :class:`RunFailed` when it failed too, its own answer when it handled
-    the failure, a re-park), which is finalized ``terminal`` and returned; a raise of the fire
-    propagates with nothing finalized. An UNCHAINED park finalizes ``failed`` itself (``aborted``
+    ``LeaseLostError``). A CHAINED terminal (``routing`` set) fires that routing ``failed`` with
+    ``failed``'s outcome; the waiting ancestor's chain-delivery face resumes it with the failure
+    and returns the outermost outcome (a :class:`RunFailed` when it failed too, its own answer when
+    it handled the failure, a re-park), which is finalized ``terminal`` and returned; a raise of
+    the fire propagates with nothing finalized. A routing of ``None`` (an unchained park, or a
+    take-over whose terminal returns to the inline resumer) finalizes ``failed`` itself (``aborted``
     when the run was torn down mid-drive, else ``terminal``) and returns it.
     """
     index = agents_park_index()
     if not await lease.holds():
         raise LeaseLostError(lease.thread_id, lease.superstep)
-    routing = chained_resume_from_entry(entry)
     if routing is not None:
         tool, payload = terminal_chain_notice(routing, failed)
         outcome = await tai42_app.tools.run_tool(tool, payload, continues_chain=routing.asked_by)
