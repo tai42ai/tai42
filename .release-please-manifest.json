@@ -11,7 +11,7 @@
   "plugins/channel-slack": "5.0.1",
   "plugins/channel-telegram": "5.0.1",
   "plugins/channel-twilio": "6.0.1",
-  "plugins/channel-web": "7.0.1",
+  "plugins/channel-web": "7.1.0",
   "plugins/channel-whatsapp": "7.0.1",
   "plugins/connector-atlassian": "3.0.1",
   "plugins/connector-github": "2.0.1",
