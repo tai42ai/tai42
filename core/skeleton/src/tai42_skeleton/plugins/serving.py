@@ -71,7 +71,9 @@ def security_headers(nonce: str) -> dict[str, str]:
     explicitly because they do NOT fall back to ``default-src``. ``img-src`` admits
     ``https:`` so a question's media images render directly from remote https
     origins (``http:`` stays excluded — mixed content); images cannot execute
-    script, so the ``script-src`` posture is unaffected. ``worker-src 'self'`` is
+    script, so the ``script-src`` posture is unaffected. ``media-src 'self'`` admits the
+    native audio/video players, which load only the same-origin served-media route
+    (remote media never reaches a player, so no remote origin is admitted). ``worker-src 'self'`` is
     stated explicitly: without it workers fall back to
     ``script-src`` whose ``'self'`` already admits same-origin worker URLs, but a
     later hardening (e.g. ``'strict-dynamic'``) would silently break them — the
@@ -85,6 +87,7 @@ def security_headers(nonce: str) -> dict[str, str]:
             "worker-src 'self'",
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data: https:",
+            "media-src 'self'",
             "connect-src 'self'",
             "font-src 'self'",
             "frame-ancestors 'none'",

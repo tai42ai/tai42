@@ -71,6 +71,14 @@ def test_security_headers_csp_directives():
     assert "img-src 'self' data: https:" in csp
 
 
+def test_security_headers_csp_admits_same_origin_media():
+    # The inbox's native audio/video players load only the same-origin served-media
+    # route; without ``media-src`` the browser falls back to ``default-src 'none'``.
+    csp = security_headers("NONCEVALUE")["content-security-policy"]
+    directives = [directive.strip() for directive in csp.split(";")]
+    assert "media-src 'self'" in directives
+
+
 # -- Import-map injection ----------------------------------------------------
 
 
