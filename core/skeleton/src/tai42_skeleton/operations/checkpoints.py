@@ -8,10 +8,10 @@ default and ceiling; a thread's owner may declare a shorter retention for it
   the due time stored with the mark (its finished retention after the mark, the owner's declared
   one or ``checkpoint_retention_finished_minutes``), on every provider;
 - waiting: any other thread is deleted its waiting retention after its newest checkpoint — the
-  waiting its owner declared at run start, else ``checkpoint_retention_waiting_minutes``.
-  ``postgres``/``sqlite`` are swept here; ``redis`` expires the thread by its key TTL (stamped
-  with the declared waiting at write) and ``memory`` keeps it for the process lifetime, so the
-  waiting horizon is skipped for both.
+  waiting its owner declared at run start, else ``checkpoint_retention_waiting_minutes``. A store
+  whose waiting horizon is swept lists its stale threads through its ledger and they are deleted
+  here; a store whose saver stamps the declared waiting as a key TTL expires them itself, and an
+  in-process store keeps them for the process lifetime, so the waiting horizon is skipped for both.
 
 Before any delete, every registered live-thread filter (``tai42_kit.llm.checkpoint.liveness``) is asked:
 a thread a consumer reports live is spared — logged at WARNING, counted on
@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import aclosing
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from tai42_kit.llm.checkpoint import checkpoint_provider_facts, live_threads
@@ -51,7 +51,6 @@ if TYPE_CHECKING:
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from tai42_kit.llm.checkpoint import FinishedThreadLedger
-    from tai42_kit.llm.checkpoint.checkpoint import CheckpointResource
 
 logger = logging.getLogger(__name__)
 
@@ -136,34 +135,6 @@ class _Sweep:
         return swept
 
 
-async def _stale_threads(
-    provider: str, resource: CheckpointResource, saver: Any, now: datetime, default_minutes: int
-) -> list[str]:
-    if provider == "postgres":
-        from tai42_kit.llm.checkpoint import postgres_store
-
-        return await postgres_store.stale_threads(resource.handle, now=now, default_minutes=default_minutes)
-    # sqlite: the newest checkpoint of every thread, walked through the saver (development scale).
-    newest_by_thread: dict[str, datetime] = {}
-    async for tup in saver.alist(None):
-        thread_id = tup.config["configurable"]["thread_id"]
-        ts = datetime.fromisoformat(tup.checkpoint["ts"])
-        current = newest_by_thread.get(thread_id)
-        if current is None or ts > current:
-            newest_by_thread[thread_id] = ts
-    stale: list[str] = []
-    thread_ids = sorted(newest_by_thread)
-    for start in range(0, len(thread_ids), _PAGE):
-        page = thread_ids[start : start + _PAGE]
-        declared = await resource.ledger.declared_waiting(page)
-        stale.extend(
-            thread_id
-            for thread_id in page
-            if newest_by_thread[thread_id] < now - timedelta(minutes=declared.get(thread_id, default_minutes))
-        )
-    return stale
-
-
 @operation(
     summary="Sweep expired checkpoint threads",
     tags=["checkpoints"],
@@ -174,13 +145,12 @@ async def _stale_threads(
 async def sweep_checkpoints() -> dict[str, Any]:
     """Delete the checkpoint threads of the deployment's store that are past their retention horizon.
 
-    A finished thread (marked by its owner) goes at the due time stored with its mark; on
-    ``postgres``/``sqlite`` any thread goes its waiting retention (declared by its owner, else
-    ``checkpoint_retention_waiting_minutes``) after its newest checkpoint (``redis`` expires it by key
-    TTL and ``memory`` keeps it for the process — both reported in ``skipped``). A thread a
-    registered live-thread filter claims is spared and listed. ``waiting_minutes`` and
-    ``finished_minutes`` in the result are the platform's values: the default and ceiling of every
-    thread's retention.
+    A finished thread (marked by its owner) goes at the due time stored with its mark; on a store
+    whose waiting horizon is swept any thread goes its waiting retention (declared by its owner, else
+    ``checkpoint_retention_waiting_minutes``) after its newest checkpoint (a store that expires it by
+    key TTL, or keeps it for the process, is reported in ``skipped``). A thread a registered
+    live-thread filter claims is spared and listed. ``waiting_minutes`` and ``finished_minutes`` in
+    the result are the platform's values: the default and ceiling of every thread's retention.
     """
     settings = llm_provider_settings()
     provider = settings.checkpoint
@@ -199,7 +169,7 @@ async def sweep_checkpoints() -> dict[str, Any]:
     skipped: str | None = None
     waiting_swept: list[str] = []
     if facts.retention == "sweep":
-        stale = await _stale_threads(provider, resource, saver, now, waiting)
+        stale = await resource.ledger.stale_threads(saver, now=now, default_minutes=waiting)
         waiting_swept = await sweep.waiting(resource.ledger, stale)
     elif facts.retention == "native_ttl":
         skipped = f"waiting horizon: provider {provider!r} expires threads by their key TTL"

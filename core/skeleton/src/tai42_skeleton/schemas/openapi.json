@@ -22663,7 +22663,7 @@
     },
     "/api/checkpoints/sweep": {
       "post": {
-        "description": "Delete the checkpoint threads of the deployment's store that are past their retention horizon.\n\nA finished thread (marked by its owner) goes at the due time stored with its mark; on\n``postgres``/``sqlite`` any thread goes its waiting retention (declared by its owner, else\n``checkpoint_retention_waiting_minutes``) after its newest checkpoint (``redis`` expires it by key\nTTL and ``memory`` keeps it for the process — both reported in ``skipped``). A thread a\nregistered live-thread filter claims is spared and listed. ``waiting_minutes`` and\n``finished_minutes`` in the result are the platform's values: the default and ceiling of every\nthread's retention.",
+        "description": "Delete the checkpoint threads of the deployment's store that are past their retention horizon.\n\nA finished thread (marked by its owner) goes at the due time stored with its mark; on a store\nwhose waiting horizon is swept any thread goes its waiting retention (declared by its owner, else\n``checkpoint_retention_waiting_minutes``) after its newest checkpoint (a store that expires it by\nkey TTL, or keeps it for the process, is reported in ``skipped``). A thread a registered\nlive-thread filter claims is spared and listed. ``waiting_minutes`` and ``finished_minutes`` in\nthe result are the platform's values: the default and ceiling of every thread's retention.",
         "operationId": "post_api_checkpoints_sweep",
         "responses": {
           "200": {
