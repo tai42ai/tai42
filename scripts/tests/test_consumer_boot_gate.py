@@ -297,6 +297,9 @@ def test_slot_env_supplies_placeholder_config_for_an_eager_provider():
     assert env["LANGFUSE_HOST"]
     assert env["LANGFUSE_PUBLIC_KEY"]
     assert env["LANGFUSE_SECRET_KEY"]
+    # The plugin's OTel writer refuses construction without these two at registration.
+    assert env["OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED"] == "true"
+    assert env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]
 
 
 def test_slot_env_empty_for_a_lazy_provider():
@@ -430,6 +433,12 @@ def test_external_service_env_black_holes_endpoints(dist: str, expected_keys: se
     # Every outbound endpoint the config carries points at the black hole.
     for key in endpoint_keys:
         assert blackhole in env[key]
+
+
+def test_external_service_env_points_the_docker_engine_at_the_black_hole():
+    env = gate._external_service_env("tai42-sandbox-docker", "http://127.0.0.1:54321")
+    # The engine endpoint takes the provider's documented tcp:// shape.
+    assert env == {"SANDBOX_DOCKER_HOST": "tcp://127.0.0.1:54321"}
 
 
 def test_external_service_env_empty_for_an_unknown_distribution():

@@ -9,6 +9,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from _consumer_boot_gate.boot_failure import BootFailure, parse_boot_failure
 from _consumer_boot_gate.consumers import Consumer
@@ -99,13 +100,15 @@ def build_manifest(provides: Provides) -> dict:
 # provider's settings validation without reaching a live service — its client
 # connects lazily on first use, never at boot — so health-ready proves the module
 # imported and its registration ran. Keyed by distribution name; a provider that
-# reads its settings lazily (storage/sandbox/backend register a class whose config
-# is read at call time) needs no entry.
+# reads its settings lazily (storage/backend register a class whose config is read
+# at call time) needs no entry.
 _BOOT_PLACEHOLDER_ENV: dict[str, dict[str, str]] = {
     "tai42-monitoring-langfuse": {
         "LANGFUSE_HOST": "http://127.0.0.1:1",
         "LANGFUSE_PUBLIC_KEY": "pk-boot-gate",
         "LANGFUSE_SECRET_KEY": "sk-boot-gate",
+        "OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED": "true",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://127.0.0.1:1/v1/traces",
     },
 }
 
@@ -139,8 +142,8 @@ def _external_service_env(dist_name: str, blackhole_url: str) -> dict[str, str]:
     Every OUTBOUND endpoint is pointed at ``blackhole_url`` (a closed loopback port the gate
     allocates).
 
-    A deployment supplies these credentials; the gate has no live messaging API or
-    identity provider to point them at, so the endpoint is a black hole by design. The
+    A deployment supplies these credentials; the gate has no live messaging API, identity
+    provider or container engine to point them at, so the endpoint is a black hole by design. The
     boot then exercises install -> import -> registration -> lifecycle up to the external
     boundary and surfaces a connection-class error there — the signal (see
     :func:`is_external_service_only`) that the plugin's startup needs an external service
@@ -159,6 +162,8 @@ def _external_service_env(dist_name: str, blackhole_url: str) -> dict[str, str]:
             "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT": "1",
             "CHANNEL_TELEGRAM_API_BASE_URL": blackhole_url,
         }
+    if dist_name == "tai42-sandbox-docker":
+        return {"SANDBOX_DOCKER_HOST": f"tcp://{urlsplit(blackhole_url).netloc}"}
     if dist_name == "tai42-channel-slack":
         return {
             "CHANNEL_SLACK_BOT_USER_ID": "U0BOOTGATE",
