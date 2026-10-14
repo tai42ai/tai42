@@ -1,8 +1,8 @@
 """The checkpoint provider table: what each provider is, and the retention horizons derived from it.
 
 Every fact about a checkpoint provider — whether a parked run survives a process restart,
-how expired threads leave its store, which codec the kit installs on its saver — is read
-from this one table.
+how expired threads leave its store, which codec the kit installs on its saver, whether its
+saver stores large values once per thread — is read from this one table.
 """
 
 from __future__ import annotations
@@ -39,21 +39,23 @@ class CheckpointProviderFacts:
     faithful_codec: bool
     # Large checkpoint values are compressed inline.
     inline_compress: bool
+    # Large checkpoint sub-values are stored once per thread and referenced.
+    shared_values: bool
 
 
 CHECKPOINT_PROVIDERS: Final[Mapping[str, CheckpointProviderFacts]] = MappingProxyType(
     {
         "redis": CheckpointProviderFacts(
-            durable=True, retention="native_ttl", faithful_codec=True, inline_compress=True
+            durable=True, retention="native_ttl", faithful_codec=True, inline_compress=True, shared_values=True
         ),
         "postgres": CheckpointProviderFacts(
-            durable=True, retention="sweep", faithful_codec=False, inline_compress=True
+            durable=True, retention="sweep", faithful_codec=False, inline_compress=True, shared_values=True
         ),
         "sqlite": CheckpointProviderFacts(
-            durable=False, retention="sweep", faithful_codec=False, inline_compress=False
+            durable=False, retention="sweep", faithful_codec=False, inline_compress=False, shared_values=False
         ),
         "memory": CheckpointProviderFacts(
-            durable=False, retention="process", faithful_codec=False, inline_compress=False
+            durable=False, retention="process", faithful_codec=False, inline_compress=False, shared_values=False
         ),
     }
 )

@@ -5801,6 +5801,7 @@ anthropic = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "orjson" },
     { name = "redis" },
     { name = "redisvl" },
 ]
@@ -5827,6 +5828,7 @@ google = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "orjson" },
     { name = "redis" },
     { name = "redisvl" },
 ]
@@ -5838,6 +5840,7 @@ huggingface = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "orjson" },
     { name = "redis" },
     { name = "redisvl" },
     { name = "sentence-transformers" },
@@ -5871,6 +5874,7 @@ langgraph-checkpoint-sqlite = [
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
     { name = "langgraph-checkpoint-sqlite" },
+    { name = "orjson" },
     { name = "redis" },
     { name = "redisvl" },
 ]
@@ -5881,6 +5885,7 @@ llm = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "orjson" },
     { name = "redis" },
     { name = "redisvl" },
 ]
@@ -5892,6 +5897,7 @@ mistral = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "orjson" },
     { name = "redis" },
     { name = "redisvl" },
 ]
@@ -5909,6 +5915,7 @@ ollama = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "orjson" },
     { name = "redis" },
     { name = "redisvl" },
 ]
@@ -5927,6 +5934,7 @@ typesafe = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "orjson" },
     { name = "redis" },
     { name = "redisvl" },
 ]
@@ -5941,6 +5949,7 @@ xai = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "orjson" },
     { name = "redis" },
     { name = "redisvl" },
 ]
@@ -5980,6 +5989,7 @@ requires-dist = [
     { name = "opentelemetry-sdk", marker = "extra == 'monitoring'", specifier = ">=1.44,<2" },
     { name = "orjson", marker = "extra == 'jq'", specifier = ">=3.11" },
     { name = "orjson", marker = "extra == 'langgraph-checkpoint-postgres'", specifier = ">=3.11.8,<4" },
+    { name = "orjson", marker = "extra == 'llm'", specifier = ">=3.11,<4" },
     { name = "orjson", marker = "extra == 'monitoring'", specifier = ">=3.11" },
     { name = "orjson", marker = "extra == 'postgres'", specifier = ">=3.11.8,<4" },
     { name = "prometheus-client", specifier = ">=0.24" },

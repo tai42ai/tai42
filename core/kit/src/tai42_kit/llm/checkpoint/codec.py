@@ -17,8 +17,16 @@ One envelope shape carries every kind::
 
     {"lc": 2, "type": "constructor", "id": KIT_ENVELOPE_ID, "args": [kind, payload]}
 
-A large value is stored as an ``inflate`` envelope: the JSON text of the rewritten value, zlib
-compressed and base64 encoded, so the compressed value lives and expires with its checkpoint.
+A sub-value whose encoding is above ``LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES`` is stored once per
+thread in the saver's value store and the checkpoint holds a ``ref`` envelope in its place (see
+:mod:`tai42_kit.llm.checkpoint.chunking`). A channel value or pending write whose encoding is above
+``LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES`` is stored inline as an ``inflate`` envelope: its JSON
+text, zlib compressed and base64 encoded.
+
+The saver encodes a checkpoint in one pass (:mod:`tai42_kit.llm.checkpoint.redis_values`): one faithful
+walk per channel whose version changed (an unchanged channel reuses the parent checkpoint's stored form),
+every node's encoding measured once for both thresholds and the digest, and the checkpoint text
+assembled from the channels' encodings.
 
 The Postgres saver stores channel values as msgpack blobs; :class:`BlobCompressCodec` compresses a
 blob above the threshold under its own type tag.
@@ -54,10 +62,11 @@ from redisvl.query import CountQuery
 from redisvl.query.filter import Tag
 
 from tai42_kit.llm.checkpoint.checkpoint import CheckpointDeleteError, CheckpointSerializationError
+from tai42_kit.llm.checkpoint.chunking import CheckpointValueRef
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
-    from langgraph.checkpoint.base import CheckpointMetadata, CheckpointTuple
+    from langgraph.checkpoint.base import ChannelVersions, Checkpoint, CheckpointMetadata, CheckpointTuple
 
 KIT_ENVELOPE_ID: Final[tuple[str, ...]] = ("tai42_kit", "llm", "checkpoint", "codec", "value")
 
@@ -81,6 +90,7 @@ CODEC_KINDS: Final[frozenset[str]] = frozenset(
         "exception",
         "inflate",
         "zoneinfo",
+        "ref",
     }
 )
 
@@ -103,6 +113,42 @@ def _envelope(kind: str, payload: Any) -> dict[str, Any]:
 
 def _is_kit_envelope(value: dict[str, Any]) -> bool:
     return value.get("lc") == 2 and value.get("type") == "constructor" and value.get("id") == list(KIT_ENVELOPE_ID)
+
+
+def reference_envelope(ref: CheckpointValueRef) -> dict[str, Any]:
+    """The ``ref`` envelope a checkpoint stores in place of the shared value ``ref`` names."""
+    return _envelope("ref", [ref.digest, ref.size, list(ref.closure)])
+
+
+def _is_digest(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+def reference_from_payload(payload: Any) -> CheckpointValueRef:
+    """The reference a ``ref`` envelope's payload names; a malformed payload raises ``ValueError``."""
+    if not isinstance(payload, list) or len(payload) != 3:
+        raise ValueError("a ref envelope carries [digest, size, closure]")
+    digest, size, closure = payload
+    if not _is_digest(digest):
+        raise ValueError("a ref envelope's digest must be 64 lowercase hex characters")
+    if type(size) is not int or size < 0:
+        raise ValueError("a ref envelope's size must be a non-negative integer")
+    if not isinstance(closure, list) or not all(_is_digest(item) for item in closure):
+        raise ValueError("a ref envelope's closure must be a list of digests")
+    return CheckpointValueRef(digest, size, tuple(closure))
+
+
+def envelope_reference(value: Any) -> CheckpointValueRef | None:
+    """The reference ``value`` is when it is a ``ref`` envelope as stored; ``None`` when it is not one."""
+    if type(value) is not dict or not _is_kit_envelope(value):
+        return None
+    args = value.get("args")
+    if not isinstance(args, list) or len(args) != 2 or args[0] != "ref":
+        return None
+    try:
+        return reference_from_payload(args[1])
+    except ValueError as exc:
+        raise CheckpointSerializationError(f"checkpoint envelope 'ref' cannot be decoded: {exc}") from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -362,42 +408,24 @@ def _is_checkpoint(obj: Any) -> bool:
 
 
 class RedisFaithfulCodec:
-    """The write side of the faithful Redis codec, with the inline compressed envelope.
+    """The Redis saver serializer's write side for a value the kit saver did not encode first.
 
-    ``encode`` receives a whole checkpoint (the saver's ``_dump_checkpoint``) or one pending-write
-    value (``aput_writes``), never checkpoint metadata.
+    ``encode`` receives a whole checkpoint or one pending-write value, never checkpoint metadata. It
+    shares no value (it has no thread and no store): a value above the threshold is compressed inline.
     """
 
     def __init__(self, threshold: int | None) -> None:
         """``threshold``: the encoded size in bytes above which a value is compressed; ``None`` never compresses."""
-        self._threshold = threshold
+        from tai42_kit.llm.checkpoint.redis_values import RedisCheckpointEncoder
 
-    def _compress_level(self, inner: FaithfulRedisSerializer, walked: Any) -> Any:
-        if self._threshold is None:
-            return walked
-        type_, json_bytes = inner.dumps_typed(walked)
-        if type_ != "json" or len(json_bytes) <= self._threshold:
-            return walked
-        text = base64.b64encode(zlib.compress(json_bytes, _ZLIB_LEVEL)).decode("ascii")
-        return _envelope("inflate", ["json", text])
+        self._encoder = RedisCheckpointEncoder(None, threshold)
 
     def dumps_typed(self, inner: FaithfulRedisSerializer, obj: Any) -> tuple[str, bytes]:
-        """Rewrite ``obj`` into JSON-faithful form and encode it with the Redis serializer."""
-        if isinstance(obj, (bytes, bytearray)):
-            # A top-level write of bytes is stored by the saver's own bytes types.
-            return inner.dumps_typed(obj)
+        """Rewrite ``obj`` into JSON-faithful form and encode it once."""
+        chunker = self._encoder.chunker()
         if _is_checkpoint(obj):
-            rewritten = {key: _walk(value, f"$.{key}") for key, value in obj.items() if key != "channel_values"}
-            rewritten["channel_values"] = {
-                name: self._compress_level(inner, _walk(value, f"$.channel_values.{name}"))
-                for name, value in obj["channel_values"].items()
-            }
-        else:
-            rewritten = self._compress_level(inner, _walk(obj, "$"))
-        type_, data = inner.dumps_typed(rewritten)
-        if type_ not in ("json", "null"):
-            raise CheckpointSerializationError("checkpoint value could not be JSON-encoded after the faithful rewrite")
-        return type_, data
+            return "json", self._encoder.encode_checkpoint(obj, {}, chunker)
+        return self._encoder.encode_write(obj, chunker)
 
     def loads_typed(self, inner: FaithfulRedisSerializer, data: tuple[str, bytes]) -> Any:
         """Decode through the Redis serializer, whose reviver decodes every kit envelope."""
@@ -556,6 +584,8 @@ class FaithfulRedisSerializer(JsonPlusRedisSerializer):
         if not isinstance(args, list) or len(args) != 2:
             raise TypeError("a kit envelope carries [kind, payload]")
         kind, payload = args
+        if kind == "ref":
+            return reference_from_payload(payload)
         if kind == "inflate":
             tag, text = payload
             if tag != "json":
@@ -630,8 +660,19 @@ class GuardedAsyncRedisSaver(AsyncRedisSaver):
     a plain JSON parse and no reviver, so no codec envelope may reach it. Every read raises
     :class:`CheckpointSerializationError` when a stored value could not be decoded — the library
     returns such a value raw on its checkpoint-document path. Deleting a thread removes every
-    document it holds.
+    document and every shared value it holds.
+
+    A checkpoint and a pending write are encoded off the event loop before the library stores them,
+    their shared values written to the thread's value store first, and every read resolves the
+    references before it returns (:class:`~tai42_kit.llm.checkpoint.redis_values.RedisSharedValues`).
     """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Build the library saver and its shared values over the same client and waiting retention."""
+        from tai42_kit.llm.checkpoint.redis_values import RedisSharedValues
+
+        super().__init__(*args, **kwargs)
+        self._shared = RedisSharedValues(self)
 
     async def _thread_documents(self, thread_id: str) -> tuple[int, int]:
         """The number of checkpoint and pending-write documents ``thread_id`` holds, across namespaces."""
@@ -641,7 +682,7 @@ class GuardedAsyncRedisSaver(AsyncRedisSaver):
         return cast("int", checkpoints), cast("int", writes)
 
     async def adelete_thread(self, thread_id: str) -> None:
-        """Delete every checkpoint and pending write of ``thread_id``.
+        """Delete every checkpoint and pending write of ``thread_id``, then its shared values.
 
         One library delete removes at most one search page of checkpoints and one of writes, so the
         delete repeats until the thread holds nothing. A round that does not reduce what remains
@@ -653,13 +694,14 @@ class GuardedAsyncRedisSaver(AsyncRedisSaver):
             checkpoints, writes = await self._thread_documents(thread_id)
             remaining = checkpoints + writes
             if remaining == 0:
-                return
+                break
             if previous is not None and remaining >= previous:
                 raise CheckpointDeleteError(
                     f"checkpoint thread {thread_id!r} still holds {checkpoints} checkpoint(s) and {writes} write(s) "
                     "after a delete round that did not reduce them"
                 )
             previous = remaining
+        await self._shared.delete_thread(thread_id)
 
     def _dump_metadata(self, metadata: CheckpointMetadata) -> str:
         _type, data = self.serde.dumps_metadata_typed(metadata)  # pyright: ignore[reportAttributeAccessIssue]
@@ -672,15 +714,40 @@ class GuardedAsyncRedisSaver(AsyncRedisSaver):
             return self.serde._revive_if_needed(obj)  # pyright: ignore[reportAttributeAccessIssue]
         return super()._recursive_deserialize(obj)
 
+    async def aput(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+        stream_mode: str = "values",
+    ) -> RunnableConfig:
+        """Store a checkpoint: its shared values first, then the document the library writes."""
+        encoded = await self._shared.prepare_checkpoint(config, checkpoint, new_versions)
+        return await super().aput(config, cast("Checkpoint", encoded), metadata, new_versions, stream_mode)
+
+    async def aput_writes(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        """Store pending writes: their shared values first, then the documents the library writes."""
+        if not writes:
+            return
+        encoded = await self._shared.prepare_writes(config, writes)
+        await super().aput_writes(config, encoded, task_id, task_path)
+
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
-        """Read a checkpoint tuple; an undecodable stored value raises."""
+        """Read a checkpoint tuple with its shared values; an undecodable or missing stored value raises."""
         failures, token = _open_failures()
         try:
             result = await super().aget_tuple(config)
         finally:
             _decode_failures.reset(token)
         _raise_failures(failures, _thread_of(config))
-        return result
+        return None if result is None else await self._shared.resolve(result)
 
     async def alist(
         self,
@@ -690,7 +757,7 @@ class GuardedAsyncRedisSaver(AsyncRedisSaver):
         before: RunnableConfig | None = None,
         limit: int | None = None,
     ) -> AsyncIterator[CheckpointTuple]:
-        """List checkpoint tuples; a tuple holding an undecodable stored value raises before it is yielded."""
+        """List checkpoint tuples with their shared values; a tuple holding an undecodable or missing value raises."""
         inner = cast(
             "AsyncGenerator[CheckpointTuple]", super().alist(config, filter=filter, before=before, limit=limit)
         )
@@ -704,6 +771,6 @@ class GuardedAsyncRedisSaver(AsyncRedisSaver):
                 finally:
                     _decode_failures.reset(token)
                 _raise_failures(failures, _thread_of(item.config))
-                yield item
+                yield await self._shared.resolve(item)
         finally:
             await inner.aclose()

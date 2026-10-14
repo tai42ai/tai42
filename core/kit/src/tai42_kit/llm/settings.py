@@ -170,7 +170,7 @@ class LLMProviderSettings(TaiBaseSettings):
     """Selects the LLM, embedding, checkpoint, and store provider implementations and their connection strings."""
 
     # ``null`` sets an optional value to ``None`` (an empty value means "unset" and keeps the default),
-    # so a deployment can turn the inline checkpoint compression off.
+    # so a deployment can turn the inline checkpoint compression or the shared checkpoint values off.
     model_config = SettingsConfigDict(env_prefix="LLM_PROVIDER_", env_parse_none_str="null")
     env_prefix_owned: ClassVar[bool] = True
 
@@ -191,6 +191,10 @@ class LLMProviderSettings(TaiBaseSettings):
     # A checkpoint value whose encoding exceeds this many bytes is stored compressed; ``None``
     # (``LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES=null``) turns the compression off.
     checkpoint_inline_compress_bytes: int | None = Field(default=65536, gt=0)
+    # On the redis and postgres providers, a checkpoint sub-value whose encoding exceeds this many bytes
+    # is stored once per thread and referenced from every checkpoint and pending write that carries it;
+    # ``None`` (``LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES=null``) stores every value inline.
+    checkpoint_shared_value_bytes: int | None = Field(default=65536, gt=0)
     store: str = "redis"
     store_conn_string: str | None = None
 

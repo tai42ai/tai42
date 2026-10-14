@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -68,12 +68,40 @@ def _serialization_error(obj: Any, cause: ormsgpack.MsgpackEncodeError) -> Check
     return CheckpointSerializationError(f"checkpoint value could not be msgpack-encoded: {cause}")
 
 
+class PreEncodedValue:
+    """A checkpoint value the kit saver already encoded: the saver's serializer returns ``encoded`` as it is."""
+
+    __slots__ = ("encoded",)
+
+    def __init__(self, encoded: tuple[str, bytes]) -> None:
+        """``encoded``: the ``(type, bytes)`` pair the serializer returns for this value."""
+        self.encoded = encoded
+
+
+class PreEncodedCheckpoint(dict[str, Any]):
+    """A checkpoint the kit saver already encoded, carrying the checkpoint's keys for the library saver.
+
+    The library saver reads the checkpoint's id and copies it before handing it to its serializer;
+    the copy keeps the encoding, and the serializer returns ``encoded`` as it is.
+    """
+
+    def __init__(self, checkpoint: Mapping[str, Any], encoded: tuple[str, bytes]) -> None:
+        """``encoded``: the ``(type, bytes)`` pair the serializer returns for this checkpoint."""
+        super().__init__(checkpoint)
+        self.encoded = encoded
+
+    def copy(self) -> PreEncodedCheckpoint:  # pyright: ignore[reportIncompatibleMethodOverride]
+        """A shallow copy that keeps the encoding."""
+        return PreEncodedCheckpoint(self, self.encoded)
+
+
 class _GuardedSerializer:
     """Wrap a saver's serializer: a codec (when the provider has one) and the encode-failure guard.
 
     A ``MsgpackEncodeError`` becomes a :class:`CheckpointSerializationError` naming the offending path.
-    ``dumps_metadata_typed`` encodes checkpoint metadata through the inner serializer alone (no codec).
-    All other serializer methods delegate unchanged.
+    A :class:`PreEncodedValue` or :class:`PreEncodedCheckpoint` is returned as the kit saver encoded it.
+    ``dumps_plain_typed`` and ``dumps_metadata_typed`` encode through the inner serializer alone (no
+    codec). All other serializer methods delegate unchanged.
     """
 
     def __init__(self, inner: Any, codec: CheckpointCodec | None = None) -> None:
@@ -84,6 +112,8 @@ class _GuardedSerializer:
         return getattr(self._inner, name)
 
     def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
+        if isinstance(obj, (PreEncodedValue, PreEncodedCheckpoint)):
+            return obj.encoded
         try:
             if self._codec is not None:
                 return self._codec.dumps_typed(self._inner, obj)
@@ -91,11 +121,14 @@ class _GuardedSerializer:
         except ormsgpack.MsgpackEncodeError as exc:
             raise _serialization_error(obj, exc) from exc
 
-    def dumps_metadata_typed(self, obj: Any) -> tuple[str, bytes]:
+    def dumps_plain_typed(self, obj: Any) -> tuple[str, bytes]:
         try:
             return self._inner.dumps_typed(obj)
         except ormsgpack.MsgpackEncodeError as exc:
             raise _serialization_error(obj, exc) from exc
+
+    def dumps_metadata_typed(self, obj: Any) -> tuple[str, bytes]:
+        return self.dumps_plain_typed(obj)
 
     def dumps(self, obj: Any) -> bytes:
         try:
@@ -120,7 +153,8 @@ def _guard_saver_serialization(saver: BaseCheckpointSaver, facts: CheckpointProv
 
     Every saver the registry hands to a graph flows through here, so no checkpoint write can
     reach the serializer unguarded. Redis gets the faithful JSON codec (with the inline compressed
-    envelope); Postgres compresses large blobs; sqlite and memory get the guard alone.
+    envelope); Postgres compresses large blobs; sqlite and memory get the guard alone. A value the
+    kit's Redis or Postgres saver already encoded passes the guard as it is.
     """
     if isinstance(saver.serde, _GuardedSerializer):
         return saver
@@ -212,6 +246,7 @@ async def _create_postgres_checkpoint(conn_string: str | None) -> tuple[Checkpoi
 
     from tai42_kit.clients.impl.postgres import open_dedicated_pool
     from tai42_kit.llm._langgraph_postgres import LANGGRAPH_CONNECTION_KWARGS, serialised_setup
+    from tai42_kit.llm.checkpoint.value_store import PostgresCheckpointValueStore
 
     # An unset conn string means the base Postgres namespace: its DSN builder raises a named
     # error if that identity is also unset, and its deployment sizes size this pool.
@@ -224,6 +259,7 @@ async def _create_postgres_checkpoint(conn_string: str | None) -> tuple[Checkpoi
         async with pool.connection() as conn, serialised_setup(conn, "checkpoint_migrations"):
             temp_saver = AsyncPostgresSaver(cast("AsyncConnection[DictRow]", conn))
             await temp_saver.setup()
+        await PostgresCheckpointValueStore(pool).setup()
         ledger = PostgresFinishedThreadLedger(pool)
         await ledger.setup()
     except BaseException:
@@ -241,8 +277,8 @@ async def _create_postgres_checkpoint(conn_string: str | None) -> tuple[Checkpoi
 def _redis_ttl_config(waiting_minutes: int) -> dict[str, Any]:
     # Every key a write stamps carries the waiting retention, and a read never re-arms it: a
     # thread lives that long after its last write. A parked run's last write is its park
-    # checkpoint, and the latest checkpoint carries its channel values inline, so older
-    # checkpoints expiring first never breaks a resume.
+    # checkpoint, which carries its channel values inline or references shared values that
+    # same write re-armed, so older checkpoints expiring first never breaks a resume.
     return {"default_ttl": waiting_minutes, "refresh_on_read": False}
 
 
@@ -353,9 +389,9 @@ def get_saver_from_resource(provider: str, resource: CheckpointResource) -> Base
 
             saver: BaseCheckpointSaver = AsyncSqliteSaver(resource.handle)
         case "postgres":
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # pyright: ignore[reportMissingImports]
+            from tai42_kit.llm.checkpoint.postgres_saver import GuardedAsyncPostgresSaver
 
-            saver = AsyncPostgresSaver(resource.handle)
+            saver = GuardedAsyncPostgresSaver(resource.handle)
         case _:
             saver = resource.handle
     return _guard_saver_serialization(saver, facts)
