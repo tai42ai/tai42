@@ -30,6 +30,7 @@ from typing import Any
 from tai42_kit.registry import staged as staged_primitives
 
 from tai42_skeleton.app import registry_staging
+from tai42_skeleton.app.route_registry import route_registry
 
 _STAGING_PHASES: tuple[FunctionType, ...] = (
     registry_staging.begin_staging_all,
@@ -124,10 +125,17 @@ def _restore(obj: Any, saved: dict[str, Any]) -> None:
 
 @contextmanager
 def preserved_staged_generations() -> Iterator[None]:
-    """Restore every staged participant's committed and staged state when the block exits."""
+    """Restore every staged participant's committed and staged state when the block exits.
+
+    The route registry's version is moved past every version the block reached instead of
+    being put back: tables are memoised on it, and a rewound version would hand a table built
+    from the block's records to a later block that records as many routes.
+    """
     saved = [(obj, _snapshot(obj)) for obj in saved_objects()]
     try:
         yield
     finally:
+        version = route_registry.version
         for obj, state in saved:
             _restore(obj, state)
+        route_registry._version = version + 1

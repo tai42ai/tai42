@@ -24,9 +24,8 @@ def _registry_copy(monkeypatch: pytest.MonkeyPatch) -> None:
         route_registry, "_routes", {key: meta for key, meta in route_registry._routes.items() if not meta.mounted}
     )
     monkeypatch.setattr(route_registry, "_control_plane_mount", None)
-    monkeypatch.setattr(route_registry, "_version", route_registry._version + 1)
-    # The derived table is memoised on the registry version, which this fixture rewinds.
-    monkeypatch.setattr(mcp_endpoints, "_table", None)
+    # The records changed outside ``record_mounted``; moving the version on rebuilds the memoised table.
+    route_registry._version += 1
     monkeypatch.setattr(mcp_endpoints, "_sse_stream_by_message_prefix", {})
 
 

@@ -187,7 +187,6 @@ def streamable_http_mounted(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(route_registry, "_routes", dict(route_registry._routes))
     monkeypatch.setattr(route_registry, "_control_plane_mount", route_registry._control_plane_mount)
-    monkeypatch.setattr(route_registry, "_version", route_registry._version)
     record_streamable_http_surface("/mcp", stateless=False)
 
 
