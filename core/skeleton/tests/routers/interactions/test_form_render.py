@@ -431,6 +431,10 @@ async def test_get_form_ticket_renders_display_blocks_and_review(wired):
     assert "<h3>Your details</h3>" in body
     assert '<p class="display-body">Tell us who you are.</p>' in body
     assert '<img src="https://cdn.example/x.png" alt="a logo">' in body
+    # The page policy admits the image sources a display block draws from: a remote https
+    # url and the deployment's own same-origin served-media reference.
+    directives = [directive.strip() for directive in resp.headers["content-security-policy"].split(";")]
+    assert "img-src 'self' https:" in directives
     # The review step carries the generic readback target and no input field.
     assert "<dl data-readback></dl>" in body
     # The readback is driven from the labels embedded on the form.

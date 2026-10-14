@@ -699,28 +699,45 @@ export function stackRedisUrl(): string {
   return url;
 }
 
-interface RedisReply {
-  readonly value: string | null;
-  readonly consumed: number;
+/** One RESP reply: a simple/bulk string, an integer, nil, or an array of replies. */
+type RespValue = string | number | null | RespValue[];
+
+interface RespParse {
+  readonly value: RespValue;
+  readonly next: number;
 }
 
-/** Parse ONE RESP reply from the head of `buf`, or `null` when it is incomplete. Handles
- * the simple-string/error/integer line replies and the bulk-string reply (incl. nil). */
-function parseRedisReply(buf: Buffer): RedisReply | null {
-  const nl = buf.indexOf('\r\n');
+/** Parse ONE RESP reply from `buf` at `at`, or `null` when it is incomplete. Handles the
+ * simple-string/error/integer line replies, the bulk string (incl. nil) and the array. */
+function parseResp(buf: Buffer, at: number): RespParse | null {
+  const nl = buf.indexOf('\r\n', at);
   if (nl === -1) return null;
-  const type = String.fromCharCode(buf[0]);
-  const line = buf.subarray(1, nl).toString('utf8');
+  const type = String.fromCharCode(buf[at]);
+  const line = buf.subarray(at + 1, nl).toString('utf8');
+  if (type === '-') throw new Error(`redis error reply: ${line}`);
+  if (type === ':') return { value: Number(line), next: nl + 2 };
   if (type === '$') {
     const len = Number(line);
-    if (len === -1) return { value: null, consumed: nl + 2 };
+    if (len === -1) return { value: null, next: nl + 2 };
     const start = nl + 2;
     const end = start + len;
     if (buf.length < end + 2) return null;
-    return { value: buf.subarray(start, end).toString('utf8'), consumed: end + 2 };
+    return { value: buf.subarray(start, end).toString('utf8'), next: end + 2 };
   }
-  if (type === '-') throw new Error(`redis error reply: ${line}`);
-  return { value: line, consumed: nl + 2 };
+  if (type === '*') {
+    const count = Number(line);
+    if (count === -1) return { value: null, next: nl + 2 };
+    const items: RespValue[] = [];
+    let next = nl + 2;
+    for (let i = 0; i < count; i++) {
+      const item = parseResp(buf, next);
+      if (item === null) return null;
+      items.push(item.value);
+      next = item.next;
+    }
+    return { value: items, next };
+  }
+  return { value: line, next: nl + 2 };
 }
 
 function respCommand(args: readonly string[]): Buffer {
@@ -729,40 +746,43 @@ function respCommand(args: readonly string[]): Buffer {
   return Buffer.from(out, 'utf8');
 }
 
-/** GET one key off the SUT Redis over a raw RESP socket — no client dependency, mirroring
- * the pytest harness's `registered_visitor_id`. Selects the URL's DB, GETs the key, and
- * returns the bulk string (or `null` when the key is absent). */
-async function redisGet(redisUrl: string, key: string): Promise<string | null> {
+/** Run `commands` on the SUT Redis over a raw RESP socket — no client dependency, mirroring
+ * the pytest harness's raw reads. Selects the URL's DB first and returns one reply per
+ * command, in order. */
+async function redisCommands(
+  redisUrl: string,
+  commands: readonly (readonly string[])[],
+): Promise<RespValue[]> {
   const url = new URL(redisUrl);
   const db = url.pathname.length > 1 ? url.pathname.slice(1) : '0';
   const host = url.hostname;
   const port = Number(url.port.length > 0 ? url.port : '6379');
-  return await new Promise<string | null>((resolve, reject) => {
+  return await new Promise<RespValue[]>((resolve, reject) => {
     const socket = connect({ host, port });
     let buf = Buffer.alloc(0);
-    const replies: (string | null)[] = [];
+    const replies: RespValue[] = [];
     const fail = (err: Error): void => {
       socket.destroy();
       reject(err);
     };
-    socket.setTimeout(5000, () => fail(new Error(`redis GET timed out for ${key}`)));
+    socket.setTimeout(5000, () => fail(new Error(`redis commands timed out: ${JSON.stringify(commands)}`)));
     socket.on('error', fail);
     socket.on('connect', () => {
       socket.write(respCommand(['SELECT', db]));
-      socket.write(respCommand(['GET', key]));
+      for (const command of commands) socket.write(respCommand(command));
     });
     socket.on('data', (chunk) => {
       buf = Buffer.concat([buf, typeof chunk === 'string' ? Buffer.from(chunk) : chunk]);
       try {
         for (;;) {
-          const reply = parseRedisReply(buf);
+          const reply = parseResp(buf, 0);
           if (reply === null) break;
           replies.push(reply.value);
-          buf = buf.subarray(reply.consumed);
-          // Reply 0 is SELECT's +OK; reply 1 is the GET we want.
-          if (replies.length >= 2) {
+          buf = buf.subarray(reply.next);
+          // Reply 0 is SELECT's +OK; the rest answer `commands` in order.
+          if (replies.length > commands.length) {
             socket.end();
-            resolve(replies[1]);
+            resolve(replies.slice(1));
             return;
           }
         }
@@ -771,6 +791,41 @@ async function redisGet(redisUrl: string, key: string): Promise<string | null> {
       }
     });
   });
+}
+
+/** GET one key off the SUT Redis, or `null` when it is absent. */
+async function redisGet(redisUrl: string, key: string): Promise<string | null> {
+  const [value] = await redisCommands(redisUrl, [['GET', key]]);
+  if (value !== null && typeof value !== 'string') {
+    throw new Error(`redis GET ${key} answered a non-string reply: ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+/** The key shape of an interaction's callback ticket (its value is the interaction id),
+ * under whatever namespace the stack's reserved DB carries. */
+const CALLBACK_TICKET_KEY_PATTERN = '*:interactions:ticket:*';
+
+/** The callback ticket minted for `interactionId` — a bearer capability the admin API
+ * never serializes, read from the SUT Redis exactly as the pytest harness's
+ * `_resolve_ticket` reads it. Throws when no ticket maps to the interaction. */
+export async function resolveCallbackTicket(interactionId: string): Promise<string> {
+  const redisUrl = stackRedisUrl();
+  let cursor = '0';
+  do {
+    const [reply] = await redisCommands(redisUrl, [
+      ['SCAN', cursor, 'MATCH', CALLBACK_TICKET_KEY_PATTERN, 'COUNT', '1000'],
+    ]);
+    if (!Array.isArray(reply) || typeof reply[0] !== 'string' || !Array.isArray(reply[1])) {
+      throw new Error(`redis SCAN answered an unexpected reply: ${JSON.stringify(reply)}`);
+    }
+    cursor = reply[0];
+    for (const key of reply[1]) {
+      if (typeof key !== 'string') throw new Error(`redis SCAN yielded a non-string key: ${JSON.stringify(key)}`);
+      if ((await redisGet(redisUrl, key)) === interactionId) return key.slice(key.lastIndexOf(':') + 1);
+    }
+  } while (cursor !== '0');
+  throw new Error(`no callback ticket maps to interaction ${interactionId}`);
 }
 
 /** The server-side visitor id a web-session cookie token is registered against — the
