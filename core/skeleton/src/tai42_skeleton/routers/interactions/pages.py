@@ -28,13 +28,16 @@ _HTML_HEADERS = {
 # The form page needs its own inline submit script (a native form cannot build the
 # typed ``{"answer": {...}}`` JSON body) plus a same-origin fetch back to this
 # callback URL. The CSP widens only to a constant inline ``script-src`` and a
-# ``connect-src``/``form-action`` pinned to ``'self'`` — no external origins, no
-# ``unsafe-eval`` — over the same locked-down ``default-src 'none'`` base.
+# ``connect-src``/``form-action`` pinned to ``'self'`` — no ``unsafe-eval`` — over the
+# same locked-down ``default-src 'none'`` base. ``img-src`` admits the sources a
+# display-block image draws from: a remote ``https:`` url and the deployment's own
+# same-origin served-media reference (``http:`` stays excluded — mixed content); an
+# image cannot execute script, so the script posture is unaffected.
 _FORM_HTML_HEADERS = {
     **_BASE_HEADERS,
     "Content-Security-Policy": (
         "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-        "connect-src 'self'; form-action 'self'"
+        "img-src 'self' https:; connect-src 'self'; form-action 'self'"
     ),
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
