@@ -54,6 +54,10 @@ def build_agents_stack(res: StackResources, variants: Variants) -> StackConfig:
     )
 
 
+# The shared-value threshold of the agents-redis stack, in bytes.
+AGENTS_REDIS_SHARED_VALUE_BYTES = 1024
+
+
 def build_agents_redis_stack(res: StackResources, variants: Variants) -> StackConfig:
     """REPLICAS + metrics — the production-default langgraph ``redis``
     checkpoint/store provider on the module-capable checkpoint Redis.
@@ -88,6 +92,9 @@ def build_agents_redis_stack(res: StackResources, variants: Variants) -> StackCo
     env = _base_env(res, variants)
     env.update(_redis_agent_state_env(res))
     env.update(_llm_env(res))
+    # A checkpoint sub-value above 1 KiB is stored once per thread and referenced, so a
+    # conversation turn carrying a large message crosses replicas through a shared value.
+    env["LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES"] = str(AGENTS_REDIS_SHARED_VALUE_BYTES)
     return StackConfig(
         name="agents-redis",
         topology=Topology.REPLICAS,

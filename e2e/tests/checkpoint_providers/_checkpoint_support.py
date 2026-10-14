@@ -4,8 +4,8 @@ A bare-name sibling module (the suite's convention for shared spec helpers), rea
 by both this dir's ``conftest`` and its spec module. Reuses the shared manifest
 primitives from ``tai42_e2e.manifests`` and sets only the ``LLM_PROVIDER_*`` checkpoint
 knobs (``core/kit/src/tai42_kit/llm/settings.py``), so the profile diverges from the
-others in exactly the dimension under test — the checkpoint provider and its two
-retention horizons."""
+others in exactly the dimension under test — the checkpoint provider, its two retention
+horizons and the shared-value threshold."""
 
 from __future__ import annotations
 
@@ -26,6 +26,10 @@ from tai42_e2e.variants import Variants
 # a finished mark — well past them, and keeps a fresh thread inside them.
 WAITING_MINUTES = 60
 FINISHED_MINUTES = 30
+
+# A checkpoint sub-value above this many bytes is stored once per thread and referenced: low
+# enough that the spec's threads carry shared values on the providers that store them.
+SHARED_VALUE_BYTES = 1024
 
 
 def checkpoint_conn_string(provider: str, res: StackResources) -> str:
@@ -49,7 +53,8 @@ def checkpoint_conn_string(provider: str, res: StackResources) -> str:
 def build_checkpoint_stack(res: StackResources, variants: Variants, *, provider: str) -> StackConfig:
     """MULTIWORKER(1), no backend — the ``_CORE_ROUTERS`` surface plus the checkpoints
     router (so ``sweep_checkpoints`` projects as a tool and ``POST /api/checkpoints/sweep``
-    is mounted), pinned to a checkpoint provider and the two retention horizons."""
+    is mounted), pinned to a checkpoint provider, the two retention horizons and the
+    shared-value threshold."""
     manifest = {
         "default_routers": "none",
         "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.checkpoints"],
@@ -67,6 +72,7 @@ def build_checkpoint_stack(res: StackResources, variants: Variants, *, provider:
     env["LLM_PROVIDER_CHECKPOINT_CONN_STRING"] = checkpoint_conn_string(provider, res)
     env["LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES"] = str(WAITING_MINUTES)
     env["LLM_PROVIDER_CHECKPOINT_RETENTION_FINISHED_MINUTES"] = str(FINISHED_MINUTES)
+    env["LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES"] = str(SHARED_VALUE_BYTES)
     return StackConfig(
         name=f"checkpoint-{provider}",
         topology=Topology.MULTIWORKER,

@@ -28,6 +28,7 @@ import pytest
 import redis
 
 from tai42_e2e.llmstub import LlmStub
+from tai42_e2e.manifests.agents import AGENTS_REDIS_SHARED_VALUE_BYTES
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 
@@ -112,6 +113,44 @@ async def test_redis_checkpoint_resumes_across_replicas(
     finally:
         client.close()
     assert keys, "no checkpoint keys landed in the checkpoint Redis; the redis provider was not exercised"
+
+
+@pytest.mark.needs("store:redis", "topology:replicas", "setting:agent:tools_agent", "setting:checkpoint:redis")
+async def test_a_large_value_stored_once_by_replica_a_resumes_on_replica_b(
+    agents_redis_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
+) -> None:
+    """A turn whose message is above the stack's shared-value threshold is stored once in the
+    thread's value store by replica A; replica B resolves the reference and resumes with the
+    whole message — the reference a worker writes resolves in another process."""
+    thread_id = uniq("thread")
+    marker = uniq("large")
+    large = f"{marker} " + " ".join(f"line {index} of the attached notes" for index in range(200))
+    assert len(large) > AGENTS_REDIS_SHARED_VALUE_BYTES * 4
+    llm_stub.reset()
+    llm_stub.script([{"content": "Noted."}, {"content": f"The notes start with {marker}."}])
+    langgraph_config = {"configurable": {"thread_id": thread_id}}
+
+    async with agents_redis_stack.mcp(port=agents_redis_stack.port_a) as mcp_a:
+        await mcp_a.call_tool("tools_agent", {"user_message": {"content": large}, "langgraph_config": langgraph_config})
+
+    checkpoint_url = agents_redis_stack.resources.checkpoint_redis_url
+    assert checkpoint_url is not None  # the module skips unless the checkpoint Redis is configured
+    client = redis.Redis.from_url(checkpoint_url, decode_responses=True)
+    try:
+        values = client.keys(f"tai42:checkpoint:value:{{{thread_id}}}:*")
+    finally:
+        client.close()
+    assert values, "replica A stored no shared value for the large message"
+
+    async with agents_redis_stack.mcp(port=agents_redis_stack.port_b) as mcp_b:
+        await mcp_b.call_tool(
+            "tools_agent",
+            {"user_message": {"content": "how do my notes start?"}, "langgraph_config": langgraph_config},
+        )
+
+    requests = llm_stub.requests
+    assert len(requests) == 2, f"expected 2 LLM round-trips, saw {len(requests)}"
+    assert large in json.dumps(requests[1]), "replica B did not resume with the whole large message from replica A"
 
 
 @pytest.mark.needs("topology:replicas", "setting:agent:tools_agent", "setting:checkpoint:redis")
