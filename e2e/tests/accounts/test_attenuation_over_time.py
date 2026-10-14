@@ -11,7 +11,9 @@ from collections.abc import Callable
 
 import pytest
 
-from tai42_e2e.member_admin import invite_member, update_member
+from tai42_e2e.accounts_flow import invite_accept_login
+from tai42_e2e.httpapi import ApiClient
+from tai42_e2e.member_admin import handle_for_user, update_member
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 
@@ -24,17 +26,24 @@ pytestmark = pytest.mark.needs(
 )
 
 _SCOPE = "e2e-all"
+_PASSWORD = "owner-user-password-1"
 
 
 async def test_owned_key_follows_owner_role_over_time(accounts_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     stack = accounts_stack
     admin = stack.api(port=stack.port_a)  # seeded root sk- key (unconditional "*" admin)
 
-    # An editor owner with a live policy (the invite action applies the role), and a
-    # machine key owned by that editor.
-    owner = await invite_member(admin, email=f"{uniq('owner')}@e2e.test", role="editor")
-    owner_id = owner["user_id"]
-    owner_handle = owner["handle"]
+    # An editor owner with a live policy (the invite action applies the role) who accepts
+    # the invite, so its directory row is a member row offering the role and access change;
+    # and a machine key owned by that editor.
+    owner_id, _session = await invite_accept_login(
+        admin,
+        ApiClient(stack.origin(stack.port_a)),
+        email=f"{uniq('owner')}@e2e.test",
+        role="editor",
+        password=_PASSWORD,
+    )
+    owner_handle = await handle_for_user(admin, owner_id)
     owned_id = uniq("owned")
     created_key = await admin.post(
         "/api/auth/api-keys",

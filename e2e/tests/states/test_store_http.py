@@ -728,7 +728,7 @@ async def test_a_state_and_template_recreated_on_one_worker_are_served_anew_on_t
     assert (await api_b.get(f"{record}/template-jq/answer"))["value"] == "after"
 
 
-@pytest.mark.needs("kind:states")
+@pytest.mark.needs("kind:states", "setting:fixture-seams")
 async def test_a_shipped_template_seed_reads_back(seams_stack: TaiStack) -> None:
     """A template a plugin ships as a seed is stored through the validated write, so it reads
     back like an uploaded one — typed sections, the trace default included."""

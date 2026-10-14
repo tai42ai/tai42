@@ -13,7 +13,7 @@ from collections.abc import Callable
 import pytest
 
 from tai42_e2e.httpapi import ApiClient
-from tai42_e2e.member_admin import invite_member, invoke_raw, resolve_action_key
+from tai42_e2e.member_admin import invite_member, invoke_raw, resolve_invite_action_key
 from tai42_e2e.stack import TaiStack
 
 pytestmark = pytest.mark.needs("kind:identity", "kind:accounts:postgres", "topology:replicas")
@@ -68,7 +68,7 @@ async def test_invite_accept_login_and_rejections(accounts_stack: TaiStack, uniq
 
     # The invited editor is a NON-admin: its jq condition fences it out of the reserved
     # member-administration surface, so it cannot invoke a member action to create members.
-    invite_key = await resolve_action_key(admin, scope="page")
+    invite_key = await resolve_invite_action_key(admin)
     editor = stack.api(port=stack.port_b).with_token(session)
     denied = await invoke_raw(
         editor, action_key=invite_key, action_input={"email": f"{uniq('x')}@e2e.test", "role": "viewer"}
