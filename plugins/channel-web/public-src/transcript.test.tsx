@@ -338,6 +338,7 @@ describe('Transcript', () => {
         header: null,
         footer: null,
         location: null,
+        wording: null,
         ts: new Date(NOW).toISOString(),
       },
     };
@@ -366,6 +367,7 @@ describe('Transcript', () => {
         location: null,
         formData: null,
         pages: null,
+        wording: null,
         ts: new Date(NOW).toISOString(),
       },
     };
@@ -409,6 +411,7 @@ describe('Transcript', () => {
         header: null,
         footer: null,
         location: null,
+        wording: null,
         ts: new Date(NOW).toISOString(),
       },
     };

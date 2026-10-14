@@ -120,6 +120,11 @@ def _errors_response(block_id: str | None, text: str) -> JSONResponse:
 
     Slack requires the id of a block present in the view; a submission that
     carried none is malformed and raised rather than silently closed.
+
+    Slack documents no maximum length for an ``errors`` message string (unlike the
+    ``plain_text`` caps elsewhere), so none is enforced here; ``text`` is already
+    bounded by the contract's rejection-notice cap. This reply is synchronous, so a
+    cap — had one existed — would have to hold at compose, never here.
     """
     if block_id is None:
         raise ValueError("view_submission carried no input block to report the error on")
@@ -131,6 +136,28 @@ def _state_values(view: dict[str, Any]) -> dict[str, Any]:
     state = view.get("state")
     values = state.get("values") if isinstance(state, dict) else None
     return values if isinstance(values, dict) else {}
+
+
+def _form_wording(record: dict[str, Any]) -> dict[str, Any]:
+    """The ``wording.form`` chapter off the stored form record, or ``{}`` when the ask set none.
+
+    The modal's title/submit/close label, review line and per-field placeholders are read from it.
+    """
+    wording = record.get("wording")
+    form = wording.get("form") if isinstance(wording, dict) else None
+    return form if isinstance(form, dict) else {}
+
+
+def _rejected_template(record: dict[str, Any]) -> str | None:
+    """The caller's ``wording.answer.rejected`` refusal sentence off the record, or ``None``.
+
+    When set it is the modal's inline-error template (an optional ``{reason}`` token takes the
+    door's reason); ``None`` means the surface draws its own generic correction line.
+    """
+    wording = record.get("wording")
+    answer = wording.get("answer") if isinstance(wording, dict) else None
+    rejected = answer.get("rejected") if isinstance(answer, dict) else None
+    return rejected if isinstance(rejected, str) else None
 
 
 def _field_has_block(schema: dict[str, Any], field: str | None) -> bool:
@@ -231,7 +258,10 @@ async def _open_form_modal(payload: dict[str, Any], action: dict[str, Any]) -> R
     if not isinstance(trigger_id, str) or not trigger_id:
         raise ValueError("block_actions payload carried no trigger_id")
     # The per-send prefill/choices, step layout (display/review) and reaction triggers reserved
-    # at delivery are what this modal renders; absent (a plain ask) render the plain modal.
+    # at delivery are what this modal renders; absent (a plain ask) render the plain modal. The
+    # caller's form chrome (title, submit, close, review line, per-field placeholders) rides the
+    # record's ``wording`` too — read off it here so the opened modal shows the caller's words,
+    # never the platform default when one was set.
     data = record.get("data") or {}
     view = build_modal_view(
         interaction_id,
@@ -241,6 +271,7 @@ async def _open_form_modal(payload: dict[str, Any], action: dict[str, Any]) -> R
         data.get("options"),
         record.get("pages"),
         reactions=record.get("reactions"),
+        form_wording=_form_wording(record),
     )
     await open_modal_view(trigger_id, view)
     return JSONResponse({"status": "opened"})
@@ -345,6 +376,7 @@ async def _handle_form_field_action(payload: dict[str, Any], action: dict[str, A
         field_errors=field_errors,
         metadata_options=meta_options or None,
         metadata_display=meta_display or None,
+        form_wording=_form_wording(record),
     )
     if banner is not None:
         view_out["blocks"].insert(1, {"type": "section", "text": {"type": "mrkdwn", "text": banner}})
@@ -462,11 +494,14 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
         logger.info("slack interactive: form %s reply bridged as a fresh turn; ask kept parked", interaction_id)
         return JSONResponse({})
     if result.outcome is InboundAnswerOutcome.RETRY_KEPT:
-        # The channel owns the correction: the modal stays open with an inline error
-        # carrying the door's OWN reason, pinned under the door-named field's block when
-        # it is a declared schema property, else the first field.
+        # The channel owns the correction: the modal stays open with an inline error. The caller's
+        # ``wording.answer.rejected`` sentence (its optional ``{reason}`` token taking the door's
+        # reason) carries it when set, else the door's own reason, else the generic line — pinned
+        # under the door-named field's block when it is a declared schema property, else the first.
         logger.warning("slack interactive: door rejected form %s (retry-in-place); record kept", interaction_id)
-        error_text = result.retry_reason or _MODAL_RETRY_TEXT
+        reason = result.retry_reason or _MODAL_RETRY_TEXT
+        template = _rejected_template(record)
+        error_text = template.replace("{reason}", reason) if template else reason
         block = result.retry_field if _field_has_block(schema, result.retry_field) else first_block
         return _errors_response(block, error_text)
     # NO_CORRELATION / BRIDGED: the ask is gone. The ladder released the record (and, on

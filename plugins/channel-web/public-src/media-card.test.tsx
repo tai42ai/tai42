@@ -22,6 +22,7 @@ function card(overrides: Partial<MediaCardItem> = {}): MediaCardItem {
     header: null,
     footer: null,
     location: null,
+    wording: null,
     ts: TS,
     ...overrides,
   };
@@ -226,6 +227,24 @@ describe('MediaCard', () => {
     await user.click(screen.getByRole('button', { name: 'Item A' }));
 
     expect(onSend).toHaveBeenCalledWith('Item A', null);
+  });
+
+  it('names the flat reply-option group with the default, then the caller word', () => {
+    renderCard(card({ options: [reply('Item A')] }));
+    expect(screen.getByRole('group', { name: 'Suggested replies' })).toBeInTheDocument();
+    cleanup();
+    renderCard(
+      card({
+        options: [reply('Item A')],
+        wording: {
+          form: null,
+          choice: { groupLabel: 'Quick answers' },
+          answer: null,
+          status: null,
+        },
+      }),
+    );
+    expect(screen.getByRole('group', { name: 'Quick answers' })).toBeInTheDocument();
   });
 
   it('rides the tapped reply option authored id back on the send', async () => {

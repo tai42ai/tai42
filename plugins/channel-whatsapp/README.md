@@ -126,13 +126,41 @@ renders as an in-chat **WhatsApp Flow** — one screen of typed fields the human
 fills and submits: a `string` becomes a text field, a `string` with a short
 `enum` a **radio group** (a longer enum, or a per-send option list, a dropdown),
 an **array of strings** a **checkbox group** (multiple choice), a `boolean` an
-opt-in toggle, and an `integer`/`number` a numeric text field. A `string` with
+opt-in toggle, and an `integer`/`number` a numeric text field. A `control: chips`
+choice draws a **chip grid** (`ChipsSelector`) — single-pick for a string `enum`,
+multi-pick for an array — for Meta's 2–20 choices, else it **degrades** to the
+default control (the radio/dropdown or checkbox group) for that shape. A
+`control: textarea` string draws a **multi-line text area**, and a declared
+`maxLength`/`minLength` is drawn as the field's character limit (`max-chars`/
+`min-chars` on a single-line field, `max-length` on the text area) as well as
+enforced at the answer door. A `string` field's
+`inputMode` hint picks the text field's keyboard: `numeric` and `decimal` draw
+the **numeric keypad** (it admits a decimal separator), `tel` the **phone
+keypad**, `email` the **email keyboard**, and `url` **degrades to a plain text
+field** (Meta has no `url` input-type); `text` (or no hint) is the plain text
+field. `inputMode` only chooses the keyboard — the value is always submitted as
+the typed string, never coerced. A `string` with
 `format: date` that carries platform date constraints (`minDate`/`maxDate`,
 `unavailableDates`, or a two-field range pairing) renders a bounded
 **CalendarPicker** (an unconstrained date stays a plain date picker); a declared
-date range is drawn as **two scalar date fields** and its ordering/span is
-enforced at the single answer facet, so the submitted answer is always the two
-date values, never a combined object. A page's **display blocks** (heading/body/
+date range is drawn as **one range control** when both ends sit on the same page
+with the same visibility, no other field depends on either end, and the form has no
+**review** page, else as **two date fields** (a documented degrade — a review page
+reads each field's value back as text, which a range object cannot render) — either
+way its ordering/span is enforced at
+the single answer facet, so the submitted answer is always the two date values,
+never a combined object. The platform-drawn texts of a send ride the sender's `wording` catalogue. The chat
+button that **opens** the Flow reads `wording.form.open` (else *Fill form*; ≤20
+characters), a page-less form's screen **title** reads `wording.form.title` (else
+*Form*) and its terminal button reads `wording.form.submit` (else *Submit*; ≤35
+characters), each page's own primary button reads its `button_label` (else
+*Continue*/*Submit*; ≤35 characters), and a `select` ask's or options/sections
+notification's list-opening button reads `wording.choice.label` (else *Choose an
+option*; ≤20 characters) with its numbered-text fallback hint reading
+`wording.choice.reply_hint`. A non-form `confirm`/`external` ask is a text link whose
+line reads `wording.lines.answer_link` (its `{url}` token filled with the callback
+link).
+A page's **display blocks** (heading/body/
 image, each static or a reaction-filled slot) render ahead of its inputs, a
 **review** page shows a generic readback of the entered values, and a field with
 a `visibleWhen` predicate is shown/hidden by client-side `If`s — one per value
@@ -145,8 +173,10 @@ types before the answer object is forwarded. When the callback door **rejects**
 a forwarded form answer (`400` — a schema rule the Flow could not enforce, e.g. a
 minimum or pattern), a completed Flow has no re-reply surface, so the channel
 **re-sends a fresh Flow** for the same interaction: same flow token, the cached
-flow id, and a body that repeats the question with the door's error line (which
-names the failing field). This is **bounded** — after a fixed number of
+flow id, and a body that repeats the question with the refusal sentence — the
+sender's `wording.answer.rejected` (its `{reason}` token filled with the door's
+error line, which names the failing field) when set, else a generic lead and that
+line. This is **bounded** — after a fixed number of
 rejections the channel stops re-sending, tells the participant once the form could not
 be processed, and lets the ask time out on its own deadline. The platform
 validates the answer schema against this subset when the question is asked —

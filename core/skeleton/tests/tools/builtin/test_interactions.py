@@ -96,13 +96,13 @@ async def test_ask_forwards_arguments_and_returns_answer(monkeypatch: pytest.Mon
                 "pages": None,
                 "reaction_tool": None,
                 "reactions": None,
+                "wording": None,
                 "group_id": "g1",
                 "timeout": 30.0,
                 "link": None,
                 "channel": None,
                 "recipient": None,
                 "on_mismatch": AnswerMismatchPolicy.RETRY,
-                "mismatch_notice": None,
                 "audience": None,
                 "media": None,
                 "mode": "sync",
@@ -133,13 +133,13 @@ async def test_ask_defaults_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
                 "pages": None,
                 "reaction_tool": None,
                 "reactions": None,
+                "wording": None,
                 "group_id": None,
                 "timeout": None,
                 "link": None,
                 "channel": None,
                 "recipient": None,
                 "on_mismatch": AnswerMismatchPolicy.RETRY,
-                "mismatch_notice": None,
                 "audience": None,
                 "media": None,
                 "mode": "sync",
@@ -185,23 +185,23 @@ async def test_ask_forwards_on_mismatch(monkeypatch: pytest.MonkeyPatch) -> None
     assert helper.calls[0][1]["on_mismatch"] is AnswerMismatchPolicy.BRIDGE
 
 
-async def test_ask_forwards_mismatch_notice(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The custom retry notice is forwarded verbatim; on_mismatch defaults to retry.
+async def test_ask_forwards_wording_rejected_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The caller's refusal sentence rides the wording catalogue and is forwarded verbatim;
+    # on_mismatch defaults to retry.
     helper = _RecordingHelper(answer="ok")
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
-    result = await builtin_interactions.ask(
-        "Ping?", channel="telegram", mismatch_notice="Please answer yes or no ({reason})."
-    )
+    wording = {"answer": {"rejected": "Please answer yes or no ({reason})."}}
+    result = await builtin_interactions.ask("Ping?", channel="telegram", wording=wording)
 
     assert result == "ok"
-    assert helper.calls[0][1]["mismatch_notice"] == "Please answer yes or no ({reason})."
+    assert helper.calls[0][1]["wording"] == wording
     assert helper.calls[0][1]["on_mismatch"] is AnswerMismatchPolicy.RETRY
 
 
-def test_ask_tool_schema_advertises_mismatch_fields() -> None:
-    # The typed signature fastmcp derives advertises both fields to the LLM: a bounded
-    # retry|bridge choice defaulting to retry, and an optional custom notice string.
+def test_ask_tool_schema_advertises_the_wording_and_mismatch_fields() -> None:
+    # The typed signature fastmcp derives advertises the fields to the LLM: a bounded
+    # retry|bridge on_mismatch choice defaulting to retry, and an optional wording object.
     # Neither is required, so every existing ask keeps working unchanged.
     from fastmcp.utilities.types import get_cached_typeadapter
 
@@ -209,9 +209,9 @@ def test_ask_tool_schema_advertises_mismatch_fields() -> None:
     props = schema["properties"]
     assert props["on_mismatch"]["enum"] == ["retry", "bridge"]
     assert props["on_mismatch"]["default"] == "retry"
-    assert "mismatch_notice" in props
+    assert "wording" in props
     assert "on_mismatch" not in schema.get("required", [])
-    assert "mismatch_notice" not in schema.get("required", [])
+    assert "wording" not in schema.get("required", [])
 
 
 async def test_ask_forwards_media(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -268,6 +268,30 @@ async def test_ask_forwards_reaction_fields_as_none_by_default(monkeypatch: pyte
     assert result == "ok"
     assert helper.calls[0][1]["reaction_tool"] is None
     assert helper.calls[0][1]["reactions"] is None
+
+
+async def test_ask_forwards_the_wording_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The caller's per-send wording catalogue crosses the TOOL door verbatim, so a form/select/
+    # question sent via run_tool/agent/MCP can localize every platform-drawn text.
+    helper = _RecordingHelper(answer="ok")
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
+
+    wording = {"form": {"open": "Rellenar", "cancel": "Cancelar", "back": "Atras", "title": "Formulario"}}
+    result = await builtin_interactions.ask("Pick?", answer_format="form", wording=wording)
+
+    assert result == "ok"
+    assert helper.calls[0][1]["wording"] == wording
+
+
+async def test_ask_forwards_the_wording_as_none_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A plain ask forwards the wording catalogue as None, so the surfaces keep their defaults.
+    helper = _RecordingHelper(answer="ok")
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
+
+    result = await builtin_interactions.ask("Anything?")
+
+    assert result == "ok"
+    assert helper.calls[0][1]["wording"] is None
 
 
 async def test_ask_propagates_timeout(monkeypatch: pytest.MonkeyPatch) -> None:

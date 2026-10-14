@@ -16,7 +16,7 @@ from tai42_contract.interactions import CALLBACK_LINK_FORMATS
 
 from tai42_channel_whatsapp.channel.asks import _render_link, _send_question
 from tai42_channel_whatsapp.channel.forms import _deliver_form, _send_form_notification
-from tai42_channel_whatsapp.channel.interactive import _INTERACTIVE_BODY_MAX_CHARS
+from tai42_channel_whatsapp.channel.interactive import _INTERACTIVE_BODY_MAX_CHARS, _choice_of, _guard_choice_label
 from tai42_channel_whatsapp.channel.media import _send_media_prelude
 from tai42_channel_whatsapp.channel.notifications import _send_notification
 from tai42_channel_whatsapp.channel.recipients import _NO_DEFAULT_RECIPIENT, _require_recipient, _send_template
@@ -126,8 +126,16 @@ class WhatsAppChannel:
             await _deliver_form(settings, phone_number_id, target, delivery)
             return
 
+        # A select ask's list-opening button carries the caller's ``wording.choice.label``; refuse
+        # an over-cap label loudly BEFORE the reservation and any send, regardless of the shape the
+        # options end up rendering as (buttons / list / numbered text).
+        choice = _choice_of(delivery)
+        _guard_choice_label(choice.label if choice is not None else None)
+
         # Reserve before send: a fast reply's webhook can beat the send response,
-        # and this enforces one-pending-per-pair before any network cost.
+        # and this enforces one-pending-per-pair before any network cost. The reservation
+        # carries the ask's digression policy and per-send wording so the shared answer ladder
+        # honours them and draws the caller's refusal sentence off the stored record.
         await reserve_pending(
             phone_number_id=phone_number_id,
             wa_id=target,
@@ -135,6 +143,8 @@ class WhatsAppChannel:
             timeout_at=delivery.timeout_at,
             options=delivery.options,
             interaction_id=delivery.interaction_id,
+            on_mismatch=delivery.on_mismatch,
+            wording=delivery.wording,
         )
         try:
             await _send_question(phone_number_id, target, delivery)

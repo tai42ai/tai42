@@ -94,6 +94,38 @@ checkbox group, a constrained `format: date` a bounded calendar picker; a page's
 display blocks and a review page render too, and a `visibleWhen` field is shown or
 hidden client-side.
 
+A string field's `inputMode` hint picks the text field's keyboard: `numeric` and
+`decimal` draw the numeric keypad (it admits a decimal separator), `tel` the phone
+keypad, `email` the email keyboard, and `url` degrades to a plain text field (Meta
+has no `url` input-type); `text` (or no hint) is the plain text field. `inputMode`
+only chooses the keyboard — the value is always submitted as the typed string.
+
+A `control: chips` choice draws a chip grid (single-pick for a string `enum`,
+multi-pick for an array of strings) for Meta's 2–20 choices, else it degrades to the
+default radio/dropdown or checkbox control. A `control: textarea` string draws a
+multi-line text area, and a declared `maxLength`/`minLength` is drawn as the field's
+character limit (`max-chars`/`min-chars` on a single-line field, `max-length` on the
+text area). A declared date range (a `rangeStart` pairing) draws as one range
+CalendarPicker when both ends sit on the same page with the same visibility, no
+other field depends on either end, and the form has no review page, else as two date
+fields (a review page reads each field's value back as text, which a range object
+cannot render); either way the answer is the two date strings.
+
+The platform-drawn texts of a send ride the sender's `wording` catalogue. The chat
+button that opens the Flow reads `wording.form.open` (else *Fill form*, ≤20
+characters), a page-less form's screen title reads `wording.form.title` (else *Form*)
+and its terminal button reads `wording.form.submit` (else *Submit*, ≤35 characters),
+each page's own primary button reads its `button_label` (else *Continue*/*Submit*,
+≤35 characters), and a `select` ask's or options/sections notification's list-opening
+button reads `wording.choice.label` (else *Choose an option*, ≤20 characters) with its
+numbered-text fallback hint reading `wording.choice.reply_hint` (else *Reply with the
+text of one option.*). A non-form `confirm`/`external` ask is a text link whose line
+reads `wording.lines.answer_link` (its `{url}` token filled with the callback link,
+else *Answer here: {url}*); WhatsApp draws no `wording.answer` button. When the callback
+door rejects a form answer, the re-sent Flow's body reads `wording.answer.rejected`
+(its `{reason}` token filled with the door's reason, else a generic lead), capped at
+deliver so the reason always fits Meta's message body.
+
 A form that **reacts while open** (its ask declares reaction triggers) publishes as
 an endpoint-driven Flow whose controls call this plugin's encrypted Flow **data
 endpoint** (`/api/channels/whatsapp/flow-data`, which answers the encrypted reply as a

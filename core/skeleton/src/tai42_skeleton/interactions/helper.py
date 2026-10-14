@@ -35,6 +35,7 @@ from tai42_contract.interactions import (
     FormReactions,
     MediaItem,
     SuspendedInteraction,
+    Wording,
 )
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
@@ -126,6 +127,7 @@ async def ask(
     pages: list[FormPage] | list[dict[str, Any]] | None = None,
     reaction_tool: str | None = None,
     reactions: FormReactions | dict[str, Any] | None = None,
+    wording: Wording | dict[str, Any] | None = None,
     group_id: str | None = None,
     timeout: float | None = None,
     link: str | Callable[[str], Awaitable[str]] | None = None,
@@ -133,7 +135,6 @@ async def ask(
     channel: str | None = None,
     recipient: str | None = None,
     on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY,
-    mismatch_notice: str | None = None,
     sensitive: bool = False,
     audience: str | None = None,
     media: list[MediaItem | dict[str, Any]] | None = None,
@@ -230,15 +231,6 @@ async def ask(
     (the ladder's authoritative read). It takes effect only on a channel-delivered
     ask; an inbox-only ask records it but never reaches the ladder.
 
-    ``mismatch_notice`` is an OPTIONAL custom participant-facing rejection notice used
-    ONLY under the ``RETRY`` policy: when set it REPLACES the platform's built-in
-    retry notice (a literal ``{reason}`` token is filled with the door's reason by
-    a plain substitution; a notice without it is sent verbatim). It is IGNORED
-    under ``BRIDGE`` (a digression never notifies) and by a channel that owns its
-    correction surface. It rides the same two frames as ``on_mismatch``. ``None``
-    (the default) uses the built-in notice; a set value is a non-blank string
-    within the participant-reply cap (the models enforce it).
-
     ``audience`` is the identity (a user_id) the question is addressed to:
     a restricted identity sees and answers ONLY questions addressed to it, while an
     unrestricted operator sees and may answer everything. Leave it unset for an
@@ -286,6 +278,14 @@ async def ask(
     model enforces all three loudly). A reacting form over a ``channel`` requires that channel
     to advertise ``supports_form_reaction`` (refused loudly otherwise); a ``channel=None``
     reacting form is served by the in-app reaction door. Absent both is a static form.
+
+    ``wording`` (a ``Wording`` or its dict) is the OPTIONAL per-send catalogue of the question's
+    platform-drawn texts — a form's chrome, a choice list's control words, a non-form question's
+    answer controls, the lines of the delivery message, the pages a link opens, the refusal
+    sentence the participant reads, and status copy — grouped by what each decorates. Each member
+    is admitted only on a send that draws it (a member a format has no control for is refused
+    loudly, never silently dropped); absent, every surface shows its own word. It rides a
+    ``channel`` delivery so the channel draws the caller's text.
 
     ``mode`` selects the wait discipline. ``"sync"`` (the default) blocks and
     returns the typed answer as described above. ``"async"`` PARKS the caller: it
@@ -390,11 +390,17 @@ async def ask(
             # a failed builder leaves zero state.
             final_url = await payload_shaping.resolve_link(link, callback.callback_url)  # type: ignore[arg-type]
         format_payload = payload_shaping.build_payload(
-            fmt, options, schema, url=final_url, verifier=validation.verifier
+            fmt, options, schema, url=final_url, verifier=validation.verifier, wording=wording
         )
     else:
         format_payload = payload_shaping.build_payload(
-            fmt, options, schema, data=data, pages=pages, reactions=reactions
+            fmt,
+            options,
+            schema,
+            data=data,
+            pages=pages,
+            reactions=reactions,
+            wording=wording,
         )
 
     stored_media = await persist.persist_question(
@@ -409,7 +415,6 @@ async def ask(
         format_payload=format_payload,
         reaction_tool=reaction_tool,
         on_mismatch=on_mismatch,
-        mismatch_notice=mismatch_notice,
         reply_to=reply_to,
         sensitive=sensitive,
         channel=channel,
@@ -440,7 +445,6 @@ async def ask(
             format_payload=format_payload,
             stored_media=stored_media,
             on_mismatch=on_mismatch,
-            mismatch_notice=mismatch_notice,
             callback_url=callback.callback_url,
             timeout_at=window.timeout_at,
         )

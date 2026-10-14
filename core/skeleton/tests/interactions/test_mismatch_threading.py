@@ -1,13 +1,10 @@
-"""End-to-end settability of the per-ask ``on_mismatch`` digression policy: the
-REAL ``ask`` helper threads ``on_mismatch``/``mismatch_notice`` into BOTH the
-durable ``InteractionRequest`` and the ``ChannelDelivery`` it builds, and a
-bridge-policy ask created through that helper reaches the shared inbound-answer
-ladder (which bridges the mismatched reply) once the channel copies the delivery's
-policy onto the ``Correlation`` it parks — the seam a real correlated channel uses.
-
-Born-red before the fields were threaded: ``ask`` did not accept
-``on_mismatch`` at all, so a bridge-policy ask could never be expressed and the
-policy could never reach the ladder through this path.
+"""End-to-end settability of the per-ask ``on_mismatch`` digression policy and the per-send
+``wording`` catalogue: the REAL ``ask`` helper threads ``on_mismatch`` into BOTH the durable
+``InteractionRequest`` and the ``ChannelDelivery`` it builds and carries ``wording`` into the
+delivery frame and the stored ``format_payload``, and a bridge-policy ask created through that
+helper reaches the shared inbound-answer ladder (which bridges the mismatched reply) once the
+channel copies the delivery's policy and words onto the ``Correlation`` it parks — the seam a real
+correlated channel uses.
 """
 
 from __future__ import annotations
@@ -42,8 +39,8 @@ _PUBLIC_BASE = "https://host.example"
 
 class CapturingChannel:
     """Records the ``ChannelDelivery`` the helper builds; on delivery it parks a
-    ``Correlation`` copying the delivery's mismatch policy onto a shared store — the
-    exact copy a real correlated channel performs so its ladder read is authoritative."""
+    ``Correlation`` copying the delivery's mismatch policy and per-send wording onto a shared store
+    — the exact copy a real correlated channel performs so its ladder read is authoritative."""
 
     def __init__(self, store: FakeCorrelationStore) -> None:
         self.deliveries: list[ChannelDelivery] = []
@@ -58,7 +55,7 @@ class CapturingChannel:
                 interaction_id=delivery.interaction_id,
                 ttl_deadline=delivery.timeout_at,
                 on_mismatch=delivery.on_mismatch,
-                mismatch_notice=delivery.mismatch_notice,
+                wording=delivery.wording,
             ),
             ttl_seconds=300,
         )
@@ -161,15 +158,16 @@ def _stub_forward(monkeypatch, response: httpx.Response):
     monkeypatch.setattr(inbound_module, "_forward_answer", _fake)
 
 
-async def test_helper_threads_on_mismatch_into_delivery_and_request(wired, fake_redis, driver):
-    # The real helper builds a channel-delivered ask with the bridge policy + a custom
-    # notice; both fields land on the ChannelDelivery AND the durable InteractionRequest.
+async def test_helper_threads_on_mismatch_and_wording_into_delivery_and_request(wired, fake_redis, driver):
+    # The real helper builds a channel-delivered ask with the bridge policy + a refusal sentence;
+    # the policy lands on the ChannelDelivery AND the durable InteractionRequest, and the wording
+    # lands on the delivery frame and the stored format_payload.
     result = await ask(
         "proceed?",
         channel="cap",
         recipient="+15550001111",
         on_mismatch=AnswerMismatchPolicy.BRIDGE,
-        mismatch_notice="Please answer yes or no ({reason}).",
+        wording={"answer": {"rejected": "Please answer yes or no ({reason})."}},
         mode="async",
         expiry_at=datetime.now(UTC) + timedelta(hours=1),
     )
@@ -178,19 +176,22 @@ async def test_helper_threads_on_mismatch_into_delivery_and_request(wired, fake_
     assert len(wired.channel.deliveries) == 1
     delivery = wired.channel.deliveries[0]
     assert delivery.on_mismatch is AnswerMismatchPolicy.BRIDGE
-    assert delivery.mismatch_notice == "Please answer yes or no ({reason})."
+    assert delivery.wording is not None
+    assert delivery.wording.answer is not None
+    assert delivery.wording.answer.rejected == "Please answer yes or no ({reason})."
 
-    # The durable record carries the same policy for attribution.
+    # The durable record carries the same policy for attribution and the wording in its payload.
     store = InteractionStore(wired.settings.key_prefix)
     state = await store.get_state(fake_redis, delivery.interaction_id)
     assert state is not None
     assert state.request.on_mismatch is AnswerMismatchPolicy.BRIDGE
-    assert state.request.mismatch_notice == "Please answer yes or no ({reason})."
+    assert state.request.format_payload is not None
+    assert state.request.format_payload["wording"]["answer"]["rejected"] == "Please answer yes or no ({reason})."
 
 
 async def test_helper_default_on_mismatch_is_retry_on_both_frames(wired, fake_redis, driver):
     # An ask that does not set the policy gets the default exactly: RETRY on both
-    # the delivery and the durable record, and no custom notice.
+    # the delivery and the durable record, and no wording.
     result = await ask(
         "proceed?",
         channel="cap",
@@ -202,13 +203,13 @@ async def test_helper_default_on_mismatch_is_retry_on_both_frames(wired, fake_re
 
     delivery = wired.channel.deliveries[0]
     assert delivery.on_mismatch is AnswerMismatchPolicy.RETRY
-    assert delivery.mismatch_notice is None
+    assert delivery.wording is None
 
     store = InteractionStore(wired.settings.key_prefix)
     state = await store.get_state(fake_redis, delivery.interaction_id)
     assert state is not None
     assert state.request.on_mismatch is AnswerMismatchPolicy.RETRY
-    assert state.request.mismatch_notice is None
+    assert state.request.format_payload is None
 
 
 async def test_bridge_policy_reaches_the_ladder_through_the_real_helper(wired, fake_redis, driver, monkeypatch):
@@ -238,14 +239,14 @@ async def test_bridge_policy_reaches_the_ladder_through_the_real_helper(wired, f
         client_address="+15550001111",
         cap_key="+15550001111",
         provider_message_id="prov-msg-1",
-        bridge_text="tell me about refunds",
+        bridge_text="tell me about the schedule",
         owns_retry_notice=False,
     )
 
     ladder = await handle_inbound_answer(
         channel_id="cap",
         correlation_key="participant-key",
-        answer="tell me about refunds",
+        answer="tell me about the schedule",
         store=wired.corr_store,
         bridge=bridge,
     )

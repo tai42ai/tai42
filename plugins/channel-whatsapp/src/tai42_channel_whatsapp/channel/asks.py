@@ -4,16 +4,24 @@ from __future__ import annotations
 
 from tai42_contract.channels import ChannelDelivery
 
-from tai42_channel_whatsapp.channel.interactive import _send_choice
+from tai42_channel_whatsapp.channel.interactive import _choice_of, _send_choice
 from tai42_channel_whatsapp.client import send_message
+
+# The DEFAULT line carrying the tappable answer link; the caller's own ``wording.lines.answer_link``
+# overrides it per send. Its ``{url}`` token is filled with the callback link by a plain substitution.
+_ANSWER_LINK_LINE = "Answer here: {url}"
 
 
 def _render_link(delivery: ChannelDelivery) -> str:
     """The message body for a Tier-1 ask (``confirm`` or ``external``).
 
-    The question plus the tappable callback link.
+    The question plus the tappable callback link — the caller's ``wording.lines.answer_link`` (its
+    ``{url}`` token filled with the callback link) when set, else the generic :data:`_ANSWER_LINK_LINE`.
     """
-    return f"{delivery.question}\n\nAnswer here: {delivery.callback_url}"
+    lines = delivery.wording.lines if delivery.wording is not None else None
+    template = lines.answer_link if lines is not None else None
+    link_line = (template or _ANSWER_LINK_LINE).replace("{url}", delivery.callback_url)
+    return f"{delivery.question}\n\n{link_line}"
 
 
 def _interaction_ids(delivery: ChannelDelivery) -> list[tuple[str, str]]:
@@ -31,4 +39,11 @@ async def _send_question(phone_number_id: str, target: str, delivery: ChannelDel
     if delivery.answer_format != "select":
         await send_message(phone_number_id=phone_number_id, to=target, body=delivery.question)
         return
-    await _send_choice(phone_number_id, target, delivery.question, delivery.options or [], _interaction_ids(delivery))
+    await _send_choice(
+        phone_number_id,
+        target,
+        delivery.question,
+        delivery.options or [],
+        _interaction_ids(delivery),
+        _choice_of(delivery),
+    )

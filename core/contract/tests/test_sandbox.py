@@ -326,7 +326,7 @@ def test_app_interactions_exposes_ask_typed_by_the_contract_protocol():
 
 def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
     # A double implementing the AppInteractions facet exposes an Ask callable that
-    # ACCEPTS the per-ask ``on_mismatch``/``mismatch_notice`` kwargs — the settability
+    # ACCEPTS the per-ask ``on_mismatch``/``wording`` kwargs — the settability
     # a caller reaches through the typed protocol. Both protocols are runtime-checkable,
     # and calling the double captures the values, proving the kwargs are part of the
     # contract surface (not merely present on some impl).
@@ -341,7 +341,7 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
     # through the typed protocol.
     proto_params = inspect.signature(Ask.__call__).parameters
     assert proto_params["on_mismatch"].default is AnswerMismatchPolicy.RETRY
-    assert proto_params["mismatch_notice"].default is None
+    assert proto_params["wording"].default is None
 
     captured: dict[str, object] = {}
 
@@ -351,12 +351,12 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
             question: str,
             *,
             on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY,
-            mismatch_notice: str | None = None,
+            wording: object = None,
             **kwargs: object,
         ) -> object:
             captured["question"] = question
             captured["on_mismatch"] = on_mismatch
-            captured["mismatch_notice"] = mismatch_notice
+            captured["wording"] = wording
             return "ok"
 
     class _InteractionsDouble:
@@ -423,11 +423,13 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
     assert isinstance(facet.ask, Ask)
 
     answer = asyncio.run(
-        facet.ask("confirm?", on_mismatch=AnswerMismatchPolicy.BRIDGE, mismatch_notice="try again: {reason}")
+        facet.ask(
+            "confirm?", on_mismatch=AnswerMismatchPolicy.BRIDGE, wording={"answer": {"rejected": "try again: {reason}"}}
+        )
     )
     assert answer == "ok"
     assert captured["on_mismatch"] is AnswerMismatchPolicy.BRIDGE
-    assert captured["mismatch_notice"] == "try again: {reason}"
+    assert captured["wording"] == {"answer": {"rejected": "try again: {reason}"}}
 
 
 # -- Manifest wiring: kind, binding, sandbox_module ----------------------------

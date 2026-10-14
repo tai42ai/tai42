@@ -99,7 +99,9 @@ Kit modal. Schema properties map to controls — a short `enum` to a radio group
 longer one to a select, an array of strings to a checkbox group or multi-select, a
 date to a date picker, a boolean to Yes/No, a number to a number input — and the
 per-send layout drives display blocks, a review step, conditional fields and mid-form
-reactions.
+reactions. A string field may name an `inputMode` for the kind of text it collects:
+`email` draws an email text input and `url` a url text input. A property may also name
+a `control`: `chips` on a choice, `textarea` on a `string`.
 
 Slack-specific behaviour (the documented degrades):
 
@@ -107,6 +109,45 @@ Slack-specific behaviour (the documented degrades):
   dates and no range control — so a date bound, an unavailable-days rule or a range
   (two date fields) is **enforced on submit** and shown as an inline error on the
   field, not prevented in the picker.
+- **Input kinds.** Slack has no numeric or phone keyboard hint on a text element, so a
+  string field whose `inputMode` is `numeric`, `decimal` or `tel` renders as a plain
+  text input; only `email` and `url` draw a distinct Slack text element. `inputMode`
+  selects the control, it never validates — the value is always the string typed.
+- **Chips.** Slack has no chip input, so `control: chips` draws the shape's default
+  choice control (a radio group/select for a single string, a checkbox
+  group/multi-select for an array of strings).
+- **Text length bounds.** A declared `maxLength`/`minLength` on a `string` is drawn as
+  Slack's `max_length`/`min_length` on both the single-line plain text input and the
+  multi-line textarea (`control: textarea`), so Slack shows and enforces the maximum. A
+  `maxLength` above Slack's 3000 limit is refused loudly at delivery, never truncated.
+  Slack's `email`/`url` text elements accept no length bound, so a declared bound is not
+  drawn on them — it stays enforced at the answer door.
+- **Buttons and title.** The open button reads `wording.form.open` (else *Fill form*,
+  cap 75); the modal's submit reads the **last** page's `button_label` (else — for a
+  form with no pages — the caller's `wording.form.submit`, else *Submit*) — a
+  non-terminal page's label is not drawn; the close reads `wording.form.cancel`
+  (else *Cancel*) and the title reads `wording.form.title` (else *Please respond*), each
+  capped at 24 characters and read off the record on open and every re-render.
+  `wording.form.back` draws nothing (one surface). A `wording.choice.label` and a non-form
+  ask's `wording.answer` controls draw nothing on Slack (inline choices, a text-link
+  Tier-1 ask).
+- **Field placeholders.** A field's `wording.form.fields[name].choice_label` draws as the
+  `placeholder` of that field's **select** (`static_select`/`multi_static_select`), capped
+  at Slack's 150-character placeholder limit and refused loudly over it; a radio or checkbox
+  group has no placeholder slot, so it draws none. Absent, the select shows Slack's own
+  default prompt.
+- **Review line.** The review step's empty readback (before anything is filled) reads
+  `wording.form.review_empty` (else *No answers to review yet.*), capped at Slack's
+  3000-character section-text limit.
+- **Message lines.** A Tier-1 ask's link line and deadline line read `wording.lines.answer_link`
+  (`{url}` filled with the callback URL) and `wording.lines.deadline` (`{deadline}` filled with
+  the ISO instant); a Tier-2 ask composes `wording.lines.reply` and the deadline line, and lists
+  its choices through `wording.lines.options` (`{options}` filled with the joined list). Each is
+  a plain substitution; absent, the platform's own line is used.
+- **Refusal sentence.** When the door rejects a modal submission in place, the modal's inline
+  error reads `wording.answer.rejected` (its optional `{reason}` token filled with the door's
+  reason), else the door's reason, else a generic correction line. The thread-reply rejection
+  notice draws the same caller sentence through the shared answer ladder.
 - **Display and review.** A page's heading/body/image blocks render as
   `header`/`section`/`image`; a review page is a final titled readback group in the
   single modal (Slack has no native multi-step, so no pushed confirmation view).

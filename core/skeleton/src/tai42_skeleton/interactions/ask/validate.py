@@ -69,7 +69,15 @@ def validate_ask_arguments(
     """
     check_addressing(to=to, mode=mode, question=question, payload=payload, answer_format=answer_format)
     fmt = _validate_timing_and_format(
-        mode, timeout, expiry_at, answer_format, options, data, pages, reaction_tool, reactions
+        mode,
+        timeout,
+        expiry_at,
+        answer_format,
+        options,
+        data,
+        pages,
+        reaction_tool,
+        reactions,
     )
     is_external = fmt is AnswerFormat.EXTERNAL
     # ``audience`` (the addressed identity) is validated loud and up front — a
@@ -106,7 +114,8 @@ def _validate_timing_and_format(
     """Validate the timing (sync ``timeout`` vs async ``expiry_at``) and the format's argument shape.
 
     ``options`` only on select/text, ``data``/``pages``/``reactions``/``reaction_tool`` only on
-    form. Returns the parsed :class:`AnswerFormat`.
+    form. The per-send ``wording`` members' per-format admission is the one admission table checked
+    when the ``InteractionRequest`` is built. Returns the parsed :class:`AnswerFormat`.
     """
     check_ask_timing(timeout=timeout, expiry_at=expiry_at)
     if mode != "async" and expiry_at is not None:

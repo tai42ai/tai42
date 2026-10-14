@@ -22,6 +22,7 @@ from tai42_contract.interactions.models import (
     FormPage,
     LocationElement,
     MediaItem,
+    Wording,
     check_form_tag,
     check_media_list,
 )
@@ -138,6 +139,12 @@ with warnings.catch_warnings():
         # interprets it, only bounds it (:func:`check_form_tag`); rides ONLY a form send
         # (``schema`` present). None -> no tag.
         form_tag: str | None = None
+        # The caller's words for this notification's platform-drawn texts, grouped by what each
+        # decorates (:class:`~tai42_contract.interactions.models.wording.Wording`). Each member is
+        # admitted only on the notification surface that draws it (a form ``schema``, a flat
+        # ``options`` list, or a sectioned ``sections`` list), the shared admission the composition
+        # rule reads. None -> each surface shows its own word.
+        wording: Wording | None = None
 
         @field_validator("message")
         @classmethod
@@ -215,8 +222,9 @@ with warnings.catch_warnings():
 
         @model_validator(mode="after")
         def _check_composition(self) -> ChannelNotification:
-            # The shared cross-field interactive-composition rules, so this carrier and AnswerPart
-            # can never drift (see :func:`check_interactive_composition`).
+            # The shared cross-field interactive-composition rules (including the per-send
+            # ``wording`` admission), so this carrier and AnswerPart can never drift (see
+            # :func:`check_interactive_composition`).
             check_interactive_composition(
                 message=self.message,
                 media=self.media,
@@ -227,17 +235,19 @@ with warnings.catch_warnings():
                 schema=self.schema,
                 header=self.header,
                 footer=self.footer,
+                wording=self.wording,
+                has_pages=self.pages is not None,
                 noun="notification",
             )
             return self
 
         @model_validator(mode="after")
         def _check_form_extras(self) -> ChannelNotification:
-            # ``data``/``pages`` enrich a form send's ``schema`` and mean nothing without it, so
-            # they ride ONLY a notification that carries a ``schema`` — present on any other send
-            # is a caller bug refused loudly, mirroring :class:`ChannelDelivery`. The deep prefill
-            # cross-check against the schema is the sender's (the :class:`AnswerPart` /
-            # ``InteractionRequest`` seam), never re-run here.
+            # ``data``/``pages`` and the ``form_tag`` enrich a form send's ``schema`` and mean
+            # nothing without it, so they ride ONLY a notification that carries a ``schema`` —
+            # present on any other send is a caller bug refused loudly, mirroring
+            # :class:`ChannelDelivery`. The deep prefill cross-check against the schema is the
+            # sender's (the :class:`AnswerPart` / ``InteractionRequest`` seam), never re-run here.
             if self.schema is None:
                 if self.data is not None:
                     raise ValueError("a notification with no schema carries no form data")

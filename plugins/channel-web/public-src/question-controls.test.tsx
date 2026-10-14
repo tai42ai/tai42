@@ -3,12 +3,68 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { QuestionItem } from '@/question-card';
-import { CALLBACK, externalQuestion, question, renderCard } from '@/question-card.test-support';
+import {
+  CALLBACK,
+  externalQuestion,
+  formQuestion,
+  question,
+  renderCard,
+} from '@/question-card.test-support';
+import type {
+  AnswerWording,
+  ChoiceWording,
+  FormWording,
+  StatusWording,
+  Wording,
+} from '@/transcript-model';
 
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
 });
+
+/** A `Wording` with the named chapters and every other chapter unset. */
+function wording(chapters: Partial<Wording>): Wording {
+  return { form: null, choice: null, answer: null, status: null, ...chapters };
+}
+
+function answerWording(partial: Partial<AnswerWording>): AnswerWording {
+  return {
+    open: null,
+    confirm: null,
+    decline: null,
+    submit: null,
+    replyHint: null,
+    rejected: null,
+    ...partial,
+  };
+}
+
+function formWording(partial: Partial<FormWording>): FormWording {
+  return { submit: null, back: null, fields: {}, ...partial };
+}
+
+function choiceWording(partial: Partial<ChoiceWording>): ChoiceWording {
+  return { groupLabel: null, ...partial };
+}
+
+function statusWording(partial: Partial<StatusWording>): StatusWording {
+  return {
+    sending: null,
+    answered: null,
+    expired: null,
+    closed: null,
+    sent: null,
+    unavailable: null,
+    countdown: null,
+    ...partial,
+  };
+}
+
+/** An `onAnswer` that never settles, so the control stays in its in-flight state. */
+function pendingAnswer(): () => Promise<void> {
+  return () => new Promise<void>(() => {});
+}
 
 describe('QuestionControls', () => {
   it('sends a typed answer for the text format', async () => {
@@ -70,5 +126,84 @@ describe('QuestionControls', () => {
     renderCard(malformed);
 
     expect(screen.getByRole('alert')).toHaveTextContent(/malformed/i);
+  });
+});
+
+describe("QuestionControls draw the send's wording", () => {
+  it('draws the platform words when the send set none', () => {
+    renderCard(question('text'));
+    expect(screen.getByRole('textbox')).toHaveAttribute('placeholder', 'Type your answer');
+    expect(screen.getByRole('button', { name: 'Answer' })).toBeInTheDocument();
+  });
+
+  it("draws the caller's text placeholder and submit label", async () => {
+    const user = userEvent.setup();
+    renderCard(
+      question('text', {
+        wording: wording({
+          answer: answerWording({ replyHint: 'Say something', submit: 'Ship it' }),
+        }),
+      }),
+    );
+    expect(screen.getByRole('textbox')).toHaveAttribute('placeholder', 'Say something');
+    await user.type(screen.getByRole('textbox'), 'go');
+    expect(screen.getByRole('button', { name: 'Ship it' })).toBeInTheDocument();
+  });
+
+  it("draws the caller's confirm and decline labels", () => {
+    renderCard(
+      question('confirm', {
+        wording: wording({ answer: answerWording({ confirm: 'Approve', decline: 'Reject' }) }),
+      }),
+    );
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeInTheDocument();
+  });
+
+  it('names the select option group — the default, then the caller word', () => {
+    renderCard(question('select'));
+    expect(screen.getByRole('group', { name: 'Choose an option' })).toBeInTheDocument();
+    cleanup();
+    renderCard(
+      question('select', {
+        wording: wording({ choice: choiceWording({ groupLabel: 'Pick a time' }) }),
+      }),
+    );
+    expect(screen.getByRole('group', { name: 'Pick a time' })).toBeInTheDocument();
+  });
+
+  it("draws the caller's open label on an external question", () => {
+    renderCard(
+      question('external', { wording: wording({ answer: answerWording({ open: 'Answer now' }) }) }),
+    );
+    expect(screen.getByRole('link', { name: 'Answer now' })).toHaveAttribute('href', CALLBACK);
+  });
+
+  it("draws the caller's one-page form submit label and field placeholder", () => {
+    const item = formQuestion(
+      { type: 'object', properties: { kind: { type: 'string', title: 'Kind' } } },
+      { values: {}, options: { kind: [{ value: 'a', label: 'Option A' }] } },
+      null,
+      null,
+      wording({
+        form: formWording({ submit: 'File it', fields: { kind: { choiceLabel: 'Pick a kind' } } }),
+      }),
+    );
+    renderCard(item);
+    expect(screen.getByRole('button', { name: 'File it' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Pick a kind' })).toBeInTheDocument();
+  });
+
+  it("speaks the caller's in-flight label while a text answer is sending", async () => {
+    const user = userEvent.setup();
+    renderCard(
+      question('text', { wording: wording({ status: statusWording({ sending: 'On its way' }) }) }),
+      {
+        onAnswer: pendingAnswer(),
+      },
+    );
+    await user.type(screen.getByRole('textbox'), 'go');
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+    expect(await screen.findByRole('status', { name: 'On its way' })).toBeInTheDocument();
   });
 });

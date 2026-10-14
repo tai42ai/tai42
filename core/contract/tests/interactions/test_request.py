@@ -45,9 +45,9 @@ def test_interaction_select_valid():
 
 
 def test_interaction_select_requires_options():
-    with pytest.raises(ValueError, match="non-empty options"):
+    with pytest.raises(ValueError, match=r"non-empty options"):
         _interaction(answer_format=AnswerFormat.SELECT, format_payload={"options": []})
-    with pytest.raises(ValueError, match="non-empty options"):
+    with pytest.raises(ValueError, match=r"non-empty options"):
         _interaction(answer_format=AnswerFormat.SELECT, format_payload=None)
 
 
@@ -57,7 +57,7 @@ def test_interaction_form_valid():
 
 
 def test_interaction_form_requires_schema():
-    with pytest.raises(ValueError, match="requires a schema"):
+    with pytest.raises(ValueError, match=r"requires a schema"):
         _interaction(answer_format=AnswerFormat.FORM, format_payload={})
 
 
@@ -79,7 +79,7 @@ def test_interaction_text_valid_no_payload():
 
 def test_interaction_text_forbids_non_options_payload():
     # TEXT carries no payload EXCEPT an optional ``options`` list; any other key is refused.
-    with pytest.raises(ValueError, match="carries only optional options"):
+    with pytest.raises(ValueError, match=r"carries only optional options"):
         _interaction(answer_format=AnswerFormat.TEXT, format_payload={"x": 1})
 
 
@@ -91,13 +91,18 @@ def test_interaction_text_allows_suggested_reply_options():
 
 
 def test_interaction_text_options_must_be_non_empty_when_present():
-    with pytest.raises(ValueError, match="non-empty list when present"):
+    with pytest.raises(ValueError, match=r"non-empty list when present"):
         _interaction(answer_format=AnswerFormat.TEXT, format_payload={"options": []})
 
 
-def test_interaction_confirm_forbids_payload():
-    with pytest.raises(ValueError, match="carries no format_payload"):
+def test_interaction_confirm_forbids_non_wording_payload():
+    # CONFIRM carries no payload EXCEPT an optional ``wording``; any other key refuses.
+    with pytest.raises(ValueError, match=r"carries only optional wording"):
         _interaction(answer_format=AnswerFormat.CONFIRM, format_payload={"x": 1})
+
+
+def test_interaction_confirm_accepts_no_payload():
+    assert _interaction(answer_format=AnswerFormat.CONFIRM).format_payload is None
 
 
 def test_interaction_external_valid():
@@ -107,14 +112,117 @@ def test_interaction_external_valid():
 
 def test_interaction_external_requires_url():
     # Missing, empty, and non-str url are all rejected.
-    with pytest.raises(ValueError, match="non-empty string url"):
+    with pytest.raises(ValueError, match=r"non-empty string url"):
         _interaction(answer_format=AnswerFormat.EXTERNAL, format_payload={})
-    with pytest.raises(ValueError, match="non-empty string url"):
+    with pytest.raises(ValueError, match=r"non-empty string url"):
         _interaction(answer_format=AnswerFormat.EXTERNAL, format_payload={"url": ""})
-    with pytest.raises(ValueError, match="non-empty string url"):
+    with pytest.raises(ValueError, match=r"non-empty string url"):
         _interaction(answer_format=AnswerFormat.EXTERNAL, format_payload={"url": 123})
-    with pytest.raises(ValueError, match="non-empty string url"):
+    with pytest.raises(ValueError, match=r"non-empty string url"):
         _interaction(answer_format=AnswerFormat.EXTERNAL, format_payload=None)
+
+
+def test_interaction_select_accepts_a_wording_choice_label():
+    req = _interaction(
+        answer_format=AnswerFormat.SELECT,
+        format_payload={"options": ["a", "b"], "wording": {"choice": {"label": "Choose one"}}},
+    )
+    assert req.format_payload == {"options": ["a", "b"], "wording": {"choice": {"label": "Choose one"}}}
+
+
+def test_interaction_select_wording_choice_label_must_be_non_blank():
+    with pytest.raises(ValueError, match=r"wording.choice.label must be non-blank when set"):
+        _interaction(
+            answer_format=AnswerFormat.SELECT,
+            format_payload={"options": ["a"], "wording": {"choice": {"label": "   "}}},
+        )
+
+
+def test_interaction_select_still_refuses_a_stray_key():
+    with pytest.raises(ValueError, match=r"carries only options and an optional wording"):
+        _interaction(answer_format=AnswerFormat.SELECT, format_payload={"options": ["a"], "pages": []})
+
+
+def test_interaction_form_accepts_a_wording_form_chapter():
+    req = _interaction(
+        answer_format=AnswerFormat.FORM,
+        format_payload={
+            "schema": {"type": "object"},
+            "wording": {"form": {"title": "Formulario", "open": "Fill it in", "cancel": "Never mind", "submit": "Go"}},
+        },
+    )
+    assert req.format_payload is not None
+    assert req.format_payload["wording"]["form"]["open"] == "Fill it in"
+    assert req.format_payload["wording"]["form"]["title"] == "Formulario"
+
+
+def test_interaction_form_refuses_malformed_wording_form():
+    with pytest.raises(ValueError, match=r"Extra inputs are not permitted"):
+        _interaction(
+            answer_format=AnswerFormat.FORM,
+            format_payload={"schema": {"type": "object"}, "wording": {"form": {"nope": "x"}}},
+        )
+    with pytest.raises(ValueError, match=r"wording.form must set at least one member"):
+        _interaction(
+            answer_format=AnswerFormat.FORM,
+            format_payload={"schema": {"type": "object"}, "wording": {"form": {}}},
+        )
+
+
+def test_interaction_form_refuses_a_member_it_cannot_draw():
+    # A form draws its form chapter; a non-form answer control never rides a form.
+    with pytest.raises(ValueError, match=r"form answer_format draws no wording.answer.open"):
+        _interaction(
+            answer_format=AnswerFormat.FORM,
+            format_payload={"schema": {"type": "object"}, "wording": {"answer": {"open": "Answer"}}},
+        )
+
+
+def test_interaction_form_submit_refused_with_pages():
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    with pytest.raises(ValueError, match=r"wording.form.submit is refused with pages"):
+        _interaction(
+            answer_format=AnswerFormat.FORM,
+            format_payload={
+                "schema": schema,
+                "pages": [{"title": "Step", "fields": ["name"]}],
+                "wording": {"form": {"submit": "Go"}},
+            },
+        )
+
+
+def test_interaction_text_accepts_a_wording_reply_hint():
+    req = _interaction(
+        answer_format=AnswerFormat.TEXT, format_payload={"wording": {"answer": {"reply_hint": "Type your reply"}}}
+    )
+    assert req.format_payload == {"wording": {"answer": {"reply_hint": "Type your reply"}}}
+
+
+def test_interaction_text_refuses_a_member_it_cannot_draw():
+    with pytest.raises(ValueError, match=r"text answer_format draws no wording.answer.open"):
+        _interaction(answer_format=AnswerFormat.TEXT, format_payload={"wording": {"answer": {"open": "Answer"}}})
+
+
+def test_interaction_confirm_accepts_wording_answer_controls():
+    req = _interaction(
+        answer_format=AnswerFormat.CONFIRM,
+        format_payload={"wording": {"answer": {"open": "Answer here", "confirm": "Yes, do it"}}},
+    )
+    assert req.format_payload == {"wording": {"answer": {"open": "Answer here", "confirm": "Yes, do it"}}}
+
+
+def test_interaction_confirm_refuses_a_member_it_cannot_draw():
+    with pytest.raises(ValueError, match=r"confirm answer_format draws no wording.answer.reply_hint"):
+        _interaction(answer_format=AnswerFormat.CONFIRM, format_payload={"wording": {"answer": {"reply_hint": "Type"}}})
+
+
+def test_interaction_external_accepts_wording_answer_controls():
+    req = _interaction(
+        answer_format=AnswerFormat.EXTERNAL,
+        format_payload={"url": "https://sign.example/abc", "wording": {"answer": {"open": "Open to answer"}}},
+    )
+    assert req.format_payload is not None
+    assert req.format_payload["wording"]["answer"]["open"] == "Open to answer"
 
 
 def test_interaction_channel_defaults_none_and_round_trips():
@@ -202,22 +310,22 @@ def test_interaction_async_with_continuation_valid_and_json_round_trips():
 
 
 def test_interaction_async_missing_continuation_tool_raises_naming_it():
-    with pytest.raises(ValueError, match="continuation_tool"):
+    with pytest.raises(ValueError, match=r"continuation_tool"):
         _interaction(mode="async", continuation_identity="svc-key-1")
 
 
 def test_interaction_async_missing_continuation_identity_raises_naming_it():
-    with pytest.raises(ValueError, match="continuation_identity"):
+    with pytest.raises(ValueError, match=r"continuation_identity"):
         _interaction(mode="async", continuation_tool="resume_tool")
 
 
 def test_interaction_sync_with_continuation_tool_raises_naming_it():
-    with pytest.raises(ValueError, match="continuation_tool"):
+    with pytest.raises(ValueError, match=r"continuation_tool"):
         _interaction(continuation_tool="resume_tool")
 
 
 def test_interaction_sync_with_continuation_identity_raises_naming_it():
-    with pytest.raises(ValueError, match="continuation_identity"):
+    with pytest.raises(ValueError, match=r"continuation_identity"):
         _interaction(continuation_identity="svc-key-1")
 
 
@@ -244,13 +352,13 @@ def test_caller_ask_valid_defaults_to_user_elsewhere():
 
 
 def test_caller_ask_forbids_sync_mode():
-    with pytest.raises(ValueError, match="to='caller' requires mode='async'"):
+    with pytest.raises(ValueError, match=r"to='caller' requires mode='async'"):
         _interaction(to="caller", mode="sync")
 
 
 def test_caller_ask_requires_question_or_payload():
     # Empty question with no payload leaves the resolving run nothing to act on.
-    with pytest.raises(ValueError, match="requires a question or a payload"):
+    with pytest.raises(ValueError, match=r"requires a question or a payload"):
         _caller(question="")
     # A payload substitutes for an empty question.
     req = _caller(question="", payload={"intent": "review"})
@@ -258,12 +366,12 @@ def test_caller_ask_requires_question_or_payload():
 
 
 def test_user_ask_forbids_payload():
-    with pytest.raises(ValueError, match="payload is only valid with to='caller'"):
+    with pytest.raises(ValueError, match=r"payload is only valid with to='caller'"):
         _interaction(payload={"x": 1})
 
 
 def test_user_ask_forbids_free_format():
-    with pytest.raises(ValueError, match="answer_format 'free' is only valid with to='caller'"):
+    with pytest.raises(ValueError, match=r"answer_format 'free' is only valid with to='caller'"):
         _interaction(answer_format=AnswerFormat.FREE)
 
 
@@ -274,7 +382,7 @@ def test_caller_ask_allows_free_format_and_optional_schema():
 
 
 def test_free_format_payload_rejects_extra_keys():
-    with pytest.raises(ValueError, match="free answer_format payload carries only an optional schema"):
+    with pytest.raises(ValueError, match=r"free answer_format payload carries only an optional schema"):
         _caller(answer_format=AnswerFormat.FREE, format_payload={"schema": {}, "bogus": 1})
 
 
@@ -353,14 +461,14 @@ def test_suspended_interaction_merged_step_lists_survive():
 
 
 def test_suspended_interaction_requires_interaction_id():
-    with pytest.raises(ValueError, match="interaction_id"):
+    with pytest.raises(ValueError, match=r"interaction_id"):
         SuspendedInteraction()  # type: ignore[call-arg]
 
 
 def test_suspended_interaction_rejects_naive_expiry_at():
     # A naive ``expiry_at`` would raise TypeError when compared against an aware
     # ``now()`` by the expiry reaper; the validator refuses it at construction.
-    with pytest.raises(ValueError, match="timezone-aware"):
+    with pytest.raises(ValueError, match=r"timezone-aware"):
         SuspendedInteraction(interaction_id="i1", expiry_at=datetime(2026, 1, 1, 12, 0))
 
 
@@ -391,7 +499,7 @@ def test_check_ask_timing_allows_neither():
 
 
 def test_check_ask_timing_rejects_both():
-    with pytest.raises(ValueError, match="mutually exclusive"):
+    with pytest.raises(ValueError, match=r"mutually exclusive"):
         check_ask_timing(timeout=5.0, expiry_at=_now())
 
 
@@ -407,12 +515,12 @@ def test_ask_signature_has_keyword_only_mode_and_expiry():
 
 
 def test_interaction_rejects_naive_created_at():
-    with pytest.raises(ValueError, match="timezone-aware"):
+    with pytest.raises(ValueError, match=r"timezone-aware"):
         _interaction(created_at=datetime(2026, 1, 1))
 
 
 def test_interaction_rejects_naive_timeout_at():
-    with pytest.raises(ValueError, match="timezone-aware"):
+    with pytest.raises(ValueError, match=r"timezone-aware"):
         _interaction(timeout_at=datetime(2026, 1, 1))
 
 
@@ -424,14 +532,14 @@ def test_interaction_datetime_normalized_to_utc():
 
 
 def test_interaction_rejects_naive_expiry_at():
-    with pytest.raises(ValueError, match="timezone-aware"):
+    with pytest.raises(ValueError, match=r"timezone-aware"):
         _interaction(mode="async", continuation_tool="t", continuation_identity="k", expiry_at=datetime(2026, 1, 1))
 
 
 def test_interaction_async_missing_expiry_at_raises_naming_it():
     # An async park without an ``expiry_at`` is never expiry-indexed, so the reaper
     # could never fire its continuation — the validator refuses it, naming the field.
-    with pytest.raises(ValueError, match="expiry_at"):
+    with pytest.raises(ValueError, match=r"expiry_at"):
         _interaction(mode="async", continuation_tool="t", continuation_identity="k")
 
 

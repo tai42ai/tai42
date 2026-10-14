@@ -812,13 +812,13 @@ async def test_400_retry_policy_is_the_default_and_tags_the_event(wired, monkeyp
     assert wired.events[0].payload["policy"] == "retry"
 
 
-# -- mismatch_notice: a per-ask custom retry notice (retry policy ONLY) ----------------
+# -- wording.answer.rejected / rejected_final: the caller's refusal sentence off the record --------
 
 
-async def test_retry_custom_mismatch_notice_replaces_default_and_fills_reason(wired, monkeypatch):
-    # A retry-policy ask with a custom notice REPLACES the built-in text; a literal {reason}
-    # token is filled by plain substitution with the door's reason.
-    store = FakeStore(_entry(mismatch_notice="Please pick a listed option ({reason})."))
+async def test_retry_caller_rejected_replaces_default_and_fills_reason(wired, monkeypatch):
+    # A retry-policy ask whose record carries wording.answer.rejected REPLACES the built-in text; a
+    # literal {reason} token is filled by plain substitution with the door's reason.
+    store = FakeStore(_entry(wording={"answer": {"rejected": "Please pick a listed option ({reason})."}}))
     _stub_forward(monkeypatch, httpx.Response(400, json={"error": "not a valid choice", "retry_in_place": True}))
 
     await handle_inbound_answer(channel_id="fakechan", correlation_key="k", answer="huh", store=store, bridge=_bridge())
@@ -827,9 +827,9 @@ async def test_retry_custom_mismatch_notice_replaces_default_and_fills_reason(wi
     assert wired.channel.notifications[0].message == "Please pick a listed option (not a valid choice)."
 
 
-async def test_retry_custom_mismatch_notice_without_placeholder_is_verbatim(wired, monkeypatch):
-    # A custom notice WITHOUT the {reason} token is sent verbatim; stray braces never raise.
-    store = FakeStore(_entry(mismatch_notice="That won't work here {oops}."))
+async def test_retry_caller_rejected_without_placeholder_is_verbatim(wired, monkeypatch):
+    # A caller sentence WITHOUT the {reason} token is sent verbatim; stray braces never raise.
+    store = FakeStore(_entry(wording={"answer": {"rejected": "That won't work here {oops}."}}))
     _stub_forward(monkeypatch, httpx.Response(400, json={"error": "bad", "retry_in_place": True}))
 
     await handle_inbound_answer(channel_id="fakechan", correlation_key="k", answer="huh", store=store, bridge=_bridge())
@@ -837,9 +837,9 @@ async def test_retry_custom_mismatch_notice_without_placeholder_is_verbatim(wire
     assert wired.channel.notifications[0].message == "That won't work here {oops}."
 
 
-async def test_retry_default_mismatch_notice_unchanged_when_none(wired, monkeypatch):
-    # None keeps the built-in notice (carrying the door reason).
-    store = FakeStore(_entry())  # mismatch_notice defaults to None
+async def test_retry_default_notice_unchanged_when_no_wording(wired, monkeypatch):
+    # No wording on the record keeps the built-in notice (carrying the door reason).
+    store = FakeStore(_entry())  # wording defaults to None
     door_body = {"error": "Please answer with yes or no.", "retry_in_place": True}
     _stub_forward(monkeypatch, httpx.Response(400, json=door_body))
 
@@ -848,11 +848,26 @@ async def test_retry_default_mismatch_notice_unchanged_when_none(wired, monkeypa
     assert "Please answer with yes or no." in wired.channel.notifications[0].message
 
 
-async def test_bridge_policy_ignores_mismatch_notice(wired, monkeypatch):
+async def test_hard_mismatch_caller_rejected_final_replaces_default_and_fills_reason(wired, monkeypatch):
+    # A non-retryable 400 draws the caller's wording.answer.rejected_final, {reason} filled.
+    store = FakeStore(_entry(wording={"answer": {"rejected_final": "No longer open ({reason})."}}))
+    _stub_forward(monkeypatch, httpx.Response(400, json={"error": "too late", "retry_in_place": False}))
+
+    result = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="huh", store=store, bridge=_bridge()
+    )
+
+    assert result.outcome is InboundAnswerOutcome.BRIDGED
+    assert wired.channel.notifications[0].message == "No longer open (too late)."
+
+
+async def test_bridge_policy_ignores_caller_rejected(wired, monkeypatch):
     from tai42_contract.interactions.models import AnswerMismatchPolicy
 
-    # Under bridge policy a custom notice is IGNORED — a digression never notifies.
-    store = FakeStore(_entry(on_mismatch=AnswerMismatchPolicy.BRIDGE, mismatch_notice="You should never see this"))
+    # Under bridge policy a caller sentence is IGNORED — a digression never notifies.
+    store = FakeStore(
+        _entry(on_mismatch=AnswerMismatchPolicy.BRIDGE, wording={"answer": {"rejected": "You should never see this"}})
+    )
     _stub_forward(monkeypatch, httpx.Response(400, json={"error": "nope", "retry_in_place": True}))
 
     await handle_inbound_answer(channel_id="fakechan", correlation_key="k", answer="huh", store=store, bridge=_bridge())

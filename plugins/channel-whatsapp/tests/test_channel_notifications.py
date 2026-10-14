@@ -12,7 +12,7 @@ from tai42_contract.channels import (
     OptionSection,
     ReplyOption,
 )
-from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_contract.interactions.models import ChoiceWording, MediaItem, MediaKind, Wording
 
 from tai42_channel_whatsapp.channel import WhatsAppChannel
 
@@ -221,6 +221,98 @@ async def test_notify_many_options_render_as_interactive_list(fake_redis: FakeRe
     assert interactive["type"] == "list"
     assert interactive["action"]["button"] == "Choose an option"
     assert interactive["action"]["sections"][0]["rows"] == [{"id": str(i), "title": f"choice-{i}"} for i in range(5)]
+
+
+async def test_notify_choice_label_labels_the_reply_list_button(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(_accepted("wamid.LIST"))
+    options: list[Option] = [ReplyOption(text=f"choice-{i}") for i in range(5)]
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Pick one",
+            recipient=ALLOWED_A,
+            options=options,
+            wording=Wording(choice=ChoiceWording(label="View all")),
+        )
+    )
+
+    interactive = fake_httpx.calls[0]["json"]["interactive"]
+    assert interactive["type"] == "list"
+    assert interactive["action"]["button"] == "View all"
+
+
+async def test_notify_section_list_choice_label_labels_the_list_button(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(_accepted("wamid.SEC"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Pick a dish",
+            recipient=ALLOWED_A,
+            sections=[OptionSection(title="Mains", rows=[ReplyOption(text="Steak")])],
+            wording=Wording(choice=ChoiceWording(label="Browse menu")),
+        )
+    )
+
+    interactive = fake_httpx.calls[0]["json"]["interactive"]
+    assert interactive["type"] == "list"
+    assert interactive["action"]["button"] == "Browse menu"
+
+
+async def test_notify_choice_label_over_cap_refused_before_any_send(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    options: list[Option] = [ReplyOption(text=f"choice-{i}") for i in range(5)]
+
+    with pytest.raises(ChannelInputError, match="list button"):
+        await WhatsAppChannel().notify(
+            ChannelNotification(
+                message="Pick one",
+                recipient=ALLOWED_A,
+                options=options,
+                wording=Wording(choice=ChoiceWording(label="z" * 21)),
+            )
+        )
+
+    assert fake_httpx.calls == []
+
+
+async def test_notify_reply_options_reply_hint_draws_on_numbered_fallback(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A flat reply-options list forced past the wire caps to numbered text draws the caller's
+    # ``reply_hint`` as the type-an-option line in place of the generic default.
+    fake_httpx.responses.append(_accepted("wamid.NUM"))
+    options: list[Option] = [ReplyOption(text="x" * 25) for _ in range(2)]  # over the row-title cap → numbered
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Pick one",
+            recipient=ALLOWED_A,
+            options=options,
+            wording=Wording(choice=ChoiceWording(reply_hint="Reply with a number.")),
+        )
+    )
+
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "text"
+    assert payload["text"]["body"].endswith("Reply with a number.")
+    assert "Reply with the text of one option." not in payload["text"]["body"]
+
+
+async def test_notify_sections_reply_hint_draws_on_numbered_fallback(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A sectioned list forced to numbered text draws the caller's ``reply_hint`` as the
+    # type-an-option line.
+    fake_httpx.responses.append(_accepted("wamid.SNUM"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Pick a dish",
+            recipient=ALLOWED_A,
+            sections=[OptionSection(title="Mains", rows=[ReplyOption(text="y" * 25)])],  # over the row cap
+            wording=Wording(choice=ChoiceWording(reply_hint="Type the dish name.")),
+        )
+    )
+
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "text"
+    assert "Type the dish name." in payload["text"]["body"]
+    assert "Reply with the text of one option." not in payload["text"]["body"]
 
 
 async def test_notify_long_options_fall_to_numbered_text(fake_redis: FakeRedis, fake_httpx: FakeHttpx):

@@ -15,9 +15,11 @@ import math
 from typing import Any
 
 from tai42_contract.channels import AnswerForwardError
+from tai42_contract.interactions.models import Wording
 from tai42_kit.utils.data.form_text import render_form_text
 
 from tai42_channel_whatsapp.channel import _NOTIFY_FORM_TOKEN_PREFIX, send_form_ask_flow
+from tai42_channel_whatsapp.channel.forms import _DOOR_REJECTION_MAX_CHARS, _FLOW_BODY_MAX_CHARS
 from tai42_channel_whatsapp.client import send_message
 from tai42_channel_whatsapp.correlation import (
     PendingQuestion,
@@ -27,6 +29,7 @@ from tai42_channel_whatsapp.correlation import (
     peek_pending,
     release_pending,
 )
+from tai42_channel_whatsapp.flows_components import _chips_single_pick, split_range_values
 from tai42_channel_whatsapp.inbound.answers import _bridge_inbound, _resolve_answer
 from tai42_channel_whatsapp.settings import whatsapp_settings
 
@@ -46,15 +49,10 @@ _FORM_UNPROCESSABLE = "Sorry, your form could not be processed."
 # Shown in place of a 400 body that is not this platform's error envelope (a proxy
 # or WAF page); the participant is never shown an intermediary's content.
 _CALLBACK_REJECTION_OPAQUE = "the answer could not be accepted"
-# The door's own rejection line is bounded before it rides the participant-facing re-sent
-# Flow body — it names the failing field, never an intermediary's whole page.
-_DOOR_REJECTION_MAX_CHARS = 500
-# Meta caps interactive.body.text at 1024 chars (WhatsApp Cloud API interactive
-# message limit); a longer body is a non-retryable param error that fails the
-# re-send forever, stranding the participant with neither the Flow nor a final message.
-_FLOW_BODY_MAX_CHARS = 1024
 # The lead + bounded door line alone always fit the cap, so the overflow fallback
-# (drop the whole question) is guaranteed deliverable — verified, not assumed.
+# (drop the whole question) is guaranteed deliverable — verified, not assumed. The door line
+# is bounded at ``_DOOR_REJECTION_MAX_CHARS`` and the Flow body cap is ``_FLOW_BODY_MAX_CHARS``
+# (both owned beside the deliver-time rejection-template guard in ``channel.forms``).
 if len(_FORM_REJECTION_LEAD) + 1 + _DOOR_REJECTION_MAX_CHARS > _FLOW_BODY_MAX_CHARS:
     raise AssertionError
 
@@ -93,6 +91,11 @@ def _coerce_value(value: Any, prop: Any) -> Any:
         # A CheckboxGroup delivers a JSON list of the selected option values; pass it through
         # as the list answer (a non-list arrival is returned raw so the door 400s and restores).
         return value
+    if isinstance(prop, dict) and _chips_single_pick(prop):
+        # A single-pick ChipsSelector delivers a ONE-element list; unwrap it to the string the
+        # schema declares. A list of any other length is forwarded raw so the door 400s and
+        # restores (the existing non-coercible convention).
+        return value[0] if isinstance(value, list) and len(value) == 1 else value
     if not isinstance(prop, dict) or not isinstance(value, str):
         return value
     prop_type = prop.get("type")
@@ -132,6 +135,10 @@ def _coerce_form_answer(
     then each value coerced by that schema key's type. A response key absent from
     ``labels`` is a payload label the map does not know: it is forwarded under its OWN
     key with a WARNING (never dropped), uncoerced.
+
+    A ``rangeStart`` pair drawn as ONE range control returns its value as a ``{start-date,
+    end-date}`` object under the START's key; :func:`split_range_values` splits it back onto the
+    two schema date keys, so the forwarded answer is always the two scalar date strings.
     """
     properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
     props = properties if isinstance(properties, dict) else {}
@@ -144,7 +151,7 @@ def _coerce_form_answer(
             logger.warning("whatsapp nfm_reply carried unknown payload label %r; forwarding under its own key", key)
             schema_key = key
         coerced[schema_key] = _coerce_value(value, props.get(schema_key))
-    return coerced
+    return split_range_values(props, coerced)
 
 
 async def _handle_form_reply(
@@ -305,7 +312,21 @@ async def _recover_form_rejection(
         await mark_seen(wamid)
         return
 
-    body_text = _rejection_body(pending.question, _door_error_line(retry_reason))
+    # Reproduce every per-send text from the stored wording catalogue: the form chapter's open
+    # button, screen title and submit label so the re-sent Flow looks identical, and the caller's
+    # refusal sentence (``wording.answer.rejected``) carrying the door's own reason. A stored
+    # catalogue that fails to validate is a loud server-bug backstop, never a silent default.
+    wording = Wording.model_validate(pending.wording) if pending.wording is not None else None
+    form = wording.form if wording is not None else None
+    answer = wording.answer if wording is not None else None
+    door_line = _door_error_line(retry_reason)
+    rejected_template = answer.rejected if answer is not None else None
+    tail = (
+        rejected_template.replace("{reason}", door_line)
+        if rejected_template is not None
+        else f"{_FORM_REJECTION_LEAD} {door_line}"
+    )
+    body_text = _rejection_body(pending.question, tail)
     # A re-send that fails must NOT mark the wamid seen and must NOT count the rejection:
     # the record is still held (the ladder kept it), so letting the error propagate is
     # enough — Meta's redelivery re-runs the ladder and re-enters this path. The one
@@ -322,21 +343,24 @@ async def _recover_form_rejection(
         values=pending.form_values or {},
         options=pending.form_options or {},
         reactions=pending.form_reactions,
+        open_label=form.open if form is not None else None,
+        form_title=form.title if form is not None else None,
+        form_submit=form.submit if form is not None else None,
     )
     await bump_rejections(phone_number_id, wa_id, pending)
     await mark_seen(wamid)
 
 
-def _rejection_body(question: str, error_line: str) -> str:
-    """The re-sent Flow's body: the question, then the door's rejection line.
+def _rejection_body(question: str, tail: str) -> str:
+    """The re-sent Flow's body: the question, then the refusal ``tail``.
 
     When the composed body would exceed ``_FLOW_BODY_MAX_CHARS`` the question is
     dropped WHOLE — the fresh Flow re-presents the fields, so a mid-string ellipsis
-    (forbidden by the no-silent-truncation posture) is never needed. ``error_line`` is
-    the door's OWN reason (which names the failing field), bounded by
-    :func:`_door_error_line` to ``_DOOR_REJECTION_MAX_CHARS`` — or the fixed opaque line
-    when the door gave none — so the lead + tail always fits the cap.
+    (forbidden by the no-silent-truncation posture) is never needed. ``tail`` is the refusal
+    sentence (the caller's ``wording.answer.rejected`` with the door's reason substituted, else the
+    generic lead + reason); its reason is bounded by :func:`_door_error_line` to
+    ``_DOOR_REJECTION_MAX_CHARS`` and a caller template is capped at deliver, so the tail always
+    fits the cap even when the question is dropped.
     """
-    tail = f"{_FORM_REJECTION_LEAD} {error_line}"
     full = f"{question}\n\n{tail}"
     return full if len(full) <= _FLOW_BODY_MAX_CHARS else tail

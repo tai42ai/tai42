@@ -233,6 +233,204 @@ def test_integer_and_number_map_to_number_text_input(json_type: str):
     }
 
 
+# -- the string inputMode → TextInput keyboard mapping -------------------------
+
+
+@pytest.mark.parametrize(
+    ("mode", "input_type"),
+    [("numeric", "number"), ("decimal", "number"), ("tel", "phone"), ("email", "email")],
+)
+def test_string_input_mode_draws_the_matching_keyboard(mode: str, input_type: str):
+    # A string field's ``inputMode`` selects Meta's ``input-type`` keyboard: a numeric keypad for
+    # ``numeric``/``decimal`` (its keypad admits a decimal separator), the phone keypad for ``tel``,
+    # the email keyboard for ``email``. The value still arrives as the typed string.
+    schema = {"type": "object", "properties": {"field": {"type": "string", "inputMode": mode}}, "required": ["field"]}
+
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field == {
+        "type": "TextInput",
+        "name": "field",
+        "label": "field",
+        "required": True,
+        "input-type": input_type,
+        "init-value": "${data.field__init}",
+    }
+
+
+@pytest.mark.parametrize("mode", ["url", "text"])
+def test_string_input_mode_url_and_text_stay_a_plain_text_input(mode: str):
+    # ``text`` is the identity (no keyboard hint); ``url`` degrades to the plain text field because
+    # Meta's TextInput has no ``url`` input-type. Both emit the plain TextInput, byte-identical to a
+    # string field with no ``inputMode`` at all.
+    schema = {"type": "object", "properties": {"field": {"type": "string", "inputMode": mode}}, "required": ["field"]}
+
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field == {
+        "type": "TextInput",
+        "name": "field",
+        "label": "field",
+        "required": True,
+        "init-value": "${data.field__init}",
+    }
+
+
+def test_string_input_mode_text_is_byte_identical_to_absent():
+    plain = {"type": "object", "properties": {"field": {"type": "string"}}, "required": ["field"]}
+    with_text = {
+        "type": "object",
+        "properties": {"field": {"type": "string", "inputMode": "text"}},
+        "required": ["field"],
+    }
+
+    assert _controls(build_form_flow(plain)[0])[0] == _controls(build_form_flow(with_text)[0])[0]
+
+
+def test_string_bogus_input_mode_raises_channel_input_error_naming_the_property():
+    schema = {
+        "type": "object",
+        "properties": {"field": {"type": "string", "inputMode": "bogus"}},
+        "required": ["field"],
+    }
+
+    with pytest.raises(ChannelInputError, match="'field'"):
+        build_form_flow(schema)
+
+
+def test_bogus_input_mode_surfaces_as_value_error_at_ask_time():
+    # The ask-time hook turns the builder's ``ChannelInputError`` into the ``ValueError`` the
+    # chokepoint expects, so an out-of-set inputMode is refused before any state is written.
+    from tai42_channel_whatsapp import WhatsAppChannel
+
+    schema = {
+        "type": "object",
+        "properties": {"field": {"type": "string", "inputMode": "bogus"}},
+        "required": ["field"],
+    }
+
+    with pytest.raises(ValueError, match="'field'"):
+        WhatsAppChannel().validate_form_schema(schema, "question")
+
+
+# -- control: chips → ChipsSelector -------------------------------------------
+
+
+def test_string_enum_chips_renders_a_single_pick_chips_selector():
+    schema = {
+        "type": "object",
+        "properties": {"pick": {"type": "string", "enum": ["a", "b", "c"], "control": "chips"}},
+        "required": ["pick"],
+    }
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field == {
+        "type": "ChipsSelector",
+        "name": "pick",
+        "label": "pick",
+        "required": True,
+        "data-source": "${data.pick__ds}",
+        "init-value": "${data.pick__init}",
+        "max-selected-items": 1,
+    }
+    # The single-pick control's init is an array-typed carrier (a one-element list on the wire).
+    assert build_flow_data(schema, {"pick": "b"}, {}) == {
+        "pick__init": ["b"],
+        "pick__ds": [{"id": "a", "title": "a"}, {"id": "b", "title": "b"}, {"id": "c", "title": "c"}],
+    }
+    assert build_flow_data(schema, {}, {})["pick__init"] == []
+
+
+def test_array_chips_renders_a_multi_pick_chips_selector_with_selection_bounds():
+    schema = {
+        "type": "object",
+        "properties": {
+            "picks": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["a", "b", "c"]},
+                "control": "chips",
+                "minItems": 1,
+                "maxItems": 2,
+            }
+        },
+        "required": ["picks"],
+    }
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field["type"] == "ChipsSelector"
+    assert field["min-selected-items"] == 1
+    assert field["max-selected-items"] == 2
+    # A multi-pick answer is a list and needs no unwrap; its init stays the list.
+    assert build_flow_data(schema, {"picks": ["a", "b"]}, {})["picks__init"] == ["a", "b"]
+
+
+def test_array_chips_without_max_items_defaults_the_vendor_ceiling_and_a_required_floor():
+    schema = {
+        "type": "object",
+        "properties": {"picks": {"type": "array", "items": {"type": "string", "enum": ["a", "b"]}, "control": "chips"}},
+        "required": ["picks"],
+    }
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field["max-selected-items"] == 20  # Meta's ceiling when no maxItems is modeled
+    assert field["min-selected-items"] == 1  # a required array with no minItems floor demands one pick
+
+
+@pytest.mark.parametrize("count", [1, 21])
+def test_chips_outside_meta_bounds_degrades_to_the_default_control(count: int):
+    # Fewer than 2 or more than 20 choices cannot render as a ChipsSelector, so the field DEGRADES to
+    # the shape's default control (a named, documented degrade) — a radio/dropdown here.
+    enum = [f"opt{n}" for n in range(count)]
+    kind = "RadioButtonsGroup" if count <= 5 else "Dropdown"
+    schema = {
+        "type": "object",
+        "properties": {"pick": {"type": "string", "enum": enum, "control": "chips"}},
+        "required": ["pick"],
+    }
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field["type"] == kind
+    # The degraded control's value is the scalar string, so its init is the empty string, not a list.
+    assert build_flow_data(schema, {}, {})["pick__init"] == ""
+
+
+# -- control: textarea / drawn maxLength / minLength --------------------------
+
+
+def test_string_textarea_control_renders_a_text_area_with_max_length():
+    schema = {
+        "type": "object",
+        "properties": {"notes": {"type": "string", "control": "textarea", "maxLength": 500}},
+        "required": ["notes"],
+    }
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field == {
+        "type": "TextArea",
+        "name": "notes",
+        "label": "notes",
+        "required": True,
+        "max-length": 500,
+        "init-value": "${data.notes__init}",
+    }
+
+
+def test_string_textarea_without_max_length_omits_it():
+    schema = {
+        "type": "object",
+        "properties": {"notes": {"type": "string", "control": "textarea"}},
+        "required": ["notes"],
+    }
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field["type"] == "TextArea"
+    assert "max-length" not in field
+
+
+def test_single_line_text_input_draws_max_chars_and_min_chars_from_length_bounds():
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string", "maxLength": 80, "minLength": 2}},
+        "required": ["name"],
+    }
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field["type"] == "TextInput"
+    assert field["max-chars"] == 80
+    assert field["min-chars"] == 2
+
+
 # -- the format: date → DatePicker mapping ------------------------------------
 
 
@@ -511,6 +709,49 @@ def test_form_flow_option_bearing_string_renders_a_dropdown_and_keys_its_own_flo
     assert dropdown["data-source"] == "${data.note__ds}"
     assert dropdown["init-value"] == "${data.note__init}"
     assert option_key != enum_only_key
+
+
+def test_page_button_label_labels_the_footer_else_the_generic_default():
+    schema = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}}
+    pages = [
+        {"title": "First", "fields": ["a"], "button_label": "Next step"},
+        {"title": "Second", "fields": ["b"], "button_label": "Send it"},
+    ]
+    flow_json, _ = build_form_flow(schema, pages)
+    assert _screen_children(flow_json, 0)[-1]["label"] == "Next step"  # the step footer
+    assert _screen_children(flow_json, 1)[-1]["label"] == "Send it"  # the terminal footer
+    # A page with no button_label keeps the generic defaults.
+    plain, _ = build_form_flow(schema, [{"title": "1", "fields": ["a"]}, {"title": "2", "fields": ["b"]}])
+    assert _screen_children(plain, 0)[-1]["label"] == "Continue"
+    assert _screen_children(plain, 1)[-1]["label"] == "Submit"
+
+
+def test_page_button_label_over_the_cap_is_refused_naming_the_page():
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    pages = [{"title": "Only", "fields": ["a"], "button_label": "x" * 36}]
+    with pytest.raises(ChannelInputError, match="'Only'"):
+        build_form_flow(schema, pages)
+
+
+def test_form_title_is_the_page_less_screen_title_else_form():
+    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
+    titled, _ = build_form_flow(schema, form_title="Your details")
+    assert titled["screens"][0]["title"] == "Your details"
+    default, _ = build_form_flow(schema)
+    assert default["screens"][0]["title"] == "Form"
+
+
+def test_form_title_rekeys_a_page_less_flow_but_not_a_paged_one():
+    # A page-less form_title is Flow JSON (the screen title), so it re-keys the published Flow; a
+    # paged form shows each step's own title, so form_title does not change its emitted shape or key.
+    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
+    _, plain = build_form_flow(schema)
+    _, titled = build_form_flow(schema, form_title="Your details")
+    assert plain != titled
+    pages = [{"title": "Step", "fields": ["note"]}]
+    _, paged = build_form_flow(schema, pages)
+    _, paged_titled = build_form_flow(schema, pages, form_title="Ignored")
+    assert paged == paged_titled
 
 
 def test_form_flow_key_folds_the_emitted_shape():
@@ -876,27 +1117,179 @@ def test_unconstrained_date_stays_a_bare_date_picker():
     assert "required" not in field
 
 
-def test_declared_range_renders_two_scalar_date_controls_each_submitting_its_own_field():
+def _range_schema(**end_extra: object) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date", "title": "From"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start", "title": "To", **end_extra},
+        },
+        "required": ["start", "end"],
+    }
+
+
+def test_same_page_range_pair_merges_into_one_range_calendar_picker():
+    # A ``rangeStart`` pair on one page, same (absent) visibleWhen, no sibling dependant: ONE
+    # range-mode CalendarPicker at the START's position; the END emits no control of its own.
+    schema = _range_schema(minDays=3, maxDays=7)
+    flow_json, _ = build_form_flow(schema)
+
+    controls = _controls(flow_json)
+    assert len(controls) == 1
+    picker = controls[0]
+    assert picker["type"] == "CalendarPicker"
+    assert picker["name"] == "start"
+    assert picker["mode"] == "range"
+    # The two ends carry their own titles and required flags as the paired objects Meta's range takes.
+    assert picker["label"] == {"start-date": "From", "end-date": "To"}
+    assert picker["required"] == {"start-date": True, "end-date": True}
+    assert picker["init-value"] == "${data.start__init}"
+    # Meta counts the DIFFERENCE between the two dates; the platform span is the inclusive count.
+    assert picker["min-days"] == 2
+    assert picker["max-days"] == 6
+    # One completion entry, under the START's label, carrying the range object; the END contributes none.
+    footer = _screen_children(flow_json)[-1]
+    assert set(footer["on-click-action"]["payload"]) == {"From"}
+    assert footer["on-click-action"]["payload"]["From"] == "${form.start}"
+
+
+def test_merged_range_bounds_are_never_looser_than_either_field():
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {
+                "type": "string",
+                "format": "date",
+                "minDate": "2026-01-01",
+                "maxDate": "2026-06-30",
+                "unavailableDates": ["2026-02-02", "saturday"],
+            },
+            "end": {
+                "type": "string",
+                "format": "date",
+                "rangeStart": "start",
+                "minDate": "2026-02-01",
+                "maxDate": "2026-12-31",
+                "unavailableDates": ["2026-03-03", "sunday"],
+            },
+        },
+        "required": ["start", "end"],
+    }
+    picker = _controls(build_form_flow(schema)[0])[0]
+    assert picker["min-date"] == "2026-02-01"  # the LATER minDate
+    assert picker["max-date"] == "2026-06-30"  # the EARLIER maxDate
+    assert set(picker["unavailable-dates"]) == {"2026-02-02", "2026-03-03"}  # the UNION
+    # Both Saturday and Sunday are excluded (union), so include-days keeps Mon..Fri.
+    assert picker["include-days"] == ["Mon", "Tue", "Wed", "Thu", "Fri"]
+
+
+def test_range_pair_with_a_sibling_visible_when_on_an_end_draws_two_date_controls():
+    # Folded tightening: a sibling whose visibleWhen names either end would read the merged control's
+    # OBJECT value as a scalar, so the pair is NOT merged — it draws as two date controls and the
+    # sibling's conditional reference resolves against the scalar START control.
     schema = {
         "type": "object",
         "properties": {
             "start": {"type": "string", "format": "date"},
-            "end": {"type": "string", "format": "date", "rangeStart": "start", "minDays": 1, "maxDays": 7},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+            "note": {"type": "string", "visibleWhen": {"field": "start", "notEmpty": True}},
         },
         "required": ["start", "end"],
     }
     flow_json, _ = build_form_flow(schema)
     start = _field_by_name(flow_json, "start")
     end = _field_by_name(flow_json, "end")
-    # The end field carries a range pairing, so it is a (constrained) CalendarPicker; the start
-    # is a bare DatePicker. The span is enforced at the answer facet, not drawn — so the
-    # completion submits the TWO scalar date fields, nothing recombined.
-    assert start["type"] == "DatePicker"
+    assert start["type"] == "DatePicker"  # two separate scalar date controls, not one range picker
     assert end["type"] == "CalendarPicker"
-    footer = _screen_children(flow_json)[-1]
-    assert set(footer["on-click-action"]["payload"]) == {"start", "end"}
-    assert footer["on-click-action"]["payload"]["start"] == "${form.start}"
-    assert footer["on-click-action"]["payload"]["end"] == "${form.end}"
+    assert end.get("mode") != "range"
+    # The conditional note gates on the scalar START control's form value, not an object.
+    note_if = next(child for child in _screen_children(flow_json) if child.get("type") == "If")
+    assert note_if["condition"] == "${form.start} != ''"
+
+
+def test_range_pair_with_a_multi_value_visible_when_draws_two_date_controls():
+    # A shared multi-value ``in`` predicate splits a control into per-value cases, which the one
+    # range control's single object value cannot express — so the pair draws as two date controls.
+    predicate = {"field": "mode", "in": ["x", "y"]}
+    schema = {
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string", "enum": ["x", "y"]},
+            "start": {"type": "string", "format": "date", "visibleWhen": predicate},
+            "end": {"type": "string", "format": "date", "rangeStart": "start", "visibleWhen": predicate},
+        },
+    }
+    pages = [{"title": "P", "fields": ["mode", "start", "end"]}]
+    flow_json, _ = build_form_flow(schema, pages)
+
+    # The split fields are wrapped in per-value ``If`` nodes; collect every control type and mode.
+    types: list[str] = []
+    modes: list[str] = []
+
+    def _walk(node: object) -> None:
+        if isinstance(node, dict):
+            ctype = node.get("type")
+            if isinstance(ctype, str) and ctype != "If" and isinstance(node.get("name"), str):
+                types.append(ctype)
+                if isinstance(node.get("mode"), str):
+                    modes.append(node["mode"])
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(flow_json["screens"][0]["layout"]["children"])
+    # Two separate scalar date controls (a DatePicker and a single-mode CalendarPicker), never a
+    # merged range picker.
+    assert "DatePicker" in types
+    assert "CalendarPicker" in types
+    assert "range" not in modes
+
+
+def test_range_pair_on_different_pages_draws_two_date_controls():
+    schema = _range_schema()
+    pages = [{"title": "First", "fields": ["start"]}, {"title": "Second", "fields": ["end"]}]
+    flow_json, _ = build_form_flow(schema, pages)
+    assert _field_by_name(flow_json, "start", 0)["type"] == "DatePicker"
+    assert _field_by_name(flow_json, "end", 1)["type"] == "CalendarPicker"
+
+
+def test_range_pair_with_a_review_page_draws_two_date_controls():
+    # A review page reads each field's scalar ``__val`` back into a text line; a merged range
+    # START's ``__val`` would be the range OBJECT, which Meta's text interpolation cannot render.
+    # So the pair does NOT merge when the form has a review page — each end draws as its own scalar
+    # date control whose ``__val`` the readback renders correctly (the documented degrade).
+    schema = _range_schema()
+    pages = [
+        {"title": "Dates", "fields": ["start", "end"], "kind": "input"},
+        {"title": "Review", "fields": [], "kind": "review"},
+    ]
+    flow_json, _ = build_form_flow(schema, pages)
+    start = _field_by_name(flow_json, "start", 0)
+    end = _field_by_name(flow_json, "end", 0)
+    assert start["type"] == "DatePicker"  # two separate scalar date controls, not one range picker
+    assert end["type"] == "CalendarPicker"
+    assert end.get("mode") != "range"
+    # The review readback references each field's own scalar carrier — never a range object.
+    review_children = _screen_children(flow_json, 1)
+    texts = [child["text"] for child in review_children if child["type"] == "TextBody"]
+    assert "From: ${data.start__val}" in texts
+    assert "To: ${data.end__val}" in texts
+
+
+def test_merged_range_build_flow_data_emits_the_object_init_and_no_end_init():
+    schema = _range_schema()
+    data = build_flow_data(schema, {"start": "2026-05-01", "end": "2026-05-04"}, {})
+    assert data["start__init"] == {"start-date": "2026-05-01", "end-date": "2026-05-04"}
+    assert "end__init" not in data
+
+
+def test_merged_range_build_flow_data_empty_object_when_unprefilled():
+    schema = _range_schema()
+    data = build_flow_data(schema, {}, {})
+    assert data["start__init"] == {"start-date": "", "end-date": ""}
+    assert "end__init" not in data
 
 
 # -- D: display blocks + review screen --------------------------------------------
@@ -1156,6 +1549,19 @@ def test_reacting_field_change_publishes_endpoint_driven_with_a_data_exchange_ac
     assert action["payload"]["pick"] == "${form.pick}"
 
 
+def test_reacting_field_change_on_a_chips_control_attaches_an_on_select_action():
+    # A ChipsSelector is a selectable control, so a field_changed reaction attaches to it.
+    schema = {
+        "type": "object",
+        "properties": {"pick": {"type": "string", "enum": ["a", "b", "c"], "control": "chips"}},
+        "required": ["pick"],
+    }
+    reactions = {"field_changed": ["pick"], "page_advanced": [], "submitted": False, "choices": []}
+    field = _controls(build_form_flow(schema, reactions=reactions)[0])[0]
+    assert field["type"] == "ChipsSelector"
+    assert field["on-select-action"]["payload"]["tai42_event"] == "field_changed"
+
+
 def test_reacting_submit_turns_the_terminal_footer_into_a_data_exchange():
     schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
     reactions = {"field_changed": [], "page_advanced": [], "submitted": True, "choices": []}
@@ -1311,3 +1717,218 @@ def test_build_flow_data_array_without_options_or_enum_is_refused():
     schema = {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}}}}
     with pytest.raises(ChannelInputError, match="data-source"):
         build_flow_data(schema, {}, {})
+
+
+# -- branch coverage: chips refusal, button-label cap, merged-range edges ---------
+
+from tai42_channel_whatsapp.flows import _attach_field_reaction  # noqa: E402
+from tai42_channel_whatsapp.flows_components import range_pairs  # noqa: E402
+
+
+def test_plain_string_chips_control_without_an_enum_is_refused():
+    # A ``control: chips`` on a plain string (no declared choice list) cannot draw a ChipsSelector, so
+    # it is refused loudly rather than silently drawn as plain text.
+    schema = {"type": "object", "properties": {"pick": {"type": "string", "control": "chips"}}}
+    with pytest.raises(ChannelInputError, match="chips"):
+        build_form_flow(schema)
+
+
+def test_page_button_label_that_is_not_a_string_is_refused():
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    pages = [{"title": "P", "fields": ["a"], "button_label": 123}]
+    with pytest.raises(ChannelInputError, match="button_label must be a string"):
+        build_form_flow(schema, pages)
+
+
+def test_range_start_pair_on_non_date_fields_draws_two_plain_controls():
+    # ``rangeStart`` merges only a pair of date fields; on plain strings the pair never merges and both
+    # ends draw as their own TextInput.
+    schema = {
+        "type": "object",
+        "properties": {"start": {"type": "string"}, "end": {"type": "string", "rangeStart": "start"}},
+    }
+    controls = _controls(build_form_flow(schema)[0])
+    assert {c["name"] for c in controls} == {"start", "end"}
+    assert all(c["type"] == "TextInput" for c in controls)
+
+
+def test_range_pairs_skips_a_non_dict_property():
+    # A property whose schema is not an object contributes no merge (guarded before any date check).
+    assert range_pairs(["start", "end"], {"start": {"type": "string", "format": "date"}, "end": "oops"}) == {}
+
+
+def test_merged_range_union_skips_a_non_string_unavailable_entry():
+    # A non-string entry in an end's ``unavailableDates`` is ignored when the merged control's exclusions
+    # are unioned; only the real date string survives.
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date", "unavailableDates": ["2026-01-01", 5]},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+        },
+        "required": ["start", "end"],
+    }
+    picker = _controls(build_form_flow(schema)[0])[0]
+    assert picker["type"] == "CalendarPicker"
+    assert picker["unavailable-dates"] == ["2026-01-01"]
+
+
+def test_merged_range_prefill_that_is_not_an_iso_date_is_refused():
+    schema = _range_schema()
+    with pytest.raises(ChannelInputError, match="YYYY-MM-DD"):
+        build_flow_data(schema, {"start": "not-a-date"}, {})
+
+
+def test_visible_when_in_value_with_no_identifier_safe_characters_is_refused():
+    # A multi-value ``in`` splits into per-value case names; a value that slugs to the empty string
+    # cannot name a case and is refused loudly.
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "in": ["ok", "!!!"]}},
+        },
+    }
+    with pytest.raises(ChannelInputError, match="no identifier-safe characters"):
+        build_form_flow(schema)
+
+
+def test_attach_field_reaction_on_a_non_selectable_control_is_refused():
+    # A plain text control has no on-change event on WhatsApp; attaching a field_changed reaction to one
+    # is refused loudly.
+    component = {"type": "TextInput", "name": "note", "label": "note"}
+    with pytest.raises(ChannelInputError, match="selectable control"):
+        _attach_field_reaction(component, "note", ["note"], [], {"note": "note"}, {"note": [("", [])]}, {})
+
+
+def test_merged_range_data_model_on_a_later_screen_omits_the_end_init():
+    # The merged pair sits on the SECOND screen; its ``data`` declares the START's range ``init`` and no
+    # ``init`` for the merged-away END.
+    schema = {
+        "type": "object",
+        "properties": {
+            "note": {"type": "string"},
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+        },
+    }
+    pages = [
+        {"title": "Note", "fields": ["note"], "kind": "input", "display": []},
+        {"title": "Dates", "fields": ["start", "end"], "kind": "input", "display": []},
+    ]
+    data = build_form_flow(schema, pages)[0]["screens"][1]["data"]
+    assert "start__init" in data
+    assert "end__init" not in data
+
+
+def test_merged_range_val_carrier_on_a_later_screen_omits_the_end_val():
+    # The merged pair sits on the FIRST screen; a later screen declares the START's range ``__val`` and
+    # no ``__val`` for the merged-away END.
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+            "note": {"type": "string"},
+        },
+    }
+    pages = [
+        {"title": "Dates", "fields": ["start", "end"], "kind": "input", "display": []},
+        {"title": "Note", "fields": ["note"], "kind": "input", "display": []},
+    ]
+    data = build_form_flow(schema, pages)[0]["screens"][1]["data"]
+    assert "start__val" in data
+    assert "end__val" not in data
+
+
+def test_merged_range_step_footer_forwards_only_the_start_carrier():
+    # A 3-screen form with the merged pair on the FIRST screen: the navigate payloads carry the START's
+    # range ``__val`` and nothing for the merged END, both from the this-screen and the earlier-screen
+    # forward loops.
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+            "mid": {"type": "string"},
+            "note": {"type": "string"},
+        },
+    }
+    pages = [
+        {"title": "Dates", "fields": ["start", "end"], "kind": "input", "display": []},
+        {"title": "Mid", "fields": ["mid"], "kind": "input", "display": []},
+        {"title": "Note", "fields": ["note"], "kind": "input", "display": []},
+    ]
+    flow_json = build_form_flow(schema, pages)[0]
+    first = _screen_children(flow_json, 0)[-1]["on-click-action"]["payload"]
+    assert "start__val" in first
+    assert "end__val" not in first
+    second = _screen_children(flow_json, 1)[-1]["on-click-action"]["payload"]
+    assert "start__val" in second
+    assert "end__val" not in second
+
+
+def test_merged_range_step_footer_forwards_only_the_start_init_to_a_later_pair():
+    # A 3-screen form with the merged pair on the SECOND screen: the first screen's navigate forwards the
+    # START's range ``init`` downstream and nothing for the merged END (the later-screen forward loop).
+    schema = {
+        "type": "object",
+        "properties": {
+            "mid": {"type": "string"},
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+            "note": {"type": "string"},
+        },
+    }
+    pages = [
+        {"title": "Mid", "fields": ["mid"], "kind": "input", "display": []},
+        {"title": "Dates", "fields": ["start", "end"], "kind": "input", "display": []},
+        {"title": "Note", "fields": ["note"], "kind": "input", "display": []},
+    ]
+    first = _screen_children(build_form_flow(schema, pages)[0], 0)[-1]["on-click-action"]["payload"]
+    assert "start__init" in first
+    assert "end__init" not in first
+
+
+def test_submitted_reaction_payload_omits_the_merged_range_end_same_screen():
+    # A reacting ``submitted`` single-screen form: the terminal data_exchange payload carries the START's
+    # range reference and no entry for the merged-away END (the this-screen payload loop).
+    schema = _range_schema()
+    reactions = {"field_changed": [], "page_advanced": [], "submitted": True, "choices": []}
+    payload = _screen_children(build_form_flow(schema, reactions=reactions)[0])[-1]["on-click-action"]["payload"]
+    assert payload["start"] == "${form.start}"
+    assert "end" not in payload
+
+
+def test_submitted_reaction_payload_omits_the_merged_range_end_earlier_screen():
+    # A reacting ``submitted`` 2-screen form with the merged pair on the FIRST screen: the terminal
+    # payload carries the START's ``__val`` carrier and no entry for the merged-away END.
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+            "note": {"type": "string"},
+        },
+    }
+    pages = [
+        {"title": "Dates", "fields": ["start", "end"], "kind": "input", "display": []},
+        {"title": "Note", "fields": ["note"], "kind": "input", "display": []},
+    ]
+    reactions = {"field_changed": [], "page_advanced": [], "submitted": True, "choices": []}
+    footer = _screen_children(build_form_flow(schema, pages, reactions=reactions)[0], 1)[-1]
+    payload = footer["on-click-action"]["payload"]
+    assert payload["start"] == "${data.start__val}"
+    assert "end" not in payload
+
+
+def test_field_changed_on_a_merged_range_end_attaches_the_reaction_to_the_range_control():
+    # A ``field_changed`` naming either end of a merged pair attaches the one on-select-action to the
+    # single range control, named by the end that declared the trigger.
+    schema = _range_schema()
+    reactions = {"field_changed": ["end"], "page_advanced": [], "submitted": False, "choices": []}
+    picker = _controls(build_form_flow(schema, reactions=reactions)[0])[0]
+    assert picker["type"] == "CalendarPicker"
+    assert picker["mode"] == "range"
+    assert picker["on-select-action"]["name"] == "data_exchange"
+    assert picker["on-select-action"]["payload"]["tai42_field"] == "end"

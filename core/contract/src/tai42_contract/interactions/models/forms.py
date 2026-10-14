@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
-from typing import Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
+
+if TYPE_CHECKING:
+    from tai42_contract.interactions.models.wording import FieldWording
 
 _SCALAR_FORM_TYPES = ("string", "boolean", "integer", "number")
 
@@ -45,6 +48,32 @@ def check_form_tag(value: str) -> str:
             f"set (A-Z a-z 0-9 and - . _ ~)"
         )
     return value
+
+
+class FormInputMode(StrEnum):
+    """The kind of text a form ``string`` field collects — the keyboard a channel draws for it.
+
+    It is a rendering hint, never a validator: the value is always the string typed
+    (``numeric`` keeps ``"007"`` as ``"007"``, never a number; a value that may hold letters
+    is ``text``), and the answer door still enforces only the schema's ``type``, ``pattern``
+    and date ``format``s. A channel draws the kind's control where it has one and degrades to
+    a plain text field by its documented rule where it does not. The vocabulary is the open
+    HTML ``inputmode`` set, so no one channel's naming enters the platform.
+    """
+
+    TEXT = "text"
+    NUMERIC = "numeric"
+    DECIMAL = "decimal"
+    TEL = "tel"
+    EMAIL = "email"
+    URL = "url"
+
+
+class FormControl(StrEnum):
+    """The control a surface draws for a form property in place of its shape's default."""
+
+    CHIPS = "chips"
+    TEXTAREA = "textarea"
 
 
 class FormOption(BaseModel):
@@ -148,6 +177,14 @@ class FormPage(BaseModel):
     ``display`` is the ordered list of :class:`DisplayBlock` shown on the page. Across a
     form's ``pages`` every property appears exactly once on the INPUT pages (the
     interaction request enforces the coverage); absent ``pages`` means one page.
+
+    ``button_label`` is the text of the page's primary button — the one that advances from
+    an input page or submits from the last — in the sender's own words and the end-user's
+    language; absent, the surface shows its own generic word. A page's primary button is
+    labelled HERE, on the page; the texts that are not a page's — the one that opens the form,
+    the one that cancels it, and every other platform-drawn word of the send — are the wording
+    catalogue's (``wording.form`` and its sibling chapters). The platform's word is the default
+    on every one of them.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -156,12 +193,20 @@ class FormPage(BaseModel):
     fields: list[str]
     display: list[DisplayBlock] = []
     kind: Literal["input", "review"] = "input"
+    button_label: str | None = None
 
     @field_validator("title")
     @classmethod
     def _title_non_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("form page title must be non-blank")
+        return value
+
+    @field_validator("button_label")
+    @classmethod
+    def _button_label_non_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("form page button_label must be non-blank when set")
         return value
 
     @model_validator(mode="after")
@@ -384,6 +429,43 @@ def check_form_data(schema: dict[str, Any], data: FormData) -> None:
         if prop is None:
             raise ValueError(f"form data values names unknown property {name!r}")
         _check_form_value(name, prop, value, data.options.get(name))
+
+
+def _form_property_draws_choice(prop: dict[str, Any], named_in_options: bool) -> bool:
+    # Whether a form property draws a choice list a per-field word could label: a property named in
+    # the per-send ``data.options`` (its list replaces the enum for this send), a string with an
+    # ``enum``, or an array whose items are strings with an ``enum``. Any other property draws a
+    # free input or a shape no single picker renders.
+    if named_in_options:
+        return True
+    if prop.get("type") == "string":
+        return isinstance(prop.get("enum"), list)
+    items = prop.get("items")
+    return (
+        prop.get("type") == "array"
+        and isinstance(items, dict)
+        and cast("dict[str, Any]", items).get("type") == "string"
+        and isinstance(cast("dict[str, Any]", items).get("enum"), list)
+    )
+
+
+def check_form_wording_fields(schema: dict[str, Any], data: FormData | None, fields: dict[str, FieldWording]) -> None:
+    """Validate a form's per-field ``wording`` keys against its schema and per-send data.
+
+    Every key of ``wording.form.fields`` must name a declared top-level property that DRAWS a
+    choice list — a string with an ``enum`` or named in the per-send ``data.options``, or an array
+    of strings with an ``items.enum`` or named in ``data.options`` — since a per-field word labels
+    the field's picker and a field with no picker has nothing to label. Raises ``ValueError``
+    naming the offending property.
+    """
+    props = _schema_properties(schema)
+    option_names: set[str] = set(data.options) if data is not None else set()
+    for name in fields:
+        prop = props.get(name)
+        if prop is None:
+            raise ValueError(f"wording.form.fields names {name!r}, which is not a declared property")
+        if not _form_property_draws_choice(prop, name in option_names):
+            raise ValueError(f"wording.form.fields names {name!r}, which draws no choice list")
 
 
 def check_form_pages(schema: dict[str, Any], pages: list[FormPage]) -> None:

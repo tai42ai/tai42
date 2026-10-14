@@ -25,6 +25,7 @@ describe('applyFrame: chat.media', () => {
       header: null,
       footer: null,
       location: null,
+      wording: null,
       ts: TS,
     });
   });

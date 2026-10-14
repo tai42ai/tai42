@@ -2,10 +2,11 @@
 
 Registered SUT-side on import via a manifest ``channel_modules`` entry. It advertises
 ``supports_form_notifications`` so ``notify_user`` accepts a ``schema`` + ``data`` + ``pages``
-send on it, and its ``notify`` RECORDS the delivered form (its prefilled values and pages) onto
-``e2e:rec:notify_form:{recipient}`` — so a spec proves the delivered form carries the values and
-pages the send named, without a real bot medium. A send that fails validation (a bad prefill / a
-bad page) is refused before ``notify`` runs, so nothing is recorded.
+send on it, and its ``notify`` RECORDS the delivered form (its prefilled values, pages, and the
+caller-set ``wording`` catalogue) onto ``e2e:rec:notify_form:{recipient}`` — so a spec proves the
+delivered form carries the values, pages and words the send named, without a real bot medium. A
+send that fails validation (a bad prefill / a bad page) is refused before ``notify`` runs, so
+nothing is recorded.
 """
 
 from __future__ import annotations
@@ -50,6 +51,14 @@ class _StubFormChannel:
                 "data": notification.data.model_dump(mode="json") if notification.data is not None else None,
                 "pages": [p.model_dump(mode="json") for p in notification.pages] if notification.pages else None,
                 "form_tag": notification.form_tag,
+                # The caller-set per-send ``wording`` catalogue (the form's chrome, choice words and
+                # status copy). Recorded verbatim so a spec proves the delivered notification carries
+                # the sender's own words.
+                "wording": (
+                    notification.wording.model_dump(mode="json", exclude_none=True)
+                    if notification.wording is not None
+                    else None
+                ),
             }
         )
         key = f"e2e:rec:notify_form:{notification.recipient}"

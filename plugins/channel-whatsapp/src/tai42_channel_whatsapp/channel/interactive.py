@@ -7,6 +7,9 @@ the shape decision, the wire caps deciding it, and the send of one choice messag
 
 from __future__ import annotations
 
+from tai42_contract.channels import ChannelDelivery, ChannelInputError, ChannelNotification
+from tai42_contract.interactions.models import ChoiceWording
+
 from tai42_channel_whatsapp.client import (
     send_interactive_buttons,
     send_interactive_list,
@@ -32,20 +35,43 @@ _SECTION_TITLE_MAX_CHARS = 24  # sectioned-list section header
 _FOOTER_MAX_CHARS = 60  # interactive footer line
 _CTA_URL_LABEL_MAX_CHARS = 20  # cta_url button display_text (label)
 _INTERACTIVE_BODY_MAX_CHARS = 1024  # interactive body text
-# The list-opening button label (its own 20-char cap); a fixed, generic prompt.
+# The DEFAULT list-opening button label; the caller's own ``choice_label`` overrides it per send.
 _LIST_BUTTON_LABEL = "Choose an option"
+# Meta's cap on the list-opening button (``action.button``): up to 20 characters.
+_LIST_BUTTON_MAX_CHARS = 20
 # The footer on the numbered-text fallback — the human types an option instead of tapping.
 _NUMBERED_FALLBACK_FOOTER = "Reply with the text of one option."
 
 
-def _numbered_body(body: str, options: list[str]) -> str:
+def _choice_of(send: ChannelDelivery | ChannelNotification) -> ChoiceWording | None:
+    """The send's ``wording.choice`` chapter, or ``None`` when the send carried no choice wording."""
+    return send.wording.choice if send.wording is not None else None
+
+
+def _guard_choice_label(label: str | None) -> None:
+    """Refuse a caller ``choice_label`` over Meta's list-button cap, before any store or send.
+
+    The label rides the list-opening button where the choice draws as a list; the cap is the
+    medium's for that control, so the same label must not pass on three options (buttons) and fail
+    on four (a list). A label over the cap is a permanent input refusal (:class:`ChannelInputError`),
+    run regardless of the shape the message ends up rendering as — never truncated, never retried.
+    """
+    if label is not None and len(label) > _LIST_BUTTON_MAX_CHARS:
+        raise ChannelInputError(
+            f"choice-list button label is {len(label)} characters; WhatsApp caps the list button at "
+            f"{_LIST_BUTTON_MAX_CHARS} characters"
+        )
+
+
+def _numbered_body(body: str, options: list[str], reply_hint: str | None = None) -> str:
     """The numbered-text fallback body for a tappable choice past the interactive caps.
 
-    The body, the options numbered 1-based, then the type-an-option footer.
+    The body, the options numbered 1-based, then the type-an-option hint — the caller's
+    ``reply_hint`` when set, else the generic :data:`_NUMBERED_FALLBACK_FOOTER`.
     """
     lines = [body]
     lines.extend(f"{index}. {option}" for index, option in enumerate(options, start=1))
-    lines.append(_NUMBERED_FALLBACK_FOOTER)
+    lines.append(reply_hint or _NUMBERED_FALLBACK_FOOTER)
     return "\n".join(lines)
 
 
@@ -97,13 +123,24 @@ def _interactive_choice_kind(
 
 
 async def _send_choice(
-    phone_number_id: str, target: str, body: str, options: list[str], ids: list[tuple[str, str]]
+    phone_number_id: str,
+    target: str,
+    body: str,
+    options: list[str],
+    ids: list[tuple[str, str]],
+    choice: ChoiceWording | None = None,
 ) -> list[str]:
     """Send one tappable-choice message in its native shape and return its ``wamid`` (one message).
 
     ``ids`` are the ``(id, title)`` reply ids; the numbered fallback carries no ids (the
-    human types an option). Shared by the select ask and the interactive notification.
+    human types an option). ``choice`` is the caller's choice wording: its ``label`` draws the
+    list-opening button (list shape only; the buttons and numbered-text shapes draw no opener),
+    else the generic :data:`_LIST_BUTTON_LABEL`, and its ``reply_hint`` draws the type-an-option
+    line on the numbered-text shape, else :data:`_NUMBERED_FALLBACK_FOOTER`. Shared by the select
+    ask and the interactive notification.
     """
+    choice_label = choice.label if choice is not None else None
+    reply_hint = choice.reply_hint if choice is not None else None
     kind = _interactive_choice_kind(body, options)
     if kind == "buttons":
         return [await send_interactive_buttons(phone_number_id=phone_number_id, to=target, body=body, buttons=ids)]
@@ -111,7 +148,13 @@ async def _send_choice(
         sections = [{"rows": [{"id": rid, "title": title} for rid, title in ids]}]
         return [
             await send_interactive_list(
-                phone_number_id=phone_number_id, to=target, body=body, button_text=_LIST_BUTTON_LABEL, sections=sections
+                phone_number_id=phone_number_id,
+                to=target,
+                body=body,
+                button_text=choice_label or _LIST_BUTTON_LABEL,
+                sections=sections,
             )
         ]
-    return [await send_message(phone_number_id=phone_number_id, to=target, body=_numbered_body(body, options))]
+    return [
+        await send_message(phone_number_id=phone_number_id, to=target, body=_numbered_body(body, options, reply_hint))
+    ]

@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, Correlation
+from tai42_contract.interactions.models import AnswerMismatchPolicy, AnswerWording, Wording
 
 from tai42_channel_twilio.correlation import (
     PendingQuestionExistsError,
@@ -88,7 +89,9 @@ async def test_release_frees_the_pair_and_is_idempotent(fake_redis: FakeRedis):
 
 async def test_reserve_stores_the_correlation_record(fake_redis: FakeRedis):
     timeout_at = _deadline()
-    await reserve_pending(_TWILIO, _HUMAN, _CALLBACK, "int-42", timeout_at)
+    await reserve_pending(
+        _TWILIO, _HUMAN, _CALLBACK, "int-42", timeout_at, on_mismatch=AnswerMismatchPolicy.RETRY, wording=None
+    )
 
     got = await twilio_correlation_store.get_correlation(_KEY)
     assert got is not None
@@ -96,10 +99,41 @@ async def test_reserve_stores_the_correlation_record(fake_redis: FakeRedis):
     assert got.interaction_id == "int-42"  # the interaction id is stored (additive)
 
 
+async def test_reserve_carries_on_mismatch_and_wording_onto_the_record(fake_redis: FakeRedis):
+    # The deliver path copies the ask's digression policy and per-send wording onto the
+    # parked record, so the shared answer ladder draws the caller's refusal sentence and
+    # honours the policy when a typed reply is rejected. Both survive the store's
+    # JSON dump/validate round-trip.
+    wording = Wording(answer=AnswerWording(rejected="Please answer yes or no. {reason}"))
+    await reserve_pending(
+        _TWILIO, _HUMAN, _CALLBACK, "int-1", _deadline(), on_mismatch=AnswerMismatchPolicy.BRIDGE, wording=wording
+    )
+
+    got = await twilio_correlation_store.get_correlation(_KEY)
+    assert got is not None
+    assert got.on_mismatch is AnswerMismatchPolicy.BRIDGE
+    assert got.wording is not None
+    assert got.wording.answer is not None
+    assert got.wording.answer.rejected == "Please answer yes or no. {reason}"
+
+
+async def test_reserve_without_wording_stores_the_default_policy_and_no_wording(fake_redis: FakeRedis):
+    await reserve_pending(
+        _TWILIO, _HUMAN, _CALLBACK, "int-1", _deadline(), on_mismatch=AnswerMismatchPolicy.RETRY, wording=None
+    )
+
+    got = await twilio_correlation_store.get_correlation(_KEY)
+    assert got is not None
+    assert got.on_mismatch is AnswerMismatchPolicy.RETRY
+    assert got.wording is None
+
+
 async def test_reservation_ttl_is_remaining_budget(fake_redis: FakeRedis):
     before = datetime.now(UTC)
     timeout_at = _deadline(120)
-    await reserve_pending(_TWILIO, _HUMAN, _CALLBACK, "int-1", timeout_at)
+    await reserve_pending(
+        _TWILIO, _HUMAN, _CALLBACK, "int-1", timeout_at, on_mismatch=AnswerMismatchPolicy.RETRY, wording=None
+    )
     after = datetime.now(UTC)
 
     ttl = fake_redis.ttls[_REDIS_KEY]
@@ -107,25 +141,47 @@ async def test_reservation_ttl_is_remaining_budget(fake_redis: FakeRedis):
 
 
 async def test_double_reserve_rejected(fake_redis: FakeRedis):
-    await reserve_pending(_TWILIO, _HUMAN, _CALLBACK, "int-1", _deadline())
+    await reserve_pending(
+        _TWILIO, _HUMAN, _CALLBACK, "int-1", _deadline(), on_mismatch=AnswerMismatchPolicy.RETRY, wording=None
+    )
 
     with pytest.raises(PendingQuestionExistsError, match="already pending"):
-        await reserve_pending(_TWILIO, _HUMAN, "https://app.example/other", "int-2", _deadline())
+        await reserve_pending(
+            _TWILIO,
+            _HUMAN,
+            "https://app.example/other",
+            "int-2",
+            _deadline(),
+            on_mismatch=AnswerMismatchPolicy.RETRY,
+            wording=None,
+        )
 
 
 async def test_reserve_past_deadline_raises_and_stores_nothing(fake_redis: FakeRedis):
     with pytest.raises(ChannelDeliveryError, match="already passed"):
-        await reserve_pending(_TWILIO, _HUMAN, _CALLBACK, "int-1", _deadline(-1))
+        await reserve_pending(
+            _TWILIO, _HUMAN, _CALLBACK, "int-1", _deadline(-1), on_mismatch=AnswerMismatchPolicy.RETRY, wording=None
+        )
 
     assert not fake_redis.store  # nothing reserved for an expired budget
 
 
 async def test_release_pending_frees_the_pair(fake_redis: FakeRedis):
-    await reserve_pending(_TWILIO, _HUMAN, _CALLBACK, "int-1", _deadline())
+    await reserve_pending(
+        _TWILIO, _HUMAN, _CALLBACK, "int-1", _deadline(), on_mismatch=AnswerMismatchPolicy.RETRY, wording=None
+    )
     await release_pending(_TWILIO, _HUMAN)
 
     # Freed — a fresh reservation for the pair succeeds.
-    await reserve_pending(_TWILIO, _HUMAN, "https://app.example/next", "int-2", _deadline())
+    await reserve_pending(
+        _TWILIO,
+        _HUMAN,
+        "https://app.example/next",
+        "int-2",
+        _deadline(),
+        on_mismatch=AnswerMismatchPolicy.RETRY,
+        wording=None,
+    )
 
 
 # -- the MessageSid dedupe set (upstream replay guard) ---------------------------
@@ -150,7 +206,9 @@ async def test_missing_redis_url_raises_on_every_store_function(fake_redis: Fake
         twilio_correlation_store.set_correlation(_KEY, _entry(), ttl_seconds=300),
         twilio_correlation_store.get_correlation(_KEY),
         twilio_correlation_store.release_correlation(_KEY),
-        reserve_pending(_TWILIO, _HUMAN, _CALLBACK, "int-1", _deadline()),
+        reserve_pending(
+            _TWILIO, _HUMAN, _CALLBACK, "int-1", _deadline(), on_mismatch=AnswerMismatchPolicy.RETRY, wording=None
+        ),
         release_pending(_TWILIO, _HUMAN),
         already_seen("SM123"),
         mark_seen("SM123"),

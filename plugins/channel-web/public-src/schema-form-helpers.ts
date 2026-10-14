@@ -27,7 +27,11 @@ export function resolvePages(
   schema: JsonSchema,
   pages: readonly FormPage[] | null,
 ): readonly FormPage[] {
-  return pages ?? [{ title: '', fields: propertyOrder(schema), display: [], kind: 'input' }];
+  return (
+    pages ?? [
+      { title: '', fields: propertyOrder(schema), display: [], kind: 'input', buttonLabel: null },
+    ]
+  );
 }
 
 /** The initial form value: the schema's defaults overlaid with any prefilled

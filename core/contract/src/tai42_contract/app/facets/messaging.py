@@ -237,7 +237,7 @@ class AppInteractions(Protocol):
         ``mode="sync"`` returns the typed answer, ``mode="async"`` returns a
         ``SuspendedInteraction``. Its full call signature is the ``Ask``
         Protocol's, including the per-ask ``on_mismatch`` digression policy and
-        ``mismatch_notice`` retry text a channel-delivered ask carries. A facade
+        the ``wording`` catalogue a channel-delivered ask carries. A facade
         EXPOSURE of the skeleton helper through the already-typed Protocol — no new
         ask semantics.
         """

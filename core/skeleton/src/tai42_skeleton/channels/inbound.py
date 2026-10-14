@@ -44,7 +44,7 @@ from tai42_contract.channels import (
     InboundBridge,
 )
 from tai42_contract.conversations import BlankInboundTextError, InboundRejectionReason
-from tai42_contract.interactions.models import AnswerMismatchPolicy
+from tai42_contract.interactions.models import AnswerMismatchPolicy, Wording
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.interactions import CallbackUrlRefusedError, pin_callback_url
 
@@ -92,6 +92,12 @@ ANSWER_REJECTED_RETRY_NOTICE = "Sorry, that didn't match what the question expec
 # re-answered in place (a hard mismatch): the reply is bridged as a fresh turn, so
 # the participant is told the question is closed rather than left waiting on a retry.
 ANSWER_REJECTED_FINAL_NOTICE = "Sorry, that answer wasn't accepted and this question is now closed. {reason}"
+
+# The ``{reason}`` filler when the door gave no human-readable reason: a generic sentence that
+# names the fact without echoing the participant's content. One per arm — the re-answerable retry
+# and the hard-mismatch final notice — so the notice reads cleanly whether or not a reason was given.
+_NO_REASON_RETRY = "The answer wasn't in the expected format."
+_NO_REASON_FINAL = "The answer wasn't accepted."
 
 # The platform-event topic emitted when the answer door rejects a forwarded answer.
 # Core states the fact; a deployment wires a hook (topic -> a tool such as
@@ -239,17 +245,17 @@ async def _bridge(bridge: InboundBridge) -> None:
         )
 
 
-def _retry_notice_text(custom: str | None, reason: str) -> str:
-    """The participant-facing retry notice for a ``retry``-policy rejection.
+def _notice_text(wording: Wording | None, member: str, default: str, reason: str) -> str:
+    """The participant-facing rejection notice: the caller's ``wording.answer`` sentence when set, else ``default``.
 
-    ``None`` uses the built-in :data:`ANSWER_REJECTED_RETRY_NOTICE`; a per-ask ``custom`` notice
-    REPLACES it, with a literal ``{reason}`` token filled by a PLAIN substitution (``str.replace``,
-    never ``str.format``) so a notice without the token is sent verbatim and stray braces in
-    authored text never raise.
+    ``member`` is ``"rejected"`` (the ask stays open, the participant may answer again) or
+    ``"rejected_final"`` (the ask is closed). The caller's sentence off the parked ask's
+    ``Correlation.wording`` REPLACES the built-in default; a literal ``{reason}`` token in either is
+    filled by a PLAIN substitution (``str.replace``, never ``str.format``) with the door's reason,
+    so a sentence without the token is sent verbatim and stray braces in authored text never raise.
     """
-    if custom is None:
-        return ANSWER_REJECTED_RETRY_NOTICE.format(reason=reason)
-    return custom.replace("{reason}", reason)
+    template = getattr(wording.answer, member) if wording is not None and wording.answer is not None else None
+    return (template or default).replace("{reason}", reason)
 
 
 async def _notify_participant(bridge: InboundBridge, message: str) -> None:
@@ -687,9 +693,11 @@ async def _handle_live_rejection(
         # re-opened Flow/modal it renders off RETRY_KEPT), core skips its generic
         # participant notice so the participant is messaged exactly once — but still keeps the
         # correlation and still emits the operator event (tagged notice_owner).
-        reason = error or "The answer wasn't in the expected format."
+        reason = error or _NO_REASON_RETRY
         if not bridge.owns_retry_notice:
-            await _notify_participant(bridge, _retry_notice_text(entry.mismatch_notice, reason))
+            await _notify_participant(
+                bridge, _notice_text(entry.wording, "rejected", ANSWER_REJECTED_RETRY_NOTICE, reason)
+            )
         await _emit_answer_rejected(
             bridge,
             interaction_id=entry.interaction_id,
@@ -717,9 +725,11 @@ async def _handle_live_rejection(
     # final notice (the participant must be told the question is closed) and owns it.
     # Release, tell the participant the question is closed, alert the operator, and
     # bridge the reply as a fresh turn.
-    reason = error or "The answer wasn't accepted."
+    reason = error or _NO_REASON_FINAL
     await store.release_correlation(correlation_key)
-    await _notify_participant(bridge, ANSWER_REJECTED_FINAL_NOTICE.format(reason=reason))
+    await _notify_participant(
+        bridge, _notice_text(entry.wording, "rejected_final", ANSWER_REJECTED_FINAL_NOTICE, reason)
+    )
     await _emit_answer_rejected(
         bridge,
         interaction_id=entry.interaction_id,

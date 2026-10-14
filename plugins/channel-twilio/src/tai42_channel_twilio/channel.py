@@ -72,6 +72,16 @@ from tai42_channel_twilio.settings import TwilioSettings, require_delivery_setti
 # ``link`` (a labelled anchor, never an attachment).
 _MMS_MEDIA_KINDS = frozenset({MediaKind.IMAGE, MediaKind.VIDEO, MediaKind.AUDIO})
 
+# The default line carrying the tappable callback link on a Tier-1 ask; the caller's
+# ``wording.lines.answer_link`` replaces it. The ``{url}`` token is filled with the
+# callback url by a plain substitution.
+_ANSWER_LINK_LINE = "Answer here: {url}"
+
+# The default hint under the numbered options of a Tier-2 ask that lists choices (a
+# ``select`` answer set, or a ``text`` ask's suggested replies); the caller's
+# ``wording.choice.reply_hint`` replaces it.
+_CHOICE_REPLY_HINT = "Reply with the text of one option."
+
 
 def _text_media_lines(media: list[MediaItem] | None) -> list[str]:
     """The ``link`` and ``document`` media items rendered as labelled ``Body`` lines.
@@ -119,12 +129,15 @@ def _render_question(delivery: ChannelDelivery) -> str:
 
     Carries the question, any ``link``/``document`` media as labelled lines, plus
     numbered options (a select answer set, or a text ask's suggested replies) the
-    human answers by typing one.
+    human answers by typing one. The hint under the numbered options is the caller's
+    ``wording.choice.reply_hint`` when set, else :data:`_CHOICE_REPLY_HINT`.
     """
     lines = [delivery.question, *_text_media_lines(delivery.media)]
     if delivery.options:
         lines.extend(f"{index}. {option}" for index, option in enumerate(delivery.options, start=1))
-        lines.append("Reply with the text of one option.")
+        choice = delivery.wording.choice if delivery.wording is not None else None
+        reply_hint = choice.reply_hint if choice is not None else None
+        lines.append(reply_hint or _CHOICE_REPLY_HINT)
     return "\n".join(lines)
 
 
@@ -132,9 +145,14 @@ def _render_link(delivery: ChannelDelivery) -> str:
     """The SMS body for a Tier-1 ask (``confirm`` or ``external``).
 
     Carries the question, any ``link``/``document`` media as labelled lines, then
-    the tappable callback link.
+    the tappable callback link. The link line is the caller's
+    ``wording.lines.answer_link`` when set, else :data:`_ANSWER_LINK_LINE`, with the
+    ``{url}`` token filled by a plain substitution.
     """
-    lines = [delivery.question, *_text_media_lines(delivery.media), "", f"Answer here: {delivery.callback_url}"]
+    link_wording = delivery.wording.lines if delivery.wording is not None else None
+    answer_link = link_wording.answer_link if link_wording is not None else None
+    link_line = (answer_link or _ANSWER_LINK_LINE).replace("{url}", delivery.callback_url)
+    lines = [delivery.question, *_text_media_lines(delivery.media), "", link_line]
     return "\n".join(lines)
 
 
@@ -208,6 +226,8 @@ class TwilioChannel:
             callback_url=delivery.callback_url,
             interaction_id=delivery.interaction_id,
             timeout_at=delivery.timeout_at,
+            on_mismatch=delivery.on_mismatch,
+            wording=delivery.wording,
         )
         try:
             await send_message(

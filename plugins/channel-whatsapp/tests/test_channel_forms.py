@@ -9,7 +9,14 @@ import logging
 import httpx
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelNotification
-from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_contract.interactions.models import (
+    AnswerMismatchPolicy,
+    AnswerWording,
+    FormWording,
+    MediaItem,
+    MediaKind,
+    Wording,
+)
 
 from tai42_channel_whatsapp.channel import WhatsAppChannel
 from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow, payload_labels
@@ -188,6 +195,203 @@ async def test_form_per_send_option_on_non_string_field_raises_before_any_send(
         await WhatsAppChannel().deliver(_form_delivery(schema=schema, data=data))
     assert fake_httpx.calls == []
     assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+
+
+async def test_form_open_label_draws_the_flow_cta_and_round_trips_on_the_pending_record(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    await WhatsAppChannel().deliver(_form_delivery(wording=Wording(form=FormWording(open="Begin"))))
+
+    params = fake_httpx.calls[0]["json"]["interactive"]["action"]["parameters"]
+    assert params["flow_cta"] == "Begin"
+    # The open label is a message parameter, not Flow JSON — the cached flow id is reused (no republish).
+    assert params["flow_id"] == "flow-cached"
+    # The whole wording catalogue round-trips on the pending record, so a re-send reproduces it.
+    stored = json.loads(fake_redis.store[f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}"])
+    assert stored["wording"]["form"]["open"] == "Begin"
+
+
+async def test_form_open_label_over_cap_refused_before_any_reserve_or_send(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    with pytest.raises(ChannelInputError, match="flow_cta"):
+        await WhatsAppChannel().deliver(_form_delivery(wording=Wording(form=FormWording(open="x" * 21))))
+
+    assert fake_httpx.calls == []
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+
+
+async def test_form_title_is_the_page_less_screen_title_and_rekeys_the_flow(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    flow_json, schema_hash = build_form_flow(_FORM_SCHEMA, form_title="Your details")
+    assert flow_json["screens"][0]["title"] == "Your details"
+    # The titled flow keys its own published Flow (distinct from the untitled one), so a cache miss
+    # creates+publishes against the titled hash.
+    fake_httpx.responses.append(_flow_created("flow-titled"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    await WhatsAppChannel().deliver(_form_delivery(wording=Wording(form=FormWording(title="Your details"))))
+
+    create = fake_httpx.calls[0]["json"]
+    assert json.loads(create["flow_json"])["screens"][0]["title"] == "Your details"
+    assert fake_redis.store[_flow_cache_key(schema_hash)] == "flow-titled"
+    stored = json.loads(fake_redis.store[f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}"])
+    assert stored["wording"]["form"]["title"] == "Your details"
+
+
+async def test_form_submit_draws_the_page_less_footer_and_rekeys_the_flow(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    # A page-less form's terminal button reads ``wording.form.submit``: it is the one resolved
+    # page's Footer.label (Flow JSON), so it re-keys the published Flow (distinct from the default).
+    flow_json, schema_hash = build_form_flow(_FORM_SCHEMA, form_submit="Send it")
+    footer = flow_json["screens"][0]["layout"]["children"][-1]
+    assert footer["type"] == "Footer"
+    assert footer["label"] == "Send it"
+    _, default_hash = build_form_flow(_FORM_SCHEMA)
+    assert schema_hash != default_hash  # the submit label re-keys the Flow
+
+    fake_httpx.responses.append(_flow_created("flow-submit"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    await WhatsAppChannel().deliver(_form_delivery(wording=Wording(form=FormWording(submit="Send it"))))
+
+    create = fake_httpx.calls[0]["json"]
+    created_footer = json.loads(create["flow_json"])["screens"][0]["layout"]["children"][-1]
+    assert created_footer["label"] == "Send it"
+    assert fake_redis.store[_flow_cache_key(schema_hash)] == "flow-submit"
+    stored = json.loads(fake_redis.store[f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}"])
+    assert stored["wording"]["form"]["submit"] == "Send it"
+
+
+async def test_form_submit_over_cap_refused_before_any_send(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # The page-less submit label rides Meta's Footer.label, capped at 35; 36 is refused loudly at
+    # build, before any reservation or send.
+    with pytest.raises(ChannelInputError, match="footer label"):
+        await WhatsAppChannel().deliver(_form_delivery(wording=Wording(form=FormWording(submit="z" * 36))))
+
+    assert fake_httpx.calls == []
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+
+
+async def test_form_rejected_template_over_cap_refused_before_any_reserve_or_send(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The caller's refusal sentence, with its one ``{reason}`` token filled by the door reason (up to
+    # 500 chars), must fit the 1024-char Flow body: a one-token template whose fixed text exceeds
+    # 1024 - 500 = 524 overflows on the re-send and is refused at deliver.
+    over = "x" * 525 + "{reason}"
+    with pytest.raises(ChannelInputError, match=r"wording\.answer\.rejected"):
+        await WhatsAppChannel().deliver(_form_delivery(wording=Wording(answer=AnswerWording(rejected=over))))
+
+    assert fake_httpx.calls == []
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+
+
+async def test_form_rejected_template_with_repeated_reason_token_bounded_by_worst_case(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # Each ``{reason}`` token is filled, so the cap bounds the WORST-CASE expansion, not a single
+    # stripping: a template whose fixed text fits alone but whose two filled tokens push the body past
+    # 1024 (520 + 2*500 = 1520) is refused at deliver, never stranding the participant on the re-send.
+    two_tokens = "x" * 520 + "{reason}{reason}"
+    with pytest.raises(ChannelInputError, match=r"wording\.answer\.rejected"):
+        await WhatsAppChannel().deliver(_form_delivery(wording=Wording(answer=AnswerWording(rejected=two_tokens))))
+
+    assert fake_httpx.calls == []
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+
+
+async def test_form_rejected_template_at_cap_boundary_is_accepted(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    # Exactly the worst-case boundary passes: 524 fixed chars + one filled {reason} (500) = 1024.
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    template = "x" * 524 + "{reason}"
+    await WhatsAppChannel().deliver(_form_delivery(wording=Wording(answer=AnswerWording(rejected=template))))
+
+    stored = json.loads(fake_redis.store[f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}"])
+    assert stored["wording"]["answer"]["rejected"] == template
+
+
+async def test_form_reservation_carries_on_mismatch_and_wording(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    import json
+
+    # A form ask reserves its digression policy and the whole wording catalogue, so a door-rejection
+    # re-send reproduces every per-send text and the ladder reads the policy off the record.
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    await WhatsAppChannel().deliver(
+        _form_delivery(
+            on_mismatch=AnswerMismatchPolicy.BRIDGE,
+            wording=Wording(form=FormWording(open="Begin"), answer=AnswerWording(rejected="Nope: {reason}")),
+        )
+    )
+
+    stored = json.loads(fake_redis.store[f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}"])
+    assert stored["on_mismatch"] == "bridge"
+    assert stored["wording"]["form"]["open"] == "Begin"
+    assert stored["wording"]["answer"]["rejected"] == "Nope: {reason}"
+
+
+async def test_notify_form_open_label_draws_the_flow_cta(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
+    fake_httpx.responses.append(_accepted("wamid.FLOW"))
+
+    await WhatsAppChannel().notify(_form_notification(wording=Wording(form=FormWording(open="Open form"))))
+
+    params = fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]
+    assert params["flow_cta"] == "Open form"
+
+
+async def test_notify_form_submit_draws_the_page_less_footer(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    import json
+
+    # An ask-less form's page-less submit label draws the Footer exactly as a form ask's does: it
+    # re-keys the published Flow, so a cache miss creates against the submit-keyed hash and the
+    # created Flow JSON's terminal Footer carries the caller's label.
+    _, schema_hash = build_form_flow(_FORM_SCHEMA, form_submit="Send it")
+    fake_httpx.responses.append(_flow_created("flow-nf-submit"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.FLOW"))
+
+    await WhatsAppChannel().notify(_form_notification(wording=Wording(form=FormWording(submit="Send it"))))
+
+    create = fake_httpx.calls[0]["json"]
+    footer = json.loads(create["flow_json"])["screens"][0]["layout"]["children"][-1]
+    assert footer["type"] == "Footer"
+    assert footer["label"] == "Send it"
+    assert fake_redis.store[_flow_cache_key(schema_hash)] == "flow-nf-submit"
+
+
+async def test_notify_form_open_label_over_cap_refused_before_send(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    with pytest.raises(ChannelInputError, match="flow_cta"):
+        await WhatsAppChannel().notify(_form_notification(wording=Wording(form=FormWording(open="y" * 21))))
+
+    assert fake_httpx.calls == []
 
 
 async def test_form_cache_hit_sends_only(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):

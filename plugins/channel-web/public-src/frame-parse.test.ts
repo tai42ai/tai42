@@ -334,7 +334,7 @@ describe('formPagesOf', () => {
 
   it('allows an empty review page and parses a populated input page', () => {
     expect(formPagesOf([{ title: 'Review', fields: [], kind: 'review' }])).toEqual([
-      { title: 'Review', fields: [], display: [], kind: 'review' },
+      { title: 'Review', fields: [], display: [], kind: 'review', buttonLabel: null },
     ]);
     expect(
       formPagesOf([{ title: 'Step', fields: ['a'], display: [{ kind: 'heading', text: 'Hi' }] }]),
@@ -344,8 +344,18 @@ describe('formPagesOf', () => {
         fields: ['a'],
         display: [{ kind: 'heading', text: 'Hi', src: null, alt: null, slot: null }],
         kind: 'input',
+        buttonLabel: null,
       },
     ]);
+  });
+
+  it('parses a page button_label and rejects a blank one', () => {
+    expect(formPagesOf([{ title: 'Step', fields: ['a'], button_label: 'Send it all' }])).toEqual([
+      { title: 'Step', fields: ['a'], display: [], kind: 'input', buttonLabel: 'Send it all' },
+    ]);
+    // Blank or non-string is malformed, like every other wording field.
+    expect(formPagesOf([{ title: 'Step', fields: ['a'], button_label: '   ' }])).toBeUndefined();
+    expect(formPagesOf([{ title: 'Step', fields: ['a'], button_label: 123 }])).toBeUndefined();
   });
 });
 

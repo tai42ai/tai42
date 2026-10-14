@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ChatApiError } from '@/api';
 import { FormCard, type FormCardItem } from '@/form-card';
-import type { FormPage, FormPrefill, JsonSchema, MediaItem } from '@/transcript-model';
+import type { FormPage, FormPrefill, JsonSchema, MediaItem, Wording } from '@/transcript-model';
 
 afterEach(() => {
   cleanup();
@@ -26,6 +26,7 @@ function formItem(overrides: Partial<FormCardItem> = {}): FormCardItem {
     location: null,
     formData: null,
     pages: null,
+    wording: null,
     ts: new Date().toISOString(),
     ...overrides,
   };
@@ -123,8 +124,8 @@ describe('FormCard', () => {
       properties: { first: { type: 'string' }, second: { type: 'string' } },
     };
     const pages: readonly FormPage[] = [
-      { title: 'Your name', fields: ['first'], display: [], kind: 'input' },
-      { title: 'Your note', fields: ['second'], display: [], kind: 'input' },
+      { title: 'Your name', fields: ['first'], display: [], kind: 'input', buttonLabel: null },
+      { title: 'Your note', fields: ['second'], display: [], kind: 'input', buttonLabel: null },
     ];
     const { onSubmitForm } = renderCard(enrichedItem(schema, null, pages));
 
@@ -254,5 +255,84 @@ describe('FormCard', () => {
     expect(screen.getByText('Session ended')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  it("draws the caller's terminal button, sent badge, session-ended badge and no-longer-available line", async () => {
+    const user = userEvent.setup();
+    const cardWording: Wording = {
+      form: { submit: 'File it', back: null, fields: {} },
+      choice: null,
+      answer: null,
+      status: {
+        sending: null,
+        answered: null,
+        expired: null,
+        closed: 'Chat over',
+        sent: 'Filed',
+        unavailable: 'That form is closed.',
+        countdown: null,
+      },
+    };
+    const onSubmitForm = vi.fn().mockResolvedValue(undefined);
+    render(
+      <FormCard
+        item={formItem({ wording: cardWording })}
+        onSubmitForm={onSubmitForm}
+        locked={false}
+      />,
+    );
+
+    await user.type(screen.getByRole('textbox'), 'ship it');
+    await user.click(screen.getByRole('button', { name: 'File it' }));
+    expect(await screen.findByText('Filed')).toBeInTheDocument();
+  });
+
+  it("draws the caller's session-ended badge when the page is locked", () => {
+    const cardWording: Wording = {
+      form: null,
+      choice: null,
+      answer: null,
+      status: {
+        sending: null,
+        answered: null,
+        expired: null,
+        closed: 'Chat over',
+        sent: null,
+        unavailable: null,
+        countdown: null,
+      },
+    };
+    renderCard(formItem({ wording: cardWording }), { locked: true });
+    expect(screen.getByText('Chat over')).toBeInTheDocument();
+  });
+
+  it("draws the caller's no-longer-available line on a 404", async () => {
+    const user = userEvent.setup();
+    const cardWording: Wording = {
+      form: null,
+      choice: null,
+      answer: null,
+      status: {
+        sending: null,
+        answered: null,
+        expired: null,
+        closed: null,
+        sent: null,
+        unavailable: 'That form is closed.',
+        countdown: null,
+      },
+    };
+    const onSubmitForm = vi.fn().mockRejectedValue(new ChatApiError('form not found', 404, null));
+    render(
+      <FormCard
+        item={formItem({ wording: cardWording })}
+        onSubmitForm={onSubmitForm}
+        locked={false}
+      />,
+    );
+
+    await user.type(screen.getByRole('textbox'), 'ship it');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText('That form is closed.')).toBeInTheDocument();
   });
 });

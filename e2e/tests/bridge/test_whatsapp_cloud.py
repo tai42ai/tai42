@@ -42,6 +42,7 @@ from ._bridge_support import (
     request_mentions,
     script_reply,
     tool_text,
+    wait_channel_send_count,
     wait_probe_record,
     wait_whatsapp_send,
     whatsapp_get_verify,
@@ -62,18 +63,56 @@ pytestmark = [
 ]
 
 
-# The smallest form answer schema: a text field, an integer field, and a date field, all
-# required — the integer is what the Flow returns as a string and the coercion turns back into
-# an int; the ``format: date`` field renders Meta's date picker and returns a ``YYYY-MM-DD``
-# string the decode leaves unchanged.
+# The smallest form answer schema: a text field, an integer field, a date field, and an
+# ``inputMode: email`` string field, all required — the integer is what the Flow returns as a
+# string and the coercion turns back into an int; the ``format: date`` field renders Meta's date
+# picker and returns a ``YYYY-MM-DD`` string the decode leaves unchanged; ``contact`` declares the
+# email keyboard, so its Flow ``TextInput`` carries Meta's ``input-type: email`` while the value
+# still arrives as the typed string.
 _FORM_SCHEMA = {
     "type": "object",
     "properties": {
         "label": {"type": "string"},
         "amount": {"type": "integer"},
         "when": {"type": "string", "format": "date"},
+        "contact": {"type": "string", "inputMode": "email"},
     },
-    "required": ["label", "amount", "when"],
+    "required": ["label", "amount", "when", "contact"],
+}
+
+
+# A schema carrying the four new form controls, all on one page so the range pair merges:
+# ``colour`` a chips string enum (2..20 choices) → a ChipsSelector; ``size`` a chips string enum
+# of ONE choice (below Meta's 2-choice floor) → the documented degrade to the default control (a
+# RadioButtonsGroup); ``notes`` a ``textarea`` string with a drawn ``maxLength`` → a TextArea
+# carrying ``max-length``; ``start``/``end`` a ``rangeStart`` date pair with a span → ONE
+# range-mode CalendarPicker. The page carries a caller ``button_label`` (the footer's text).
+_CONTROLS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "colour": {"type": "string", "enum": ["red", "green", "blue"], "control": "chips"},
+        "size": {"type": "string", "enum": ["one"], "control": "chips"},
+        "notes": {"type": "string", "control": "textarea", "maxLength": 600},
+        "start": {"type": "string", "format": "date"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start", "minDays": 2, "maxDays": 5},
+    },
+}
+_CONTROLS_PAGES = [
+    {"title": "Details", "fields": ["colour", "size", "notes", "start", "end"], "button_label": "Send it"}
+]
+
+# A ``rangeStart`` date pair the WhatsApp renderer must NOT merge into one range control, because
+# a SIBLING field's ``visibleWhen`` names the pair's END — merging would leave that sibling's
+# ``${form.end}`` reference reading the one range control's object value. The pair draws as two
+# separate date controls instead (the documented degrade): ``start`` (no constraints) a bare
+# DatePicker, ``end`` (its ``rangeStart`` is a constraint) a single-mode CalendarPicker.
+_RANGE_WITH_DEPENDENT_SIBLING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "start": {"type": "string", "format": "date"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start", "minDays": 1, "maxDays": 30},
+        "detail": {"type": "string", "visibleWhen": {"field": "end", "equals": "2026-02-04"}},
+    },
 }
 
 
@@ -90,6 +129,56 @@ def _flow_control_names(flow_json: dict) -> list[str]:
         for child in screen["layout"]["children"]
         if child.get("type") in {"TextInput", "Dropdown", "OptIn", "DatePicker"}
     ]
+
+
+def _text_input_by_name(flow_json: dict, name: str) -> dict:
+    """The single ``TextInput`` component carrying ``name`` across the Flow's screens."""
+    matches = [
+        child
+        for screen in flow_json["screens"]
+        for child in screen["layout"]["children"]
+        if child.get("type") == "TextInput" and child.get("name") == name
+    ]
+    assert len(matches) == 1, f"expected exactly one TextInput named {name!r}, saw {len(matches)}"
+    return matches[0]
+
+
+def _layout_children(flow_json: dict) -> list[dict]:
+    """Every layout child across the Flow's screens, flattened (an ``If`` wrapper's ``then`` unwrapped).
+
+    A ``visibleWhen`` field renders under one or more nested ``If`` components; this descends into
+    their ``then`` lists so a control is found whether or not it is conditionally gated."""
+    out: list[dict] = []
+
+    def _walk(children: list[dict]) -> None:
+        for child in children:
+            if child.get("type") == "If":
+                _walk(child.get("then", []))
+            else:
+                out.append(child)
+
+    for screen in flow_json["screens"]:
+        _walk(screen["layout"]["children"])
+    return out
+
+
+def _components_of_type(flow_json: dict, ctype: str) -> list[dict]:
+    """Every layout component of type ``ctype`` across the Flow's screens."""
+    return [child for child in _layout_children(flow_json) if child.get("type") == ctype]
+
+
+def _component_by_name(flow_json: dict, ctype: str, name: str) -> dict:
+    """The single ``ctype`` component carrying ``name`` across the Flow's screens."""
+    matches = [c for c in _components_of_type(flow_json, ctype) if c.get("name") == name]
+    assert len(matches) == 1, f"expected exactly one {ctype} named {name!r}, saw {len(matches)}"
+    return matches[0]
+
+
+def _terminal_footer_label(flow_json: dict) -> str:
+    """The ``label`` of the terminal screen's Footer (the form's submit button)."""
+    footers = _components_of_type(flow_json, "Footer")
+    assert footers, "the published Flow carries no Footer"
+    return footers[-1]["label"]
 
 
 def _assert_flow_wire_names_identifier_safe(flow_json: dict) -> None:
@@ -553,7 +642,12 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
     question = uniq("l7-form-q")
-    good_answer = {"label": uniq("l7-form-label"), "amount": 4, "when": "2026-09-27"}
+    good_answer = {
+        "label": uniq("l7-form-label"),
+        "amount": 4,
+        "when": "2026-09-27",
+        "contact": "alice@example.com",
+    }
     wa_id = _fresh_wa_id()
 
     async def ask() -> object:
@@ -581,6 +675,11 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
         assert len(bridge.fake_whatsapp.flows) == 1
         created = bridge.fake_whatsapp.flows[0]["id"]
         assert bridge.fake_whatsapp.published_flows == [created]
+        # The ``contact`` field declared inputMode email, so its published Flow TextInput carries
+        # Meta's input-type email (the email keyboard + Meta's own check); the value still returns
+        # as the typed string, coerced only by the schema type (the integer below).
+        flow_json = json.loads(bridge.fake_whatsapp.flows[0]["flow_json"])
+        assert _text_input_by_name(flow_json, "contact")["input-type"] == "email"
         params = interactive["action"]["parameters"]
         assert params["flow_id"] == created
         flow_token = params["flow_token"]
@@ -596,6 +695,7 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
                 "label": good_answer["label"],
                 "amount": "4",
                 "when": "2026-09-27",
+                "contact": good_answer["contact"],
             },
         )
         resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
@@ -679,6 +779,445 @@ async def test_form_with_odd_property_names_maps_to_identifier_safe_flow_and_ans
 
     # The label-keyed reply mapped back to the schema keys and coerced ("5" -> 5).
     assert resolved == good_answer
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_form_controls_render_native_flow_components_and_answer_resolves(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    # A form ask carrying the four new controls, a per-page button label and a caller open-button
+    # label publishes a Flow whose JSON draws each control natively, and a completed nfm_reply
+    # resolves the ask with the chips enum string and the two range date strings.
+    question = uniq("l7-ctrl-q")
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": _CONTROLS_SCHEMA,
+                    "pages": _CONTROLS_PAGES,
+                    "wording": {"form": {"open": "Open the form"}},
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        interactive = send["payload"]["interactive"]
+        assert interactive["type"] == "flow"
+        # The caller's open-button label rides the chat message as the Flow CTA (not Flow JSON).
+        assert interactive["action"]["parameters"]["flow_cta"] == "Open the form"
+
+        flow_json = json.loads(bridge.fake_whatsapp.flows[0]["flow_json"])
+        # The chips string enum (3 choices, inside Meta's 2..20) draws a single-pick ChipsSelector.
+        chips = _component_by_name(flow_json, "ChipsSelector", "colour")
+        assert chips["max-selected-items"] == 1
+        # The one-choice chips field falls below Meta's floor and degrades to the default control —
+        # a RadioButtonsGroup, never a ChipsSelector.
+        assert [c["name"] for c in _components_of_type(flow_json, "ChipsSelector")] == ["colour"]
+        assert _component_by_name(flow_json, "RadioButtonsGroup", "size")
+        # The textarea string draws a TextArea carrying the declared maximum.
+        assert _component_by_name(flow_json, "TextArea", "notes")["max-length"] == 600
+        # The rangeStart date pair draws ONE range-mode CalendarPicker, keyed by the start, its two
+        # ends labelled by their own titles (here their names) and the span carried as min/max-days
+        # (Meta counts the difference, one less than the platform's inclusive day count).
+        ranges = [c for c in _components_of_type(flow_json, "CalendarPicker") if c.get("mode") == "range"]
+        assert len(ranges) == 1
+        assert ranges[0]["name"] == "start"
+        assert ranges[0]["label"] == {"start-date": "start", "end-date": "end"}
+        assert ranges[0]["min-days"] == 1
+        assert ranges[0]["max-days"] == 4
+        # The page's button_label is the terminal screen's footer (the submit button).
+        assert _terminal_footer_label(flow_json) == "Send it"
+
+        flow_token = interactive["action"]["parameters"]["flow_token"]
+        # The single-pick ChipsSelector returns a one-element list; the merged range returns one
+        # {start-date, end-date} object under the start field's label.
+        reply = bridge.whatsapp_nfm_reply(
+            phone_number_id=BRIDGE_WHATSAPP_PHONE_ID,
+            wa_id=wa_id,
+            response={
+                "flow_token": flow_token,
+                "colour": ["green"],
+                "start": {"start-date": "2026-02-01", "end-date": "2026-02-04"},
+            },
+        )
+        resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
+        assert resp.status_code == 200, resp.text
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        await cancel_and_join(ask_task)
+
+    # The chips list unwrapped to the enum string, and the range object split onto the two date keys.
+    assert resolved == {"colour": "green", "start": "2026-02-01", "end": "2026-02-04"}
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_form_range_pair_degrades_to_two_controls_when_a_sibling_depends_on_an_end(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-rangedep-q")
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": _RANGE_WITH_DEPENDENT_SIBLING_SCHEMA,
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_json = json.loads(bridge.fake_whatsapp.flows[0]["flow_json"])
+        # A sibling's visibleWhen names the end, so the pair is NOT merged: no range-mode control,
+        # and the two date fields draw as their own controls (the start a bare DatePicker, the end
+        # — its rangeStart a constraint — a single-mode CalendarPicker), so ${form.end} resolves.
+        assert [c for c in _components_of_type(flow_json, "CalendarPicker") if c.get("mode") == "range"] == []
+        assert _component_by_name(flow_json, "DatePicker", "start")
+        assert _component_by_name(flow_json, "CalendarPicker", "end")["mode"] == "single"
+    finally:
+        await cancel_and_join(ask_task)
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_form_wording_title_sets_the_single_screen_title(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-title-q")
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": {"type": "object", "properties": {"label": {"type": "string"}}},
+                    "wording": {"form": {"title": "Form details"}},
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_json = json.loads(bridge.fake_whatsapp.flows[0]["flow_json"])
+        # A page-less form's single screen takes the caller's wording.form.title as its top-bar title.
+        assert flow_json["screens"][0]["title"] == "Form details"
+    finally:
+        await cancel_and_join(ask_task)
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_form_open_label_is_reused_on_the_door_rejection_resend(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-resend-q")
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"amount": {"type": "integer"}},
+                        "required": ["amount"],
+                    },
+                    "wording": {"form": {"open": "Start now"}},
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        first = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        assert first["payload"]["interactive"]["action"]["parameters"]["flow_cta"] == "Start now"
+        flow_token = first["payload"]["interactive"]["action"]["parameters"]["flow_token"]
+
+        # A mismatched answer (a non-integer) is door-rejected and the channel recovers by
+        # RE-SENDING a fresh Flow for the same ask — carrying the SAME open-button label.
+        reply = bridge.whatsapp_nfm_reply(
+            phone_number_id=BRIDGE_WHATSAPP_PHONE_ID,
+            wa_id=wa_id,
+            response={"flow_token": flow_token, "amount": "not-a-number"},
+        )
+        resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
+        assert resp.status_code == 200, resp.text
+        sends = await wait_channel_send_count(bridge.fake_whatsapp, question, 2)
+        resend = sends[-1]
+        assert resend["payload"]["interactive"]["type"] == "flow"
+        assert resend["payload"]["interactive"]["action"]["parameters"]["flow_cta"] == "Start now"
+    finally:
+        await cancel_and_join(ask_task)
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_select_list_button_reads_the_caller_choice_wording_label(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-choicelbl-q")
+    # > 3 options render as an interactive list, whose opening button reads the caller's label.
+    options = ["North", "South", "East", "West", "Central"]
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "select",
+                    "options": options,
+                    "wording": {"choice": {"label": "Pick a region"}},
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        interactive = send["payload"]["interactive"]
+        assert interactive["type"] == "list"
+        # The list-opening button carries the caller's wording.choice.label, not the default "Choose an option".
+        assert interactive["action"]["button"] == "Pick a region"
+    finally:
+        await cancel_and_join(ask_task)
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_page_less_form_footer_reads_the_caller_submit_label(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-submit-q")
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": {"type": "object", "properties": {"label": {"type": "string"}}},
+                    "wording": {"form": {"submit": "Send answers"}},
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_json = json.loads(bridge.fake_whatsapp.flows[0]["flow_json"])
+        # A page-less form's single screen draws the caller's wording.form.submit as the terminal
+        # footer (the submit button), not the generic "Submit".
+        assert _terminal_footer_label(flow_json) == "Send answers"
+    finally:
+        await cancel_and_join(ask_task)
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_numbered_text_select_reads_the_caller_reply_hint(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-hint-q")
+    # 11 options exceed the list-row cap -> the numbered-text fallback, whose type-an-option line
+    # the caller's wording.choice.reply_hint replaces (the default is covered by the over-cap test).
+    options = [f"Choice {index}" for index in range(1, 12)]
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "select",
+                    "options": options,
+                    "wording": {"choice": {"reply_hint": "Type an option exactly."}},
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        assert send["type"] == "text"
+        assert "Type an option exactly." in send["body"]
+        assert "Reply with the text of one option." not in send["body"]
+    finally:
+        await cancel_and_join(ask_task)
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_confirm_tier1_link_line_reads_the_caller_template(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-link-q")
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "confirm",
+                    "wording": {"lines": {"answer_link": "Tap to reply: {url}"}},
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        assert send["type"] == "text"
+        body = send["body"]
+        # A Tier-1 confirm ask draws the caller's wording.lines.answer_link with its {url} token
+        # filled by the callback link; the default "Answer here:" line is replaced.
+        assert "Tap to reply: " in body
+        assert "/api/interactions/callback/" in body
+        assert "{url}" not in body
+        assert "Answer here:" not in body
+    finally:
+        await cancel_and_join(ask_task)
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_door_rejection_resend_carries_the_caller_rejected_sentence(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-reject-q")
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"amount": {"type": "integer"}},
+                        "required": ["amount"],
+                    },
+                    "wording": {"answer": {"rejected": "Not accepted — {reason} — try again."}},
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        first = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_token = first["payload"]["interactive"]["action"]["parameters"]["flow_token"]
+
+        # A mismatched answer (a non-integer) is door-rejected; the channel recovers by re-sending a
+        # fresh Flow whose body carries the caller's refusal sentence off the pending record — proof
+        # the record round-tripped on_mismatch (the RETRY re-send) and wording. The {reason} token is
+        # filled with the door's own reason, and the generic lead is replaced.
+        reply = bridge.whatsapp_nfm_reply(
+            phone_number_id=BRIDGE_WHATSAPP_PHONE_ID,
+            wa_id=wa_id,
+            response={"flow_token": flow_token, "amount": "not-a-number"},
+        )
+        resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
+        assert resp.status_code == 200, resp.text
+        sends = await wait_channel_send_count(bridge.fake_whatsapp, question, 2)
+        body = sends[-1]["payload"]["interactive"]["body"]["text"]
+        assert "Not accepted — " in body
+        assert " — try again." in body
+        assert "{reason}" not in body
+        assert "Your last answer could not be accepted:" not in body
+    finally:
+        await cancel_and_join(ask_task)
 
 
 @pytest.mark.needs(

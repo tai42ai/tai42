@@ -230,6 +230,69 @@
         "title": "AnswerFormat",
         "type": "string"
       },
+      "AnswerPageWording": {
+        "additionalProperties": false,
+        "description": "The caller's words for the pages a question's link opens, for ONE send. Frozen, strict keys.\n\n``confirm`` is the confirm page's copy; ``done`` the already-answered page's; ``awaiting`` the\nreply-on-the-channel page's; ``submitted`` the form page's post-submit copy; ``form`` carries the\nform page's own validation/error sentences. Each is drawn where a surface has that page or\nsentence. An empty object names nothing and is refused; an unknown key is refused.",
+        "properties": {
+          "awaiting": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PageCopy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "confirm": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PageCopy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "done": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PageCopy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "form": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FormPageWording"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "submitted": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PageCopy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "title": "AnswerPageWording",
+        "type": "object"
+      },
       "AnswerPart": {
         "additionalProperties": false,
         "description": "One message of an ordered multi-message answer — the platform's rich part shape.\n\nIt mirrors :class:`ChannelNotification`'s CONTENT surface exactly (``message`` plus the\noptional ``media`` / ``location`` / ``template`` / ``options`` / ``sections`` / ``header``\n/ ``footer`` / ``schema`` richer-send forms and their validators), MINUS the per-delivery\nrouting fields (``recipient`` / ``sender_identity``) — those stay on the single delivery,\nnever per part. The delivery machine sends each part as its own ``ChannelNotification``,\nin order, chunking the ``message`` text at the channel width and carrying the part's\nricher forms alongside it, exactly as a single notification does today. Every\ncross-field rule (content-only blank message, ``options`` XOR ``sections``, ``schema``\nexcludes both, ``header``/``footer`` require a choice surface, ``template`` standalone) is\nthe SHARED :func:`~tai42_contract.channels.check_interactive_composition`, so an authored\npart and a delivered notification can never diverge.\n\nA part is a NEW authoring surface, so it is STRICT FROM BIRTH: unknown keys are refused\n(``extra=\"forbid\"``) rather than silently dropped. A tool route authors parts as a JSON\narray whose elements are each EITHER a plain string (shorthand for a text-only part) or a\npart object — both normalize to THIS one model. Frozen.\n\n``message`` mirrors :class:`ChannelNotification.message`'s blank-vs-media RULE: non-blank BY\nDEFAULT, EXCEPT it may be blank for a MEDIA-ONLY part — a caption-less image with no text\ncarrier. The admissible states are \"``message`` non-blank\" OR \"blank ``message`` WITH non-empty\n``media``\"; a blank ``message`` and no media has nothing to deliver and is refused. ``options``\nREQUIRE a non-blank ``message`` (a tappable choice needs a prompt), and a ``template`` rides a\nnon-blank ``message`` too — so a media-only part carries only ``media``. Unlike\n``ChannelNotification`` (always constructed in code), a part is authored as JSON where the\n``message`` key may be ABSENT, so it defaults to ``\"\"`` — a media-only part is just ``{\"media\": …}``.",
@@ -393,9 +456,112 @@
               }
             ],
             "default": null
+          },
+          "wording": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Wording"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "title": "AnswerPart",
+        "type": "object"
+      },
+      "AnswerWording": {
+        "additionalProperties": false,
+        "description": "The caller's words for a non-form question's answer controls and refusal sentences. Frozen, strict keys.\n\n``open`` labels the control that opens the question's answer page; ``confirm`` labels its\naffirmative control; ``decline`` labels its negative control; ``submit`` labels the button that\nsends a typed or picked answer; ``reply_hint`` is the hint shown in an empty reply input.\n``rejected`` is the sentence drawn when an answer is refused and may be given again; its\nOPTIONAL ``{reason}`` token takes the door's reason by a plain substitution. ``rejected_final``\nis the sentence drawn when a refused answer also closes the question; it too takes an OPTIONAL\n``{reason}``. Each is the sender's own words, in the end-user's language; absent, the surface\nshows its own generic word. A set value is non-blank; ``rejected`` / ``rejected_final`` are\nbounded by :data:`REJECTION_NOTICE_MAX_CHARS`; an empty object names nothing and is refused; an\nunknown key is refused.",
+        "properties": {
+          "confirm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Confirm"
+          },
+          "decline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Decline"
+          },
+          "open": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Open"
+          },
+          "rejected": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rejected"
+          },
+          "rejected_final": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rejected Final"
+          },
+          "reply_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reply Hint"
+          },
+          "submit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Submit"
+          }
+        },
+        "title": "AnswerWording",
         "type": "object"
       },
       "ApiConversationRouteCreate": {
@@ -2727,6 +2893,50 @@
         "title": "CheckpointSweepResult",
         "type": "object"
       },
+      "ChoiceWording": {
+        "additionalProperties": false,
+        "description": "The caller's words for a choice list, for ONE send. Frozen, strict keys.\n\n``label`` is the word on the control that presents the list (the button or control that opens\nit); ``reply_hint`` is the line under a list rendered as numbered text telling the end user how\nto reply; ``group_label`` is the accessible name of a flat group of option buttons. Each text\nis the sender's own words, in the end-user's language; absent, the surface shows its own generic\nword. A set value is non-blank; an empty object names nothing and is refused; an unknown key is\nrefused.",
+        "properties": {
+          "group_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Group Label"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Label"
+          },
+          "reply_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reply Hint"
+          }
+        },
+        "title": "ChoiceWording",
+        "type": "object"
+      },
       "ClaimExchange": {
         "description": "Exchange a one-time claim token for its API key.",
         "properties": {
@@ -4304,6 +4514,74 @@
         "title": "ConversationTurnAck",
         "type": "object"
       },
+      "CountdownWording": {
+        "additionalProperties": false,
+        "description": "The caller's words for a live question card's countdown, for ONE send. Frozen, strict keys.\n\n``seconds_left`` is the visible plural line and MUST contain the ``{seconds}`` token (the card\nfills it with the number remaining); ``one_second_left`` is the visible singular line;\n``under_minute`` / ``under_half_minute`` / ``under_ten_seconds`` are the spoken lines at the\nthree thresholds. Each is the sender's own words, in the end-user's language; absent, the card\nshows its own generic word. A set value is non-blank; an empty object names nothing and is\nrefused; an unknown key is refused.",
+        "properties": {
+          "one_second_left": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "One Second Left"
+          },
+          "seconds_left": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Seconds Left"
+          },
+          "under_half_minute": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Under Half Minute"
+          },
+          "under_minute": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Under Minute"
+          },
+          "under_ten_seconds": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Under Ten Seconds"
+          }
+        },
+        "title": "CountdownWording",
+        "type": "object"
+      },
       "CrontabCadence": {
         "additionalProperties": false,
         "description": "Fire on a five-field crontab (minute, hour, day of month, month, day of week).",
@@ -5029,6 +5307,26 @@
         "title": "FanoutWorkerResult",
         "type": "object"
       },
+      "FieldWording": {
+        "additionalProperties": false,
+        "description": "The caller's words for one form field's platform-drawn controls. Frozen, strict keys.\n\n``choice_label`` is the placeholder of the field's picker (its empty-state prompt). It is the\nsender's own words, in the end-user's language; absent, the surface shows its own generic word.\nA set value is non-blank; an empty object names nothing and is refused; an unknown key is\nrefused.",
+        "properties": {
+          "choice_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Choice Label"
+          }
+        },
+        "title": "FieldWording",
+        "type": "object"
+      },
       "FleetResult": {
         "description": "The awaited result of one :meth:`WorkerBus.publish`.\n\nTwo honest shapes. Reachable (``reachable=True``): ``results`` holds, per worker,\nthe expected workers' verdicts (the synthesized self entry included) AND the gap\nrows (``resyncing`` / ``recycling`` / ``stale``) for rows that failed the ready+\nfresh gate — each carried as its actual condition rather than dropped.\nBus-unreachable (``reachable=False``): the transport failed before any worker\ncould reply, so there is NO worker list — only ``error``. ``local_only`` marks\nthe result of the no-op :meth:`WorkerBus.local` variant.",
         "properties": {
@@ -5408,8 +5706,20 @@
       },
       "FormPage": {
         "additionalProperties": false,
-        "description": "One step of a stepped form. Frozen.\n\n``title`` heads the step. ``fields`` names the top-level properties collected on an\nINPUT page (``kind == \"input\"``, the default); a REVIEW page (``kind == \"review\"``)\ncarries NO input fields (a terminal/summary step) and so has an empty ``fields``.\n``display`` is the ordered list of :class:`DisplayBlock` shown on the page. Across a\nform's ``pages`` every property appears exactly once on the INPUT pages (the\ninteraction request enforces the coverage); absent ``pages`` means one page.",
+        "description": "One step of a stepped form. Frozen.\n\n``title`` heads the step. ``fields`` names the top-level properties collected on an\nINPUT page (``kind == \"input\"``, the default); a REVIEW page (``kind == \"review\"``)\ncarries NO input fields (a terminal/summary step) and so has an empty ``fields``.\n``display`` is the ordered list of :class:`DisplayBlock` shown on the page. Across a\nform's ``pages`` every property appears exactly once on the INPUT pages (the\ninteraction request enforces the coverage); absent ``pages`` means one page.\n\n``button_label`` is the text of the page's primary button — the one that advances from\nan input page or submits from the last — in the sender's own words and the end-user's\nlanguage; absent, the surface shows its own generic word. A page's primary button is\nlabelled HERE, on the page; the texts that are not a page's — the one that opens the form,\nthe one that cancels it, and every other platform-drawn word of the send — are the wording\ncatalogue's (``wording.form`` and its sibling chapters). The platform's word is the default\non every one of them.",
         "properties": {
+          "button_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Button Label"
+          },
           "display": {
             "default": [],
             "items": {
@@ -5444,6 +5754,162 @@
           "fields"
         ],
         "title": "FormPage",
+        "type": "object"
+      },
+      "FormPageWording": {
+        "additionalProperties": false,
+        "description": "The caller's words for the form page's own sentences, for ONE send. Frozen, strict keys.\n\n``failed`` is the line when the send did not land; ``network_error`` is the line when the\nbrowser could not reach the server; ``update_failed`` is the line when a reacting form could\nnot refresh and takes an OPTIONAL ``{reason}`` token; ``choose_one`` is the validation line for\na required multi-choice left empty; ``date_unavailable`` is the validation line for a blocked\ndate. Each is the sender's own words, in the end-user's language; absent, the page shows its own\ngeneric word. A set value is non-blank; an empty object names nothing and is refused; an unknown\nkey is refused.",
+        "properties": {
+          "choose_one": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Choose One"
+          },
+          "date_unavailable": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Date Unavailable"
+          },
+          "failed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Failed"
+          },
+          "network_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Network Error"
+          },
+          "update_failed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Update Failed"
+          }
+        },
+        "title": "FormPageWording",
+        "type": "object"
+      },
+      "FormWording": {
+        "additionalProperties": false,
+        "description": "The caller's words for a form's platform-drawn chrome, for ONE send. Frozen, strict keys.\n\n``title`` heads the form surface; ``open`` labels the button that opens the form; ``cancel``\nlabels its cancel/close; ``back`` labels the button that returns to the previous step of a\nstepped form; ``submit`` labels the terminal button of a form with no pages; ``review_empty``\nis the line the review step shows before anything is filled; ``fields`` carries per-field\nwords keyed by property name. Each text is the sender's own words, in the end-user's language;\nabsent, the surface shows its own generic word. A set value is non-blank; an empty object names\nnothing and is refused; an unknown key is refused.",
+        "properties": {
+          "back": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Back"
+          },
+          "cancel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cancel"
+          },
+          "fields": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/FieldWording"
+            },
+            "default": {},
+            "title": "Fields",
+            "type": "object"
+          },
+          "open": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Open"
+          },
+          "review_empty": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Review Empty"
+          },
+          "submit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Submit"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Title"
+          }
+        },
+        "title": "FormWording",
         "type": "object"
       },
       "FreshLife": {
@@ -6900,6 +7366,62 @@
           "at"
         ],
         "title": "LastOp",
+        "type": "object"
+      },
+      "LineWording": {
+        "additionalProperties": false,
+        "description": "The caller's words for the lines of a delivery message, for ONE send. Frozen, strict keys.\n\n``answer_link`` is the sentence carrying the tappable answer link and MUST contain the ``{url}``\ntoken (the channel fills it by a plain substitution); ``deadline`` names the deadline and MUST\ncontain ``{deadline}`` (the channel fills it with its own formatted instant); ``reply`` tells\nthe end user how to reply and carries no token; ``options`` lists the choices and MUST contain\n``{options}`` (the channel fills it with its own joined list). Each is the sender's own words,\nin the end-user's language; absent, the surface shows its own generic word. A set value is\nnon-blank; an empty object names nothing and is refused; an unknown key is refused.",
+        "properties": {
+          "answer_link": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Answer Link"
+          },
+          "deadline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Deadline"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Options"
+          },
+          "reply": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reply"
+          }
+        },
+        "title": "LineWording",
         "type": "object"
       },
       "LinkOption": {
@@ -8456,6 +8978,18 @@
             ],
             "default": null,
             "description": "Optional pre-approved template for an out-of-window send. On a named channel it requires a channel that advertises template support (else a 501); with no channel it is stored on the internal inbox record. Mutually exclusive with media and options."
+          },
+          "wording": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Wording"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional per-send catalogue of the notification's platform-drawn texts, grouped by what each decorates — form (a form send's chrome), choice (a choice list's control words) and status (in-flight status copy). Each member is admitted only on the surface that draws it (a schema form, a flat options list, or a sectioned list); a member on a notification with no such surface is a 400. Recorded on the in-app feed (display content, feed parity)."
           }
         },
         "required": [
@@ -8912,6 +9446,38 @@
           }
         },
         "title": "OverlapPolicy",
+        "type": "object"
+      },
+      "PageCopy": {
+        "additionalProperties": false,
+        "description": "The heading and sentence of one platform-drawn answer page. Frozen, strict keys.\n\n``heading`` is the page's ``<title>`` and ``<h1>``; ``text`` is its one sentence. Each is\nthe sender's own words, in the end-user's language; absent, the page shows its own generic\nword. A set value is non-blank; an empty object names nothing and is refused; an unknown key\nis refused.",
+        "properties": {
+          "heading": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Heading"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Text"
+          }
+        },
+        "title": "PageCopy",
         "type": "object"
       },
       "ParkedEntry": {
@@ -15834,6 +16400,97 @@
         "title": "StateUpdate",
         "type": "object"
       },
+      "StatusWording": {
+        "additionalProperties": false,
+        "description": "The caller's words for in-flight and settled status copy, for ONE send. Frozen, strict keys.\n\n``sending`` is the screen-reader label while a send is in flight; ``answered`` / ``expired`` /\n``closed`` are the badges once a question settles; ``sent`` is the badge after an ask-less form\nis submitted; ``unavailable`` is the line when a form's door no longer resolves; ``countdown``\ncarries the live-countdown words. Each is the sender's own words, in the end-user's language;\nabsent, the surface shows its own generic word. A set value is non-blank; an empty object names\nnothing and is refused; an unknown key is refused.",
+        "properties": {
+          "answered": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Answered"
+          },
+          "closed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Closed"
+          },
+          "countdown": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CountdownWording"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "expired": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expired"
+          },
+          "sending": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sending"
+          },
+          "sent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sent"
+          },
+          "unavailable": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unavailable"
+          }
+        },
+        "title": "StatusWording",
+        "type": "object"
+      },
       "StorageInfo": {
         "description": "The storage provider identity, or ``present: false`` when none is installed.",
         "properties": {
@@ -18248,6 +18905,80 @@
           "updated"
         ],
         "title": "UserUpdateAck",
+        "type": "object"
+      },
+      "Wording": {
+        "additionalProperties": false,
+        "description": "The one catalogue of a send's platform-drawn texts, for ONE send. Frozen, strict keys.\n\nEvery platform-drawn text of a question or a notification — a button, a heading, an input hint,\na line of the message, a sentence of an answer page, a screen-reader label, the sentence that\ntells the end user their answer was refused, a settled card's badge — carries the caller's\nwords, the platform's word as the default. ``wording`` is the catalogue of those words for ONE\nsend, in the end-user's language, grouped by what each word decorates: the form (``form``), the\nchoice list (``choice``), a question's answer controls and refusal sentences (``answer``), the\nlines of the delivery message (``lines``), the pages a question's link opens (``answer_page``),\nand in-flight and settled status (``status``). A page's primary button is the one text not here:\nit is on the page (``pages[].button_label``). Each member is drawn where a surface has that\ncontrol or sentence and is admitted only on a send that draws it (:data:`ADMISSION`); a surface\nwith no such control draws nothing for it. A set value is non-blank; an empty chapter names\nnothing and is refused; an unknown key is refused.",
+        "properties": {
+          "answer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AnswerWording"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "answer_page": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AnswerPageWording"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "choice": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChoiceWording"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "form": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FormWording"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "lines": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LineWording"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StatusWording"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "title": "Wording",
         "type": "object"
       },
       "WorkerKind": {
@@ -30359,7 +31090,7 @@
         ]
       },
       "post": {
-        "description": "Send a human a one-way notification, fire-and-forget.\n\nNo reply is expected and nothing blocks. With a named channel the message is\nsent and the call returns as soon as the medium ACCEPTED it (not that a human\nsaw it). With ``channel`` omitted the message is recorded to the internal\nnotifications sink the Studio inbox reads. One send attempt, no retry; every\nfailure raises loudly, never a silent no-op:\n\n* a blank message with no media to carry it (the contract admits a blank message\n  only for a media-only send), an unknown channel name, a blank recipient/audience, a\n  caller-supplied ``sender_identity``, a contract-invalid ``media``/``template``/\n  ``options``/``schema`` combination (an empty list/dict, an over-cap value, or a\n  mutually exclusive\n  media+template / options+template / schema+template / schema+options), a ``schema``\n  with no channel (the internal sink has no submission door) or one the channel's form\n  subset/hook refuses, or a channel's permanent refusal of the input's\n  shape (retrying cannot succeed) → 400;\n* a restricted caller addressing another identity (cross-identity denial) → 403;\n* a channel that cannot notify, or does not advertise the\n  ``media``/``template``/``options``/``schema`` capability the send needs → 501;\n* a transient channel delivery failure (the raised error's ``retryable``) → 503,\n  carrying the medium's ``retry_after`` when it named one;\n* a permanent channel delivery refusal → 502.\n\n``media`` (display media sent with the message), ``location`` (a shared map pin),\n``template`` (a pre-approved out-of-window send), ``options`` (FLAT tappable options a tap\nof which enters the conversation), ``sections`` (the SECTIONED tappable-options\nalternative), ``header``/``footer`` (a media header / trailing line composing an interactive\nmessage) and ``schema`` (an ask-less form's answer schema — the channel renders the\nmessage as the form's prompt, and a submission enters the conversation as a message from\nthe person) are OPTIONAL richer-send forms — FULL parity with the flow answer path's\n``AnswerPart`` vocabulary. The contract's shared composition matrix is enforced on this\nrequest model identically: ``options`` XOR ``sections`` (one choice surface); ``schema``\nexcludes both; ``header``/``footer`` require a choice surface; ``template`` is the standalone\nout-of-window send exclusive with every other content/interactive field; ``options``/\n``sections`` may each combine with ``media``/``location`` (a contract-invalid combination is\na 400). On a\nnamed channel each needs a channel that advertises the matching capability\n(``media``→media, ``location``→location, ``template``→template, ``options``/``sections``→\ninteractive, ``schema``→form; ``header``/``footer`` ride the choice surface's capability, no\nflag of their own) — otherwise\nthe send is refused as a 501, never downgraded to a silent freeform send. With no\nchannel media/location/template/options/sections/header/footer are stored on the internal\ninbox record and rendered\nthere; ``schema`` alone REQUIRES a channel (a 400 without one) — a stored form nobody\ncould submit would be a dead surface, not a notification.\n\n``data`` (per-send prefill ``values`` and per-send ``options`` lists) and ``pages`` (the\nstepped layout) are the ask-less form's per-send extras — the same ``FormData``/``FormPage``\nan ask carries. They ride ONLY a form send: present without ``schema`` is a 400. When a\n``schema`` is present each is cross-checked against it by the same validator the ask door\nruns — a prefill against an unknown/ill-typed property, a per-send option list on a\nnon-string property, or a page that omits/duplicates/misnames a property is a 400.\n\n``form_tag`` is the caller-set opaque per-send correlation the channel carries with the form\nand hands back on submit. It rides ONLY a form send: present without ``schema`` is a 400. The\nplatform bounds it (an out-of-charset or over-length tag is a 400) but never interprets it,\nand it is not written to the in-app feed record.\n\n``audience`` addresses the in-app record to an identity's feed; it is honored\neven when a channel also delivers the message (channel push AND in-app record).\n``sender_identity`` is the sending identity a channel message leaves FROM, which the\nconversation bridge sets on the notification it builds to answer a route; a caller may\nnot supply it here and a set value is rejected loudly, never forwarded to the channel.\n\nReturns a short confirmation string — ``\"notification sent via '<channel>'\"``\nfor a channel send, ``\"notification recorded to the internal sink\"`` otherwise.",
+        "description": "Send a human a one-way notification, fire-and-forget.\n\nNo reply is expected and nothing blocks. With a named channel the message is\nsent and the call returns as soon as the medium ACCEPTED it (not that a human\nsaw it). With ``channel`` omitted the message is recorded to the internal\nnotifications sink the Studio inbox reads. One send attempt, no retry; every\nfailure raises loudly, never a silent no-op:\n\n* a blank message with no media to carry it (the contract admits a blank message\n  only for a media-only send), an unknown channel name, a blank recipient/audience, a\n  caller-supplied ``sender_identity``, a contract-invalid ``media``/``template``/\n  ``options``/``schema`` combination (an empty list/dict, an over-cap value, or a\n  mutually exclusive\n  media+template / options+template / schema+template / schema+options), a ``schema``\n  with no channel (the internal sink has no submission door) or one the channel's form\n  subset/hook refuses, or a channel's permanent refusal of the input's\n  shape (retrying cannot succeed) → 400;\n* a restricted caller addressing another identity (cross-identity denial) → 403;\n* a channel that cannot notify, or does not advertise the\n  ``media``/``template``/``options``/``schema`` capability the send needs → 501;\n* a transient channel delivery failure (the raised error's ``retryable``) → 503,\n  carrying the medium's ``retry_after`` when it named one;\n* a permanent channel delivery refusal → 502.\n\n``media`` (display media sent with the message), ``location`` (a shared map pin),\n``template`` (a pre-approved out-of-window send), ``options`` (FLAT tappable options a tap\nof which enters the conversation), ``sections`` (the SECTIONED tappable-options\nalternative), ``header``/``footer`` (a media header / trailing line composing an interactive\nmessage) and ``schema`` (an ask-less form's answer schema — the channel renders the\nmessage as the form's prompt, and a submission enters the conversation as a message from\nthe person) are OPTIONAL richer-send forms — FULL parity with the flow answer path's\n``AnswerPart`` vocabulary. The contract's shared composition matrix is enforced on this\nrequest model identically: ``options`` XOR ``sections`` (one choice surface); ``schema``\nexcludes both; ``header``/``footer`` require a choice surface; ``template`` is the standalone\nout-of-window send exclusive with every other content/interactive field; ``options``/\n``sections`` may each combine with ``media``/``location`` (a contract-invalid combination is\na 400). On a\nnamed channel each needs a channel that advertises the matching capability\n(``media``→media, ``location``→location, ``template``→template, ``options``/``sections``→\ninteractive, ``schema``→form; ``header``/``footer`` ride the choice surface's capability, no\nflag of their own) — otherwise\nthe send is refused as a 501, never downgraded to a silent freeform send. With no\nchannel media/location/template/options/sections/header/footer are stored on the internal\ninbox record and rendered\nthere; ``schema`` alone REQUIRES a channel (a 400 without one) — a stored form nobody\ncould submit would be a dead surface, not a notification.\n\n``data`` (per-send prefill ``values`` and per-send ``options`` lists) and ``pages`` (the\nstepped layout) are the ask-less form's per-send extras — the same ``FormData``/``FormPage``\nan ask carries. They ride ONLY a form send: present without ``schema`` is a 400. When a\n``schema`` is present each is cross-checked against it by the same validator the ask door\nruns — a prefill against an unknown/ill-typed property, a per-send option list on a\nnon-string property, or a page that omits/duplicates/misnames a property is a 400.\n\n``form_tag`` is the caller-set opaque per-send correlation the channel carries with the form\nand hands back on submit. It rides ONLY a form send: present without ``schema`` is a 400. The\nplatform bounds it (an out-of-charset or over-length tag is a 400) but never interprets it,\nand it is not written to the in-app feed record.\n\n``wording`` is the per-send catalogue of the notification's platform-drawn texts, grouped by\nwhat each decorates — ``form`` (a form send's chrome), ``choice`` (a choice list's control\nwords) and ``status`` (in-flight status copy). Each member is admitted only on the surface that\ndraws it (a ``schema`` form, a flat ``options`` list, or a sectioned ``sections`` list); a\nmember on a notification with no such surface is a 400. It is display content, so an\n``audience``-addressed send records it on the in-app feed.\n\n``audience`` addresses the in-app record to an identity's feed; it is honored\neven when a channel also delivers the message (channel push AND in-app record).\n``sender_identity`` is the sending identity a channel message leaves FROM, which the\nconversation bridge sets on the notification it builds to answer a route; a caller may\nnot supply it here and a set value is rejected loudly, never forwarded to the channel.\n\nReturns a short confirmation string — ``\"notification sent via '<channel>'\"``\nfor a channel send, ``\"notification recorded to the internal sink\"`` otherwise.",
         "operationId": "post_api_notifications",
         "requestBody": {
           "content": {

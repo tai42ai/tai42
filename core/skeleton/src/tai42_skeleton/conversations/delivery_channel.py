@@ -145,9 +145,9 @@ def _part_notification(part: AnswerPart, chunk: str, record: ConversationRecord,
     """The :class:`ChannelNotification` for one chunk of ``part``.
 
     The part's rich fields (media, location, template, options, sections, header, footer, schema,
-    and a form part's per-send data/pages and form_tag) ride the FINAL chunk of the part — its
-    completed message — so a multi-chunk part's earlier chunks are plain text and the
-    media/buttons/form land with the last.
+    a form part's per-send data/pages and form_tag, and the per-send ``wording`` catalogue) ride
+    the FINAL chunk of the part — its completed message — so a multi-chunk part's earlier chunks are
+    plain text and the media/words/form land with the last.
     A CONTENT-ONLY part (media- or location-only) has a single final chunk of ``""``: the
     notification then carries a blank message plus that content, which the contract admits exactly
     because the content is present. ``recipient``/``sender_identity`` are the per-delivery routing
@@ -169,6 +169,7 @@ def _part_notification(part: AnswerPart, chunk: str, record: ConversationRecord,
         data=part.data if final else None,
         pages=part.pages if final else None,
         form_tag=part.form_tag if final else None,
+        wording=part.wording if final else None,
     )
 
 

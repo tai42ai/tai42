@@ -28,6 +28,7 @@ from typing import cast
 
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError, Correlation
+from tai42_contract.interactions.models import AnswerMismatchPolicy, Wording
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_channel_twilio.settings import TwilioRedisSettings, twilio_redis_settings, twilio_settings
@@ -106,17 +107,33 @@ twilio_correlation_store = TwilioCorrelationStore()
 
 
 async def reserve_pending(
-    twilio_number: str, human_number: str, callback_url: str, interaction_id: str, timeout_at: datetime
+    twilio_number: str,
+    human_number: str,
+    callback_url: str,
+    interaction_id: str,
+    timeout_at: datetime,
+    *,
+    on_mismatch: AnswerMismatchPolicy,
+    wording: Wording | None,
 ) -> None:
     """Atomically reserve the pair for one question, or raise ``PendingQuestionExistsError``.
 
     The deliver path's front door onto :meth:`TwilioCorrelationStore.set_correlation`:
     it computes the remaining-budget TTL (raising ``ChannelDeliveryError`` on an
     already-spent deadline), builds the :class:`Correlation` record, and turns the
-    NX-refused case into the typed one-pending error.
+    NX-refused case into the typed one-pending error. The ask's ``on_mismatch``
+    digression policy and its per-send ``wording`` catalogue are carried from the
+    delivery onto the record, so the shared answer ladder reads the caller's refusal
+    sentence and policy when a typed reply is rejected.
     """
     ttl = _remaining_seconds(timeout_at)
-    entry = Correlation(callback_url=callback_url, interaction_id=interaction_id, ttl_deadline=timeout_at)
+    entry = Correlation(
+        callback_url=callback_url,
+        interaction_id=interaction_id,
+        ttl_deadline=timeout_at,
+        on_mismatch=on_mismatch,
+        wording=wording,
+    )
     stored = await twilio_correlation_store.set_correlation(
         correlation_key(twilio_number, human_number), entry, ttl_seconds=ttl
     )

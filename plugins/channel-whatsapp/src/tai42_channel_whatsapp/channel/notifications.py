@@ -28,6 +28,8 @@ from tai42_channel_whatsapp.channel.interactive import (
     _LIST_ROW_TITLE_MAX_CHARS,
     _NUMBERED_FALLBACK_FOOTER,
     _SECTION_TITLE_MAX_CHARS,
+    _choice_of,
+    _guard_choice_label,
     _interactive_choice_kind,
     _numbered_body,
 )
@@ -142,11 +144,14 @@ def _sections_renderable(body: str, sections: list[OptionSection]) -> bool:
     return True
 
 
-def _numbered_sections_body(body: str, sections: list[OptionSection], footer: str | None) -> str:
+def _numbered_sections_body(
+    body: str, sections: list[OptionSection], footer: str | None, reply_hint: str | None = None
+) -> str:
     """The numbered-text fallback for a sectioned list past the wire caps.
 
     The body, then each section's title as a header line with its rows numbered
-    continuously (1-based across all sections), the type-an-option footer, and any
+    continuously (1-based across all sections), the type-an-option hint (the caller's
+    ``reply_hint`` when set, else the generic :data:`_NUMBERED_FALLBACK_FOOTER`), and any
     interactive footer appended as a trailing line — the plain-text send carries no wire
     caps on these fields, so the authored titles AND row descriptions ride whole (a
     description often being the very field that forced the degrade).
@@ -159,7 +164,7 @@ def _numbered_sections_body(body: str, sections: list[OptionSection], footer: st
             entry = f"{index}. {row.text} — {row.description}" if row.description else f"{index}. {row.text}"
             lines.append(entry)
             index += 1
-    lines.append(_NUMBERED_FALLBACK_FOOTER)
+    lines.append(reply_hint or _NUMBERED_FALLBACK_FOOTER)
     if footer is not None:
         lines.append(footer)
     return "\n".join(lines)
@@ -241,6 +246,8 @@ async def _render_section_list(
     body: str,
     header: MediaItem | None,
     footer: str | None,
+    choice_label: str | None,
+    reply_hint: str | None,
 ) -> list[str]:
     """Render a sectioned notification as an interactive LIST, or the numbered-text fallback.
 
@@ -253,7 +260,7 @@ async def _render_section_list(
         prelude: list[str] = []
         if header is not None:
             prelude.append(await _send_one_file(phone_number_id, target, header))
-        text_body = _numbered_sections_body(body, sections, footer)
+        text_body = _numbered_sections_body(body, sections, footer, reply_hint)
         return [*prelude, await send_message(phone_number_id=phone_number_id, to=target, body=text_body)]
     header_obj = _interactive_header(header)
     prelude = await _leading_header(phone_number_id, target, header, header_obj)
@@ -263,7 +270,7 @@ async def _render_section_list(
             phone_number_id=phone_number_id,
             to=target,
             body=body,
-            button_text=_LIST_BUTTON_LABEL,
+            button_text=choice_label or _LIST_BUTTON_LABEL,
             sections=_api_sections(sections, section_ids),
             header=header_obj,
             footer=footer,
@@ -329,11 +336,14 @@ async def _render_reply_kind(
     body: str,
     header_obj: dict[str, Any] | None,
     footer: str | None,
+    choice_label: str | None,
+    reply_hint: str | None,
 ) -> str:
     """Send the reply-options message in its chosen shape (buttons / list / numbered text).
 
     Returns its ``wamid``. Descriptions ride the numbered lines whole on the text tier —
-    a degrade never silently drops content.
+    a degrade never silently drops content. ``reply_hint`` draws the type-an-option line on
+    the numbered-text shape (the buttons and list shapes draw none).
     """
     if kind == "buttons":
         return await send_interactive_buttons(
@@ -349,13 +359,13 @@ async def _render_reply_kind(
             phone_number_id=phone_number_id,
             to=target,
             body=body,
-            button_text=_LIST_BUTTON_LABEL,
+            button_text=choice_label or _LIST_BUTTON_LABEL,
             sections=[{"rows": _reply_rows(reply_ids, replies)}],
             header=header_obj,
             footer=footer,
         )
     entries = [f"{reply.text} — {reply.description}" if reply.description else reply.text for reply in replies]
-    text_body = _append_lines(_numbered_body(body, entries), [footer] if footer else [])
+    text_body = _append_lines(_numbered_body(body, entries, reply_hint), [footer] if footer else [])
     return await send_message(phone_number_id=phone_number_id, to=target, body=text_body)
 
 
@@ -366,13 +376,17 @@ async def _render_reply_options(
     body: str,
     header: MediaItem | None,
     footer: str | None,
+    choice_label: str | None,
+    reply_hint: str | None,
 ) -> list[str]:
     """Render reply options as buttons or a list.
 
     Buttons render no description, so any described row prefers the list, and an over-cap
     row title/description/body degrades the whole message to numbered text. A media header
     rides the interactive header unless the message degrades to text (or the header is
-    audio), in which case it is sent ahead.
+    audio), in which case it is sent ahead. ``choice_label`` labels the list-opening button on
+    the list shape (the buttons and numbered-text shapes draw no opener); ``reply_hint`` draws the
+    type-an-option line on the numbered-text shape.
     """
     titles = [reply.text for reply in replies]
     descriptions = [reply.description for reply in replies]
@@ -382,7 +396,9 @@ async def _render_reply_options(
     reply_ids = _mint_wire_ids([reply.id for reply in replies], "notification")
     header_obj = _interactive_header(header) if kind != "fallback" else None
     prelude = await _leading_header(phone_number_id, target, header, header_obj)
-    message = await _render_reply_kind(phone_number_id, target, kind, replies, reply_ids, body, header_obj, footer)
+    message = await _render_reply_kind(
+        phone_number_id, target, kind, replies, reply_ids, body, header_obj, footer, choice_label, reply_hint
+    )
     return [*prelude, message]
 
 
@@ -393,6 +409,8 @@ async def _render_options(
     body: str,
     header: MediaItem | None,
     footer: str | None,
+    choice_label: str | None,
+    reply_hint: str | None,
 ) -> list[str]:
     """Render a flat ``options`` notification.
 
@@ -407,7 +425,9 @@ async def _render_options(
     body_with_links = _append_lines(body, [_link_option_line(option) for option in link_options])
     if not replies:
         return await _render_link_only(phone_number_id, target, body_with_links, header, footer)
-    return await _render_reply_options(phone_number_id, target, replies, body_with_links, header, footer)
+    return await _render_reply_options(
+        phone_number_id, target, replies, body_with_links, header, footer, choice_label, reply_hint
+    )
 
 
 async def _send_interactive_notification(
@@ -447,11 +467,22 @@ async def _send_interactive_notification(
     header or a text-fallback header is sent as its own message first. ``footer`` rides the
     interactive footer, or is appended as a body line on the text-only fallback.
     """
+    # The list-opening button's label rides the caller's ``wording.choice.label`` and the
+    # numbered-text hint its ``reply_hint``; refuse an over-cap label loudly before any send,
+    # regardless of the shape (buttons / list / numbered text) chosen below.
+    choice = _choice_of(notification)
+    choice_label = choice.label if choice is not None else None
+    reply_hint = choice.reply_hint if choice is not None else None
+    _guard_choice_label(choice_label)
     body, footer = _folded_body(notification, links_media)
     header = notification.header
     if notification.sections is not None:
-        return await _render_section_list(phone_number_id, target, notification.sections, body, header, footer)
-    return await _render_options(phone_number_id, target, notification.options or [], body, header, footer)
+        return await _render_section_list(
+            phone_number_id, target, notification.sections, body, header, footer, choice_label, reply_hint
+        )
+    return await _render_options(
+        phone_number_id, target, notification.options or [], body, header, footer, choice_label, reply_hint
+    )
 
 
 async def _send_notification(phone_number_id: str, target: str, notification: ChannelNotification) -> list[str]:

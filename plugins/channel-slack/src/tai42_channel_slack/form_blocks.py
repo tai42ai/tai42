@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import datetime
 import re
-from typing import Any
+from typing import Any, assert_never
 
 from tai42_contract.channels import ChannelInputError
+from tai42_contract.interactions import FormControl, FormInputMode
 from tai42_kit.interactions import RADIO_OPTION_THRESHOLD
 
 # One fixed action_id per input block: block_id is the field name, so the pair
@@ -26,6 +27,12 @@ _YES_NO_OPTIONS = (("Yes", "true"), ("No", "false"))
 # Slack Block Kit caps on a choice control: exceeding one is a loud error, never a truncation.
 _MAX_OPTION_TEXT_LEN = 75
 _MAX_STATIC_SELECT_OPTIONS = 100
+# A select menu's ``placeholder`` is a ``plain_text`` object Slack caps at 150 characters
+# (see ``cites.md``). A longer caller label cannot be drawn and is refused, never truncated.
+_MAX_SELECT_PLACEHOLDER_LEN = 150
+# Slack's ``plain_text_input.max_length`` upper bound (1..3000). A declared ``maxLength`` above
+# it cannot be drawn and is refused, never truncated.
+_MAX_TEXT_INPUT_LEN = 3000
 
 # Slack's own picker formats: ``initial_date`` is "YYYY-MM-DD", ``initial_time`` is
 # "HH:mm" (24-hour hour 00-23, minutes 00-59, two digits each, no seconds).
@@ -106,18 +113,48 @@ def _option_blocks(name: str, options: list[dict[str, Any]]) -> list[dict[str, A
     return blocks
 
 
-def _single_choice_element(name: str, options: list[dict[str, Any]]) -> dict[str, Any]:
-    """A ``radio_buttons`` (short list) or ``static_select`` (long list) for a string choice."""
-    blocks = _option_blocks(name, options)
-    etype = "radio_buttons" if len(blocks) <= RADIO_OPTION_THRESHOLD else "static_select"
-    return {"type": etype, "action_id": FIELD_ACTION_ID, "options": blocks}
+def _apply_choice_placeholder(name: str, element: dict[str, Any], choice_label: str | None) -> None:
+    """Draw the caller's ``choice_label`` as a select element's ``placeholder``.
+
+    ``placeholder`` is a ``plain_text`` object Slack caps at :data:`_MAX_SELECT_PLACEHOLDER_LEN`
+    characters; a longer label is refused naming the field, never truncated. ``None`` leaves the
+    element with no placeholder, so Slack shows its own default prompt (the documented absent-case).
+    """
+    if choice_label is None:
+        return
+    if len(choice_label) > _MAX_SELECT_PLACEHOLDER_LEN:
+        raise FormSchemaError(
+            f"form field {name!r} choice placeholder exceeds {_MAX_SELECT_PLACEHOLDER_LEN} characters"
+        )
+    element["placeholder"] = {"type": "plain_text", "text": choice_label}
 
 
-def _multi_choice_element(name: str, options: list[dict[str, Any]]) -> dict[str, Any]:
-    """A ``checkboxes`` (short list) or ``multi_static_select`` (long list) for an array choice."""
+def _single_choice_element(name: str, options: list[dict[str, Any]], choice_label: str | None = None) -> dict[str, Any]:
+    """A ``radio_buttons`` (short list) or ``static_select`` (long list) for a string choice.
+
+    A ``static_select`` carries the caller's ``choice_label`` as its ``placeholder`` when set; a
+    ``radio_buttons`` group has no placeholder slot, so a choice label draws none there.
+    """
     blocks = _option_blocks(name, options)
-    etype = "checkboxes" if len(blocks) <= RADIO_OPTION_THRESHOLD else "multi_static_select"
-    return {"type": etype, "action_id": FIELD_ACTION_ID, "options": blocks}
+    if len(blocks) <= RADIO_OPTION_THRESHOLD:
+        return {"type": "radio_buttons", "action_id": FIELD_ACTION_ID, "options": blocks}
+    element = {"type": "static_select", "action_id": FIELD_ACTION_ID, "options": blocks}
+    _apply_choice_placeholder(name, element, choice_label)
+    return element
+
+
+def _multi_choice_element(name: str, options: list[dict[str, Any]], choice_label: str | None = None) -> dict[str, Any]:
+    """A ``checkboxes`` (short list) or ``multi_static_select`` (long list) for an array choice.
+
+    A ``multi_static_select`` carries the caller's ``choice_label`` as its ``placeholder`` when
+    set; a ``checkboxes`` group has no placeholder slot, so a choice label draws none there.
+    """
+    blocks = _option_blocks(name, options)
+    if len(blocks) <= RADIO_OPTION_THRESHOLD:
+        return {"type": "checkboxes", "action_id": FIELD_ACTION_ID, "options": blocks}
+    element = {"type": "multi_static_select", "action_id": FIELD_ACTION_ID, "options": blocks}
+    _apply_choice_placeholder(name, element, choice_label)
+    return element
 
 
 def _radio_buttons() -> dict[str, Any]:
@@ -205,14 +242,14 @@ def _apply_multi_initial(name: str, element: dict[str, Any], value: Any) -> None
 def _apply_initial(name: str, element: dict[str, Any], value: Any) -> None:
     """Prefill one control from a per-send value.
 
-    ``initial_value`` for a text/number input (a list joins one entry per line for a free
-    multiple-choice text area), ``initial_date``/``initial_time`` for a date/time picker,
+    ``initial_value`` for a text/number/email/url input (a list joins one entry per line for a
+    free multiple-choice text area), ``initial_date``/``initial_time`` for a date/time picker,
     ``initial_option`` for a single choice (select / radio / the Yes/No boolean),
     ``initial_options`` for a multiple-choice control. A value Slack cannot display, or one
     not among a choice control's options, is a caller bug refused naming the field.
     """
     etype = element["type"]
-    if etype in ("plain_text_input", "number_input"):
+    if etype in ("plain_text_input", "number_input", "email_text_input", "url_text_input"):
         if isinstance(value, list):
             element["initial_value"] = "\n".join(str(item) for item in value)
         else:
@@ -230,12 +267,159 @@ def _apply_initial(name: str, element: dict[str, Any], value: Any) -> None:
     _apply_single_initial(name, element, value)
 
 
-def _element(name: str, spec: dict[str, Any], per_send_options: list[dict[str, Any]] | None) -> dict[str, Any]:
+def _draw_text_length_bounds(name: str, spec: dict[str, Any], element: dict[str, Any]) -> None:
+    """Draw a string property's ``maxLength``/``minLength`` onto a ``plain_text_input`` element.
+
+    Sets Slack's ``max_length``/``min_length`` so Slack's own in-modal length check shows and
+    enforces the maximum, on both the single-line and the multi-line (``multiline``) text input.
+    Slack caps ``max_length`` at :data:`_MAX_TEXT_INPUT_LEN`; a declared ``maxLength`` above it
+    cannot be drawn and is refused naming the property — never a silent truncation of the
+    author's bound. Only Slack's ``plain_text_input`` carries these bounds; see
+    :func:`_string_input_element` for the ``email_text_input``/``url_text_input`` elements, which
+    do not.
+    """
+    maximum = spec.get("maxLength")
+    if isinstance(maximum, int) and not isinstance(maximum, bool):
+        if maximum > _MAX_TEXT_INPUT_LEN:
+            raise FormSchemaError(
+                f"form schema property {name!r} maxLength {maximum} exceeds Slack's "
+                f"{_MAX_TEXT_INPUT_LEN}-character plain_text_input limit"
+            )
+        element["max_length"] = maximum
+    minimum = spec.get("minLength")
+    if isinstance(minimum, int) and not isinstance(minimum, bool):
+        element["min_length"] = minimum
+
+
+def _plain_text_input(name: str, spec: dict[str, Any]) -> dict[str, Any]:
+    """A single-line ``plain_text_input`` carrying the property's drawn length bounds."""
+    element: dict[str, Any] = {"type": "plain_text_input", "action_id": FIELD_ACTION_ID}
+    _draw_text_length_bounds(name, spec, element)
+    return element
+
+
+def _string_input_element(name: str, spec: dict[str, Any]) -> dict[str, Any]:
+    """The text element a plain ``string`` property collects, chosen by its ``inputMode``.
+
+    ``email`` draws Slack's ``email_text_input`` and ``url`` its ``url_text_input`` — the two
+    modal text elements that carry Slack's own built-in check. Those two elements accept no
+    ``max_length``/``min_length`` (only ``plain_text_input`` does), so a declared
+    ``maxLength``/``minLength`` is not drawn on them and stays enforced at the answer door —
+    never silently dropped. ``numeric``/``decimal``/``tel`` have no Slack keyboard hint and
+    degrade to a ``plain_text_input``: ``number_input`` is a number field, not a keyboard on a
+    string, so a string keeps its typed value verbatim. ``text`` or an absent ``inputMode`` is a
+    ``plain_text_input``. Every ``plain_text_input`` branch draws the property's length bounds
+    (:func:`_draw_text_length_bounds`). The map is exhaustive over
+    :class:`~tai42_contract.interactions.FormInputMode`; a value outside it is refused naming
+    the property (the render-door backstop for a record that bypassed the ask-time validator).
+    """
+    if "inputMode" not in spec:
+        return _plain_text_input(name, spec)
+    raw = spec["inputMode"]
+    try:
+        mode = FormInputMode(raw)
+    except ValueError as exc:
+        raise FormSchemaError(f"form schema property {name!r} has unsupported inputMode {raw!r}") from exc
+    match mode:
+        case FormInputMode.EMAIL:
+            return {"type": "email_text_input", "action_id": FIELD_ACTION_ID}
+        case FormInputMode.URL:
+            return {"type": "url_text_input", "action_id": FIELD_ACTION_ID}
+        case FormInputMode.NUMERIC | FormInputMode.DECIMAL | FormInputMode.TEL:
+            # Documented degrade: Slack offers no numeric/phone keyboard hint on a text
+            # element, so these keep the plain text input and arrive exactly as typed.
+            return _plain_text_input(name, spec)
+        case FormInputMode.TEXT:
+            return _plain_text_input(name, spec)
+    assert_never(mode)
+
+
+def _textarea_element(name: str, spec: dict[str, Any]) -> dict[str, Any]:
+    """A multi-line ``plain_text_input`` for a ``control: textarea`` string.
+
+    Draws the declared ``maxLength``/``minLength`` as Slack's ``max_length``/``min_length``,
+    the same bounds the single-line input draws (:func:`_draw_text_length_bounds`).
+    """
+    element: dict[str, Any] = {"type": "plain_text_input", "action_id": FIELD_ACTION_ID, "multiline": True}
+    _draw_text_length_bounds(name, spec, element)
+    return element
+
+
+def _control_element(
+    name: str,
+    spec: dict[str, Any],
+    ptype: Any,
+    options: list[dict[str, Any]] | None,
+    choice_label: str | None = None,
+) -> dict[str, Any]:
+    """The Slack element a declared ``control`` draws — exhaustive over :class:`FormControl`.
+
+    ``chips`` is a NAMED degrade: Slack has no chip input (its ``Tag`` element is display-only),
+    so a chip choice draws the shape's default choice control — ``radio_buttons``/
+    ``static_select`` for a single string, ``checkboxes``/``multi_static_select`` for an array
+    of strings. ``textarea`` draws a multi-line ``plain_text_input`` and its length bounds; a
+    per-send choice list on a textarea string wins for that send (the precedence a choice list
+    already has over a format), so the field draws the default choice control instead. The map
+    is exhaustive (``assert_never``), so a control added to the platform later is a type error
+    here until this channel decides its rendering; a value outside the set is refused naming the
+    property (the render-door backstop for a record that bypassed the ask-time validator).
+    """
+    raw = spec["control"]
+    try:
+        control = FormControl(raw)
+    except ValueError as exc:
+        raise FormSchemaError(f"form schema property {name!r} has unsupported control {raw!r}") from exc
+    match control:
+        case FormControl.CHIPS:
+            if options is None:
+                raise FormSchemaError(f"form schema property {name!r} has control 'chips' but declares no choice list")
+            if ptype == "array":
+                return _multi_choice_element(name, options, choice_label)
+            return _single_choice_element(name, options, choice_label)
+        case FormControl.TEXTAREA:
+            if options is not None:
+                return _single_choice_element(name, options, choice_label)
+            return _textarea_element(name, spec)
+    assert_never(control)
+
+
+def _string_element(
+    name: str, spec: dict[str, Any], options: list[dict[str, Any]] | None, choice_label: str | None = None
+) -> dict[str, Any]:
+    """The element a plain ``string`` property (no declared ``control``) collects.
+
+    A choice list (per-send ``options`` or a schema ``enum``) draws the single-choice control; a
+    ``format: date``/``time`` draws the native date/time picker (Slack's picker draws no
+    min/max/disabled dates and has no range control, so a declared bound/range is enforced on
+    submit — the documented Slack degrade); a ``date-time`` stays text (Slack's datetimepicker
+    returns a Unix timestamp, not an RFC 3339 string). Any other string draws the text element
+    its ``inputMode`` selects (absent ``inputMode`` is a plain text input).
+    """
+    if options is not None:
+        return _single_choice_element(name, options, choice_label)
+    fmt = spec.get("format")
+    if fmt == "date":
+        return {"type": "datepicker", "action_id": FIELD_ACTION_ID}
+    if fmt == "time":
+        return {"type": "timepicker", "action_id": FIELD_ACTION_ID}
+    return _string_input_element(name, spec)
+
+
+def _element(
+    name: str,
+    spec: dict[str, Any],
+    per_send_options: list[dict[str, Any]] | None,
+    choice_label: str | None = None,
+) -> dict[str, Any]:
     ptype = spec.get("type")
     options = _options_from_spec(name, spec, per_send_options)
+    if spec.get("control") is not None:
+        # A declared control (chips/textarea) chooses the element, respecting the choice-list
+        # precedence; its per-control shape rules were enforced at the ask door.
+        return _control_element(name, spec, ptype, options, choice_label)
     if ptype == "array":
         if options is not None:
-            return _multi_choice_element(name, options)
+            return _multi_choice_element(name, options, choice_label)
         if not _array_items_string(spec):
             raise FormSchemaError(
                 f"form schema property {name!r} is an array whose items are not strings; a channel form "
@@ -245,18 +429,7 @@ def _element(name: str, spec: dict[str, Any], per_send_options: list[dict[str, A
         # fills one entry per line (split back into a list on submit).
         return {"type": "plain_text_input", "action_id": FIELD_ACTION_ID, "multiline": True}
     if ptype == "string":
-        if options is not None:
-            return _single_choice_element(name, options)
-        fmt = spec.get("format")
-        if fmt == "date":
-            # Slack's datepicker draws no min/max/disabled dates and has no range control, so a
-            # declared bound/range is enforced on submit (the documented Slack degrade), never here.
-            return {"type": "datepicker", "action_id": FIELD_ACTION_ID}
-        if fmt == "time":
-            return {"type": "timepicker", "action_id": FIELD_ACTION_ID}
-        # A date-time property stays a text input: Slack's datetimepicker returns a Unix
-        # timestamp, not an RFC 3339 string.
-        return {"type": "plain_text_input", "action_id": FIELD_ACTION_ID}
+        return _string_element(name, spec, options, choice_label)
     if ptype == "boolean":
         return _radio_buttons()
     if ptype in ("integer", "number"):

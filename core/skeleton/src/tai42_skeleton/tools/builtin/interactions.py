@@ -48,7 +48,6 @@ async def ask(
     mode: Literal["sync", "async"] = "sync",
     expiry_at: datetime | None = None,
     on_mismatch: Literal["retry", "bridge"] = "retry",
-    mismatch_notice: str | None = None,
     data: dict[str, Any] | None = None,
     pages: list[dict[str, Any]] | None = None,
     to: Literal["user", "caller"] = "user",
@@ -56,6 +55,7 @@ async def ask(
     on_expiry: Literal["kill", "resume"] = "kill",
     reaction_tool: str | None = None,
     reactions: dict[str, Any] | None = None,
+    wording: dict[str, Any] | None = None,
 ) -> Any:
     """Ask a human a question mid-run.
 
@@ -141,12 +141,6 @@ async def ask(
               as a fresh routed turn, so the ask ends only by a real answer or its
               timeout, never by unmatched input.
             Takes effect only on a channel-delivered ask; an inbox-only ask ignores it.
-        mismatch_notice: An OPTIONAL custom participant-facing rejection notice used
-            ONLY under ``on_mismatch="retry"``: when set it REPLACES the built-in
-            retry notice. A literal ``{reason}`` token is filled with the door's
-            rejection reason by a plain substitution (a notice without it is sent
-            verbatim). IGNORED under ``on_mismatch="bridge"`` (a digression never
-            notifies). Omit to use the built-in notice.
         data: Per-send enrichment for a "form" ask (forbidden otherwise). An object
             ``{"values": {prop: value}, "options": {prop: [{"value", "label"?}]}}``:
             ``values`` prefills a property's control with a known value (validated
@@ -171,6 +165,17 @@ async def ask(
             ``submitted`` — that run ``reaction_tool`` while the form is open, and the
             ``choices`` fields a reaction may re-supply (any ``choices`` field requires the
             ``submitted`` trigger). Pairs with ``reaction_tool`` — each requires the other.
+        wording: The caller's per-send catalogue of the question's platform-drawn texts, in the
+            end-user's language (absent, every surface shows its own word). An object grouped by
+            what each word decorates — ``form`` (a form's chrome: title/open/cancel/back/submit,
+            review line, per-field picker placeholders), ``choice`` (a choice list's control
+            label, numbered-reply hint, group name), ``answer`` (a non-form question's open /
+            affirmative / negative / submit controls, reply hint, and the ``rejected`` /
+            ``rejected_final`` refusal sentences), ``lines`` (the delivery message's answer-link /
+            deadline / reply / options lines), ``answer_page`` (the confirm/done/awaiting pages,
+            the form page's submitted copy and its own validation/error sentences) and ``status``
+            (in-flight and settled status copy). Each member is admitted only on a send that draws
+            it; a member a format has no control for is refused loudly.
         to: Who the question is addressed to. "user" (the default) is a human answered
             through the inbox/callback/channel surfaces. "caller" addresses another RUN:
             the ask carries NO out-of-band delivery — it parks this run and its answer is
@@ -206,13 +211,13 @@ async def ask(
         pages=pages,
         reaction_tool=reaction_tool,
         reactions=reactions,
+        wording=wording,
         group_id=group_id,
         timeout=timeout,
         link=link,
         channel=channel,
         recipient=recipient,
         on_mismatch=AnswerMismatchPolicy(on_mismatch),
-        mismatch_notice=mismatch_notice,
         audience=audience,
         # A ``list[dict]`` is a valid ``list[MediaItem | dict]`` argument; the
         # invariant-list check is a type-system limitation, not a runtime one.

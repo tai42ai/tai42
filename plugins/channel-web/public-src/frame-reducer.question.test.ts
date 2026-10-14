@@ -64,6 +64,17 @@ describe('applyFrame: chat.question', () => {
     });
   });
 
+  it("carries each page's button_label on a form question", () => {
+    const schema = { type: 'object', properties: { note: { type: 'string' } } };
+    const pages = [{ title: 'Say', fields: ['note'], button_label: 'Send it all' }];
+    const model = fold(EMPTY_MODEL, questionFrame('form', { schema, pages }));
+
+    expect(model.items[0]).toMatchObject({
+      answerFormat: 'form',
+      pages: [{ title: 'Say', fields: ['note'], buttonLabel: 'Send it all' }],
+    });
+  });
+
   it('defaults a form question with no per-send data or pages to null', () => {
     const model = fold(
       EMPTY_MODEL,
@@ -270,6 +281,13 @@ describe('applyFrame: chat.question', () => {
       questionFrame('form', {
         schema: { type: 'object' },
         pages: [{ title: 'x', fields: ['a'], kind: 'wizard' }],
+      }),
+    ],
+    [
+      'a form page with a blank button_label',
+      questionFrame('form', {
+        schema: { type: 'object' },
+        pages: [{ title: 'x', fields: ['a'], button_label: '   ' }],
       }),
     ],
     [

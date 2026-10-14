@@ -48,6 +48,7 @@ from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError, Correlation
+from tai42_contract.interactions.models import AnswerMismatchPolicy, Wording
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_channel_whatsapp.settings import (
@@ -99,6 +100,16 @@ class PendingQuestion:
     # choices) so a door-rejection re-send reproduces the SAME endpoint-driven Flow (the reacting
     # shape folds into the published-Flow cache key); None for a static form or non-form ask.
     form_reactions: dict[str, Any] | None = None
+    # The ask's digression policy the shared answer ladder reads at a 400 rejection — ``"retry"``
+    # (keep + notify) or ``"bridge"`` (keep + bridge the reply, no notice), carried from the
+    # ``ChannelDelivery`` the channel delivered so the ladder honours it off the stored record.
+    on_mismatch: str = AnswerMismatchPolicy.RETRY.value
+    # The whole per-send ``wording`` catalogue (a ``Wording`` model dump) carried from the
+    # ``ChannelDelivery`` the channel delivered, so a door-rejection re-send reproduces every
+    # per-send text (the form's open button, title and submit label) and the shared answer ladder
+    # draws the caller's refusal sentence (``wording.answer.rejected``); None when the ask carried
+    # no wording.
+    wording: dict[str, Any] | None = None
 
 
 def correlation_key(phone_number_id: str, wa_id: str) -> str:
@@ -147,6 +158,8 @@ def _encode_pending(question: PendingQuestion) -> str:
             "form_options": question.form_options,
             "form_names": question.form_names,
             "form_reactions": question.form_reactions,
+            "on_mismatch": question.on_mismatch,
+            "wording": question.wording,
             "rejections": question.rejections,
         }
     )
@@ -182,6 +195,8 @@ async def reserve_pending(
     form_options: dict[str, list[dict[str, Any]]] | None = None,
     form_names: dict[str, str] | None = None,
     form_reactions: dict[str, Any] | None = None,
+    on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY,
+    wording: Wording | None = None,
 ) -> None:
     """Atomically reserve the pair for one question, or raise ``PendingQuestionExistsError``."""
     value = _encode_pending(
@@ -197,6 +212,8 @@ async def reserve_pending(
             form_options=form_options,
             form_names=form_names,
             form_reactions=form_reactions,
+            on_mismatch=on_mismatch.value,
+            wording=wording.model_dump(mode="json") if wording is not None else None,
         )
     )
     ttl = _remaining_seconds(timeout_at)
@@ -229,6 +246,8 @@ def _decode_pending(raw: str | bytes) -> PendingQuestion:
         form_options=data.get("form_options"),
         form_names=data.get("form_names"),
         form_reactions=data.get("form_reactions"),
+        on_mismatch=data.get("on_mismatch", AnswerMismatchPolicy.RETRY.value),
+        wording=data.get("wording"),
         rejections=data["rejections"],
     )
 
@@ -275,8 +294,9 @@ class WhatsAppCorrelationStore:
     ``get`` peek and an idempotent ``release``). The channel keeps its richer decode
     state — ``options``/``schema``/``question``/``rejections`` — in the SAME stored
     record and reads it through the adapter-private :func:`peek_pending`; this port
-    projects that record down to the three :class:`Correlation` fields the ladder
-    needs. ``set_correlation`` (used for conformance and by any port-only caller)
+    projects that record down to the :class:`Correlation` fields the ladder needs
+    (``callback_url``, ``interaction_id``, ``ttl_deadline`` and the digression policy
+    + per-send ``wording`` it reads at a 400). ``set_correlation`` (used for conformance and by any port-only caller)
     writes a minimal text-ask-shaped record — the rich deliver path uses
     :func:`reserve_pending` instead.
     """
@@ -291,6 +311,8 @@ class WhatsAppCorrelationStore:
                 callback_url=entry.callback_url,
                 timeout_at=entry.ttl_deadline,
                 interaction_id=entry.interaction_id,
+                on_mismatch=entry.on_mismatch.value,
+                wording=entry.wording.model_dump(mode="json") if entry.wording is not None else None,
             )
         )
         async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
@@ -308,6 +330,8 @@ class WhatsAppCorrelationStore:
             callback_url=record.callback_url,
             interaction_id=record.interaction_id or "",
             ttl_deadline=record.timeout_at,
+            on_mismatch=AnswerMismatchPolicy(record.on_mismatch),
+            wording=Wording.model_validate(record.wording) if record.wording is not None else None,
         )
 
     async def release_correlation(self, key: str) -> None:

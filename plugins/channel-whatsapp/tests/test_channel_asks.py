@@ -7,6 +7,13 @@ from __future__ import annotations
 import httpx
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, ChannelNotification
+from tai42_contract.interactions.models import (
+    AnswerMismatchPolicy,
+    AnswerWording,
+    ChoiceWording,
+    LineWording,
+    Wording,
+)
 
 from tai42_channel_whatsapp.channel import WhatsAppChannel
 from tai42_channel_whatsapp.client import send_message
@@ -92,6 +99,68 @@ async def test_select_many_options_render_as_interactive_list(fake_redis: FakeRe
     assert rows == [{"id": f"int-1:{i}", "title": f"opt-{i}"} for i in range(5)]
 
 
+async def test_select_choice_label_labels_the_list_opening_button(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A select ask's caller ``choice_label`` draws the list-opening button in place of the generic
+    # default; the buttons/numbered shapes draw no opener.
+    fake_httpx.responses.append(_accepted())
+    options = [f"opt-{i}" for i in range(5)]
+
+    await WhatsAppChannel().deliver(
+        make_delivery(
+            answer_format="select",
+            options=options,
+            question="Pick one",
+            wording=Wording(choice=ChoiceWording(label="See plans")),
+        )
+    )
+
+    interactive = fake_httpx.calls[0]["json"]["interactive"]
+    assert interactive["type"] == "list"
+    assert interactive["action"]["button"] == "See plans"
+
+
+async def test_select_choice_label_over_cap_refused_before_reserve_or_send(
+    fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.channels import ChannelInputError
+
+    # The cap is the medium's for the list button, so the guard runs before the reservation and send
+    # regardless of the shape (here 2 options would render as buttons, which draw no opener).
+    with pytest.raises(ChannelInputError, match="list button"):
+        await WhatsAppChannel().deliver(
+            make_delivery(
+                answer_format="select",
+                options=["a", "b"],
+                question="Pick",
+                wording=Wording(choice=ChoiceWording(label="z" * 21)),
+            )
+        )
+
+    assert fake_httpx.calls == []
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+
+
+async def test_select_reply_hint_draws_on_numbered_fallback(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A select ask forced past the interactive caps to numbered text draws the caller's
+    # ``choice.reply_hint`` as the type-an-option line in place of the generic default.
+    fake_httpx.responses.append(_accepted())
+    options = ["short", "x" * 25]  # an over-cap option forces numbered text
+
+    await WhatsAppChannel().deliver(
+        make_delivery(
+            answer_format="select",
+            options=options,
+            question="Which env?",
+            wording=Wording(choice=ChoiceWording(reply_hint="Reply with a number.")),
+        )
+    )
+
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "text"
+    assert payload["text"]["body"].endswith("Reply with a number.")
+    assert "Reply with the text of one option." not in payload["text"]["body"]
+
+
 async def test_select_long_option_title_forces_numbered_fallback(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     fake_httpx.responses.append(_accepted())
     # An option longer than the list row-title cap (24) forces the numbered-text
@@ -159,6 +228,42 @@ async def test_select_reservation_carries_options_and_interaction_id(fake_redis:
     stored = json.loads(fake_redis.store[f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}"])
     assert stored["options"] == ["staging", "production"]
     assert stored["interaction_id"] == "int-1"
+
+
+async def test_select_reservation_carries_on_mismatch_and_wording(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    import json
+
+    # The reservation copies the ask's digression policy and the whole per-send wording catalogue
+    # from the delivery, so the shared answer ladder reads them off the stored record and draws the
+    # caller's refusal sentence when it notifies.
+    fake_httpx.responses.append(_accepted())
+
+    await WhatsAppChannel().deliver(
+        make_delivery(
+            answer_format="select",
+            options=["staging", "production"],
+            question="Which env?",
+            on_mismatch=AnswerMismatchPolicy.BRIDGE,
+            wording=Wording(answer=AnswerWording(rejected="Pick staging or production. {reason}")),
+        )
+    )
+
+    stored = json.loads(fake_redis.store[f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}"])
+    assert stored["on_mismatch"] == "bridge"
+    assert stored["wording"]["answer"]["rejected"] == "Pick staging or production. {reason}"
+
+
+async def test_text_reservation_defaults_on_mismatch_retry_and_no_wording(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    import json
+
+    # A plain ask that set neither keeps the safe default policy and carries no wording.
+    fake_httpx.responses.append(_accepted())
+
+    await WhatsAppChannel().deliver(make_delivery(answer_format="text", question="Deploy?"))
+
+    stored = json.loads(fake_redis.store[f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}"])
+    assert stored["on_mismatch"] == "retry"
+    assert stored["wording"] is None
 
 
 async def test_plain_text_ask_sends_body_only(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
@@ -311,6 +416,68 @@ async def test_tier1_link_send_skips_reservation(answer_format: str, fake_redis:
     assert delivery.callback_url in body  # plain tappable link
     assert not fake_redis.store  # no reservation, no correlation
     assert not [event for event in fake_redis.events if event[0] == "redis_set"]
+
+
+@pytest.mark.parametrize("answer_format", ["confirm", "external"])
+async def test_tier1_answer_controls_are_not_drawn_on_whatsapp(
+    answer_format: str, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # WhatsApp draws a Tier-1 ask as a TEXT link, not a button, so it draws NO answer controls:
+    # the open/confirm labels belong to the surfaces that have those buttons (Telegram, the callback
+    # page). The send is the plain text link exactly as without them — never a button, never a raise.
+    fake_httpx.responses.append(_accepted())
+    delivery = make_delivery(
+        answer_format=answer_format,
+        wording=Wording(answer=AnswerWording(open="Open it", confirm="Yes please")),
+    )
+    await WhatsAppChannel().deliver(delivery)
+
+    call = fake_httpx.calls[0]["json"]
+    assert call["type"] == "text"  # a plain text link, no interactive button
+    assert delivery.callback_url in call["text"]["body"]
+    assert "Open it" not in call["text"]["body"]
+
+
+@pytest.mark.parametrize("answer_format", ["confirm", "external"])
+async def test_tier1_answer_link_line_is_the_caller_sentence_with_the_url(
+    answer_format: str, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A Tier-1 ask draws the caller's ``lines.answer_link`` with the callback link substituted for
+    # its ``{url}`` token in place of the generic default line.
+    fake_httpx.responses.append(_accepted())
+    delivery = make_delivery(
+        answer_format=answer_format,
+        wording=Wording(lines=LineWording(answer_link="Tap to answer: {url}")),
+    )
+    await WhatsAppChannel().deliver(delivery)
+
+    body = fake_httpx.calls[0]["json"]["text"]["body"]
+    assert body == f"{delivery.question}\n\nTap to answer: {delivery.callback_url}"
+
+
+@pytest.mark.parametrize("answer_format", ["confirm", "external"])
+async def test_tier1_answer_link_line_defaults_when_absent(
+    answer_format: str, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # Absent a caller line, the generic "Answer here: {url}" default carries the callback link.
+    fake_httpx.responses.append(_accepted())
+    delivery = make_delivery(answer_format=answer_format)
+    await WhatsAppChannel().deliver(delivery)
+
+    body = fake_httpx.calls[0]["json"]["text"]["body"]
+    assert body == f"{delivery.question}\n\nAnswer here: {delivery.callback_url}"
+
+
+async def test_text_ask_answer_reply_hint_is_not_drawn_on_whatsapp(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A text ask sends a plain message; WhatsApp has no reply-input chrome to label, so an
+    # ``answer.reply_hint`` is carried without drawing anything — the body is the question verbatim.
+    fake_httpx.responses.append(_accepted())
+    delivery = make_delivery(answer_format="text", wording=Wording(answer=AnswerWording(reply_hint="Type here")))
+    await WhatsAppChannel().deliver(delivery)
+
+    call = fake_httpx.calls[0]["json"]
+    assert call["type"] == "text"
+    assert call["text"]["body"] == delivery.question
 
 
 async def test_notify_sends_plain_body_without_correlation(fake_redis: FakeRedis, fake_httpx: FakeHttpx):

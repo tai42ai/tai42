@@ -23,11 +23,39 @@ def test_notification_media_and_template_are_mutually_exclusive():
 
     from tai42_contract.channels import ChannelNotification, ChannelTemplate
 
-    with pytest.raises(ValidationError, match="mutually exclusive"):
+    with pytest.raises(ValidationError, match=r"mutually exclusive"):
         ChannelNotification(
             message="both set",
             media=[_image_item()],
             template=ChannelTemplate(name="status_update", language="en_US"),
+        )
+
+
+def test_wording_choice_label_requires_a_choice_surface():
+    # The shared composition rule: a choice label names the control that opens the choice list,
+    # so it is admitted on an options/sections send — never a form (schema) or a standalone template.
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification, ChannelTemplate, ReplyOption
+    from tai42_contract.interactions import Wording
+
+    ok = ChannelNotification(
+        message="pick", options=[ReplyOption(text="A")], wording=Wording.model_validate({"choice": {"label": "Open"}})
+    )
+    assert ok.wording is not None
+    assert ok.wording.choice is not None
+    assert ok.wording.choice.label == "Open"
+    with pytest.raises(
+        ValidationError, match=r"a notification with no choice or form surface draws no wording.choice.label"
+    ):
+        ChannelNotification(message="pick", wording=Wording.model_validate({"choice": {"label": "Open"}}))
+    with pytest.raises(
+        ValidationError, match=r"a notification with no choice or form surface draws no wording.choice.label"
+    ):
+        ChannelNotification(
+            message="pick",
+            template=ChannelTemplate(name="status_update", language="en_US"),
+            wording=Wording.model_validate({"choice": {"label": "Open"}}),
         )
 
 
@@ -36,7 +64,7 @@ def test_notification_options_and_template_are_mutually_exclusive():
 
     from tai42_contract.channels import ChannelNotification, ChannelTemplate, ReplyOption
 
-    with pytest.raises(ValidationError, match="mutually exclusive"):
+    with pytest.raises(ValidationError, match=r"mutually exclusive"):
         ChannelNotification(
             message="both set",
             options=[ReplyOption(text="Item A")],
@@ -60,7 +88,7 @@ def test_notification_schema_and_template_are_mutually_exclusive():
 
     from tai42_contract.channels import ChannelNotification, ChannelTemplate
 
-    with pytest.raises(ValidationError, match="mutually exclusive"):
+    with pytest.raises(ValidationError, match=r"mutually exclusive"):
         ChannelNotification(
             message="both set",
             schema=_form_schema(),
@@ -74,7 +102,7 @@ def test_notification_schema_and_options_are_mutually_exclusive():
 
     from tai42_contract.channels import ChannelNotification, ReplyOption
 
-    with pytest.raises(ValidationError, match="mutually exclusive"):
+    with pytest.raises(ValidationError, match=r"mutually exclusive"):
         ChannelNotification(message="both set", schema=_form_schema(), options=[ReplyOption(text="Item A")])
 
 
@@ -94,7 +122,7 @@ def test_notification_blank_message_without_media_is_refused(blank: str):
 
     from tai42_contract.channels import ChannelNotification
 
-    with pytest.raises(ValidationError, match="non-blank unless media"):
+    with pytest.raises(ValidationError, match=r"non-blank unless media"):
         ChannelNotification(message=blank)
 
 
@@ -114,5 +142,5 @@ def test_notification_blank_message_with_only_template_is_refused():
 
     from tai42_contract.channels import ChannelNotification, ChannelTemplate
 
-    with pytest.raises(ValidationError, match="non-blank unless media"):
+    with pytest.raises(ValidationError, match=r"non-blank unless media"):
         ChannelNotification(message="", template=ChannelTemplate(name="status_update", language="en_US"))

@@ -66,6 +66,15 @@ from tai42_channel_slack.forms import (
 from tai42_channel_slack.forms import validate_form_schema as _validate_form_schema
 from tai42_channel_slack.settings import SlackSettings, slack_settings
 
+# The default message lines, each the platform's word a caller's ``wording.lines`` member
+# overrides. ``{url}``/``{deadline}``/``{options}`` are filled by a plain substitution with the
+# channel's own value (the callback URL, the ISO deadline, the joined option list); the caller
+# sets the sentence, the channel the value.
+_ANSWER_LINK_LINE = "Answer here: {url}"
+_DEADLINE_LINE = "Deadline: {deadline}"
+_REPLY_LINE = "Reply in this thread."
+_OPTIONS_LINE = "Options: {options}"
+
 
 def _require_for_delivery[T](value: T | None, env_name: str) -> T:
     """The configured value, or :class:`ChannelDeliveryError` naming the env var.
@@ -97,15 +106,32 @@ def _render_text(delivery: ChannelDelivery) -> str:
     thread is the correlation key); Tier-1 (``confirm``/``external``) carries the
     callback URL as a plain link. ``select`` enumerates its options inline; the
     answer is validated at the callback door.
+
+    Each line carries the caller's ``wording.lines`` member when set, the platform's word
+    otherwise, with the channel's own value substituted in (plainly, never ``str.format``):
+    the link line's ``{url}`` is the callback URL, the deadline line's ``{deadline}`` the ISO
+    instant, the options line's ``{options}`` the joined option list.
     """
+    lines_wording = delivery.wording.lines if delivery.wording is not None else None
+    deadline_template = (
+        lines_wording.deadline if lines_wording is not None and lines_wording.deadline else _DEADLINE_LINE
+    )
+    deadline_line = deadline_template.replace("{deadline}", delivery.timeout_at.isoformat())
     lines = [delivery.question]
     if delivery.answer_format in CALLBACK_LINK_FORMATS:
-        lines.append(f"Answer here: {delivery.callback_url}")
-        lines.append(f"Deadline: {delivery.timeout_at.isoformat()}")
+        link_template = (
+            lines_wording.answer_link if lines_wording is not None and lines_wording.answer_link else _ANSWER_LINK_LINE
+        )
+        lines.append(link_template.replace("{url}", delivery.callback_url))
+        lines.append(deadline_line)
         return "\n".join(lines)
     if delivery.options:
-        lines.append("Options: " + ", ".join(delivery.options))
-    lines.append(f"Reply in this thread. Deadline: {delivery.timeout_at.isoformat()}")
+        options_template = (
+            lines_wording.options if lines_wording is not None and lines_wording.options else _OPTIONS_LINE
+        )
+        lines.append(options_template.replace("{options}", ", ".join(delivery.options)))
+    reply_line = lines_wording.reply if lines_wording is not None and lines_wording.reply else _REPLY_LINE
+    lines.append(f"{reply_line} {deadline_line}")
     return "\n".join(lines)
 
 
@@ -357,21 +383,47 @@ def _form_data_dict(delivery: ChannelDelivery) -> dict[str, Any] | None:
 def _form_pages_list(delivery: ChannelDelivery) -> list[dict[str, Any]] | None:
     """The form's step layout as plain JSON, or ``None`` when the ask carried one page.
 
-    Each page is ``{"title", "fields", "kind", "display"}`` — the input/review kind and the
-    ordered display blocks (heading/body/image, each static or slotted) ride alongside the
-    field list, so the modal draws display elements and a review step.
+    Each page is ``{"title", "fields", "kind", "display", "button_label"?}`` — the input/review
+    kind, the ordered display blocks (heading/body/image, each static or slotted) and the page's
+    primary-button label ride alongside the field list, so the modal draws display elements, a
+    review step, and the form's terminal ``submit`` from the LAST page's label.
     """
     if delivery.pages is None:
         return None
-    return [
-        {
+    pages: list[dict[str, Any]] = []
+    for page in delivery.pages:
+        entry: dict[str, Any] = {
             "title": page.title,
             "fields": list(page.fields),
             "kind": page.kind,
             "display": [block.model_dump(exclude_none=True) for block in page.display],
         }
-        for page in delivery.pages
-    ]
+        if page.button_label is not None:
+            entry["button_label"] = page.button_label
+        pages.append(entry)
+    return pages
+
+
+def _wording_dict(delivery: ChannelDelivery) -> dict[str, Any] | None:
+    """The per-send ``wording`` catalogue as plain JSON, or ``None`` when the ask carried none.
+
+    Rides the record so the modal built AT CLICK TIME and every re-render read the caller's form
+    chrome (title, submit, close, review line, per-field placeholders) off it, and the rejected
+    modal submission draws the caller's refusal sentence.
+    """
+    if delivery.wording is None:
+        return None
+    return delivery.wording.model_dump(mode="json", exclude_none=True)
+
+
+def _form_wording_dict(delivery: ChannelDelivery) -> dict[str, Any]:
+    """The ``wording.form`` chapter as plain JSON, or ``{}`` when the ask set no form words.
+
+    The chapter the modal builder reads its title/submit/close/review-line/placeholders from.
+    """
+    if delivery.wording is None or delivery.wording.form is None:
+        return {}
+    return delivery.wording.form.model_dump(mode="json", exclude_none=True)
 
 
 def _form_reactions_dict(delivery: ChannelDelivery) -> dict[str, Any] | None:
@@ -413,19 +465,36 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
     form_data = _form_data_dict(delivery)
     pages = _form_pages_list(delivery)
     reactions = _form_reactions_dict(delivery)
+    wording = _wording_dict(delivery)
+    form_wording = _form_wording_dict(delivery)
+    # The caller's form chrome: the open button on the message, and the title/submit/close label,
+    # review line and per-field placeholders on the modal. Each is drawn with its cap enforced in
+    # the compose/compose-and-discard below, BEFORE any store or send.
+    open_label = form_wording.get("open")
     values = form_data.get("values") if form_data is not None else None
     options = form_data.get("options") if form_data is not None else None
     # Compose the exact modal the click will build, discarding it — same single
     # source of truth, so every cap it enforces is enforced here. An unmappable
-    # schema, an unmappable per-send extra, or a modal past a Slack cap is a permanent
-    # input refusal (:class:`FormSchemaError`, a ``ChannelInputError``), raised before
-    # any store or send — never a retryable delivery failure.
-    build_modal_view(delivery.interaction_id, delivery.question, schema, values, options, pages, reactions=reactions)
+    # schema, an unmappable per-send extra, a modal past a Slack cap, a title/submit/cancel
+    # label over the 24-character modal-text cap, or a field placeholder over the 150-character
+    # select-placeholder cap is a permanent input refusal (:class:`FormSchemaError`, a
+    # ``ChannelInputError``), raised before any store or send — never a retryable delivery failure.
+    build_modal_view(
+        delivery.interaction_id,
+        delivery.question,
+        schema,
+        values,
+        options,
+        pages,
+        reactions=reactions,
+        form_wording=form_wording,
+    )
     # Any display media rides above the form's section + open-modal button (a data:
-    # image is refused here, before the reserve or send).
+    # image is refused here, before the reserve or send). The open button's own 75-character
+    # cap is enforced in build_message_blocks, also before the reserve or send.
     message_blocks = [
         *build_media_blocks(delivery.media),
-        *build_message_blocks(delivery.question, delivery.interaction_id),
+        *build_message_blocks(delivery.question, delivery.interaction_id, open_label),
     ]
     await store_form_record(
         delivery.interaction_id,
@@ -436,6 +505,8 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
         data=form_data,
         pages=pages,
         reactions=reactions,
+        wording=wording,
+        on_mismatch=delivery.on_mismatch,
     )
     try:
         await _post_message(token, target, delivery.question, blocks=message_blocks)
@@ -527,7 +598,14 @@ class SlackChannel:
         ts = body.get("ts")
         if not isinstance(ts, str) or not ts:
             raise ChannelDeliveryError("chat.postMessage ok response carried no ts")
-        await store_correlation(ts, delivery.callback_url, delivery.interaction_id, delivery.timeout_at)
+        await store_correlation(
+            ts,
+            delivery.callback_url,
+            delivery.interaction_id,
+            delivery.timeout_at,
+            on_mismatch=delivery.on_mismatch,
+            wording=delivery.wording,
+        )
 
     async def notify(self, notification: ChannelNotification) -> list[str]:
         """Post one plain fire-and-forget message via ``chat.postMessage``, returning the posted ``[ts]``.

@@ -122,6 +122,12 @@ class AskFrame(BaseModel):
     :class:`FormReactions` dict); the adapter forwards each to ``tai42_app.interactions.ask`` by
     the same name, so the contract enforces their combination (both-or-neither, form-only,
     reacting forms async).
+
+    ``wording`` (a :class:`Wording` dict) is the per-send catalogue of the question's
+    platform-drawn texts — a form's chrome, a choice list's control words, a non-form question's
+    answer controls, the message lines, the pages a link opens, the refusal sentence and status
+    copy — grouped by what each decorates. It is forwarded to ``tai42_app.interactions.ask`` by the
+    same name, so the contract admits each member only on a send that draws it.
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -138,6 +144,7 @@ class AskFrame(BaseModel):
     pages: list[dict[str, Any]] | None = None
     reaction_tool: str | None = None
     reactions: dict[str, Any] | None = None
+    wording: dict[str, Any] | None = None
 
 
 class ToolCallFrame(BaseModel):

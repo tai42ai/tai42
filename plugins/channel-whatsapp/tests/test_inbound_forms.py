@@ -9,18 +9,20 @@ import logging
 import httpx
 import pytest
 from tai42_contract.channels import AnswerForwardError, ChannelDeliveryError, InboundAnswerOutcome
+from tai42_contract.interactions.models import AnswerWording, FormWording, Wording
 from tai42_kit.settings import reset_all_settings
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (route registration side-effect)
 from tai42_channel_whatsapp.channel import WhatsAppChannel
+from tai42_channel_whatsapp.channel.forms import _FLOW_BODY_MAX_CHARS
 from tai42_channel_whatsapp.correlation import reserve_pending
 from tai42_channel_whatsapp.flows import build_form_flow, payload_labels
 from tai42_channel_whatsapp.inbound.forms import (
     _CALLBACK_REJECTION_OPAQUE,
-    _FLOW_BODY_MAX_CHARS,
     _FORM_REJECTION_LEAD,
     _FORM_UNPROCESSABLE,
     _MAX_FORM_REJECTIONS,
+    _coerce_form_answer,
     _coerce_value,
 )
 
@@ -66,6 +68,38 @@ def test_checkbox_array_value_decodes_as_a_list():
     # the decode passes it through as the list answer.
     prop = {"type": "array", "items": {"type": "string"}}
     assert _coerce_value(["a", "b"], prop) == ["a", "b"]
+
+
+def test_single_pick_chips_value_unwraps_the_one_element_list_to_the_string():
+    # A single-pick ChipsSelector (a string chips choice) returns a one-element list; the decode
+    # unwraps it to the string the schema declares.
+    prop = {"type": "string", "enum": ["a", "b", "c"], "control": "chips"}
+    assert _coerce_value(["b"], prop) == "b"
+
+
+def test_single_pick_chips_value_of_wrong_length_is_forwarded_raw_for_the_door_to_400():
+    # A list of any other length cannot be the one string the schema expects, so it is forwarded raw
+    # (the door then 400s and restores the pending ask) — never silently collapsed.
+    prop = {"type": "string", "enum": ["a", "b", "c"], "control": "chips"}
+    assert _coerce_value(["a", "b"], prop) == ["a", "b"]
+    assert _coerce_value([], prop) == []
+
+
+def test_merged_range_object_splits_onto_the_two_date_keys():
+    # A ``rangeStart`` pair drawn as ONE range control returns its value as a ``{start-date,
+    # end-date}`` object under the START's payload label; the decode splits it back onto the two
+    # scalar schema date keys.
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date", "title": "From"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start", "title": "To"},
+        },
+        "required": ["start", "end"],
+    }
+    labels = {label: key for key, label in payload_labels(schema["properties"]).items()}
+    response = {"flow_token": "x", "From": {"start-date": "2026-05-01", "end-date": "2026-05-04"}}
+    assert _coerce_form_answer(response, schema, labels) == {"start": "2026-05-01", "end": "2026-05-04"}
 
 
 def _flow_cache_key() -> str:
@@ -220,6 +254,120 @@ async def test_form_retry_kept_re_sends_fresh_flow(
     assert _stored_rejections(fake_redis) == 1  # counter incremented
     assert await _pending_intact(fake_redis)  # pending kept
     assert _SEEN_KEY in fake_redis.store
+
+
+async def test_form_rejection_resend_reuses_the_same_open_label(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The pending record carries the caller's open-button label, so the door-rejection re-send draws
+    # the SAME flow_cta the first send did — a correction message with a different button is the bug.
+    delivery = make_delivery()
+    await reserve_pending(
+        PHONE_NUMBER_ID,
+        WA_ID,
+        delivery.callback_url,
+        delivery.timeout_at,
+        interaction_id="int-1",
+        schema=_FORM_SCHEMA,
+        question=_FORM_QUESTION,
+        form_names={label: key for key, label in payload_labels(_FORM_SCHEMA["properties"]).items()},
+        wording=Wording(form=FormWording(open="Start now")),
+    )
+    _seed_flow_cache(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "note: must not be blank"
+    fake_httpx.responses.append(_flow_accepted())
+
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    params = fake_httpx.calls[0]["json"]["interactive"]["action"]["parameters"]
+    assert params["flow_cta"] == "Start now"
+
+
+async def test_form_rejection_resend_draws_the_caller_rejected_sentence(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The channel owns the form's retry notice: the re-sent Flow body is the caller's
+    # ``wording.answer.rejected`` with the door's own reason substituted for ``{reason}``.
+    delivery = make_delivery()
+    await reserve_pending(
+        PHONE_NUMBER_ID,
+        WA_ID,
+        delivery.callback_url,
+        delivery.timeout_at,
+        interaction_id="int-1",
+        schema=_FORM_SCHEMA,
+        question=_FORM_QUESTION,
+        form_names={label: key for key, label in payload_labels(_FORM_SCHEMA["properties"]).items()},
+        wording=Wording(answer=AnswerWording(rejected="We couldn't accept that: {reason}")),
+    )
+    _seed_flow_cache(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "note: must not be blank"
+    fake_httpx.responses.append(_flow_accepted())
+
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    body = fake_httpx.calls[0]["json"]["interactive"]["body"]["text"]
+    assert body == f"{_FORM_QUESTION}\n\nWe couldn't accept that: note: must not be blank"
+
+
+async def test_form_rejection_resend_draws_caller_rejected_sentence_verbatim_without_token(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A caller sentence with no ``{reason}`` token rides verbatim — the door's reason is not appended.
+    delivery = make_delivery()
+    await reserve_pending(
+        PHONE_NUMBER_ID,
+        WA_ID,
+        delivery.callback_url,
+        delivery.timeout_at,
+        interaction_id="int-1",
+        schema=_FORM_SCHEMA,
+        question=_FORM_QUESTION,
+        form_names={label: key for key, label in payload_labels(_FORM_SCHEMA["properties"]).items()},
+        wording=Wording(answer=AnswerWording(rejected="Please check your entries and try again.")),
+    )
+    _seed_flow_cache(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "note: must not be blank"
+    fake_httpx.responses.append(_flow_accepted())
+
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    body = fake_httpx.calls[0]["json"]["interactive"]["body"]["text"]
+    assert body == f"{_FORM_QUESTION}\n\nPlease check your entries and try again."
+
+
+async def test_form_rejection_resend_reuses_the_submit_and_title(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The re-send reproduces every form word off the stored catalogue: the page-less title and
+    # submit label ride the re-built Flow JSON (a cache miss re-creates against the same keyed hash).
+    delivery = make_delivery()
+    await reserve_pending(
+        PHONE_NUMBER_ID,
+        WA_ID,
+        delivery.callback_url,
+        delivery.timeout_at,
+        interaction_id="int-1",
+        schema=_FORM_SCHEMA,
+        question=_FORM_QUESTION,
+        form_names={label: key for key, label in payload_labels(_FORM_SCHEMA["properties"]).items()},
+        wording=Wording(form=FormWording(title="Your details", submit="Resend")),
+    )
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "note: must not be blank"
+    fake_httpx.responses.append(_flow_created("flow-resend"))
+    fake_httpx.responses.append(response(200, json={"success": True}))
+    fake_httpx.responses.append(_flow_accepted())
+
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    create = fake_httpx.calls[0]["json"]
+    screen = json.loads(create["flow_json"])["screens"][0]
+    assert screen["title"] == "Your details"
+    assert screen["layout"]["children"][-1]["label"] == "Resend"
 
 
 async def test_form_retry_kept_without_reason_uses_opaque_line(

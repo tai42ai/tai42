@@ -109,6 +109,7 @@ async def test_notify_user_route_sends_and_wraps_in_envelope(monkeypatch) -> Non
         data=None,
         pages=None,
         form_tag=None,
+        wording=None,
     ):
         sent.append((message, channel, recipient, audience))
 
@@ -139,6 +140,7 @@ async def test_notify_user_route_threads_audience_to_helper(monkeypatch) -> None
         data=None,
         pages=None,
         form_tag=None,
+        wording=None,
     ):
         sent.append((message, channel, recipient, audience))
 
@@ -169,6 +171,7 @@ async def test_notify_user_route_maps_valueerror_to_400(monkeypatch) -> None:
         data=None,
         pages=None,
         form_tag=None,
+        wording=None,
     ):
         raise ValueError("channel must be a non-empty string")
 

@@ -36,6 +36,7 @@ from tai42_contract.interactions.models import (
     LocationElement,
     MediaItem,
     MediaKind,
+    Wording,
 )
 
 from tai42_skeleton.app.instance import app
@@ -575,6 +576,62 @@ async def test_notify_threads_schema_to_a_capable_channel(register_channel):
     await notify_user("fill this in", channel="rich", schema=_FORM_SCHEMA)
 
     assert channel.notifications == [ChannelNotification(message="fill this in", schema=_FORM_SCHEMA)]
+
+
+async def test_notify_threads_form_wording_to_channel_and_feed(register_channel, sink_redis):
+    # A form send's platform-drawn chrome (wording.form) reaches the channel AND the
+    # in-app feed (feed parity — display content, unlike form_tag).
+    channel = register_channel("rich", RichChannel())
+    wording = Wording.model_validate({"form": {"open": "Fill in", "back": "Go back", "title": "Your details"}})
+
+    await notify_user(
+        "fill this in",
+        channel="rich",
+        schema=_FORM_SCHEMA,
+        wording=wording,
+        audience="alice",
+    )
+
+    assert channel.notifications == [ChannelNotification(message="fill this in", schema=_FORM_SCHEMA, wording=wording)]
+    records = await notifications_sink.read_notifications(audience="alice")
+    assert len(records) == 1
+    assert records[0]["wording"]["form"]["open"] == "Fill in"
+    assert records[0]["wording"]["form"]["back"] == "Go back"
+    assert records[0]["wording"]["form"]["title"] == "Your details"
+
+
+async def test_notify_refuses_form_fields_wording_naming_a_choiceless_or_unknown_property(register_channel):
+    # The per-field wording cross-check holds on the notify door exactly as on the ask door: a
+    # wording.form.fields entry must name a declared property that draws a choice list, else it is
+    # refused loudly — never silently accepted and then drawn on a field with no picker.
+    register_channel("rich", RichChannel())
+
+    choiceless = Wording.model_validate({"form": {"fields": {"name": {"choice_label": "Pick one"}}}})
+    with pytest.raises(ValueError, match="draws no choice list"):
+        await notify_user("fill this in", channel="rich", schema=_FORM_SCHEMA, wording=choiceless)
+
+    unknown = Wording.model_validate({"form": {"fields": {"ghost": {"choice_label": "Pick one"}}}})
+    with pytest.raises(ValueError, match="is not a declared property"):
+        await notify_user("fill this in", channel="rich", schema=_FORM_SCHEMA, wording=unknown)
+
+
+async def test_notify_threads_choice_wording_to_channel_and_feed(register_channel, sink_redis):
+    # A choice list's opener (wording.choice.label) reaches the channel beside its options AND the feed.
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user(
+        "pick one",
+        channel="rich",
+        options=[ReplyOption(text="Item A")],
+        wording={"choice": {"label": "Choose one"}},
+        audience="alice",
+    )
+
+    assert channel.notifications[0].wording is not None
+    assert channel.notifications[0].wording.choice is not None
+    assert channel.notifications[0].wording.choice.label == "Choose one"
+    records = await notifications_sink.read_notifications(audience="alice")
+    assert records[0]["wording"]["choice"]["label"] == "Choose one"
 
 
 async def test_schema_to_channel_without_capability_is_not_implemented(register_channel):

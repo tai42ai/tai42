@@ -12,7 +12,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 from tai42_contract.channels import Channel, ChannelDelivery, ChannelDeliveryError
-from tai42_contract.interactions import AnswerFormat, FormData, FormPage, FormReactions, MediaItem
+from tai42_contract.interactions import (
+    AnswerFormat,
+    FormData,
+    FormPage,
+    FormReactions,
+    MediaItem,
+    Wording,
+)
 
 from tai42_skeleton.channels.send_span import send_span
 from tai42_skeleton.hooks import cache as hooks_cache
@@ -93,14 +100,14 @@ def build_delivery_frame(
     format_payload: dict[str, Any] | None,
     stored_media: list[MediaItem] | None,
     on_mismatch: Any,
-    mismatch_notice: str | None,
     callback_url: str,
     timeout_at: Any,
 ) -> ChannelDelivery:
     """Build the frozen ``ChannelDelivery`` frame reused across delivery attempts.
 
     Carries the question + format + suggested options, a form's normalized schema/prefill/pages, the
-    display media (absolute served refs), the digression policy/notice, the callback URL and the stored deadline.
+    display media (absolute served refs), the per-send ``wording`` catalogue, the digression policy,
+    the callback URL and the stored deadline.
     """
     payload = format_payload or {}
     is_form = fmt is AnswerFormat.FORM
@@ -130,15 +137,19 @@ def build_delivery_frame(
             if is_form and payload.get("reactions") is not None
             else None
         ),
+        # The per-send ``wording`` catalogue rides the delivery too, re-parsed from the payload the
+        # request already validated, so the channel draws the caller's words. Its admission is
+        # re-checked on the frame against this format — the delivery frame is bounded exactly as the
+        # ask. None otherwise.
+        wording=(Wording.model_validate(payload["wording"]) if payload.get("wording") is not None else None),
         # The question's display media rides the delivery too — the SAME stored items,
         # here with any data: image substituted to an ABSOLUTE served reference, so a
         # vendor can fetch it off-origin. None when the ask carried no media.
         media=stored_media,
-        # The ladder's authoritative path: the channel copies these onto the
-        # ``Correlation`` it parks, and the shared inbound-answer ladder reads them at
-        # the 400 decision (bridge the digression / send the custom retry notice).
+        # The ladder's authoritative path: the channel copies this (with ``wording``) onto the
+        # ``Correlation`` it parks, and the shared inbound-answer ladder reads them at the 400
+        # decision (bridge the digression / send the caller's refusal sentence).
         on_mismatch=on_mismatch,
-        mismatch_notice=mismatch_notice,
         callback_url=callback_url,
         timeout_at=timeout_at,
     )

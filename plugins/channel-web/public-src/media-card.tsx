@@ -38,6 +38,9 @@ import type {
 /** The transcript item this card renders. */
 export type MediaCardItem = Extract<ChatItem, { kind: 'media' }>;
 
+/** The accessible name of the flat reply-option group when the send set none. */
+const SUGGESTED_REPLIES_LABEL = 'Suggested replies';
+
 /** Sends one reply's text as a regular visitor message — the same send door the
  * composer uses. `replyId` rides the send as the tapped option's authored id when
  * present, so the flow reads which option was chosen (`params.reply_id`). */
@@ -60,7 +63,12 @@ export function MediaCard({ item, onSend, locked }: MediaCardProps): ReactElemen
         {item.media !== null ? <MediaItems media={item.media} /> : null}
         {item.location !== null ? <LocationPin location={item.location} /> : null}
         {item.options !== null ? (
-          <CardOptions options={item.options} onSend={onSend} locked={locked} />
+          <CardOptions
+            options={item.options}
+            groupLabel={item.wording?.choice?.groupLabel ?? SUGGESTED_REPLIES_LABEL}
+            onSend={onSend}
+            locked={locked}
+          />
         ) : null}
         {item.sections !== null ? (
           <CardSections sections={item.sections} onSend={onSend} locked={locked} />
@@ -180,15 +188,17 @@ function DocumentCard({ element }: { readonly element: MediaItem }): ReactElemen
  * link actions (a tap opens their url), in wire order. */
 function CardOptions({
   options,
+  groupLabel,
   onSend,
   locked,
 }: {
   readonly options: readonly CardOption[];
+  readonly groupLabel: string;
   readonly onSend: SendReply;
   readonly locked: boolean;
 }): ReactElement {
   return (
-    <div className="tcw-media-options" role="group" aria-label="Suggested replies">
+    <div className="tcw-media-options" role="group" aria-label={groupLabel}>
       {options.map((option, index) =>
         option.kind === 'link' ? (
           <LinkAction key={`link-${index}-${option.url}`} option={option} />

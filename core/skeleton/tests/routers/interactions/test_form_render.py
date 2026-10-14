@@ -99,6 +99,36 @@ async def test_get_form_ticket_renders_format_controls(wired):
     assert 'data-field="stamp" data-kind="string" type="text"' in body
 
 
+async def test_get_form_ticket_renders_input_mode_controls(wired):
+    schema = {
+        "type": "object",
+        "properties": {
+            "plain": {"type": "string", "inputMode": "text"},
+            "num": {"type": "string", "inputMode": "numeric"},
+            "dec": {"type": "string", "inputMode": "decimal"},
+            "phone": {"type": "string", "inputMode": "tel"},
+            "mail": {"type": "string", "inputMode": "email"},
+            "link": {"type": "string", "inputMode": "url"},
+        },
+    }
+    data = {"values": {"mail": "a@b.com"}}
+    await _seed_form_payload(wired, format_payload={"schema": schema, "data": data})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    body = bytes(resp.body).decode()
+    # Each kind picks its control; ``numeric``/``decimal`` stay ``type="text"`` with an
+    # ``inputmode`` hint so the value stays the typed string. ``data-kind="string"`` is kept
+    # for every kind so the submit script posts the string.
+    assert 'data-field="plain" data-kind="string" type="text"' in body
+    assert 'data-field="num" data-kind="string" type="text" inputmode="numeric"' in body
+    assert 'data-field="dec" data-kind="string" type="text" inputmode="decimal"' in body
+    assert 'data-field="phone" data-kind="string" type="tel"' in body
+    assert 'data-field="mail" data-kind="string" type="email"' in body
+    assert 'data-field="link" data-kind="string" type="url"' in body
+    # Prefill rides the value attribute whatever the keyboard.
+    assert 'data-field="mail" data-kind="string" type="email" value="a@b.com"' in body
+
+
 async def test_get_form_ticket_renders_pages_as_steps(wired):
     schema = {
         "type": "object",
@@ -160,20 +190,225 @@ async def test_get_form_ticket_renders_date_bounds(wired):
     assert "data-unavailable=" in body
 
 
-async def test_get_form_ticket_renders_a_date_range_as_two_inputs(wired):
+async def test_get_form_ticket_groups_a_drawable_date_range(wired):
     schema = {
         "type": "object",
         "properties": {
-            "start": {"type": "string", "format": "date"},
-            "end": {"type": "string", "format": "date", "rangeStart": "start", "minDays": 1, "maxDays": 14},
+            "start": {"type": "string", "format": "date", "title": "From"},
+            "end": {
+                "type": "string",
+                "format": "date",
+                "rangeStart": "start",
+                "minDays": 1,
+                "maxDays": 14,
+                "title": "To",
+            },
         },
     }
     await _seed_form_payload(wired, format_payload={"schema": schema})
     resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
     body = bytes(resp.body).decode()
-    # TWO ordinary date inputs — never one combined control, never recombined.
+    # A drawable pair (same page, both format date, same visibleWhen, no sibling depends on an
+    # end) is ONE fieldset grouping the two date inputs, labelled by both ends' titles.
+    assert '<fieldset class="daterange"><legend>From \u2013 To</legend>' in body
     assert 'data-field="start" data-kind="string" type="date"' in body
     assert 'data-field="end" data-kind="string" type="date"' in body
+    # The pair is one field row (the END's own row is not drawn separately).
+    assert 'data-field-row="start"' in body
+    assert 'data-field-row="end"' not in body
+    # The answer is still the two date strings — nothing is recombined.
+    assert body.count('type="date"') == 2
+
+
+async def test_get_form_ticket_draws_a_date_range_as_two_fields_when_a_sibling_depends_on_an_end(wired):
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date", "title": "From"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start", "title": "To"},
+            # A sibling whose visibleWhen names the END dissolves the merge: the pair stays two
+            # date fields so the sibling's conditional still references a real control.
+            "note": {"type": "string", "visibleWhen": {"field": "end", "equals": "2024-01-01"}},
+        },
+    }
+    await _seed_form_payload(wired, format_payload={"schema": schema})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    assert '<fieldset class="daterange">' not in body
+    assert 'data-field-row="start"' in body
+    assert 'data-field-row="end"' in body
+    assert 'data-field="start" data-kind="string" type="date"' in body
+    assert 'data-field="end" data-kind="string" type="date"' in body
+
+
+async def test_get_form_ticket_renders_chips_for_a_string_enum(wired):
+    schema = {
+        "type": "object",
+        "properties": {"colour": {"type": "string", "enum": ["red", "blue"], "control": "chips"}},
+    }
+    await _seed_form_payload(wired, format_payload={"schema": schema})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    # A chip grid is a radio group inside a pill-styled fieldset; each pill keeps the radio
+    # markup the submit script reads (name/data-field/data-kind="string").
+    assert '<fieldset class="chips">' in body
+    assert '<label class="choice chip"><input type="radio" name="colour" data-field="colour" ' in body
+    assert 'data-kind="string" value="red"' in body
+    # The page CSS hides the radio and styles the label as a pill.
+    assert "fieldset.chips label.chip:has(:checked)" in body
+
+
+async def test_get_form_ticket_renders_chips_for_an_array_of_strings(wired):
+    schema = {
+        "type": "object",
+        "required": ["tags"],
+        "properties": {
+            "tags": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["a", "b", "c"]},
+                "control": "chips",
+            }
+        },
+    }
+    await _seed_form_payload(wired, format_payload={"schema": schema})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    # Several chips selected -> checkboxes, data-kind="array"; the required group still carries
+    # the data-array-required marker the submit script checks.
+    assert '<fieldset class="chips" data-array-required="1">' in body
+    assert '<label class="choice chip"><input type="checkbox" data-field="tags" data-kind="array" value="a"' in body
+
+
+async def test_get_form_ticket_renders_a_textarea_with_its_maximum(wired):
+    schema = {
+        "type": "object",
+        "properties": {
+            "notes": {"type": "string", "control": "textarea", "maxLength": 500, "minLength": 10},
+        },
+    }
+    await _seed_form_payload(wired, format_payload={"schema": schema})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    # A multi-line control with its native length bounds and the maximum shown as a hint.
+    assert '<textarea data-field="notes" data-kind="string" rows="4" maxlength="500" minlength="10">' in body
+    assert '<small class="hint">up to 500 characters</small>' in body
+
+
+async def test_get_form_ticket_draws_the_length_bounds_on_a_single_line_input(wired):
+    schema = {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string", "maxLength": 12, "minLength": 3},
+        },
+    }
+    await _seed_form_payload(wired, format_payload={"schema": schema})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    # The length bound is drawn on the plain single-line input too, with the maximum shown.
+    assert '<input data-field="code" data-kind="string" type="text" maxlength="12" minlength="3"' in body
+    assert '<small class="hint">up to 12 characters</small>' in body
+
+
+async def test_get_form_ticket_draws_the_page_button_label_and_chrome(wired):
+    schema = {"type": "object", "properties": {"name": {"type": "string"}, "count": {"type": "integer"}}}
+    pages = [
+        {"title": "Who", "fields": ["name"], "button_label": "Continue"},
+        {"title": "How many", "fields": ["count"], "button_label": "Send request"},
+    ]
+    payload = {
+        "schema": schema,
+        "pages": pages,
+        "wording": {"form": {"title": "Your <details>", "back": "Go back"}},
+    }
+    await _seed_form_payload(wired, format_payload=payload)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    # Each step carries its primary-button label for the submit script to draw.
+    assert '<section class="step" data-step="0" data-page-title="Who" data-button-label="Continue">' in body
+    assert 'data-button-label="Send request"' in body
+    assert "next.textContent = (!last && bl) ? bl : 'Next';" in body
+    assert "submit.textContent = (last && bl) ? bl : 'Submit';" in body
+    # The form title heads the page (escaped), and the Back button reads the caller's word.
+    assert "<title>Your &lt;details&gt;</title>" in body
+    assert "<h1>Your &lt;details&gt;</h1>" in body
+    assert '<button type="button" data-nav="back" hidden>Go back</button>' in body
+
+
+async def test_get_form_ticket_chrome_defaults_when_absent(wired):
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    await _seed_form_payload(wired, format_payload={"schema": schema})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    # No wording.form -> the surface's own words.
+    assert "<title>Respond</title>" in body
+    assert "<h1>Respond</h1>" in body
+    assert '<button type="button" data-nav="back" hidden>Back</button>' in body
+
+
+async def test_get_form_ticket_draws_the_page_less_submit_label(wired):
+    # A page-less form's terminal button reads wording.form.submit on the single step.
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    payload = {"schema": schema, "wording": {"form": {"submit": "Send it"}}}
+    await _seed_form_payload(wired, format_payload=payload)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    assert '<section class="step" data-step="0" data-button-label="Send it">' in body
+
+
+async def test_get_form_ticket_draws_the_caller_choice_label_on_a_select(wired):
+    # A select field's empty-state prompt reads wording.form.fields[name].choice_label, escaped;
+    # radio groups (short enums) draw none, and an absent label keeps the dash.
+    schema = {
+        "type": "object",
+        "properties": {
+            "size": {"type": "string", "enum": ["xs", "s", "m", "l", "xl", "xxl"]},
+            "color": {"type": "string", "enum": ["red", "blue"]},
+        },
+    }
+    payload = {"schema": schema, "wording": {"form": {"fields": {"size": {"choice_label": "Pick a <size>"}}}}}
+    await _seed_form_payload(wired, format_payload=payload)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    # The select's leading blank option carries the caller's label, HTML-escaped.
+    assert '<option value="">Pick a &lt;size&gt;</option>' in body
+    assert "Pick a <size>" not in body
+    # The radio-rendered field (and any unlabelled select) is untouched — no placeholder leaks to it.
+    assert 'type="radio" name="color"' in body
+
+
+async def test_get_form_ticket_select_without_a_choice_label_keeps_the_dash(wired):
+    schema = {"type": "object", "properties": {"size": {"type": "string", "enum": ["xs", "s", "m", "l", "xl", "xxl"]}}}
+    await _seed_form_payload(wired, format_payload={"schema": schema})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    assert '<option value="">—</option>' in body
+
+
+async def test_get_form_ticket_draws_the_wording_text_attributes(wired):
+    # The caller's form-page sentences, refusal sentence and submitted copy ride escaped data-*
+    # attributes the constant script reads; each is written only when set.
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    payload = {
+        "schema": schema,
+        "wording": {
+            "answer": {"rejected": "No vale ({reason})."},
+            "answer_page": {
+                "form": {"failed": "Fallo al enviar.", "choose_one": "Elige una."},
+                "submitted": {"heading": "Enviado", "text": "Gracias"},
+            },
+        },
+    }
+    await _seed_form_payload(wired, format_payload=payload)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    assert 'data-text-rejected="No vale ({reason})."' in body
+    assert 'data-text-failed="Fallo al enviar."' in body
+    assert 'data-text-choose_one="Elige una."' in body
+    assert 'data-submitted-heading="Enviado"' in body
+    assert 'data-submitted-text="Gracias"' in body
+    # Unset members draw no attribute.
+    assert "data-text-network_error" not in body
+    assert "data-text-date_unavailable" not in body
 
 
 async def test_get_form_ticket_renders_display_blocks_and_review(wired):

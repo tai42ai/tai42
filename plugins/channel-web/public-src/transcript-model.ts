@@ -66,12 +66,16 @@ export interface DisplayBlock {
  * appears exactly once; absent pages means one page. `display` is the step's ordered
  * display-only blocks (empty when it carries none); `kind` marks a terminal `review`
  * step — a generic readback of entered values and the confirm footer, carrying no new
- * input fields — or an ordinary `input` step. */
+ * input fields — or an ordinary `input` step. `buttonLabel` is the text of the step's
+ * primary button — the one that advances from an input step or submits from the last —
+ * in the sender's words; `null` when the step sets none, so the step shows the generic
+ * word. */
 export interface FormPage {
   readonly title: string;
   readonly fields: readonly string[];
   readonly display: readonly DisplayBlock[];
   readonly kind: 'input' | 'review';
+  readonly buttonLabel: string | null;
 }
 
 /** When a form reacts while it is open: the plain, renderer-readable description of
@@ -199,6 +203,81 @@ export interface LocationPoint {
   readonly address: string | null;
 }
 
+/** The caller's word for one form field's picker placeholder (its empty-state prompt),
+ * keyed by property name in {@link FormWording.fields}. `null` when the caller set none. */
+export interface FieldWording {
+  readonly choiceLabel: string | null;
+}
+
+/** The caller's words for a form's chrome: the terminal button of a one-page form
+ * (`submit`), the Back button of a stepped form (`back`), and per-field picker
+ * placeholders (`fields`). The web form draws no form `title`/`open`/`cancel` (it is
+ * rendered inline), so those catalogue members are not read here. Each word is `null`
+ * when the caller set none. */
+export interface FormWording {
+  readonly submit: string | null;
+  readonly back: string | null;
+  readonly fields: Readonly<Record<string, FieldWording>>;
+}
+
+/** The caller's words for a choice list. The web draws the accessible name of a flat
+ * group of option buttons (`groupLabel`); `null` when the caller set none. */
+export interface ChoiceWording {
+  readonly groupLabel: string | null;
+}
+
+/** The caller's words for a non-form question's answer controls and refusal sentence:
+ * the link-out control (`open`), the affirmative/negative controls (`confirm`/`decline`),
+ * the send button (`submit`), the empty-input hint (`replyHint`), and the sentence drawn
+ * when an answer is refused and may be given again (`rejected`, an optional `{reason}`
+ * token takes the door's reason). Each is `null` when the caller set none. */
+export interface AnswerWording {
+  readonly open: string | null;
+  readonly confirm: string | null;
+  readonly decline: string | null;
+  readonly submit: string | null;
+  readonly replyHint: string | null;
+  readonly rejected: string | null;
+}
+
+/** The caller's words for a live question card's countdown: the visible plural line
+ * (`secondsLeft`, carrying a `{seconds}` token), the visible singular (`oneSecondLeft`),
+ * and the three spoken lines at the minute/half-minute/ten-second thresholds. Each is
+ * `null` when the caller set none. */
+export interface CountdownWording {
+  readonly secondsLeft: string | null;
+  readonly oneSecondLeft: string | null;
+  readonly underMinute: string | null;
+  readonly underHalfMinute: string | null;
+  readonly underTenSeconds: string | null;
+}
+
+/** The caller's words for in-flight and settled status copy: the in-flight send label
+ * (`sending`), the settled-card badges (`answered`/`expired`/`closed`), the ask-less
+ * form's local sent badge and no-longer-available line (`sent`/`unavailable`), and the
+ * live-countdown words (`countdown`). Each is `null` when the caller set none. */
+export interface StatusWording {
+  readonly sending: string | null;
+  readonly answered: string | null;
+  readonly expired: string | null;
+  readonly closed: string | null;
+  readonly sent: string | null;
+  readonly unavailable: string | null;
+  readonly countdown: CountdownWording | null;
+}
+
+/** The send's catalogue of platform-drawn texts, parsed down to the chapters the web
+ * surface draws (`form`, `choice`, `answer`, `status`). A chapter is `null` when the
+ * caller set none of its members. The catalogue's message-line (`lines`) and
+ * answer-page (`answer_page`) chapters are valid for a send but draw nothing on the
+ * web surface, so they are accepted off the wire and not carried here. */
+export interface Wording {
+  readonly form: FormWording | null;
+  readonly choice: ChoiceWording | null;
+  readonly answer: AnswerWording | null;
+  readonly status: StatusWording | null;
+}
+
 /** Everything a question row carries apart from its ticket. */
 interface QuestionBase {
   readonly kind: 'question';
@@ -211,6 +290,10 @@ interface QuestionBase {
   readonly media: readonly MediaItem[] | null;
   readonly timeoutAt: string;
   readonly ts: string;
+  /** The send's platform-drawn texts the question's surfaces draw — the answer
+   * controls, field placeholders, settled-state badges, countdown and refusal line.
+   * `null` when the send carried none; each surface then shows its own word. */
+  readonly wording: Wording | null;
 }
 
 /** One rendered row of the transcript. */
@@ -234,6 +317,10 @@ export type ChatItem =
       readonly formData: FormPrefill | null;
       /** The form's steps, or `null` for one page. */
       readonly pages: readonly FormPage[] | null;
+      /** The send's platform-drawn texts the card's surfaces draw — the terminal
+       * button, field placeholders and status copy. `null` when the send carried
+       * none; each surface then shows its own word. */
+      readonly wording: Wording | null;
       readonly ts: string;
     }
   | {
@@ -270,6 +357,10 @@ export type ChatItem =
       readonly header: MediaItem | null;
       readonly footer: string | null;
       readonly location: LocationPoint | null;
+      /** The send's platform-drawn texts the card draws — the accessible name of the
+       * flat reply-option group. `null` when the send carried none; the group then
+       * shows its own word. */
+      readonly wording: Wording | null;
       readonly ts: string;
     }
   | (QuestionBase & QuestionFacet)

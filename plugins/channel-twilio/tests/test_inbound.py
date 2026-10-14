@@ -68,7 +68,15 @@ def handler(stub_app) -> Callable[..., Awaitable[Response]]:
 
 async def _seed_pending(callback_url: str = _CALLBACK) -> None:
     delivery = make_delivery(callback_url=callback_url)
-    await reserve_pending(_TWILIO, _HUMAN, delivery.callback_url, delivery.interaction_id, delivery.timeout_at)
+    await reserve_pending(
+        _TWILIO,
+        _HUMAN,
+        delivery.callback_url,
+        delivery.interaction_id,
+        delivery.timeout_at,
+        on_mismatch=delivery.on_mismatch,
+        wording=delivery.wording,
+    )
 
 
 async def _pending_intact(fake_redis: FakeRedis) -> bool:

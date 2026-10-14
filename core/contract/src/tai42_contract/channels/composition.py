@@ -11,7 +11,7 @@ from typing import Any
 
 from tai42_contract.channels.options import Option, OptionSection
 from tai42_contract.channels.templates import ChannelTemplate
-from tai42_contract.interactions.models import LocationElement, MediaItem
+from tai42_contract.interactions.models import LocationElement, MediaItem, Wording, check_wording_for_notification
 
 
 def _require_prompt_for_surfaces(
@@ -56,7 +56,8 @@ def _check_header_footer_require_surface(
     sections: list[OptionSection] | None,
     noun: str,
 ) -> None:
-    # A header/footer composes an interactive message, so each requires a choice surface.
+    # A header/footer composes an interactive message, so each requires a choice surface
+    # (``options``/``sections``).
     if header is not None and options is None and sections is None:
         raise ValueError(f"a header requires options or sections on the {noun}")
     if footer is not None and options is None and sections is None:
@@ -101,6 +102,8 @@ def check_interactive_composition(
     schema: dict[str, Any] | None,
     header: MediaItem | None,
     footer: str | None,
+    wording: Wording | None,
+    has_pages: bool,
     noun: str,
 ) -> None:
     """The shared cross-field rules every option-carrying message carrier enforces.
@@ -118,6 +121,10 @@ def check_interactive_composition(
       (a form's fields OR a choice list), never both.
     * ``header`` and ``footer`` compose an interactive message, so each REQUIRES ``options`` or
       ``sections`` present.
+    * each per-send ``wording`` member is admitted only on the surface that draws it — a form
+      (``schema``), a flat ``options`` list, or a sectioned ``sections`` list (the one admission
+      table, :func:`~tai42_contract.interactions.models.wording.check_wording_for_notification`);
+      ``wording.form.submit`` is refused when the form carries ``pages`` (``has_pages``).
     * ``template`` is the standalone out-of-window send: exclusive with every other content and
       interactive field (``media``, ``location``, ``options``, ``sections``, ``schema``; and
       transitively ``header``/``footer``, which require ``options``/``sections``).
@@ -126,3 +133,11 @@ def check_interactive_composition(
     _check_surface_exclusivity(options, sections, schema, noun)
     _check_header_footer_require_surface(header, footer, options, sections, noun)
     _check_template_standalone(template, media, location, options, sections, schema, header, footer, noun)
+    if wording is not None:
+        check_wording_for_notification(
+            wording,
+            has_schema=schema is not None,
+            has_options=options is not None,
+            has_sections=sections is not None,
+            has_pages=has_pages,
+        )

@@ -11,7 +11,11 @@ layout the ask carried (``data``/``pages``/``reactions``):
 * the answer dict extracted and coerced from a ``view_submission`` state.
 
 Supported property subset (identical to the callback door's own form renderer, so
-a modal answer validates there): ``string`` → ``plain_text_input``; ``string``
+a modal answer validates there): ``string`` → ``plain_text_input``, except a
+``string`` whose ``inputMode`` is ``email`` → ``email_text_input`` or ``url`` →
+``url_text_input`` (Slack's own text elements, which carry their built-in check),
+while ``numeric``/``decimal``/``tel`` have no Slack keyboard hint and degrade to a
+``plain_text_input`` (the value always arrives exactly as typed); ``string``
 with an ``enum`` (or per-send ``options``) → ``radio_buttons`` at or below
 :data:`RADIO_OPTION_THRESHOLD` choices, else ``static_select``; ``string``+
 ``format: date`` → ``datepicker`` (Slack's picker draws NO min/max/disabled dates
@@ -98,6 +102,10 @@ _MAX_BUTTON_VALUE_LEN = 2000
 _MAX_HEADER_LEN = 150
 # The ``private_metadata`` string cap Slack enforces on a view.
 _MAX_PRIVATE_METADATA_LEN = 3000
+# A modal view's ``title``/``submit``/``close`` ``plain_text`` cap.
+_MAX_MODAL_TEXT_LEN = 24
+# A message ``button`` element's ``text`` cap — the surface the open button draws on.
+_MAX_BUTTON_TEXT_LEN = 75
 
 # A triggering text input dispatches its ``block_actions`` when the human presses
 # enter (a select/radio/checkbox/datepicker dispatches on selection with no config).
@@ -150,17 +158,18 @@ def _input_block(
     per_send_options: list[dict[str, Any]] | None = None,
     *,
     dispatch: bool = False,
+    choice_label: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(spec, dict):
         raise FormSchemaError(f"form schema property {name!r} must be an object")
     label = str(spec.get("title") or name)
     if len(label) > _MAX_LABEL_LEN:
         raise FormSchemaError(f"form schema property {name!r} label exceeds {_MAX_LABEL_LEN} characters")
-    element = _element(name, spec, per_send_options)
+    element = _element(name, spec, per_send_options, choice_label)
     if value is not None:
         _apply_initial(name, element, value)
-    if dispatch and element["type"] in ("plain_text_input", "number_input"):
-        # A text/number input dispatches on enter; a selection control dispatches on its own.
+    if dispatch and element["type"] in ("plain_text_input", "number_input", "email_text_input", "url_text_input"):
+        # A text/number/email/url input dispatches on enter; a selection control dispatches on its own.
         element["dispatch_action_config"] = _TEXT_DISPATCH_CONFIG
     block: dict[str, Any] = {
         "type": "input",
@@ -221,17 +230,20 @@ def _readback_value(value: Any) -> str:
     return str(value)
 
 
-def _readback_section(properties: dict[str, Any], values: dict[str, Any], hidden: set[str]) -> dict[str, Any]:
+def _readback_section(
+    properties: dict[str, Any], values: dict[str, Any], hidden: set[str], review_empty: str | None = None
+) -> dict[str, Any]:
     # A review page's generic readback of the values entered so far: one ``*label*: value``
     # line per visible, filled field. A field hidden by its predicate is omitted (it is not
-    # part of the answer); when nothing is filled yet the placeholder line is shown.
+    # part of the answer); when nothing is filled yet the empty line is shown — the caller's
+    # ``review_empty`` when set, else the platform default.
     lines: list[str] = []
     for name, spec in properties.items():
         if name in hidden or name not in values:
             continue
         label = str((spec.get("title") if isinstance(spec, dict) else None) or name)
         lines.append(f"*{label}*: {_readback_value(values[name])}")
-    text = "\n".join(lines) if lines else _REVIEW_EMPTY_TEXT
+    text = "\n".join(lines) if lines else (review_empty or _REVIEW_EMPTY_TEXT)
     if len(text) > _MAX_SECTION_TEXT_LEN:
         raise FormSchemaError(f"form review readback exceeds {_MAX_SECTION_TEXT_LEN} characters")
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
@@ -283,17 +295,29 @@ def _field_group(
     hidden: set[str],
     triggers: set[str],
     field_errors: dict[str, Any],
+    field_wording: dict[str, Any],
 ) -> list[dict[str, Any]]:
     # One field's blocks: its input block (prefilled, with a dispatch flag when it is a
     # reaction/conditional trigger), plus a context block for any reaction error on it. A
-    # field hidden by its predicate contributes nothing; an unknown field is refused.
+    # field hidden by its predicate contributes nothing; an unknown field is refused. A per-field
+    # ``choice_label`` draws the field's select placeholder (a non-select control ignores it).
     spec = properties.get(name)
     if spec is None:
         raise FormSchemaError(f"form page names unknown property {name!r}")
     if name in hidden:
         return []
     prefill = values.get(name) if values is not None else None
-    block = _input_block(name, spec, name in required, prefill, options.get(name), dispatch=name in triggers)
+    entry = field_wording.get(name)
+    choice_label = entry.get("choice_label") if isinstance(entry, dict) else None
+    block = _input_block(
+        name,
+        spec,
+        name in required,
+        prefill,
+        options.get(name),
+        dispatch=name in triggers,
+        choice_label=choice_label,
+    )
     group = [block]
     if name in field_errors:
         group.append(_error_context(name, field_errors[name]))
@@ -310,6 +334,8 @@ def _page_blocks(
     triggers: set[str],
     field_errors: dict[str, Any],
     display_values: dict[str, Any],
+    review_empty: str | None,
+    field_wording: dict[str, Any],
 ) -> list[dict[str, Any]]:
     # One page: its title header, its ordered display blocks, then either a review readback
     # (a review page) or its input fields (an input page).
@@ -319,10 +345,14 @@ def _page_blocks(
         if rendered is not None:
             blocks.append(rendered)
     if page.get("kind") == "review":
-        blocks.append(_readback_section(properties, values or {}, hidden))
+        blocks.append(_readback_section(properties, values or {}, hidden, review_empty))
         return blocks
     for field in page["fields"]:
-        blocks.extend(_field_group(str(field), properties, required, values, options, hidden, triggers, field_errors))
+        blocks.extend(
+            _field_group(
+                str(field), properties, required, values, options, hidden, triggers, field_errors, field_wording
+            )
+        )
     return blocks
 
 
@@ -335,6 +365,8 @@ def build_modal_blocks(
     reactions: dict[str, Any] | None = None,
     display_values: dict[str, Any] | None = None,
     field_errors: dict[str, Any] | None = None,
+    review_empty: str | None = None,
+    field_wording: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """The input/display blocks of a form modal.
 
@@ -346,12 +378,15 @@ def build_modal_blocks(
     evaluate against nothing, so every field shows — the cap upper bound and the show-all
     base), hides a field; a reaction/conditional trigger field carries ``dispatch_action``; a
     reaction's ``display_values`` fill display slots and its ``field_errors`` render as context
-    lines. Raises :class:`FormSchemaError` on any property this mapping cannot express or any
-    per-send extra it cannot map.
+    lines. ``review_empty`` is the caller's line a review page shows before anything is filled;
+    ``field_wording`` carries per-field words (``{name: {"choice_label": ...}}``), the select
+    placeholder of each named field. Raises :class:`FormSchemaError` on any property this mapping
+    cannot express or any per-send extra it cannot map.
     """
     options = options or {}
     display_values = display_values or {}
     field_errors = field_errors or {}
+    field_wording = field_wording or {}
     required = _required_set(schema)
     properties = _properties(schema)
     # The platform's own visibility rule, so the modal shows and hides exactly what the answer
@@ -363,13 +398,27 @@ def build_modal_blocks(
         for page in pages:
             blocks.extend(
                 _page_blocks(
-                    page, properties, required, values, options, hidden, triggers, field_errors, display_values
+                    page,
+                    properties,
+                    required,
+                    values,
+                    options,
+                    hidden,
+                    triggers,
+                    field_errors,
+                    display_values,
+                    review_empty,
+                    field_wording,
                 )
             )
         return blocks
     blocks = []
     for name in properties:
-        blocks.extend(_field_group(str(name), properties, required, values, options, hidden, triggers, field_errors))
+        blocks.extend(
+            _field_group(
+                str(name), properties, required, values, options, hidden, triggers, field_errors, field_wording
+            )
+        )
     return blocks
 
 
@@ -421,6 +470,33 @@ def decode_private_metadata(raw: Any) -> tuple[str, dict[str, Any], dict[str, An
     return interaction_id, options, display
 
 
+def _modal_text(role: str, label: str | None, default: str) -> dict[str, Any]:
+    """One modal ``plain_text`` chrome field (title/submit/close): the caller's label else the default.
+
+    A caller label over Slack's :data:`_MAX_MODAL_TEXT_LEN`-character modal-text cap is a loud
+    :class:`FormSchemaError` naming the role — never a silent truncation of the caller's words.
+    """
+    text = label if label is not None else default
+    if len(text) > _MAX_MODAL_TEXT_LEN:
+        raise FormSchemaError(f"form modal {role} {text!r} exceeds {_MAX_MODAL_TEXT_LEN} characters")
+    return {"type": "plain_text", "text": text}
+
+
+def _submit_label(pages: list[dict[str, Any]] | None) -> str | None:
+    """The form's terminal submit label — the LAST page's ``button_label`` — or ``None`` for the default.
+
+    Slack renders every page of a form in ONE modal with ONE ``submit``, so the submit takes the
+    LAST page's label (the form's terminal action); a non-terminal page's label is not drawn —
+    Slack has no per-page button (the documented degrade). A form with no ``pages`` has no page
+    label and shows the default word.
+    """
+    if not pages:
+        return None
+    last = pages[-1]
+    label = last.get("button_label") if isinstance(last, dict) else None
+    return label if isinstance(label, str) else None
+
+
 def build_modal_view(
     interaction_id: str,
     question: str,
@@ -434,14 +510,22 @@ def build_modal_view(
     field_errors: dict[str, Any] | None = None,
     metadata_options: dict[str, list[dict[str, Any]]] | None = None,
     metadata_display: dict[str, Any] | None = None,
+    form_wording: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``views.open``/``views.update`` modal: the question as a section, then the blocks.
 
     The input/display/review blocks are built with the per-send prefill, option lists, display
     slots and any reaction errors; ``private_metadata`` carries the interaction id plus the
     accumulated reaction state (``metadata_options``/``metadata_display``) back on the next
-    interaction.
+    interaction. ``form_wording`` (the ``wording.form`` chapter) carries the caller's words, the
+    platform's as the default: ``title`` is ``form_wording["title"]`` else "Please respond";
+    ``submit`` is the LAST page's ``button_label``, else — for a page-less form — the caller's
+    ``form_wording["submit"]``, else "Submit"; ``close`` is ``form_wording["cancel"]`` else
+    "Cancel". Each is capped at Slack's 24-character modal-text limit, refused loudly over it
+    (:class:`FormSchemaError`). ``form_wording["review_empty"]`` is the review step's empty line
+    and ``form_wording["fields"]`` the per-field select placeholders, threaded into the blocks.
     """
+    form_wording = form_wording or {}
     blocks = [
         _question_section(question),
         *build_modal_blocks(
@@ -452,6 +536,8 @@ def build_modal_view(
             reactions=reactions,
             display_values=display_values,
             field_errors=field_errors,
+            review_empty=form_wording.get("review_empty"),
+            field_wording=form_wording.get("fields") or {},
         ),
     ]
     if len(blocks) > _MAX_MODAL_BLOCKS:
@@ -460,9 +546,9 @@ def build_modal_view(
         "type": "modal",
         "callback_id": FORM_SUBMIT_CALLBACK_ID,
         "private_metadata": _encode_private_metadata(interaction_id, metadata_options, metadata_display),
-        "title": {"type": "plain_text", "text": _MODAL_TITLE},
-        "submit": {"type": "plain_text", "text": _SUBMIT_LABEL},
-        "close": {"type": "plain_text", "text": _CLOSE_LABEL},
+        "title": _modal_text("title", form_wording.get("title"), _MODAL_TITLE),
+        "submit": _modal_text("submit", _submit_label(pages) or form_wording.get("submit"), _SUBMIT_LABEL),
+        "close": _modal_text("close", form_wording.get("cancel"), _CLOSE_LABEL),
         "blocks": blocks,
     }
 
@@ -486,13 +572,19 @@ def validate_form_schema(schema: dict[str, Any], question: str) -> None:
         raise FormSchemaError(f"form modal exceeds {_MAX_MODAL_BLOCKS} blocks")
 
 
-def build_message_blocks(question: str, interaction_id: str) -> list[dict[str, Any]]:
-    """The ``chat.postMessage`` blocks: the question section plus a single button.
+def build_message_blocks(question: str, interaction_id: str, open_label: str | None = None) -> list[dict[str, Any]]:
+    """The ``chat.postMessage`` blocks: the question section plus the open-form button.
 
-    The button's ``value`` is the interaction id (read back on ``block_actions``).
+    The button's ``value`` is the interaction id (read back on ``block_actions``); its ``text``
+    is the caller's ``open_label`` else "Fill form", capped at Slack's
+    :data:`_MAX_BUTTON_TEXT_LEN`-character button-text limit — a longer caller label is refused
+    loudly (:class:`FormSchemaError`), never truncated.
     """
     if len(interaction_id) > _MAX_BUTTON_VALUE_LEN:
         raise FormSchemaError(f"interaction id exceeds the {_MAX_BUTTON_VALUE_LEN}-character button value cap")
+    label = open_label if open_label is not None else _BUTTON_LABEL
+    if len(label) > _MAX_BUTTON_TEXT_LEN:
+        raise FormSchemaError(f"form open button label {label!r} exceeds {_MAX_BUTTON_TEXT_LEN} characters")
     return [
         _question_section(question),
         {
@@ -502,7 +594,7 @@ def build_message_blocks(question: str, interaction_id: str) -> list[dict[str, A
                     "type": "button",
                     "action_id": FORM_OPEN_ACTION_ID,
                     "value": interaction_id,
-                    "text": {"type": "plain_text", "text": _BUTTON_LABEL},
+                    "text": {"type": "plain_text", "text": label},
                 }
             ],
         },
@@ -514,7 +606,7 @@ def _raw_value(entry: Any) -> str | None:
     if not isinstance(entry, dict):
         return None
     kind = entry.get("type")
-    if kind in ("plain_text_input", "number_input"):
+    if kind in ("plain_text_input", "number_input", "email_text_input", "url_text_input"):
         value = entry.get("value")
         return value if isinstance(value, str) and value != "" else None
     if kind in ("datepicker", "timepicker"):
@@ -553,9 +645,15 @@ def _array_value(entry: Any) -> list[str]:
 
 
 def _coerce(name: str, spec: dict[str, Any], raw: str) -> Any:
-    """Map a submitted string to the schema's JSON type.
+    """Lift a submitted string to the JSON type its schema property declares.
 
-    Slack's inputs constrain the text already; a value that still fails to coerce raises loudly.
+    Slack delivers every scalar input as a string. ``"true"``/``"false"`` for a
+    ``boolean``, an integer literal for an ``integer`` and a finite literal for a
+    ``number`` become the typed value; any other string is returned as submitted,
+    and the answer door rejects a value of the wrong type against the schema with a
+    field-located reason the modal shows inline. A non-finite ``number`` literal
+    stays a string on purpose: as a float it would pass ``type: number`` and
+    serialize to null.
     """
     ptype = spec.get("type")
     if ptype == "boolean":
@@ -563,21 +661,19 @@ def _coerce(name: str, spec: dict[str, Any], raw: str) -> Any:
             return True
         if raw == "false":
             return False
-        raise FormSchemaError(f"form field {name!r} boolean value not recognized: {raw!r}")
+        return raw
     if ptype == "integer":
         try:
             return int(raw)
-        except ValueError as exc:
-            raise FormSchemaError(f"form field {name!r} is not an integer: {raw!r}") from exc
+        except ValueError:
+            return raw
     if ptype == "number":
         try:
             parsed = float(raw)
-        except ValueError as exc:
-            raise FormSchemaError(f"form field {name!r} is not a number: {raw!r}") from exc
-        # inf/nan pass jsonschema's ``type: number`` and pydantic stores them as
-        # null — a silent value loss. Decline the coercion so the raw string
-        # travels to the callback door and its schema validation rejects it there,
-        # the same recovery a non-numeric entry already takes.
+        except ValueError:
+            return raw
+        # A non-finite float passes ``type: number`` and serializes to null; the
+        # string does not pass, so it is forwarded for the door to reject.
         if not math.isfinite(parsed):
             return raw
         return parsed
@@ -587,8 +683,9 @@ def _coerce(name: str, spec: dict[str, Any], raw: str) -> Any:
 def extract_answer(schema: dict[str, Any], state_values: dict[str, Any]) -> dict[str, Any]:
     """The answer dict from a ``view_submission`` state.
 
-    Each present, non-empty field coerced to its schema type (an array field returns a list,
-    an unfilled optional field is omitted). A field whose block is absent from the state — a
+    Each present, non-empty field lifted to its schema type when its string denotes one, else
+    forwarded as submitted (an array field returns a list, an unfilled optional field is
+    omitted). A field whose block is absent from the state — a
     field hidden by its conditional predicate before submit — is omitted; the answer facet
     drops any hidden field left in the answer besides.
     """

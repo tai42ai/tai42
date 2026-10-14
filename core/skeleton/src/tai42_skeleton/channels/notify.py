@@ -46,8 +46,10 @@ from tai42_contract.interactions.models import (
     LocationElement,
     MediaItem,
     MediaKind,
+    Wording,
     check_form_data,
     check_form_pages,
+    check_form_wording_fields,
 )
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
@@ -153,8 +155,9 @@ def _validate_channel_form(channel_obj: Channel, schema: dict[str, Any], message
 def _coerce_form_extras(
     data: FormData | dict[str, Any] | None,
     pages: list[FormPage] | list[dict[str, Any]] | None,
-) -> tuple[FormData | None, list[FormPage] | None]:
-    """Coerce the per-send form extras to their typed models once.
+    wording: Wording | dict[str, Any] | None,
+) -> tuple[FormData | None, list[FormPage] | None, Wording | None]:
+    """Coerce the per-send extras to their typed models once.
 
     The operation door hands them typed already; a direct in-process caller may pass plain
     dicts. The same coercion ``ChannelNotification`` applies to its own fields, done here so
@@ -166,22 +169,30 @@ def _coerce_form_extras(
         if pages is None
         else [page if isinstance(page, FormPage) else FormPage.model_validate(page) for page in pages]
     )
-    return typed_data, typed_pages
+    typed_wording = (
+        Wording.model_validate(wording) if wording is not None and not isinstance(wording, Wording) else wording
+    )
+    return typed_data, typed_pages, typed_wording
 
 
-def _validate_channel_form_extras(schema: dict[str, Any], data: FormData | None, pages: list[FormPage] | None) -> None:
+def _validate_channel_form_extras(
+    schema: dict[str, Any], data: FormData | None, pages: list[FormPage] | None, wording: Wording | None
+) -> None:
     """Deep-check the per-send form extras against the send's schema.
 
-    The ONE validator the ask door runs (``check_form_data`` / ``check_form_pages``), never a
-    second rule set: a bad prefill (unknown/ill-typed property, a per-send option list on a
-    non-string property) or a page that omits/duplicates a property raises ``ValueError``
-    (→ 400). ``data``/``pages`` with no schema never reach here — the ``ChannelNotification``
-    presence rule refuses them loudly.
+    The ONE validator the ask door runs (``check_form_data`` / ``check_form_pages`` /
+    ``check_form_wording_fields``), never a second rule set: a bad prefill (unknown/ill-typed
+    property, a per-send option list on a non-string property), a page that omits/duplicates a
+    property, or a ``wording.form.fields`` entry naming a property that is not declared or draws
+    no choice list raises ``ValueError`` (→ 400). ``data``/``pages`` with no schema never reach
+    here — the ``ChannelNotification`` presence rule refuses them loudly.
     """
     if data is not None:
         check_form_data(schema, data)
     if pages is not None:
         check_form_pages(schema, pages)
+    if wording is not None and wording.form is not None and wording.form.fields:
+        check_form_wording_fields(schema, data, wording.form.fields)
 
 
 async def _prepare_channel_media(media: list[Any], settings: Any) -> list[MediaItem]:
@@ -237,6 +248,7 @@ async def _record_feed(notification: ChannelNotification, audience: str | None) 
         schema=notification.schema,
         data=notification.data,
         pages=notification.pages,
+        wording=notification.wording,
     )
 
 
@@ -292,6 +304,7 @@ async def notify_user(
     data: FormData | dict[str, Any] | None = None,
     pages: list[FormPage] | list[dict[str, Any]] | None = None,
     form_tag: str | None = None,
+    wording: Wording | dict[str, Any] | None = None,
 ) -> list[str]:
     """Notify a human of ``message``, fire-and-forget.
 
@@ -384,6 +397,14 @@ async def notify_user(
     written to the in-app feed record — the feed has no submission door, so a tag there would
     correlate nothing.
 
+    ``wording`` (a ``Wording`` or its dict) is the per-send catalogue of the notification's
+    platform-drawn texts, grouped by what each decorates — a form's chrome (``form``), a choice
+    list's control words (``choice``) and in-flight status (``status``). Each member is admitted
+    only on the surface that draws it (a form ``schema``, a flat ``options`` list, or a sectioned
+    ``sections`` list), the shared composition rule refusing any member on a notification with no
+    such surface. It threads onto the ``ChannelNotification`` the channel receives and is recorded
+    on the in-app feed (feed parity) for an ``audience``-addressed send.
+
     The notification carries no ``sender_identity`` — that field is the conversation
     bridge's — so the channel sends from its own configured identity.
 
@@ -431,9 +452,9 @@ async def notify_user(
     # caller is unchanged. The cross-identity rejection is an authorization denial the
     # operation door maps to a 403 (the write-side mirror of the read door).
     audience = clamp_write_audience(audience)
-    # Coerce the form extras to their typed models once, so the feed record and the deep
+    # Coerce the per-send extras to their typed models once, so the feed record and the deep
     # form check below both work on one typed shape.
-    data, pages = _coerce_form_extras(data, pages)
+    data, pages, wording = _coerce_form_extras(data, pages, wording)
     if channel is None and schema is not None:
         # A form notification NEEDS a channel: the sink has no delivery vehicle to render
         # the form and no submission door for the answers, so a feed entry carrying a
@@ -467,6 +488,7 @@ async def notify_user(
             data=data,
             pages=pages,
             form_tag=form_tag,
+            wording=wording,
         )
         await _record_feed(sink_notification, audience)
         return []
@@ -487,7 +509,7 @@ async def notify_user(
         _validate_channel_template(channel_obj, template)
     if schema is not None:
         _validate_channel_form(channel_obj, schema, message)
-        _validate_channel_form_extras(schema, data, pages)
+        _validate_channel_form_extras(schema, data, pages, wording)
     if media is not None:
         media = await _prepare_channel_media(media, interactions_settings())
     # Construct (and thereby validate) the notification BEFORE the in-app feed record.
@@ -510,6 +532,7 @@ async def notify_user(
         data=data,
         pages=pages,
         form_tag=form_tag,
+        wording=wording,
     )
     # An addressed notification lands in the identity's in-app feed even on the
     # channel path, matching ``ask`` (which always persists). After the clamp a

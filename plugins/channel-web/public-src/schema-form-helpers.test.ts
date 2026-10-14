@@ -13,7 +13,13 @@ import {
 } from '@/schema-form-helpers';
 import type { FormPage } from '@/transcript-model';
 
-const page = (fields: string[]): FormPage => ({ title: '', fields, display: [], kind: 'input' });
+const page = (fields: string[]): FormPage => ({
+  title: '',
+  fields,
+  display: [],
+  kind: 'input',
+  buttonLabel: null,
+});
 
 describe('isPlainObject', () => {
   it('accepts a plain object and rejects arrays, null, and primitives', () => {
@@ -41,7 +47,7 @@ describe('resolvePages', () => {
   it('falls back to one input page carrying every top-level property in order', () => {
     const schema = { type: 'object', properties: { x: {}, y: {} } } as unknown as JsonSchema;
     expect(resolvePages(schema, null)).toEqual([
-      { title: '', fields: ['x', 'y'], display: [], kind: 'input' },
+      { title: '', fields: ['x', 'y'], display: [], kind: 'input', buttonLabel: null },
     ]);
   });
 });

@@ -73,9 +73,15 @@ def _reply_event(**overrides: Any) -> dict[str, Any]:
 
 
 def _seed_correlation(fake_redis) -> None:
-    # The corr record is now a JSON {callback_url, interaction_id, timeout_at}.
+    # The corr record is a JSON {callback_url, interaction_id, timeout_at, on_mismatch, wording}.
     fake_redis.store[_CORR_KEY] = json.dumps(
-        {"callback_url": _CALLBACK, "interaction_id": "int-7", "timeout_at": "2999-01-01T00:00:00+00:00"}
+        {
+            "callback_url": _CALLBACK,
+            "interaction_id": "int-7",
+            "timeout_at": "2999-01-01T00:00:00+00:00",
+            "on_mismatch": "retry",
+            "wording": None,
+        }
     )
     fake_redis.ttls[_CORR_KEY] = 300
 

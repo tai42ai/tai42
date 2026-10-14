@@ -13,8 +13,8 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
-from tai42_contract.interactions.models import FormReactions
+from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelInputError, ChannelNotification
+from tai42_contract.interactions.models import FormReactions, FormWording
 
 from tai42_channel_whatsapp.channel.media import _send_media_prelude
 from tai42_channel_whatsapp.client import create_flow, delete_flow, publish_flow, send_flow
@@ -49,6 +49,61 @@ _NOTIFY_FORM_TOKEN_PREFIX = "tai42-nf:"  # noqa: S105 constant identifier, not a
 # uniqueness. One Flow per distinct answer schema comes from the cache plus the
 # orphan-draft cleanup, never from the name.
 _FLOW_NAME_PREFIX = "tai42-form-"
+
+# Meta's cap on the Flow message's ``flow_cta`` (the chat button that opens the Flow): up to 20
+# characters, no emoji. LIVE-CITE(flow_cta cap): the documented numbers disagree (pywa mirrors 20,
+# Meta's "Sending a Flow" guide advises 30), so the stricter 20 is enforced here and the live API's
+# actual refusal boundary is proved on the live leg before this constant is loosened.
+_OPEN_LABEL_MAX_CHARS = 20
+
+# Meta caps the Flow message's ``interactive.body.text`` at this many characters. A door-rejection
+# re-send carries the caller's refusal sentence (``wording.answer.rejected``) with the door's own
+# reason substituted into every ``{reason}`` token, so the caller's template must leave room for the
+# reason: the door line is bounded at ``_DOOR_REJECTION_MAX_CHARS`` before it rides the body, and the
+# template's worst-case expansion (its fixed text plus every token filled) is capped at the body size.
+_FLOW_BODY_MAX_CHARS = 1024
+_DOOR_REJECTION_MAX_CHARS = 500
+
+
+def _form_wording(send: ChannelDelivery | ChannelNotification) -> FormWording | None:
+    """The send's ``wording.form`` chapter, or ``None`` when the send carried no form wording."""
+    return send.wording.form if send.wording is not None else None
+
+
+def _guard_open_label(label: str | None) -> None:
+    """Refuse a caller ``wording.form.open`` over Meta's ``flow_cta`` cap, before any store or send.
+
+    A label the chat button cannot carry is a permanent input refusal (:class:`ChannelInputError`),
+    never truncated and never retried.
+    """
+    if label is not None and len(label) > _OPEN_LABEL_MAX_CHARS:
+        raise ChannelInputError(
+            f"form open-button label is {len(label)} characters; WhatsApp caps the flow button "
+            f"(flow_cta) at {_OPEN_LABEL_MAX_CHARS} characters"
+        )
+
+
+def _guard_rejected_template(template: str | None) -> None:
+    """Refuse a caller ``wording.answer.rejected`` too long to ride a door-rejection re-send, up front.
+
+    A refused form answer is re-asked with a fresh Flow whose body is the caller's refusal sentence
+    with the door's own reason substituted for EACH ``{reason}`` token. Every substitution is bounded
+    at ``_DOOR_REJECTION_MAX_CHARS`` and Meta caps the body at ``_FLOW_BODY_MAX_CHARS``, so the
+    template's worst-case expansion — its fixed text plus every ``{reason}`` filled — must fit the
+    body; otherwise the re-send would strand the participant with neither the Flow nor a message. A
+    template over the cap is a permanent input refusal (:class:`ChannelInputError`), checked at
+    deliver — never at inbound time, where a re-send Meta refuses has no recovery.
+    """
+    if template is None:
+        return
+    reason_count = template.count("{reason}")
+    worst_case = len(template.replace("{reason}", "")) + reason_count * _DOOR_REJECTION_MAX_CHARS
+    if worst_case > _FLOW_BODY_MAX_CHARS:
+        raise ChannelInputError(
+            f"wording.answer.rejected expands to up to {worst_case} characters once each of its "
+            f"{reason_count} {{reason}} token(s) is filled (up to {_DOOR_REJECTION_MAX_CHARS} characters each); "
+            f"WhatsApp caps the re-sent Flow body at Meta's {_FLOW_BODY_MAX_CHARS}-character limit"
+        )
 
 
 def _reverse_payload_labels(schema: dict[str, Any]) -> dict[str, str]:
@@ -123,6 +178,7 @@ def _form_pages_list(send: ChannelDelivery | ChannelNotification) -> list[dict[s
             "fields": list(page.fields),
             "kind": page.kind,
             "display": [block.model_dump(exclude_none=True) for block in page.display],
+            **({"button_label": page.button_label} if page.button_label is not None else {}),
         }
         for page in send.pages
     ]
@@ -187,6 +243,9 @@ async def send_form_ask_flow(
     values: dict[str, Any],
     options: dict[str, list[dict[str, Any]]],
     reactions: dict[str, Any] | None = None,
+    open_label: str | None = None,
+    form_title: str | None = None,
+    form_submit: str | None = None,
 ) -> str:
     """Build, resolve and send a form ask's Flow; return its ``wamid``.
 
@@ -198,9 +257,15 @@ async def send_form_ask_flow(
     (present for a reacting form) publishes the Flow as ENDPOINT-DRIVEN against the
     configured data endpoint; the reacting flow folds into the cache key, so its published
     Flow is distinct from the static one.
+
+    ``open_label`` is the caller's text for the chat button that opens the Flow, drawn as the
+    message ``flow_cta`` (not Flow JSON, so it never re-keys the Flow); ``form_title`` is the
+    caller's screen title and ``form_submit`` the caller's terminal-button label for a page-less
+    form (both Flow JSON, so they DO re-key). The re-send passes the stored values of all three, so
+    the correction message draws the same button, title and submit label.
     """
-    flow_json, schema_hash = build_form_flow(schema, pages, set(options), reactions)
-    flow_data = build_flow_data(schema, values, options)
+    flow_json, schema_hash = build_form_flow(schema, pages, set(options), reactions, form_title, form_submit)
+    flow_data = build_flow_data(schema, values, options, pages)
     settings = whatsapp_settings()
     waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
     endpoint_uri = _require_reaction_settings(settings) if reactions is not None else None
@@ -213,6 +278,7 @@ async def send_form_ask_flow(
         flow_token=flow_token,
         screen=FORM_ENTRY_SCREEN,
         data=flow_data,
+        open_label=open_label,
     )
 
 
@@ -245,10 +311,20 @@ async def _deliver_form(
     pages = _form_pages_list(delivery)
     values, options = _form_values_and_options(delivery)
     reactions = _reactions_dict(delivery.reactions)
+    form = _form_wording(delivery)
+    open_label = form.open if form is not None else None
+    form_title = form.title if form is not None else None
+    form_submit = form.submit if form is not None else None
+    answer = delivery.wording.answer if delivery.wording is not None else None
+    rejected_template = answer.rejected if answer is not None else None
     # Build + validate before any reservation (raises on an unsupported schema, an
-    # unmappable per-send option, an unknown page field, or an unrenderable reaction trigger).
-    build_form_flow(delivery.schema, pages, set(options), reactions)
-    build_flow_data(delivery.schema, values, options)
+    # unmappable per-send option, an unknown page field, an unrenderable reaction trigger, an
+    # over-cap open-button label / footer label, or an over-cap rejection template), so an
+    # unrenderable send reserves nothing.
+    _guard_open_label(open_label)
+    _guard_rejected_template(rejected_template)
+    build_form_flow(delivery.schema, pages, set(options), reactions, form_title, form_submit)
+    build_flow_data(delivery.schema, values, options, pages)
     require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
     # A reacting form cannot publish or be served without its data-endpoint key material —
     # refuse loudly up front (never a silent fall back to a non-reacting flow).
@@ -268,6 +344,8 @@ async def _deliver_form(
         form_options=options,
         form_names=_reverse_payload_labels(delivery.schema),
         form_reactions=reactions,
+        on_mismatch=delivery.on_mismatch,
+        wording=delivery.wording,
     )
     # A reacting form's data endpoint recovers its schema + inputs from this sidecar by the
     # flow token (the interaction id); it expires with the ask's own deadline.
@@ -284,6 +362,9 @@ async def _deliver_form(
             values=values,
             options=options,
             reactions=reactions,
+            open_label=open_label,
+            form_title=form_title,
+            form_submit=form_submit,
         )
     except Exception:
         # Any create/publish/store/send failure frees the pair instead of holding
@@ -325,8 +406,15 @@ async def _send_form_notification(
     # across sends; the prefilled values and per-send option lists ride the send's data.
     pages = _form_pages_list(notification)
     values, options = _form_values_and_options(notification)
-    flow_json, schema_hash = build_form_flow(notification.schema, pages, set(options))
-    flow_data = build_flow_data(notification.schema, values, options)
+    form = _form_wording(notification)
+    open_label = form.open if form is not None else None
+    form_title = form.title if form is not None else None
+    form_submit = form.submit if form is not None else None
+    _guard_open_label(open_label)
+    flow_json, schema_hash = build_form_flow(
+        notification.schema, pages, set(options), form_title=form_title, form_submit=form_submit
+    )
+    flow_data = build_flow_data(notification.schema, values, options, pages)
     waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
 
     sent = await _send_media_prelude(phone_number_id, target, list(notification.media or []))
@@ -348,6 +436,7 @@ async def _send_form_notification(
             flow_token=flow_token,
             screen=FORM_ENTRY_SCREEN,
             data=flow_data,
+            open_label=open_label,
         )
     )
     return sent

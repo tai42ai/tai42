@@ -19,6 +19,7 @@ describe('applyFrame: chat.form', () => {
         location: null,
         formData: null,
         pages: null,
+        wording: null,
         ts: TS,
       },
     ]);

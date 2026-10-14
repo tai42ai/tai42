@@ -399,8 +399,9 @@ function displayBlocksOf(raw: unknown): readonly DisplayBlock[] | undefined {
 
 /** One form page: a non-blank `title`, an ordered list of non-blank field names (NON-EMPTY
  * for an `input` page; empty for a `review` page, which carries no input fields), its
- * ordered display blocks (absent → `[]`), and its `kind` (absent → `input`). `undefined` on
- * anything off-shape. */
+ * ordered display blocks (absent → `[]`), its `kind` (absent → `input`), and its
+ * `button_label` (absent → `null`; a non-blank string else the frame is malformed, like
+ * every other wording field). `undefined` on anything off-shape. */
 function formPageOf(raw: unknown): FormPage | undefined {
   if (!isRecord(raw)) return undefined;
   const { title, fields } = raw;
@@ -420,7 +421,17 @@ function formPageOf(raw: unknown): FormPage | undefined {
   if (kind === 'input' && names.length === 0) return undefined;
   const display = displayBlocksOf(raw.display);
   if (display === undefined) return undefined;
-  return { title, fields: names, display, kind };
+  const buttonLabel = buttonLabelOf(raw.button_label);
+  if (buttonLabel === undefined) return undefined;
+  return { title, fields: names, display, kind, buttonLabel };
+}
+
+/** A page's primary-button label: absent → `null`; a non-blank string → itself;
+ * `undefined` (malformed) on a blank or non-string, like every other wording field. */
+function buttonLabelOf(raw: unknown): string | null | undefined {
+  if (raw === undefined) return null;
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+  return raw;
 }
 
 /** A form's reaction triggers (`reactions` on a form question's frame): absent (`null`),
