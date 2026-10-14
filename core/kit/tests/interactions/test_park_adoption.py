@@ -46,6 +46,9 @@ from tai42_kit.interactions.park_adoption import (
     terminal_chain_notice,
 )
 
+# A fixed held-step deadline the ledger records against a chained key.
+_DEADLINE = datetime(2030, 1, 1, tzinfo=UTC)
+
 
 def test_a_park_raised_under_the_bound_continuation_is_adoptable():
     # The caller's own binding raised the ask, so the caller is the park's resume owner and
@@ -164,7 +167,10 @@ def test_this_runs_own_park_is_adopted_by_its_interaction_id():
         # The ask was raised under THIS run's binding — a chained dispatch around it changes
         # nothing: the run parks on its own interaction, under its own owner, and the platform
         # resumes it directly.
-        assert resolve_park_adoption("agent_resume", interaction_id="i1", tool_name="ask") == ("i1", "agent_resume")
+        assert resolve_park_adoption("agent_resume", interaction_id="i1", tool_name="ask", expiry_at=None) == (
+            "i1",
+            "agent_resume",
+        )
     finally:
         reset_chained_resume(completion)
         reset_resume_continuation_tool(resume)
@@ -176,7 +182,9 @@ def test_a_nested_runs_park_is_chained_when_the_dispatch_was_chained():
     try:
         # The nested run keeps its own park and its own resume; this run parks on the CALL —
         # a park owned by its OWN resume continuation, so the claim point downstream agrees.
-        claimed = resolve_park_adoption("nested_driver_resume", interaction_id="i-nested", tool_name="run_target")
+        claimed = resolve_park_adoption(
+            "nested_driver_resume", interaction_id="i-nested", tool_name="run_target", expiry_at=_DEADLINE
+        )
     finally:
         reset_chained_resume(completion)
         reset_resume_continuation_tool(resume)
@@ -189,7 +197,7 @@ def test_an_ownerless_nested_park_is_chained_too():
     resume = set_resume_continuation_tool("agent_resume")
     completion = _chain("tai42:chained-park:k1")
     try:
-        assert resolve_park_adoption(None, interaction_id="i-nested", tool_name="inner_agent") == (
+        assert resolve_park_adoption(None, interaction_id="i-nested", tool_name="inner_agent", expiry_at=_DEADLINE) == (
             "tai42:chained-park:k1",
             "agent_resume",
         )
@@ -204,7 +212,7 @@ def test_an_unchained_dispatch_still_refuses_a_nested_runs_park():
     resume = set_resume_continuation_tool("agent_resume")
     try:
         with pytest.raises(NestedParkOwnershipError) as caught:
-            resolve_park_adoption("nested_driver_resume", interaction_id="i1", tool_name="run_target")
+            resolve_park_adoption("nested_driver_resume", interaction_id="i1", tool_name="run_target", expiry_at=None)
     finally:
         reset_resume_continuation_tool(resume)
     message = str(caught.value)
@@ -224,7 +232,7 @@ def test_a_bound_door_completion_without_chain_routing_neither_chains_nor_notifi
     completion = set_park_completion("conversation_deliver", {"route_name": "chat"}, thread_id="thread-1")
     try:
         with pytest.raises(NestedParkOwnershipError):
-            resolve_park_adoption("nested_driver_resume", interaction_id="i1", tool_name="run_target")
+            resolve_park_adoption("nested_driver_resume", interaction_id="i1", tool_name="run_target", expiry_at=None)
         assert repark_notice(datetime(2030, 1, 1, tzinfo=UTC)) is None
     finally:
         reset_park_completion(completion)
@@ -237,12 +245,14 @@ def test_a_chained_adoption_is_recorded_in_the_open_claims_ledger():
         with chained_park_claims() as claims:
             completion = _chain("tai42:chained-park:k1")
             try:
-                resolve_park_adoption("nested_driver_resume", interaction_id="i1", tool_name="run_target")
+                resolve_park_adoption(
+                    "nested_driver_resume", interaction_id="i1", tool_name="run_target", expiry_at=_DEADLINE
+                )
             finally:
                 reset_chained_resume(completion)
             # The driver reads the ledger when its drive stops: a claim it never turned into a
-            # park is a dead chain it must detach.
-            assert claims == {"tai42:chained-park:k1"}
+            # park is a dead chain it must detach, sized past the held step's deadline it recorded.
+            assert claims == {"tai42:chained-park:k1": _DEADLINE}
     finally:
         reset_resume_continuation_tool(resume)
 
@@ -253,14 +263,62 @@ def test_an_adopted_own_park_records_no_claim():
         with chained_park_claims() as claims:
             completion = _chain("tai42:chained-park:k1")
             try:
-                resolve_park_adoption("agent_resume", interaction_id="i1", tool_name="ask")
+                resolve_park_adoption("agent_resume", interaction_id="i1", tool_name="ask", expiry_at=None)
             finally:
                 reset_chained_resume(completion)
             # Nothing was chained, so nothing needs detaching — no key is written for a chain
             # the run never parked on.
-            assert claims == set()
+            assert claims == {}
     finally:
         reset_resume_continuation_tool(resume)
+
+
+def test_a_deadline_less_claim_is_recorded_as_none():
+    # A chained call whose held step carried no deadline still records its key, mapped to
+    # ``None`` — so the dead chain is detached, sized by the floor alone.
+    resume = set_resume_continuation_tool("agent_resume")
+    try:
+        with chained_park_claims() as claims:
+            completion = _chain("tai42:chained-park:k1")
+            try:
+                resolve_park_adoption(
+                    "nested_driver_resume", interaction_id="i1", tool_name="run_target", expiry_at=None
+                )
+            finally:
+                reset_chained_resume(completion)
+            assert claims == {"tai42:chained-park:k1": None}
+    finally:
+        reset_resume_continuation_tool(resume)
+
+
+def test_an_existing_ledger_is_re_bound_and_accumulates():
+    # A driver that re-binds its OWN ledger each drive-step accumulates claims across the steps:
+    # a key recorded under an earlier binding is still there under a later one, so the reconcile
+    # at the drive's end sees every dead chain with the deadline it carried.
+    resume = set_resume_continuation_tool("agent_resume")
+    ledger: dict[str, datetime | None] = {}
+    try:
+        with chained_park_claims(ledger) as first:
+            assert first is ledger
+            completion = _chain("tai42:chained-park:early")
+            try:
+                resolve_park_adoption(
+                    "nested_driver_resume", interaction_id="i1", tool_name="run_target", expiry_at=_DEADLINE
+                )
+            finally:
+                reset_chained_resume(completion)
+        with chained_park_claims(ledger) as second:
+            assert second is ledger
+            completion = _chain("tai42:chained-park:late")
+            try:
+                resolve_park_adoption(
+                    "nested_driver_resume", interaction_id="i2", tool_name="run_target", expiry_at=None
+                )
+            finally:
+                reset_chained_resume(completion)
+    finally:
+        reset_resume_continuation_tool(resume)
+    assert ledger == {"tai42:chained-park:early": _DEADLINE, "tai42:chained-park:late": None}
 
 
 def test_a_claim_recorded_in_a_child_task_is_visible_to_the_opener():
@@ -274,12 +332,14 @@ def test_a_claim_recorded_in_a_child_task_is_visible_to_the_opener():
                     # ledger has to be shared by identity, not by contextvar value.
                     completion = _chain(key)
                     try:
-                        resolve_park_adoption("nested_driver_resume", interaction_id="i", tool_name="run_target")
+                        resolve_park_adoption(
+                            "nested_driver_resume", interaction_id="i", tool_name="run_target", expiry_at=_DEADLINE
+                        )
                     finally:
                         reset_chained_resume(completion)
 
                 await asyncio.gather(dispatch("tai42:chained-park:a"), dispatch("tai42:chained-park:b"))
-                assert claims == {"tai42:chained-park:a", "tai42:chained-park:b"}
+                assert claims == {"tai42:chained-park:a": _DEADLINE, "tai42:chained-park:b": _DEADLINE}
         finally:
             reset_resume_continuation_tool(resume)
 
@@ -292,7 +352,9 @@ def test_the_claims_ledger_is_closed_outside_a_drive():
     resume = set_resume_continuation_tool("agent_resume")
     completion = _chain("tai42:chained-park:k1")
     try:
-        assert resolve_park_adoption("nested_driver_resume", interaction_id="i1", tool_name="run_target") == (
+        assert resolve_park_adoption(
+            "nested_driver_resume", interaction_id="i1", tool_name="run_target", expiry_at=_DEADLINE
+        ) == (
             "tai42:chained-park:k1",
             "agent_resume",
         )
@@ -339,12 +401,14 @@ def test_attaching_a_claim_drops_it_from_the_ledger():
         with chained_park_claims() as claims:
             completion = _chain("tai42:chained-park:k1")
             try:
-                key, _owner = resolve_park_adoption("nested_driver_resume", interaction_id="i1", tool_name="run_target")
+                key, _owner = resolve_park_adoption(
+                    "nested_driver_resume", interaction_id="i1", tool_name="run_target", expiry_at=_DEADLINE
+                )
             finally:
                 reset_chained_resume(completion)
             # The driver recorded a park on the key, so it is attached, not dead.
             attach_chained_park(key)
-            assert claims == set()
+            assert claims == {}
     finally:
         reset_resume_continuation_tool(resume)
 
@@ -355,7 +419,7 @@ def test_attaching_an_unclaimed_key_outside_a_ledger_is_a_no_op():
     attach_chained_park("tai42:chained-park:never-claimed")
     with chained_park_claims() as claims:
         attach_chained_park("i1")
-        assert claims == set()
+        assert claims == {}
 
 
 # --- the terminal chain notice ---------------------------------------------------------
@@ -404,11 +468,14 @@ class _ProbeDriver:
         try:
             with chained_park_claims() as claims:
                 key, owner = resolve_park_adoption(
-                    nested_park.resume_owner, interaction_id=nested_park.interaction_id, tool_name="probe_nested"
+                    nested_park.resume_owner,
+                    interaction_id=nested_park.interaction_id,
+                    tool_name="probe_nested",
+                    expiry_at=nested_park.expiry_at,
                 )
                 self.parks[key] = owner
                 attach_chained_park(key)
-                assert claims == set()
+                assert claims == {}
         finally:
             if routing is not None:
                 reset_chained_resume(routing)

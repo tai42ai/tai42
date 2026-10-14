@@ -19,6 +19,7 @@ that produces none raises rather than silently omitting it.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
+from datetime import datetime
 from typing import Any, ClassVar
 
 from langchain_core.tools import StructuredTool
@@ -466,9 +467,9 @@ class DeepAgent(Agent):
                 # Bind the resume continuation and the chained-park claims ledger around each
                 # drive step, NOT in this generator's body: a ``with`` wrapping the ``yield``
                 # would leak the bindings into the consumer's task (PEP 568 is unimplemented) and
-                # strand them on an abandoned stream. The claims set is owned here for the whole
+                # strand them on an abandoned stream. The claims ledger is owned here for the whole
                 # drive — each step re-binds it — and its dead chains are detached on the way out.
-                claims: set[str] = set()
+                claims: dict[str, datetime | None] = {}
                 try:
                     async for event in bind_resume_per_step(
                         lambda: park_step_binding(park, claims),

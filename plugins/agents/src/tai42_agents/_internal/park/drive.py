@@ -65,16 +65,16 @@ def park_continuation(park: ParkIdentity | None) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def park_step_binding(park: ParkIdentity | None, claims: set[str]) -> Iterator[None]:
+def park_step_binding(park: ParkIdentity | None, claims: dict[str, datetime | None]) -> Iterator[None]:
     """Per-drive-step binding for a STREAMING drive: the resume continuation and the chained-park claims ledger.
 
     Both are re-entered around each ``__anext__`` by :func:`bind_resume_per_step`
     and both released before the step's value is yielded, so neither leaks into
     the consumer. The two bindings differ in what they own. The resume continuation is per-step by nature —
     nothing carries across steps. The claims ledger is WHOLE-DRIVE: every step re-binds the ONE
-    ``claims`` set the face owns, so a chained key claimed in an early step survives to the
-    reconcile the face runs — :func:`detach_dead_chains` over that same set — when the drive
-    stops. A non-park-capable run binds ``None`` and claims nothing; its set stays empty.
+    ``claims`` ledger the face owns, so a chained key claimed in an early step survives to the
+    reconcile the face runs — :func:`detach_dead_chains` over that same ledger — when the drive
+    stops. A non-park-capable run binds ``None`` and claims nothing; its ledger stays empty.
     """
     with park_continuation(park), chained_park_claims(claims):
         yield
@@ -91,7 +91,7 @@ async def park_drive(park: ParkIdentity | None) -> AsyncIterator[None]:
     generator nothing leaks past a yield — a streaming face binds per step via
     :func:`park_step_binding` and detaches around its own loop instead.
     """
-    claims: set[str] = set()
+    claims: dict[str, datetime | None] = {}
     with park_continuation(park), chained_park_claims(claims):
         try:
             yield
@@ -99,20 +99,22 @@ async def park_drive(park: ParkIdentity | None) -> AsyncIterator[None]:
             await detach_dead_chains(claims)
 
 
-async def detach_dead_chains(claims: set[str]) -> None:
+async def detach_dead_chains(claims: dict[str, datetime | None]) -> None:
     """Tombstone the chained keys this drive claimed but never parked on.
 
     So a later terminal lands benignly (a detached tombstone, written only where no key exists)
-    instead of hunting a park that will never exist. Failures are logged and swallowed: the drive
-    already has its result (or its exception), and a detach that could not run must not replace
-    either — the undetached chain falls back to the delivery tool's own at-least-once retry tail.
-    ``CancelledError`` propagates: a drive being torn down has no time to write, and swallowing it
-    would fight the cancellation.
+    instead of hunting a park that will never exist. Each tombstone is sized PAST the held step's
+    deadline the ledger recorded for its key (``expiry_ats=claims.values()``), so the run that
+    still fires the key until that deadline finds the tombstone rather than a key it already
+    dropped. Failures are logged and swallowed: the drive already has its result (or its
+    exception), and a detach that could not run must not replace either — the undetached chain
+    falls back to the delivery tool's own at-least-once retry tail. ``CancelledError`` propagates:
+    a drive being torn down has no time to write, and swallowing it would fight the cancellation.
     """
     if not claims:
         return
     try:
-        await agents_park_index().detach(sorted(claims))
+        await agents_park_index().detach(sorted(claims), expiry_ats=claims.values())
     except Exception:
         logger.warning(
             "Agent drive left %d chained call(s) unparked and could not detach them; a later terminal will "

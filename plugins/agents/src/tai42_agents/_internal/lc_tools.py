@@ -55,7 +55,10 @@ def adapt_tool_result(tool_name: str, result: Any) -> Any:
         return result
     try:
         key, owner = resolve_park_adoption(
-            result.resume_owner, interaction_id=result.interaction_id, tool_name=tool_name
+            result.resume_owner,
+            interaction_id=result.interaction_id,
+            tool_name=tool_name,
+            expiry_at=result.expiry_at,
         )
     except NestedParkOwnershipError as exc:
         # A deliberate refusal already worded for the model and naming the tool: re-raised as its

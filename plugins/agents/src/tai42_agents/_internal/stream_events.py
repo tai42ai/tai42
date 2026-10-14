@@ -32,6 +32,7 @@ raises from validation.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from datetime import datetime
 from typing import Any
 
 from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
@@ -179,9 +180,9 @@ async def astream_tools_agent_events(
     # Bind the resume continuation and the chained-park claims ledger around each drive step,
     # NOT in this generator's body: a ``with`` wrapping the ``yield`` would leak the bindings
     # into the consumer's task (PEP 568 is unimplemented) and strand them on an abandoned
-    # stream. The claims set is owned here for the whole drive — each step re-binds it — and the
+    # stream. The claims ledger is owned here for the whole drive — each step re-binds it — and the
     # dead chains it holds when the drive stops are detached, whether it drained or was abandoned.
-    claims: set[str] = set()
+    claims: dict[str, datetime | None] = {}
     try:
         async for event in bind_resume_per_step(lambda: park_step_binding(park, claims), _drive()):
             yield event

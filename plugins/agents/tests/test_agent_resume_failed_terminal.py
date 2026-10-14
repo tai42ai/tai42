@@ -414,7 +414,7 @@ def test_a_failed_detach_is_logged_and_the_drive_result_is_kept(
 
     index = agents_park_index()
 
-    async def broken_detach(_ids: Any) -> None:
+    async def broken_detach(_ids: Any, *, expiry_ats: Any = ()) -> None:
         raise ConnectionError("redis down")
 
     monkeypatch.setattr(index, "detach", broken_detach)
@@ -423,7 +423,7 @@ def test_a_failed_detach_is_logged_and_the_drive_result_is_kept(
         async with park_drive(None):
             claims = _chained_park_claims.get()
             assert claims is not None
-            claims.add("tai42:chained-park:dead")
+            claims["tai42:chained-park:dead"] = None
             return "the drive result"
 
     assert asyncio.run(go()) == "the drive result"
