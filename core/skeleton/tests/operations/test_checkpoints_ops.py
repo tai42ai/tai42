@@ -1,9 +1,9 @@
 """Op-level oracles for the checkpoint retention sweep.
 
-The sweep deletes finished threads past the finished horizon on every provider and, on the
-``postgres``/``sqlite`` providers, any thread past the waiting horizon; a thread a registered
-live-thread filter claims is spared, logged, counted and listed; a deletion that leaves documents
-behind is retried and then raised. It also projects as a tool, so it is schedulable through the
+The sweep deletes finished threads past the finished horizon on every provider and, on a store
+whose waiting horizon is swept, any thread its ledger lists past the waiting horizon; a thread a
+registered live-thread filter claims is spared, logged, counted and listed; a deletion that leaves
+documents behind is retried and then raised. It also projects as a tool, so it is schedulable through the
 existing ``/api/schedules`` create door. The memory and sqlite stores are the kit's real ones.
 """
 
@@ -21,7 +21,7 @@ from prometheus_client import REGISTRY
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import CrontabCadence
 from tai42_contract.manifest import ApiToolsConfig
-from tai42_kit.llm.checkpoint import ThreadRetention, liveness, register_live_thread_filter
+from tai42_kit.llm.checkpoint import CHECKPOINT_PROVIDERS, ThreadRetention, liveness, register_live_thread_filter
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.settings import reset_all_settings
 
@@ -173,7 +173,7 @@ async def test_a_filter_raise_fails_the_operation(store_env) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# waiting horizon — sqlite (the real store) and postgres (the adapter query)
+# waiting horizon — the real sqlite store, and a swept store's ledger listing
 # --------------------------------------------------------------------------- #
 async def test_sqlite_waiting_past_the_horizon_is_deleted_unless_claimed(store_env, tmp_path) -> None:
     pytest.importorskip("aiosqlite")
@@ -221,10 +221,12 @@ class _Store:
 
 
 class _Ledger:
-    def __init__(self, finished: list[str] | None = None) -> None:
+    def __init__(self, finished: list[str] | None = None, stale: list[str] | None = None) -> None:
         self.finished = list(finished or [])
+        self.stale = list(stale or [])
         self.forgotten: list[str] = []
         self.cutoffs: list[datetime] = []
+        self.stale_calls: list[tuple[Any, datetime, int]] = []
 
     async def finished_before(self, cutoff: datetime, limit: int) -> list[str]:
         self.cutoffs.append(cutoff)
@@ -234,10 +236,14 @@ class _Ledger:
         self.forgotten.extend(thread_ids)
         self.finished = [t for t in self.finished if t not in thread_ids]
 
+    async def stale_threads(self, saver: Any, *, now: datetime, default_minutes: int) -> list[str]:
+        self.stale_calls.append((saver, now, default_minutes))
+        return list(self.stale)
+
 
 def _install_store(monkeypatch: pytest.MonkeyPatch, store_env: Any, provider: str, store: _Store, ledger: _Ledger):
     store_env(provider)
-    resource = SimpleNamespace(provider=provider, handle="pool", ledger=ledger)
+    resource = SimpleNamespace(provider=provider, ledger=ledger)
 
     async def _resource(provider: str, conn_string: str | None) -> Any:
         return resource
@@ -252,20 +258,11 @@ def _install_store(monkeypatch: pytest.MonkeyPatch, store_env: Any, provider: st
     )
 
 
-async def test_postgres_waiting_past_the_horizon_is_deleted_unless_claimed(monkeypatch, store_env) -> None:
-    from tai42_kit.llm.checkpoint import postgres_store
-
+async def test_a_swept_store_lists_its_stale_threads_through_its_ledger(monkeypatch, store_env) -> None:
+    provider = next(name for name, facts in CHECKPOINT_PROVIDERS.items() if facts.retention == "sweep")
     store = _Store({"stale": 1, "parked": 1, "fresh": 1})
-    ledger = _Ledger()
-    _install_store(monkeypatch, store_env, "postgres", store, ledger)
-    calls: list[tuple[datetime, int]] = []
-
-    async def _stale(pool: Any, *, now: datetime, default_minutes: int) -> list[str]:
-        assert pool == "pool"
-        calls.append((now, default_minutes))
-        return ["parked", "stale"]
-
-    monkeypatch.setattr(postgres_store, "stale_threads", _stale)
+    ledger = _Ledger(stale=["parked", "stale"])
+    _install_store(monkeypatch, store_env, provider, store, ledger)
     register_live_thread_filter("probe", _claiming("parked"))
 
     result = await checkpoints_ops.sweep_checkpoints()
@@ -274,7 +271,8 @@ async def test_postgres_waiting_past_the_horizon_is_deleted_unless_claimed(monke
     assert result["spared"] == ["parked"]
     assert set(store.rounds) == {"parked", "fresh"}
     assert ledger.forgotten == ["stale"]
-    [(swept_at, default_minutes)] = calls
+    [(saver, swept_at, default_minutes)] = ledger.stale_calls
+    assert saver is store
     assert default_minutes == 60
     assert datetime.now(UTC) - timedelta(minutes=1) < swept_at <= datetime.now(UTC)
 
