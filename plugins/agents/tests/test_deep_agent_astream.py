@@ -302,7 +302,7 @@ class _ClaimingGraph:
         resume = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
         try:
             key, _owner = resolve_park_adoption(
-                "nested_driver_resume", interaction_id="i-nested", tool_name="run_target"
+                "nested_driver_resume", interaction_id="i-nested", tool_name="run_target", expiry_at=None
             )
             assert key == self.chain_key
         finally:

@@ -126,7 +126,12 @@ async def _held_run(run: Any) -> tuple[SuspendedInteraction, str, tuple[str, str
     with _holder_bindings() as chain_key:
         receipt = await run()
         assert isinstance(receipt, SuspendedInteraction), receipt
-        adopted = resolve_park_adoption(receipt.resume_owner, interaction_id=receipt.interaction_id, tool_name="held")
+        adopted = resolve_park_adoption(
+            receipt.resume_owner,
+            interaction_id=receipt.interaction_id,
+            tool_name="held",
+            expiry_at=receipt.expiry_at,
+        )
     return receipt, chain_key, adopted
 
 

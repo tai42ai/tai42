@@ -18,11 +18,12 @@ differ.
 Refusing is not the only answer to a park this caller does not own. :func:`resolve_park_adoption`
 is the OBJECT seams' form of the guard, and it answers adopt-your-own or CHAIN: a nested dispatch
 a CHAIN routing (:class:`~tai42_contract.interactions.ChainedResume`) was bound around parks on
-the nested CALL — a key of its own, owned by its own resume continuation — while the nested run
-keeps its park and its resume, and its terminal re-enters the caller through the routing's
-delivery tool. A dispatch nothing chained still gets the loud refusal. The CLAIM point cannot
-chain: a park reaching it as content belongs to no dispatch it could attribute the call to, so
-there it is adopt-or-refuse.
+the nested CALL — a key of its own, owned by its own resume continuation, recorded in the open
+ledger with the held step's deadline so a drive that never parks on it detaches it sized past that
+deadline — while the nested run keeps its park and its resume, and its terminal re-enters the
+caller through the routing's delivery tool. A dispatch nothing chained still gets the loud refusal.
+The CLAIM point cannot chain: a park reaching it as content belongs to no dispatch it could
+attribute the call to, so there it is adopt-or-refuse.
 
 Every driver builds the chain fires here too — :func:`repark_notice` when a chained run re-parks,
 :func:`terminal_chain_notice` at its terminal — so each payload has one shape.
@@ -72,7 +73,9 @@ PARK_SUPERSEDED_OUTCOME: Final[dict[str, str]] = {
 }
 
 
-_chained_park_claims: ContextVar[set[str] | None] = ContextVar("tai42_chained_park_claims", default=None)
+_chained_park_claims: ContextVar[dict[str, datetime | None] | None] = ContextVar(
+    "tai42_chained_park_claims", default=None
+)
 
 
 def new_chained_park_key() -> str:
@@ -100,8 +103,8 @@ def _bound_chained_park_key() -> str | None:
 
 
 @contextlib.contextmanager
-def chained_park_claims(claims: set[str] | None = None) -> Generator[set[str]]:
-    """Bind the per-drive ledger of chained keys :func:`resolve_park_adoption` CLAIMED, yield the set.
+def chained_park_claims(claims: dict[str, datetime | None] | None = None) -> Generator[dict[str, datetime | None]]:
+    """Bind the per-drive ledger of chained keys :func:`resolve_park_adoption` CLAIMED, yield the dict.
 
     A driver opens one around each drive so it can tell, when the drive stops, which chained
     calls it actually parked on: it drops each key it persists, and whatever REMAINS is a
@@ -109,17 +112,22 @@ def chained_park_claims(claims: set[str] | None = None) -> Generator[set[str]]:
     Those are dead chains — the nested run will still fire its terminal at them — so the
     driver detaches them rather than leaving the fire to hunt a park that will never exist.
 
-    The yielded set is mutated in place, so a claim recorded inside a task the drive spawns
+    The ledger maps each claimed chained key to the HELD step's deadline — the ``expiry_at``
+    :func:`resolve_park_adoption` recorded for it, ``None`` when the held step carried none — so a
+    driver sizes the dead-chain detach past that deadline (``expiry_ats=claims.values()``) and the
+    tombstone outlasts the run that still fires the key until its own deadline.
+
+    The yielded dict is mutated in place, so a claim recorded inside a task the drive spawns
     (every nested dispatch runs in a child context) is visible to the opener.
 
-    ``claims`` lets a caller pass an EXISTING set to re-bind rather than a fresh one. A driver
+    ``claims`` lets a caller pass an EXISTING ledger to re-bind rather than a fresh one. A driver
     that binds per drive-step — the resume binding cannot span a generator's yields, so it is
-    re-entered around each ``__anext__`` — owns one accumulating set for the whole drive and
+    re-entered around each ``__anext__`` — owns one accumulating ledger for the whole drive and
     re-binds it here each step, so a claim recorded in an early step survives to the reconcile
     at the end. Omit it (the default) to open a fresh ledger for the whole drive at once.
     """
     if claims is None:
-        claims = set()
+        claims = {}
     token = _chained_park_claims.set(claims)
     try:
         yield claims
@@ -135,10 +143,12 @@ def attach_chained_park(key: str) -> None:
     """
     claims = _chained_park_claims.get()
     if claims is not None:
-        claims.discard(key)
+        claims.pop(key, None)
 
 
-def resolve_park_adoption(resume_owner: str | None, *, interaction_id: str, tool_name: str) -> tuple[str, str | None]:
+def resolve_park_adoption(
+    resume_owner: str | None, *, interaction_id: str, tool_name: str, expiry_at: datetime | None
+) -> tuple[str, str | None]:
     """The park THIS run records for a returned park sentinel — ADOPT-your-own, or CHAIN.
 
     Returned as the ``(key, resume_owner)`` its own park is keyed and owned by.
@@ -153,11 +163,17 @@ def resolve_park_adoption(resume_owner: str | None, *, interaction_id: str, tool
       KEY instead, owned by this run's OWN resume continuation — because that park is genuinely
       this run's: it waits on the CALL, while the nested run keeps its own park and its own resume
       and re-enters here through the chain's delivery tool when it terminates. The key is recorded
-      in the open :func:`chained_park_claims` ledger, so a drive that never turns the claim into a
-      park can detach it;
+      in the open :func:`chained_park_claims` ledger against ``expiry_at`` — the held step's
+      deadline — so a drive that never turns the claim into a park detaches it sized past that
+      deadline;
     * otherwise :class:`~tai42_contract.interactions.NestedParkOwnershipError`, exactly as
       :func:`assert_park_adoptable` raises it: waiting on a foreign park with nothing chained would
       leave this run suspended behind a resume fired only at the nested run.
+
+    ``expiry_at`` is the returned sentinel's
+    :attr:`~tai42_contract.interactions.SuspendedInteraction.expiry_at` — the held step's deadline,
+    the latest of its open asks — carried so the ledger can size a dead-chain detach past it. It is
+    recorded only on the CHAIN outcome; an adopted own park needs no chain claim and ignores it.
 
     Never returns a foreign interaction id, and never returns a key owned by anything but the
     continuation bound here — so the claim point downstream reaches the same verdict.
@@ -170,7 +186,7 @@ def resolve_park_adoption(resume_owner: str | None, *, interaction_id: str, tool
             raise
         claims = _chained_park_claims.get()
         if claims is not None:
-            claims.add(chained)
+            claims[chained] = expiry_at
         return chained, get_resume_continuation_tool()
     return interaction_id, resume_owner
 

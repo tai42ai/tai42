@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
@@ -34,7 +35,7 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
 from tai42_contract.tools import AppTools, ClientToolError, UndeclaredPauseError
-from tai42_kit.interactions.park_adoption import is_chained_park_key
+from tai42_kit.interactions.park_adoption import chained_park_claims, is_chained_park_key
 from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 from tai42_kit.llm import ToolNameTooLongError
 from tests._client_tool import FakeClientTool, client_tool
@@ -165,14 +166,17 @@ def test_a_park_this_run_owns_becomes_the_marker_with_both_id_lists(parkable_run
 
 def test_a_nested_park_under_a_chained_dispatch_parks_on_the_call(parkable_run: None) -> None:
     # The nested run bound its own continuation; this run is park-capable, so the dispatch was
-    # chained and this run parks on the chained KEY, owned by its own continuation.
+    # chained and this run parks on the chained KEY, owned by its own continuation. The held
+    # step's deadline the sentinel carried is recorded in the claims ledger against that key.
     seen: list[ChainedResume | None] = []
+    far = datetime.now(UTC) + timedelta(days=40)
 
     def nested() -> SuspendedInteraction:
         seen.append(get_chained_resume())
-        return SuspendedInteraction(interaction_id="i-nested", resume_owner="nested_driver_resume")
+        return SuspendedInteraction(interaction_id="i-nested", resume_owner="nested_driver_resume", expiry_at=far)
 
-    result = asyncio.run(to_structured_tool(client_tool("nested", nested)).ainvoke({}))
+    with chained_park_claims() as claims:
+        result = asyncio.run(to_structured_tool(client_tool("nested", nested)).ainvoke({}))
     marker = read_suspended_interaction_marker(result)
     assert marker is not None
     (routing,) = seen
@@ -180,6 +184,7 @@ def test_a_nested_park_under_a_chained_dispatch_parks_on_the_call(parkable_run: 
     assert marker["interaction_id"] == routing.chain_key
     assert is_chained_park_key(marker["interaction_id"])
     assert marker["resume_owner"] == AGENT_RESUME_TOOL_NAME
+    assert claims == {routing.chain_key: far}
 
 
 def test_a_nested_park_with_nothing_chained_is_refused_to_the_model() -> None:

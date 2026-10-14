@@ -31,7 +31,13 @@ from tai42_contract.interactions import (
 from tai42_contract.template import TemplatedText
 from tai42_kit.interactions.park_adoption import is_chained_park_key
 from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome
-from tai42_kit.interactions.park_index import DriveInProgressError, ResolutionRecord, superstep_id
+from tai42_kit.interactions.park_index import (
+    ENTRY_TTL_FLOOR_SECONDS,
+    DriveInProgressError,
+    ResolutionRecord,
+    entry_ttl_seconds,
+    superstep_id,
+)
 from tai42_kit.settings import reset_all_settings
 from tests._client_tool import client_tool
 from tests._tools_agent_park_support import (
@@ -46,7 +52,7 @@ from tests._tools_agent_park_support import (
 )
 from tests.conftest import bind_park_index
 
-from tai42_agents._internal.park import deliver_chained_park
+from tai42_agents._internal.park import deliver_chained_park, detach_dead_chains
 from tai42_agents._internal.park import persist as park_persist
 from tai42_agents._internal.park.errors import AgentResumeParkEntryNotFoundError
 from tai42_agents._internal.park.park_binding import agents_park_index
@@ -767,5 +773,20 @@ def test_the_give_up_returns_none_for_a_park_it_does_not_own(
         assert await agent_park_giveup_handler("tai42:chained-park:dead", _ABANDONED) is None
         bind_park_index(monkeypatch, None, configured=False)
         assert await agent_park_giveup_handler("i-own", _ABANDONED) is None
+
+    asyncio.run(go())
+
+
+def test_a_dead_chain_is_detached_sized_past_the_held_steps_deadline(fake_park_redis: Any) -> None:
+    # A drive that claimed a chain and never parked on it detaches the key with the held step's
+    # deadline the ledger recorded, so the tombstone outlasts the run that still fires the key
+    # until that deadline — sized past the entry floor, not capped at it.
+    far = datetime.now(UTC) + timedelta(days=40)
+
+    async def go() -> None:
+        await detach_dead_chains({"tai42:chained-park:dead": far})
+        ttl = await fake_park_redis.ttl(agents_park_index().entry_key("tai42:chained-park:dead"))
+        assert ttl > ENTRY_TTL_FLOOR_SECONDS
+        assert abs(ttl - entry_ttl_seconds(far)) <= 5
 
     asyncio.run(go())
