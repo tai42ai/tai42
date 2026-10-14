@@ -62,6 +62,11 @@ class SuspendedInteraction(BaseModel):
     """
 
     interaction_id: str
+    # The park's deadline. For one ask, that ask's deadline; a driver that surfaces a whole
+    # super-step reports the LATEST of its open asks' deadlines — the moment past which nothing
+    # of the step remains open — so a caller that parks on the step, releases it, or sizes any
+    # wait for it bounds that wait by this value, the same rule the step's own barrier is sized
+    # by. ``None`` when no open ask carries a deadline.
     expiry_at: datetime | None = None
     # The resume continuation this park was raised UNDER — the one driver entitled to ADOPT
     # it as its own park (see ``tai42_kit.interactions.park_adoption.assert_park_adoptable``). A

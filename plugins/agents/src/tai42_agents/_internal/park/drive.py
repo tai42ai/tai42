@@ -16,6 +16,7 @@ import contextlib
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
 from contextlib import AbstractContextManager
+from datetime import datetime
 from typing import Any
 
 from langgraph.types import StateSnapshot
@@ -266,7 +267,7 @@ async def finalize_drive(
                 thread_id=park.thread_id,
                 # Only the caller asks the index actually holds (the persisted union bounds it).
                 caller_interaction_ids=sorted(caller_ids & set(union)),
-                expiry_at=_earliest_expiry(union),
+                expiry_at=_latest_expiry(union),
             )
         )
     for interrupt_id, value in hitl:
@@ -274,9 +275,12 @@ async def finalize_drive(
     return events
 
 
-def _earliest_expiry(interactions: dict[str, Any]) -> str | None:
-    """The earliest park deadline across the siblings (ISO-8601), or ``None`` when none carried one."""
+def _latest_expiry(interactions: dict[str, Any]) -> str | None:
+    """The step's deadline.
+
+    The latest park deadline across the siblings (ISO-8601), or ``None`` when none carried one.
+    """
     deadlines = [v for v in interactions.values() if v is not None]
     if not deadlines:
         return None
-    return min(deadlines)
+    return max(deadlines, key=datetime.fromisoformat)

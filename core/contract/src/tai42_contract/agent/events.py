@@ -153,8 +153,8 @@ class SuspendedFinal(StreamEvent):
     ``caller_interaction_ids`` is the subset of them addressed to the CALLER
     (``to="caller"``), empty for a park of only user asks — the two id lists let the
     platform's ``visit`` normalise a caller-ask park inside an agent into its
-    caller/user partition; ``expiry_at`` is the earliest park deadline (ISO-8601, or
-    ``None`` when no park carried one); ``thread_id`` is the parked run's thread. The
+    caller/user partition; ``expiry_at`` is the step's deadline — the latest of its parks'
+    deadlines (ISO-8601, or ``None`` when no park carried one); ``thread_id`` is the parked run's thread. The
     vocabulary is generic — it names no driver, engine, or resume state, only the parked
     interaction ids the flow-blind platform already holds.
     """
@@ -170,7 +170,7 @@ class SuspendedFinal(StreamEvent):
         """The park as the shared typed sentinel the platform's ``visit`` recognises by type.
 
         It carries the whole super-step's two id lists, so ``visit`` normalises it per ask, and the
-        earliest deadline. It carries NO ``resume_owner``: the parked run recorded its own resume
+        step's deadline. It carries NO ``resume_owner``: the parked run recorded its own resume
         state against those interactions and is the only thing the platform resumes for them, so no
         caller may adopt the park as its own.
         """

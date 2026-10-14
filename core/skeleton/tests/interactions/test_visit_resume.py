@@ -205,8 +205,8 @@ async def test_inline_resume_returns_buffered_partitions_by_to(store, fake_redis
     assert [entry.id for entry in outcome.asks] == ["r1"]  # only the caller sibling surfaces
 
 
-async def test_inline_resume_buffered_sentinels_carry_the_earliest_open_deadline(store, fake_redis):
-    # The re-park sentinel over the still-open siblings carries the earliest of their stored
+async def test_inline_resume_buffered_sentinels_carry_the_latest_open_deadline(store, fake_redis):
+    # The re-park sentinel over the still-open siblings carries the latest of their stored
     # deadlines, so a caller re-parking on it can bound its own park.
     now = datetime.now(UTC)
     await store.add(fake_redis, _caller_park(store, "i1"), idle_ttl=86400, to="caller")
@@ -229,10 +229,10 @@ async def test_inline_resume_buffered_sentinels_carry_the_earliest_open_deadline
         )
     assert outcome.kind == "asks"
     assert outcome.suspended is not None
-    assert outcome.suspended.expiry_at == now + timedelta(minutes=20)
+    assert outcome.suspended.expiry_at == now + timedelta(hours=3)
 
 
-async def test_inline_resume_buffered_user_only_sentinel_carries_the_earliest_deadline(store, fake_redis):
+async def test_inline_resume_buffered_user_only_sentinel_carries_the_latest_deadline(store, fake_redis):
     now = datetime.now(UTC)
     await store.add(fake_redis, _caller_park(store, "i1"), idle_ttl=86400, to="caller")
     for iid, minutes in (("u1", 90), ("u2", 40)):
@@ -253,7 +253,7 @@ async def test_inline_resume_buffered_user_only_sentinel_carries_the_earliest_de
     assert outcome.kind == "parked"
     assert outcome.suspended is not None
     assert outcome.suspended.interaction_ids == ["u1", "u2"]
-    assert outcome.suspended.expiry_at == now + timedelta(minutes=40)
+    assert outcome.suspended.expiry_at == now + timedelta(minutes=90)
 
 
 async def test_inline_resume_reparks_a_new_caller_ask(store, fake_redis):

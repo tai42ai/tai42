@@ -48,7 +48,7 @@ def adapt_tool_result(tool_name: str, result: Any) -> Any:
     A :class:`SuspendedInteraction` becomes the reserved park marker, keyed and owned by the park
     THIS run records (:func:`~tai42_contract.interactions.resolve_park_adoption`) and carrying both
     id lists and the deadline, so the park middleware partitions caller from user asks and a chained
-    park inherits the nested ask's horizon. A nested run's park this run may not adopt or chain is
+    park inherits the held step's deadline. A nested run's park this run may not adopt or chain is
     refused as a ``ToolException`` worded for the model. Any other value is returned as it is.
     """
     if not isinstance(result, SuspendedInteraction):
