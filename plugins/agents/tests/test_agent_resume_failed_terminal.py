@@ -18,10 +18,17 @@ import pytest
 from tai42_contract.conversations import TurnSupersededError
 from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
+    PARK_COMPLETION_SUCCEEDED,
+    ChainedResume,
     ResumeBuffered,
     RunFailed,
     RunTerminalFailed,
     SuspendedInteraction,
+    get_chained_resume,
+    reset_chained_resume,
+    reset_resume_continuation_tool,
+    set_chained_resume,
+    set_resume_continuation_tool,
 )
 from tai42_kit.interactions.park_index import (
     LeaseLostError,
@@ -35,13 +42,18 @@ from tai42_agents._internal.park.chain import deliver_chained_park
 from tai42_agents._internal.park.drive import park_drive
 from tai42_agents._internal.park.errors import WorkspaceLeaseHeldError
 from tai42_agents._internal.park.park_binding import agents_park_index
-from tai42_agents._internal.park.resume import agent_resume
+from tai42_agents._internal.park.resume import AGENT_RESUME_TOOL_NAME, agent_resume
 from tai42_agents._internal.park.resume_tool import agent_resume_tool
 
 THREAD = "t-failed"
 AGENT = "probe_resumable_agent"
 CALLER_KEY = "tai42:chained-park:caller"
+RESUMER_KEY = "tai42:chained-park:resumer"
 PROVIDER_DOWN = {"status": "error", "error_type": "RuntimeError", "error": "provider down"}
+
+
+def _resumer_routing() -> ChainedResume:
+    return ChainedResume(delivery_tool="probe_resumer_deliver", chain_key=RESUMER_KEY, asked_by=("resumer",))
 
 
 class _ResumableAgent:
@@ -80,6 +92,13 @@ class _ChainTool:
 def chain_tool(app_tools: Any) -> _ChainTool:
     tool = _ChainTool()
     app_tools.tool_runners["probe_chain_deliver"] = tool
+    return tool
+
+
+@pytest.fixture
+def resumer_tool(app_tools: Any) -> _ChainTool:
+    tool = _ChainTool()
+    app_tools.tool_runners["probe_resumer_deliver"] = tool
     return tool
 
 
@@ -409,3 +428,158 @@ def test_a_failed_detach_is_logged_and_the_drive_result_is_kept(
 
     assert asyncio.run(go()) == "the drive result"
     assert any(r.levelno == logging.WARNING and "could not detach" in r.getMessage() for r in caplog.records)
+
+
+# ---- the inline-resumer take-over arm ---------------------------------------------------------
+
+
+def test_an_inline_resumer_that_chains_the_run_takes_the_call_over_on_a_repark(
+    park_redis: Any, agent: _ResumableAgent, chain_tool: _ChainTool, resumer_tool: _ChainTool, app_tools: Any
+) -> None:
+    # A holder resumes a chained agent INLINE under its own routing, and the agent parks again. The
+    # drive runs under the RESUMER's routing (so the re-park captures it and a later answer reaches
+    # the resumer), the superseded stored routing is fired FAILED so a caller still parked on it
+    # ends loudly, and the resumer's routing is NOT fired (the terminal returns to it inline).
+    seen: dict[str, Any] = {}
+    re_park = SuspendedInteraction(interaction_id="i9")
+
+    async def parks_again() -> Any:
+        seen["routing"] = get_chained_resume()
+        return re_park
+
+    async def go() -> None:
+        await _park(["i1"], chained=True)
+        agent.body = parks_again
+
+        cont = set_resume_continuation_tool("holder_resume")
+        chain = set_chained_resume(_resumer_routing())
+        try:
+            outcome = await agent_resume("i1", "x")
+        finally:
+            reset_chained_resume(chain)
+            reset_resume_continuation_tool(cont)
+
+        assert seen["routing"] == _resumer_routing()
+        assert outcome == re_park
+        assert resumer_tool.fired == []
+        assert len(chain_tool.fired) == 1
+        assert chain_tool.fired[0]["chain_token"] == CALLER_KEY
+        assert chain_tool.fired[0]["status"] == PARK_COMPLETION_FAILED
+        assert app_tools.run_tool_calls[-1]["continues_chain"] == ("caller",)
+
+    asyncio.run(go())
+
+
+def test_an_inline_resumer_take_over_returns_the_terminal_and_supersedes_the_stored_routing(
+    park_redis: Any, agent: _ResumableAgent, chain_tool: _ChainTool, resumer_tool: _ChainTool
+) -> None:
+    async def resumed_terminal() -> Any:
+        return "the final answer"
+
+    async def go() -> None:
+        await _park(["i1"], chained=True)
+        agent.body = resumed_terminal
+
+        cont = set_resume_continuation_tool("holder_resume")
+        chain = set_chained_resume(_resumer_routing())
+        try:
+            outcome = await agent_resume("i1", "x")
+        finally:
+            reset_chained_resume(chain)
+            reset_resume_continuation_tool(cont)
+
+        # The terminal returns to the resumer inline, never fired along the resumer's routing.
+        assert outcome == "the final answer"
+        assert resumer_tool.fired == []
+        # Only the superseded stored routing is fired, FAILED.
+        assert [f["chain_token"] for f in chain_tool.fired] == [CALLER_KEY]
+        assert chain_tool.fired[0]["status"] == PARK_COMPLETION_FAILED
+
+    asyncio.run(go())
+
+
+def test_an_inline_resume_by_the_same_driver_does_not_take_the_call_over(
+    park_redis: Any, agent: _ResumableAgent, chain_tool: _ChainTool, resumer_tool: _ChainTool
+) -> None:
+    # An inline resume whose bound continuation is the agent's OWN resume continuation is a
+    # same-driver adopter, not a take-over: the stored routing still carries the terminal.
+    async def resumed_terminal() -> Any:
+        return "answer"
+
+    async def go() -> None:
+        await _park(["i1"], chained=True)
+        agent.body = resumed_terminal
+
+        cont = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+        chain = set_chained_resume(_resumer_routing())
+        try:
+            outcome = await agent_resume("i1", "x")
+        finally:
+            reset_chained_resume(chain)
+            reset_resume_continuation_tool(cont)
+
+        assert [f["chain_token"] for f in chain_tool.fired] == [CALLER_KEY]
+        assert chain_tool.fired[0]["status"] == PARK_COMPLETION_SUCCEEDED
+        assert resumer_tool.fired == []
+        assert outcome == "the caller handled it"
+
+    asyncio.run(go())
+
+
+def test_an_inline_resumer_on_the_stored_key_does_not_take_the_call_over(
+    park_redis: Any, agent: _ResumableAgent, chain_tool: _ChainTool, resumer_tool: _ChainTool
+) -> None:
+    # An inline resumer whose own routing carries the SAME key the park captured is that stored
+    # routing (an adopter re-using the key), not a take-over: the stored routing still carries the
+    # terminal and nothing is superseded.
+    async def resumed_terminal() -> Any:
+        return "answer"
+
+    async def go() -> None:
+        await _park(["i1"], chained=True)
+        agent.body = resumed_terminal
+
+        cont = set_resume_continuation_tool("holder_resume")
+        chain = set_chained_resume(
+            ChainedResume(delivery_tool="probe_resumer_deliver", chain_key=CALLER_KEY, asked_by=("resumer",))
+        )
+        try:
+            outcome = await agent_resume("i1", "x")
+        finally:
+            reset_chained_resume(chain)
+            reset_resume_continuation_tool(cont)
+
+        assert [f["chain_token"] for f in chain_tool.fired] == [CALLER_KEY]
+        assert chain_tool.fired[0]["status"] == PARK_COMPLETION_SUCCEEDED
+        assert resumer_tool.fired == []
+        assert outcome == "the caller handled it"
+
+    asyncio.run(go())
+
+
+def test_an_inline_resumer_take_over_of_an_unchained_run_supersedes_nothing(
+    park_redis: Any, agent: _ResumableAgent, chain_tool: _ChainTool, resumer_tool: _ChainTool
+) -> None:
+    # A run the park captured NO routing for (unchained), taken over by an inline chained resumer:
+    # the terminal returns to the resumer inline, and with no stored routing there is nothing to
+    # supersede, so no chain delivery fires at all.
+    async def resumed_terminal() -> Any:
+        return "the final answer"
+
+    async def go() -> None:
+        await _park(["i1"], chained=False)
+        agent.body = resumed_terminal
+
+        cont = set_resume_continuation_tool("holder_resume")
+        chain = set_chained_resume(_resumer_routing())
+        try:
+            outcome = await agent_resume("i1", "x")
+        finally:
+            reset_chained_resume(chain)
+            reset_resume_continuation_tool(cont)
+
+        assert outcome == "the final answer"
+        assert chain_tool.fired == []
+        assert resumer_tool.fired == []
+
+    asyncio.run(go())

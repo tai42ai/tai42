@@ -75,19 +75,24 @@ async def _extend_horizon(chain_token: str, expiry_at: str | None) -> dict[str, 
     bound the entry recorded — so an extension can never carry a park past the window its own
     state survives, and never past the configured cap.
 
-    A key with no live entry is a no-op, not an error, and that is the COMMON case rather than a
+    A key with no entry is a no-op, not an error, and that is the COMMON case rather than a
     fault: the first park of a chained call always notifies before the waiting run has finished
     recording its own park (the nested run parks first, by construction); a park the caller
     ADOPTED as its own — an ``ask`` raised directly by a chained dispatch — notifies a chain
-    nothing ever parks on; and a resolved or detached chain has nothing left to extend. The
-    extension only ever grows the park's TTLs.
+    nothing ever parks on; and a resolved chain has nothing left to extend. A DETACHED tombstone
+    (a chain released or left dead by its drive, whose held run still fires the key until its own
+    deadline) IS grown: it carries no run state and no retention bound, so it moves straight out to
+    the run's new deadline, and the eventual terminal still lands on it. The extension only ever
+    grows the park's TTLs.
     """
     index = agents_park_index()
     entry = await index.read_entry(chain_token)
-    if entry is None or index.tombstone_kind(entry) != "live":
+    if entry is None or index.tombstone_kind(entry) == "resolved":
         logger.debug("agents: re-park notice for chained call %s has no live park to extend", chain_token)
         return {"status": "not_parked"}
-    retention = entry.get("retention_bound")
+    # A live park re-clamps against the retention bound it recorded; a detached tombstone carries
+    # none, so it grows straight to the new deadline.
+    retention = entry.get("retention_bound") if index.tombstone_kind(entry) == "live" else None
     horizon = chained_park_horizon(expiry_at, datetime.fromisoformat(retention) if retention else None)
     if not await index.extend_horizon(chain_token, datetime.fromisoformat(horizon)):
         logger.debug("agents: chained call %s stopped being parked before its horizon could be extended", chain_token)

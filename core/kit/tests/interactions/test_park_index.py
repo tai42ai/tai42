@@ -373,6 +373,52 @@ async def test_detach_writes_a_record_less_tombstone_and_never_overwrites(make_i
     assert index.tombstone_kind(held) == "live"
 
 
+async def test_detach_sizes_the_tombstone_past_the_held_step_deadline(make_index: Any, fake_redis: Any) -> None:
+    index = make_index("probe:park")
+    far = datetime.now(UTC) + timedelta(days=90)
+    await index.detach(["floor"])
+    await index.detach(["dated"], expiry_ats=[datetime.now(UTC) + timedelta(hours=1), far, None])
+
+    # A detached tombstone lives at least the park-entry floor, never the short resolution TTL that
+    # would let a held run's later, still-valid answer fire a key the tombstone no longer backs.
+    floor_ttl = await fake_redis.ttl(index.entry_key("floor"))
+    assert floor_ttl > 2 * REDELIVERY_HORIZON_SECONDS
+    assert ENTRY_TTL_FLOOR_SECONDS - 5 <= floor_ttl <= ENTRY_TTL_FLOOR_SECONDS
+    # Sized by the LATEST of the step's deadlines, past the floor.
+    dated_ttl = await fake_redis.ttl(index.entry_key("dated"))
+    assert dated_ttl > ENTRY_TTL_FLOOR_SECONDS
+    assert abs(dated_ttl - entry_ttl_seconds(far)) <= 5
+
+
+async def test_extend_horizon_grows_a_detached_tombstone_and_never_shrinks_it(make_index: Any, fake_redis: Any) -> None:
+    index = make_index("probe:park")
+    await index.detach(["released"])
+    base = await fake_redis.ttl(index.entry_key("released"))
+    far = datetime.now(UTC) + timedelta(days=90)
+
+    # A re-park notice on a released key grows the tombstone to outlast the run's new deadline, so
+    # the held run's terminal still finds it.
+    assert await index.extend_horizon("released", far) is True
+    grown = await fake_redis.ttl(index.entry_key("released"))
+    assert grown > base
+    assert abs(grown - entry_ttl_seconds(far)) <= 5
+    # A nearer deadline never shrinks it.
+    assert await index.extend_horizon("released", datetime.now(UTC)) is True
+    assert await fake_redis.ttl(index.entry_key("released")) == grown
+    # The grown tombstone stays a detached tombstone (no barrier, no live set were written).
+    entry = await index.read_entry("released")
+    assert entry is not None
+    assert index.tombstone_kind(entry) == "detached"
+
+
+async def test_extend_horizon_returns_false_for_a_non_dict_entry(make_index: Any, fake_redis: Any) -> None:
+    index = make_index("probe:park")
+    # A stored entry that is valid JSON but not a mapping backs no live entry or tombstone, so the
+    # horizon cannot grow and the caller is told so rather than a shape error being papered over.
+    await fake_redis.set(index.entry_key("weird"), json.dumps(["not", "a", "mapping"]))
+    assert await index.extend_horizon("weird", datetime.now(UTC) + timedelta(hours=1)) is False
+
+
 async def test_a_corrupt_record_or_entry_raises(make_index: Any, fake_redis: Any) -> None:
     index = make_index("probe:park")
     await fake_redis.set(index.resolution_key(THREAD, "s"), json.dumps({"resolution": "won", "value": encode_value(1)}))

@@ -34,6 +34,7 @@ from tai42_contract.interactions import (
 )
 
 from tai42_kit.interactions.park_adoption import (
+    PARK_SUPERSEDED_OUTCOME,
     assert_park_adoptable,
     attach_chained_park,
     chained_park_claims,
@@ -41,6 +42,7 @@ from tai42_kit.interactions.park_adoption import (
     new_chained_park_key,
     repark_notice,
     resolve_park_adoption,
+    supersede_chain_notice,
     terminal_chain_notice,
 )
 
@@ -374,6 +376,15 @@ def test_a_failed_terminal_carries_its_outcome_under_the_failed_status() -> None
     assert tool == "probe_chain_deliver"
     assert set(payload) == {CHAINED_PARK_TOKEN_KEY, "result", "status"}
     assert payload["result"] == {"status": "error", "error": "down"}
+    assert payload["status"] == PARK_COMPLETION_FAILED
+
+
+def test_a_superseded_routing_ends_failed_with_the_take_over_outcome() -> None:
+    tool, payload = supersede_chain_notice(_ROUTING)
+
+    assert tool == "probe_chain_deliver"
+    assert set(payload) == {CHAINED_PARK_TOKEN_KEY, "result", "status"}
+    assert payload["result"] == PARK_SUPERSEDED_OUTCOME
     assert payload["status"] == PARK_COMPLETION_FAILED
 
 

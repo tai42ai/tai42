@@ -392,6 +392,37 @@ def test_a_re_park_notice_for_an_unparked_chain_is_benign(
     asyncio.run(go())
 
 
+def test_a_re_park_notice_grows_a_detached_chain_tombstone(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A chain the drive detached (released or dead) still receives re-park notices while the held
+    # run keeps asking; the notice grows the tombstone so the eventual terminal still lands on it
+    # rather than hunting a key that already dropped.
+    monkeypatch.setattr(
+        park_persist, "agents_limits_settings", lambda: SimpleNamespace(chained_park_horizon_cap_hours=24 * 365)
+    )
+
+    async def go() -> None:
+        token = "tai42:chained-park:released"
+        index = agents_park_index()
+        await index.detach([token])
+        before = await fake_park_redis.ttl(f"agent:park:{token}")
+        later = datetime.now(UTC) + timedelta(days=60)
+
+        extended = await deliver_chained_park(
+            chain_token=token, status=PARK_COMPLETION_REPARKED, expiry_at=later.isoformat()
+        )
+
+        assert extended["status"] == "extended"
+        grown = await fake_park_redis.ttl(f"agent:park:{token}")
+        assert grown > before
+        entry = await index.read_entry(token)
+        assert entry is not None
+        assert index.tombstone_kind(entry) == "detached"
+
+    asyncio.run(go())
+
+
 def test_a_failed_nested_terminal_re_enters_as_a_model_visible_tool_error(
     fake_park_redis: Any,
     monkeypatch: pytest.MonkeyPatch,

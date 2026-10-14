@@ -35,7 +35,7 @@ import uuid
 from collections.abc import Generator
 from contextvars import ContextVar
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 
 from tai42_contract.interactions import (
     CHAINED_PARK_KEY_PREFIX,
@@ -51,6 +51,7 @@ from tai42_contract.interactions import (
 )
 
 __all__ = [
+    "PARK_SUPERSEDED_OUTCOME",
     "assert_park_adoptable",
     "attach_chained_park",
     "chained_park_claims",
@@ -58,8 +59,17 @@ __all__ = [
     "new_chained_park_key",
     "repark_notice",
     "resolve_park_adoption",
+    "supersede_chain_notice",
     "terminal_chain_notice",
 ]
+
+# The person-data-free failed outcome a superseded chain routing is ended with when a later inline
+# resumer takes a run over: it names the take-over so an operator trace reads why, and the caller's
+# own failure path surfaces it as the uniform "the call came back empty" notice.
+PARK_SUPERSEDED_OUTCOME: Final[dict[str, str]] = {
+    "status": "superseded",
+    "reason": "the run was resumed inline by another caller, which now owns its outcome",
+}
 
 
 _chained_park_claims: ContextVar[set[str] | None] = ContextVar("tai42_chained_park_claims", default=None)
@@ -266,3 +276,16 @@ def terminal_chain_notice(routing: ChainedResume, result: Any) -> tuple[str, dic
     else:
         payload = {CHAINED_PARK_TOKEN_KEY: routing.chain_key, "result": result, "status": PARK_COMPLETION_SUCCEEDED}
     return routing.delivery_tool, payload
+
+
+def supersede_chain_notice(routing: ChainedResume) -> tuple[str, dict[str, Any]]:
+    """The ``(delivery tool, payload)`` that ends a chain routing a later inline resumer superseded.
+
+    A run resumed inline by a caller that chains it with a routing of its own takes the call over:
+    the drive runs under the resumer's routing and its terminal reaches the resumer, so the routing
+    the park had captured no longer fires at this run's terminal. This notice ends that superseded
+    routing ``failed`` with :data:`PARK_SUPERSEDED_OUTCOME`, so a caller still parked on it fails
+    loudly through its own error path instead of waiting on a key nothing will fire. The drive still
+    fires the resumer's routing with the real terminal through :func:`terminal_chain_notice`.
+    """
+    return terminal_chain_notice(routing, RunFailed(outcome=dict(PARK_SUPERSEDED_OUTCOME)))

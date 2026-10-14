@@ -187,6 +187,22 @@ end
 return 1
 """
 
+# Grow a detached tombstone's OWN TTL, never shrinking it, while it still holds exactly the value
+# the caller read. A detached tombstone has no barrier and no live set, so only its own key moves.
+# KEYS: entry. ARGV: the entry value read, entry TTL. Returns -1 when the entry changed since the
+# read.
+_EXTEND_TOMBSTONE_SCRIPT: Final[str] = """
+if redis.call('get', KEYS[1]) ~= ARGV[1] then
+    return -1
+end
+local wanted = tonumber(ARGV[2])
+local current = redis.call('ttl', KEYS[1])
+if current >= 0 and current < wanted then
+    redis.call('expire', KEYS[1], wanted)
+end
+return 1
+"""
+
 
 def superstep_id(member_ids: Iterable[str]) -> str:
     """A deterministic super-step id: a sha256 over the sorted member ids, insensitive to their order."""
@@ -553,11 +569,18 @@ class ParkIndex:
             pipe.hdel(self.run_resolutions_key(thread_id), superstep)
             await pipe.execute()
 
-    async def detach(self, entry_ids: Sequence[str]) -> None:
-        """Tombstone keys that were claimed but never parked on, never overwriting an existing key."""
+    async def detach(self, entry_ids: Sequence[str], *, expiry_ats: Iterable[datetime | None] = ()) -> None:
+        """Tombstone keys that were claimed but never parked on, never overwriting an existing key.
+
+        Each detached tombstone lives the held step's park-entry life — the entry floor, extended to
+        outlast the LATEST of ``expiry_ats`` plus the margin (:func:`barrier_ttl_seconds`) — so a run
+        whose chain was detached but which still fires the key until its own deadline finds the
+        tombstone and its fire lands transparently, not a key the tombstone already dropped. A
+        re-park grows it through :meth:`extend_horizon`. With no deadline the floor alone applies.
+        """
         if not entry_ids:
             return
-        ttl = resolution_ttl_seconds()
+        ttl = barrier_ttl_seconds(expiry_ats)
         tombstone = json.dumps({RESOLVED_FIELD: True})
         async with self._client() as client, client.pipeline(transaction=True) as pipe:
             for entry_id in entry_ids:
@@ -565,9 +588,14 @@ class ParkIndex:
             await pipe.execute()
 
     async def extend_horizon(self, entry_id: str, expiry_at: datetime | None) -> bool:
-        """Grow a live entry's, its barrier's and its live set's TTLs to outlast ``expiry_at``; never shrink one.
+        """Grow the TTLs backing ``entry_id`` to outlast ``expiry_at``; never shrink one.
 
-        Returns ``False`` when no live entry backs ``entry_id`` (absent or a tombstone).
+        A LIVE entry grows its own, its barrier's and its thread's live set's TTLs. A DETACHED
+        tombstone (a chain released or claimed but never parked on, whose held run still fires the
+        key until its own deadline) has no barrier and no live set, so only its own TTL grows — so a
+        re-park notice carries the tombstone out to the run's new deadline. Returns ``False`` when no
+        live entry or detached tombstone backs ``entry_id`` (absent, or a resolved tombstone, which
+        stays at its resolution record's life).
         """
         key = self.entry_key(entry_id)
         async with self._client() as client:
@@ -575,7 +603,16 @@ class ParkIndex:
             if raw is None:
                 return False
             entry = json.loads(raw)
-            if not isinstance(entry, dict) or self.tombstone_kind(entry) != "live":
+            if not isinstance(entry, dict):
+                return False
+            kind = self.tombstone_kind(entry)
+            if kind == "detached":
+                detached_outcome = await cast(
+                    "Awaitable[int]",
+                    client.eval(_EXTEND_TOMBSTONE_SCRIPT, 1, key, raw, str(entry_ttl_seconds(expiry_at))),
+                )
+                return detached_outcome == 1
+            if kind != "live":
                 return False
             thread_id, superstep = self._entry_coordinates(entry, key)
             outcome = await cast(
