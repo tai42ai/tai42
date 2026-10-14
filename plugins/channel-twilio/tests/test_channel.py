@@ -5,11 +5,19 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelNotification
-from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelNotification, Correlation
+from tai42_contract.interactions.models import (
+    AnswerMismatchPolicy,
+    AnswerWording,
+    ChoiceWording,
+    LineWording,
+    MediaItem,
+    MediaKind,
+    Wording,
+)
 
 from tai42_channel_twilio.channel import TwilioChannel
-from tai42_channel_twilio.correlation import PendingQuestionExistsError
+from tai42_channel_twilio.correlation import PendingQuestionExistsError, correlation_key
 
 from .conftest import FakeHttpx, FakeRedis, make_delivery, response
 
@@ -61,6 +69,104 @@ async def test_select_rendering_numbers_options(fake_redis: FakeRedis, fake_http
 
     body = fake_httpx.calls[0]["data"]["Body"]
     assert body == "Which env?\n1. staging\n2. production\nReply with the text of one option."
+
+
+async def test_select_reply_hint_uses_caller_wording(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # The numbered-options hint is the caller's ``wording.choice.reply_hint`` when set.
+    fake_httpx.responses.append(_accepted())
+
+    await TwilioChannel().deliver(
+        make_delivery(
+            answer_format="select",
+            options=["staging", "production"],
+            question="Which env?",
+            wording=Wording(choice=ChoiceWording(reply_hint="Text one of the numbers above.")),
+        )
+    )
+
+    body = fake_httpx.calls[0]["data"]["Body"]
+    assert body == "Which env?\n1. staging\n2. production\nText one of the numbers above."
+
+
+async def test_text_with_options_reply_hint_uses_caller_wording(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A text ask carrying suggested options also draws the numbered hint — the caller's word.
+    fake_httpx.responses.append(_accepted())
+
+    await TwilioChannel().deliver(
+        make_delivery(
+            answer_format="text",
+            options=["yes", "no"],
+            question="Pick one:",
+            wording=Wording(choice=ChoiceWording(reply_hint="Type one option.")),
+        )
+    )
+
+    body = fake_httpx.calls[0]["data"]["Body"]
+    assert body == "Pick one:\n1. yes\n2. no\nType one option."
+
+
+async def test_text_without_options_draws_no_reply_hint(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A text ask with no suggested options lists no choices and draws no hint at all.
+    fake_httpx.responses.append(_accepted())
+
+    await TwilioChannel().deliver(make_delivery(answer_format="text", question="Free text?"))
+
+    assert fake_httpx.calls[0]["data"]["Body"] == "Free text?"
+
+
+@pytest.mark.parametrize("answer_format", ["confirm", "external"])
+async def test_tier1_link_line_defaults_when_no_wording(
+    answer_format: str, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # Absent ``wording.lines.answer_link``, the link line is the platform default with the
+    # callback url substituted for ``{url}``.
+    fake_httpx.responses.append(_accepted())
+
+    delivery = make_delivery(answer_format=answer_format)
+    await TwilioChannel().deliver(delivery)
+
+    body = fake_httpx.calls[0]["data"]["Body"]
+    assert body == f"Deploy to prod?\n\nAnswer here: {delivery.callback_url}"
+
+
+@pytest.mark.parametrize("answer_format", ["confirm", "external"])
+async def test_tier1_link_line_uses_caller_wording_with_url_substituted(
+    answer_format: str, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The link line is the caller's ``wording.lines.answer_link`` with ``{url}`` replaced by
+    # the callback url (a plain substitution, so the token may sit anywhere in the sentence).
+    fake_httpx.responses.append(_accepted())
+
+    delivery = make_delivery(
+        answer_format=answer_format,
+        wording=Wording(lines=LineWording(answer_link="Tap {url} to reply.")),
+    )
+    await TwilioChannel().deliver(delivery)
+
+    body = fake_httpx.calls[0]["data"]["Body"]
+    assert body == f"Deploy to prod?\n\nTap {delivery.callback_url} to reply."
+
+
+async def test_deliver_parks_correlation_with_on_mismatch_and_wording(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # The Tier-2 deliver path copies the ask's digression policy and per-send wording onto the
+    # parked correlation record, so the shared answer ladder reads the caller's refusal sentence
+    # and policy when a typed reply is rejected.
+    fake_httpx.responses.append(_accepted())
+
+    await TwilioChannel().deliver(
+        make_delivery(
+            answer_format="text",
+            on_mismatch=AnswerMismatchPolicy.BRIDGE,
+            wording=Wording(answer=AnswerWording(rejected="Only yes or no, please. {reason}")),
+        )
+    )
+
+    key = f"channel:twilio:pending:{correlation_key('+15550000001', '+15550000002')}"
+    stored = Correlation.model_validate_json(fake_redis.store[key])
+    assert stored.on_mismatch is AnswerMismatchPolicy.BRIDGE
+    assert stored.wording is not None
+    assert stored.wording.answer is not None
+    assert stored.wording.answer.rejected == "Only yes or no, please. {reason}"
 
 
 def test_channel_advertises_media_only_and_no_other_capability():

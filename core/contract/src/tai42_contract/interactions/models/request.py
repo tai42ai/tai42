@@ -21,14 +21,11 @@ from tai42_contract.interactions.models.forms import (
     check_form_data,
     check_form_pages,
     check_form_reactions,
+    check_form_wording_fields,
 )
 from tai42_contract.interactions.models.media import MediaItem, check_media_list
+from tai42_contract.interactions.models.wording import Wording, check_wording_for_ask
 from tai42_contract.states import StateBinding, StateContext
-
-# Cap on a per-ask custom mismatch notice — the participant-facing rejection text a ``retry``-policy ask
-# may substitute for the built-in one. A single participant reply, so a small bound (channels impose
-# their own tighter message caps); matches the conversation route's ``error_reply_text`` bound.
-MISMATCH_NOTICE_MAX_CHARS = 2000
 
 # Cap on the question text stored verbatim into the interaction state hash and the
 # per-group stream — a prompt authored by a server tool, so a few KB is generous.
@@ -41,14 +38,17 @@ def _check_select_payload(payload: dict[str, Any]) -> None:
     options = payload.get("options")
     if not options:
         raise ValueError("select answer_format requires non-empty options")
-    # SELECT carries only its answer set; form-only keys (data/pages) and any
-    # other extra are a caller bug, refused rather than silently ignored.
-    extra = set(payload) - {"options"}
+    # SELECT carries its answer set and the OPTIONAL per-send ``wording`` catalogue (its choice
+    # chapter labels the control that opens the list). Form-only keys (data/pages) and any other
+    # extra are a caller bug, refused rather than silently ignored.
+    extra = set(payload) - {"options", "wording"}
     if extra:
-        raise ValueError(f"select answer_format payload carries only options, got extra {sorted(extra)}")
+        raise ValueError(
+            f"select answer_format payload carries only options and an optional wording, got extra {sorted(extra)}"
+        )
 
 
-def _check_form_payload(payload: dict[str, Any]) -> None:
+def _check_form_payload(payload: dict[str, Any], wording: Wording | None) -> None:
     schema = payload.get("schema")
     if not schema:
         raise ValueError("form answer_format requires a schema")
@@ -60,13 +60,18 @@ def _check_form_payload(payload: dict[str, Any]) -> None:
     if (data is not None or pages is not None or reactions is not None) and not isinstance(schema, dict):
         raise ValueError("form data/pages/reactions require an object schema")
     schema_obj = cast("dict[str, Any]", schema)
+    data_model = FormData.model_validate(data) if data is not None else None
     page_models = [FormPage.model_validate(page) for page in cast("list[Any]", pages)] if pages is not None else None
-    if data is not None:
-        check_form_data(schema_obj, FormData.model_validate(data))
+    if data_model is not None:
+        check_form_data(schema_obj, data_model)
     if page_models is not None:
         check_form_pages(schema_obj, page_models)
     if reactions is not None:
         check_form_reactions(schema_obj, page_models, FormReactions.model_validate(reactions))
+    # The form's per-field words must each name a declared property that draws a choice list,
+    # cross-checked here against the schema and the per-send option lists (the shared chokepoint).
+    if wording is not None and wording.form is not None and wording.form.fields:
+        check_form_wording_fields(schema_obj, data_model, wording.form.fields)
 
 
 def _check_external_payload(payload: dict[str, Any]) -> None:
@@ -87,22 +92,28 @@ def _check_free_payload(payload: dict[str, Any] | None) -> None:
 
 
 def _check_text_payload(payload: dict[str, Any] | None) -> None:
-    # TEXT carries no payload EXCEPT an OPTIONAL ``options`` list of suggested
-    # replies: a tapped option submits its own text as the free-text answer, which
-    # stays unconstrained (unlike SELECT, where options ARE the answer set). Any
-    # other key on a text payload is a caller bug.
+    # TEXT carries no payload EXCEPT an OPTIONAL ``options`` list of suggested replies (a tapped
+    # option submits its own text as the free-text answer, which stays unconstrained, unlike
+    # SELECT, where options ARE the answer set) and the OPTIONAL per-send ``wording`` catalogue.
+    # Any other key is a caller bug.
     if payload is not None:
-        extra = set(payload) - {"options"}
+        extra = set(payload) - {"options", "wording"}
         if extra:
-            raise ValueError(f"text answer_format payload carries only optional options, got extra {sorted(extra)}")
+            raise ValueError(
+                f"text answer_format payload carries only optional options and wording, got extra {sorted(extra)}"
+            )
         options = payload.get("options")
         if options is not None and not options:
             raise ValueError("text answer_format options must be a non-empty list when present")
 
 
-def _check_no_payload(answer_format: AnswerFormat, payload: dict[str, Any] | None) -> None:
+def _check_confirm_payload(payload: dict[str, Any] | None) -> None:
+    # CONFIRM carries no payload EXCEPT the OPTIONAL per-send ``wording`` catalogue. Any other key
+    # is a caller bug.
     if payload is not None:
-        raise ValueError(f"{answer_format.value} answer_format carries no format_payload")
+        extra = set(payload) - {"wording"}
+        if extra:
+            raise ValueError(f"confirm answer_format payload carries only optional wording, got extra {sorted(extra)}")
 
 
 def _check_external_answer_payload(payload: dict[str, Any] | None) -> None:
@@ -123,10 +134,15 @@ def check_format_payload(answer_format: AnswerFormat, payload: dict[str, Any] | 
     included; ``durable=False`` checks the answer-check view of a question, where EXTERNAL carries
     only its optional ``schema``.
     """
+    # The per-send ``wording`` rides every channel-deliverable format in the payload; parse it once
+    # so the per-format shape check (``form`` cross-checks its field words) and the shared admission
+    # check both read the one validated model. The answer-check view strips wording from its payload,
+    # so there it is None and the admission is a no-op.
+    wording = Wording.model_validate(payload["wording"]) if payload and payload.get("wording") is not None else None
     if answer_format is AnswerFormat.SELECT:
         _check_select_payload(payload or {})
     elif answer_format is AnswerFormat.FORM:
-        _check_form_payload(payload or {})
+        _check_form_payload(payload or {}, wording)
     elif answer_format is AnswerFormat.EXTERNAL:
         if durable:
             _check_external_payload(payload or {})
@@ -134,10 +150,20 @@ def check_format_payload(answer_format: AnswerFormat, payload: dict[str, Any] | 
             _check_external_answer_payload(payload)
     elif answer_format is AnswerFormat.TEXT:
         _check_text_payload(payload)
+    elif answer_format is AnswerFormat.CONFIRM:
+        _check_confirm_payload(payload)
     elif answer_format is AnswerFormat.FREE:
         _check_free_payload(payload)
-    else:
-        _check_no_payload(answer_format, payload)
+    # Admit each ``wording`` member only on a send the format draws its control or sentence on —
+    # the one admission table, shared with the delivery frame. FREE is a caller-only inter-run shape
+    # with no human surface, so it carries no wording (refused above as an extra key).
+    if wording is not None and answer_format is not AnswerFormat.FREE:
+        check_wording_for_ask(
+            wording,
+            answer_format.value,
+            has_options=bool((payload or {}).get("options")),
+            has_pages=(payload or {}).get("pages") is not None,
+        )
 
 
 def check_addressing(*, to: str, mode: str, question: str, payload: dict[str, Any] | None, answer_format: str) -> None:
@@ -198,14 +224,12 @@ class InteractionRequest(BaseModel):
     # the conversation as a fresh routed turn). Set per ask by the tool author; the default is a
     # zero-behavior-change for every existing ask.
     on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY
-    # A per-ask custom participant-facing rejection notice, used ONLY under the ``retry`` policy: when
-    # set it REPLACES the platform's built-in retry notice. A literal ``{reason}`` token (if
-    # present) is filled with the door's rejection reason by a PLAIN substitution — a notice
-    # without the token is sent verbatim, and stray braces never raise (never ``str.format``). It
-    # customizes the CORE-sent notice only; a channel that owns its correction surface renders its
-    # own text off the door's reason and ignores this. Under the ``bridge`` policy it is IGNORED (a
-    # digression never notifies). ``None`` uses the built-in default.
-    mismatch_notice: str | None = None
+    # The caller's words for this send's platform-drawn texts (buttons, headings, message lines,
+    # answer-page sentences, refusal sentences, status copy), grouped by what each decorates
+    # (:class:`~tai42_contract.interactions.models.wording.Wording`). Each member is admitted only
+    # on a send that draws it (the admission table), cross-checked against ``answer_format`` by the
+    # model validator. None -> every surface shows its own word.
+    wording: Wording | None = None
     reply_to: str
     created_at: datetime
     timeout_at: datetime
@@ -329,19 +353,6 @@ class InteractionRequest(BaseModel):
     def _check_question(cls, value: str) -> str:
         if len(value) > QUESTION_MAX_CHARS:
             raise ValueError(f"question must be at most {QUESTION_MAX_CHARS} characters, got {len(value)}")
-        return value
-
-    @field_validator("mismatch_notice")
-    @classmethod
-    def _check_mismatch_notice(cls, value: str | None) -> str | None:
-        # None uses the built-in default; a set notice is non-blank and within the participant-reply cap.
-        if value is not None:
-            if not value.strip():
-                raise ValueError("mismatch_notice must be non-blank when set")
-            if len(value) > MISMATCH_NOTICE_MAX_CHARS:
-                raise ValueError(
-                    f"mismatch_notice must be at most {MISMATCH_NOTICE_MAX_CHARS} characters, got {len(value)}"
-                )
         return value
 
     @field_validator("media")

@@ -35,6 +35,7 @@ import {
   type OptionSection,
   type StreamModel,
 } from '@/transcript-model';
+import { wordingOf } from '@/wording-parse';
 
 /** What one frame did: advanced the model, completed the backlog, or arrived
  * malformed (which the caller surfaces — it is never swallowed). */
@@ -131,6 +132,8 @@ function applyMediaFrame(
   if (footer === undefined) return malformed(event);
   const location = locationOf(payload.location);
   if (location === undefined) return malformed(event);
+  const wording = wordingOf(payload.wording);
+  if (wording === undefined) return malformed(event);
   if (!mediaCardIsCoherent(media, options, sections, header, footer, location)) {
     return malformed(event);
   }
@@ -146,6 +149,7 @@ function applyMediaFrame(
       header,
       footer,
       location,
+      wording,
       ts,
     }),
   };
@@ -175,6 +179,8 @@ function applyFormFrame(
   if (formData === undefined) return malformed(event);
   const pages = formPagesOf(payload.pages);
   if (pages === undefined) return malformed(event);
+  const wording = wordingOf(payload.wording);
+  if (wording === undefined) return malformed(event);
   return {
     kind: 'model',
     model: withItem(model, {
@@ -187,6 +193,7 @@ function applyFormFrame(
       location,
       formData,
       pages,
+      wording,
       ts,
     }),
   };
@@ -221,6 +228,8 @@ function applyQuestionFrame(
   // as one on a card.
   const media = mediaOf(payload.media);
   if (media === undefined) return malformed(event);
+  const wording = wordingOf(payload.wording);
+  if (wording === undefined) return malformed(event);
   return {
     kind: 'model',
     model: withItem(model, {
@@ -231,6 +240,7 @@ function applyQuestionFrame(
       options,
       media,
       timeoutAt: timeout_at,
+      wording,
       ts,
       ...facet,
     }),

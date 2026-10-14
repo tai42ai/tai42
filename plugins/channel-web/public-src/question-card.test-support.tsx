@@ -8,6 +8,7 @@ import type {
   FormPrefill,
   FormReactions,
   JsonSchema,
+  Wording,
 } from '@/transcript-model';
 
 export const CALLBACK = 'https://app.example/api/interactions/callback/ticket-1';
@@ -44,6 +45,7 @@ export function question(
     media: null,
     timeoutAt: new Date(Date.now() + 10 * 60_000).toISOString(),
     ts: new Date().toISOString(),
+    wording: null,
     ...overrides,
   } as const;
   if (format === 'external')
@@ -82,6 +84,7 @@ export function formQuestion(
   formData: FormPrefill | null,
   pages: readonly FormPage[] | null,
   reactions: FormReactions | null = null,
+  wording: Wording | null = null,
 ): QuestionItem {
   return {
     kind: 'question',
@@ -92,6 +95,7 @@ export function formQuestion(
     media: null,
     timeoutAt: new Date(Date.now() + 10 * 60_000).toISOString(),
     ts: new Date().toISOString(),
+    wording,
     answerFormat: 'form',
     callbackUrl: null,
     schema,

@@ -30,10 +30,49 @@ import { useState } from 'react';
 import { isFormGone } from '@/api';
 import { LocationPin, MediaItems } from '@/media-card';
 import { SchemaFormAnswer } from '@/schema-form-answer';
-import type { ChatItem } from '@/transcript-model';
+import type { ChatItem, FieldWording, FormWording, StatusWording } from '@/transcript-model';
 
 /** The transcript item this card renders. */
 export type FormCardItem = Extract<ChatItem, { kind: 'form' }>;
+
+/** The platform's own words, drawn when the send set no wording for the card. */
+const SENT_BADGE = 'Sent';
+const CLOSED_BADGE = 'Session ended';
+const UNAVAILABLE_LINE = 'This form is no longer available.';
+const SUBMIT_LABEL = 'Send';
+const SENDING_LABEL = 'Sending the form';
+const BACK_LABEL = 'Back';
+const FIELD_PLACEHOLDER = 'Choose an option';
+
+const EMPTY_FIELDS: Readonly<Record<string, FieldWording>> = {};
+
+/** The card's form-chrome words resolved to the caller's or the platform's own. */
+function resolveFormWords(form: FormWording | null | undefined): {
+  readonly submit: string;
+  readonly back: string;
+  readonly fields: Readonly<Record<string, FieldWording>>;
+} {
+  return {
+    submit: form?.submit ?? SUBMIT_LABEL,
+    back: form?.back ?? BACK_LABEL,
+    fields: form?.fields ?? EMPTY_FIELDS,
+  };
+}
+
+/** The card's status words resolved to the caller's or the platform's own. */
+function resolveFormStatus(status: StatusWording | null | undefined): {
+  readonly sent: string;
+  readonly closed: string;
+  readonly unavailable: string;
+  readonly sending: string;
+} {
+  return {
+    sent: status?.sent ?? SENT_BADGE,
+    closed: status?.closed ?? CLOSED_BADGE,
+    unavailable: status?.unavailable ?? UNAVAILABLE_LINE,
+    sending: status?.sending ?? SENDING_LABEL,
+  };
+}
 
 export interface FormCardProps {
   readonly item: FormCardItem;
@@ -83,19 +122,21 @@ export function FormCard({ item, onSubmitForm, locked }: FormCardProps): ReactEl
     );
   };
 
+  const form = resolveFormWords(item.wording?.form);
+  const status = resolveFormStatus(item.wording?.status);
   return (
     <div className="tcw-row tcw-row--out tcw-row--start">
       <div className="tcw-form">
         <div className="tcw-question-head">
           {item.text !== '' ? <Markdown markdown={item.text} className="tcw-prose" /> : null}
-          {sent && !gone ? <Badge variant="success">Sent</Badge> : null}
-          {locked ? <Badge variant="neutral">Session ended</Badge> : null}
+          {sent && !gone ? <Badge variant="success">{status.sent}</Badge> : null}
+          {locked ? <Badge variant="neutral">{status.closed}</Badge> : null}
         </div>
         {item.media !== null ? <MediaItems media={item.media} /> : null}
         {item.location !== null ? <LocationPin location={item.location} /> : null}
         {gone ? (
           <p className="tcw-form-gone" role="status">
-            This form is no longer available.
+            {status.unavailable}
           </p>
         ) : null}
         {!gone && !locked ? (
@@ -108,9 +149,12 @@ export function FormCard({ item, onSubmitForm, locked }: FormCardProps): ReactEl
             sending={sending}
             onSubmit={submit}
             idPrefix={item.id}
-            submitLabel="Send"
-            steppedSubmitLabel="Send"
-            sendingLabel="Sending the form"
+            submitLabel={form.submit}
+            steppedSubmitLabel={SUBMIT_LABEL}
+            sendingLabel={status.sending}
+            backLabel={form.back}
+            fieldWording={form.fields}
+            fieldPlaceholder={FIELD_PLACEHOLDER}
           />
         ) : null}
         {error !== null && !gone ? (

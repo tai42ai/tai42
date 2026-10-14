@@ -99,6 +99,61 @@ def test_long_per_send_option_list_renders_a_select_above_the_threshold():
     assert block["element"]["type"] == "static_select"
 
 
+_SELECT_SCHEMA = {"type": "object", "properties": {"colour": {"type": "string"}}}
+_SELECT_OPTIONS = {"colour": [{"value": f"c{i}"} for i in range(RADIO_OPTION_THRESHOLD + 1)]}
+
+
+def test_field_choice_label_draws_a_static_select_placeholder():
+    (block,) = build_modal_blocks(
+        _SELECT_SCHEMA, {}, _SELECT_OPTIONS, field_wording={"colour": {"choice_label": "Pick a colour"}}
+    )
+    assert block["element"]["type"] == "static_select"
+    assert block["element"]["placeholder"] == {"type": "plain_text", "text": "Pick a colour"}
+
+
+def test_field_without_a_choice_label_draws_no_placeholder():
+    (block,) = build_modal_blocks(_SELECT_SCHEMA, {}, _SELECT_OPTIONS)
+    assert "placeholder" not in block["element"]
+
+
+def test_multi_static_select_draws_the_choice_label_placeholder():
+    schema = {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}}}}
+    options = {"tags": [{"value": f"t{i}"} for i in range(RADIO_OPTION_THRESHOLD + 1)]}
+    (block,) = build_modal_blocks(schema, {}, options, field_wording={"tags": {"choice_label": "Choose tags"}})
+    assert block["element"]["type"] == "multi_static_select"
+    assert block["element"]["placeholder"] == {"type": "plain_text", "text": "Choose tags"}
+
+
+def test_radio_buttons_draw_no_placeholder_even_with_a_choice_label():
+    # A short list renders as radio_buttons, which has no placeholder slot — the label draws none.
+    options = {"colour": [{"value": "r"}, {"value": "b"}]}
+    (block,) = build_modal_blocks(
+        _SELECT_SCHEMA, {}, options, field_wording={"colour": {"choice_label": "Pick a colour"}}
+    )
+    assert block["element"]["type"] == "radio_buttons"
+    assert "placeholder" not in block["element"]
+
+
+def test_checkboxes_draw_no_placeholder_even_with_a_choice_label():
+    schema = {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}}}}
+    options = {"tags": [{"value": "a"}, {"value": "b"}]}
+    (block,) = build_modal_blocks(schema, {}, options, field_wording={"tags": {"choice_label": "Choose tags"}})
+    assert block["element"]["type"] == "checkboxes"
+    assert "placeholder" not in block["element"]
+
+
+def test_field_choice_label_over_150_characters_is_refused():
+    with pytest.raises(FormSchemaError, match=r"placeholder|150"):
+        build_modal_blocks(_SELECT_SCHEMA, {}, _SELECT_OPTIONS, field_wording={"colour": {"choice_label": "x" * 151}})
+
+
+def test_field_choice_label_of_exactly_150_characters_is_accepted():
+    (block,) = build_modal_blocks(
+        _SELECT_SCHEMA, {}, _SELECT_OPTIONS, field_wording={"colour": {"choice_label": "x" * 150}}
+    )
+    assert block["element"]["placeholder"] == {"type": "plain_text", "text": "x" * 150}
+
+
 def test_per_send_option_without_a_label_shows_its_value():
     schema = {"type": "object", "properties": {"colour": {"type": "string"}}}
     (block,) = build_modal_blocks(schema, {}, {"colour": [{"value": "r"}]})
@@ -240,6 +295,308 @@ def test_extract_answer_omits_an_empty_picker(kind, key):
     assert extract_answer({"type": "object", "properties": {"on": {"type": "string", "format": "date"}}}, state) == {}
 
 
+_INPUT_MODE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "contact": {"type": "string", "inputMode": "email", "title": "Contact"},
+        "site": {"type": "string", "inputMode": "url", "title": "Site"},
+        "code": {"type": "string", "inputMode": "numeric"},
+        "amount": {"type": "string", "inputMode": "decimal"},
+        "line": {"type": "string", "inputMode": "tel"},
+        "note": {"type": "string", "inputMode": "text"},
+    },
+}
+
+
+def test_email_input_mode_renders_an_email_text_input():
+    element = build_modal_blocks(_INPUT_MODE_SCHEMA)[0]["element"]
+    assert element == {"type": "email_text_input", "action_id": FIELD_ACTION_ID}
+
+
+def test_url_input_mode_renders_a_url_text_input():
+    element = build_modal_blocks(_INPUT_MODE_SCHEMA)[1]["element"]
+    assert element == {"type": "url_text_input", "action_id": FIELD_ACTION_ID}
+
+
+@pytest.mark.parametrize("field", ["code", "amount", "line", "note"])
+def test_numeric_decimal_tel_and_text_input_modes_render_a_plain_text_input(field):
+    # Slack carries no numeric/phone keyboard hint on a text element, so numeric/decimal/tel
+    # degrade to the plain text input (documented); text is the native mapping. All keep the
+    # value exactly as typed.
+    by_id = {b["block_id"]: b for b in build_modal_blocks(_INPUT_MODE_SCHEMA)}
+    assert by_id[field]["element"] == {"type": "plain_text_input", "action_id": FIELD_ACTION_ID}
+
+
+def test_email_and_url_input_modes_prefill_their_initial_value():
+    values = {"contact": "alice@example.com", "site": "https://example.com"}
+    by_id = {b["block_id"]: b for b in build_modal_blocks(_INPUT_MODE_SCHEMA, values)}
+    assert by_id["contact"]["element"]["initial_value"] == "alice@example.com"
+    assert by_id["site"]["element"]["initial_value"] == "https://example.com"
+
+
+@pytest.mark.parametrize(
+    ("name", "kind", "submitted"),
+    [
+        ("contact", "email_text_input", "alice@example.com"),
+        ("site", "url_text_input", "https://example.com"),
+    ],
+)
+def test_extract_answer_reads_back_email_and_url_text_inputs(name, kind, submitted):
+    # The round-trip: a value submitted in Slack's own email/url text element must be read
+    # back, not silently dropped. Without _raw_value admitting these element types the value
+    # reads as None and the field vanishes from the answer.
+    state = {name: {FIELD_ACTION_ID: {"type": kind, "value": submitted}}}
+    assert extract_answer(_INPUT_MODE_SCHEMA, state) == {name: submitted}
+
+
+@pytest.mark.parametrize(("kind", "name"), [("email_text_input", "contact"), ("url_text_input", "site")])
+def test_extract_answer_omits_an_empty_email_or_url_text_input(kind, name):
+    state = {name: {FIELD_ACTION_ID: {"type": kind, "value": ""}}}
+    assert extract_answer(_INPUT_MODE_SCHEMA, state) == {}
+
+
+def test_unsupported_input_mode_is_refused_naming_the_property():
+    schema = {"type": "object", "properties": {"contact": {"type": "string", "inputMode": "voice"}}}
+    with pytest.raises(FormSchemaError, match=r"contact.*inputMode"):
+        build_modal_blocks(schema)
+
+
+def test_email_input_mode_trigger_field_carries_dispatch_action_and_config():
+    # An email field named as a reaction trigger dispatches like any other text input: the
+    # block flags dispatch_action and the element carries the on-enter dispatch config.
+    schema = {"type": "object", "properties": {"contact": {"type": "string", "inputMode": "email"}}}
+    reactions = {"field_changed": ["contact"], "page_advanced": [], "submitted": False, "choices": []}
+    (block,) = build_modal_blocks(schema, {}, None, None, reactions=reactions)
+    assert block["dispatch_action"] is True
+    assert block["element"]["dispatch_action_config"] == {"trigger_actions_on": ["on_enter_pressed"]}
+
+
+# -- the single-line text input draws its declared length bounds ------------------
+
+
+def test_single_line_string_draws_its_declared_max_and_min_length():
+    # A plain single-line string draws maxLength/minLength as Slack's max_length/min_length,
+    # the same bounds the multi-line textarea draws — on the ordinary plain_text_input.
+    schema = {"type": "object", "properties": {"full_name": {"type": "string", "maxLength": 80, "minLength": 2}}}
+    element = build_modal_blocks(schema)[0]["element"]
+    assert element["type"] == "plain_text_input"
+    assert "multiline" not in element
+    assert element["max_length"] == 80
+    assert element["min_length"] == 2
+
+
+def test_single_line_string_max_length_above_slacks_3000_cap_is_refused_naming_the_property():
+    # The same loud refusal the multi-line textarea path raises: Slack caps
+    # plain_text_input.max_length at 3000, so a larger declared maxLength cannot be drawn and
+    # is refused at build, never silently truncated.
+    schema = {"type": "object", "properties": {"full_name": {"type": "string", "maxLength": 3001}}}
+    with pytest.raises(FormSchemaError, match=r"full_name.*3000"):
+        build_modal_blocks(schema)
+
+
+@pytest.mark.parametrize("mode", ["numeric", "decimal", "tel", "text"])
+def test_degraded_text_input_modes_draw_their_length_bounds(mode):
+    # numeric/decimal/tel/text all draw a plain_text_input, which carries Slack's length bounds.
+    schema = {"type": "object", "properties": {"code": {"type": "string", "inputMode": mode, "maxLength": 20}}}
+    element = build_modal_blocks(schema)[0]["element"]
+    assert element["type"] == "plain_text_input"
+    assert element["max_length"] == 20
+
+
+@pytest.mark.parametrize("mode", ["email", "url"])
+def test_email_and_url_inputs_carry_no_slack_length_bound(mode):
+    # Slack's email_text_input/url_text_input accept no max_length/min_length, so a declared
+    # bound is not drawn on them — it stays enforced at the answer door, never silently dropped.
+    schema = {"type": "object", "properties": {"contact": {"type": "string", "inputMode": mode, "maxLength": 50}}}
+    element = build_modal_blocks(schema)[0]["element"]
+    assert "max_length" not in element
+    assert "min_length" not in element
+
+
+# -- control: chips → the default choice control (the named Slack degrade) --------
+
+
+def test_chips_on_a_short_string_enum_degrades_to_a_radio_group():
+    # Slack has no chip input, so control:chips on a single-choice string draws the default
+    # choice control — a radio group at or below the threshold (the documented degrade).
+    schema = {
+        "type": "object",
+        "properties": {"tier": {"type": "string", "enum": ["gold", "silver"], "control": "chips"}},
+    }
+    element = build_modal_blocks(schema)[0]["element"]
+    assert element["type"] == "radio_buttons"
+    assert [o["value"] for o in element["options"]] == ["gold", "silver"]
+
+
+def test_chips_on_a_long_string_enum_degrades_to_a_static_select():
+    enum = [f"c{i}" for i in range(RADIO_OPTION_THRESHOLD + 1)]
+    schema = {"type": "object", "properties": {"tier": {"type": "string", "enum": enum, "control": "chips"}}}
+    element = build_modal_blocks(schema)[0]["element"]
+    assert element["type"] == "static_select"
+
+
+def test_chips_on_a_short_array_enum_degrades_to_a_checkbox_group():
+    schema = {
+        "type": "object",
+        "properties": {"tags": {"type": "array", "items": {"type": "string", "enum": ["a", "b"]}, "control": "chips"}},
+    }
+    element = build_modal_blocks(schema)[0]["element"]
+    assert element["type"] == "checkboxes"
+    assert [o["value"] for o in element["options"]] == ["a", "b"]
+
+
+def test_chips_on_a_long_array_enum_degrades_to_a_multi_static_select():
+    enum = [f"c{i}" for i in range(RADIO_OPTION_THRESHOLD + 1)]
+    schema = {
+        "type": "object",
+        "properties": {"tags": {"type": "array", "items": {"type": "string", "enum": enum}, "control": "chips"}},
+    }
+    element = build_modal_blocks(schema)[0]["element"]
+    assert element["type"] == "multi_static_select"
+
+
+def test_chips_with_per_send_options_degrades_to_a_labelled_choice_control():
+    # A per-send option list on a chips string still degrades to the choice control (its
+    # labels shown, values submitted), replacing the schema enum as it does for any choice.
+    schema = {"type": "object", "properties": {"tier": {"type": "string", "enum": ["x"], "control": "chips"}}}
+    options = {"tier": [{"value": "g", "label": "Gold"}]}
+    element = build_modal_blocks(schema, None, options)[0]["element"]
+    assert element["type"] == "radio_buttons"
+    assert element["options"] == [{"text": {"type": "plain_text", "text": "Gold"}, "value": "g"}]
+
+
+# -- control: textarea → a multi-line text input with its drawn length bounds -----
+
+
+def test_textarea_renders_a_multiline_plain_text_input():
+    schema = {"type": "object", "properties": {"notes": {"type": "string", "control": "textarea"}}}
+    element = build_modal_blocks(schema)[0]["element"]
+    assert element == {"type": "plain_text_input", "action_id": FIELD_ACTION_ID, "multiline": True}
+
+
+def test_textarea_draws_its_declared_max_and_min_length():
+    schema = {
+        "type": "object",
+        "properties": {"notes": {"type": "string", "control": "textarea", "maxLength": 500, "minLength": 10}},
+    }
+    element = build_modal_blocks(schema)[0]["element"]
+    assert element["multiline"] is True
+    assert element["max_length"] == 500
+    assert element["min_length"] == 10
+
+
+def test_textarea_max_length_above_slacks_3000_cap_is_refused_naming_the_property():
+    # Slack caps plain_text_input.max_length at 3000; a larger declared maxLength is a loud
+    # refusal at build, never a silent truncation of the author's bound.
+    schema = {"type": "object", "properties": {"notes": {"type": "string", "control": "textarea", "maxLength": 3001}}}
+    with pytest.raises(FormSchemaError, match=r"notes.*3000"):
+        build_modal_blocks(schema)
+
+
+def test_textarea_with_per_send_options_degrades_to_the_choice_control():
+    # A per-send choice list wins over the text area for this send (the documented precedence
+    # a format already has) — the field draws the default choice control.
+    schema = {"type": "object", "properties": {"notes": {"type": "string", "control": "textarea"}}}
+    options = {"notes": [{"value": "yes", "label": "Yes"}]}
+    element = build_modal_blocks(schema, None, options)[0]["element"]
+    assert element["type"] == "radio_buttons"
+
+
+def test_unsupported_control_is_refused_naming_the_property():
+    schema = {"type": "object", "properties": {"notes": {"type": "string", "control": "slider"}}}
+    with pytest.raises(FormSchemaError, match=r"notes.*control"):
+        build_modal_blocks(schema)
+
+
+# -- the modal's submit / close / title, and the message's open button ------------
+
+_PAGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"full_name": {"type": "string"}, "tier": {"type": "string"}},
+}
+
+
+def test_submit_reads_the_last_pages_button_label():
+    pages = [
+        {"title": "You", "fields": ["full_name"], "button_label": "Keep going"},
+        {"title": "Done", "fields": ["tier"], "button_label": "Send it"},
+    ]
+    view = build_modal_view("int", "Q", _PAGE_SCHEMA, None, None, pages)
+    assert view["submit"] == {"type": "plain_text", "text": "Send it"}
+
+
+def test_submit_defaults_when_the_last_page_sets_no_button_label():
+    pages = [{"title": "You", "fields": ["full_name", "tier"]}]
+    view = build_modal_view("int", "Q", _PAGE_SCHEMA, None, None, pages)
+    assert view["submit"] == {"type": "plain_text", "text": "Submit"}
+
+
+def test_submit_defaults_without_pages():
+    view = build_modal_view("int", "Q", _PAGE_SCHEMA)
+    assert view["submit"] == {"type": "plain_text", "text": "Submit"}
+
+
+def test_submit_label_over_24_characters_is_refused():
+    pages = [{"title": "Done", "fields": ["full_name", "tier"], "button_label": "x" * 25}]
+    with pytest.raises(FormSchemaError, match=r"submit|24"):
+        build_modal_view("int", "Q", _PAGE_SCHEMA, None, None, pages)
+
+
+def test_close_reads_the_cancel_label_else_the_default():
+    view = build_modal_view("int", "Q", _PAGE_SCHEMA, form_wording={"cancel": "Not now"})
+    assert view["close"] == {"type": "plain_text", "text": "Not now"}
+    assert build_modal_view("int", "Q", _PAGE_SCHEMA)["close"] == {"type": "plain_text", "text": "Cancel"}
+
+
+def test_cancel_label_over_24_characters_is_refused():
+    with pytest.raises(FormSchemaError, match=r"cancel|close|24"):
+        build_modal_view("int", "Q", _PAGE_SCHEMA, form_wording={"cancel": "x" * 25})
+
+
+def test_title_reads_the_form_title_else_the_default():
+    view = build_modal_view("int", "Q", _PAGE_SCHEMA, form_wording={"title": "Tell us about you"})
+    assert view["title"] == {"type": "plain_text", "text": "Tell us about you"}
+    assert build_modal_view("int", "Q", _PAGE_SCHEMA)["title"] == {"type": "plain_text", "text": "Please respond"}
+
+
+def test_form_title_over_24_characters_is_refused():
+    with pytest.raises(FormSchemaError, match=r"title|24"):
+        build_modal_view("int", "Q", _PAGE_SCHEMA, form_wording={"title": "x" * 25})
+
+
+def test_submit_reads_the_form_submit_on_a_page_less_form():
+    # A form with NO pages has no page label, so the modal's submit takes the caller's
+    # ``wording.form.submit`` when set, the default otherwise.
+    view = build_modal_view("int", "Q", _PAGE_SCHEMA, form_wording={"submit": "Send it"})
+    assert view["submit"] == {"type": "plain_text", "text": "Send it"}
+
+
+def test_page_less_form_submit_over_24_characters_is_refused():
+    with pytest.raises(FormSchemaError, match=r"submit|24"):
+        build_modal_view("int", "Q", _PAGE_SCHEMA, form_wording={"submit": "x" * 25})
+
+
+def test_paged_form_submit_takes_the_last_page_label_not_the_form_submit():
+    # With pages present the terminal button is the LAST page's button_label; a page-less
+    # ``form.submit`` is refused beside pages at the ask door, so it never reaches here, and
+    # the page label wins regardless.
+    pages = [{"title": "Done", "fields": ["full_name", "tier"], "button_label": "Finish"}]
+    view = build_modal_view("int", "Q", _PAGE_SCHEMA, None, None, pages, form_wording={"submit": "ignored"})
+    assert view["submit"] == {"type": "plain_text", "text": "Finish"}
+
+
+def test_open_button_reads_the_open_label_else_the_default():
+    _section, actions = build_message_blocks("Q", "int-1", open_label="Start here")
+    assert actions["elements"][0]["text"] == {"type": "plain_text", "text": "Start here"}
+    default = build_message_blocks("Q", "int-1")
+    assert default[1]["elements"][0]["text"] == {"type": "plain_text", "text": "Fill form"}
+
+
+def test_open_label_over_75_characters_is_refused():
+    with pytest.raises(FormSchemaError, match=r"open|75"):
+        build_message_blocks("Q", "int-1", open_label="x" * 76)
+
+
 def test_required_fields_have_no_optional_flag_others_do():
     by_id = {b["block_id"]: b for b in build_modal_blocks(_SCHEMA)}
 
@@ -374,36 +731,37 @@ def test_extract_answer_unfilled_select_is_omitted():
     assert "tier" not in extract_answer(_SCHEMA, state)
 
 
-def test_extract_answer_uncoercible_integer_raises():
+def test_extract_answer_uncoercible_integer_is_forwarded_raw():
+    # A string that is no integer literal cannot be lifted to ``integer``; it is
+    # forwarded as submitted so the answer door rejects it against the schema.
     state = _state()
     state["count"][FIELD_ACTION_ID]["value"] = "not-a-number"
-    with pytest.raises(FormSchemaError, match=r"count.*not an integer"):
-        extract_answer(_SCHEMA, state)
+    assert extract_answer(_SCHEMA, state)["count"] == "not-a-number"
 
 
-def test_extract_answer_uncoercible_number_raises():
+def test_extract_answer_uncoercible_number_is_forwarded_raw():
+    # A non-numeric string cannot be lifted to ``number``; it is forwarded as
+    # submitted so the answer door rejects it against the schema.
     state = _state()
     state["ratio"][FIELD_ACTION_ID]["value"] = "abc"
-    with pytest.raises(FormSchemaError, match=r"ratio.*not a number"):
-        extract_answer(_SCHEMA, state)
+    assert extract_answer(_SCHEMA, state)["ratio"] == "abc"
 
 
 @pytest.mark.parametrize("literal", ["1e999", "nan"])
 def test_extract_answer_non_finite_number_is_forwarded_raw(literal):
-    # inf/nan pass jsonschema's type:number and pydantic would store null; the
-    # non-finite entry is declined so the raw string travels to the callback
-    # door, where schema validation rejects it — the recovery a non-numeric
-    # entry already takes.
+    # A non-finite float passes jsonschema's type:number and serializes to null;
+    # the string does not pass, so it is forwarded for the answer door to reject.
     state = _state()
     state["ratio"][FIELD_ACTION_ID]["value"] = literal
     assert extract_answer(_SCHEMA, state)["ratio"] == literal
 
 
-def test_extract_answer_unrecognized_boolean_raises():
+def test_extract_answer_unrecognized_boolean_is_forwarded_raw():
+    # A string that is neither "true" nor "false" cannot be lifted to ``boolean``;
+    # it is forwarded as submitted so the answer door rejects it against the schema.
     state = _state()
     state["subscribed"][FIELD_ACTION_ID]["selected_option"]["value"] = "maybe"
-    with pytest.raises(FormSchemaError, match=r"subscribed.*boolean value not recognized"):
-        extract_answer(_SCHEMA, state)
+    assert extract_answer(_SCHEMA, state)["subscribed"] == "maybe"
 
 
 def test_extract_answer_omits_absent_and_unknown_kind_fields():
@@ -564,6 +922,29 @@ def test_review_readback_shows_a_placeholder_when_nothing_is_entered():
     ]
     blocks = build_modal_blocks(schema, {}, None, pages)
     assert blocks[-1]["text"]["text"] == "No answers to review yet."
+
+
+def test_review_readback_empty_line_reads_the_caller_review_empty():
+    # The caller's ``wording.form.review_empty`` replaces the platform's empty-readback line.
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    pages = [
+        {"title": "Fill", "fields": ["name"], "display": []},
+        {"title": "Review", "fields": [], "kind": "review", "display": []},
+    ]
+    blocks = build_modal_blocks(schema, {}, None, pages, review_empty="Nothing filled in yet.")
+    assert blocks[-1]["text"]["text"] == "Nothing filled in yet."
+
+
+def test_build_modal_view_threads_review_empty_from_form_wording():
+    # The review line rides through build_modal_view's form_wording so the click-time open and
+    # every re-render draw the caller's line, not the default.
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    pages = [
+        {"title": "Fill", "fields": ["name"], "display": []},
+        {"title": "Review", "fields": [], "kind": "review", "display": []},
+    ]
+    view = build_modal_view("int", "Q", schema, {}, None, pages, form_wording={"review_empty": "Nothing yet."})
+    assert view["blocks"][-1]["text"]["text"] == "Nothing yet."
 
 
 def test_slotted_display_block_is_empty_until_a_value_fills_it():

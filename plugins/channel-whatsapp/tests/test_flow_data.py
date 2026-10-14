@@ -18,8 +18,27 @@ from tai42_kit.settings import reset_all_settings
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (registers the /flow-data route on the bound stub app)
 from tai42_channel_whatsapp.correlation import cache_reaction_form
+from tai42_channel_whatsapp.inbound.flow_data import _partial_values
 
 from .conftest import APP_SECRET, FakeRedis, _StubApp, build_request, compute_signature
+
+
+def test_partial_values_unwraps_a_single_pick_chips_string():
+    # A single-pick chips string's partial value arrives as a one-element list and is unwrapped to
+    # the string the react facet type-checks; an unfilled (empty-list) chips is omitted.
+    props = {"pick": {"type": "string", "enum": ["a", "b", "c"], "control": "chips"}}
+    assert _partial_values({"pick": ["b"], "tai42_event": "field_changed"}, props) == {"pick": "b"}
+    assert _partial_values({"pick": []}, props) == {}
+
+
+def test_partial_values_splits_a_merged_range_object_onto_the_two_date_keys():
+    props = {
+        "start": {"type": "string", "format": "date"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start"},
+    }
+    data = {"start": {"start-date": "2026-05-01", "end-date": "2026-05-04"}, "tai42_event": "submitted"}
+    assert _partial_values(data, props) == {"start": "2026-05-01", "end": "2026-05-04"}
+
 
 _FLOW_PATH = "/flow-data"
 _TOKEN = "int-react-1"
@@ -372,6 +391,58 @@ async def test_field_changed_values_update_sets_the_field_init(
     assert out["data"]["tier__ds"] == [{"id": "g", "title": "g"}]
 
 
+_CHIPS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pick": {"type": "string", "enum": ["a", "b", "c"], "control": "chips"},
+        "note": {"type": "string"},
+    },
+    "required": ["pick"],
+}
+
+
+async def test_page_advance_carries_a_single_pick_chips_val_as_a_one_element_list(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # A single-pick chips field's data carrier is ARRAY-typed (``max-selected-items: 1``), so its
+    # forwarded ``__val`` on a page advance must be a one-element LIST, not a scalar string — a scalar
+    # would mismatch the published ChipsSelector's array carrier and fail the advance.
+    pages = [
+        {"title": "First", "fields": ["pick"], "kind": "input", "display": []},
+        {"title": "Second", "fields": ["note"], "kind": "input", "display": []},
+    ]
+    await cache_reaction_form(_TOKEN, _CHIPS_SCHEMA, pages, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    stub_app.interactions.react_result = {}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "page_advanced", "tai42_page": "First", "pick": ["b"]},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    assert out["data"]["pick__val"] == ["b"]
+
+
+async def test_reaction_values_set_a_single_pick_chips_init_as_a_one_element_list(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # A reaction that SETS a single-pick chips field emits its ``__init`` as a one-element list too,
+    # so the ChipsSelector's array carrier is fed the shape it expects (not a scalar).
+    await cache_reaction_form(_TOKEN, _CHIPS_SCHEMA, None, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    stub_app.interactions.react_result = {"values": {"pick": "c"}}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "field_changed", "tai42_field": "note", "note": "hi"},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["pick__init"] == ["c"]
+
+
 async def test_page_advance_applies_reaction_options_and_defaults_unfilled_val(
     flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
 ):
@@ -435,3 +506,40 @@ async def test_reaction_error_message_falls_back_to_the_key_without_a_title(
     out = _decrypt_response(await flow_handler(request), aes_key, iv)
     # No title: the field renders under its key, and so does its error.
     assert out["data"]["error_message"] == "qty: must be at least 1"
+
+
+async def test_page_advance_forwards_a_merged_range_val_carrier(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # The merged range control on the first screen returns one object value under the START's key; the
+    # next-screen response forwards it as the START's ``__val`` carrier and emits no carrier for the
+    # merged-away END.
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+            "note": {"type": "string"},
+        },
+    }
+    pages = [
+        {"title": "Dates", "fields": ["start", "end"], "kind": "input", "display": []},
+        {"title": "Note", "fields": ["note"], "kind": "input", "display": []},
+    ]
+    await cache_reaction_form(_TOKEN, schema, pages, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    stub_app.interactions.react_result = {}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {
+            "tai42_event": "page_advanced",
+            "tai42_page": "Dates",
+            "start": {"start-date": "2026-05-01", "end-date": "2026-05-04"},
+        },
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    assert out["data"]["start__val"] == {"start-date": "2026-05-01", "end-date": "2026-05-04"}
+    assert "end__val" not in out["data"]

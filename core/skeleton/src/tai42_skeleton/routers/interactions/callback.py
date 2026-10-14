@@ -27,6 +27,7 @@ from tai42_contract.interactions import (
     InteractionResponse,
     InteractionState,
     QuestionFormat,
+    Wording,
 )
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
@@ -61,7 +62,14 @@ from tai42_skeleton.operations.interactions import (
 from tai42_skeleton.webhooks.verify import VERIFY_ERROR, WebhookVerifyFailure, verify_webhook
 
 from .form_render import _FormRenderError, _render_form_page
-from .pages import _BASE_HEADERS, _CONFIRM_PAGE, _DONE_PAGE, _FORM_HTML_HEADERS, _HTML_HEADERS, _REPLY_PAGE
+from .pages import (
+    _BASE_HEADERS,
+    _FORM_HTML_HEADERS,
+    _HTML_HEADERS,
+    _render_awaiting_page,
+    _render_confirm_page,
+    _render_done_page,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +419,15 @@ async def _callback_post(
     return await _claim_verbatim_external(request, r, store, settings, ticket, interaction_id, state, raw, post_only)
 
 
+def _page_wording(state: InteractionState) -> Wording | None:
+    # The parked ask's per-send ``wording`` catalogue off the stored ``format_payload``, parsed into
+    # the model once so each page draws the caller's heading/sentence/button. The record was
+    # validated at the ask door, so a stored value that fails to parse is the server-bug backstop —
+    # it raises here and the door answers a loud 500, as the form page's ``_FormRenderError`` does.
+    raw = (state.request.format_payload or {}).get("wording")
+    return Wording.model_validate(raw) if raw is not None else None
+
+
 async def _callback_get(request: Request, r: Any, store: InteractionStore) -> Response:
     ticket = request.path_params["ticket"]
     interaction_id = await store.resolve_ticket(r, ticket)
@@ -432,7 +449,7 @@ async def _callback_get(request: Request, r: Any, store: InteractionStore) -> Re
         # exported to a human, so no legitimate reader loses anything.
         return PlainTextResponse(_CALLBACK_GET_NOT_FOUND, status_code=404, headers=_BASE_HEADERS)
     if state.status == "answered":
-        return HTMLResponse(_DONE_PAGE, headers=_HTML_HEADERS)
+        return HTMLResponse(_render_done_page(_page_wording(state)), headers=_HTML_HEADERS)
     if state.request.answer_format is AnswerFormat.FORM:
         # A channel-delivered form needs a real answer surface: render its schema
         # server-side. An unrenderable schema on a form record is a server bug —
@@ -445,12 +462,13 @@ async def _callback_get(request: Request, r: Any, store: InteractionStore) -> Re
         return HTMLResponse(page, headers=_FORM_HTML_HEADERS)
     if state.request.answer_format in CALLBACK_LINK_FORMATS:
         # Only these formats map the confirm form's empty-body POST to an
-        # answer (confirm -> True, external -> the query-param payload).
-        return HTMLResponse(_CONFIRM_PAGE, headers=_HTML_HEADERS)
+        # answer (confirm -> True, external -> the query-param payload). The page reads the caller's
+        # ``wording.answer_page.confirm`` copy and ``wording.answer.confirm`` button when set.
+        return HTMLResponse(_render_confirm_page(_page_wording(state)), headers=_HTML_HEADERS)
     # A ticketed text/select question needs a VALUE answer, which the channel
     # plugin forwards as a POST body — never a bare confirm tap, so no page
     # with an action that would be rejected.
-    return HTMLResponse(_REPLY_PAGE, headers=_HTML_HEADERS)
+    return HTMLResponse(_render_awaiting_page(_page_wording(state)), headers=_HTML_HEADERS)
 
 
 def _parse_react_body(raw: bytes) -> Response | tuple[Any, Any]:

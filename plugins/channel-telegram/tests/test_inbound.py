@@ -6,13 +6,19 @@ import importlib
 import json
 import sys
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from pydantic import SecretStr
-from tai42_contract.channels import AnswerForwardError, ChannelDeliveryError, InboundAnswerOutcome
+from tai42_contract.channels import (
+    AnswerForwardError,
+    ChannelDelivery,
+    ChannelDeliveryError,
+    InboundAnswerOutcome,
+)
 from tai42_contract.conversations import BlankInboundTextError, InboundRejectionReason
 from tai42_contract.interactions import (
     IngestedMedia,
@@ -433,6 +439,39 @@ async def test_ladder_retry_kept_outcome_acks_rejected(http_recorder, fake_redis
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "rejected"}}
     assert len(channels.inbound_calls) == 1
+
+
+async def test_ladder_reads_the_delivered_on_mismatch_and_wording_off_the_store(http_recorder, fake_redis, channels):
+    # End-to-end within the plugin: a delivered ask parks a correlation record carrying its
+    # ``on_mismatch`` policy and per-send ``wording``, and an off-format reply hands THAT store
+    # to the shared ladder — so the ladder draws the caller's refusal sentence (retry) or
+    # bridges the reply (bridge) off the record, never the built-in fallback.
+    from tai42_contract.interactions.models import AnswerMismatchPolicy, AnswerWording, Wording
+
+    from tai42_channel_telegram.channel import TelegramChannel
+
+    wording = Wording(answer=AnswerWording(rejected="Por favor responde sí o no. {reason}"))
+    await TelegramChannel().deliver(
+        ChannelDelivery(
+            interaction_id="int-1",
+            question="Yes or no?",
+            answer_format="text",
+            wording=wording,
+            on_mismatch=AnswerMismatchPolicy.BRIDGE,
+            callback_url=_CALLBACK,
+            timeout_at=datetime.now(UTC) + timedelta(seconds=600),
+        )
+    )
+
+    channels.inbound_outcome = InboundAnswerOutcome.BRIDGED_KEPT
+    response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert len(channels.inbound_calls) == 1
+    call = channels.inbound_calls[0]
+    entry = await call.store.get_correlation(call.correlation_key)
+    assert entry is not None
+    assert entry.on_mismatch is AnswerMismatchPolicy.BRIDGE
+    assert entry.wording == wording
 
 
 # --- inline-keyboard callback taps (select / suggested-reply / notify options) ---

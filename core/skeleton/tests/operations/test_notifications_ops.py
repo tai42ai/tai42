@@ -37,6 +37,7 @@ from tai42_contract.interactions.models import (
     LocationElement,
     MediaItem,
     MediaKind,
+    Wording,
 )
 from tai42_contract.manifest import ApiToolsConfig
 
@@ -148,6 +149,7 @@ async def test_notify_user_forwards_arguments_and_confirms(monkeypatch: pytest.M
                 "data": None,
                 "pages": None,
                 "form_tag": None,
+                "wording": None,
             },
         )
     ]
@@ -181,6 +183,7 @@ async def test_notify_user_defaults_forwarded_and_maps_valueerror(monkeypatch: p
                 "data": None,
                 "pages": None,
                 "form_tag": None,
+                "wording": None,
             },
         )
     ]
@@ -289,6 +292,7 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
                 "data": None,
                 "pages": None,
                 "form_tag": None,
+                "wording": None,
             },
         ),
         (
@@ -308,6 +312,7 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
                 "data": None,
                 "pages": None,
                 "form_tag": None,
+                "wording": None,
             },
         ),
     ]
@@ -340,6 +345,7 @@ async def test_notify_user_forwards_schema_and_form_tag(monkeypatch: pytest.Monk
                 "data": None,
                 "pages": None,
                 "form_tag": "ref-42",
+                "wording": None,
             },
         )
     ]
@@ -441,6 +447,7 @@ async def test_notify_user_forwards_options(monkeypatch: pytest.MonkeyPatch) -> 
                 "data": None,
                 "pages": None,
                 "form_tag": None,
+                "wording": None,
             },
         )
     ]
@@ -473,6 +480,7 @@ async def test_notify_user_forwards_schema(monkeypatch: pytest.MonkeyPatch) -> N
                 "data": None,
                 "pages": None,
                 "form_tag": None,
+                "wording": None,
             },
         )
     ]
@@ -509,6 +517,7 @@ async def test_notify_user_forwards_full_vocabulary(monkeypatch: pytest.MonkeyPa
                 "data": None,
                 "pages": None,
                 "form_tag": None,
+                "wording": None,
             },
         )
     ]
@@ -543,9 +552,24 @@ async def test_notify_user_forwards_form_data_and_pages(monkeypatch: pytest.Monk
                 "data": data,
                 "pages": pages,
                 "form_tag": None,
+                "wording": None,
             },
         )
     ]
+
+
+async def test_notify_user_forwards_wording(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A form send's platform-drawn chrome rides the wording catalogue and is forwarded verbatim to
+    # the channels helper alongside the other fields.
+    helper = _RecordingHelper()
+    monkeypatch.setattr(notifications_ops, "_notify_user", helper)
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    wording = Wording.model_validate({"form": {"open": "Fill in", "cancel": "Dismiss", "title": "Your details"}})
+
+    await notifications_ops.notify_user("fill this in", channel="web", schema=schema, wording=wording)
+
+    call = helper.calls[0][1]
+    assert call["wording"] == wording
 
 
 def test_notify_user_projected_tool_carries_form_data_and_pages() -> None:

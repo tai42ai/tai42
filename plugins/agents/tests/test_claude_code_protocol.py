@@ -52,6 +52,7 @@ def test_parse_ask_without_form_fields_defaults_to_none() -> None:
     assert ask.pages is None
     assert ask.reaction_tool is None
     assert ask.reactions is None
+    assert ask.wording is None
 
 
 def test_parse_ask_carries_the_form_fields() -> None:
@@ -79,6 +80,29 @@ def test_parse_ask_carries_the_form_fields() -> None:
     assert ask.pages == [{"title": "p1", "fields": ["color"]}]
     assert ask.reaction_tool == "recolor"
     assert ask.reactions == {"field_changed": ["color"], "submitted": True}
+
+
+def test_parse_ask_carries_the_wording_catalogue() -> None:
+    # The per-send wording catalogue rides the ask frame by name, so the adapter forwards it to
+    # ``tai42_app.interactions.ask``.
+    wording = {
+        "form": {"open": "Fill in", "back": "Back", "title": "Your details"},
+        "answer": {"open": "Answer", "confirm": "Yes"},
+    }
+    ask = parse_up_frame(
+        json.dumps(
+            {
+                "v": 1,
+                "type": "ask",
+                "ask_id": "a",
+                "question": "respond",
+                "answer_format": "confirm",
+                "wording": wording,
+            }
+        )
+    )
+    assert isinstance(ask, AskFrame)
+    assert ask.wording == wording
 
 
 def test_parse_tool_call() -> None:

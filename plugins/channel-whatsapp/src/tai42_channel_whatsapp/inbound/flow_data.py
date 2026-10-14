@@ -52,7 +52,7 @@ from tai42_channel_whatsapp.flows import (
     _RESERVED_REACTION_KEYS,
     FORM_ENTRY_SCREEN,
     SUCCESS_SCREEN,
-    _init_value,
+    _form_range_merges,
     _resolve_pages,
     _screen_id,
     build_flow_data,
@@ -60,6 +60,8 @@ from tai42_channel_whatsapp.flows import (
     payload_labels,
     slot_datanames,
 )
+from tai42_channel_whatsapp.flows_components import _chips_single_pick, split_range_values
+from tai42_channel_whatsapp.flows_send_data import _field_init_value, _init_value
 from tai42_channel_whatsapp.inbound.auth import _SIGNATURE_HEADER, SignatureRejectedError, _validate_signature
 from tai42_channel_whatsapp.inbound.forms import _coerce_value
 from tai42_channel_whatsapp.settings import whatsapp_settings
@@ -222,10 +224,14 @@ def _partial_values(data: dict[str, Any], properties: dict[str, Any]) -> dict[st
         prop = properties.get(key)
         coerced = _coerce_value(raw, prop)
         ptype = prop.get("type") if isinstance(prop, dict) else None
-        if ptype != "string" and coerced in ("", [], None):
+        # A single-pick chips string's empty value is a ``[]`` (not ``""``), so treat it like the
+        # other non-string unfilled defaults and omit it from the partial subset.
+        unset_when_empty = ptype != "string" or (isinstance(prop, dict) and _chips_single_pick(prop))
+        if unset_when_empty and coerced in ("", [], None):
             continue
         partial[key] = coerced
-    return partial
+    # A merged range control's object value under the START key splits back onto the two date keys.
+    return split_range_values(properties, partial)
 
 
 def _error_response(screen: str) -> dict[str, Any]:
@@ -280,7 +286,10 @@ def _update_data(
     for name, value in (update.get("values") or {}).items():
         prop = properties.get(name)
         prop = prop if isinstance(prop, dict) else {}
-        out[f"{names[name]}__init"] = _init_value(prop.get("type"), value)
+        shaped = _init_value(prop.get("type"), value)
+        # A single-pick chips string's data carrier is array-typed (``max-selected-items: 1``), so its
+        # ``__init`` is the one-element list the ChipsSelector expects — matching the initial send.
+        out[f"{names[name]}__init"] = [shaped] if _chips_single_pick(prop) else shaped
     for name, option_list in (update.get("options") or {}).items():
         out[f"{names[name]}__ds"] = [
             {"id": option["value"], "title": option.get("label") or option["value"]} for option in option_list
@@ -336,11 +345,14 @@ def _advance_screen(
     """
     properties = schema.get("properties")
     properties = properties if isinstance(properties, dict) else {}
-    _resolved, fields_by_screen = _resolve_pages(properties, pages)
+    resolved, fields_by_screen = _resolve_pages(properties, pages)
     current = next((index for index in range(len(fields_by_screen)) if _screen_id(index) == screen), None)
     if current is None or current + 1 >= len(fields_by_screen):
         return None
     next_screen = _screen_id(current + 1)
+    range_merges = _form_range_merges(properties, resolved, fields_by_screen)
+    merged_ends = set(range_merges)
+    merged_starts = {start: end for end, start in range_merges.items()}
     merged_values = {**values, **partial, **(update.get("values") or {})}
     merged_options: dict[str, list[dict[str, Any]]] = {**options}
     for name, option_list in (update.get("options") or {}).items():
@@ -348,13 +360,30 @@ def _advance_screen(
             {"value": option["value"], **({"label": option["label"]} if option.get("label") else {})}
             for option in option_list
         ]
-    data_out = build_flow_data(schema, merged_values, merged_options)
+    data_out = build_flow_data(schema, merged_values, merged_options, pages)
     collected = [field for group in fields_by_screen[: current + 1] for field in group]
     for name in collected:
-        ptype = properties.get(name, {}).get("type") if isinstance(properties.get(name), dict) else None
-        if name in merged_values:
-            data_out[f"{names[name]}__val"] = _init_value(ptype, merged_values[name])
-        else:
-            data_out[f"{names[name]}__val"] = [] if ptype == "array" else False if ptype == "boolean" else ""
+        if name in merged_ends:
+            # A merged END carries no value of its own — its START holds the pair's object ``__val``.
+            continue
+        if name in merged_starts:
+            data_out[f"{names[name]}__val"] = _range_val_carrier(name, merged_starts[name], merged_values)
+            continue
+        prop = properties.get(name)
+        prop = prop if isinstance(prop, dict) else {}
+        # The ``__val`` carrier must carry the field's control shape exactly as its ``__init`` does
+        # (so a single-pick chips value is the one-element list its array carrier expects, never a
+        # scalar). ``_field_init_value`` is the one shaper both carriers share, so they never drift.
+        data_out[f"{names[name]}__val"] = _field_init_value(name, prop, merged_values)
     data_out.update(_update_data(update, properties, names, labels, slots))
     return {"screen": next_screen, "data": data_out}
+
+
+def _range_val_carrier(start: str, end: str, merged_values: dict[str, Any]) -> dict[str, str]:
+    """The forwarded ``__val`` object for a merged range START — both ends' collected date strings."""
+
+    def _member(name: str) -> str:
+        raw = merged_values.get(name)
+        return raw if isinstance(raw, str) else ""
+
+    return {"start-date": _member(start), "end-date": _member(end)}

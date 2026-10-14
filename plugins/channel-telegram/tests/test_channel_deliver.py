@@ -19,7 +19,16 @@ from tai42_contract.channels import (
     Option,
     ReplyOption,
 )
-from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_contract.interactions.models import (
+    AnswerMismatchPolicy,
+    AnswerWording,
+    ChoiceWording,
+    FormWording,
+    LineWording,
+    MediaItem,
+    MediaKind,
+    Wording,
+)
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_telegram.channel import TelegramChannel
@@ -45,7 +54,10 @@ def _delivery(
     data: Any = None,
     pages: Any = None,
     reactions: Any = None,
+    wording: Wording | None = None,
+    on_mismatch: AnswerMismatchPolicy | None = None,
 ) -> ChannelDelivery:
+    extra: dict[str, Any] = {} if on_mismatch is None else {"on_mismatch": on_mismatch}
     return ChannelDelivery(
         interaction_id="int-1",
         question="Which one?",
@@ -55,9 +67,11 @@ def _delivery(
         data=data,
         pages=pages,
         reactions=reactions,
+        wording=wording,
         callback_url=_CALLBACK,
         timeout_at=datetime.now(UTC) + timedelta(seconds=timeout_in),
         recipient=recipient,
+        **extra,
     )
 
 
@@ -492,3 +506,315 @@ async def test_no_recipient_and_no_default_raises_naming_var(
     with pytest.raises(ChannelDeliveryError, match="set CHANNEL_TELEGRAM_DEFAULT_RECIPIENT"):
         await TelegramChannel().deliver(_delivery())
     assert http_recorder.requests == []
+
+
+# --- The caller's wording on the platform-drawn open button and the reply input ---
+
+
+async def test_form_web_app_button_reads_wording_form_open(http_recorder, fake_redis):
+    # The form's open button is the web_app inline button; its text is the caller's
+    # ``wording.form.open`` when set, in the end-user's language.
+    await TelegramChannel().deliver(
+        _delivery(
+            answer_format="form",
+            schema=_FORM_SCHEMA,
+            wording=Wording(form=FormWording(open="Rellenar formulario")),
+        )
+    )
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {
+        "inline_keyboard": [[{"text": "Rellenar formulario", "web_app": {"url": _CALLBACK}}]]
+    }
+
+
+async def test_form_web_app_button_defaults_when_wording_absent(http_recorder, fake_redis):
+    # No ``wording`` -> the platform's own word.
+    await TelegramChannel().deliver(_delivery(answer_format="form", schema=_FORM_SCHEMA))
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {"inline_keyboard": [[{"text": "Fill form", "web_app": {"url": _CALLBACK}}]]}
+
+
+async def test_form_web_app_button_defaults_when_form_chapter_sets_only_cancel(http_recorder, fake_redis):
+    # ``wording.form`` present but with no ``open`` (only ``cancel``, which Telegram's webview
+    # chrome draws, not this channel) -> the open button still shows the platform's word.
+    await TelegramChannel().deliver(
+        _delivery(answer_format="form", schema=_FORM_SCHEMA, wording=Wording(form=FormWording(cancel="Cerrar")))
+    )
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {"inline_keyboard": [[{"text": "Fill form", "web_app": {"url": _CALLBACK}}]]}
+    # The cancel/back labels name Telegram's own webview chrome — nothing this channel draws.
+    assert "Cerrar" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("answer_format", ["confirm", "external"])
+async def test_tier1_url_button_reads_wording_answer_open(http_recorder, fake_redis, answer_format: str):
+    # The Tier-1 (confirm/external) open button is the url inline button; its text is the
+    # caller's ``wording.answer.open`` when set.
+    await TelegramChannel().deliver(
+        _delivery(answer_format=answer_format, wording=Wording(answer=AnswerWording(open="Responder ahora")))
+    )
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {"inline_keyboard": [[{"text": "Responder ahora", "url": _CALLBACK}]]}
+
+
+@pytest.mark.parametrize("answer_format", ["confirm", "external"])
+async def test_tier1_url_button_defaults_when_wording_absent(http_recorder, fake_redis, answer_format: str):
+    await TelegramChannel().deliver(_delivery(answer_format=answer_format))
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {"inline_keyboard": [[{"text": "Answer", "url": _CALLBACK}]]}
+
+
+@pytest.mark.parametrize("answer_format", ["confirm", "external"])
+async def test_tier1_confirm_label_is_not_drawn_by_telegram(http_recorder, fake_redis, answer_format: str):
+    # ``wording.answer.confirm`` labels the affirmative button on the callback confirm PAGE,
+    # which Telegram does not render — it only draws the open (url) button. The confirm word
+    # must never leak onto the Telegram message.
+    await TelegramChannel().deliver(
+        _delivery(
+            answer_format=answer_format,
+            wording=Wording(answer=AnswerWording(open="Abrir", confirm="Sí, confirmo")),
+        )
+    )
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {"inline_keyboard": [[{"text": "Abrir", "url": _CALLBACK}]]}
+    assert "Sí, confirmo" not in json.dumps(body)
+
+
+async def test_force_reply_placeholder_reads_reply_hint(http_recorder, fake_redis):
+    # A text ask with no options draws a force_reply whose placeholder is the caller's
+    # ``wording.answer.reply_hint`` when set.
+    await TelegramChannel().deliver(
+        _delivery(answer_format="text", wording=Wording(answer=AnswerWording(reply_hint="Escribe tu respuesta")))
+    )
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {"force_reply": True, "input_field_placeholder": "Escribe tu respuesta"}
+
+
+async def test_force_reply_placeholder_defaults_when_reply_hint_absent(http_recorder, fake_redis):
+    await TelegramChannel().deliver(_delivery(answer_format="text"))
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {"force_reply": True, "input_field_placeholder": "Reply to answer"}
+
+
+async def test_reply_hint_within_64_chars_accepted(http_recorder, fake_redis):
+    hint = "x" * 64
+    await TelegramChannel().deliver(
+        _delivery(answer_format="text", wording=Wording(answer=AnswerWording(reply_hint=hint)))
+    )
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {"force_reply": True, "input_field_placeholder": hint}
+
+
+async def test_reply_hint_over_64_chars_refused_before_any_send(http_recorder, fake_redis):
+    # Telegram caps ``force_reply.input_field_placeholder`` at 1-64 characters; a longer hint
+    # is a permanent input refusal raised BEFORE any send, so nothing lands and no correlation
+    # is stored.
+    from tai42_contract.channels import ChannelInputError
+
+    with pytest.raises(ChannelInputError, match="1-64 characters"):
+        await TelegramChannel().deliver(
+            _delivery(answer_format="text", wording=Wording(answer=AnswerWording(reply_hint="y" * 65)))
+        )
+    assert http_recorder.requests == []
+    assert fake_redis.data == {}
+
+
+async def test_reply_hint_over_cap_with_media_sends_nothing(http_recorder, fake_redis):
+    # The hint guard runs before the file-media prelude: an over-cap hint on an ask that also
+    # carries media lands neither the media nor the message.
+    from tai42_contract.channels import ChannelInputError
+
+    delivery = ChannelDelivery(
+        interaction_id="int-1",
+        question="Which one?",
+        answer_format="text",
+        media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/a.png", caption=None)],
+        wording=Wording(answer=AnswerWording(reply_hint="z" * 65)),
+        callback_url=_CALLBACK,
+        timeout_at=datetime.now(UTC) + timedelta(seconds=600),
+    )
+    with pytest.raises(ChannelInputError, match="1-64 characters"):
+        await TelegramChannel().deliver(delivery)
+    assert http_recorder.requests == []
+    assert fake_redis.data == {}
+
+
+async def test_reply_hint_not_drawn_when_options_present(http_recorder, fake_redis):
+    # A text ask carrying suggested replies draws the inline keyboard, which REPLACES the
+    # reply prompt — so ``reply_hint`` names no control here and is not drawn. An over-cap
+    # hint is accepted silently (there is no placeholder to overflow) and the keyboard stands.
+    await TelegramChannel().deliver(
+        _delivery(
+            answer_format="text",
+            options=["yes please", "no thanks"],
+            wording=Wording(answer=AnswerWording(reply_hint="w" * 65)),
+        )
+    )
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "yes please", "callback_data": "0"}],
+            [{"text": "no thanks", "callback_data": "1"}],
+        ]
+    }
+    assert "force_reply" not in json.dumps(body)
+    assert "input_field_placeholder" not in json.dumps(body)
+
+
+async def test_choice_label_draws_nothing_on_a_select_ask(http_recorder, fake_redis):
+    # Telegram draws a select ask's choices as an inline keyboard (no list-opening button),
+    # so ``wording.choice.label`` names no control here and is drawn nowhere.
+    await TelegramChannel().deliver(
+        _delivery(
+            answer_format="select",
+            options=["red", "blue"],
+            wording=Wording(choice=ChoiceWording(label="Elegir una opción")),
+        )
+    )
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "red", "callback_data": "0"}],
+            [{"text": "blue", "callback_data": "1"}],
+        ]
+    }
+    assert "Elegir una opción" not in json.dumps(body)
+
+
+async def test_form_title_draws_nothing_on_telegram(http_recorder, fake_redis):
+    # The form's heading is the callback PAGE's, not Telegram's; ``wording.form.title`` is drawn
+    # nowhere on the chat message (only the web_app open button).
+    await TelegramChannel().deliver(
+        _delivery(answer_format="form", schema=_FORM_SCHEMA, wording=Wording(form=FormWording(title="Mi formulario")))
+    )
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {"inline_keyboard": [[{"text": "Fill form", "web_app": {"url": _CALLBACK}}]]}
+    assert "Mi formulario" not in json.dumps(body)
+
+
+# --- The deadline line (wording.lines.deadline), drawn on EVERY format ---
+
+
+@pytest.mark.parametrize(
+    ("answer_format", "options", "schema"),
+    [
+        ("text", None, None),
+        ("select", ["red", "blue"], None),
+        ("confirm", None, None),
+        ("external", None, None),
+        ("form", None, _FORM_SCHEMA),
+    ],
+)
+async def test_deadline_line_reads_wording_lines_deadline(
+    http_recorder, fake_redis, answer_format: str, options, schema
+):
+    # Every question's text ends with a deadline line; its sentence is the caller's
+    # ``wording.lines.deadline`` when set, with the ``{deadline}`` token filled by this
+    # channel's own formatted instant (the FORMAT stays the channel's). Drawn on EVERY
+    # format — a form and a Tier-1 ask included.
+    await TelegramChannel().deliver(
+        _delivery(
+            answer_format=answer_format,
+            options=options,
+            schema=schema,
+            wording=Wording(lines=LineWording(deadline="Responde antes del {deadline}.")),
+        )
+    )
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert "Responde antes del " in body["text"]
+    # The platform default is replaced, and the token is substituted (never left literal).
+    assert "(Answer before " not in body["text"]
+    assert "{deadline}" not in body["text"]
+
+
+async def test_deadline_line_defaults_when_wording_absent(http_recorder, fake_redis):
+    # No ``wording.lines.deadline`` -> the platform's own deadline line, token substituted.
+    await TelegramChannel().deliver(_delivery(answer_format="text"))
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert "(Answer before " in body["text"]
+    assert "{deadline}" not in body["text"]
+
+
+async def test_lines_answer_link_draws_nothing_on_telegram(http_recorder, fake_redis):
+    # Telegram draws a url button (not an answer-link sentence) for a Tier-1 ask, so
+    # ``wording.lines.answer_link`` names no control here: the message text is unchanged by it
+    # (the url rides the button, not the body).
+    await TelegramChannel().deliver(
+        _delivery(answer_format="confirm", wording=Wording(lines=LineWording(answer_link="Abre aquí: {url}")))
+    )
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert "Abre aquí" not in body["text"]
+    assert _CALLBACK not in body["text"]
+
+
+async def test_lines_reply_and_options_draw_nothing_on_a_select_ask(http_recorder, fake_redis):
+    # A select ask draws an inline keyboard, not a reply instruction or an options sentence,
+    # so ``wording.lines.reply`` / ``options`` name no control here: the message text is
+    # unchanged by them (only the default deadline line is drawn).
+    await TelegramChannel().deliver(
+        _delivery(
+            answer_format="select",
+            options=["red", "blue"],
+            wording=Wording(lines=LineWording(reply="Responde en este hilo.", options="Opciones: {options}")),
+        )
+    )
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["text"].startswith("Which one?")
+    assert "Responde en este hilo." not in body["text"]
+    assert "Opciones:" not in body["text"]
+    assert "{options}" not in body["text"]
+
+
+# --- The parked correlation carries the ask's digression policy and wording ---
+
+
+@pytest.mark.parametrize(
+    ("answer_format", "options"),
+    [("text", None), ("select", ["red", "blue"])],
+)
+async def test_stored_correlation_carries_on_mismatch_and_wording_from_delivery(
+    http_recorder, fake_redis, answer_format: str, options
+):
+    # The record the shared answer ladder reads must carry the ask's ``on_mismatch`` policy
+    # and its per-send ``wording``, copied from the delivery and round-tripped through the
+    # store's JSON. Absent them the ladder would always fall back to the built-in sentence and
+    # the safe retry policy — the bug this seam fixes.
+    wording = Wording(answer=AnswerWording(rejected="Por favor responde sí o no. {reason}"))
+    await TelegramChannel().deliver(
+        _delivery(
+            answer_format=answer_format,
+            options=options,
+            wording=wording,
+            on_mismatch=AnswerMismatchPolicy.BRIDGE,
+        )
+    )
+
+    entry = _stored_correlation(fake_redis)
+    assert entry.on_mismatch is AnswerMismatchPolicy.BRIDGE
+    assert entry.wording == wording
+
+
+async def test_stored_correlation_defaults_when_delivery_sets_neither(http_recorder, fake_redis):
+    # A delivery that sets neither -> the record carries the safe retry default and no wording,
+    # so the ladder draws the built-in sentence.
+    await TelegramChannel().deliver(_delivery(answer_format="text"))
+
+    entry = _stored_correlation(fake_redis)
+    assert entry.on_mismatch is AnswerMismatchPolicy.RETRY
+    assert entry.wording is None

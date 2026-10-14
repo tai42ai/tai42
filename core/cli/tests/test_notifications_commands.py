@@ -220,7 +220,7 @@ def test_notifications_notify_data_and_pages_ride_validated_body(monkeypatch: py
             "channel": "whatsapp",
             "schema": {"type": "object", "properties": {"name": {"type": "string"}}},
             "data": {"values": {"name": "Ada"}, "options": {}},
-            "pages": [{"title": "You", "fields": ["name"], "display": [], "kind": "input"}],
+            "pages": [{"title": "You", "fields": ["name"], "display": [], "kind": "input", "button_label": None}],
         }
         return data_response("notification sent via 'whatsapp'")
 
@@ -242,6 +242,88 @@ def test_notifications_notify_data_and_pages_ride_validated_body(monkeypatch: py
         ],
     )
     assert result.exit_code == 0, result.output
+
+
+def test_notifications_notify_form_wording_rides_validated_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --wording (a Wording) over --schema is validated and posted as its canonical dump; an
+    # unknown key is refused (see the next test), the server owns the rest.
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["message"] == "fill this in"
+        assert body["channel"] == "whatsapp"
+        assert body["schema"] == {"type": "object", "properties": {"name": {"type": "string"}}}
+        assert body["wording"]["form"]["open"] == "Fill in"
+        assert body["wording"]["form"]["back"] == "Go back"
+        assert body["wording"]["form"]["title"] == "Your details"
+        return data_response("notification sent via 'whatsapp'")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "fill this in",
+            "--channel",
+            "whatsapp",
+            "--schema",
+            '{"type": "object", "properties": {"name": {"type": "string"}}}',
+            "--wording",
+            '{"form": {"open": "Fill in", "back": "Go back", "title": "Your details"}}',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_notifications_notify_choice_wording_rides_validated_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --wording's choice chapter rides the body beside the options it labels.
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["message"] == "pick one"
+        assert body["wording"]["choice"]["label"] == "Choose one"
+        return data_response("notification sent via 'telegram'")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "pick one",
+            "--channel",
+            "telegram",
+            "--options",
+            '[{"kind": "reply", "text": "A"}]',
+            "--wording",
+            '{"choice": {"label": "Choose one"}}',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_notifications_notify_unknown_wording_key_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A --wording JSON object carrying a key the Wording model does not declare is refused loudly
+    # before any request leaves — the CLI guards its own seam against a silently dropped key.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request must be made for an invalid --wording")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "hi",
+            "--channel",
+            "whatsapp",
+            "--schema",
+            '{"type": "object"}',
+            "--wording",
+            '{"form": {"nope": "x"}}',
+        ],
+    )
+    assert result.exit_code != 0
+    assert "wording" in result.output.lower()
 
 
 def test_notifications_notify_invalid_data_shape_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:

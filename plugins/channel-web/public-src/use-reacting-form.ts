@@ -80,7 +80,13 @@ interface FormState {
 }
 
 /** The step a form falls back to only to satisfy the index type; it never renders. */
-const EMPTY_PAGE: FormPage = { title: '', fields: [], display: [], kind: 'input' };
+const EMPTY_PAGE: FormPage = {
+  title: '',
+  fields: [],
+  display: [],
+  kind: 'input',
+  buttonLabel: null,
+};
 
 /** The value, validation/reaction errors, per-send choices, and display slots of one open
  * form, plus `applyUpdate` which folds a reaction's returned update into all of them. */

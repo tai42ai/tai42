@@ -16,9 +16,22 @@ import type { ReactElement, RefObject } from 'react';
 
 import { DisplayBlocks, ReviewReadback } from '@/form-display';
 import { isPlainObject, singleFieldSchema } from '@/schema-form-helpers';
-import type { FormOptionData, FormPage } from '@/transcript-model';
+import type { FieldWording, FormOptionData, FormPage } from '@/transcript-model';
 import type { ReactingFormInput } from '@/use-reacting-form';
 import { useReactingForm } from '@/use-reacting-form';
+
+/** The parsed per-field wording as the SDK's `fieldWording` prop — a map of property
+ * name to `{choiceLabel}` carrying the caller's word, omitting the unset ones so the
+ * SDK's `enum` select draws its own default placeholder. */
+function toSdkFieldWording(
+  fields: Readonly<Record<string, FieldWording>>,
+): Readonly<Record<string, { choiceLabel?: string }>> {
+  const out: Record<string, { choiceLabel?: string }> = {};
+  for (const [name, field] of Object.entries(fields)) {
+    if (field.choiceLabel !== null) out[name] = { choiceLabel: field.choiceLabel };
+  }
+  return out;
+}
 
 /** A LOUD inline notice for a structurally-malformed schema: a visible `alert`
  * rather than an empty or silently-dropped control. */
@@ -38,6 +51,7 @@ export function MalformedNotice({ message }: { readonly message: string }): Reac
 function OptionSelect({
   id,
   label,
+  placeholder,
   options,
   value,
   error,
@@ -45,6 +59,7 @@ function OptionSelect({
 }: {
   readonly id: string;
   readonly label: string;
+  readonly placeholder: string;
   readonly options: readonly FormOptionData[];
   readonly value: unknown;
   readonly error: string | undefined;
@@ -63,7 +78,7 @@ function OptionSelect({
         onChange={(event) => onChange(event.target.value)}
       >
         <option value="" disabled>
-          Choose an option
+          {placeholder}
         </option>
         {options.map((option) => (
           <option key={option.value} value={option.value}>
@@ -91,6 +106,8 @@ function FormField({
   value,
   errors,
   idPrefix,
+  fieldWording,
+  fieldPlaceholder,
   onChange,
 }: {
   readonly field: string;
@@ -99,6 +116,8 @@ function FormField({
   readonly value: unknown;
   readonly errors: SchemaFormErrors;
   readonly idPrefix: string;
+  readonly fieldWording: Readonly<Record<string, FieldWording>>;
+  readonly fieldPlaceholder: string;
   readonly onChange: (value: unknown) => void;
 }): ReactElement | null {
   const prop = isPlainObject(schema.properties) ? schema.properties[field] : undefined;
@@ -112,6 +131,7 @@ function FormField({
       <OptionSelect
         id={`${idPrefix}-${field}`}
         label={label}
+        placeholder={fieldWording[field]?.choiceLabel ?? fieldPlaceholder}
         options={choices}
         value={isPlainObject(value) ? value[field] : undefined}
         error={errors[field]}
@@ -131,12 +151,16 @@ function FormField({
       onChange={onChange}
       errors={errors}
       idPrefix={`${idPrefix}-${field}`}
+      fieldWording={toSdkFieldWording(fieldWording)}
     />
   );
 }
 
 /** The step controls: Back once off the first page, Next until the last, and the
- * terminal Submit/Answer button on the last (or only) page. */
+ * terminal Submit/Answer button on the last (or only) page. The current page's
+ * `buttonLabel` overrides the primary button's text when the sender set one; absent, the
+ * primary button keeps its generic word ('Next' off the last step, the terminal
+ * Submit/Answer copy on it). */
 function FormNav({
   stepped,
   pageIndex,
@@ -145,6 +169,8 @@ function FormNav({
   sendingLabel,
   submitLabel,
   steppedSubmitLabel,
+  backLabel,
+  buttonLabel,
   onBack,
   onNext,
   onSubmit,
@@ -156,24 +182,27 @@ function FormNav({
   readonly sendingLabel: string;
   readonly submitLabel: string;
   readonly steppedSubmitLabel: string;
+  readonly backLabel: string;
+  readonly buttonLabel: string | null;
   readonly onBack: () => void;
   readonly onNext: () => void;
   readonly onSubmit: () => void;
 }): ReactElement {
+  const terminalLabel = stepped ? steppedSubmitLabel : submitLabel;
   return (
     <div className="tcw-form-nav">
       {stepped && pageIndex > 0 ? (
         <Button type="button" variant="secondary" disabled={sending} onClick={onBack}>
-          Back
+          {backLabel}
         </Button>
       ) : null}
       {stepped && !isLast ? (
         <Button type="button" variant="primary" disabled={sending} onClick={onNext}>
-          Next
+          {buttonLabel ?? 'Next'}
         </Button>
       ) : (
         <Button type="button" variant="primary" disabled={sending} onClick={onSubmit}>
-          {sending ? <Spinner label={sendingLabel} /> : stepped ? steppedSubmitLabel : submitLabel}
+          {sending ? <Spinner label={sendingLabel} /> : (buttonLabel ?? terminalLabel)}
         </Button>
       )}
     </div>
@@ -200,6 +229,9 @@ function FormSurface({
   submitLabel,
   steppedSubmitLabel,
   sendingLabel,
+  backLabel,
+  fieldWording,
+  fieldPlaceholder,
   pageRef,
   headingRef,
   onChange,
@@ -223,6 +255,9 @@ function FormSurface({
   readonly submitLabel: string;
   readonly steppedSubmitLabel: string;
   readonly sendingLabel: string;
+  readonly backLabel: string;
+  readonly fieldWording: Readonly<Record<string, FieldWording>>;
+  readonly fieldPlaceholder: string;
   readonly pageRef: RefObject<HTMLDivElement | null>;
   readonly headingRef: RefObject<HTMLParagraphElement | null>;
   readonly onChange: (value: unknown) => void;
@@ -257,6 +292,8 @@ function FormSurface({
               value={value}
               errors={errors}
               idPrefix={idPrefix}
+              fieldWording={fieldWording}
+              fieldPlaceholder={fieldPlaceholder}
               onChange={onChange}
             />
           ))
@@ -270,6 +307,8 @@ function FormSurface({
         sendingLabel={sendingLabel}
         submitLabel={submitLabel}
         steppedSubmitLabel={steppedSubmitLabel}
+        backLabel={backLabel}
+        buttonLabel={page.buttonLabel}
         onBack={onBack}
         onNext={onNext}
         onSubmit={onSubmit}
@@ -287,9 +326,24 @@ export function SchemaFormAnswer(
     readonly steppedSubmitLabel: string;
     /** The spinner label shown while a submission is in flight. */
     readonly sendingLabel: string;
+    /** The button that returns to the previous step of a stepped form. */
+    readonly backLabel: string;
+    /** The caller's per-field picker placeholders, keyed by property name. */
+    readonly fieldWording: Readonly<Record<string, FieldWording>>;
+    /** The placeholder of a per-send option field when the caller set none. */
+    readonly fieldPlaceholder: string;
   },
 ): ReactElement {
-  const { schema, idPrefix, submitLabel, steppedSubmitLabel, sendingLabel } = props;
+  const {
+    schema,
+    idPrefix,
+    submitLabel,
+    steppedSubmitLabel,
+    sendingLabel,
+    backLabel,
+    fieldWording,
+    fieldPlaceholder,
+  } = props;
   const form = useReactingForm(props);
   return (
     <FormSurface
@@ -309,6 +363,9 @@ export function SchemaFormAnswer(
       submitLabel={submitLabel}
       steppedSubmitLabel={steppedSubmitLabel}
       sendingLabel={sendingLabel}
+      backLabel={backLabel}
+      fieldWording={fieldWording}
+      fieldPlaceholder={fieldPlaceholder}
       pageRef={form.pageRef}
       headingRef={form.headingRef}
       onChange={form.onChange}

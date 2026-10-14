@@ -164,6 +164,7 @@ async def append_media(
     header: dict[str, Any] | None = None,
     footer: str | None = None,
     location: dict[str, Any] | None = None,
+    wording: dict[str, Any] | None = None,
 ) -> str:
     """Append one ``chat.media`` agent entry (a rich card) and return its id.
 
@@ -184,6 +185,10 @@ async def append_media(
     * ``footer`` — the short trailing line under the card; carried only when present.
     * ``location`` — a shared geographic point ``{"latitude", "longitude", "name"?,
       "address"?}``, rendered as a map-pin element; carried only when present.
+    * ``wording`` — the send's catalogue of platform-drawn texts (the serialized
+      ``Wording``), carried only when present. The card reads the members its surface
+      draws (the flat reply-option group's accessible name) and the widget defaults the
+      rest.
     """
     entry_id = _mint_id()
     data: dict[str, Any] = {"id": entry_id, "direction": "out", "text": text, "ts": _now_iso()}
@@ -199,6 +204,8 @@ async def append_media(
         data["footer"] = footer
     if location is not None:
         data["location"] = location
+    if wording is not None:
+        data["wording"] = wording
     await _append(identity, address, MEDIA_EVENT, data)
     return entry_id
 
@@ -217,6 +224,7 @@ async def append_question(
     form_data: dict[str, Any] | None = None,
     pages: list[dict[str, Any]] | None = None,
     reactions: dict[str, Any] | None = None,
+    wording: dict[str, Any] | None = None,
 ) -> str:
     """Append one ``chat.question`` entry (the UI renders the per-format widget) and return its id.
 
@@ -246,6 +254,11 @@ async def append_question(
     ``chat.media`` card carries so the page renders them with the same media-card
     component — carried in the frame ONLY when non-empty; otherwise the key is absent.
     It is display-only, never part of the answer.
+
+    ``wording`` is the send's catalogue of platform-drawn texts (the serialized
+    ``Wording``), carried in the frame ONLY when present. The widget reads the members
+    this question's surface draws — the answer controls, the field placeholders, the
+    settled-state badges, the countdown and the refusal line — and defaults the rest.
     """
     entry_id = _mint_id()
     data: dict[str, Any] = {
@@ -269,6 +282,8 @@ async def append_question(
         data["reactions"] = reactions
     if media:
         data["media"] = media
+    if wording is not None:
+        data["wording"] = wording
     await _append(identity, address, QUESTION_EVENT, data)
     return entry_id
 
@@ -295,6 +310,7 @@ async def append_form(
     location: dict[str, Any] | None = None,
     form_data: dict[str, Any] | None = None,
     pages: list[dict[str, Any]] | None = None,
+    wording: dict[str, Any] | None = None,
 ) -> str:
     """Append one ``chat.form`` agent entry (an ask-less form card) and return its id.
 
@@ -310,6 +326,10 @@ async def append_form(
     ``form_data`` is the card's per-send enrichment — ``{"values", "options"}``, the
     prefilled values shown filled in and the per-send choice lists — and ``pages`` its
     step layout, each the same frame shape a form question carries, present ONLY when set.
+    ``wording`` is the send's catalogue of platform-drawn texts (the serialized
+    ``Wording``), present ONLY when set — the widget reads the members the form card
+    draws (the terminal button, the field placeholders, the in-flight and settled status
+    copy) and defaults the rest.
     """
     entry_id = _mint_id()
     data: dict[str, Any] = {"id": entry_id, "text": text, "schema": schema, "token": token, "ts": _now_iso()}
@@ -321,6 +341,8 @@ async def append_form(
         data["data"] = form_data
     if pages is not None:
         data["pages"] = pages
+    if wording is not None:
+        data["wording"] = wording
     await _append(identity, address, FORM_EVENT, data)
     return entry_id
 

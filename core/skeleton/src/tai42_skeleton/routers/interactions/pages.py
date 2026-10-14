@@ -1,6 +1,17 @@
-"""Byte-constant HTML pages and response-header sets for the unauthenticated interactions callback surface."""
+"""HTML pages and response-header sets for the unauthenticated interactions callback surface.
+
+The confirm/done/awaiting pages interpolate only the caller's contract-validated per-send
+``wording`` (headings, sentences and the confirm button, each escaped); absent, each shows the
+platform's own word. The form page interpolates only its escaped schema/page-derived markup and
+the caller's words through escaped ``data-*`` attributes its constant script reads. No
+request-derived value (query, ticket, path) is interpolated on any page.
+"""
 
 from __future__ import annotations
+
+import html
+
+from tai42_contract.interactions.models import Wording
 
 # no-store + nosniff ride EVERY callback response: capability-bearing URLs must
 # never be cached, and the schema-mismatch 400 reflects attacker-influenced
@@ -29,37 +40,90 @@ _FORM_HTML_HEADERS = {
     "Referrer-Policy": "no-referrer",
 }
 
-# Byte-constant pages: zero interpolation of any request-derived value. The
-# confirm form posts to the SAME URL (empty action preserves the query string).
-_CONFIRM_PAGE = (
-    "<!doctype html>\n"
-    '<html lang="en"><head><meta charset="utf-8"><title>Confirm</title>\n'
-    "<style>body{font-family:system-ui,sans-serif;margin:3rem;text-align:center}"
-    "button{font-size:1rem;padding:.6rem 1.4rem}</style></head><body>\n"
-    "<h1>Confirm</h1>\n"
-    "<p>Click confirm to submit your response.</p>\n"
-    '<form method="post"><button type="submit">Confirm</button></form>\n'
-    "</body></html>\n"
-)
-_DONE_PAGE = (
-    "<!doctype html>\n"
-    '<html lang="en"><head><meta charset="utf-8"><title>Done</title>\n'
-    "<style>body{font-family:system-ui,sans-serif;margin:3rem;text-align:center}</style></head><body>\n"
-    "<h1>Done</h1>\n"
-    "<p>This interaction has already been answered.</p>\n"
-    "</body></html>\n"
-)
-# Served on GET for a ticketed text/select question (channel delivery mints a
-# ticket for every format): a value answer is required, so the page presents no
-# form — the confirm button's empty-body POST could never succeed here.
-_REPLY_PAGE = (
-    "<!doctype html>\n"
-    '<html lang="en"><head><meta charset="utf-8"><title>Awaiting reply</title>\n'
-    "<style>body{font-family:system-ui,sans-serif;margin:3rem;text-align:center}</style></head><body>\n"
-    "<h1>Awaiting your reply</h1>\n"
-    "<p>Answer this question by replying on the channel where you received it.</p>\n"
-    "</body></html>\n"
-)
+
+def _answer_page_copy(wording: Wording | None, page: str) -> tuple[str | None, str | None]:
+    # The caller's ``(heading, text)`` for one answer page off the per-send catalogue; each ``None``
+    # when unset (the renderer then shows its own default). The record was contract-validated at the
+    # ask door, so a set value is a non-blank string.
+    if wording is None or wording.answer_page is None:
+        return None, None
+    copy = getattr(wording.answer_page, page)
+    if copy is None:
+        return None, None
+    return copy.heading, copy.text
+
+
+_PAGE_STYLE = "<style>body{font-family:system-ui,sans-serif;margin:3rem;text-align:center}"
+
+
+def _render_confirm_page(wording: Wording | None) -> str:
+    """The confirm page served on GET for a ``confirm``/``external`` ask.
+
+    Its ``<title>``/``<h1>`` read ``wording.answer_page.confirm.heading`` (else "Confirm"), its
+    sentence ``.text`` (else "Click confirm to submit your response."), and its one button
+    ``wording.answer.confirm`` (else "Confirm") — each a contract-validated string from the stored
+    ask, interpolated escaped under the locked-down CSP. The empty-body POST to the SAME URL records
+    the answer (``confirm`` -> True; ``external`` -> the query-param payload), so the form's empty
+    action preserves the query string.
+    """
+    heading, body = _answer_page_copy(wording, "confirm")
+    title = html.escape(heading) if heading else "Confirm"
+    sentence = html.escape(body) if body else "Click confirm to submit your response."
+    confirm = wording.answer.confirm if wording is not None and wording.answer is not None else None
+    label = html.escape(confirm) if confirm else "Confirm"
+    return (
+        "<!doctype html>\n"
+        f'<html lang="en"><head><meta charset="utf-8"><title>{title}</title>\n'
+        f"{_PAGE_STYLE}"
+        "button{font-size:1rem;padding:.6rem 1.4rem}</style></head><body>\n"
+        f"<h1>{title}</h1>\n"
+        f"<p>{sentence}</p>\n"
+        f'<form method="post"><button type="submit">{label}</button></form>\n'
+        "</body></html>\n"
+    )
+
+
+def _render_done_page(wording: Wording | None) -> str:
+    """The done page served on GET for an already-answered interaction of any format.
+
+    Its ``<title>``/``<h1>`` read ``wording.answer_page.done.heading`` (else "Done") and its
+    sentence ``.text`` (else "This interaction has already been answered."), escaped.
+    """
+    heading, body = _answer_page_copy(wording, "done")
+    title = html.escape(heading) if heading else "Done"
+    sentence = html.escape(body) if body else "This interaction has already been answered."
+    return (
+        "<!doctype html>\n"
+        f'<html lang="en"><head><meta charset="utf-8"><title>{title}</title>\n'
+        f"{_PAGE_STYLE}</style></head><body>\n"
+        f"<h1>{title}</h1>\n"
+        f"<p>{sentence}</p>\n"
+        "</body></html>\n"
+    )
+
+
+def _render_awaiting_page(wording: Wording | None) -> str:
+    """The awaiting-reply page served on GET for a ticketed ``text``/``select`` question.
+
+    A value answer is required, so the page presents no form — the confirm button's empty-body POST
+    could never succeed here. ``wording.answer_page.awaiting.heading`` reads into BOTH the
+    ``<title>`` and the ``<h1>`` when set; absent, the page keeps its own two words ("Awaiting
+    reply" / "Awaiting your reply"). The sentence reads ``.text`` (else "Answer this question by
+    replying on the channel where you received it."), escaped.
+    """
+    heading, body = _answer_page_copy(wording, "awaiting")
+    title = html.escape(heading) if heading else "Awaiting reply"
+    h1 = html.escape(heading) if heading else "Awaiting your reply"
+    sentence = html.escape(body) if body else "Answer this question by replying on the channel where you received it."
+    return (
+        "<!doctype html>\n"
+        f'<html lang="en"><head><meta charset="utf-8"><title>{title}</title>\n'
+        f"{_PAGE_STYLE}</style></head><body>\n"
+        f"<h1>{h1}</h1>\n"
+        f"<p>{sentence}</p>\n"
+        "</body></html>\n"
+    )
+
 
 # The constant submit script for the form page. It drives the stepped pages (showing one
 # ``.step`` section at a time, wiring Back/Next, revealing Submit only on the last step — a
@@ -101,6 +165,39 @@ _FORM_SUBMIT_SCRIPT = """<script>
   var reactUrl = window.location.pathname + '/react';
   var WEEKDAYS = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
   var current = 0;
+  // The page's own sentences: the caller's words ride escaped data-* attributes the renderer
+  // writes only when set; absent, each reads the platform's own default below. The script stays a
+  // byte constant — it reads attributes and writes textContent, never interpolating a caller string
+  // into markup, never innerHTML from a caller string, never String.replace (split/join fills the
+  // {reason} token so a $-sequence in a reason is never interpreted).
+  var DEFAULT_TEXT = {
+    rejected: 'Invalid submission, please check your answers.',
+    failed: 'Submission failed, please try again.',
+    network_error: 'Network error, please try again.',
+    update_failed: 'The form could not update, please try again.',
+    choose_one: 'Please choose at least one option.',
+    date_unavailable: 'That date is unavailable, please choose another.'
+  };
+  function text(name) {
+    var v = form.getAttribute('data-text-' + name);
+    return v === null ? DEFAULT_TEXT[name] : v;
+  }
+  function reasonText(name, reason) {
+    var tmpl = form.getAttribute('data-text-' + name);
+    if (tmpl !== null) { return tmpl.split('{reason}').join(reason || ''); }
+    return reason || DEFAULT_TEXT[name];
+  }
+  function showSubmitted() {
+    var h = document.createElement('h1');
+    var hv = form.getAttribute('data-submitted-heading');
+    h.textContent = (hv === null) ? 'Done' : hv;
+    var p = document.createElement('p');
+    var pv = form.getAttribute('data-submitted-text');
+    p.textContent = (pv === null) ? 'Your response has been submitted.' : pv;
+    document.body.innerHTML = '';
+    document.body.appendChild(h);
+    document.body.appendChild(p);
+  }
   function isEmpty(v) {
     return v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0);
   }
@@ -237,6 +334,7 @@ _FORM_SUBMIT_SCRIPT = """<script>
     var fieldset = first.closest('fieldset');
     if (!fieldset) { return; }
     var isArray = (first.getAttribute('data-kind') === 'array');
+    var isChip = fieldset.classList.contains('chips');
     var wasRequired = first.hasAttribute('required');
     var selected = {};
     for (var i = 0; i < cs.length; i++) { if (cs[i].checked) { selected[cs[i].value] = true; } }
@@ -244,7 +342,7 @@ _FORM_SUBMIT_SCRIPT = """<script>
     for (var j = 0; j < old.length; j++) { old[j].parentNode.removeChild(old[j]); }
     options.forEach(function (o) {
       var label = document.createElement('label');
-      label.className = 'choice';
+      label.className = isChip ? 'choice chip' : 'choice';
       var input = document.createElement('input');
       input.type = isArray ? 'checkbox' : 'radio';
       input.setAttribute('data-field', name);
@@ -303,14 +401,14 @@ _FORM_SUBMIT_SCRIPT = """<script>
         });
       }
       return resp.json().then(function (data) {
-        err.textContent = (data && data.error) ? data.error : 'The form could not update, please try again.';
+        err.textContent = reasonText('update_failed', data && data.error);
         if (cb) { cb(null); }
       }).catch(function () {
-        err.textContent = 'The form could not update, please try again.';
+        err.textContent = reasonText('update_failed');
         if (cb) { cb(null); }
       });
     }).catch(function () {
-      err.textContent = 'Network error, please try again.';
+      err.textContent = text('network_error');
       if (cb) { cb(null); }
     });
   }
@@ -329,20 +427,20 @@ _FORM_SUBMIT_SCRIPT = """<script>
       body: JSON.stringify({ answer: answer })
     }).then(function (resp) {
       if (resp.status === 200) {
-        document.body.innerHTML = '<h1>Done</h1><p>Your response has been submitted.</p>';
+        showSubmitted();
         return;
       }
       if (resp.status === 400) {
         resp.json().then(function (data) {
-          err.textContent = (data && data.error) ? data.error : 'Invalid submission, please check your answers.';
+          err.textContent = reasonText('rejected', data && data.error);
         }).catch(function () {
-          err.textContent = 'Invalid submission, please check your answers.';
+          err.textContent = reasonText('rejected');
         });
         return;
       }
-      err.textContent = 'Submission failed, please try again.';
+      err.textContent = text('failed');
     }).catch(function () {
-      err.textContent = 'Network error, please try again.';
+      err.textContent = text('network_error');
     });
   }
   function show(i) {
@@ -351,6 +449,11 @@ _FORM_SUBMIT_SCRIPT = """<script>
     var last = (i === steps.length - 1);
     next.hidden = last;
     submit.hidden = !last;
+    // The shown step's primary button reads its own data-button-label (the caller's word for
+    // this page's Next/Submit), else the surface's generic word.
+    var bl = steps[i].getAttribute('data-button-label');
+    next.textContent = (!last && bl) ? bl : 'Next';
+    submit.textContent = (last && bl) ? bl : 'Submit';
     err.textContent = '';
     applyConditional();
     fillReadback(steps[i]);
@@ -370,7 +473,7 @@ _FORM_SUBMIT_SCRIPT = """<script>
     for (var g = 0; g < groups.length; g++) {
       if (groups[g].hidden) { continue; }
       if (!groups[g].querySelector('input[type="checkbox"]:checked')) {
-        err.textContent = 'Please choose at least one option.';
+        err.textContent = text('choose_one');
         return false;
       }
     }
@@ -379,7 +482,7 @@ _FORM_SUBMIT_SCRIPT = """<script>
       var drow = dates[d].closest('[data-field-row]');
       if (drow && drow.hidden) { continue; }
       if (dateUnavailable(dates[d])) {
-        err.textContent = 'That date is unavailable, please choose another.';
+        err.textContent = text('date_unavailable');
         dates[d].focus();
         return false;
       }

@@ -48,6 +48,7 @@ from tai42_contract.interactions.models import (
     FormReactions,
     LocationElement,
     MediaItem,
+    Wording,
 )
 
 from tai42_channel_web.store.forms import FormRecord, store_form_record
@@ -182,9 +183,11 @@ def _form_pages_frame(pages: list[FormPage]) -> list[dict[str, object]]:
     """A form question's step layout as its transcript-frame shape: each page in order.
 
     Each page is ``{"title", "fields"}`` plus its ordered ``display`` blocks when it carries
-    any and its ``kind`` when it is a ``review`` page (the default ``input`` kind is omitted,
-    like every other default/absent frame key). The widget renders one step per page, draws
-    the display blocks in order, and shows a review page as a terminal readback step.
+    any, its ``kind`` when it is a ``review`` page (the default ``input`` kind is omitted,
+    like every other default/absent frame key), and its ``button_label`` when the page sets
+    the text of its primary button. The widget renders one step per page, draws the display
+    blocks in order, shows a review page as a terminal readback step, and labels each step's
+    primary button with its ``button_label`` (its own generic word when absent).
     """
     frames: list[dict[str, object]] = []
     for page in pages:
@@ -193,6 +196,8 @@ def _form_pages_frame(pages: list[FormPage]) -> list[dict[str, object]]:
             frame["display"] = [_display_block_frame(block) for block in page.display]
         if page.kind != "input":
             frame["kind"] = page.kind
+        if page.button_label is not None:
+            frame["button_label"] = page.button_label
         frames.append(frame)
     return frames
 
@@ -225,6 +230,19 @@ def _location_frame_item(location: LocationElement) -> dict[str, object]:
     if location.address is not None:
         entry["address"] = location.address
     return entry
+
+
+def _wording_frame(wording: Wording | None) -> dict[str, object] | None:
+    """A send's ``wording`` catalogue as its transcript-frame shape, or ``None`` when absent.
+
+    The whole catalogue is serialized with its unset members dropped, so the frame carries
+    exactly the words the caller set. The widget reads the members its surfaces draw and
+    defaults every other; a member for a surface the web does not draw (a message line, an
+    answer page) rides the frame inert, exactly as it rides a send for the channels that do.
+    """
+    if wording is None:
+        return None
+    return wording.model_dump(mode="json", exclude_none=True)
 
 
 def _require_recipient(requested: str | None, message: str) -> str:
@@ -375,6 +393,10 @@ class WebChannel:
                     media=(
                         [_media_frame_item(item) for item in delivery.media] if delivery.media is not None else None
                     ),
+                    # The send's platform-drawn texts ride the question frame so the widget
+                    # draws the caller's answer controls, field placeholders, badges,
+                    # countdown and refusal line; absent, the widget shows its own words.
+                    wording=_wording_frame(delivery.wording),
                 )
                 # Set INSIDE the gate: leaving the ``async with`` is a suspension
                 # point, and a cancellation delivered there would release the
@@ -478,6 +500,10 @@ class WebChannel:
                     # a form send, which the contract couples them to).
                     form_data=(_form_data_frame(notification.data) if notification.data is not None else None),
                     pages=(_form_pages_frame(notification.pages) if notification.pages is not None else None),
+                    # The ask-less form's platform-drawn texts ride the card frame so the
+                    # widget draws the caller's terminal button, field placeholders and
+                    # status copy; absent, the widget shows its own words.
+                    wording=_wording_frame(notification.wording),
                 )
             return [entry_id]
 
@@ -517,5 +543,9 @@ class WebChannel:
                 frame_header,
                 notification.footer,
                 frame_location,
+                # The card's platform-drawn texts ride the frame so the widget draws the
+                # caller's accessible name for the flat reply-option group; absent, the
+                # widget shows its own word.
+                _wording_frame(notification.wording),
             )
         return [entry_id]

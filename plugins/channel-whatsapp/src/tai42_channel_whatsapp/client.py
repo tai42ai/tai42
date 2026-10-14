@@ -534,6 +534,11 @@ async def delete_flow(flow_id: str) -> None:
     await _send(url, method="delete")
 
 
+# The default label on the chat button that OPENS a Flow, made explicit; the caller's own
+# ``wording.form.open`` overrides it per send.
+_OPEN_LABEL = "Fill form"
+
+
 async def send_flow(
     phone_number_id: str,
     to: str,
@@ -542,6 +547,7 @@ async def send_flow(
     flow_token: str,
     screen: str,
     data: dict[str, Any],
+    open_label: str | None = None,
 ) -> str:
     """Send an interactive Flow message opening the published ``flow_id``; return its ``wamid``.
 
@@ -554,6 +560,11 @@ async def send_flow(
     ``data`` is the per-send ``flow_action_payload.data`` — the prefilled values and
     the dynamic option data-sources the entry screen reads; the builder always emits
     a ``data`` model, so every caller passes it.
+
+    ``open_label`` is the caller's text for the chat button that opens the Flow (the
+    sender's own words); absent, the generic :data:`_OPEN_LABEL` is drawn. It is a
+    MESSAGE parameter (``flow_cta``), never part of the Flow JSON, so it never re-keys
+    the published Flow.
     """
     flow_action_payload: dict[str, Any] = {"screen": screen, "data": data}
     payload = {
@@ -569,7 +580,7 @@ async def send_flow(
                     "flow_message_version": "3",
                     "flow_token": flow_token,
                     "flow_id": flow_id,
-                    "flow_cta": "Fill form",
+                    "flow_cta": open_label if open_label is not None else _OPEN_LABEL,
                     "flow_action": "navigate",
                     "flow_action_payload": flow_action_payload,
                 },

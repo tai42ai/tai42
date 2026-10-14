@@ -2,7 +2,13 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { countdownAnnouncement, QuestionCard, secondsLeft } from '@/question-card';
+import { ChatApiError } from '@/api';
+import {
+  countdownAnnouncement,
+  QuestionCard,
+  resolveCountdown,
+  secondsLeft,
+} from '@/question-card';
 import {
   freezeClock,
   question,
@@ -11,12 +17,44 @@ import {
   tick,
   tickSeconds,
 } from '@/question-card.test-support';
-import type { MediaItem } from '@/transcript-model';
+import type { CountdownWording, MediaItem, StatusWording, Wording } from '@/transcript-model';
 
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
 });
+
+/** A `Wording` carrying only a `status` chapter, every other chapter unset. */
+function statusWordingCatalogue(partial: Partial<StatusWording>): Wording {
+  return {
+    form: null,
+    choice: null,
+    answer: null,
+    status: {
+      sending: null,
+      answered: null,
+      expired: null,
+      closed: null,
+      sent: null,
+      unavailable: null,
+      countdown: null,
+      ...partial,
+    },
+  };
+}
+
+function countdownCatalogue(partial: Partial<CountdownWording>): Wording {
+  return statusWordingCatalogue({
+    countdown: {
+      secondsLeft: null,
+      oneSecondLeft: null,
+      underMinute: null,
+      underHalfMinute: null,
+      underTenSeconds: null,
+      ...partial,
+    },
+  });
+}
 
 describe('secondsLeft', () => {
   it('counts whole seconds and floors at zero', () => {
@@ -30,23 +68,25 @@ describe('secondsLeft', () => {
   });
 });
 
+const WORDS = resolveCountdown(null);
+
 describe('countdownAnnouncement', () => {
   it('speaks in coarse steps, and says nothing outside the countdown window', () => {
-    expect(countdownAnnouncement(61)).toBe('');
-    expect(countdownAnnouncement(60)).toBe('');
-    expect(countdownAnnouncement(59)).toBe('Less than a minute left to answer');
-    expect(countdownAnnouncement(30)).toBe('Less than a minute left to answer');
-    expect(countdownAnnouncement(29)).toBe('Less than 30 seconds left to answer');
-    expect(countdownAnnouncement(10)).toBe('Less than 30 seconds left to answer');
-    expect(countdownAnnouncement(9)).toBe('Less than 10 seconds left to answer');
-    expect(countdownAnnouncement(0)).toBe('');
+    expect(countdownAnnouncement(61, WORDS)).toBe('');
+    expect(countdownAnnouncement(60, WORDS)).toBe('');
+    expect(countdownAnnouncement(59, WORDS)).toBe('Less than a minute left to answer');
+    expect(countdownAnnouncement(30, WORDS)).toBe('Less than a minute left to answer');
+    expect(countdownAnnouncement(29, WORDS)).toBe('Less than 30 seconds left to answer');
+    expect(countdownAnnouncement(10, WORDS)).toBe('Less than 30 seconds left to answer');
+    expect(countdownAnnouncement(9, WORDS)).toBe('Less than 10 seconds left to answer');
+    expect(countdownAnnouncement(0, WORDS)).toBe('');
   });
 
   it('changes three times across the last minute, not sixty', () => {
     let changes = 0;
-    let previous = countdownAnnouncement(60);
+    let previous = countdownAnnouncement(60, WORDS);
     for (let remaining = 59; remaining > 0; remaining -= 1) {
-      const spoken = countdownAnnouncement(remaining);
+      const spoken = countdownAnnouncement(remaining, WORDS);
       if (spoken !== previous) changes += 1;
       previous = spoken;
     }
@@ -258,5 +298,116 @@ describe('QuestionCard', () => {
 
     expect(screen.getByRole('alert')).toHaveTextContent('That question was already answered.');
     expect(card).toHaveFocus();
+  });
+});
+
+describe("QuestionCard draws the send's status wording", () => {
+  it("draws the caller's answered badge", () => {
+    renderCard(question('confirm', { wording: statusWordingCatalogue({ answered: 'Recorded' }) }), {
+      answered: true,
+    });
+    expect(screen.getByText('Recorded')).toBeInTheDocument();
+  });
+
+  it("draws the caller's expired badge", () => {
+    renderCard(
+      question('confirm', {
+        timeoutAt: new Date(Date.now() - 1000).toISOString(),
+        wording: statusWordingCatalogue({ expired: 'Window closed' }),
+      }),
+    );
+    expect(screen.getByText('Window closed')).toBeInTheDocument();
+  });
+
+  it("draws the caller's session-ended badge", () => {
+    renderCard(question('confirm', { wording: statusWordingCatalogue({ closed: 'Chat over' }) }), {
+      locked: true,
+    });
+    expect(screen.getByText('Chat over')).toBeInTheDocument();
+  });
+
+  it("draws the caller's countdown words, filling the {seconds} token", () => {
+    freezeClock();
+    renderCard(
+      question('confirm', {
+        timeoutAt: new Date(T0 + 45_000).toISOString(),
+        wording: countdownCatalogue({
+          secondsLeft: '{seconds} left!',
+          underMinute: 'Hurry up',
+        }),
+      }),
+    );
+    expect(screen.getByText('45 left!')).toHaveAttribute('aria-hidden', 'true');
+    expect(screen.getByRole('status')).toHaveTextContent('Hurry up');
+  });
+
+  it("draws the caller's refusal line with the door reason on a 400", async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi
+      .fn()
+      .mockRejectedValue(new ChatApiError('answer must be a boolean', 400, null));
+    render(
+      <QuestionCard
+        question={question('confirm', {
+          wording: {
+            form: null,
+            choice: null,
+            status: null,
+            answer: {
+              open: null,
+              confirm: null,
+              decline: null,
+              submit: null,
+              replyHint: null,
+              rejected: 'No good: {reason}',
+            },
+          },
+        })}
+        answered={false}
+        onAnswer={onAnswer}
+        onAnswered={vi.fn()}
+        locked={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Yes' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('No good: answer must be a boolean');
+  });
+
+  it('keeps the widget refusal copy for a non-400 failure even with a refusal line set', async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi
+      .fn()
+      .mockRejectedValue(new ChatApiError('That question was already answered.', 409, null));
+    render(
+      <QuestionCard
+        question={question('confirm', {
+          wording: {
+            form: null,
+            choice: null,
+            status: null,
+            answer: {
+              open: null,
+              confirm: null,
+              decline: null,
+              submit: null,
+              replyHint: null,
+              rejected: 'No good: {reason}',
+            },
+          },
+        })}
+        answered={false}
+        onAnswer={onAnswer}
+        onAnswered={vi.fn()}
+        locked={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Yes' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'That question was already answered.',
+    );
   });
 });

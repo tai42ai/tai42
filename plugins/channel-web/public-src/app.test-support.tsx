@@ -58,6 +58,7 @@ export function agentSentMedia(id: string, options: readonly string[]): ChatItem
     header: null,
     footer: null,
     location: null,
+    wording: null,
     ts: TS,
   };
 }
@@ -73,6 +74,7 @@ export function agentSentForm(id: string): ChatItem {
     location: null,
     formData: null,
     pages: null,
+    wording: null,
     ts: TS,
   };
 }
@@ -91,6 +93,7 @@ export function pendingQuestion(): ChatItem {
     formData: null,
     pages: null,
     timeoutAt: new Date(Date.now() + 600_000).toISOString(),
+    wording: null,
     ts: TS,
   };
 }

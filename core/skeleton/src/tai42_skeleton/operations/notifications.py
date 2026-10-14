@@ -44,7 +44,14 @@ from tai42_contract.channels import (
     check_sections,
 )
 from tai42_contract.errors import UnavailableError
-from tai42_contract.interactions.models import FormData, FormPage, LocationElement, MediaItem, check_form_tag
+from tai42_contract.interactions.models import (
+    FormData,
+    FormPage,
+    LocationElement,
+    MediaItem,
+    Wording,
+    check_form_tag,
+)
 
 from tai42_skeleton.access_control.user import CrossIdentityAudienceError, request_identity
 from tai42_skeleton.channels.notifications_sink import read_notifications
@@ -193,6 +200,16 @@ with warnings.catch_warnings():
                 "to the in-app feed record."
             ),
         )
+        wording: Wording | None = Field(
+            default=None,
+            description=(
+                "Optional per-send catalogue of the notification's platform-drawn texts, grouped by what each "
+                "decorates — form (a form send's chrome), choice (a choice list's control words) and status "
+                "(in-flight status copy). Each member is admitted only on the surface that draws it (a schema "
+                "form, a flat options list, or a sectioned list); a member on a notification with no such "
+                "surface is a 400. Recorded on the in-app feed (display content, feed parity)."
+            ),
+        )
 
         # The new rich fields reuse AnswerPart's/ChannelNotification's SAME field validators, so
         # the operator send surface bounds each shape identically to the flow answer path — never
@@ -239,6 +256,8 @@ with warnings.catch_warnings():
                 schema=self.schema,
                 header=self.header,
                 footer=self.footer,
+                wording=self.wording,
+                has_pages=self.pages is not None,
                 noun="notification",
             )
             return self
@@ -287,6 +306,7 @@ async def notify_user(
     data: FormData | None = None,
     pages: list[FormPage] | None = None,
     form_tag: str | None = None,
+    wording: Wording | None = None,
 ) -> str:
     """Send a human a one-way notification, fire-and-forget.
 
@@ -347,6 +367,13 @@ async def notify_user(
     platform bounds it (an out-of-charset or over-length tag is a 400) but never interprets it,
     and it is not written to the in-app feed record.
 
+    ``wording`` is the per-send catalogue of the notification's platform-drawn texts, grouped by
+    what each decorates — ``form`` (a form send's chrome), ``choice`` (a choice list's control
+    words) and ``status`` (in-flight status copy). Each member is admitted only on the surface that
+    draws it (a ``schema`` form, a flat ``options`` list, or a sectioned ``sections`` list); a
+    member on a notification with no such surface is a 400. It is display content, so an
+    ``audience``-addressed send records it on the in-app feed.
+
     ``audience`` addresses the in-app record to an identity's feed; it is honored
     even when a channel also delivers the message (channel push AND in-app record).
     ``sender_identity`` is the sending identity a channel message leaves FROM, which the
@@ -379,6 +406,7 @@ async def notify_user(
             data=data,
             pages=pages,
             form_tag=form_tag,
+            wording=wording,
         )
     except SenderIdentityNotAllowedError as exc:
         raise BadRequestError(str(exc)) from exc

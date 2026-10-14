@@ -86,6 +86,7 @@ describe('SchemaFormAnswer reactions', () => {
         fields: ['qty'],
         display: [block({ kind: 'body', slot: 'total' })],
         kind: 'input',
+        buttonLabel: null,
       },
     ];
     renderCard(formQuestion(schema, null, pages, reactions({ fieldChanged: ['qty'] })));
@@ -192,8 +193,8 @@ describe('SchemaFormAnswer reactions', () => {
       },
     };
     const pages: readonly FormPage[] = [
-      { title: 'One', fields: ['first'], display: [], kind: 'input' },
-      { title: 'Two', fields: ['second'], display: [], kind: 'input' },
+      { title: 'One', fields: ['first'], display: [], kind: 'input', buttonLabel: null },
+      { title: 'Two', fields: ['second'], display: [], kind: 'input', buttonLabel: null },
     ];
     renderCard(formQuestion(schema, null, pages, reactions({ pageAdvanced: ['One'] })));
 
@@ -299,6 +300,7 @@ describe('SchemaFormAnswer reactions', () => {
         fields: ['qty', 'colour'],
         display: [block({ kind: 'body', slot: 'total' })],
         kind: 'input',
+        buttonLabel: null,
       },
     ];
     renderCard(
@@ -357,6 +359,7 @@ describe('SchemaFormAnswer display + review', () => {
           block({ kind: 'body', text: 'Please fill in' }),
         ],
         kind: 'input',
+        buttonLabel: null,
       },
     ];
     renderCard(formQuestion(schema, null, pages, null));
@@ -379,6 +382,7 @@ describe('SchemaFormAnswer display + review', () => {
           block({ kind: 'image', alt: 'Only alt' }),
         ],
         kind: 'input',
+        buttonLabel: null,
       },
     ];
     renderCard(formQuestion(schema, null, pages, null));
@@ -396,8 +400,8 @@ describe('SchemaFormAnswer display + review', () => {
       properties: { name: { type: 'string', title: 'Name' } },
     };
     const pages: readonly FormPage[] = [
-      { title: 'Fill', fields: ['name'], display: [], kind: 'input' },
-      { title: 'Review', fields: [], display: [], kind: 'review' },
+      { title: 'Fill', fields: ['name'], display: [], kind: 'input', buttonLabel: null },
+      { title: 'Review', fields: [], display: [], kind: 'review', buttonLabel: null },
     ];
     renderCard(formQuestion(schema, { values: { name: 'Ada' }, options: {} }, pages, null));
 

@@ -163,7 +163,34 @@ per-send `options` list) → a **radio group** of five choices or fewer, a
 date-time picker returns a Unix timestamp, not an RFC 3339 string); an **array of
 strings** → a **checkbox group** of five choices or fewer, a **multi-select** above
 that, or a multiline text box (one entry per line) when the array declares no
-choices; `boolean` → a Yes/No radio; `integer`/`number` → a number input.
+choices; `boolean` → a Yes/No radio; `integer`/`number` → a number input. A
+`string` may also carry an `inputMode` naming the kind of text it collects: `email`
+→ an **email text input**, `url` → a **url text input** (both Slack text elements
+that carry their own built-in check); `numeric`, `decimal` and `tel` keep a plain
+text input (see the degrade below); `text` is the plain text input. A property may
+also name a `control`: `chips` on a choice and `textarea` on a `string` (see below).
+
+**Input kinds (the Slack degrade).** Slack offers no numeric or phone keyboard hint
+on a text element, so `numeric`, `decimal` and `tel` render as a plain text input.
+Slack's `number_input` is deliberately not used for a `numeric`/`decimal` string: it
+is a number field, not a keyboard on text, and a string answer must arrive exactly as
+typed. Only `email` and `url`, which Slack draws as dedicated text elements, keep a
+distinct control. The value is always the string typed — `inputMode` draws the
+control, it never validates.
+
+**Chips (the Slack degrade).** Slack has **no** chip input (its `Tag` element is
+display-only), so a choice with `control: chips` renders as the shape's default
+choice control: a **radio group** / **select** for a single string, a **checkbox
+group** / **multi-select** for an array of strings — the same control the choice
+would draw without `control`.
+
+**Text length bounds.** A declared `maxLength`/`minLength` on a `string` is drawn as
+Slack's `max_length`/`min_length` on **both** the single-line plain text input and the
+multi-line textarea (`control: textarea`), so Slack shows and enforces the maximum in
+the modal. Slack caps `max_length` at **3000**; a declared `maxLength` above it is
+refused loudly at delivery — never silently truncated. Slack's `email_text_input` and
+`url_text_input` (the `email`/`url` input modes) accept no length bound, so a declared
+`maxLength`/`minLength` is not drawn on them; it stays enforced at the answer door.
 
 **Dates (the Slack degrade).** Slack's date picker draws **no** minimum,
 maximum or disabled dates, and Slack has **no** range picker. So a declared date
@@ -201,6 +228,40 @@ the modal open as inline errors; a clean check lets the answer through. A handle
 failure surfaces loudly — a notice to the person plus a logged error — never a stale
 or silent value. A `page_advanced` trigger has no Slack event (the single-surface
 modal has no page-advance step), so only `field_changed` and `submitted` fire here.
+
+**Form buttons and title.** The modal's chrome carries the sender's own words, the
+platform's as the default, all read from the per-send `wording` catalogue. The **open**
+button on the chat message reads `wording.form.open` (else *Fill form*, cap 75
+characters). The modal's **submit** reads the **last** page's `button_label` (the form's
+terminal action; a non-terminal page's label is not drawn — Slack renders every page in
+one modal with one submit), else — for a form with **no pages** — the caller's
+`wording.form.submit`, else *Submit*. The modal's **close** reads `wording.form.cancel`
+(else *Cancel*) and its **title** reads `wording.form.title` (else *Please respond*);
+each is capped at Slack's **24**-character modal-text limit and refused loudly over it.
+The whole catalogue rides the form record, so the modal built at click time and every
+re-render show the caller's words. `wording.form.back` draws nothing — the modal is one
+surface with no page-back step. A choice list's `wording.choice.label` and a non-form
+question's `wording.answer` controls draw nothing on Slack: the choices are inline
+buttons (no list opener) and a Tier-1 ask is a text link (no button) with no input hint.
+
+**Field placeholders and the review line.** A field's
+`wording.form.fields[name].choice_label` draws as the `placeholder` of that field's
+**select** (`static_select`/`multi_static_select`), capped at Slack's **150**-character
+placeholder limit and refused loudly over it; a radio or checkbox group has no
+placeholder slot and draws none, and an absent label leaves Slack's own default prompt.
+The review step's empty readback reads `wording.form.review_empty` (else *No answers to
+review yet.*), within Slack's 3000-character section-text limit.
+
+**Message lines and the refusal sentence.** A Tier-1 (`confirm`/`external`) ask's link
+and deadline lines read `wording.lines.answer_link` (`{url}` → the callback URL) and
+`wording.lines.deadline` (`{deadline}` → the ISO instant); a Tier-2 (`text`/`select`)
+ask composes `wording.lines.reply` and the deadline line and lists its choices through
+`wording.lines.options` (`{options}` → the joined list). Each is a plain substitution,
+the platform's own line when absent. When the door rejects a modal submission in place,
+the modal's inline error reads `wording.answer.rejected` (its optional `{reason}` token
+→ the door's reason), else the door's reason, else a generic line; the thread-reply
+rejection notice draws the same caller sentence through the shared answer ladder, which
+also honours the ask's `on_mismatch` digression policy carried on the correlation record.
 
 Operational notes: answers must be typed in-thread; non-answer traffic (edits,
 bot echoes, other channels, top-level messages, threads with no pending

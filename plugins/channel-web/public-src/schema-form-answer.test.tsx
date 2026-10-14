@@ -112,8 +112,8 @@ describe('SchemaFormAnswer', () => {
       properties: { first: { type: 'string' }, second: { type: 'string' } },
     };
     const pages: readonly FormPage[] = [
-      { title: 'Your name', fields: ['first'], display: [], kind: 'input' },
-      { title: 'Your note', fields: ['second'], display: [], kind: 'input' },
+      { title: 'Your name', fields: ['first'], display: [], kind: 'input', buttonLabel: null },
+      { title: 'Your note', fields: ['second'], display: [], kind: 'input', buttonLabel: null },
     ];
     const { onAnswer, onAnswered } = renderCard(formQuestion(schema, null, pages));
 
@@ -132,6 +132,74 @@ describe('SchemaFormAnswer', () => {
     expect(onAnswer).toHaveBeenCalledWith('int-1', { first: 'Ada', second: 'ship it' });
   });
 
+  it("draws each stepped page's own button_label in place of the generic Next/Submit", async () => {
+    const user = userEvent.setup();
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { first: { type: 'string' }, second: { type: 'string' } },
+    };
+    const pages: readonly FormPage[] = [
+      {
+        title: 'Your name',
+        fields: ['first'],
+        display: [],
+        kind: 'input',
+        buttonLabel: 'Continue',
+      },
+      {
+        title: 'Your note',
+        fields: ['second'],
+        display: [],
+        kind: 'input',
+        buttonLabel: 'Send it all',
+      },
+    ];
+    const { onAnswer, onAnswered } = renderCard(formQuestion(schema, null, pages));
+
+    // Step 1 advances with the page's own label, not the generic 'Next'.
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument();
+    await user.type(screen.getByRole('textbox'), 'Ada');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+    // The last step submits with its own label, not the generic 'Submit'.
+    expect(screen.queryByRole('button', { name: 'Submit' })).not.toBeInTheDocument();
+    await user.type(screen.getByRole('textbox'), 'ship it');
+    await user.click(screen.getByRole('button', { name: 'Send it all' }));
+
+    await waitFor(() => expect(onAnswered).toHaveBeenCalled());
+    expect(onAnswer).toHaveBeenCalledWith('int-1', { first: 'Ada', second: 'ship it' });
+  });
+
+  it("draws a single page's button_label in place of the terminal default", () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { note: { type: 'string' } },
+    };
+    const pages: readonly FormPage[] = [
+      { title: '', fields: ['note'], display: [], kind: 'input', buttonLabel: 'Send it all' },
+    ];
+    renderCard(formQuestion(schema, null, pages));
+
+    expect(screen.getByRole('button', { name: 'Send it all' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Answer' })).not.toBeInTheDocument();
+  });
+
+  it('falls back to the generic Next and terminal label when a page sets no button_label', async () => {
+    const user = userEvent.setup();
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { first: { type: 'string' }, second: { type: 'string' } },
+    };
+    const pages: readonly FormPage[] = [
+      { title: 'Your name', fields: ['first'], display: [], kind: 'input', buttonLabel: null },
+      { title: 'Your note', fields: ['second'], display: [], kind: 'input', buttonLabel: null },
+    ];
+    renderCard(formQuestion(schema, null, pages));
+
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    expect(screen.getByRole('button', { name: 'Submit' })).toBeInTheDocument();
+  });
+
   it('moves focus to the shown step first control on Next and on Back', async () => {
     const user = userEvent.setup();
     const schema: JsonSchema = {
@@ -139,8 +207,8 @@ describe('SchemaFormAnswer', () => {
       properties: { first: { type: 'string' }, second: { type: 'string' } },
     };
     const pages: readonly FormPage[] = [
-      { title: 'Your name', fields: ['first'], display: [], kind: 'input' },
-      { title: 'Your note', fields: ['second'], display: [], kind: 'input' },
+      { title: 'Your name', fields: ['first'], display: [], kind: 'input', buttonLabel: null },
+      { title: 'Your note', fields: ['second'], display: [], kind: 'input', buttonLabel: null },
     ];
     renderCard(formQuestion(schema, null, pages));
 

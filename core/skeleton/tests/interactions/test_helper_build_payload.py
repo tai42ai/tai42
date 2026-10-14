@@ -66,7 +66,7 @@ def test_form_payload_carries_data_and_pages():
     assert payload is not None
     assert payload["schema"] == schema
     assert payload["data"] == {"values": {"c": "x"}, "options": {"c": [{"value": "x", "label": "X"}]}}
-    assert payload["pages"] == [{"title": "A", "fields": ["c"], "display": [], "kind": "input"}]
+    assert payload["pages"] == [{"title": "A", "fields": ["c"], "display": [], "kind": "input", "button_label": None}]
 
 
 def test_form_payload_accepts_dict_data_and_pages():
@@ -80,7 +80,7 @@ def test_form_payload_accepts_dict_data_and_pages():
     )
     assert payload is not None
     assert payload["data"] == {"values": {"c": "x"}, "options": {}}
-    assert payload["pages"] == [{"title": "A", "fields": ["c"], "display": [], "kind": "input"}]
+    assert payload["pages"] == [{"title": "A", "fields": ["c"], "display": [], "kind": "input", "button_label": None}]
 
 
 def test_form_payload_omits_absent_data_and_pages():
@@ -133,7 +133,6 @@ def test_delivery_frame_carries_reactions():
         format_payload=payload,
         stored_media=None,
         on_mismatch=AnswerMismatchPolicy.RETRY,
-        mismatch_notice=None,
         callback_url="https://cb.example/x",
         timeout_at=datetime.now(UTC) + timedelta(seconds=60),
     )

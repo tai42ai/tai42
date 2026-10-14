@@ -30,6 +30,17 @@ non-date property, ``maxDate`` before ``minDate``, ``rangeStart`` naming an
 undeclared or non-date property, ``minDays`` above ``maxDays``, or a span key on a
 field that declares no ``rangeStart`` is refused loudly.
 
+A ``rangeStart`` pair IS the platform's date range, and the one definition states
+both its data shape and how it draws: a surface with a range control draws the pair
+as ONE control labelled by the START's and END's ``title`` (else their names); a
+surface without one draws two date fields. The answer is always the two date
+strings — nothing is recombined. A pair is drawable as one control only when both
+fields sit on the same page, both are ``format: date``, both carry the same
+``visibleWhen``, and no OTHER field on the page has a ``visibleWhen`` naming either
+end; otherwise it draws as two date fields (a documented degrade). A ``rangeStart``
+that names another range's END, or two ENDs naming the same start, make the pair
+ambiguous and are refused.
+
 Any property MAY carry a ``visibleWhen`` predicate (``{"field": <other property>,
 "equals"|"in"|"notEmpty": ...}``) making its visibility depend on another field.
 It is evaluated on the submitted values at the answer facet: a field hidden by its
@@ -40,6 +51,30 @@ property.
 An extra constraint keyword riding alongside a scalar ``type`` (``pattern``,
 ``minimum``, an inline ``anyOf``, ...) is not rendered but is enforced when the
 answer is validated.
+
+A ``string`` property MAY carry an ``inputMode`` keyword naming the keyboard/input
+kind a channel draws for it (``text``/``numeric``/``decimal``/``tel``/``email``/
+``url``). It is a rendering hint only: the value stays the string typed (``numeric``
+keeps ``"007"``) and the answer is still validated against ``type``/``pattern``/
+``format`` alone. Each channel draws the kind's control where it has one and degrades
+to a plain text field by its documented rule where it does not. ``inputMode`` on a
+non-string property, an unknown value, or ``inputMode`` alongside an ``enum`` or a
+``format`` (which already select the control) — or on an array's ``items`` — is
+refused naming the property.
+
+A ``string`` or array-of-strings property MAY carry a ``control`` keyword naming the
+CONTROL a surface draws in place of its shape's default: ``chips`` draws a choice (a
+string ``enum``, or an array whose string ``items`` declare an ``enum``) as a chip
+grid; ``textarea`` draws a ``string`` as a multi-line text control. It changes what
+is DRAWN, never what is accepted — the value and its validation stay the property's.
+Each channel draws the control where it has one and degrades to the shape's default
+control by its documented rule where it does not. ``control`` outside the set
+(``chips``/``textarea``), ``chips`` on a non-choice or a choice with no declared
+list, ``textarea`` on a non-string or alongside an ``enum``/``format``/``inputMode``
+(which already select the control), or ``control`` on an array's ``items`` — is
+refused naming the property. ``maxLength``/``minLength`` are drawn where the control
+can show them and enforced at the answer door; a ``minLength`` above ``maxLength`` is
+a constraint no answer could meet and is refused.
 
 The ask-time guard (``ask``) and the callback form renderer share this ONE
 walk, so the shared subset is judged by a single rule set. Channel-SPECIFIC limits
@@ -54,9 +89,16 @@ import datetime
 import re
 from typing import Any
 
+from tai42_contract.interactions.models import FormControl, FormInputMode
 from tai42_kit.interactions.form_vocabulary import DATE_CONSTRAINT_KEYS, FORM_WEEKDAYS, VISIBLE_WHEN_OPS
 
 _SCALAR_TYPES = ("string", "boolean", "integer", "number")
+# The keyboard/input kinds a string field may declare via ``inputMode`` — the shared
+# vocabulary every channel maps to its own control (or a documented plain-text degrade).
+_INPUT_MODES = tuple(mode.value for mode in FormInputMode)
+# The controls a property may request via ``control`` — the shared set every channel maps to
+# its own control (or a documented degrade to the default control for the property's shape).
+_FORM_CONTROLS = tuple(control.value for control in FormControl)
 # The string formats a channel form may declare, each with a value shape the answer
 # door validates (``date`` -> YYYY-MM-DD, ``time`` -> HH:MM[:SS], ``date-time`` -> RFC 3339).
 _STRING_FORMATS = ("date", "time", "date-time")
@@ -95,6 +137,12 @@ def _validate_array_items(name: str, prop: dict[str, Any]) -> None:
             f"form schema property {name!r} is an array whose items are not strings; a channel form allows "
             f"only an array of strings (a multiple-choice field)"
         )
+    if "inputMode" in items:
+        raise ValueError(
+            f"form schema property {name!r} items carry inputMode; a multiple-choice field draws no keyboard"
+        )
+    if "control" in items:
+        raise ValueError(f"form schema property {name!r} items carry control; a control is declared on the property")
     enum = items.get("enum")
     if enum is not None:
         if not isinstance(enum, list) or not enum:
@@ -124,6 +172,113 @@ def _validate_scalar_string(name: str, prop: dict[str, Any], ptype: Any) -> None
         raise ValueError(f"form schema property {name!r} enum must be a non-empty list")
     if not all(isinstance(choice, str) for choice in enum):
         raise ValueError(f"form schema property {name!r} enum must contain only strings")
+
+
+def _validate_input_mode(name: str, prop: dict[str, Any], ptype: Any) -> None:
+    # The optional ``inputMode`` keyword names the keyboard/input kind a channel draws for a
+    # ``string`` field (one of ``_INPUT_MODES``). It is a rendering hint, never a validator —
+    # refused loudly where no control could draw it: on a non-string property, for a value
+    # outside the set (including a non-string value), or alongside an ``enum`` or a ``format``
+    # that already selects the control. Absent means a plain text field.
+    mode = prop.get("inputMode")
+    if mode is None:
+        return
+    if ptype != "string":
+        raise ValueError(f"form schema property {name!r} has inputMode {mode!r} but is not a 'string' property")
+    if mode not in _INPUT_MODES:
+        raise ValueError(
+            f"form schema property {name!r} has unsupported inputMode {mode!r}; a channel form allows "
+            f"only {', '.join(_INPUT_MODES)}"
+        )
+    if prop.get("enum") is not None:
+        raise ValueError(
+            f"form schema property {name!r} carries inputMode alongside an enum; a choice control draws no keyboard"
+        )
+    if prop.get("format") is not None:
+        raise ValueError(
+            f"form schema property {name!r} carries inputMode alongside format {prop['format']!r}; a format "
+            f"already selects the control"
+        )
+
+
+def _validate_chips_control(name: str, prop: dict[str, Any], ptype: Any) -> None:
+    # ``control: chips`` draws a choice as a chip grid, so it needs a choice to draw: a
+    # ``string`` (or an array of string ``items``) that declares an ``enum`` (a per-send
+    # option list may replace it). Any other shape, or a choice with no declared list, is
+    # refused naming the property.
+    items = prop.get("items")
+    is_string = ptype == "string"
+    is_string_array = ptype == "array" and isinstance(items, dict) and items.get("type") == "string"
+    if not (is_string or is_string_array):
+        raise ValueError(
+            f"form schema property {name!r} has control 'chips' but is not a string or an array of strings"
+        )
+    # The choice list lives on the property itself for a string, on its ``items`` for an array.
+    enum_source = prop if is_string else (items if isinstance(items, dict) else {})
+    if enum_source.get("enum") is None:
+        raise ValueError(
+            f"form schema property {name!r} has control 'chips' but declares no enum; a chip grid needs a "
+            f"declared choice list (a per-send option list may replace it)"
+        )
+
+
+def _validate_textarea_control(name: str, prop: dict[str, Any], ptype: Any) -> None:
+    # ``control: textarea`` draws a ``string`` as a multi-line text control, so it is refused
+    # on a non-string or alongside a keyword that already selects the control: an ``enum`` (a
+    # choice control), a ``format`` (its own control), or an ``inputMode`` (a text area draws
+    # the plain keyboard). Each is refused naming the property.
+    if ptype != "string":
+        raise ValueError(f"form schema property {name!r} has control 'textarea' but is not a 'string' property")
+    if prop.get("enum") is not None:
+        raise ValueError(
+            f"form schema property {name!r} carries control 'textarea' alongside an enum; a choice control "
+            f"draws no text area"
+        )
+    if prop.get("format") is not None:
+        raise ValueError(
+            f"form schema property {name!r} carries control 'textarea' alongside format {prop['format']!r}; "
+            f"a format already selects the control"
+        )
+    if prop.get("inputMode") is not None:
+        raise ValueError(
+            f"form schema property {name!r} carries control 'textarea' alongside inputMode {prop['inputMode']!r}; "
+            f"a text area draws the plain keyboard"
+        )
+
+
+def _validate_control(name: str, prop: dict[str, Any], ptype: Any) -> None:
+    # The optional ``control`` keyword overrides the default control a surface draws for a
+    # property's shape (``chips`` for a choice, ``textarea`` for multi-line text). It changes
+    # what is DRAWN, never what is accepted. A value outside the set is refused naming the
+    # property; the per-control shape rules are checked below.
+    control = prop.get("control")
+    if control is None:
+        return
+    if control not in _FORM_CONTROLS:
+        raise ValueError(
+            f"form schema property {name!r} has unsupported control {control!r}; a channel form allows "
+            f"only {', '.join(_FORM_CONTROLS)}"
+        )
+    if control == FormControl.CHIPS:
+        _validate_chips_control(name, prop, ptype)
+    else:
+        _validate_textarea_control(name, prop, ptype)
+
+
+def _validate_length_bounds(name: str, prop: dict[str, Any]) -> None:
+    # ``minLength``/``maxLength`` are JSON-Schema string bounds the answer door enforces and the
+    # text controls draw. A ``minLength`` above ``maxLength`` is a constraint no answer could
+    # meet — refused when the form is built, the same discipline as a maxDate before its minDate.
+    minimum = prop.get("minLength")
+    maximum = prop.get("maxLength")
+    if (
+        isinstance(minimum, int)
+        and not isinstance(minimum, bool)
+        and isinstance(maximum, int)
+        and not isinstance(maximum, bool)
+        and minimum > maximum
+    ):
+        raise ValueError(f"form schema property {name!r} has minLength {minimum} above maxLength {maximum}")
 
 
 def _check_bound_date(name: str, key: str, value: Any) -> None:
@@ -211,10 +366,13 @@ def _validate_property(name: str, prop: Any) -> None:
     if not isinstance(prop, dict):
         raise ValueError(f"form schema property {name!r} must be an object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     ptype = prop.get("type")
+    _validate_input_mode(name, prop, ptype)
+    _validate_control(name, prop, ptype)
     if ptype == "array":
         _validate_array_items(name, prop)
     elif ptype in _SCALAR_TYPES:
         _validate_scalar_string(name, prop, ptype)
+        _validate_length_bounds(name, prop)
         _validate_date_constraints(name, prop)
     else:
         raise ValueError(
@@ -225,21 +383,40 @@ def _validate_property(name: str, prop: Any) -> None:
     _validate_visible_when(name, prop)
 
 
+def _check_range_start(name: str, start: str, props: dict[str, dict], start_to_end: dict[str, str]) -> None:
+    # Resolve one ``rangeStart`` reference: it must name a declared DATE property (not itself),
+    # that property must be a plain start (not another range's END — a chain is ambiguous), and
+    # no earlier END may already name the same start (two ENDs on one start are ambiguous too).
+    if start == name:
+        raise ValueError(f"form schema property {name!r} rangeStart cannot name itself")
+    target = props.get(start)
+    if target is None:
+        raise ValueError(f"form schema property {name!r} rangeStart names undeclared property {start!r}")
+    if not _prop_is_date(target):
+        raise ValueError(f"form schema property {name!r} rangeStart names non-date property {start!r}")
+    target_start = target.get("rangeStart")
+    if isinstance(target_start, str) and target_start:
+        raise ValueError(
+            f"form schema property {name!r} rangeStart names {start!r}, which is already paired with {target_start!r}"
+        )
+    if start in start_to_end:
+        raise ValueError(
+            f"form schema property {name!r} rangeStart names {start!r}, which is already paired "
+            f"with {start_to_end[start]!r}"
+        )
+    start_to_end[start] = name
+
+
 def _check_cross_references(fields: list[tuple[str, dict, bool]]) -> None:
     # Resolve the property references the per-property walk could not: a ``rangeStart``
-    # must name a declared DATE property (not itself), and a ``visibleWhen.field`` must
-    # name another declared property.
+    # must name a declared, plain DATE start (:func:`_check_range_start`), and a
+    # ``visibleWhen.field`` must name another declared property.
     props = {name: prop for name, prop, _ in fields}
+    start_to_end: dict[str, str] = {}
     for name, prop, _ in fields:
         start = prop.get("rangeStart")
         if isinstance(start, str) and start:
-            if start == name:
-                raise ValueError(f"form schema property {name!r} rangeStart cannot name itself")
-            target = props.get(start)
-            if target is None:
-                raise ValueError(f"form schema property {name!r} rangeStart names undeclared property {start!r}")
-            if not _prop_is_date(target):
-                raise ValueError(f"form schema property {name!r} rangeStart names non-date property {start!r}")
+            _check_range_start(name, start, props, start_to_end)
         predicate = prop.get("visibleWhen")
         if isinstance(predicate, dict):
             field = predicate.get("field")

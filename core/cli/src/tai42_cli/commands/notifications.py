@@ -152,6 +152,18 @@ def notify(
             ),
         ),
     ] = None,
+    wording: Annotated[
+        str | None,
+        typer.Option(
+            "--wording",
+            help=(
+                "JSON object of the notification's per-send platform-drawn texts, grouped by what each "
+                "decorates — form (a form send's chrome), choice (a choice list's control words) and "
+                'status (in-flight status copy), e.g. \'{"form":{"open":"Fill in","submit":"Send"}}\'. Each '
+                "member is admitted only on the surface that draws it; an unknown key is rejected."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Send a human a one-way, fire-and-forget notification.
 
@@ -159,19 +171,33 @@ def notify(
     request — a list of ``MediaItem`` for ``--media``, a discriminated ``Option`` list
     (reply/link) for ``--options``, an ``OptionSection`` list for ``--sections``, a
     ``ChannelTemplate`` for ``--template``, a ``LocationElement`` for ``--location``, a
-    ``MediaItem`` for ``--header``, a JSON object for ``--schema``, a ``FormData`` for ``--data``
-    and a ``FormPage`` list for ``--pages`` — so a mis-shaped value
-    (including an unknown template/location/header/data key, which the contract would otherwise
-    silently drop) raises loudly here; the contract's cross-field rules (caps, non-blank,
-    the options-XOR-sections choice surface, header/footer requiring a choice surface,
-    template exclusivity, the channel-deliverable form subset, and the form data/pages
-    requiring a schema and matching its properties) are enforced by the server.
+    ``MediaItem`` for ``--header``, a JSON object for ``--schema``, a ``FormData`` for ``--data``,
+    a ``FormPage`` list for ``--pages`` and a ``Wording`` for ``--wording`` — so a
+    mis-shaped value (including an unknown template/location/header/data/wording key, which
+    the contract would otherwise silently drop) raises loudly here. The contract's cross-field
+    rules (caps, non-blank, the options-XOR-sections choice surface, header/footer requiring a
+    choice surface, template exclusivity, the channel-deliverable form subset, the form data/pages
+    requiring a schema and matching its properties, and each ``wording`` member admitted only on the
+    surface that draws it) are enforced by the server.
 
     Example: ``tai notifications notify "Deploy finished" --channel telegram``
     """
     ctx_obj = app_context(ctx)
     body = build_notify_body(
-        message, channel, recipient, media, template, options, sections, location, header, footer, schema, data, pages
+        message,
+        channel,
+        recipient,
+        media,
+        template,
+        options,
+        sections,
+        location,
+        header,
+        footer,
+        schema,
+        data,
+        pages,
+        wording,
     )
     with ctx_obj.client() as client:
         result = client.post("/api/notifications", json=body)

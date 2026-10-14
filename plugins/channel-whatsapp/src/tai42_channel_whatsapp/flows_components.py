@@ -11,12 +11,12 @@ visibility wrapper. The screen/footer assembly and the public ``build_form_flow`
 
 from __future__ import annotations
 
-import copy
 import datetime
 import re
-from typing import Any
+from typing import Any, assert_never
 
 from tai42_contract.channels import ChannelInputError
+from tai42_contract.interactions import FormControl, FormInputMode
 from tai42_kit.interactions import DATE_CONSTRAINT_KEYS, FORM_WEEKDAYS, RADIO_OPTION_THRESHOLD
 
 # Meta injects ``flow_token`` into every Flow response to correlate the reply, so a
@@ -39,6 +39,14 @@ _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # weekday names an ``unavailableDates`` entry may carry. Each weekday maps onto Meta's
 # CalendarPicker ``include-days`` enum code below; an excluded weekday is dropped from
 # ``include-days`` (the days that STAY selectable).
+
+# Meta's ``ChipsSelector`` option bounds: it renders at least 2 and at most 20 choices. A
+# ``control: chips`` choice whose declared list falls outside this range cannot render as a
+# ChipsSelector, so it DEGRADES to the shape's default control (a radio group / dropdown for a
+# string, a checkbox group for an array) — a named, documented degrade, never a silent drop.
+_CHIPS_MIN_CHOICES = 2
+_CHIPS_MAX_CHOICES = 20
+
 _WEEKDAY_CODES = {
     "monday": "Mon",
     "tuesday": "Tue",
@@ -193,6 +201,63 @@ def _choice_component_type(prop: dict[str, Any]) -> str:
     return "Dropdown"
 
 
+def _draws_chips(prop: dict[str, Any]) -> bool:
+    """Whether a ``control: chips`` choice property renders as a ``ChipsSelector`` on this channel.
+
+    A ChipsSelector draws Meta's 2..20 choices. A ``chips`` choice whose declared list
+    (:func:`_choice_options_enum` — a string's ``enum`` or an array's ``items.enum``, which the
+    schema always carries for ``chips``) falls outside that range cannot render as one and DEGRADES
+    to the shape's default control; a property not marked ``chips`` never draws one.
+    """
+    if prop.get("control") != FormControl.CHIPS:
+        return False
+    enum = _choice_options_enum(prop)
+    return enum is not None and _CHIPS_MIN_CHOICES <= len(enum) <= _CHIPS_MAX_CHOICES
+
+
+def _chips_single_pick(prop: dict[str, Any]) -> bool:
+    """Whether a property renders as a SINGLE-pick ``ChipsSelector`` — a ``string`` chips choice.
+
+    Its control value is a one-element LIST (``max-selected-items: 1``), so its screen-``data``
+    ``init``/``__val`` carriers are array-typed and the inbound decode unwraps the one-element list
+    back to the string. An ARRAY chips choice is already a list answer and needs no unwrap; a chips
+    choice that degrades (outside Meta's 2..20) draws a scalar default control and is not this.
+    """
+    return prop.get("type") == "string" and _draws_chips(prop)
+
+
+def _chips_component(cname: str, label: str, required: bool, prop: dict[str, Any], init: str) -> dict[str, Any]:
+    """A ``ChipsSelector`` for a ``control: chips`` choice field.
+
+    A string enum is SINGLE-pick (``max-selected-items: 1``); its value is a one-element list,
+    decoded back to the string. An array of strings is MULTI-pick: ``min/max-selected-items`` come
+    from the modeled ``minItems``/``maxItems`` (a required array with no ``minItems`` floor demands
+    at least one pick; an absent ``maxItems`` is Meta's 20 ceiling). Both read the per-send option
+    list (``data-source``) and prefill (``init-value``, an array).
+    """
+    component: dict[str, Any] = {
+        "type": "ChipsSelector",
+        "name": cname,
+        "label": label,
+        "required": required,
+        "data-source": f"${{data.{cname}__ds}}",
+        "init-value": init,
+    }
+    if _is_array_of_strings(prop):
+        min_items = prop.get("minItems")
+        max_items = prop.get("maxItems")
+        if isinstance(min_items, int) and not isinstance(min_items, bool):
+            component["min-selected-items"] = min_items
+        elif required:
+            component["min-selected-items"] = 1
+        component["max-selected-items"] = (
+            max_items if isinstance(max_items, int) and not isinstance(max_items, bool) else _CHIPS_MAX_CHOICES
+        )
+    else:
+        component["max-selected-items"] = 1
+    return component
+
+
 def _date_has_constraints(prop: dict[str, Any]) -> bool:
     """Whether a date property carries any platform date constraint (bounds, excluded days, a range pairing)."""
     return any(key in prop for key in DATE_CONSTRAINT_KEYS)
@@ -232,6 +297,189 @@ def _calendar_component(cname: str, label: str, required: bool, prop: dict[str, 
     return component
 
 
+def _sibling_depends_on(fields: list[str], properties: dict[str, Any], pair: set[str]) -> bool:
+    """Whether any field OTHER than the pair itself has a ``visibleWhen`` naming either end of the pair.
+
+    A controller reference to a merged pair's end would read the one range control's OBJECT value as
+    a scalar (same screen) or a carrier the merged-away end never emits (an earlier screen), so a pair
+    any other field depends on is NOT merged — it draws as two separate date controls instead.
+    """
+    for name in fields:
+        if name in pair:
+            continue
+        prop = properties.get(name)
+        predicate = prop.get("visibleWhen") if isinstance(prop, dict) else None
+        if isinstance(predicate, dict) and predicate.get("field") in pair:
+            return True
+    return False
+
+
+def range_pairs(this_fields: list[str], properties: dict[str, Any], has_review_page: bool = False) -> dict[str, str]:
+    """The ``END name -> START name`` map for every ``rangeStart`` pair drawable as ONE range control.
+
+    A ``rangeStart`` pair (the END names its START) draws as one :func:`_calendar_range_component`
+    when both ends sit on THIS screen, both are ``format: date``, both carry the SAME ``visibleWhen``
+    (both absent or deep-equal), and no OTHER field anywhere in the form has a ``visibleWhen`` naming
+    either end (:func:`_sibling_depends_on`, checked over all ``properties`` so a dependant on a
+    later screen degrades the pair too). Any pair failing a condition is omitted — it draws as two
+    date controls, the documented degrade. This is the ONE authority on "merged here"; the screen
+    builder, the per-send data, the footers and the inbound decode all consult it, so every surface's
+    merge decision agrees and no object value is ever read where a scalar is expected.
+
+    ``has_review_page`` disables EVERY merge for the form: a ``review`` page reads each field's scalar
+    ``${data.<name>__val}`` carrier back into a text line, and a merged range START's ``__val`` is the
+    range OBJECT ``{start-date, end-date}`` — which Meta's text interpolation cannot render (an
+    un-publishable / garbled readback). So when the form carries a review page the pair draws as two
+    date controls, whose scalar ``__val`` carriers the readback renders correctly (the documented
+    degrade).
+    """
+    if has_review_page:
+        return {}
+    on_screen = set(this_fields)
+    merges: dict[str, str] = {}
+    for end in this_fields:
+        end_prop = properties.get(end)
+        if not isinstance(end_prop, dict):
+            continue
+        start = end_prop.get("rangeStart")
+        if not isinstance(start, str) or start not in on_screen:
+            continue
+        start_prop = properties.get(start)
+        if not isinstance(start_prop, dict) or not _is_date_field(end_prop) or not _is_date_field(start_prop):
+            continue
+        shared = end_prop.get("visibleWhen")
+        if shared != start_prop.get("visibleWhen") or _splits_into_variants(shared):
+            # The two ends must share the SAME predicate, and it must not split the control into
+            # several per-value cases — the one range control carries a single object value, which a
+            # per-case backtick concatenation cannot express. Either draws two date controls instead.
+            continue
+        if _sibling_depends_on(list(properties), properties, {start, end}):
+            continue
+        merges[end] = start
+    return merges
+
+
+def _splits_into_variants(predicate: Any) -> bool:
+    # Whether a ``visibleWhen`` predicate renders as several per-value cases — a multi-entry ``in``
+    # (Meta's ``||`` cannot test membership, so each value becomes its own ``If`` branch). An
+    # ``equals``/``notEmpty`` or a single-entry ``in`` is one case.
+    return isinstance(predicate, dict) and isinstance(predicate.get("in"), list) and len(predicate["in"]) > 1
+
+
+def _union_exclusions(start_prop: dict[str, Any], end_prop: dict[str, Any]) -> tuple[list[str], set[str]]:
+    # The UNION of both fields' excluded explicit dates (order-preserving, de-duplicated) and excluded
+    # weekday names — a merged range control is never looser than either field.
+    excluded_dates: list[str] = []
+    excluded_days: set[str] = set()
+    for prop in (start_prop, end_prop):
+        unavailable = prop.get("unavailableDates")
+        if not isinstance(unavailable, list):
+            continue
+        for entry in unavailable:
+            if not isinstance(entry, str):
+                continue
+            if _ISO_DATE_RE.match(entry) and entry not in excluded_dates:
+                excluded_dates.append(entry)
+            elif entry.lower() in FORM_WEEKDAYS:
+                excluded_days.add(entry.lower())
+    return excluded_dates, excluded_days
+
+
+def _merged_date_bounds(start_prop: dict[str, Any], end_prop: dict[str, Any]) -> dict[str, Any]:
+    # The bounds a merged range CalendarPicker carries: never looser than either field. ``min-date``
+    # is the LATER of the two ``minDate``s, ``max-date`` the EARLIER of the two ``maxDate``s (ISO dates
+    # sort lexically), and the excluded dates / weekdays are the UNION of both fields' exclusions.
+    out: dict[str, Any] = {}
+    min_dates = [p["minDate"] for p in (start_prop, end_prop) if isinstance(p.get("minDate"), str)]
+    max_dates = [p["maxDate"] for p in (start_prop, end_prop) if isinstance(p.get("maxDate"), str)]
+    if min_dates:
+        out["min-date"] = max(min_dates)
+    if max_dates:
+        out["max-date"] = min(max_dates)
+    excluded_dates, excluded_days = _union_exclusions(start_prop, end_prop)
+    if excluded_dates:
+        out["unavailable-dates"] = excluded_dates
+    if excluded_days:
+        out["include-days"] = [_WEEKDAY_CODES[day] for day in FORM_WEEKDAYS if day not in excluded_days]
+    return out
+
+
+def _range_span(end_prop: dict[str, Any]) -> dict[str, Any]:
+    # ``min-days``/``max-days`` from the END's span. The platform span is the INCLUSIVE day count
+    # ``(end - start).days + 1``; Meta's ``min-days``/``max-days`` count the DIFFERENCE, so each is
+    # the platform value minus one. A ``minDays`` of 0 or 1 is no real floor and emits no ``min-days``.
+    out: dict[str, Any] = {}
+    min_days = end_prop.get("minDays")
+    max_days = end_prop.get("maxDays")
+    if isinstance(min_days, int) and not isinstance(min_days, bool) and min_days > 1:
+        out["min-days"] = min_days - 1
+    if isinstance(max_days, int) and not isinstance(max_days, bool) and max_days >= 1:
+        out["max-days"] = max_days - 1
+    return out
+
+
+def _range_value_type_decl() -> dict[str, Any]:
+    """The screen-``data`` type declaration for a merged range control's value — an object of two date strings."""
+    return {
+        "type": "object",
+        "properties": {"start-date": {"type": "string"}, "end-date": {"type": "string"}},
+        "__example__": {"start-date": "", "end-date": ""},
+    }
+
+
+def _calendar_range_component(
+    start_name: str,
+    end_name: str,
+    start_prop: dict[str, Any],
+    end_prop: dict[str, Any],
+    required_start: bool,
+    required_end: bool,
+    start_cname: str,
+) -> dict[str, Any]:
+    """A range-mode ``CalendarPicker`` for a ``rangeStart`` pair drawn as ONE control.
+
+    Emitted at the START's position and keyed by the START's component name; the END emits no
+    control. ``label`` and ``required`` are each the paired object Meta's range mode takes
+    (``{start-date, end-date}``), so the two ends carry their own titles and required flags. The
+    bounds are never looser than either field (:func:`_merged_date_bounds`) and the span rides the
+    END's ``minDays``/``maxDays`` (:func:`_range_span`). The value is the object ``{start-date,
+    end-date}``; the inbound decode splits it back onto the two schema date keys, so the submitted
+    answer stays the two scalar date strings.
+    """
+    component: dict[str, Any] = {
+        "type": "CalendarPicker",
+        "name": start_cname,
+        "label": {"start-date": _field_label(start_name, start_prop), "end-date": _field_label(end_name, end_prop)},
+        "mode": "range",
+        "required": {"start-date": required_start, "end-date": required_end},
+        "init-value": f"${{data.{start_cname}__init}}",
+    }
+    component.update(_merged_date_bounds(start_prop, end_prop))
+    component.update(_range_span(end_prop))
+    return component
+
+
+def split_range_values(properties: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+    """Split a merged range control's object value back onto its two schema date keys.
+
+    A ``rangeStart`` pair merged into one range control returns its value as ``{start-date,
+    end-date}`` under the START's schema key; this maps the two members onto the START key and the
+    END key (the property whose ``rangeStart`` names the START), leaving the answer the two scalar
+    date strings. A pair drawn as two controls carries two scalar values already (no object), so it
+    passes through untouched. Unknown/malformed objects are left as-is for the door to refuse.
+    """
+    out = dict(values)
+    for end_name, end_prop in properties.items():
+        start = end_prop.get("rangeStart") if isinstance(end_prop, dict) else None
+        if not isinstance(start, str):
+            continue
+        obj = out.get(start)
+        if isinstance(obj, dict) and ("start-date" in obj or "end-date" in obj):
+            out[start] = obj.get("start-date", "")
+            out[end_name] = obj.get("end-date", "")
+    return out
+
+
 def _checkbox_component(cname: str, label: str, required: bool, prop: dict[str, Any], init: str) -> dict[str, Any]:
     """A ``CheckboxGroup`` for a multiple-choice (array-of-strings) field.
 
@@ -258,6 +506,137 @@ def _checkbox_component(cname: str, label: str, required: bool, prop: dict[str, 
     return component
 
 
+def _text_input_component(
+    name: str, cname: str, label: str, required: bool, prop: dict[str, Any], init: str
+) -> dict[str, Any]:
+    """A ``TextInput`` for a ``string`` field, drawing the keyboard its ``inputMode`` names.
+
+    The platform ``inputMode`` hint (the open HTML ``inputmode`` vocabulary) selects Meta's
+    ``input-type``: ``numeric`` and ``decimal`` draw the numeric keypad (``number`` — its keypad
+    admits a decimal separator), ``tel`` the phone keypad (``phone``), ``email`` the email keyboard
+    (``email``). ``url`` has no Meta ``input-type`` (its set is text|number|email|password|passcode|
+    phone), so it DEGRADES to the plain text field here — named explicitly below, never a silent
+    fallthrough; the kind is still honoured on surfaces that draw it. ``text`` and an absent
+    ``inputMode`` are the plain text field, byte-identical to a string field carrying no hint.
+
+    ``inputMode`` only chooses the keyboard: the value always arrives as the typed string and is
+    never coerced. The map is exhaustive over :class:`FormInputMode` (``assert_never``), so a value
+    added to the platform later is a type error here until this channel decides its rendering. A
+    value the enum cannot construct raises :class:`ChannelInputError` naming the property.
+
+    A declared ``maxLength``/``minLength`` is drawn as Meta's ``max-chars``/``min-chars`` on the
+    single-line field (Meta otherwise caps an unbounded ``TextInput`` at 80 characters), so an
+    author's length bound holds on this surface instead of being silently cut to the vendor default.
+    """
+    plain: dict[str, Any] = {"type": "TextInput", "name": cname, "label": label, "required": required}
+    length = _length_attrs(prop)
+    raw = prop.get("inputMode")
+    if raw is None:
+        return {**plain, **length, "init-value": init}
+    try:
+        mode = FormInputMode(raw)
+    except ValueError as exc:
+        raise ChannelInputError(
+            f"form property {name!r}: unsupported inputMode {raw!r} — a text field allows only "
+            "text, numeric, decimal, tel, email, url"
+        ) from exc
+    match mode:
+        case FormInputMode.TEXT:
+            return {**plain, **length, "init-value": init}
+        case FormInputMode.URL:
+            # Meta's TextInput has no ``url`` input-type, so ``url`` degrades to the plain text field.
+            return {**plain, **length, "init-value": init}
+        case FormInputMode.NUMERIC | FormInputMode.DECIMAL:
+            # Meta's numeric keypad (``input-type: number``) admits a decimal separator, so both
+            # the whole-number and decimal keyboards map to it.
+            input_type = "number"
+        case FormInputMode.TEL:
+            input_type = "phone"
+        case FormInputMode.EMAIL:
+            input_type = "email"
+        case _:
+            assert_never(mode)
+    return {**plain, "input-type": input_type, **length, "init-value": init}
+
+
+def _length_attrs(prop: dict[str, Any]) -> dict[str, Any]:
+    """Meta's ``max-chars``/``min-chars`` from a string property's ``maxLength``/``minLength``, when declared."""
+    attrs: dict[str, Any] = {}
+    max_length = prop.get("maxLength")
+    min_length = prop.get("minLength")
+    if isinstance(max_length, int) and not isinstance(max_length, bool):
+        attrs["max-chars"] = max_length
+    if isinstance(min_length, int) and not isinstance(min_length, bool):
+        attrs["min-chars"] = min_length
+    return attrs
+
+
+def _textarea_component(cname: str, label: str, required: bool, prop: dict[str, Any], init: str) -> dict[str, Any]:
+    """A multi-line ``TextArea`` for a ``control: textarea`` string field.
+
+    Meta's ``TextArea`` carries ``max-length`` (drawn from a declared ``maxLength``, else Meta
+    defaults it to 600 characters) but has no ``input-type`` and no ``min-length`` — so a
+    ``textarea`` never carries an ``inputMode`` (the schema refuses the combination) and its only
+    drawn bound is the maximum.
+    """
+    component: dict[str, Any] = {"type": "TextArea", "name": cname, "label": label, "required": required}
+    max_length = prop.get("maxLength")
+    if isinstance(max_length, int) and not isinstance(max_length, bool):
+        component["max-length"] = max_length
+    component["init-value"] = init
+    return component
+
+
+def _choice_component(cname: str, label: str, required: bool, prop: dict[str, Any], init: str) -> dict[str, Any]:
+    """The Flow control a dynamic (``data-source``) choice property renders as.
+
+    A ``control: chips`` choice renders as a ``ChipsSelector`` for Meta's 2..20 choices, else
+    DEGRADES to the shape's default control (named, documented); a property with no ``chips`` draws
+    the default. The default is a ``CheckboxGroup`` for an array of strings, and for a string a
+    ``RadioButtonsGroup`` (short enum) / ``Dropdown``.
+    """
+    if _draws_chips(prop):
+        return _chips_component(cname, label, required, prop, init)
+    if _is_array_of_strings(prop):
+        return _checkbox_component(cname, label, required, prop, init)
+    return {
+        "type": _choice_component_type(prop),
+        "name": cname,
+        "label": label,
+        "required": required,
+        "data-source": f"${{data.{cname}__ds}}",
+        "init-value": init,
+    }
+
+
+def _string_component(
+    name: str, cname: str, label: str, required: bool, prop: dict[str, Any], init: str
+) -> dict[str, Any]:
+    """The control a plain (non-choice, non-date) ``string`` field renders as.
+
+    A ``control: textarea`` draws a multi-line ``TextArea``; no control draws the single-line
+    ``TextInput`` (whose keyboard its ``inputMode`` selects). A ``chips`` control never reaches
+    here — a chips string carries an ``enum`` and so is a choice field drawn above — so it is a
+    schema inconsistency and refused loudly rather than silently drawn as plain text. The match is
+    exhaustive over :class:`FormControl` (``assert_never``), so a control added to the platform later
+    is a type error here until this channel decides how a plain string draws it.
+    """
+    raw = prop.get("control")
+    if raw is None:
+        return _text_input_component(name, cname, label, required, prop, init)
+    control = FormControl(raw)
+    match control:
+        case FormControl.TEXTAREA:
+            return _textarea_component(cname, label, required, prop, init)
+        case FormControl.CHIPS:
+            raise ChannelInputError(
+                f"form property {name!r}: control 'chips' needs a declared choice list (an enum); a "
+                "plain string carries none"
+            )
+        case _:
+            assert_never(control)
+
+
 def _dynamic_component(
     name: str, prop: dict[str, Any], required: bool, option_fields: set[str], names: dict[str, str]
 ) -> dict[str, Any]:
@@ -281,17 +660,9 @@ def _dynamic_component(
                 f"form property {name!r}: a multiple-choice (array of strings) field needs an 'items' enum "
                 "or per-send options to render as a CheckboxGroup"
             )
-        return _checkbox_component(cname, label, required, prop, init)
+        return _choice_component(cname, label, required, prop, init)
     if _is_choice_field(name, prop, option_fields):
-        kind = _choice_component_type(prop)
-        return {
-            "type": kind,
-            "name": cname,
-            "label": label,
-            "required": required,
-            "data-source": f"${{data.{cname}__ds}}",
-            "init-value": init,
-        }
+        return _choice_component(cname, label, required, prop, init)
     if _is_date_field(prop):
         if _date_has_constraints(prop):
             return _calendar_component(cname, label, required, prop, init)
@@ -300,7 +671,7 @@ def _dynamic_component(
         # component property at publish, so the required flag is deliberately not emitted here.
         return {"type": "DatePicker", "name": cname, "label": label, "init-value": init}
     if prop_type == "string":
-        return {"type": "TextInput", "name": cname, "label": label, "required": required, "init-value": init}
+        return _string_component(name, cname, label, required, prop, init)
     if prop_type == "boolean":
         return {"type": "OptIn", "name": cname, "label": label, "required": required, "init-value": init}
     if prop_type in ("integer", "number"):
@@ -332,22 +703,26 @@ def _value_type_decl(prop: dict[str, Any]) -> dict[str, Any]:
     prop_type = prop.get("type")
     if prop_type == "boolean":
         return {"type": "boolean", "__example__": False}
-    if prop_type == "array":
+    if prop_type == "array" or _chips_single_pick(prop):
+        # A single-pick ChipsSelector carries a one-element LIST, so a ``string`` chips field's
+        # value is array-typed exactly like a multiple-choice field (decoded back to the string).
         return {"type": "array", "items": {"type": "string"}, "__example__": []}
     return {"type": "string", "__example__": ""}
 
 
 def _field_data_decls(
-    name: str, prop: dict[str, Any], option_fields: set[str], names: dict[str, str]
+    name: str, prop: dict[str, Any], option_fields: set[str], names: dict[str, str], merged_start: bool = False
 ) -> dict[str, Any]:
     """The screen-``data`` declarations a field needs where it is RENDERED.
 
     Its ``init-value`` source and, for a choice field, its dynamic ``data-source`` —
-    keyed by the field's identifier-safe component name.
+    keyed by the field's identifier-safe component name. A merged range START declares its
+    ``init`` as the range object (two date strings) and carries no ``data-source``.
     """
     cname = names[name]
-    decls: dict[str, Any] = {f"{cname}__init": _value_type_decl(prop)}
-    if _is_choice_field(name, prop, option_fields):
+    init_decl = _range_value_type_decl() if merged_start else _value_type_decl(prop)
+    decls: dict[str, Any] = {f"{cname}__init": init_decl}
+    if not merged_start and _is_choice_field(name, prop, option_fields):
         decls[f"{cname}__ds"] = {
             "type": "array",
             "items": {
@@ -396,179 +771,3 @@ def _display_component(block: dict[str, Any], slots: dict[str, str]) -> dict[str
 def _display_component_list(page: dict[str, Any], slots: dict[str, str]) -> list[dict[str, Any]]:
     """The ordered display components for a page (empty when it carries none)."""
     return [_display_component(block, slots) for block in (page.get("display") or [])]
-
-
-def _cond_literal(value: Any) -> str:
-    """One ``visibleWhen`` comparison value as a Flow ``If`` expression literal."""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
-    return f"'{escaped}'"
-
-
-# Meta's ``If`` components nest at most three deep, so a ``visibleWhen`` dependency chain
-# (a field gated on a field that is itself gated, …) renders at most this many nested ``If``.
-_MAX_IF_NESTING = 3
-
-# One render VARIANT of a field: the component-name suffix it carries and the ordered list of
-# ``If`` conditions that must all hold for it to show. A field with a single-valued predicate has
-# one variant with an empty suffix (byte-identical to a plain ``If``); a field shown for several
-# values of a controller has one variant per value, each under a distinct suffixed name.
-_Variant = tuple[str, list[str]]
-
-
-def _controller_ref(
-    field: str, suffix: str, this_fields: list[str], earlier_fields: list[str], names: dict[str, str]
-) -> str | None:
-    """The ``${…}`` reference to a controlling field's value, or ``None`` when it is unreadable here.
-
-    A controller rendered on this screen is read live as ``${form.<name><suffix>}`` (the suffix
-    names the controller's own matching variant); one collected on an earlier screen is read from
-    its coalesced carrier ``${data.<name>__val}`` (a single value, so no suffix). ``None`` means the
-    controller is on neither — the dependent cannot be gated here and renders unconditionally (the
-    answer facet still enforces its visibility).
-    """
-    if field in this_fields:
-        return f"${{form.{names[field]}{suffix}}}"
-    if field in earlier_fields:
-        return f"${{data.{names[field]}__val}}"
-    return None
-
-
-def screen_field_variants(
-    this_fields: list[str], earlier_fields: list[str], properties: dict[str, Any], names: dict[str, str]
-) -> dict[str, list[_Variant]]:
-    """The render variants of every field on a screen, keyed by schema property name.
-
-    A field with no ``visibleWhen``, or one whose controller is unreadable here, has the single
-    unconditional variant ``("", [])``. A field shown when a controller equals ONE value (``equals``,
-    a single-entry ``in``) or is non-empty (``notEmpty``) keeps one variant with an empty suffix and
-    one ``If`` condition — byte-identical to the former single-``If`` output. A field shown for
-    SEVERAL values (a multi-entry ``in``) splits into one variant per value, each with a distinct
-    ``__<value>`` suffix and its own ``== <value>`` condition — Meta's ``||`` refuses a disjunction of
-    equality comparisons, so the disjunction is expressed as sibling ``If`` branches instead. When the
-    controller is itself split, the dependent inherits each of the controller's variants (its
-    conditions prepended), so a dependency chain renders as nested ``If`` under the matching case.
-    """
-    memo: dict[str, list[_Variant]] = {}
-
-    def resolve(name: str) -> list[_Variant]:
-        if name in memo:
-            return memo[name]
-        predicate = properties[name].get("visibleWhen")
-        controller = predicate.get("field") if isinstance(predicate, dict) else None
-        if not isinstance(predicate, dict) or not isinstance(controller, str):
-            memo[name] = [("", [])]
-            return memo[name]
-        controller_variants = resolve(controller) if controller in this_fields else [("", [])]
-        if "in" in predicate:
-            values = list(predicate["in"])
-            if not values:
-                raise ChannelInputError(f"form property {name!r}: visibleWhen 'in' names no value")
-            split = len(values) > 1
-            comparisons = [f"== {_cond_literal(choice)}" for choice in values]
-            suffixes = [f"__{_slug_value(choice)}" if split else "" for choice in values]
-        elif "equals" in predicate:
-            comparisons = [f"== {_cond_literal(predicate['equals'])}"]
-            suffixes = [""]
-        else:
-            comparisons = ["!= ''"]
-            suffixes = [""]
-        variants: list[_Variant] = []
-        for controller_suffix, controller_conditions in controller_variants:
-            ref = _controller_ref(controller, controller_suffix, this_fields, earlier_fields, names)
-            if ref is None:
-                variants.append((controller_suffix, controller_conditions))
-                continue
-            for suffix, comparison in zip(suffixes, comparisons, strict=True):
-                variants.append((controller_suffix + suffix, [*controller_conditions, f"{ref} {comparison}"]))
-        _guard_variants(name, variants)
-        _guard_coalescible(name, properties[name], variants)
-        memo[name] = variants
-        return variants
-
-    return {name: resolve(name) for name in this_fields}
-
-
-def _slug_value(value: Any) -> str:
-    """A ``visibleWhen`` value as an identifier-safe component-name suffix fragment.
-
-    Lower-cased, with every run of non-``[a-z0-9]`` characters collapsed to a single ``_`` and the
-    ends trimmed. Raises when a value slugs to the empty string — a name suffix must be a real token.
-    """
-    slug = re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_")
-    if not slug:
-        raise ChannelInputError(f"visibleWhen value {value!r} has no identifier-safe characters for a case name")
-    return slug
-
-
-def _guard_variants(name: str, variants: list[_Variant]) -> None:
-    """Refuse a variant set Meta would reject: colliding case names, or a chain past the nesting cap."""
-    suffixes = [suffix for suffix, _ in variants]
-    if len(set(suffixes)) != len(suffixes):
-        raise ChannelInputError(
-            f"form property {name!r}: visibleWhen 'in' values collide after sanitising to identifier-safe case names"
-        )
-    for _, conditions in variants:
-        if len(conditions) > _MAX_IF_NESTING:
-            raise ChannelInputError(
-                f"form property {name!r}: visibleWhen dependency chain is {len(conditions)} deep; Meta nests "
-                f"at most {_MAX_IF_NESTING} If components"
-            )
-
-
-def _guard_coalescible(name: str, prop: dict[str, Any], variants: list[_Variant]) -> None:
-    """Refuse a split field whose answer cannot coalesce to one typed value across its cases.
-
-    A field shown for several values renders one control per case and its answer is coalesced by
-    :func:`form_ref` as a backtick string concatenation — correct only for a STRING value (at most one
-    case shows, so the concatenation is that case's string). A ``boolean`` (OptIn) or ``array``
-    (CheckboxGroup) field cannot be coalesced this way: the concatenation is a string where Meta
-    expects a boolean/array, and stringifying a list loses it. Such a field is refused loudly rather
-    than rendered into Meta-refused or value-losing Flow JSON (only string-valued conditional fields
-    support a multi-value ``visibleWhen`` on this channel).
-    """
-    if len(variants) <= 1:
-        return
-    prop_type = prop.get("type")
-    if prop_type in ("boolean", "array"):
-        raise ChannelInputError(
-            f"form property {name!r}: a {prop_type} field shown for several values of its controller is not "
-            "renderable on WhatsApp — its per-case answers cannot coalesce to one typed value (only "
-            "string-valued conditional fields support a multi-value visibleWhen here)"
-        )
-
-
-def emit_field_variants(component: dict[str, Any], variants: list[_Variant]) -> list[dict[str, Any]]:
-    """A control's render nodes: one per variant, the control (uniquely renamed) under its nested ``If``s.
-
-    An unconditional single variant returns the control itself. A conditional variant wraps the
-    control — renamed with the variant suffix when it is one of several — in an ``If`` per condition,
-    outermost first, so the controller's own condition encloses the dependent's.
-    """
-    base_name = component["name"]
-    nodes: list[dict[str, Any]] = []
-    for suffix, conditions in variants:
-        node = component if suffix == "" else {**copy.deepcopy(component), "name": base_name + suffix}
-        for condition in reversed(conditions):
-            node = {"type": "If", "condition": condition, "then": [node]}
-        nodes.append(node)
-    return nodes
-
-
-def form_ref(name: str, variants: list[_Variant], names: dict[str, str]) -> str:
-    """The ``${form.…}`` reference carrying a field's answer, coalesced across its render variants.
-
-    A single-variant field reads ``${form.<name>}`` as before. A split field (always string-valued —
-    :func:`_guard_coalescible` refuses a split boolean/array) reads a backtick concatenation of every
-    variant's reference; the variants' render conditions are mutually exclusive, so at most one is ever
-    shown and the concatenation equals that one's string value (an unshown control resolves to empty),
-    keeping one answer under the field's own name.
-    """
-    component_name = names[name]
-    if len(variants) == 1 and variants[0][0] == "":
-        return f"${{form.{component_name}}}"
-    references = "".join(f"${{form.{component_name}{suffix}}}" for suffix, _ in variants)
-    return f"`{references}`"

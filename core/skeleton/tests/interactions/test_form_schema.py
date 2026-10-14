@@ -193,6 +193,177 @@ def test_accepts_format_alongside_an_enum():
     assert validate_channel_form_schema(schema) is None
 
 
+# === inputMode (the keyboard/input-kind hint on a string field) =============
+
+
+@pytest.mark.parametrize("mode", ["text", "numeric", "decimal", "tel", "email", "url"])
+def test_accepts_each_input_mode(mode):
+    schema = {"type": "object", "properties": {"ref": {"type": "string", "inputMode": mode}}}
+    assert validate_channel_form_schema(schema) is None
+
+
+def test_rejects_unknown_input_mode():
+    with pytest.raises(ValueError, match="property 'ref' has unsupported inputMode 'phone'"):
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"ref": {"type": "string", "inputMode": "phone"}}}
+        )
+
+
+def test_rejects_non_string_input_mode_value():
+    with pytest.raises(ValueError, match="property 'ref' has unsupported inputMode 5"):
+        validate_channel_form_schema({"type": "object", "properties": {"ref": {"type": "string", "inputMode": 5}}})
+
+
+def test_rejects_input_mode_on_a_non_string_property():
+    with pytest.raises(ValueError, match="property 'n' has inputMode 'numeric' but is not a 'string'"):
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"n": {"type": "integer", "inputMode": "numeric"}}}
+        )
+
+
+def test_rejects_input_mode_on_an_array_property():
+    # The keyword must be refused on an array itself, not only inside its items — otherwise it
+    # would ride through silently on the array node.
+    with pytest.raises(ValueError, match="property 'tags' has inputMode 'numeric' but is not a 'string'"):
+        validate_channel_form_schema(
+            {
+                "type": "object",
+                "properties": {"tags": {"type": "array", "inputMode": "numeric", "items": {"type": "string"}}},
+            }
+        )
+
+
+def test_rejects_input_mode_alongside_an_enum():
+    with pytest.raises(ValueError, match="property 'c' carries inputMode alongside an enum"):
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"c": {"type": "string", "enum": ["a", "b"], "inputMode": "email"}}}
+        )
+
+
+def test_rejects_input_mode_alongside_a_format():
+    with pytest.raises(ValueError, match="property 'd' carries inputMode alongside format 'date'"):
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"d": {"type": "string", "format": "date", "inputMode": "numeric"}}}
+        )
+
+
+def test_rejects_input_mode_inside_array_items():
+    with pytest.raises(ValueError, match="property 'tags' items carry inputMode"):
+        validate_channel_form_schema(
+            {
+                "type": "object",
+                "properties": {"tags": {"type": "array", "items": {"type": "string", "inputMode": "email"}}},
+            }
+        )
+
+
+# === control (chips / textarea) ============================================
+
+
+def test_accepts_chips_on_a_string_enum():
+    schema = {"type": "object", "properties": {"c": {"type": "string", "enum": ["a", "b"], "control": "chips"}}}
+    assert validate_channel_form_schema(schema) is None
+
+
+def test_accepts_chips_on_an_array_with_items_enum():
+    schema = {
+        "type": "object",
+        "properties": {"tags": {"type": "array", "items": {"type": "string", "enum": ["a", "b"]}, "control": "chips"}},
+    }
+    assert validate_channel_form_schema(schema) is None
+
+
+def test_accepts_textarea_on_a_plain_string():
+    schema = {"type": "object", "properties": {"notes": {"type": "string", "control": "textarea"}}}
+    assert validate_channel_form_schema(schema) is None
+
+
+def test_rejects_unknown_control():
+    with pytest.raises(ValueError, match="property 'c' has unsupported control 'pills'"):
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"c": {"type": "string", "enum": ["a"], "control": "pills"}}}
+        )
+
+
+def test_rejects_non_string_control_value():
+    with pytest.raises(ValueError, match="property 'c' has unsupported control 5"):
+        validate_channel_form_schema({"type": "object", "properties": {"c": {"type": "string", "control": 5}}})
+
+
+def test_rejects_chips_on_a_non_choice_property():
+    with pytest.raises(ValueError, match="property 'n' has control 'chips' but is not a string or an array of strings"):
+        validate_channel_form_schema({"type": "object", "properties": {"n": {"type": "integer", "control": "chips"}}})
+
+
+def test_rejects_chips_without_an_enum():
+    with pytest.raises(ValueError, match="property 'c' has control 'chips' but declares no enum"):
+        validate_channel_form_schema({"type": "object", "properties": {"c": {"type": "string", "control": "chips"}}})
+
+
+def test_rejects_chips_on_an_array_without_items_enum():
+    with pytest.raises(ValueError, match="property 'tags' has control 'chips' but declares no enum"):
+        validate_channel_form_schema(
+            {
+                "type": "object",
+                "properties": {"tags": {"type": "array", "items": {"type": "string"}, "control": "chips"}},
+            }
+        )
+
+
+def test_rejects_control_inside_array_items():
+    with pytest.raises(ValueError, match="property 'tags' items carry control"):
+        validate_channel_form_schema(
+            {
+                "type": "object",
+                "properties": {"tags": {"type": "array", "items": {"type": "string", "control": "chips"}}},
+            }
+        )
+
+
+def test_rejects_textarea_on_a_non_string_property():
+    with pytest.raises(ValueError, match="property 'n' has control 'textarea' but is not a 'string'"):
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"n": {"type": "integer", "control": "textarea"}}}
+        )
+
+
+def test_rejects_textarea_alongside_an_enum():
+    with pytest.raises(ValueError, match="property 'c' carries control 'textarea' alongside an enum"):
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"c": {"type": "string", "enum": ["a"], "control": "textarea"}}}
+        )
+
+
+def test_rejects_textarea_alongside_a_format():
+    with pytest.raises(ValueError, match="property 'd' carries control 'textarea' alongside format 'date'"):
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"d": {"type": "string", "format": "date", "control": "textarea"}}}
+        )
+
+
+def test_rejects_textarea_alongside_an_input_mode():
+    with pytest.raises(ValueError, match="property 'd' carries control 'textarea' alongside inputMode 'numeric'"):
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"d": {"type": "string", "inputMode": "numeric", "control": "textarea"}}}
+        )
+
+
+# === minLength / maxLength shape =============================================
+
+
+def test_rejects_min_length_above_max_length():
+    with pytest.raises(ValueError, match="property 'bio' has minLength 10 above maxLength 5"):
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"bio": {"type": "string", "minLength": 10, "maxLength": 5}}}
+        )
+
+
+def test_admits_min_length_within_max_length():
+    validate_channel_form_schema(
+        {"type": "object", "properties": {"bio": {"type": "string", "minLength": 2, "maxLength": 200}}}
+    )
+
+
 # === date constraint keys (send-time shape check) ===========================
 
 
@@ -269,6 +440,35 @@ def test_rejects_span_key_without_range_start():
 def test_rejects_min_days_above_max_days():
     with pytest.raises(ValueError, match="minDays 5 above maxDays 2"):
         validate_channel_form_schema(_range_schema(minDays=5, maxDays=2))
+
+
+def test_rejects_chained_range_start():
+    # A start that is itself an end (a.rangeStart=b, b.rangeStart=c) makes "the pair" ambiguous.
+    schema = {
+        "type": "object",
+        "properties": {
+            "c": {"type": "string", "format": "date"},
+            "b": {"type": "string", "format": "date", "rangeStart": "c"},
+            "a": {"type": "string", "format": "date", "rangeStart": "b"},
+        },
+    }
+    with pytest.raises(ValueError, match="property 'a' rangeStart names 'b', which is already paired with 'c'"):
+        validate_channel_form_schema(schema)
+
+
+def test_rejects_two_ends_naming_the_same_start():
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date"},
+            "end1": {"type": "string", "format": "date", "rangeStart": "start"},
+            "end2": {"type": "string", "format": "date", "rangeStart": "start"},
+        },
+    }
+    with pytest.raises(
+        ValueError, match="property 'end2' rangeStart names 'start', which is already paired with 'end1'"
+    ):
+        validate_channel_form_schema(schema)
 
 
 # === visibleWhen predicate ==================================================

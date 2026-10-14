@@ -11,9 +11,33 @@ from typing import Any
 
 from pydantic import BaseModel
 from tai42_contract.hooks import TopicVerifierBinding
-from tai42_contract.interactions import AnswerFormat, FormData, FormPage, FormReactions
+from tai42_contract.interactions import (
+    AnswerFormat,
+    FormData,
+    FormPage,
+    FormReactions,
+    Wording,
+)
 
 _CALLBACK_PLACEHOLDER = "{callback_url}"
+
+
+def _wording_dump(wording: Wording | dict[str, Any]) -> dict[str, Any]:
+    # The per-send ``wording`` catalogue as its canonical dump; a dict from a direct caller is
+    # validated once here (the request validator re-checks each member against the format too).
+    parsed = wording if isinstance(wording, Wording) else Wording.model_validate(wording)
+    return parsed.model_dump()
+
+
+def _with_wording(payload: dict[str, Any] | None, wording_dump: dict[str, Any] | None) -> dict[str, Any] | None:
+    # Fold the dumped ``wording`` into a format's payload under the ``wording`` key the request
+    # validator and the delivery frame both read. A format with no other payload carries only the
+    # wording; absent wording leaves the payload (possibly None) untouched.
+    if wording_dump is None:
+        return payload
+    base = payload or {}
+    base["wording"] = wording_dump
+    return base
 
 
 def normalize_schema(schema: type[BaseModel] | dict[str, Any]) -> dict:
@@ -86,6 +110,7 @@ def build_payload(
     data: FormData | dict[str, Any] | None = None,
     pages: list[FormPage] | list[dict[str, Any]] | None = None,
     reactions: FormReactions | dict[str, Any] | None = None,
+    wording: Wording | dict[str, Any] | None = None,
 ) -> dict | None:
     """Build the stored ``format_payload`` for ``answer_format``, or ``None`` when it carries none.
 
@@ -94,14 +119,19 @@ def build_payload(
     callback route authenticates the signed server-to-server answer with — the client-facing
     serialization strips it (see ``routers.interactions``). The URL exists only after the link is
     resolved, so EXTERNAL is built after that step.
+
+    The per-send ``wording`` catalogue rides every format under the ``wording`` key; which of its
+    members a format may draw is the one admission table, re-checked when the ``InteractionRequest``
+    is built (before any state is written) and mirrored on the delivery frame.
     """
+    wording_dump = _wording_dump(wording) if wording is not None else None
     answer = answer_payload(answer_format, options, schema, data=data, pages=pages, reactions=reactions)
     if answer_format is not AnswerFormat.EXTERNAL:
-        return answer
+        return _with_wording(answer, wording_dump)
     payload: dict[str, Any] = {"url": url, **(answer or {})}
     if verifier is not None:
         payload["verifier"] = verifier.model_dump(mode="json")
-    return payload
+    return _with_wording(payload, wording_dump)
 
 
 async def resolve_link(link: str | Callable[[str], Awaitable[str]], callback_url: str) -> str:

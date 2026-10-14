@@ -56,13 +56,13 @@ def test_new_file_kinds_accept_https_and_served_media(kind: MediaKind):
 @pytest.mark.parametrize("kind", [MediaKind.DOCUMENT, MediaKind.VIDEO, MediaKind.AUDIO])
 def test_new_file_kinds_reject_data_uri(kind: MediaKind):
     # A data:image/* URI is IMAGE-only — every other file kind refuses it.
-    with pytest.raises(ValidationError, match="only image media may carry a data:image"):
+    with pytest.raises(ValidationError, match=r"only image media may carry a data:image"):
         MediaItem(kind=kind, url="data:image/png;base64,AAAA")
 
 
 @pytest.mark.parametrize("kind", [MediaKind.DOCUMENT, MediaKind.VIDEO, MediaKind.AUDIO])
 def test_new_file_kinds_reject_non_absolute(kind: MediaKind):
-    with pytest.raises(ValidationError, match="absolute https URL or a served-media reference"):
+    with pytest.raises(ValidationError, match=r"absolute https URL or a served-media reference"):
         MediaItem(kind=kind, url="ftp://x/y")
 
 
@@ -73,13 +73,13 @@ def test_document_carries_filename():
 
 @pytest.mark.parametrize("kind", [MediaKind.IMAGE, MediaKind.VIDEO, MediaKind.AUDIO, MediaKind.LINK])
 def test_filename_only_on_document(kind: MediaKind):
-    with pytest.raises(ValidationError, match="filename is meaningful only for document"):
+    with pytest.raises(ValidationError, match=r"filename is meaningful only for document"):
         MediaItem(kind=kind, url="https://cdn.example/x", filename="no.bin")
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
 def test_filename_non_blank(blank: str):
-    with pytest.raises(ValidationError, match="filename must be non-blank"):
+    with pytest.raises(ValidationError, match=r"filename must be non-blank"):
         MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.example/d", filename=blank)
 
 
@@ -89,7 +89,7 @@ def test_filename_length_capped():
 
 
 def test_filename_rejects_control_chars():
-    with pytest.raises(ValidationError, match="single-line label"):
+    with pytest.raises(ValidationError, match=r"single-line label"):
         MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.example/d", filename="a\nb.pdf")
 
 
@@ -109,24 +109,24 @@ def test_location_minimal_and_full():
 
 @pytest.mark.parametrize("lat", [-90.1, 90.1, 200.0])
 def test_location_latitude_bounds(lat: float):
-    with pytest.raises(ValidationError, match="latitude must be within"):
+    with pytest.raises(ValidationError, match=r"latitude must be within"):
         LocationElement(latitude=lat, longitude=0.0)
 
 
 @pytest.mark.parametrize("lon", [-180.1, 180.1])
 def test_location_longitude_bounds(lon: float):
-    with pytest.raises(ValidationError, match="longitude must be within"):
+    with pytest.raises(ValidationError, match=r"longitude must be within"):
         LocationElement(latitude=0.0, longitude=lon)
 
 
 def test_location_name_and_address_bounds():
-    with pytest.raises(ValidationError, match="location name must be at most"):
+    with pytest.raises(ValidationError, match=r"location name must be at most"):
         LocationElement(latitude=0, longitude=0, name="x" * (LOCATION_NAME_MAX_CHARS + 1))
-    with pytest.raises(ValidationError, match="location address must be at most"):
+    with pytest.raises(ValidationError, match=r"location address must be at most"):
         LocationElement(latitude=0, longitude=0, address="x" * (LOCATION_ADDRESS_MAX_CHARS + 1))
-    with pytest.raises(ValidationError, match="location name must be non-blank"):
+    with pytest.raises(ValidationError, match=r"location name must be non-blank"):
         LocationElement(latitude=0, longitude=0, name="   ")
-    with pytest.raises(ValidationError, match="single-line label"):
+    with pytest.raises(ValidationError, match=r"single-line label"):
         LocationElement(latitude=0, longitude=0, address="line1\nline2")
 
 
@@ -165,11 +165,11 @@ def test_reply_and_link_options():
 
 
 def test_reply_option_bounds():
-    with pytest.raises(ValidationError, match="reply option text must be non-blank"):
+    with pytest.raises(ValidationError, match=r"reply option text must be non-blank"):
         ReplyOption(text="  ")
-    with pytest.raises(ValidationError, match="reply option text must be at most"):
+    with pytest.raises(ValidationError, match=r"reply option text must be at most"):
         ReplyOption(text="x" * (NOTIFICATION_OPTION_MAX_CHARS + 1))
-    with pytest.raises(ValidationError, match="reply option description must be non-blank"):
+    with pytest.raises(ValidationError, match=r"reply option description must be non-blank"):
         ReplyOption(text="ok", description="  ")
 
 
@@ -184,20 +184,20 @@ def test_reply_option_authored_id_roundtrips_flat_and_in_a_section():
 
 
 def test_reply_option_id_bounds():
-    with pytest.raises(ValidationError, match="reply option id must be non-blank"):
+    with pytest.raises(ValidationError, match=r"reply option id must be non-blank"):
         ReplyOption(text="Yes", id="  ")
     with pytest.raises(ValidationError, match=f"at most {OPTION_ID_MAX_CHARS}"):
         ReplyOption(text="Yes", id="x" * (OPTION_ID_MAX_CHARS + 1))
-    with pytest.raises(ValidationError, match="single-line token"):
+    with pytest.raises(ValidationError, match=r"single-line token"):
         ReplyOption(text="Yes", id="a b")
-    with pytest.raises(ValidationError, match="single-line token"):
+    with pytest.raises(ValidationError, match=r"single-line token"):
         ReplyOption(text="Yes", id="a\nb")
 
 
 def test_link_option_bounds():
-    with pytest.raises(ValidationError, match="link option label must be non-blank"):
+    with pytest.raises(ValidationError, match=r"link option label must be non-blank"):
         LinkOption(label=" ", url="https://x.example")
-    with pytest.raises(ValidationError, match="absolute http"):
+    with pytest.raises(ValidationError, match=r"absolute http"):
         LinkOption(label="Go", url="notaurl")
 
 
@@ -216,9 +216,9 @@ def test_option_section_roundtrips():
 
 
 def test_section_rows_non_empty_and_title_blank():
-    with pytest.raises(ValidationError, match="section rows must be a non-empty list"):
+    with pytest.raises(ValidationError, match=r"section rows must be a non-empty list"):
         OptionSection(title="t", rows=[])
-    with pytest.raises(ValidationError, match="section title must be non-blank"):
+    with pytest.raises(ValidationError, match=r"section title must be non-blank"):
         OptionSection(title="  ", rows=[ReplyOption(text="a")])
 
 
@@ -237,7 +237,7 @@ def test_sections_total_rows_capped():
 
 
 def test_options_xor_sections():
-    with pytest.raises(ValidationError, match="options and sections are mutually exclusive"):
+    with pytest.raises(ValidationError, match=r"options and sections are mutually exclusive"):
         ChannelNotification(
             message="m",
             options=[ReplyOption(text="a")],
@@ -255,17 +255,17 @@ def test_header_and_footer_on_interactive():
 
 
 def test_header_requires_choice_surface():
-    with pytest.raises(ValidationError, match="header requires options or sections"):
+    with pytest.raises(ValidationError, match=r"header requires options or sections"):
         ChannelNotification(message="m", header=_image())
 
 
 def test_footer_requires_choice_surface():
-    with pytest.raises(ValidationError, match="footer requires options or sections"):
+    with pytest.raises(ValidationError, match=r"footer requires options or sections"):
         ChannelNotification(message="m", footer="ft")
 
 
 def test_footer_bounds():
-    with pytest.raises(ValidationError, match="footer must be non-blank"):
+    with pytest.raises(ValidationError, match=r"footer must be non-blank"):
         ChannelNotification(message="m", options=[ReplyOption(text="a")], footer="  ")
     with pytest.raises(ValidationError, match=f"at most {NOTIFICATION_FOOTER_MAX_CHARS}"):
         ChannelNotification(
@@ -275,7 +275,7 @@ def test_footer_bounds():
 
 def test_header_rejects_link_kind():
     link = MediaItem(kind=MediaKind.LINK, url="https://x.example/p")
-    with pytest.raises(ValidationError, match="header media must be a display item"):
+    with pytest.raises(ValidationError, match=r"header media must be a display item"):
         ChannelNotification(message="m", options=[ReplyOption(text="a")], header=link)
 
 
@@ -295,7 +295,7 @@ def test_location_combines_with_options_and_media():
 
 
 def test_location_excludes_template():
-    with pytest.raises(ValidationError, match="location and template are mutually exclusive"):
+    with pytest.raises(ValidationError, match=r"location and template are mutually exclusive"):
         ChannelNotification(
             message="m",
             location=LocationElement(latitude=1, longitude=2),
@@ -304,7 +304,7 @@ def test_location_excludes_template():
 
 
 def test_blank_message_needs_content():
-    with pytest.raises(ValidationError, match="non-blank unless media or location"):
+    with pytest.raises(ValidationError, match=r"non-blank unless media or location"):
         ChannelNotification(message="")
 
 
@@ -326,7 +326,7 @@ def test_template_is_a_reference_with_opaque_parameters():
 
 def test_template_parameters_optional_and_non_empty_when_present():
     assert ChannelTemplate(name="ping", language="en").parameters is None
-    with pytest.raises(ValidationError, match="non-empty dict"):
+    with pytest.raises(ValidationError, match=r"non-empty dict"):
         ChannelTemplate(name="t", language="en", parameters={})
 
 
@@ -356,7 +356,7 @@ def test_answer_part_location_only_not_plain_text():
 
 
 def test_answer_part_options_xor_sections():
-    with pytest.raises(ValidationError, match="options and sections are mutually exclusive"):
+    with pytest.raises(ValidationError, match=r"options and sections are mutually exclusive"):
         AnswerPart(
             message="m",
             options=[ReplyOption(text="a")],
@@ -365,7 +365,7 @@ def test_answer_part_options_xor_sections():
 
 
 def test_answer_part_header_requires_choice():
-    with pytest.raises(ValidationError, match="header requires options or sections"):
+    with pytest.raises(ValidationError, match=r"header requires options or sections"):
         AnswerPart(message="m", header=_image())
 
 
@@ -391,7 +391,7 @@ def test_conversation_message_attachments_and_location():
 
 
 def test_conversation_message_attachments_list_caps():
-    with pytest.raises(ValidationError, match="non-empty list when present"):
+    with pytest.raises(ValidationError, match=r"non-empty list when present"):
         ConversationMessage(external_user_id="u", text="hi", attachments=[])
 
 
@@ -422,7 +422,7 @@ def test_inbound_bridge_params_roundtrip_and_validation():
         ).params
         is None
     )
-    with pytest.raises(ValidationError, match="must match"):
+    with pytest.raises(ValidationError, match=r"must match"):
         InboundBridge(
             channel_id="c",
             our_identity="o",
@@ -492,11 +492,11 @@ def test_channel_delivery_carries_on_mismatch():
     assert ChannelDelivery(**base, on_mismatch=AnswerMismatchPolicy.BRIDGE).on_mismatch is AnswerMismatchPolicy.BRIDGE
 
 
-def test_mismatch_notice_defaults_bounds_and_rides_the_shapes():
+def test_rejection_wording_defaults_bounds_and_rides_the_shapes():
     from datetime import timedelta
 
     from tai42_contract.channels import ChannelDelivery, Correlation
-    from tai42_contract.interactions.models import MISMATCH_NOTICE_MAX_CHARS, InteractionRequest
+    from tai42_contract.interactions.models import REJECTION_NOTICE_MAX_CHARS, InteractionRequest, Wording
 
     now = datetime.now(UTC)
 
@@ -511,15 +511,14 @@ def test_mismatch_notice_defaults_bounds_and_rides_the_shapes():
             **over,
         )
 
-    # Default None (built-in notice); a set notice rides verbatim.
-    assert _ask().mismatch_notice is None
-    assert _ask(mismatch_notice="Please pick a listed option ({reason}).").mismatch_notice == (
-        "Please pick a listed option ({reason})."
-    )
-    with pytest.raises(ValidationError, match="mismatch_notice must be non-blank"):
-        _ask(mismatch_notice="   ")
-    with pytest.raises(ValidationError, match=f"at most {MISMATCH_NOTICE_MAX_CHARS}"):
-        _ask(mismatch_notice="x" * (MISMATCH_NOTICE_MAX_CHARS + 1))
+    # Default None (built-in sentence); a set refusal sentence rides verbatim in the payload.
+    assert _ask().wording is None
+    rejected = {"wording": {"answer": {"rejected": "Please pick a listed option ({reason})."}}}
+    assert _ask(format_payload=rejected).format_payload == rejected
+    with pytest.raises(ValidationError, match=r"wording.answer.rejected must be non-blank"):
+        _ask(format_payload={"wording": {"answer": {"rejected": "   "}}})
+    with pytest.raises(ValidationError, match=f"at most {REJECTION_NOTICE_MAX_CHARS}"):
+        _ask(format_payload={"wording": {"answer": {"rejected": "x" * (REJECTION_NOTICE_MAX_CHARS + 1)}}})
 
     # It rides the delivery and the parked correlation the ladder reads.
     delivery = ChannelDelivery(
@@ -528,43 +527,46 @@ def test_mismatch_notice_defaults_bounds_and_rides_the_shapes():
         answer_format="text",
         callback_url="https://x/cb",
         timeout_at=now,
-        mismatch_notice="Try again: {reason}",
+        wording=Wording.model_validate({"answer": {"rejected": "Try again: {reason}"}}),
     )
-    assert delivery.mismatch_notice == "Try again: {reason}"
+    assert delivery.wording is not None
+    assert delivery.wording.answer is not None
+    assert delivery.wording.answer.rejected == "Try again: {reason}"
     entry = Correlation(
         callback_url="https://x/cb",
         interaction_id="i",
         ttl_deadline=now + timedelta(minutes=5),
-        mismatch_notice="Try again: {reason}",
+        wording=Wording.model_validate({"answer": {"rejected": "Try again: {reason}"}}),
     )
-    assert entry.mismatch_notice == "Try again: {reason}"
+    assert entry.wording is not None
+    assert entry.wording.answer is not None
+    assert entry.wording.answer.rejected == "Try again: {reason}"
 
-    # ChannelDelivery re-validates the notice defensively — the SAME non-blank + cap bound the
-    # ask REQUEST enforces, symmetric with its media re-validation, so the delivery frame is
-    # bounded exactly as the ask that produced it.
+    # ChannelDelivery re-validates the sentence defensively — the SAME non-blank + cap bound the
+    # ask REQUEST enforces, so the delivery frame is bounded exactly as the ask that produced it.
     assert (
         ChannelDelivery(
             interaction_id="i", question="pick", answer_format="text", callback_url="https://x/cb", timeout_at=now
-        ).mismatch_notice
+        ).wording
         is None
     )
-    with pytest.raises(ValidationError, match="mismatch_notice must be non-blank"):
+    with pytest.raises(ValidationError, match=r"wording.answer.rejected must be non-blank"):
         ChannelDelivery(
             interaction_id="i",
             question="pick",
             answer_format="text",
             callback_url="https://x/cb",
             timeout_at=now,
-            mismatch_notice="   ",
+            wording=Wording.model_validate({"answer": {"rejected": "   "}}),
         )
-    with pytest.raises(ValidationError, match=f"at most {MISMATCH_NOTICE_MAX_CHARS}"):
+    with pytest.raises(ValidationError, match=f"at most {REJECTION_NOTICE_MAX_CHARS}"):
         ChannelDelivery(
             interaction_id="i",
             question="pick",
             answer_format="text",
             callback_url="https://x/cb",
             timeout_at=now,
-            mismatch_notice="x" * (MISMATCH_NOTICE_MAX_CHARS + 1),
+            wording=Wording.model_validate({"answer": {"rejected": "x" * (REJECTION_NOTICE_MAX_CHARS + 1)}}),
         )
 
 
@@ -582,7 +584,7 @@ def test_interaction_response_params_roundtrip_and_validation():
         InteractionResponse(interaction_id="i", answer="yes", answered_by="ext", answered_at=datetime.now(UTC)).params
         is None
     )
-    with pytest.raises(ValidationError, match="over the"):
+    with pytest.raises(ValidationError, match=r"over the"):
         InteractionResponse(
             interaction_id="i",
             answer="yes",

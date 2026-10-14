@@ -512,8 +512,17 @@ def make_delivery(
     media: list[MediaItem] | None = None,
     data: Any = None,
     pages: Any = None,
+    wording: Any = None,
+    on_mismatch: Any = None,
 ) -> ChannelDelivery:
-    """A valid ``ChannelDelivery`` with a comfortably-future default budget."""
+    """A valid ``ChannelDelivery`` with a comfortably-future default budget.
+
+    ``wording`` is the per-send catalogue (a :class:`Wording` or a mapping coerced into one);
+    ``on_mismatch`` the ask's digression policy (``AnswerMismatchPolicy``), defaulted by the model.
+    """
+    extras: dict[str, Any] = {}
+    if on_mismatch is not None:
+        extras["on_mismatch"] = on_mismatch
     return ChannelDelivery(
         interaction_id=interaction_id,
         recipient=recipient,
@@ -523,9 +532,11 @@ def make_delivery(
         schema=schema,
         data=data,
         pages=pages,
+        wording=wording,
         media=media,
         callback_url=callback_url,
         timeout_at=timeout_at or (datetime.now(UTC) + timedelta(minutes=10)),
+        **extras,
     )
 
 

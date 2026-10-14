@@ -24,7 +24,13 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
     from tai42_contract.hooks.models import TopicVerifierBinding
-    from tai42_contract.interactions.models import FormData, FormPage, FormReactions, MediaItem
+    from tai42_contract.interactions.models import (
+        FormData,
+        FormPage,
+        FormReactions,
+        MediaItem,
+        Wording,
+    )
 
 
 def check_ask_timing(*, timeout: float | None, expiry_at: datetime | None) -> None:
@@ -52,6 +58,7 @@ class Ask(Protocol):
         pages: list[FormPage] | list[dict[str, Any]] | None = None,
         reaction_tool: str | None = None,
         reactions: FormReactions | dict[str, Any] | None = None,
+        wording: Wording | dict[str, Any] | None = None,
         group_id: str | None = None,
         timeout: float | None = None,
         link: str | Callable[[str], Awaitable[str]] | None = None,
@@ -59,7 +66,6 @@ class Ask(Protocol):
         channel: str | None = None,
         recipient: str | None = None,
         on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY,
-        mismatch_notice: str | None = None,
         sensitive: bool = False,
         audience: str | None = None,
         media: list[MediaItem | dict[str, Any]] | None = None,
@@ -140,15 +146,15 @@ class Ask(Protocol):
         shared inbound-answer ladder reads it); an inbox-only ask records it but
         never reaches the ladder.
 
-        ``mismatch_notice`` is an OPTIONAL custom participant-facing rejection notice
-        used ONLY under the ``RETRY`` policy: when set it REPLACES the platform's
-        built-in retry notice. A literal ``{reason}`` token, if present, is filled
-        with the door's rejection reason by a plain substitution (a notice without
-        the token is sent verbatim; stray braces never raise). It is IGNORED under
-        the ``BRIDGE`` policy (a digression never notifies) and by a channel that
-        owns its own correction surface (which renders its own text off the door's
-        reason). ``None`` (the default) uses the built-in notice; a set value is a
-        non-blank string within the participant-reply cap.
+        ``wording`` is the OPTIONAL per-send catalogue of the question's
+        platform-drawn texts — buttons, headings, input hints, message lines,
+        answer-page sentences, the refusal sentence the participant reads, status
+        copy — grouped by what each decorates (a :class:`Wording` or its dict,
+        coerced through the model). Each member is admitted only on a send that
+        draws it (a member a format has no control for is refused), and the refusal
+        sentence ``wording.answer.rejected`` fills an OPTIONAL ``{reason}`` token
+        with the door's reason by a plain substitution. ``None`` (the default) draws
+        every surface's own word.
 
         ``sensitive`` marks the answer body as not-to-be-persisted AND wraps the
         returned answer in a ``SecretValue``: the caller reaches the real answer

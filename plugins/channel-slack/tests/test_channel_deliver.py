@@ -5,6 +5,7 @@ correlation storage, and form delivery through modal blocks.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -13,11 +14,13 @@ from tai42_contract.channels import (
     ChannelInputError,
 )
 from tai42_contract.interactions.models import (
+    AnswerMismatchPolicy,
     FormData,
     FormOption,
     FormPage,
     MediaItem,
     MediaKind,
+    Wording,
 )
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.settings import reset_all_settings
@@ -256,6 +259,57 @@ async def test_tier1_formats_link_only_no_correlation(http_script, fake_redis, a
     assert fake_redis.store == {}
 
 
+@pytest.mark.parametrize("answer_format", ["confirm", "external"])
+async def test_tier1_lines_draw_the_caller_answer_link_and_deadline(http_script, fake_redis, answer_format):
+    # The Tier-1 link line and deadline line carry the caller's wording.lines members with the
+    # channel's own url / ISO instant substituted in (plain replace, never str.format).
+    http_script.results.append(_ok_response(ts=None))
+    delivery = make_delivery(
+        answer_format=answer_format,
+        wording=Wording.model_validate(
+            {"lines": {"answer_link": "Tap to reply: {url}", "deadline": "Due by {deadline}"}}
+        ),
+    )
+
+    await SlackChannel().deliver(delivery)
+
+    text = json.loads(http_script.requests[0].content)["text"]
+    assert f"Tap to reply: {delivery.callback_url}" in text
+    assert f"Due by {delivery.timeout_at.isoformat()}" in text
+    assert "Answer here:" not in text
+
+
+async def test_tier2_lines_draw_the_caller_reply_options_and_deadline(http_script, fake_redis):
+    # A select ask's Tier-2 text composes the caller's reply line + deadline line, and lists the
+    # options through the caller's options line.
+    http_script.results.append(_ok_response(ts="1.1"))
+    delivery = make_delivery(
+        answer_format="select",
+        options=["staging", "production"],
+        wording=Wording.model_validate(
+            {"lines": {"reply": "Answer in the thread.", "deadline": "Closes {deadline}", "options": "Pick: {options}"}}
+        ),
+    )
+
+    await SlackChannel().deliver(delivery)
+
+    text = json.loads(http_script.requests[0].content)["text"]
+    assert "Pick: staging, production" in text
+    assert f"Answer in the thread. Closes {delivery.timeout_at.isoformat()}" in text
+    assert "Reply in this thread." not in text
+
+
+async def test_tier2_default_lines_unchanged_without_wording(http_script, fake_redis):
+    # Absent wording.lines, the platform's default reply + deadline line composes as before.
+    http_script.results.append(_ok_response(ts="1.1"))
+    delivery = make_delivery(answer_format="text")
+
+    await SlackChannel().deliver(delivery)
+
+    text = json.loads(http_script.requests[0].content)["text"]
+    assert f"Reply in this thread. Deadline: {delivery.timeout_at.isoformat()}" in text
+
+
 def test_channel_advertises_media_and_interactive_notifications():
     # The central notify guard reads these before handing a media / options
     # notification to this channel.
@@ -335,6 +389,7 @@ async def test_deliver_form_posts_blocks_and_stores_record(http_script, fake_red
         "schema": _FORM_SCHEMA,
         "question": delivery.question,
         "timeout_at": delivery.timeout_at.isoformat(),
+        "on_mismatch": "retry",
     }
     assert fake_redis.ttls[_FORM_KEY] == remaining_seconds(delivery.timeout_at)
     # The form path never writes a ts-correlation (its answer comes via the modal).
@@ -363,6 +418,162 @@ async def test_deliver_form_stores_the_per_send_data_and_pages_on_the_record(htt
     ]
     # A static form carries no reaction triggers on the record.
     assert "reactions" not in record
+
+
+async def test_deliver_form_stores_wording_and_on_mismatch_on_the_record(http_script, fake_redis):
+    # The per-send wording (title/cancel/... chrome) and the digression policy ride the record
+    # (the modal is built at click time), so a later open/re-render reads the caller's words off
+    # it and the ladder reads the policy.
+    http_script.results.append(_ok_response(ts="1.1"))
+    delivery = make_delivery(
+        answer_format="form",
+        schema=_FORM_SCHEMA,
+        wording=Wording.model_validate({"form": {"open": "Start", "cancel": "Not now", "title": "Tell us"}}),
+        on_mismatch=AnswerMismatchPolicy.BRIDGE,
+    )
+
+    await SlackChannel().deliver(delivery)
+
+    record = json.loads(fake_redis.store[_FORM_KEY])
+    assert record["wording"]["form"]["cancel"] == "Not now"
+    assert record["wording"]["form"]["title"] == "Tell us"
+    assert record["on_mismatch"] == "bridge"
+
+
+async def test_deliver_form_draws_the_open_button_from_wording_form_open(http_script, fake_redis):
+    http_script.results.append(_ok_response(ts="1.1"))
+    delivery = make_delivery(
+        answer_format="form", schema=_FORM_SCHEMA, wording=Wording.model_validate({"form": {"open": "Begin"}})
+    )
+
+    await SlackChannel().deliver(delivery)
+
+    blocks = json.loads(http_script.requests[0].content)["blocks"]
+    (button,) = blocks[-1]["elements"]
+    assert button["text"] == {"type": "plain_text", "text": "Begin"}
+
+
+async def test_deliver_form_open_label_over_75_refused_before_any_io(http_script, fake_redis):
+    delivery = make_delivery(
+        answer_format="form", schema=_FORM_SCHEMA, wording=Wording.model_validate({"form": {"open": "x" * 76}})
+    )
+    with pytest.raises(ChannelInputError, match=r"open|75"):
+        await SlackChannel().deliver(delivery)
+    assert _FORM_KEY not in fake_redis.store
+    assert http_script.requests == []
+
+
+async def test_deliver_form_cancel_label_over_24_refused_before_any_io(http_script, fake_redis):
+    delivery = make_delivery(
+        answer_format="form", schema=_FORM_SCHEMA, wording=Wording.model_validate({"form": {"cancel": "x" * 25}})
+    )
+    with pytest.raises(ChannelInputError, match=r"cancel|close|24"):
+        await SlackChannel().deliver(delivery)
+    assert _FORM_KEY not in fake_redis.store
+    assert http_script.requests == []
+
+
+async def test_deliver_form_title_over_24_refused_before_any_io(http_script, fake_redis):
+    delivery = make_delivery(
+        answer_format="form", schema=_FORM_SCHEMA, wording=Wording.model_validate({"form": {"title": "x" * 25}})
+    )
+    with pytest.raises(ChannelInputError, match=r"title|24"):
+        await SlackChannel().deliver(delivery)
+    assert _FORM_KEY not in fake_redis.store
+    assert http_script.requests == []
+
+
+async def test_deliver_page_less_form_submit_over_24_refused_before_any_io(http_script, fake_redis):
+    # A page-less form's submit takes wording.form.submit; a caller label over the 24-char modal
+    # cap is refused at the compose-and-discard, before any store or send.
+    delivery = make_delivery(
+        answer_format="form", schema=_FORM_SCHEMA, wording=Wording.model_validate({"form": {"submit": "x" * 25}})
+    )
+    with pytest.raises(ChannelInputError, match=r"submit|24"):
+        await SlackChannel().deliver(delivery)
+    assert _FORM_KEY not in fake_redis.store
+    assert http_script.requests == []
+
+
+async def test_deliver_form_field_choice_label_over_150_refused_before_any_io(http_script, fake_redis):
+    # A field's select placeholder (wording.form.fields[name].choice_label) over Slack's 150-char
+    # placeholder cap is refused at the compose-and-discard, before any store or send.
+    schema = {"type": "object", "properties": {"colour": {"type": "string", "enum": [f"c{i}" for i in range(6)]}}}
+    delivery = make_delivery(
+        answer_format="form",
+        schema=schema,
+        wording=Wording.model_validate({"form": {"fields": {"colour": {"choice_label": "x" * 151}}}}),
+    )
+    with pytest.raises(ChannelInputError, match=r"placeholder|150"):
+        await SlackChannel().deliver(delivery)
+    assert _FORM_KEY not in fake_redis.store
+    assert http_script.requests == []
+
+
+async def test_deliver_select_choice_label_draws_nothing_on_slack(http_script, fake_redis):
+    # Slack draws the choices inline (option buttons), so there is no list opener to label:
+    # wording.choice.label changes nothing in the posted blocks (documented degrade).
+    http_script.results.append(_ok_response(ts="1.1"))
+    await SlackChannel().deliver(make_delivery(answer_format="select", options=["a", "b"]))
+    without = json.loads(http_script.requests[0].content)["blocks"]
+
+    http_script.requests.clear()
+    http_script.results.append(_ok_response(ts="1.2"))
+    await SlackChannel().deliver(
+        make_delivery(
+            answer_format="select",
+            options=["a", "b"],
+            wording=Wording.model_validate({"choice": {"label": "Pick one"}}),
+        )
+    )
+    with_label = json.loads(http_script.requests[0].content)["blocks"]
+
+    assert with_label == without
+
+
+@pytest.mark.parametrize("answer_format", ["confirm", "external"])
+async def test_deliver_tier1_answer_controls_draw_nothing_on_slack(http_script, fake_redis, answer_format):
+    # Slack draws a Tier-1 ask as a text link (no button), so wording.answer.open/confirm have no
+    # control to label — the posted body is byte-for-byte unchanged (documented degrade).
+    deadline = datetime.now(UTC) + timedelta(minutes=10)
+    http_script.results.append(_ok_response(ts=None))
+    await SlackChannel().deliver(make_delivery(answer_format=answer_format, timeout_at=deadline))
+    without = http_script.requests[0].content
+
+    http_script.requests.clear()
+    http_script.results.append(_ok_response(ts=None))
+    await SlackChannel().deliver(
+        make_delivery(
+            answer_format=answer_format,
+            timeout_at=deadline,
+            wording=Wording.model_validate({"answer": {"open": "Open", "confirm": "Yes"}}),
+        )
+    )
+    with_controls = http_script.requests[0].content
+
+    assert with_controls == without
+
+
+async def test_deliver_text_reply_hint_draws_nothing_on_slack(http_script, fake_redis):
+    # A text ask has no platform reply-input control on Slack (the human replies in-thread),
+    # so wording.answer.reply_hint draws nothing — the posted body is byte-for-byte unchanged.
+    deadline = datetime.now(UTC) + timedelta(minutes=10)
+    http_script.results.append(_ok_response(ts="1.1"))
+    await SlackChannel().deliver(make_delivery(answer_format="text", timeout_at=deadline))
+    without = http_script.requests[0].content
+
+    http_script.requests.clear()
+    http_script.results.append(_ok_response(ts="1.2"))
+    await SlackChannel().deliver(
+        make_delivery(
+            answer_format="text",
+            timeout_at=deadline,
+            wording=Wording.model_validate({"answer": {"reply_hint": "Type here"}}),
+        )
+    )
+    with_hint = http_script.requests[0].content
+
+    assert with_hint == without
 
 
 async def test_deliver_form_unmappable_per_send_option_raises_before_any_io(http_script, fake_redis):

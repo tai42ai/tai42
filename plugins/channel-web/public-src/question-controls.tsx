@@ -14,6 +14,23 @@ import type { ChatItem, FormPage, FormPrefill, FormReactions } from '@/transcrip
 /** The transcript item this card renders. */
 export type QuestionItem = Extract<ChatItem, { kind: 'question' }>;
 
+/** The platform's own words, drawn when the send set no wording for a control. */
+const OPEN_LABEL = 'Open to answer';
+const REPLY_PLACEHOLDER = 'Type your answer';
+const TEXT_SUBMIT_LABEL = 'Answer';
+const CONFIRM_LABEL = 'Yes';
+const DECLINE_LABEL = 'No';
+const SENDING_LABEL = 'Sending your answer';
+/** The accessible name of a flat group of option buttons — the platform's word for the
+ * same choose-from-a-list decision Studio's select field and the web form field make. */
+export const SELECT_GROUP_LABEL = 'Choose an option';
+/** The terminal button of a one-page form answered as an ask. */
+const FORM_SUBMIT_LABEL = 'Answer';
+/** The button that returns to a stepped form's previous step. */
+const FORM_BACK_LABEL = 'Back';
+/** The placeholder of a form field's per-send option picker. */
+export const FIELD_PLACEHOLDER = 'Choose an option';
+
 interface ControlsProps {
   readonly question: QuestionItem;
   readonly draft: string;
@@ -57,7 +74,9 @@ export function QuestionControls(props: ControlsProps): ReactElement {
       // `ExternalLinkButton`.
       return (
         <div className="tcw-question-actions">
-          <ExternalLinkButton url={question.callbackUrl}>Open to answer</ExternalLinkButton>
+          <ExternalLinkButton url={question.callbackUrl}>
+            {question.wording?.answer?.open ?? OPEN_LABEL}
+          </ExternalLinkButton>
         </div>
       );
   }
@@ -65,6 +84,8 @@ export function QuestionControls(props: ControlsProps): ReactElement {
 
 function TextAnswer({ question, draft, onDraft, sending, onSubmit }: ControlsProps): ReactElement {
   const blank = draft.trim() === '';
+  const answer = question.wording?.answer;
+  const sendingLabel = question.wording?.status?.sending ?? SENDING_LABEL;
   return (
     <form
       className="tcw-question-actions"
@@ -77,37 +98,45 @@ function TextAnswer({ question, draft, onDraft, sending, onSubmit }: ControlsPro
         value={draft}
         onChange={(event) => onDraft(event.target.value)}
         aria-label={question.question}
-        placeholder="Type your answer"
+        placeholder={answer?.replyHint ?? REPLY_PLACEHOLDER}
         disabled={sending}
       />
       <Button type="submit" variant="primary" disabled={blank || sending}>
-        {sending ? <Spinner label="Sending your answer" /> : 'Answer'}
+        {sending ? <Spinner label={sendingLabel} /> : (answer?.submit ?? TEXT_SUBMIT_LABEL)}
       </Button>
     </form>
   );
 }
 
-function ConfirmAnswer({ sending, onSubmit }: ControlsProps): ReactElement {
+function ConfirmAnswer({ question, sending, onSubmit }: ControlsProps): ReactElement {
+  const answer = question.wording?.answer;
+  const sendingLabel = question.wording?.status?.sending ?? SENDING_LABEL;
   return (
     <div className="tcw-question-actions">
       <Button type="button" variant="primary" disabled={sending} onClick={() => onSubmit(true)}>
-        Yes
+        {answer?.confirm ?? CONFIRM_LABEL}
       </Button>
       <Button type="button" variant="secondary" disabled={sending} onClick={() => onSubmit(false)}>
-        No
+        {answer?.decline ?? DECLINE_LABEL}
       </Button>
-      {sending ? <Spinner label="Sending your answer" /> : null}
+      {sending ? <Spinner label={sendingLabel} /> : null}
     </div>
   );
 }
 
 function SelectAnswer({
+  question,
   options,
   sending,
   onSubmit,
 }: ControlsProps & { readonly options: readonly string[] }): ReactElement {
+  const sendingLabel = question.wording?.status?.sending ?? SENDING_LABEL;
   return (
-    <div className="tcw-question-actions">
+    <div
+      className="tcw-question-actions"
+      role="group"
+      aria-label={question.wording?.choice?.groupLabel ?? SELECT_GROUP_LABEL}
+    >
       {options.map((option) => (
         <Button
           key={option}
@@ -119,7 +148,7 @@ function SelectAnswer({
           {option}
         </Button>
       ))}
-      {sending ? <Spinner label="Sending your answer" /> : null}
+      {sending ? <Spinner label={sendingLabel} /> : null}
     </div>
   );
 }
@@ -132,6 +161,7 @@ function isSchemaObject(value: unknown): value is JsonSchema {
 }
 
 function FormAnswer({
+  question,
   sending,
   onSubmit,
   schema,
@@ -151,6 +181,7 @@ function FormAnswer({
   if (!isSchemaObject(schema)) {
     return <MalformedNotice message="This form is malformed: its schema must be an object." />;
   }
+  const form = question.wording?.form;
   return (
     <SchemaFormAnswer
       schema={schema}
@@ -161,9 +192,14 @@ function FormAnswer({
       sending={sending}
       onSubmit={onSubmit}
       idPrefix={idPrefix}
-      submitLabel="Answer"
+      submitLabel={form?.submit ?? FORM_SUBMIT_LABEL}
+      // The last step of a paged form carries the page's own primary button, not
+      // the one-page `form.submit` member; the web draws its generic word there.
       steppedSubmitLabel="Submit"
-      sendingLabel="Sending your answer"
+      sendingLabel={question.wording?.status?.sending ?? SENDING_LABEL}
+      backLabel={form?.back ?? FORM_BACK_LABEL}
+      fieldWording={form?.fields ?? {}}
+      fieldPlaceholder={FIELD_PLACEHOLDER}
     />
   );
 }

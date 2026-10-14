@@ -15,7 +15,7 @@ from tai42_skeleton.interactions.caller_ask import CALLER_ASK_RESOLUTION_REFUSED
 from tai42_skeleton.operations.interactions import _add_data, _reply_ttl
 from tai42_skeleton.routers import interactions as router
 from tai42_skeleton.routers.interactions.callback import _POST_ONLY_EMPTY_BODY_DENY
-from tai42_skeleton.routers.interactions.pages import _CONFIRM_PAGE, _REPLY_PAGE
+from tai42_skeleton.routers.interactions.pages import _render_awaiting_page, _render_confirm_page
 
 from ..._helpers import await_add_event
 from ._harness import (
@@ -355,7 +355,7 @@ async def test_get_html_is_byte_constant_and_headers(wired):
     assert b'"><b>' not in body
     # The page is byte-for-byte the module constant — no request-derived value
     # (query, ticket, or path) is interpolated anywhere.
-    assert body == _CONFIRM_PAGE.encode()
+    assert body == _render_confirm_page(None).encode()
     assert resp.headers["content-security-policy"] == "default-src 'none'; style-src 'unsafe-inline'"
     assert resp.headers["x-content-type-options"] == "nosniff"
     assert resp.headers["x-frame-options"] == "DENY"
@@ -597,7 +597,7 @@ async def test_unbound_external_callback_unchanged(wired):
     await _seed(wired)
     resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
     assert resp.status_code == 200
-    assert bytes(resp.body) == _CONFIRM_PAGE.encode()
+    assert bytes(resp.body) == _render_confirm_page(None).encode()
 
 
 async def test_callback_post_only_empty_body_query_answer_denied(wired, verifier_registry):
@@ -802,7 +802,7 @@ async def test_get_typed_value_format_serves_reply_page(wired, fmt, options):
     resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
     assert resp.status_code == 200
     body = bytes(resp.body)
-    assert body == _REPLY_PAGE.encode()
+    assert body == _render_awaiting_page(None).encode()
     assert b"<form" not in body
     assert resp.headers["content-security-policy"] == "default-src 'none'; style-src 'unsafe-inline'"
     state = await wired.store.get_state(wired.fake, "t1")
@@ -815,7 +815,73 @@ async def test_get_channel_confirm_serves_confirm_page(wired):
     await _seed_typed(wired, AnswerFormat.CONFIRM)
     resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
     assert resp.status_code == 200
-    assert bytes(resp.body) == _CONFIRM_PAGE.encode()
+    assert bytes(resp.body) == _render_confirm_page(None).encode()
+
+
+async def test_get_channel_confirm_draws_the_caller_confirm_label(wired):
+    # The confirm page's button reads the caller's wording.answer.confirm, escaped.
+    request = _typed_request(wired.store, AnswerFormat.CONFIRM).model_copy(
+        update={"format_payload": {"wording": {"answer": {"confirm": "Yes, <ship> it"}}}}
+    )
+    await wired.store.add(wired.fake, request, idle_ttl=86400, ticket="TKT", ticket_ttl=60)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    body = bytes(resp.body).decode()
+    assert '<button type="submit">Yes, &lt;ship&gt; it</button>' in body
+    assert "<ship>" not in body
+
+
+async def test_get_channel_confirm_draws_the_caller_page_copy(wired):
+    # The confirm page's title/heading/sentence read the caller's wording.answer_page.confirm, escaped.
+    request = _typed_request(wired.store, AnswerFormat.CONFIRM).model_copy(
+        update={
+            "format_payload": {
+                "wording": {"answer_page": {"confirm": {"heading": "Aprobar", "text": "Toca para enviar"}}}
+            }
+        }
+    )
+    await wired.store.add(wired.fake, request, idle_ttl=86400, ticket="TKT", ticket_ttl=60)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    body = bytes(resp.body).decode()
+    assert "<title>Aprobar</title>" in body
+    assert "<h1>Aprobar</h1>" in body
+    assert "<p>Toca para enviar</p>" in body
+
+
+async def test_get_answered_done_page_draws_the_caller_copy(wired):
+    # The done page served for an answered interaction reads wording.answer_page.done, escaped.
+    request = _typed_request(wired.store, AnswerFormat.CONFIRM).model_copy(
+        update={"format_payload": {"wording": {"answer_page": {"done": {"heading": "Listo", "text": "Ya respondido"}}}}}
+    )
+    await wired.store.add(wired.fake, request, idle_ttl=86400, ticket="TKT", ticket_ttl=60)
+    prior = InteractionResponse(
+        interaction_id="t1", answer=True, answered_by="external-callback", answered_at=datetime.now(UTC)
+    )
+    await wired.store.record_answer(wired.fake, prior, "tg1", reply_ttl=60, ticket="TKT", ticket_ttl=86400)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    body = bytes(resp.body).decode()
+    assert "<h1>Listo</h1>" in body
+    assert "<p>Ya respondido</p>" in body
+
+
+async def test_get_awaiting_page_draws_the_caller_copy(wired):
+    # The awaiting-reply page served for a text ask reads wording.answer_page.awaiting, escaped.
+    request = _typed_request(wired.store, AnswerFormat.TEXT).model_copy(
+        update={
+            "format_payload": {
+                "wording": {"answer_page": {"awaiting": {"heading": "Esperando", "text": "Responde en el canal"}}}
+            }
+        }
+    )
+    await wired.store.add(wired.fake, request, idle_ttl=86400, ticket="TKT", ticket_ttl=60)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    body = bytes(resp.body).decode()
+    assert "<title>Esperando</title>" in body
+    assert "<h1>Esperando</h1>" in body
+    assert "<p>Responde en el canal</p>" in body
 
 
 async def test_add_data_channel_is_conditional(wired):

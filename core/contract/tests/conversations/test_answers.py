@@ -41,7 +41,7 @@ def test_conversation_answer_requires_answer_text_for_non_silent(status: str):
     from tai42_contract.conversations import ConversationAnswer
 
     body: dict[str, Any] = {"message_id": "m-1", "thread_id": "t", "status": status, "answer": None}
-    with pytest.raises(ValidationError, match="carries answer text"):
+    with pytest.raises(ValidationError, match=r"carries answer text"):
         ConversationAnswer(**body)
 
 
@@ -57,7 +57,7 @@ def test_conversation_answer_silent_carries_no_answer_text():
 def test_conversation_answer_silent_rejects_any_answer_field(answer: str):
     from tai42_contract.conversations import ConversationAnswer
 
-    with pytest.raises(ValidationError, match="silent answer carries no answer text"):
+    with pytest.raises(ValidationError, match=r"silent answer carries no answer text"):
         ConversationAnswer(message_id="m-1", thread_id="t", status="silent", answer=answer)
 
 
@@ -96,7 +96,7 @@ def test_answer_part_carries_media_and_options():
 def test_answer_part_rejects_a_blank_message(blank: str):
     from tai42_contract.conversations import AnswerPart
 
-    with pytest.raises(ValidationError, match="message must be non-blank"):
+    with pytest.raises(ValidationError, match=r"message must be non-blank"):
         AnswerPart(message=blank)
 
 
@@ -114,7 +114,7 @@ def test_answer_part_media_and_template_are_exclusive():
     from tai42_contract.conversations import AnswerPart
     from tai42_contract.interactions.models import MediaItem, MediaKind
 
-    with pytest.raises(ValidationError, match="media and template are mutually exclusive"):
+    with pytest.raises(ValidationError, match=r"media and template are mutually exclusive"):
         AnswerPart(
             message="hi",
             media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")],
@@ -161,7 +161,7 @@ def test_answer_part_carries_a_form_schema():
 def test_answer_part_schema_rejects_present_but_empty_dict():
     from tai42_contract.conversations import AnswerPart
 
-    with pytest.raises(ValidationError, match="non-empty dict"):
+    with pytest.raises(ValidationError, match=r"non-empty dict"):
         AnswerPart(message="hi", schema={})
 
 
@@ -183,7 +183,7 @@ def test_answer_part_schema_and_template_are_exclusive():
     from tai42_contract.channels import ChannelTemplate
     from tai42_contract.conversations import AnswerPart
 
-    with pytest.raises(ValidationError, match="schema and template are mutually exclusive"):
+    with pytest.raises(ValidationError, match=r"schema and template are mutually exclusive"):
         AnswerPart(message="hi", schema=_part_form_schema(), template=ChannelTemplate(name="t", language="en"))
 
 
@@ -192,7 +192,7 @@ def test_answer_part_schema_and_options_are_exclusive():
     from tai42_contract.channels import ReplyOption
     from tai42_contract.conversations import AnswerPart
 
-    with pytest.raises(ValidationError, match="schema and options are mutually exclusive"):
+    with pytest.raises(ValidationError, match=r"schema and options are mutually exclusive"):
         AnswerPart(message="hi", schema=_part_form_schema(), options=[ReplyOption(text="Yes")])
 
 
@@ -248,9 +248,9 @@ def test_answer_part_data_rides_a_form_part_only():
     from tai42_contract.conversations import AnswerPart
     from tai42_contract.interactions.models import FormData, FormPage
 
-    with pytest.raises(ValidationError, match="data rides a form part"):
+    with pytest.raises(ValidationError, match=r"data rides a form part"):
         AnswerPart(message="hi", data=FormData(values={"size": "M"}))
-    with pytest.raises(ValidationError, match="pages ride a form part"):
+    with pytest.raises(ValidationError, match=r"pages ride a form part"):
         AnswerPart(message="hi", pages=[FormPage(title="Details", fields=["size"])])
 
 
@@ -260,9 +260,9 @@ def test_answer_part_bad_prefill_value_is_refused():
     from tai42_contract.conversations import AnswerPart
     from tai42_contract.interactions.models import FormData
 
-    with pytest.raises(ValidationError, match="must be a string"):
+    with pytest.raises(ValidationError, match=r"must be a string"):
         AnswerPart(message="tell us your size", schema=_part_form_schema(), data=FormData(values={"size": 42}))
-    with pytest.raises(ValidationError, match="unknown property"):
+    with pytest.raises(ValidationError, match=r"unknown property"):
         AnswerPart(message="tell us your size", schema=_part_form_schema(), data=FormData(values={"nope": "x"}))
 
 
@@ -325,7 +325,7 @@ def test_conversation_answer_parts_join_to_the_answer():
 def test_conversation_answer_parts_must_join_to_the_answer():
     from tai42_contract.conversations import ConversationAnswer
 
-    with pytest.raises(ValidationError, match="answer must equal the non-blank part messages joined"):
+    with pytest.raises(ValidationError, match=r"answer must equal the non-blank part messages joined"):
         ConversationAnswer(
             message_id="m-1", thread_id="t", status="answered", answer="one\n\ntwo", parts=_parts("one", "different")
         )
@@ -334,14 +334,14 @@ def test_conversation_answer_parts_must_join_to_the_answer():
 def test_conversation_answer_parts_reject_an_empty_list():
     from tai42_contract.conversations import ConversationAnswer
 
-    with pytest.raises(ValidationError, match="parts must be a non-empty list"):
+    with pytest.raises(ValidationError, match=r"parts must be a non-empty list"):
         ConversationAnswer(message_id="m-1", thread_id="t", status="answered", answer="x", parts=[])
 
 
 def test_conversation_answer_silent_carries_no_parts():
     from tai42_contract.conversations import ConversationAnswer
 
-    with pytest.raises(ValidationError, match="silent answer carries no parts"):
+    with pytest.raises(ValidationError, match=r"silent answer carries no parts"):
         ConversationAnswer(message_id="m-1", thread_id="t", status="silent", parts=_parts("one", "two"))
 
 
@@ -377,7 +377,7 @@ def test_conversation_answer_mixed_media_only_joins_only_text_parts():
 def test_conversation_answer_blank_answer_without_parts_is_refused():
     from tai42_contract.conversations import ConversationAnswer
 
-    with pytest.raises(ValidationError, match="blank text must carry media-only parts"):
+    with pytest.raises(ValidationError, match=r"blank text must carry media-only parts"):
         ConversationAnswer(message_id="m-1", thread_id="t", status="answered", answer="")
 
 
@@ -394,7 +394,7 @@ def test_answer_part_form_tag_rides_a_form_part_only():
 
     from tai42_contract.conversations import AnswerPart
 
-    with pytest.raises(ValidationError, match="form_tag rides a form part"):
+    with pytest.raises(ValidationError, match=r"form_tag rides a form part"):
         AnswerPart(message="hi", form_tag="ref-42")
 
 
@@ -403,5 +403,88 @@ def test_answer_part_form_tag_is_bounded():
 
     from tai42_contract.conversations import AnswerPart
 
-    with pytest.raises(ValidationError, match="form_tag must be 1 to"):
+    with pytest.raises(ValidationError, match=r"form_tag must be 1 to"):
         AnswerPart(message="hi", schema=_part_form_schema(), form_tag="has:colon")
+
+
+def test_answer_part_carries_a_wording_form_chapter_on_a_form_part():
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions import Wording
+
+    part = AnswerPart(
+        message="tell us about you",
+        schema=_part_form_schema(),
+        wording=Wording.model_validate({"form": {"open": "Fill it in", "cancel": "Never mind", "back": "Go back"}}),
+    )
+    assert part.wording is not None
+    assert part.wording.form is not None
+    assert part.wording.form.back == "Go back"
+
+
+def test_answer_part_wording_form_chapter_rides_a_form_part_only():
+    from pydantic import ValidationError
+
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions import Wording
+
+    # A part with no form surface draws nothing for the form chapter.
+    with pytest.raises(
+        ValidationError, match=r"a notification with no choice or form surface draws no wording.form.open"
+    ):
+        AnswerPart(message="hi", wording=Wording.model_validate({"form": {"open": "Go"}}))
+
+
+def test_answer_part_carries_a_wording_choice_label_beside_its_options():
+    from tai42_contract.channels import ReplyOption
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions import Wording
+
+    part = AnswerPart(
+        message="pick one",
+        options=[ReplyOption(text="Item A")],
+        wording=Wording.model_validate({"choice": {"label": "Open the list"}}),
+    )
+    assert part.wording is not None
+    assert part.wording.choice is not None
+    assert part.wording.choice.label == "Open the list"
+
+
+def test_answer_part_wording_choice_requires_a_choice_surface():
+    from pydantic import ValidationError
+
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions import Wording
+
+    with pytest.raises(
+        ValidationError, match=r"a notification with no choice or form surface draws no wording.choice.label"
+    ):
+        AnswerPart(message="hi", wording=Wording.model_validate({"choice": {"label": "Open the list"}}))
+    with pytest.raises(ValidationError, match=r"notify:form draws no wording.choice.label"):
+        AnswerPart(
+            message="hi",
+            schema=_part_form_schema(),
+            wording=Wording.model_validate({"choice": {"label": "Open the list"}}),
+        )
+
+
+def test_answer_part_wording_form_fields_cross_checked_against_schema():
+    from pydantic import ValidationError
+
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions import Wording
+
+    # ``size`` is a plain string with no enum and no per-send options, so it draws no choice list.
+    with pytest.raises(ValidationError, match=r"wording.form.fields names 'size', which draws no choice list"):
+        AnswerPart(
+            message="tell us about you",
+            schema=_part_form_schema(),
+            wording=Wording.model_validate({"form": {"fields": {"size": {"choice_label": "Pick"}}}}),
+        )
+
+
+def test_answer_part_plain_text_is_unaffected_by_the_new_fields():
+    # A plain-text part cannot carry the new chrome (form chrome needs a schema, a choice label
+    # needs a choice surface), so ``is_plain_text`` stays true for a bare-message part.
+    from tai42_contract.conversations import AnswerPart
+
+    assert AnswerPart(message="just text").is_plain_text() is True

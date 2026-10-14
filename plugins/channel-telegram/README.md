@@ -113,20 +113,39 @@ Optional Redis connection tuning (see `TelegramCorrelationSettings`):
      callback_url` mapping is stored in a plugin-owned Redis key
      (`channel:telegram:corr:{chat_id}:{message_id}`, TTL = the question's
      remaining budget — chat-scoped because a Telegram `message_id` is unique
-     only per chat). A `select` ask (and a `text` ask carrying suggested
-     replies) renders its options as a native **inline keyboard**, one callback
-     button per option — a tap resolves through the correlation ladder, and a
-     typed reply to the same message still anchors the same correlation.
+     only per chat). The reply input's placeholder reads the caller's
+     `wording.answer.reply_hint` when set, else **Reply to answer** (1-64
+     characters — a longer hint is refused before the send). A `select` ask (and
+     a `text` ask carrying suggested replies) renders its options as a native
+     **inline keyboard**, one callback button per option — a tap resolves through
+     the correlation ladder, and a typed reply to the same message still anchors
+     the same correlation. The keyboard replaces the reply prompt, so a `text`
+     ask carrying options draws no placeholder, and a select ask's
+     `wording.choice.label` (the list-opening button on channels with a native
+     list) names no control here.
    - **`confirm` / `external` (tap):** the message carries a tappable URL
      button opening the callback door directly — no correlation state, no
-     inbound involvement.
+     inbound involvement. The button's text reads the caller's
+     `wording.answer.open` when set, else **Answer**. The affirmative control
+     (`wording.answer.confirm`) is drawn by the callback confirm page, not by
+     this channel.
    - **`form` (webview):** the message carries a `web_app` button opening the
      schema-rendered callback page as an in-chat webview; the page POSTs the
      answer straight to the callback door, so like the tap forms there is no
-     correlation state and no inbound involvement. Advertised by the
+     correlation state and no inbound involvement. The button's text reads the
+     caller's `wording.form.open` when set, else **Fill form**. Advertised by the
      `supports_form_delivery` capability flag. Telegram accepts a `web_app`
      button in a PRIVATE chat only, so a `form` question to a group or channel
-     recipient fails the send where every other format succeeds.
+     recipient fails the send where every other format succeeds. The form's
+     `wording.form.cancel`/`back` label the webview's own chrome and its heading
+     (`wording.form.title`) is the callback page's — this channel draws none of them.
+   - **Deadline line (every format):** every question's text ends with a
+     deadline line reading the caller's `wording.lines.deadline` when set, else
+     **(Answer before `<deadline>`.)** — the `{deadline}` token is filled by a
+     plain substitution with this channel's own formatted instant.
+     `wording.lines.answer_link` / `reply` / `options` name no control here
+     (Telegram draws a url button, a force_reply or an inline keyboard, not those
+     sentences) and are drawn nowhere.
 3. The human replies in Telegram. Telegram POSTs the update to this plugin's
    own public route `POST /api/channels/telegram/inbound`, registered by
    `setWebhook` at startup with a shared `secret_token`.
@@ -143,6 +162,14 @@ Optional Redis connection tuning (see `TelegramCorrelationSettings`):
    door validates it against the question's stored `answer_format` and records
    it.
 5. The blocked `ask` call returns the recorded answer.
+
+The parked correlation record also carries the ask's `on_mismatch` policy and its
+per-send `wording`, both read by the shared answer ladder when a reply lands
+off-format: under the `retry` policy the human is told what's expected in the
+caller's `wording.answer.rejected` sentence (`wording.answer.rejected_final` when a
+refusal also closes the question), each in the end-user's language with an optional
+`{reason}` token filled by the door's reason; under the `bridge` policy the reply is
+bridged as a fresh turn and no notice is sent.
 
 Telegram redelivers an update until it gets a 2xx, so the inbound status code
 is the retry contract:

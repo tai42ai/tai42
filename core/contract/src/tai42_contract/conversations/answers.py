@@ -24,9 +24,11 @@ from tai42_contract.interactions.models import (
     FormPage,
     LocationElement,
     MediaItem,
+    Wording,
     check_form_data,
     check_form_pages,
     check_form_tag,
+    check_form_wording_fields,
     check_media_list,
 )
 
@@ -108,6 +110,12 @@ with warnings.catch_warnings():
         # interprets it, only bounds it (:func:`check_form_tag`); rides ONLY a form part
         # (``schema`` present). None -> no tag.
         form_tag: str | None = None
+        # The caller's words for this part's platform-drawn texts, grouped by what each decorates
+        # (:class:`~tai42_contract.interactions.models.wording.Wording`). Each member is admitted
+        # only on the surface that draws it (a form ``schema``, a flat ``options`` list, a sectioned
+        # ``sections`` list), the shared admission the composition rule reads. None -> the surface's
+        # own word.
+        wording: Wording | None = None
 
         @field_validator("message")
         @classmethod
@@ -168,8 +176,9 @@ with warnings.catch_warnings():
 
         @model_validator(mode="after")
         def _check_composition(self) -> AnswerPart:
-            # The SAME shared cross-field rules ChannelNotification enforces, so the flow-message
-            # authoring surface and the delivery frame can never drift.
+            # The SAME shared cross-field rules ChannelNotification enforces (including the per-send
+            # ``wording`` admission), so the flow-message authoring surface and the delivery frame
+            # can never drift.
             check_interactive_composition(
                 message=self.message,
                 media=self.media,
@@ -180,19 +189,22 @@ with warnings.catch_warnings():
                 schema=self.schema,
                 header=self.header,
                 footer=self.footer,
+                wording=self.wording,
+                has_pages=self.pages is not None,
                 noun="part",
             )
             return self
 
         @model_validator(mode="after")
         def _check_form_extras(self) -> AnswerPart:
-            # ``data``/``pages`` enrich a form part's ``schema`` (prefill, per-send option
-            # lists, stepped pages), so they ride ONLY a part that carries a ``schema`` — on
-            # any other part they name a form that is not there and are refused loudly. When a
-            # form part carries them, each is cross-checked against THIS part's ``schema`` (the
-            # same :func:`check_form_data`/:func:`check_form_pages` the ask path's
-            # ``InteractionRequest`` runs), so a bad prefill is refused here rather than
-            # delivered as a partly filled form.
+            # ``data``/``pages`` and the ``form_tag`` enrich a form part's ``schema`` (prefill,
+            # per-send option lists, stepped pages, the correlation tag), so they ride ONLY a part
+            # that carries a ``schema`` — on any other part they name a form that is not there and
+            # are refused loudly. When a form part carries ``data``/``pages``, each is cross-checked
+            # against THIS part's ``schema`` (the same :func:`check_form_data`/:func:`check_form_pages`
+            # the ask path's ``InteractionRequest`` runs), so a bad prefill is refused here rather
+            # than delivered as a partly filled form. A form part's per-field words are cross-checked
+            # against its schema and per-send option lists the same way.
             if self.schema is None:
                 if self.data is not None:
                     raise ValueError("data rides a form part (a part with a schema) only")
@@ -205,6 +217,8 @@ with warnings.catch_warnings():
                 check_form_data(self.schema, self.data)
             if self.pages is not None:
                 check_form_pages(self.schema, self.pages)
+            if self.wording is not None and self.wording.form is not None and self.wording.form.fields:
+                check_form_wording_fields(self.schema, self.data, self.wording.form.fields)
             return self
 
         def is_plain_text(self) -> bool:

@@ -9,14 +9,15 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from tai42_contract.interactions.models import (
-    MISMATCH_NOTICE_MAX_CHARS,
     AnswerFormat,
     AnswerMismatchPolicy,
     FormData,
     FormPage,
     FormReactions,
     MediaItem,
+    Wording,
     check_media_list,
+    check_wording_for_ask,
 )
 
 with warnings.catch_warnings():
@@ -77,13 +78,17 @@ with warnings.catch_warnings():
         # schema/pages at the ask door; a channel renders the reactive controls and routes
         # each trigger back through the reaction door.
         reactions: FormReactions | None = None
+        # The caller's words for this send's platform-drawn texts (buttons, headings, message
+        # lines, answer-page sentences, refusal sentences, status copy), grouped by what each
+        # decorates (:class:`~tai42_contract.interactions.models.wording.Wording`). Each member is
+        # admitted only on a send that draws it, re-checked against ``answer_format`` here as the
+        # ask REQUEST checked it, so the delivery frame is bounded exactly as the ask that produced
+        # it. None -> each surface shows its own word.
+        wording: Wording | None = None
         media: list[MediaItem] | None = None  # display media rendered WITH the question; None -> none
         # The ask's digression policy for a rejected reply; the channel carries it onto the
         # ``Correlation`` it parks so the shared answer ladder reads it at the 400 decision.
         on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY
-        # The ask's custom retry-notice text (``retry`` policy only), carried onto the parked
-        # ``Correlation`` for the ladder; ``None`` uses the built-in notice.
-        mismatch_notice: str | None = None
         callback_url: str  # public /api/interactions/callback/{ticket} — the answer sink
         timeout_at: datetime  # tz-aware; the plugin may surface a deadline to the human
 
@@ -126,22 +131,6 @@ with warnings.catch_warnings():
                 check_media_list(value)
             return value
 
-        @field_validator("mismatch_notice")
-        @classmethod
-        def _check_mismatch_notice(cls, value: str | None) -> str | None:
-            # None uses the built-in default; a set notice is re-validated to the SAME
-            # non-blank + participant-reply cap the ask REQUEST (``InteractionRequest``) enforces,
-            # so the delivery frame is bounded exactly as the ask that produced it — the
-            # symmetric defensive re-check the ``media`` re-validation above applies.
-            if value is not None:
-                if not value.strip():
-                    raise ValueError("mismatch_notice must be non-blank when set")
-                if len(value) > MISMATCH_NOTICE_MAX_CHARS:
-                    raise ValueError(
-                        f"mismatch_notice must be at most {MISMATCH_NOTICE_MAX_CHARS} characters, got {len(value)}"
-                    )
-            return value
-
         @model_validator(mode="after")
         def _check_options(self) -> ChannelDelivery:
             # SELECT REQUIRES options — the answer set the human chooses from. TEXT MAY
@@ -169,9 +158,9 @@ with warnings.catch_warnings():
 
         @model_validator(mode="after")
         def _check_form_extras(self) -> ChannelDelivery:
-            # ``data``/``pages``/``reactions`` ride ONLY a form delivery — they enrich the
-            # form's answer schema, which no other format carries. Present on any other
-            # format is a caller bug, refused loudly rather than silently ignored.
+            # ``data``/``pages``/``reactions`` ride ONLY a form delivery — they enrich the form's
+            # answer schema, which no other format carries. Present on any other format is a caller
+            # bug, refused loudly rather than silently ignored.
             if self.answer_format != AnswerFormat.FORM:
                 if self.data is not None:
                     raise ValueError(f"{self.answer_format} answer_format carries no form data")
@@ -179,4 +168,19 @@ with warnings.catch_warnings():
                     raise ValueError(f"{self.answer_format} answer_format carries no form pages")
                 if self.reactions is not None:
                     raise ValueError(f"{self.answer_format} answer_format carries no form reactions")
+            return self
+
+        @model_validator(mode="after")
+        def _check_wording(self) -> ChannelDelivery:
+            # Each ``wording`` member is admitted only on a send the format draws its control or
+            # sentence on — the SAME admission table the ask REQUEST (``InteractionRequest``) reads,
+            # so the delivery frame is bounded exactly as the ask that produced it. A member on a
+            # format that draws nothing for it is refused loudly rather than silently dropped.
+            if self.wording is not None:
+                check_wording_for_ask(
+                    self.wording,
+                    self.answer_format,
+                    has_options=bool(self.options),
+                    has_pages=self.pages is not None,
+                )
             return self

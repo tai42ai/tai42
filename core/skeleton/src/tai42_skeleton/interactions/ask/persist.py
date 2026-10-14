@@ -30,7 +30,6 @@ def build_request(
     format_payload: dict[str, Any] | None,
     reaction_tool: str | None = None,
     on_mismatch: Any,
-    mismatch_notice: str | None,
     reply_to: str,
     window: DeadlineWindow,
     sensitive: bool,
@@ -65,10 +64,9 @@ def build_request(
         to=to,
         payload=payload,
         on_expiry=on_expiry,
-        # The per-ask digression policy + custom retry notice ride the durable record
-        # for attribution; the ladder reads them off the Correlation the channel parks.
+        # The per-ask digression policy rides the durable record for attribution; the ladder reads
+        # it off the Correlation the channel parks.
         on_mismatch=on_mismatch,
-        mismatch_notice=mismatch_notice,
         reply_to=reply_to,
         created_at=window.created_at,
         timeout_at=window.timeout_at,
@@ -123,7 +121,6 @@ async def persist_question(
     format_payload: dict[str, Any] | None,
     reaction_tool: str | None = None,
     on_mismatch: Any,
-    mismatch_notice: str | None,
     reply_to: str,
     sensitive: bool,
     channel: str | None,
@@ -173,7 +170,6 @@ async def persist_question(
             format_payload=format_payload,
             reaction_tool=reaction_tool,
             on_mismatch=on_mismatch,
-            mismatch_notice=mismatch_notice,
             reply_to=reply_to,
             window=window,
             sensitive=sensitive,

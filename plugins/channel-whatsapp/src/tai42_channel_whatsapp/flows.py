@@ -5,13 +5,23 @@ publishable WhatsApp Flow the human fills in-chat. The supported subset is a
 top-level ``{"type": "object", "properties": {...}, "required": [...]}`` whose
 properties map one-to-one onto Flow field components:
 
-* ``string``                    → ``TextInput``
+* ``string``                    → ``TextInput`` (its ``inputMode`` selects the keyboard, below)
 * ``string`` with ``enum``      → ``Dropdown`` (dynamic ``data-source`` items)
 * ``string`` + ``format: date`` → ``DatePicker`` (sets/returns a ``YYYY-MM-DD`` string)
 * ``string`` + ``format: time`` / ``date-time`` → ``TextInput`` (free text; the vendor has no
   time-of-day picker, and its ``CalendarPicker`` is a calendar, not a date-time control)
 * ``boolean``                   → ``OptIn``
 * ``integer`` / ``number``      → ``TextInput`` with ``input-type: "number"``
+
+A ``string`` field's ``inputMode`` hint selects the ``TextInput`` keyboard (the value still
+arrives as the typed string, never coerced):
+
+* ``numeric`` / ``decimal``     → ``input-type: "number"`` (the numeric keypad admits a decimal separator)
+* ``tel``                       → ``input-type: "phone"``
+* ``email``                     → ``input-type: "email"``
+* ``url``                       → plain ``TextInput`` — Meta has no ``url`` input-type, so this
+  degrades to the plain text field (the kind is honoured on surfaces that draw it)
+* ``text`` / absent             → plain ``TextInput``
 
 ``format`` is part of the platform's form-schema subset (validated at the ask door); this
 module only chooses the WhatsApp control for it. A ``DatePicker`` carries no ``required`` field
@@ -85,23 +95,20 @@ from tai42_contract.interactions import FormReactionEventKind
 from tai42_channel_whatsapp.flows_components import (
     _RESERVED_PROPERTY,
     RADIO_OPTION_THRESHOLD,
-    _choice_options_enum,
+    _calendar_range_component,
     _display_component_list,
     _dynamic_component,
     _field_data_decls,
     _forward_field_data,
-    _is_array_of_strings,
-    _is_choice_field,
-    _is_date_field,
+    _range_value_type_decl,
     _sanitize_name,
-    _valid_iso_date,
     _value_type_decl,
     component_names,
-    emit_field_variants,
-    form_ref,
     payload_labels,
-    screen_field_variants,
 )
+from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages
+from tai42_channel_whatsapp.flows_send_data import build_flow_data
+from tai42_channel_whatsapp.flows_visibility import emit_field_variants, form_ref, screen_field_variants
 
 __all__ = [
     "FORM_ENTRY_SCREEN",
@@ -129,11 +136,14 @@ _SCREEN_PREFIX = "SCREEN_"
 # index's decimal representation stays injective and the ids stay unique and
 # unbounded (``SCREEN_J`` is 9, ``SCREEN_BA`` is 10).
 _SCREEN_DIGIT_LETTERS = "ABCDEFGHIJ"
-# Generic labels — a form ask carries no domain-specific chrome.
-_SCREEN_TITLE = "Form"
+# Generic labels — a form ask carries no domain-specific chrome; each is the DEFAULT a page's
+# ``button_label`` overrides in the sender's own words.
 _FOOTER_LABEL = "Submit"
 # The non-terminal step's footer — advances to the next screen.
 _CONTINUE_LABEL = "Continue"
+# Meta's ``Footer.label`` cap. A per-page ``button_label`` over this is refused loudly at build
+# (never truncated), the same discipline the per-send caps take.
+_FOOTER_LABEL_MAX_CHARS = 35
 
 # The data-exchange API version an endpoint-driven (reacting) Flow declares in its Flow JSON.
 # A static (navigate-only) Flow carries none. Meta's current data-endpoint version.
@@ -238,25 +248,6 @@ def _validate_form_properties(
         _dynamic_component(name, prop, name in required, option_fields, names)
 
 
-def _resolve_pages(
-    properties: dict[str, Any], pages: list[dict[str, Any]] | None
-) -> tuple[list[dict[str, Any]], list[list[str]]]:
-    """The resolved page list and each page's field names.
-
-    Defaults to one screen carrying every property in schema order. Raises ``ChannelInputError`` for a
-    page that names a property the schema does not declare.
-    """
-    resolved_pages = pages or [{"title": _SCREEN_TITLE, "fields": list(properties)}]
-    fields_by_screen: list[list[str]] = []
-    for page in resolved_pages:
-        page_fields = [str(field) for field in page["fields"]]
-        for field in page_fields:
-            if field not in properties:
-                raise ChannelInputError(f"form page names unknown property {field!r}")
-        fields_by_screen.append(page_fields)
-    return resolved_pages, fields_by_screen
-
-
 @dataclass(frozen=True)
 class _RenderSpec:
     """The cross-cutting inputs every screen reads while a Flow is built.
@@ -277,6 +268,9 @@ class _RenderSpec:
     page_advanced: frozenset[str]
     submitted: bool
     endpoint: bool
+    # ``END name -> START name`` for every ``rangeStart`` pair drawn as ONE range control; a merged
+    # END emits no control/data and a merged START carries the pair's object value.
+    range_merges: dict[str, str]
 
 
 def slot_datanames(pages: list[dict[str, Any]] | None) -> dict[str, str]:
@@ -315,6 +309,7 @@ def _review_readback(spec: _RenderSpec) -> list[dict[str, Any]]:
     return [
         {"type": "TextBody", "text": f"{spec.labels[name]}: ${{data.{spec.names[name]}__val}}"}
         for name in spec.properties
+        if name not in spec.range_merges  # a merged END carries no value of its own
     ]
 
 
@@ -326,6 +321,7 @@ def _reaction_event_payload(
     earlier_fields: list[str],
     names: dict[str, str],
     variants: dict[str, list[tuple[str, list[str]]]],
+    range_merges: dict[str, str],
 ) -> dict[str, str]:
     """A ``data_exchange`` action payload: the event markers plus the values filled so far.
 
@@ -333,14 +329,21 @@ def _reaction_event_payload(
     marker. Each known value is keyed by its SCHEMA NAME (this screen's through its coalesced
     ``form_ref`` — a single control, or a backtick concatenation of a split field's variants —
     earlier ones through their ``__val`` carrier), so the data endpoint hands the react facet
-    partial values keyed exactly as the stored schema. Later (unfilled) fields are omitted.
+    partial values keyed exactly as the stored schema. A merged range END emits no value of its own
+    (its START carries the pair's object, which the endpoint splits); later (unfilled) fields are
+    omitted.
     """
+    merged_ends = set(range_merges)
     payload: dict[str, str] = {_REACTION_EVENT_KEY: kind.value}
     if marker_key is not None and marker_value is not None:
         payload[marker_key] = marker_value
     for name in this_fields:
+        if name in merged_ends:
+            continue
         payload[name] = form_ref(name, variants[name], names)
     for name in earlier_fields:
+        if name in merged_ends:
+            continue
         payload[name] = f"${{data.{names[name]}__val}}"
     return payload
 
@@ -352,21 +355,29 @@ def _attach_field_reaction(
     earlier_fields: list[str],
     names: dict[str, str],
     variants: dict[str, list[tuple[str, list[str]]]],
+    range_merges: dict[str, str],
 ) -> dict[str, Any]:
     """Attach a ``field_changed`` ``data_exchange`` action to a selectable control, or raise.
 
-    A choice/date control carries the action on ``on-select-action``, an OptIn on
+    A choice/date/chips control carries the action on ``on-select-action``, an OptIn on
     ``on-click-action``; a plain text or numeric input has no on-change event on WhatsApp and is
     refused loudly (never silently dropped).
     """
     action = {
         "name": "data_exchange",
         "payload": _reaction_event_payload(
-            FormReactionEventKind.FIELD_CHANGED, _REACTION_FIELD_KEY, name, this_fields, earlier_fields, names, variants
+            FormReactionEventKind.FIELD_CHANGED,
+            _REACTION_FIELD_KEY,
+            name,
+            this_fields,
+            earlier_fields,
+            names,
+            variants,
+            range_merges,
         ),
     }
     ctype = component["type"]
-    if ctype in ("Dropdown", "RadioButtonsGroup", "CheckboxGroup", "CalendarPicker", "DatePicker"):
+    if ctype in ("Dropdown", "RadioButtonsGroup", "CheckboxGroup", "ChipsSelector", "CalendarPicker", "DatePicker"):
         component["on-select-action"] = action
     elif ctype == "OptIn":
         component["on-click-action"] = action
@@ -386,16 +397,48 @@ def _screen_data_model(
     The entry screen declares EVERY field's init/ds (the send injects them all there); a later screen
     declares its own and its successors' init/ds plus a ``__val`` carrier for each field collected earlier.
     """
+    merged_ends = set(spec.range_merges)
+    merged_starts = set(spec.range_merges.values())
     data_model: dict[str, Any] = {}
     if index == 0:
         for name, prop in spec.properties.items():
-            data_model.update(_field_data_decls(name, prop, spec.option_fields, spec.names))
+            if name in merged_ends:
+                continue
+            data_model.update(_field_data_decls(name, prop, spec.option_fields, spec.names, name in merged_starts))
     else:
         for name in [*this_fields, *later_fields]:
-            data_model.update(_field_data_decls(name, spec.properties[name], spec.option_fields, spec.names))
+            if name in merged_ends:
+                continue
+            data_model.update(
+                _field_data_decls(name, spec.properties[name], spec.option_fields, spec.names, name in merged_starts)
+            )
         for name in earlier_fields:
-            data_model[f"{spec.names[name]}__val"] = _value_type_decl(spec.properties[name])
+            if name in merged_ends:
+                continue
+            data_model[f"{spec.names[name]}__val"] = (
+                _range_value_type_decl() if name in merged_starts else _value_type_decl(spec.properties[name])
+            )
     return data_model
+
+
+def _resolve_button_label(page: dict[str, Any]) -> str | None:
+    """A page's ``button_label`` validated against Meta's ``Footer.label`` cap, or ``None`` when unset.
+
+    The caller's own word for the page's primary button (advance or submit); absent, the footer
+    shows its generic default. A label over :data:`_FOOTER_LABEL_MAX_CHARS` cannot ride Meta's
+    Footer and is refused loudly at build (naming the page), never truncated.
+    """
+    label = page.get("button_label")
+    if label is None:
+        return None
+    if not isinstance(label, str):
+        raise ChannelInputError(f"form page {page.get('title')!r} button_label must be a string")
+    if len(label) > _FOOTER_LABEL_MAX_CHARS:
+        raise ChannelInputError(
+            f"form page {page.get('title')!r} button_label is {len(label)} characters; WhatsApp caps a "
+            f"footer label at {_FOOTER_LABEL_MAX_CHARS}"
+        )
+    return label
 
 
 def _terminal_footer(
@@ -403,26 +446,38 @@ def _terminal_footer(
     earlier_fields: list[str],
     spec: _RenderSpec,
     variants: dict[str, list[tuple[str, list[str]]]],
+    button_label: str | None,
 ) -> dict[str, Any]:
-    # The terminal screen's Footer. A reacting form whose submission is reaction-checked fires a
-    # ``submitted`` data_exchange (the data endpoint accepts or refuses, then completes); a static
-    # form completes directly with the flat union of every field, keyed by human-readable label.
+    # The terminal screen's Footer, labelled by the page's ``button_label`` (else ``_FOOTER_LABEL``).
+    # A reacting form whose submission is reaction-checked fires a ``submitted`` data_exchange (the
+    # data endpoint accepts or refuses, then completes); a static form completes directly with the
+    # flat union of every field, keyed by human-readable label. A merged range END emits no
+    # completion entry — its START carries the pair's object, which the inbound decode splits.
+    label = button_label or _FOOTER_LABEL
     if spec.submitted:
         payload = _reaction_event_payload(
-            FormReactionEventKind.SUBMITTED, None, None, this_fields, earlier_fields, spec.names, variants
+            FormReactionEventKind.SUBMITTED,
+            None,
+            None,
+            this_fields,
+            earlier_fields,
+            spec.names,
+            variants,
+            spec.range_merges,
         )
         return {
             "type": "Footer",
-            "label": _FOOTER_LABEL,
+            "label": label,
             "on-click-action": {"name": "data_exchange", "payload": payload},
         }
-    payload = {
+    complete_payload = {
         spec.labels[name]: (
             form_ref(name, variants[name], spec.names) if name in this_fields else f"${{data.{spec.names[name]}__val}}"
         )
         for name in spec.properties
+        if name not in spec.range_merges
     }
-    return {"type": "Footer", "label": _FOOTER_LABEL, "on-click-action": {"name": "complete", "payload": payload}}
+    return {"type": "Footer", "label": label, "on-click-action": {"name": "complete", "payload": complete_payload}}
 
 
 def _step_footer(
@@ -434,11 +489,16 @@ def _step_footer(
     spec: _RenderSpec,
     routing_model: dict[str, list[str]],
     variants: dict[str, list[tuple[str, list[str]]]],
+    button_label: str | None,
 ) -> dict[str, Any]:
-    # A non-terminal screen's Footer. A page whose advance is reaction-triggered fires a
-    # ``page_advanced`` data_exchange (the data endpoint applies the reaction and names the next
-    # screen); any other page navigates directly, forwarding successors' init/ds and every
-    # collected value. Either way the transition is recorded in ``routing_model``.
+    # A non-terminal screen's Footer, labelled by the page's ``button_label`` (else
+    # ``_CONTINUE_LABEL``). A page whose advance is reaction-triggered fires a ``page_advanced``
+    # data_exchange (the data endpoint applies the reaction and names the next screen); any other
+    # page navigates directly, forwarding successors' init/ds and every collected value. A merged
+    # range END forwards nothing — its START carries the pair's object value. Either way the
+    # transition is recorded in ``routing_model``.
+    label = button_label or _CONTINUE_LABEL
+    merged_ends = set(spec.range_merges)
     screen_id = _screen_id(index)
     next_screen = _screen_id(index + 1)
     routing_model[screen_id] = [next_screen]
@@ -451,22 +511,29 @@ def _step_footer(
             earlier_fields,
             spec.names,
             variants,
+            spec.range_merges,
         )
         return {
             "type": "Footer",
-            "label": _CONTINUE_LABEL,
+            "label": label,
             "on-click-action": {"name": "data_exchange", "payload": payload},
         }
     forward: dict[str, str] = {}
     for name in later_fields:
+        if name in merged_ends:
+            continue
         forward.update(_forward_field_data(name, spec.properties[name], spec.option_fields, spec.names))
     for name in earlier_fields:
+        if name in merged_ends:
+            continue
         forward[f"{spec.names[name]}__val"] = f"${{data.{spec.names[name]}__val}}"
     for name in this_fields:
+        if name in merged_ends:
+            continue
         forward[f"{spec.names[name]}__val"] = form_ref(name, variants[name], spec.names)
     return {
         "type": "Footer",
-        "label": _CONTINUE_LABEL,
+        "label": label,
         "on-click-action": {"name": "navigate", "next": {"type": "screen", "name": next_screen}, "payload": forward},
     }
 
@@ -493,6 +560,7 @@ def _build_form_screen(
     later_fields = [field for screen in fields_by_screen[index + 1 :] for field in screen]
     is_terminal = index == screen_count - 1
     page_title = str(page["title"])
+    button_label = _resolve_button_label(page)
 
     data_model = _screen_data_model(index, this_fields, later_fields, earlier_fields, spec)
     for block in page.get("display") or []:
@@ -502,19 +570,48 @@ def _build_form_screen(
 
     variants = screen_field_variants(this_fields, earlier_fields, spec.properties, spec.names)
     display_blocks = _display_component_list(page, spec.slots)
+    merged_ends = set(spec.range_merges)
+    merged_starts = {start: end for end, start in spec.range_merges.items()}
     components: list[dict[str, Any]] = []
     for name in this_fields:
+        if name in merged_ends:
+            # A merged range END emits no control of its own — its START draws the one range control.
+            continue
+        if name in merged_starts:
+            end = merged_starts[name]
+            component = _calendar_range_component(
+                name,
+                end,
+                spec.properties[name],
+                spec.properties[end],
+                name in spec.required,
+                end in spec.required,
+                spec.names[name],
+            )
+            # A field_changed on EITHER end attaches the one on-select-action, named by the end that
+            # declared the trigger.
+            if name in spec.field_changed or end in spec.field_changed:
+                trigger_field = name if name in spec.field_changed else end
+                component = _attach_field_reaction(
+                    component, trigger_field, this_fields, earlier_fields, spec.names, variants, spec.range_merges
+                )
+            components.extend(emit_field_variants(component, variants[name]))
+            continue
         component = _dynamic_component(
             name, spec.properties[name], name in spec.required, spec.option_fields, spec.names
         )
         if name in spec.field_changed:
-            component = _attach_field_reaction(component, name, this_fields, earlier_fields, spec.names, variants)
+            component = _attach_field_reaction(
+                component, name, this_fields, earlier_fields, spec.names, variants, spec.range_merges
+            )
         components.extend(emit_field_variants(component, variants[name]))
     readback = _review_readback(spec) if page.get("kind") == "review" else []
     footer = (
-        _terminal_footer(this_fields, earlier_fields, spec, variants)
+        _terminal_footer(this_fields, earlier_fields, spec, variants, button_label)
         if is_terminal
-        else _step_footer(index, page_title, this_fields, later_fields, earlier_fields, spec, routing_model, variants)
+        else _step_footer(
+            index, page_title, this_fields, later_fields, earlier_fields, spec, routing_model, variants, button_label
+        )
     )
 
     screen: dict[str, Any] = {
@@ -555,7 +652,15 @@ def _reaction_sets(
             if not isinstance(prop, dict):
                 raise ChannelInputError(f"form reaction field_changed names unknown property {name!r}")
             ctype = _dynamic_component(name, prop, False, option_fields, names)["type"]
-            if ctype not in ("Dropdown", "RadioButtonsGroup", "CheckboxGroup", "CalendarPicker", "DatePicker", "OptIn"):
+            if ctype not in (
+                "Dropdown",
+                "RadioButtonsGroup",
+                "CheckboxGroup",
+                "ChipsSelector",
+                "CalendarPicker",
+                "DatePicker",
+                "OptIn",
+            ):
                 raise ChannelInputError(
                     f"form property {name!r}: a field_changed reaction needs a selectable control (a choice, "
                     f"date, or opt-in); a {ctype} has no on-change event on WhatsApp"
@@ -568,6 +673,8 @@ def build_form_flow(
     pages: list[dict[str, Any]] | None = None,
     option_fields: set[str] | None = None,
     reactions: dict[str, Any] | None = None,
+    form_title: str | None = None,
+    form_submit: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """The ``(flow_json, key)`` for a per-send/stepped form ask — publishable Flow JSON.
 
@@ -604,7 +711,7 @@ def build_form_flow(
     names = component_names(properties)
     labels = payload_labels(properties)
     _validate_form_properties(properties, required, option_fields, names)
-    resolved_pages, fields_by_screen = _resolve_pages(properties, pages)
+    resolved_pages, fields_by_screen = _resolve_pages(properties, pages, form_title, form_submit)
     field_changed, page_advanced, submitted, endpoint = _reaction_sets(reactions, properties, option_fields, names)
     spec = _RenderSpec(
         properties=properties,
@@ -617,6 +724,7 @@ def build_form_flow(
         page_advanced=page_advanced,
         submitted=submitted,
         endpoint=endpoint,
+        range_merges=_form_range_merges(properties, resolved_pages, fields_by_screen),
     )
 
     screen_count = len(resolved_pages)
@@ -641,88 +749,3 @@ def build_form_flow(
         # A single-screen endpoint-driven Flow still declares a (terminal) routing model.
         flow_json["routing_model"] = {_screen_id(0): []}
     return flow_json, _canonical_hash_pages(schema, resolved_pages, option_fields, flow_json)
-
-
-def build_flow_data(
-    schema: dict[str, Any],
-    values: dict[str, Any] | None,
-    options: dict[str, list[dict[str, Any]]] | None,
-) -> dict[str, Any]:
-    """The ``flow_action_payload.data`` a per-send form carries.
-
-    Every field's ``init`` (its prefilled value, or the empty default) and every choice field's ``ds`` (its
-    per-send option list ``{id, title}``, or the schema ``enum`` as the default) — keyed by the field's
-    identifier-safe component name (:func:`component_names`), matching the published Flow's data keys.
-
-    A choice field is a string property that carries a schema ``enum`` OR one the send
-    marks option-bearing (a key in ``options``), OR an array of strings (a CheckboxGroup) —
-    matching the published Flow's dynamic choice controls. A per-send option list keyed on a
-    property that is neither a string nor an array of strings cannot be honored and is refused
-    loudly, naming the field. A prefill on a ``format: date`` field that is not a valid
-    ``YYYY-MM-DD`` string is refused loudly too — that is the only shape Meta's date picker
-    accepts — before any network work. An array field's ``init`` is the list of selected
-    values (``[]`` when unfilled); a boolean's a bool; every other field's a string. Raises
-    ``ChannelInputError``.
-    """
-    values = values or {}
-    options = options or {}
-    properties = schema.get("properties")
-    if not isinstance(properties, dict):
-        raise ChannelInputError("form schema must carry a non-empty 'properties' object")
-    names = component_names(properties)
-
-    for name in options:
-        prop = properties.get(name)
-        if not isinstance(prop, dict) or not (prop.get("type") == "string" or _is_array_of_strings(prop)):
-            raise ChannelInputError(
-                f"form field {name!r}: WhatsApp cannot apply per-send options to this property "
-                "— only a string or an array of strings maps to a choice control"
-            )
-
-    option_fields = set(options)
-    data: dict[str, Any] = {}
-    for name, prop in properties.items():
-        cname = names[name]
-        prop_type = prop.get("type") if isinstance(prop, dict) else None
-        if name in values:
-            raw = values[name]
-            if _is_date_field(prop) and not (isinstance(raw, str) and _valid_iso_date(raw)):
-                raise ChannelInputError(
-                    f"form property {name!r}: a date field prefill must be a 'YYYY-MM-DD' string "
-                    f"(the shape Meta's date picker sets and returns), got {raw!r}"
-                )
-            data[f"{cname}__init"] = _init_value(prop_type, raw)
-        else:
-            data[f"{cname}__init"] = [] if prop_type == "array" else False if prop_type == "boolean" else ""
-        if isinstance(prop, dict) and _is_choice_field(name, prop, option_fields):
-            data[f"{cname}__ds"] = _choice_data_source(name, prop, options)
-    return data
-
-
-def _init_value(prop_type: Any, raw: Any) -> Any:
-    """A prefilled value shaped for its control's ``init-value``.
-
-    A list for an array (CheckboxGroup), a bool for an OptIn, else a string.
-    """
-    if prop_type == "boolean":
-        return bool(raw)
-    if prop_type == "array":
-        return raw if isinstance(raw, list) else [str(raw)]
-    return raw if isinstance(raw, str) else str(raw)
-
-
-def _choice_data_source(
-    name: str, prop: dict[str, Any], options: dict[str, list[dict[str, Any]]]
-) -> list[dict[str, str]]:
-    """A choice field's per-send ``data-source`` — the explicit per-send option list, else the schema enum.
-
-    Raises ``ChannelInputError`` when neither is available (a choice control with no options to show).
-    """
-    if name in options:
-        return [{"id": choice["value"], "title": choice.get("label") or choice["value"]} for choice in options[name]]
-    enum = _choice_options_enum(prop)
-    if enum is None:
-        raise ChannelInputError(
-            f"form property {name!r}: a choice control needs an enum or per-send options to populate its data-source"
-        )
-    return [{"id": str(item), "title": str(item)} for item in enum]

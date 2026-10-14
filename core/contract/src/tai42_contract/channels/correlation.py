@@ -7,7 +7,7 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from tai42_contract.interactions.models import AnswerMismatchPolicy
+from tai42_contract.interactions.models import AnswerMismatchPolicy, Wording
 
 
 class Correlation(BaseModel):
@@ -34,9 +34,11 @@ class Correlation(BaseModel):
     # fresh turn, no notice). A channel copies it from the ``ChannelDelivery`` it delivered;
     # a channel that does not set it keeps the safe default.
     on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY
-    # The ask's custom retry-notice text the ladder sends instead of the built-in one (``retry``
-    # policy only); ``None`` uses the built-in notice. Carried from the ``ChannelDelivery``.
-    mismatch_notice: str | None = None
+    # The parked ask's per-send ``wording`` catalogue, carried from the ``ChannelDelivery`` the
+    # channel delivered, so the shared answer ladder draws the caller's refusal sentence
+    # (``wording.answer.rejected`` / ``rejected_final``) when it notifies. ``None`` -> the built-in
+    # sentence.
+    wording: Wording | None = None
 
     @field_validator("ttl_deadline")
     @classmethod

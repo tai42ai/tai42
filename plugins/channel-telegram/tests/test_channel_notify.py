@@ -342,7 +342,7 @@ async def test_notify_header_media_carries_body_as_caption_with_keyboard(http_re
 def test_mint_callback_data_hash_fallback_on_index_collision():
     # An author-set id numerically equal to another button's index forces the minted
     # token onto the deterministic hash path, keeping every token in the keyboard unique.
-    from tai42_channel_telegram.channel import _mint_callback_data
+    from tai42_channel_telegram.compose import _mint_callback_data
 
     used = {"1"}  # button 0 authored id "1" already claimed the index-1 token
     token = _mint_callback_data(None, 1, used)

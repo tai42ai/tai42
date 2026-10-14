@@ -34,7 +34,7 @@ def test_notification_rejects_blank_message(blank: str):
 
     from tai42_contract.channels import ChannelNotification
 
-    with pytest.raises(ValidationError, match="non-blank"):
+    with pytest.raises(ValidationError, match=r"non-blank"):
         ChannelNotification(message=blank)
 
 
@@ -45,7 +45,7 @@ def test_notification_message_capped():
 
     at_cap = "x" * NOTIFICATION_MESSAGE_MAX_CHARS
     assert ChannelNotification(message=at_cap).message == at_cap
-    with pytest.raises(ValidationError, match="at most"):
+    with pytest.raises(ValidationError, match=r"at most"):
         ChannelNotification(message="x" * (NOTIFICATION_MESSAGE_MAX_CHARS + 1))
 
 
@@ -62,7 +62,7 @@ def test_notification_recipient_rejects_empty_when_present(empty: str):
 
     from tai42_contract.channels import ChannelNotification
 
-    with pytest.raises(ValidationError, match="non-empty address"):
+    with pytest.raises(ValidationError, match=r"non-empty address"):
         ChannelNotification(message="hi", recipient=empty)
 
 
@@ -79,7 +79,7 @@ def test_notification_sender_identity_rejects_empty_when_present(empty: str):
 
     from tai42_contract.channels import ChannelNotification
 
-    with pytest.raises(ValidationError, match="non-empty address"):
+    with pytest.raises(ValidationError, match=r"non-empty address"):
         ChannelNotification(message="hi", sender_identity=empty)
 
 
@@ -92,7 +92,7 @@ def test_notification_recipient_capped():
 
     at_cap = "x" * NOTIFICATION_ADDRESS_MAX_CHARS
     assert ChannelNotification(message="hi", recipient=at_cap).recipient == at_cap
-    with pytest.raises(ValidationError, match="address must be at most"):
+    with pytest.raises(ValidationError, match=r"address must be at most"):
         ChannelNotification(message="hi", recipient="x" * (NOTIFICATION_ADDRESS_MAX_CHARS + 1))
 
 
@@ -103,7 +103,7 @@ def test_notification_sender_identity_capped():
 
     at_cap = "x" * NOTIFICATION_ADDRESS_MAX_CHARS
     assert ChannelNotification(message="hi", sender_identity=at_cap).sender_identity == at_cap
-    with pytest.raises(ValidationError, match="address must be at most"):
+    with pytest.raises(ValidationError, match=r"address must be at most"):
         ChannelNotification(message="hi", sender_identity="x" * (NOTIFICATION_ADDRESS_MAX_CHARS + 1))
 
 
@@ -122,7 +122,7 @@ def test_notification_media_rejects_present_but_empty_list():
 
     from tai42_contract.channels import ChannelNotification
 
-    with pytest.raises(ValidationError, match="non-empty list"):
+    with pytest.raises(ValidationError, match=r"non-empty list"):
         ChannelNotification(message="hi", media=[])
 
 
@@ -218,9 +218,9 @@ def test_notification_data_and_pages_ride_a_form_send_only():
     from tai42_contract.channels import ChannelNotification
     from tai42_contract.interactions.models import FormData, FormPage
 
-    with pytest.raises(ValidationError, match="no schema carries no form data"):
+    with pytest.raises(ValidationError, match=r"no schema carries no form data"):
         ChannelNotification(message="hi", data=FormData(values={"size": "M"}))
-    with pytest.raises(ValidationError, match="no schema carries no form pages"):
+    with pytest.raises(ValidationError, match=r"no schema carries no form pages"):
         ChannelNotification(message="hi", pages=[FormPage(title="Details", fields=["size"])])
 
 
@@ -231,7 +231,7 @@ def test_notification_schema_rejects_present_but_empty_dict():
 
     from tai42_contract.channels import ChannelNotification
 
-    with pytest.raises(ValidationError, match="non-empty dict"):
+    with pytest.raises(ValidationError, match=r"non-empty dict"):
         ChannelNotification(message="hi", schema={})
 
 
@@ -257,7 +257,7 @@ def test_notification_form_tag_rides_a_form_send_only():
 
     from tai42_contract.channels import ChannelNotification
 
-    with pytest.raises(ValidationError, match="no schema carries no form tag"):
+    with pytest.raises(ValidationError, match=r"no schema carries no form tag"):
         ChannelNotification(message="hi", form_tag="ref-42")
 
 
@@ -266,5 +266,90 @@ def test_notification_form_tag_is_bounded():
 
     from tai42_contract.channels import ChannelNotification
 
-    with pytest.raises(ValidationError, match="form_tag must be 1 to"):
+    with pytest.raises(ValidationError, match=r"form_tag must be 1 to"):
         ChannelNotification(message="hi", schema=_form_schema(), form_tag="has:colon")
+
+
+def test_notification_carries_a_wording_form_chapter_on_a_form_send():
+    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.interactions import Wording
+
+    notification = ChannelNotification(
+        message="tell us about you",
+        schema=_form_schema(),
+        wording=Wording.model_validate({"form": {"open": "Fill it in", "cancel": "Never mind", "back": "Go back"}}),
+    )
+    assert notification.wording is not None
+    assert notification.wording.form is not None
+    assert notification.wording.form.cancel == "Never mind"
+
+
+def test_notification_wording_form_chapter_rides_a_form_send_only():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.interactions import Wording
+
+    # No form surface: the form chapter names a form that is not there.
+    with pytest.raises(
+        ValidationError, match=r"a notification with no choice or form surface draws no wording.form.open"
+    ):
+        ChannelNotification(message="hi", wording=Wording.model_validate({"form": {"open": "Go"}}))
+
+
+def test_notification_wording_member_must_be_non_blank():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.interactions import Wording
+
+    with pytest.raises(ValidationError, match=r"wording.form.title must be non-blank when set"):
+        ChannelNotification(
+            message="hi", schema=_form_schema(), wording=Wording.model_validate({"form": {"title": "   "}})
+        )
+
+
+def test_notification_carries_a_wording_choice_label_beside_its_options():
+    from tai42_contract.channels import ChannelNotification, ReplyOption
+    from tai42_contract.interactions import Wording
+
+    notification = ChannelNotification(
+        message="pick one",
+        options=[ReplyOption(text="Item A")],
+        wording=Wording.model_validate({"choice": {"label": "Open the list"}}),
+    )
+    assert notification.wording is not None
+    assert notification.wording.choice is not None
+    assert notification.wording.choice.label == "Open the list"
+
+
+def test_notification_wording_choice_requires_a_choice_surface():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.interactions import Wording
+
+    # No choice surface: the label names a control that opens nothing.
+    with pytest.raises(
+        ValidationError, match=r"a notification with no choice or form surface draws no wording.choice.label"
+    ):
+        ChannelNotification(message="hi", wording=Wording.model_validate({"choice": {"label": "Open the list"}}))
+    # A form carries no choice list, so a choice label beside a schema is refused too.
+    with pytest.raises(ValidationError, match=r"notify:form draws no wording.choice.label"):
+        ChannelNotification(
+            message="hi", schema=_form_schema(), wording=Wording.model_validate({"choice": {"label": "Open the list"}})
+        )
+
+
+def test_notification_wording_choice_label_must_be_non_blank():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification, ReplyOption
+    from tai42_contract.interactions import Wording
+
+    with pytest.raises(ValidationError, match=r"wording.choice.label must be non-blank when set"):
+        ChannelNotification(
+            message="pick one",
+            options=[ReplyOption(text="Item A")],
+            wording=Wording.model_validate({"choice": {"label": "  "}}),
+        )

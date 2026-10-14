@@ -346,6 +346,45 @@ async def test_block_actions_modal_carries_the_reserved_per_send_data_and_pages(
     assert [b["text"]["text"] for b in view["blocks"] if b["type"] == "header"] == ["You", "Plan"]
 
 
+async def test_block_actions_open_reads_cancel_and_title_off_the_record(fake_redis, http_script):
+    # The modal is built AT CLICK TIME from the record, so the caller's cancel label and form
+    # title must reach the opened view — a fall back to the platform defaults would be the bug.
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _SCHEMA,
+        _QUESTION,
+        datetime.now(UTC) + timedelta(minutes=10),
+        wording={"form": {"open": "Start", "cancel": "Not now", "title": "Tell us"}},
+    )
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+
+    await slack_interactive(_signed(_block_actions()))
+
+    view = json.loads(http_script.requests[0].content)["view"]
+    assert view["close"] == {"type": "plain_text", "text": "Not now"}
+    assert view["title"] == {"type": "plain_text", "text": "Tell us"}
+
+
+async def test_block_actions_open_reads_page_less_submit_off_the_record(fake_redis, http_script):
+    # A page-less form's modal submit takes the caller's wording.form.submit, read off the record
+    # at click time — never the platform default when one was set.
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _SCHEMA,
+        _QUESTION,
+        datetime.now(UTC) + timedelta(minutes=10),
+        wording={"form": {"submit": "Send it"}},
+    )
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+
+    await slack_interactive(_signed(_block_actions()))
+
+    view = json.loads(http_script.requests[0].content)["view"]
+    assert view["submit"] == {"type": "plain_text", "text": "Send it"}
+
+
 async def test_block_actions_missing_record_acks_without_opening(fake_redis, http_script):
     # The button outlived its question (record expired) — nothing to open.
     response = await slack_interactive(_signed(_block_actions()))
@@ -432,6 +471,34 @@ async def test_view_submission_forwards_coerced_answer_and_closes(fake_redis, ch
     assert _FORM_KEY not in fake_redis.store  # released by the ladder (mirrored)
 
 
+@pytest.mark.parametrize(
+    ("input_mode", "element_type", "submitted"),
+    [
+        ("email", "email_text_input", "alice@example.com"),
+        ("url", "url_text_input", "https://example.com"),
+    ],
+)
+async def test_view_submission_forwards_an_email_or_url_text_input_value(
+    fake_redis, channels, input_mode, element_type, submitted
+):
+    # A string field with inputMode email/url renders its own Slack text element; its submitted
+    # value must round-trip through extraction to the answer, not drop out silently.
+    schema = {
+        "type": "object",
+        "properties": {"field": {"type": "string", "inputMode": input_mode}},
+        "required": ["field"],
+    }
+    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, datetime.now(UTC) + timedelta(minutes=10))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    state = {"field": {FIELD_ACTION_ID: {"type": element_type, "value": submitted}}}
+
+    response = await slack_interactive(_signed(_view_submission(state=state)))
+
+    assert response.status_code == 200
+    (call,) = channels.inbound_calls
+    assert call.answer == {"field": submitted}
+
+
 async def test_view_submission_retry_kept_shows_door_reason_keeps_record(fake_redis, channels):
     # RETRY_KEPT: the ladder kept the record and sent NO participant notice (owns_retry_notice
     # =True), so the channel renders its own inline Block-Kit error carrying the DOOR'S
@@ -490,6 +557,67 @@ async def test_view_submission_retry_kept_without_reason_uses_generic_text(fake_
 
     assert body_json(response) == {"response_action": "errors", "errors": {"full_name": _RETRY_TEXT}}
     assert fake_redis.store[_FORM_KEY]
+
+
+async def test_view_submission_retry_kept_draws_caller_rejected_with_reason(fake_redis, channels):
+    # The caller's wording.answer.rejected template is the inline error, its {reason} token
+    # filled by the door's own reason (plain replace).
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _SCHEMA,
+        _QUESTION,
+        datetime.now(UTC) + timedelta(minutes=10),
+        wording={"answer": {"rejected": "We could not accept that: {reason}"}},
+    )
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "full_name is required"
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {
+        "response_action": "errors",
+        "errors": {"full_name": "We could not accept that: full_name is required"},
+    }
+
+
+async def test_view_submission_retry_kept_caller_rejected_without_reason_token_is_verbatim(fake_redis, channels):
+    # A caller template with no {reason} token is sent verbatim; the door's reason is not appended.
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _SCHEMA,
+        _QUESTION,
+        datetime.now(UTC) + timedelta(minutes=10),
+        wording={"answer": {"rejected": "Please check your entries."}},
+    )
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "full_name is required"
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {"response_action": "errors", "errors": {"full_name": "Please check your entries."}}
+
+
+async def test_view_submission_retry_kept_caller_rejected_without_door_reason_fills_generic(fake_redis, channels):
+    # The caller's template with {reason} but no door reason fills the token with the generic line.
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _SCHEMA,
+        _QUESTION,
+        datetime.now(UTC) + timedelta(minutes=10),
+        wording={"answer": {"rejected": "Not accepted: {reason}"}},
+    )
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = None
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {
+        "response_action": "errors",
+        "errors": {"full_name": f"Not accepted: {_RETRY_TEXT}"},
+    }
 
 
 async def test_view_submission_bridged_shows_expired_drops_record(fake_redis, channels):
@@ -618,6 +746,28 @@ async def test_field_change_re_renders_conditional_without_a_consumer_call(fake_
     ids = [b.get("block_id") for b in payload["view"]["blocks"] if b["type"] == "input"]
     assert "detail" not in ids  # hidden: kind == "b"
     assert "kind" in ids
+
+
+async def test_field_change_re_render_reads_cancel_and_title_off_the_record(fake_redis, http_script, interactions):
+    # Every views.update re-render rebuilds the modal from the record, so the caller's cancel
+    # label and title ride each re-render too — a re-render that fell back to the defaults
+    # would silently change the modal's chrome mid-form.
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _COND_SCHEMA,
+        _QUESTION,
+        _FUTURE,
+        wording={"form": {"cancel": "Not now", "title": "Tell us"}},
+    )
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+    state = {"kind": {FIELD_ACTION_ID: {"type": "radio_buttons", "selected_option": {"value": "b"}}}}
+
+    await slack_interactive(_signed(_field_action("kind", state)))
+
+    view = json.loads(http_script.requests[0].content)["view"]
+    assert view["close"] == {"type": "plain_text", "text": "Not now"}
+    assert view["title"] == {"type": "plain_text", "text": "Tell us"}
 
 
 async def test_field_change_failed_views_update_surfaces_loudly(fake_redis, http_script, interactions):

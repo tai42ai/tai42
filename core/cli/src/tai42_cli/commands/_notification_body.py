@@ -7,7 +7,7 @@ from typing import Any
 import typer
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
-from tai42_contract.interactions.models import FormData, FormPage, LocationElement, MediaItem
+from tai42_contract.interactions.models import FormData, FormPage, LocationElement, MediaItem, Wording
 
 from tai42_cli.commands._common import compact, parse_json_value
 
@@ -68,6 +68,7 @@ def build_notify_body(
     schema: str | None,
     data: str | None,
     pages: str | None,
+    wording: str | None = None,
 ) -> dict[str, object]:
     """Build the ``POST /api/notifications`` body from the ``notify`` command's flags.
 
@@ -76,7 +77,12 @@ def build_notify_body(
     before the request leaves the process.
     """
     body: dict[str, object] = compact(
-        {"message": message, "channel": channel, "recipient": recipient, "footer": footer}
+        {
+            "message": message,
+            "channel": channel,
+            "recipient": recipient,
+            "footer": footer,
+        }
     )
     for key, raw, adapter, label, param_hint in (
         ("media", media, _MEDIA_ADAPTER, "media item(s)", "--media"),
@@ -91,6 +97,7 @@ def build_notify_body(
         ("location", location, LocationElement, "location", "--location"),
         ("header", header, MediaItem, "header", "--header"),
         ("data", data, FormData, "form data", "--data"),
+        ("wording", wording, Wording, "wording", "--wording"),
     ):
         if raw is not None:
             body[key] = _model_field(raw, model, label, param_hint=param_hint)

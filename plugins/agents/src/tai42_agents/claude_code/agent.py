@@ -648,6 +648,7 @@ class ClaudeCodeAgent(Agent):
                 pages=frame.pages,
                 reaction_tool=frame.reaction_tool,
                 reactions=frame.reactions,
+                wording=frame.wording,
                 mode="sync",
             )
             await handle.write_stdin(dump_frame(AnswerFrame(ask_id=frame.ask_id, answer=answer)))
@@ -701,6 +702,7 @@ class ClaudeCodeAgent(Agent):
             pages=frame.pages,
             reaction_tool=frame.reaction_tool,
             reactions=frame.reactions,
+            wording=frame.wording,
             mode="async",
             expiry_at=horizon,
         )

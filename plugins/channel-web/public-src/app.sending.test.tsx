@@ -390,6 +390,7 @@ describe('media cards', () => {
       header: null,
       footer: null,
       location: null,
+      wording: null,
       ts: TS,
     };
     stream.state = streamState({ items: [withId] });

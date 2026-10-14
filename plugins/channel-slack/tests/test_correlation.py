@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, Correlation
+from tai42_contract.interactions.models import AnswerMismatchPolicy, Wording
 
 from tai42_channel_slack.correlation import (
     DEDUPE_TTL_SECONDS,
@@ -51,6 +52,35 @@ async def test_thread_set_get_round_trip(fake_redis):
     assert await slack_thread_correlation_store.get_correlation("11.22") is not None
 
 
+async def test_thread_round_trip_carries_on_mismatch_and_wording(fake_redis):
+    # The ask's digression policy and per-send catalogue ride the thread record so the shared
+    # answer ladder, reading it on a threaded reply, honours the policy and the caller's words.
+    wording = Wording.model_validate({"answer": {"rejected": "Please answer yes or no: {reason}"}})
+    entry = Correlation(
+        callback_url=_CALLBACK,
+        interaction_id="int-9",
+        ttl_deadline=_deadline(),
+        on_mismatch=AnswerMismatchPolicy.BRIDGE,
+        wording=wording,
+    )
+    await slack_thread_correlation_store.set_correlation("11.22", entry, ttl_seconds=60)
+
+    got = await slack_thread_correlation_store.get_correlation("11.22")
+    assert got is not None
+    assert got.on_mismatch is AnswerMismatchPolicy.BRIDGE
+    assert got.wording is not None
+    assert got.wording.answer is not None
+    assert got.wording.answer.rejected == "Please answer yes or no: {reason}"
+
+
+async def test_thread_round_trip_defaults_policy_and_wording_when_unset(fake_redis):
+    await slack_thread_correlation_store.set_correlation("11.22", _corr(), ttl_seconds=60)
+    got = await slack_thread_correlation_store.get_correlation("11.22")
+    assert got is not None
+    assert got.on_mismatch is AnswerMismatchPolicy.RETRY
+    assert got.wording is None
+
+
 async def test_thread_get_unknown_returns_none(fake_redis):
     assert await slack_thread_correlation_store.get_correlation("99.99") is None
 
@@ -86,6 +116,24 @@ async def test_store_correlation_writes_record_and_positive_ttl(fake_redis):
     ttl = fake_redis.ttls["channel:slack:corr:11.22"]
     assert ttl is not None
     assert 0 < ttl <= 120
+
+
+async def test_store_correlation_carries_on_mismatch_and_wording(fake_redis):
+    timeout_at = datetime.now(UTC) + timedelta(seconds=120)
+    wording = Wording.model_validate({"lines": {"reply": "Reply below."}})
+
+    await store_correlation(
+        "11.22",
+        _CALLBACK,
+        "int-9",
+        timeout_at,
+        on_mismatch=AnswerMismatchPolicy.BRIDGE,
+        wording=wording,
+    )
+
+    record = json.loads(fake_redis.store["channel:slack:corr:11.22"])
+    assert record["on_mismatch"] == "bridge"
+    assert record["wording"] == {"lines": {"reply": "Reply below."}}
 
 
 async def test_store_correlation_expired_budget_raises_and_writes_nothing(fake_redis):
@@ -130,10 +178,67 @@ async def test_store_form_record_writes_rich_json_and_positive_ttl(fake_redis):
         "schema": _SCHEMA,
         "question": "Give details",
         "timeout_at": timeout_at.isoformat(),
+        "on_mismatch": "retry",
     }
     ttl = fake_redis.ttls[key]
     assert ttl is not None
     assert 0 < ttl <= 120
+
+
+async def test_store_form_record_carries_wording_and_on_mismatch(fake_redis):
+    # The per-send ``wording`` and the digression policy ride the record so the modal built AT
+    # CLICK TIME and every re-render read the caller's words, and the ladder reads the policy.
+    timeout_at = datetime.now(UTC) + timedelta(seconds=120)
+    wording = Wording.model_validate(
+        {"form": {"title": "Tell us about you", "cancel": "Not now"}, "answer": {"rejected": "Try again: {reason}"}}
+    )
+
+    await store_form_record(
+        "int-9",
+        _CALLBACK,
+        _SCHEMA,
+        "Give details",
+        timeout_at,
+        wording=wording.model_dump(mode="json", exclude_none=True),
+        on_mismatch=AnswerMismatchPolicy.BRIDGE,
+    )
+
+    record = json.loads(fake_redis.store["channel:slack:form:int-9"])
+    assert record["wording"]["form"]["title"] == "Tell us about you"
+    assert record["wording"]["form"]["cancel"] == "Not now"
+    assert record["wording"]["answer"]["rejected"] == "Try again: {reason}"
+    assert record["on_mismatch"] == "bridge"
+
+
+async def test_store_form_record_omits_absent_wording(fake_redis):
+    await store_form_record("int-9", _CALLBACK, _SCHEMA, "q", datetime.now(UTC) + timedelta(seconds=60))
+
+    record = await get_form_record("int-9")
+    assert record is not None
+    assert "wording" not in record
+    # The policy always rides the record (the default when unset).
+    assert record["on_mismatch"] == "retry"
+
+
+async def test_form_port_get_copies_on_mismatch_and_wording_into_the_correlation(fake_redis):
+    # The ladder reads the ask's policy and refusal sentence off the projected Correlation.
+    wording = Wording.model_validate({"answer": {"rejected": "No: {reason}"}})
+    await store_form_record(
+        "int-9",
+        _CALLBACK,
+        _SCHEMA,
+        "q",
+        _deadline(),
+        wording=wording.model_dump(mode="json", exclude_none=True),
+        on_mismatch=AnswerMismatchPolicy.BRIDGE,
+    )
+
+    got = await slack_form_correlation_store.get_correlation("int-9")
+    assert got is not None
+    assert got.on_mismatch is AnswerMismatchPolicy.BRIDGE
+    assert got.wording is not None
+    assert got.wording.answer is not None
+    assert got.wording.answer.rejected == "No: {reason}"
 
 
 async def test_store_form_record_expired_budget_raises_and_writes_nothing(fake_redis):

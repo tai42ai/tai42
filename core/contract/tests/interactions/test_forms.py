@@ -11,6 +11,7 @@ import pytest
 from tai42_contract.interactions.models import (
     AnswerFormat,
     DisplayBlock,
+    FormControl,
     FormData,
     FormOption,
     FormPage,
@@ -460,3 +461,20 @@ def test_form_tag_colon_excluded_so_it_rides_a_colon_token_as_one_segment():
     # segment; the unreserved separators are admitted.
     assert FORM_TAG_RE.fullmatch("order.42-rev_1~b") is not None
     assert FORM_TAG_RE.fullmatch("a:b") is None
+
+
+# === FormControl + FormPage.button_label =====================
+
+
+def test_form_control_members():
+    assert FormControl.CHIPS == "chips"
+    assert FormControl.TEXTAREA == "textarea"
+    assert [control.value for control in FormControl] == ["chips", "textarea"]
+
+
+def test_form_page_button_label_non_blank():
+    page = FormPage(title="Who", fields=["name"], button_label="Next step")
+    assert page.button_label == "Next step"
+    assert FormPage(title="Who", fields=["name"]).button_label is None
+    with pytest.raises(ValueError, match="form page button_label must be non-blank when set"):
+        FormPage(title="Who", fields=["name"], button_label="   ")

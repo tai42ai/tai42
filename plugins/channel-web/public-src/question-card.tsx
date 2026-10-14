@@ -18,13 +18,71 @@ import { Badge } from '@tai42/studio-sdk';
 import type { ReactElement, RefObject } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { ChatApiError } from '@/api';
 import { MediaItems } from '@/media-card';
 import { QuestionControls, type QuestionItem } from '@/question-controls';
+import type { CountdownWording, StatusWording } from '@/transcript-model';
 
 export type { QuestionItem };
 
 /** How long before the deadline the remaining time is spelled out. */
 const COUNTDOWN_MS = 60_000;
+
+/** The platform's own words, drawn when the send set no wording for a settled state
+ * or the countdown. */
+const ANSWERED_BADGE = 'Answered';
+const EXPIRED_BADGE = 'Expired';
+const CLOSED_BADGE = 'Session ended';
+const SECONDS_LEFT = '{seconds} seconds left to answer';
+const ONE_SECOND_LEFT = '1 second left to answer';
+const UNDER_MINUTE = 'Less than a minute left to answer';
+const UNDER_HALF_MINUTE = 'Less than 30 seconds left to answer';
+const UNDER_TEN_SECONDS = 'Less than 10 seconds left to answer';
+
+/** The countdown words resolved to the caller's or the platform's own. */
+export interface CountdownWords {
+  readonly secondsLeft: string;
+  readonly oneSecondLeft: string;
+  readonly underMinute: string;
+  readonly underHalfMinute: string;
+  readonly underTenSeconds: string;
+}
+
+/** The visitor-facing line for a failed answer send. A door rejection (HTTP 400)
+ * carries the reason the answer was refused; when the send set a refusal sentence, it
+ * is drawn with that reason substituted for its optional `{reason}` token (a plain
+ * replace, never `String.replace`, whose replacement string would interpret `$&`/`$1`).
+ * Any other failure keeps the widget's own refusal copy. */
+function rejectionMessage(err: unknown, rejected: string | null): string {
+  if (err instanceof ChatApiError && err.status === 400 && rejected !== null) {
+    return rejected.split('{reason}').join(err.message);
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Resolve each countdown member to the caller's word or the platform's default. */
+export function resolveCountdown(countdown: CountdownWording | null | undefined): CountdownWords {
+  return {
+    secondsLeft: countdown?.secondsLeft ?? SECONDS_LEFT,
+    oneSecondLeft: countdown?.oneSecondLeft ?? ONE_SECOND_LEFT,
+    underMinute: countdown?.underMinute ?? UNDER_MINUTE,
+    underHalfMinute: countdown?.underHalfMinute ?? UNDER_HALF_MINUTE,
+    underTenSeconds: countdown?.underTenSeconds ?? UNDER_TEN_SECONDS,
+  };
+}
+
+/** Resolve each settled-state badge to the caller's word or the platform's default. */
+function resolveBadges(status: StatusWording | null | undefined): {
+  readonly answered: string;
+  readonly expired: string;
+  readonly closed: string;
+} {
+  return {
+    answered: status?.answered ?? ANSWERED_BADGE,
+    expired: status?.expired ?? EXPIRED_BADGE,
+    closed: status?.closed ?? CLOSED_BADGE,
+  };
+}
 
 export interface QuestionCardProps {
   readonly question: QuestionItem;
@@ -53,11 +111,11 @@ export function secondsLeft(timeoutAt: string, now: number): number {
  * region; this string only changes as the remaining time crosses a threshold, and
  * an unchanged string re-renders without announcing again.
  */
-export function countdownAnnouncement(remaining: number): string {
+export function countdownAnnouncement(remaining: number, words: CountdownWords): string {
   if (remaining <= 0 || remaining >= 60) return '';
-  if (remaining >= 30) return 'Less than a minute left to answer';
-  if (remaining >= 10) return 'Less than 30 seconds left to answer';
-  return 'Less than 10 seconds left to answer';
+  if (remaining >= 30) return words.underMinute;
+  if (remaining >= 10) return words.underHalfMinute;
+  return words.underTenSeconds;
 }
 
 /**
@@ -100,39 +158,52 @@ function useSettleFocus(live: boolean): {
   return { cardRef, hadFocus };
 }
 
-/** The settled-state badge: answered, expired, or shut out by an ended session. */
+/** The settled-state badge: answered, expired, or shut out by an ended session. Each
+ * word is the caller's or the platform's own. */
 function QuestionBadges({
   answered,
   expired,
   locked,
+  words,
 }: {
   readonly answered: boolean;
   readonly expired: boolean;
   readonly locked: boolean;
+  readonly words: { readonly answered: string; readonly expired: string; readonly closed: string };
 }): ReactElement {
   return (
     <>
-      {answered ? <Badge variant="success">Answered</Badge> : null}
-      {expired ? <Badge variant="warning">Expired</Badge> : null}
-      {!answered && !expired && locked ? <Badge variant="neutral">Session ended</Badge> : null}
+      {answered ? <Badge variant="success">{words.answered}</Badge> : null}
+      {expired ? <Badge variant="warning">{words.expired}</Badge> : null}
+      {!answered && !expired && locked ? <Badge variant="neutral">{words.closed}</Badge> : null}
     </>
   );
 }
 
 /** The countdown for a live card: the per-second visible text (for the eye, and only
- * inside the last minute) plus the coarser spoken form on its own live region. */
-function QuestionCountdown({ remaining }: { readonly remaining: number }): ReactElement {
+ * inside the last minute) plus the coarser spoken form on its own live region. Each
+ * line is the caller's or the platform's own; the visible plural fills its `{seconds}`
+ * token with the number remaining. */
+function QuestionCountdown({
+  remaining,
+  words,
+}: {
+  readonly remaining: number;
+  readonly words: CountdownWords;
+}): ReactElement {
   return (
     <>
       {remaining <= COUNTDOWN_MS / 1000 ? (
         // Presentational: the per-second text is for the eye. The live region
         // below carries the spoken form, on its own coarser schedule.
         <p className="tcw-countdown" aria-hidden="true">
-          {remaining === 1 ? '1 second left to answer' : `${remaining} seconds left to answer`}
+          {remaining === 1
+            ? words.oneSecondLeft
+            : words.secondsLeft.split('{seconds}').join(String(remaining))}
         </p>
       ) : null}
       <p className="tai-visually-hidden" role="status">
-        {countdownAnnouncement(remaining)}
+        {countdownAnnouncement(remaining, words)}
       </p>
     </>
   );
@@ -155,6 +226,10 @@ export function QuestionCard({
   const expired = !answered && remaining === 0;
   const live = !answered && !expired && !locked;
 
+  const status = question.wording?.status;
+  const badgeWords = resolveBadges(status);
+  const countdownWords = resolveCountdown(status?.countdown);
+
   const { cardRef, hadFocus } = useSettleFocus(live);
 
   const submit = useCallback(
@@ -175,12 +250,12 @@ export function QuestionCard({
         },
         (err: unknown) => {
           setSending(false);
-          setError(err instanceof Error ? err.message : String(err));
+          setError(rejectionMessage(err, question.wording?.answer?.rejected ?? null));
           if (held && document.activeElement === document.body) cardRef.current?.focus();
         },
       );
     },
-    [onAnswer, onAnswered, question.interactionId, cardRef, hadFocus],
+    [onAnswer, onAnswered, question.interactionId, question.wording, cardRef, hadFocus],
   );
 
   return (
@@ -198,7 +273,12 @@ export function QuestionCard({
       >
         <div className="tcw-question-head">
           <p className="tcw-text">{question.question}</p>
-          <QuestionBadges answered={answered} expired={expired} locked={locked} />
+          <QuestionBadges
+            answered={answered}
+            expired={expired}
+            locked={locked}
+            words={badgeWords}
+          />
         </div>
         {/* Display media rides between the prompt and its controls — the same
          * component a media card uses, so a question's images/links render
@@ -214,7 +294,7 @@ export function QuestionCard({
             onSubmit={submit}
           />
         ) : null}
-        {live ? <QuestionCountdown remaining={remaining} /> : null}
+        {live ? <QuestionCountdown remaining={remaining} words={countdownWords} /> : null}
         {error !== null ? (
           <p className="tcw-question-error" role="alert">
             {error}

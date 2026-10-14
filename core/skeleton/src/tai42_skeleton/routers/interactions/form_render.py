@@ -2,26 +2,71 @@
 
 The one HTML fallback surface a channel-delivered form is answered on. It renders every field
 kind the channel subset admits — scalars, a choice as a radio group (short lists) or a select
-(long lists), a multiple-choice array as a checkbox group, a date with its native min/max bounds
-— plus ordered display blocks (heading/body/image), a review/summary step, and conditional
-show/hide driven by each field's ``visibleWhen`` predicate. Where a surface cannot draw a thing
-it DEGRADES by a documented rule, never silently: an image with no static source shows its alt
-text; arbitrary unavailable days cannot be disabled on a native date input, so the client best-
-effort-validates them at submit and the server enforces them regardless. A date RANGE is simply
-its two ordinary date fields (never one combined control, never recombined).
+(long lists), a multiple-choice array as a checkbox group, a choice drawn as a chip grid
+(``control: chips``), a multi-line text control (``control: textarea``) with its length bound
+shown and enforced, a date with its native min/max bounds — plus ordered display blocks
+(heading/body/image), a review/summary step, and conditional show/hide driven by each field's
+``visibleWhen`` predicate. Where a surface cannot draw a thing it DEGRADES by a documented rule,
+never silently: an image with no static source shows its alt text; arbitrary unavailable days
+cannot be disabled on a native date input, so the client best-effort-validates them at submit
+and the server enforces them regardless. A ``rangeStart`` pair IS the platform's date range:
+where it is drawable as one (both ends on the page, both ``format: date``, the same
+``visibleWhen``, and no other field's ``visibleWhen`` names either end) it draws as ONE
+``<fieldset>`` grouping the two date inputs, labelled by the START's and END's titles; otherwise
+it draws as two ordinary date fields (a documented degrade). The answer is always the two date
+strings — nothing is recombined.
+
+The page's own chrome carries the caller's words where set, off the per-send ``wording`` catalogue:
+``wording.form.title`` is the page title and heading (else "Respond"), each page's primary button
+reads its ``button_label`` (a page-less form's submit button reads ``wording.form.submit``, else
+"Next"/"Submit"), and ``wording.form.back`` labels the Back button (else "Back"). The form page's
+own validation/error sentences (``wording.answer_page.form.*``), the refusal sentence
+(``wording.answer.rejected``) and the submitted-state copy (``wording.answer_page.submitted``) ride
+escaped ``data-*`` attributes the constant submit script reads; absent, each shows its own word.
 """
 
 from __future__ import annotations
 
 import html
 import json
-from typing import Any
+from typing import Any, assert_never
 
+from tai42_contract.interactions.models import FormControl, FormInputMode
 from tai42_kit.interactions.form_vocabulary import RADIO_OPTION_THRESHOLD
 
 from tai42_skeleton.interactions.form_schema import channel_form_fields
 
 from .pages import _FORM_SUBMIT_SCRIPT
+
+
+def _text_input_attrs(prop: dict[str, Any]) -> str:
+    """The HTML ``type``/``inputmode`` attributes for a plain string field, from its ``inputMode``.
+
+    ``numeric``/``decimal`` keep ``type="text"`` with an ``inputmode`` hint so the value stays the
+    typed string (a native ``type="number"`` would strip a leading zero); the rest pick the native
+    input type. ``data-kind="string"`` is kept by the caller for every kind, so the submit script
+    posts the typed string whatever the keyboard. Absent means a plain ``type="text"``. The schema
+    is pre-validated by ``channel_form_fields``, so the value is one of the known kinds; the match
+    is exhaustive, so a kind added later is a type error here until it is drawn.
+    """
+    mode = prop.get("inputMode")
+    if mode is None:
+        return 'type="text"'
+    match FormInputMode(mode):
+        case FormInputMode.TEXT:
+            return 'type="text"'
+        case FormInputMode.NUMERIC:
+            return 'type="text" inputmode="numeric"'
+        case FormInputMode.DECIMAL:
+            return 'type="text" inputmode="decimal"'
+        case FormInputMode.TEL:
+            return 'type="tel"'
+        case FormInputMode.EMAIL:
+            return 'type="email"'
+        case FormInputMode.URL:
+            return 'type="url"'
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 class _FormRenderError(Exception):
@@ -64,10 +109,14 @@ def _array_choices(prop: dict[str, Any], options: list[dict[str, Any]] | None) -
     return None
 
 
-def _string_select(esc_name: str, req_attr: str, choices: list[tuple[str, str]], value: Any) -> str:
+def _string_select(
+    esc_name: str, req_attr: str, choices: list[tuple[str, str]], value: Any, placeholder: str | None = None
+) -> str:
     # A ``<select>`` over ``(value, label)`` pairs: a leading blank option lets an
     # optional select stay empty and forces a required one to a real choice on submit.
-    parts = ['<option value="">—</option>']
+    # Its label is the caller's ``wording.form.fields[name].choice_label`` when set, else a dash.
+    blank_label = html.escape(placeholder) if placeholder else "—"
+    parts = [f'<option value="">{blank_label}</option>']
     for opt_value, opt_label in choices:
         selected = " selected" if value is not None and str(value) == opt_value else ""
         parts.append(f'<option value="{_attr(opt_value)}"{selected}>{html.escape(opt_label)}</option>')
@@ -101,6 +150,105 @@ def _checkbox_group(esc_name: str, choices: list[tuple[str, str]], value: Any) -
     return "".join(parts)
 
 
+def _chip_group(esc_name: str, req_attr: str, choices: list[tuple[str, str]], value: Any, *, multi: bool) -> str:
+    # A choice drawn as a chip grid: tap-to-select pills over ``(value, label)`` pairs. Each pill
+    # is a ``label.choice.chip`` whose input is hidden by the page CSS and tinted when checked. A
+    # string chooses ONE (radios, ``data-kind="string"``), an array of strings several (checkboxes,
+    # ``data-kind="array"``). The ``choice`` class and the ``data-field``/``data-kind`` markup match
+    # the radio/checkbox group, so the submit script and its ``rebuildChoices`` read a chip field
+    # exactly as they read the default control.
+    input_type = "checkbox" if multi else "radio"
+    kind = "array" if multi else "string"
+    name_attr = "" if multi else f' name="{esc_name}"'
+    selected = {str(item) for item in value} if multi and isinstance(value, list) else set()
+    parts = []
+    for opt_value, opt_label in choices:
+        if multi:
+            checked = " checked" if opt_value in selected else ""
+            req = ""
+        else:
+            checked = " checked" if value is not None and str(value) == opt_value else ""
+            req = req_attr
+        parts.append(
+            f'<label class="choice chip"><input type="{input_type}"{name_attr} data-field="{esc_name}" '
+            f'data-kind="{kind}" value="{_attr(opt_value)}"{checked}{req}> {html.escape(opt_label)}</label>'
+        )
+    return "".join(parts)
+
+
+def _length_bounds(prop: dict[str, Any]) -> tuple[str, str]:
+    # The native ``maxlength``/``minlength`` attributes a text control draws for a property's
+    # ``maxLength``/``minLength`` (the browser's ``checkValidity`` enforces them, the answer door
+    # enforces them again), and a small hint that SHOWS the maximum so the human sees the ceiling.
+    # Drawn on every text control — the single-line input and the multi-line text area alike.
+    attrs = ""
+    max_length = prop.get("maxLength")
+    min_length = prop.get("minLength")
+    if isinstance(max_length, int):
+        attrs += f' maxlength="{max_length}"'
+    if isinstance(min_length, int):
+        attrs += f' minlength="{min_length}"'
+    hint = f'<small class="hint">up to {max_length} characters</small>' if isinstance(max_length, int) else ""
+    return attrs, hint
+
+
+def _textarea_control(esc_name: str, req_attr: str, prop: dict[str, Any], value: Any) -> str:
+    # A multi-line text control. ``data-kind="string"`` is kept so the submit script posts the
+    # typed string; the length bounds and the ceiling hint are drawn by :func:`_length_bounds`.
+    bounds, hint = _length_bounds(prop)
+    content = html.escape(str(value)) if value is not None else ""
+    control = f'<textarea data-field="{esc_name}" data-kind="string" rows="4"{bounds}{req_attr}>{content}</textarea>'
+    return control + hint
+
+
+def _date_range_group(start: str, end: str, field_by_name: dict[str, tuple[dict[str, Any], bool]], values: Any) -> str:
+    # A drawable ``rangeStart`` pair as ONE ``<fieldset>``: the two native date inputs side by side,
+    # each keeping its own ``data-field``, bounds, unavailable days, ``required`` and prefilled
+    # value, under a legend naming both ends. The submit script collects the two ``data-field``
+    # strings exactly as it does two separate date inputs — the answer stays the two date strings.
+    start_prop, start_required = field_by_name[start]
+    end_prop, end_required = field_by_name[end]
+    start_label = html.escape(str(start_prop.get("title") or start))
+    end_label = html.escape(str(end_prop.get("title") or end))
+    start_input = _date_input(_attr(start), " required" if start_required else "", start_prop, values.get(start))
+    end_input = _date_input(_attr(end), " required" if end_required else "", end_prop, values.get(end))
+    legend = f"{start_label} {chr(0x2013)} {end_label}"  # an en dash between the two end labels
+    inner = f"<label>{start_label}<br>{start_input}</label><label>{end_label}<br>{end_input}</label>"
+    return f'<fieldset class="daterange"><legend>{legend}</legend>{inner}</fieldset>'
+
+
+def _drawable_date_ranges(names: list[str], field_by_name: dict[str, tuple[dict[str, Any], bool]]) -> dict[str, str]:
+    # The ``rangeStart`` pairs drawable as ONE control among ``names`` (the fields on one page),
+    # mapped START name -> END name. A pair draws as one only when: both ends are on this page;
+    # both are ``format: date``; they carry the SAME ``visibleWhen`` (both absent or deep-equal);
+    # and no OTHER field on the page has a ``visibleWhen`` naming either end (else a sibling's
+    # conditional would reference a control the merge dissolves, so the pair stays two fields). Any
+    # pair failing a condition is omitted here and drawn as two ordinary date fields.
+    name_set = set(names)
+    merged: dict[str, str] = {}
+    for end in names:
+        end_prop = field_by_name[end][0]
+        start = end_prop.get("rangeStart")
+        if not isinstance(start, str) or start not in name_set:
+            continue
+        start_prop = field_by_name[start][0]
+        if end_prop.get("format") != "date" or start_prop.get("format") != "date":
+            continue
+        if end_prop.get("visibleWhen") != start_prop.get("visibleWhen"):
+            continue
+        blocked = False
+        for other in names:
+            if other in (start, end):
+                continue
+            other_vw = field_by_name[other][0].get("visibleWhen")
+            if isinstance(other_vw, dict) and other_vw.get("field") in (start, end):
+                blocked = True
+                break
+        if not blocked:
+            merged[start] = end
+    return merged
+
+
 def _date_input(esc_name: str, req_attr: str, prop: dict[str, Any], value: Any) -> str:
     # A native date input carrying its min/max bounds (the picker restricts the range) and,
     # as a best-effort client hint, the unavailable dates/weekdays the submit script checks —
@@ -117,12 +265,76 @@ def _date_input(esc_name: str, req_attr: str, prop: dict[str, Any], value: Any) 
     return f'<input data-field="{esc_name}" data-kind="string" type="date"{bounds}{val_attr}{req_attr}>'
 
 
-def _labelled(esc_label: str, control: str, *, grouped: bool, group_attr: str = "") -> str:
-    # Wrap a control in its label — a ``<fieldset>``/``<legend>`` for a radio/checkbox group
-    # (one label cannot own several inputs), a ``<label>`` for a single control.
+def _labelled(esc_label: str, control: str, *, grouped: bool, group_attr: str = "", fieldset_class: str = "") -> str:
+    # Wrap a control in its label — a ``<fieldset>``/``<legend>`` for a radio/checkbox/chip group
+    # (one label cannot own several inputs), a ``<label>`` for a single control. ``fieldset_class``
+    # names the group's style (``chips`` for a chip grid) so the page CSS can draw it as pills.
     if grouped:
-        return f"<fieldset{group_attr}><legend>{esc_label}</legend>{control}</fieldset>"
+        cls = f' class="{fieldset_class}"' if fieldset_class else ""
+        return f"<fieldset{cls}{group_attr}><legend>{esc_label}</legend>{control}</fieldset>"
     return f"<label>{esc_label}<br>{control}</label>"
+
+
+def _render_array_field(
+    esc_name: str,
+    esc_label: str,
+    req_attr: str,
+    prop: dict[str, Any],
+    is_required: bool,
+    value: Any,
+    options: list[dict[str, Any]] | None,
+) -> str:
+    # An array-of-strings property: a chip grid (``control: chips``) or a checkbox group over its
+    # choices, else a one-entry-per-line free text area when it declares none.
+    choices = _array_choices(prop, options)
+    if choices is not None:
+        group_attr = ' data-array-required="1"' if is_required else ""
+        if prop.get("control") == FormControl.CHIPS:
+            return _labelled(
+                esc_label,
+                _chip_group(esc_name, req_attr, choices, value, multi=True),
+                grouped=True,
+                group_attr=group_attr,
+                fieldset_class="chips",
+            )
+        return _labelled(esc_label, _checkbox_group(esc_name, choices, value), grouped=True, group_attr=group_attr)
+    text = "\n".join(str(item) for item in value) if isinstance(value, list) else ""
+    control = f'<textarea data-field="{esc_name}" data-kind="arraytext"{req_attr}>{html.escape(text)}</textarea>'
+    return _labelled(esc_label, control, grouped=False)
+
+
+def _render_string_field(
+    esc_name: str,
+    esc_label: str,
+    req_attr: str,
+    prop: dict[str, Any],
+    value: Any,
+    options: list[dict[str, Any]] | None,
+    choice_label: str | None = None,
+) -> str:
+    # A string property: a choice (chips / radio group / select), a multi-line text area
+    # (``control: textarea``), a native date input, or a plain text input keyed by its inputMode.
+    choices = _string_choices(prop, options)
+    if choices is not None:
+        if prop.get("control") == FormControl.CHIPS:
+            return _labelled(
+                esc_label,
+                _chip_group(esc_name, req_attr, choices, value, multi=False),
+                grouped=True,
+                fieldset_class="chips",
+            )
+        if len(choices) <= RADIO_OPTION_THRESHOLD:
+            return _labelled(esc_label, _string_radio(esc_name, req_attr, choices, value), grouped=True)
+        return _labelled(esc_label, _string_select(esc_name, req_attr, choices, value, choice_label), grouped=False)
+    if prop.get("control") == FormControl.TEXTAREA:
+        return _labelled(esc_label, _textarea_control(esc_name, req_attr, prop, value), grouped=False)
+    if prop.get("format") == "date":
+        return _labelled(esc_label, _date_input(esc_name, req_attr, prop, value), grouped=False)
+    val_attr = f' value="{_attr(value)}"' if value is not None else ""
+    bounds, hint = _length_bounds(prop)
+    attrs = f"{_text_input_attrs(prop)}{bounds}{val_attr}{req_attr}"
+    control = f'<input data-field="{esc_name}" data-kind="string" {attrs}>{hint}'
+    return _labelled(esc_label, control, grouped=False)
 
 
 def _render_field(
@@ -132,6 +344,7 @@ def _render_field(
     *,
     value: Any = None,
     options: list[dict[str, Any]] | None = None,
+    choice_label: str | None = None,
 ) -> str:
     """Render one subset-validated schema property into an escaped form control.
 
@@ -139,8 +352,11 @@ def _render_field(
     :data:`RADIO_OPTION_THRESHOLD` options, a ``<select>`` above it. An array of strings renders
     a checkbox group over its choices (or a one-entry-per-line text area when it declares none).
     A ``format: date`` string renders a native date input with its min/max bounds; ``time`` /
-    ``date-time`` render as text (no native control emits their value shape). ``boolean`` ->
-    checkbox, ``integer``/``number`` -> number input. The property is pre-validated by
+    ``date-time`` render as text (no native control emits their value shape). A plain string's
+    ``inputMode`` picks the keyboard (``email``/``url``/``tel`` -> that input type; ``numeric`` /
+    ``decimal`` -> ``type="text"`` with an ``inputmode`` hint so the value stays the typed
+    string), ``data-kind="string"`` kept for every kind. ``boolean`` -> checkbox,
+    ``integer``/``number`` -> number input. The property is pre-validated by
     ``channel_form_fields``; an unexpected type is a server bug and raises ``_FormRenderError``.
     """
     esc_name = _attr(name)
@@ -148,25 +364,9 @@ def _render_field(
     req_attr = " required" if is_required else ""
     ptype = prop.get("type")
     if ptype == "array":
-        choices = _array_choices(prop, options)
-        if choices is not None:
-            group_attr = ' data-array-required="1"' if is_required else ""
-            return _labelled(esc_label, _checkbox_group(esc_name, choices, value), grouped=True, group_attr=group_attr)
-        # No declared choices: a free list, one entry per line (the submit script splits it).
-        text = "\n".join(str(item) for item in value) if isinstance(value, list) else ""
-        control = f'<textarea data-field="{esc_name}" data-kind="arraytext"{req_attr}>{html.escape(text)}</textarea>'
-        return _labelled(esc_label, control, grouped=False)
+        return _render_array_field(esc_name, esc_label, req_attr, prop, is_required, value, options)
     if ptype == "string":
-        choices = _string_choices(prop, options)
-        if choices is not None:
-            if len(choices) <= RADIO_OPTION_THRESHOLD:
-                return _labelled(esc_label, _string_radio(esc_name, req_attr, choices, value), grouped=True)
-            return _labelled(esc_label, _string_select(esc_name, req_attr, choices, value), grouped=False)
-        if prop.get("format") == "date":
-            return _labelled(esc_label, _date_input(esc_name, req_attr, prop, value), grouped=False)
-        val_attr = f' value="{_attr(value)}"' if value is not None else ""
-        control = f'<input data-field="{esc_name}" data-kind="string" type="text"{val_attr}{req_attr}>'
-        return _labelled(esc_label, control, grouped=False)
+        return _render_string_field(esc_name, esc_label, req_attr, prop, value, options, choice_label)
     if ptype == "boolean":
         # A checkbox always submits a boolean (checked/unchecked), so the field is always
         # present — no ``required`` attribute, which would force it checked.
@@ -233,6 +433,101 @@ def _reactions_attr(reactions: Any) -> str:
     return f' data-reactions="{_attr(json.dumps(trig))}"'
 
 
+def _render_steps_body(
+    pages: Any,
+    fields: list[tuple[str, dict[str, Any], bool]],
+    field_by_name: dict[str, tuple[dict[str, Any], bool]],
+    values: dict[str, Any],
+    options_map: dict[str, Any],
+    submit_label: str | None,
+    field_wording: dict[str, Any],
+) -> str:
+    """The form's ``<section class="step">`` body: one step per page (or one for a page-less form).
+
+    Each input page renders its fields in order — a drawable ``rangeStart`` pair as one grouped
+    fieldset at the START's position (the END's own row skipped), everything else as its own row —
+    plus its display blocks and, in a ``data-button-label`` attribute, its primary-button label; a
+    review page carries the generic readback target and no inputs. A page-less form draws ONE step
+    whose terminal button reads ``submit_label`` (``wording.form.submit``) when set. A select field's
+    empty-state prompt reads the caller's ``wording.form.fields[name].choice_label`` (``field_wording``).
+    """
+
+    def render_one(name: str) -> str:
+        prop, is_required = field_by_name[name]
+        choice_label = (field_wording.get(name) or {}).get("choice_label")
+        inner = _render_field(
+            name, prop, is_required, value=values.get(name), options=options_map.get(name), choice_label=choice_label
+        )
+        return _field_row(name, prop, inner)
+
+    def render_names(names: list[str]) -> str:
+        merged = _drawable_date_ranges(names, field_by_name)
+        merged_ends = set(merged.values())
+        rendered: list[str] = []
+        for name in names:
+            if name in merged_ends:
+                continue
+            if name in merged:
+                group = _date_range_group(name, merged[name], field_by_name, values)
+                rendered.append(_field_row(name, field_by_name[name][0], group))
+            else:
+                rendered.append(render_one(name))
+        return "\n".join(rendered)
+
+    if not pages:
+        rows = render_names([name for name, _prop, _req in fields])
+        # The page-less form draws one step whose terminal (submit) button reads the caller's
+        # ``wording.form.submit`` when set; the constant script's ``show`` draws it, else "Submit".
+        bl_attr = f' data-button-label="{_attr(submit_label)}"' if submit_label else ""
+        return f'<section class="step" data-step="0"{bl_attr}>\n{rows}\n</section>'
+    steps_html = []
+    for index, page in enumerate(pages):
+        raw_title = str(page.get("title") or "")
+        display_html = "\n".join(_render_display(block) for block in (page.get("display") or []))
+        hidden = "" if index == 0 else " hidden"
+        # The page's primary button (the one that advances or submits) reads its ``button_label``
+        # when set; the submit script's ``show`` draws it on the shown step, else "Next"/"Submit".
+        button_label = page.get("button_label")
+        bl_attr = f' data-button-label="{_attr(button_label)}"' if button_label else ""
+        if page.get("kind") == "review":
+            # A review page carries no inputs: a generic readback (filled by the submit script from
+            # the entered values) plus any display blocks and the confirm footer.
+            inner = f"{display_html}\n<dl data-readback></dl>"
+        else:
+            inner = f"{display_html}\n{render_names(page['fields'])}"
+        steps_html.append(
+            f'<section class="step" data-step="{index}" data-page-title="{_attr(raw_title)}"{bl_attr}{hidden}>\n'
+            f'<h2 tabindex="-1">{html.escape(raw_title)}</h2>\n{inner}\n</section>'
+        )
+    return "\n".join(steps_html)
+
+
+def _wording_text_attrs(wording: dict[str, Any]) -> str:
+    # The caller's form-page sentences as escaped ``data-*`` attributes the constant submit script
+    # reads — the refusal sentence (``wording.answer.rejected``), the page's own validation/error
+    # sentences (``wording.answer_page.form.*``) and the submitted-state copy
+    # (``wording.answer_page.submitted``). Each is written ONLY when set, so an absent member leaves
+    # the script on its own default word. No caller string is interpolated into markup — only into a
+    # single escaped attribute value the script copies to ``textContent``.
+    answer = wording.get("answer") or {}
+    answer_page = wording.get("answer_page") or {}
+    form_page = answer_page.get("form") or {}
+    submitted = answer_page.get("submitted") or {}
+    parts: list[str] = []
+    if answer.get("rejected"):
+        parts.append(f' data-text-rejected="{_attr(answer["rejected"])}"')
+    parts.extend(
+        f' data-text-{member}="{_attr(form_page[member])}"'
+        for member in ("failed", "network_error", "update_failed", "choose_one", "date_unavailable")
+        if form_page.get(member)
+    )
+    if submitted.get("heading"):
+        parts.append(f' data-submitted-heading="{_attr(submitted["heading"])}"')
+    if submitted.get("text"):
+        parts.append(f' data-submitted-text="{_attr(submitted["text"])}"')
+    return "".join(parts)
+
+
 def _render_form_page(format_payload: dict[str, Any] | None) -> str:
     """Render the schema-driven HTML form for a channel-delivered form question.
 
@@ -255,54 +550,45 @@ def _render_form_page(format_payload: dict[str, Any] | None) -> str:
     options_map = data.get("options") or {}
     field_by_name = {name: (prop, is_required) for name, prop, is_required in fields}
     labels = {name: str(prop.get("title") or name) for name, prop, _ in fields}
-
-    def render_one(name: str) -> str:
-        prop, is_required = field_by_name[name]
-        inner = _render_field(name, prop, is_required, value=values.get(name), options=options_map.get(name))
-        return _field_row(name, prop, inner)
-
-    pages = payload.get("pages")
-    if pages:
-        steps_html = []
-        for index, page in enumerate(pages):
-            raw_title = str(page.get("title") or "")
-            title = html.escape(raw_title)
-            display_html = "\n".join(_render_display(block) for block in (page.get("display") or []))
-            hidden = "" if index == 0 else " hidden"
-            if page.get("kind") == "review":
-                # A review page carries no inputs: a generic readback (filled by the submit
-                # script from the entered values) plus any display blocks and the confirm footer.
-                inner = f"{display_html}\n<dl data-readback></dl>"
-            else:
-                rows = "\n".join(render_one(name) for name in page["fields"])
-                inner = f"{display_html}\n{rows}"
-            steps_html.append(
-                f'<section class="step" data-step="{index}" data-page-title="{_attr(raw_title)}"{hidden}>\n'
-                f'<h2 tabindex="-1">{title}</h2>\n{inner}\n</section>'
-            )
-        body = "\n".join(steps_html)
-    else:
-        rows = "\n".join(render_one(name) for name, _prop, _req in fields)
-        body = f'<section class="step" data-step="0">\n{rows}\n</section>'
+    # The caller's per-send words ride the ``wording`` catalogue in the stored payload. Its ``form``
+    # chapter carries the page's chrome (title/back/the page-less submit label); its ``answer`` and
+    # ``answer_page`` chapters carry the sentences the constant submit script draws.
+    wording = payload.get("wording") or {}
+    form = wording.get("form") or {}
+    body = _render_steps_body(
+        payload.get("pages"), fields, field_by_name, values, options_map, form.get("submit"), form.get("fields") or {}
+    )
     labels_attr = _attr(json.dumps(labels))
+    form_title = form.get("title")
+    heading = html.escape(str(form_title)) if form_title else "Respond"
+    back_label = form.get("back")
+    back_text = html.escape(str(back_label)) if back_label else "Back"
+    text_attrs = _wording_text_attrs(wording)
     return (
         "<!doctype html>\n"
-        '<html lang="en"><head><meta charset="utf-8"><title>Respond</title>\n'
+        f'<html lang="en"><head><meta charset="utf-8"><title>{heading}</title>\n'
         "<style>body{font-family:system-ui,sans-serif;margin:3rem;max-width:40rem}"
         "label{display:block;margin:1rem 0}label.choice{display:block;margin:.3rem 0}"
         "input,select,textarea{font-size:1rem;margin-top:.3rem}"
         "fieldset{margin:1rem 0;border:1px solid #ccc;padding:.5rem 1rem}"
+        "fieldset.chips{border:0;padding:0;margin:1rem 0}"
+        "fieldset.chips label.chip{display:inline-block;margin:.3rem .4rem 0 0;padding:.35rem .8rem;"
+        "border:1px solid #888;border-radius:1rem;cursor:pointer}"
+        "fieldset.chips label.chip input{position:absolute;width:1px;height:1px;opacity:0}"
+        "fieldset.chips label.chip:has(:checked){background:#0b57d0;color:#fff;border-color:#0b57d0}"
+        "fieldset.daterange label{display:inline-block;margin:.3rem 1rem 0 0}"
+        "small.hint{display:block;color:#555;margin-top:.2rem;font-size:.85rem}"
         "h2{font-size:1.1rem;margin-top:1.5rem}h3{font-size:1rem;margin:1rem 0 .3rem}"
         "dl{margin:1rem 0}dt{font-weight:600;margin-top:.6rem}dd{margin:0 0 .3rem}"
         "img{max-width:100%}"
         "button{font-size:1rem;padding:.6rem 1.4rem;margin-top:1rem;margin-right:.5rem}"
         "#err{color:#b00020;margin-top:1rem}.field-error{color:#b00020;margin:.3rem 0}</style></head><body>\n"
-        "<h1>Respond</h1>\n"
-        f'<form id="askform" data-labels="{labels_attr}"{reactions_attr}>\n'
+        f"<h1>{heading}</h1>\n"
+        f'<form id="askform" data-labels="{labels_attr}"{reactions_attr}{text_attrs}>\n'
         f"{body}\n"
         '<div id="err" role="alert"></div>\n'
         '<div class="nav">\n'
-        '<button type="button" data-nav="back" hidden>Back</button>\n'
+        f'<button type="button" data-nav="back" hidden>{back_text}</button>\n'
         '<button type="button" data-nav="next" hidden>Next</button>\n'
         '<button type="submit" data-nav="submit">Submit</button>\n'
         "</div>\n"

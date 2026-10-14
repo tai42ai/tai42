@@ -211,6 +211,28 @@ async def test_deliver_ships_page_display_blocks_and_review_kind(fake_redis: Fak
     ]
 
 
+async def test_deliver_carries_each_page_button_label_when_set_and_omits_it_when_absent(fake_redis: FakeRedis):
+    # A page's `button_label` rides the pages frame when the sender set one (the widget
+    # labels the step's primary button with it); a page that sets none carries no
+    # `button_label` key, like every other default/absent frame key.
+    schema = {"type": "object", "properties": {"colour": {"type": "string"}, "note": {"type": "string"}}}
+    await WebChannel().deliver(
+        make_delivery(
+            answer_format="form",
+            options=None,
+            schema=schema,
+            pages=[
+                FormPage(title="Pick", fields=["colour"], button_label="Next step"),
+                FormPage(title="Say", fields=["note"]),
+            ],
+        )
+    )
+    assert _only_entry(fake_redis)["pages"] == [
+        {"title": "Pick", "fields": ["colour"], "button_label": "Next step"},
+        {"title": "Say", "fields": ["note"]},
+    ]
+
+
 async def test_deliver_carries_on_property_date_and_visibility_keys_unchanged(fake_redis: FakeRedis):
     # Date bounds and the visibleWhen predicate live ON the schema property; the frame
     # carries the schema verbatim, so they reach the widget unchanged (no re-shaping).

@@ -64,7 +64,7 @@ from typing import Any, cast
 
 from redis.asyncio import Redis
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
-from tai42_contract.interactions.models import FormData, FormPage, LocationElement, MediaItem
+from tai42_contract.interactions.models import FormData, FormPage, LocationElement, MediaItem, Wording
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -149,6 +149,7 @@ class NotificationSink:
         schema: dict[str, Any] | None = None,
         data: dict | None = None,
         pages: list[dict] | None = None,
+        wording: dict | None = None,
     ) -> dict:
         """Append one notification and return the stored record.
 
@@ -192,6 +193,7 @@ class NotificationSink:
             "schema": schema,
             "data": data,
             "pages": pages,
+            "wording": wording,
             "created_at": datetime.now(UTC).isoformat(),
         }
         payload = json.dumps(record)
@@ -251,6 +253,7 @@ async def record_notification(
     schema: dict[str, Any] | None = None,
     data: FormData | None = None,
     pages: list[FormPage] | None = None,
+    wording: Wording | None = None,
 ) -> dict:
     """Write one notification to the internal sink and return the stored record.
 
@@ -260,8 +263,9 @@ async def record_notification(
     ``media``/``template``/``options``/``location``/``sections``/``header``/``footer``/``schema``/
     ``data``/``pages`` are the OPTIONAL richer-send forms (already contract-validated by the
     caller); they are JSON-serialized here and stored on the record (``footer`` and ``schema`` are
-    stored as the plain string/dict they already are). Every Redis or serialization failure
-    propagates loudly.
+    stored as the plain string/dict they already are). ``wording`` (the per-send catalogue of the
+    notification's platform-drawn texts) is display content stored the same way (feed parity with
+    the channel the send reached). Every Redis or serialization failure propagates loudly.
     """
     # The in-app feed is interactions-Redis-backed, so every feed write refuses with
     # the feature's named 501 when the store is unconfigured — this is the sole writer
@@ -290,6 +294,7 @@ async def record_notification(
             schema=schema,
             data=data.model_dump(mode="json") if data is not None else None,
             pages=[page.model_dump(mode="json") for page in pages] if pages is not None else None,
+            wording=wording.model_dump(mode="json") if wording is not None else None,
         )
 
 

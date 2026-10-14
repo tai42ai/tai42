@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, Correlation
+from tai42_contract.interactions.models import AnswerMismatchPolicy, AnswerWording, FormWording, Wording
 
 from tai42_channel_whatsapp.correlation import (
     PendingQuestion,
@@ -80,6 +81,65 @@ async def test_port_release_is_idempotent(fake_redis: FakeRedis):
     await whatsapp_correlation_store.release_correlation(_OKEY)
     assert not fake_redis.store
     await whatsapp_correlation_store.release_correlation(_OKEY)  # no-op, never an error
+
+
+async def test_set_correlation_carries_on_mismatch_and_wording(fake_redis: FakeRedis):
+    # The conformance set_correlation copies the digression policy and per-send wording from the
+    # Correlation it is handed, and get_correlation reads them back onto the Correlation.
+    entry = Correlation(
+        callback_url=_CALLBACK,
+        interaction_id="int-9",
+        ttl_deadline=_deadline(),
+        on_mismatch=AnswerMismatchPolicy.BRIDGE,
+        wording=Wording(answer=AnswerWording(rejected="Try again: {reason}")),
+    )
+    await whatsapp_correlation_store.set_correlation(_OKEY, entry, ttl_seconds=300)
+
+    got = await whatsapp_correlation_store.get_correlation(_OKEY)
+    assert got is not None
+    assert got.on_mismatch is AnswerMismatchPolicy.BRIDGE
+    assert got.wording is not None
+    assert got.wording.answer is not None
+    assert got.wording.answer.rejected == "Try again: {reason}"
+
+
+async def test_set_correlation_defaults_retry_and_no_wording(fake_redis: FakeRedis):
+    # A port caller that set neither keeps the safe default policy and carries no wording.
+    await whatsapp_correlation_store.set_correlation(_OKEY, _corr(), ttl_seconds=300)
+
+    got = await whatsapp_correlation_store.get_correlation(_OKEY)
+    assert got is not None
+    assert got.on_mismatch is AnswerMismatchPolicy.RETRY
+    assert got.wording is None
+
+
+async def test_reserve_round_trips_on_mismatch_and_the_whole_wording(fake_redis: FakeRedis):
+    # The deliver-path reserve copies the ask's digression policy and the whole wording catalogue;
+    # get_correlation reads both back, so the shared ladder honours the policy and the refusal
+    # sentence off the stored record.
+    wording = Wording(
+        form=FormWording(open="Begin", title="Details", submit="Send"),
+        answer=AnswerWording(rejected="Nope: {reason}"),
+    )
+    await reserve_pending(
+        _PNID,
+        _WA,
+        _CALLBACK,
+        _deadline(),
+        interaction_id="int-9",
+        on_mismatch=AnswerMismatchPolicy.BRIDGE,
+        wording=wording,
+    )
+
+    peeked = await peek_pending(_PNID, _WA)
+    assert peeked is not None
+    assert peeked.on_mismatch == "bridge"
+    assert peeked.wording == wording.model_dump(mode="json")
+
+    got = await whatsapp_correlation_store.get_correlation(_OKEY)
+    assert got is not None
+    assert got.on_mismatch is AnswerMismatchPolicy.BRIDGE
+    assert got.wording == wording
 
 
 async def test_ladder_peek_reads_the_rich_reserve_record(fake_redis: FakeRedis):
