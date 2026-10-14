@@ -65,7 +65,7 @@ dependencies = [
     "tai42-channel-slack>=5.0,<6",
     "tai42-channel-twilio>=6.0,<7",
     "tai42-channel-whatsapp>=7.0,<8",
-    "tai42-channel-web>=7.0,<8",
+    "tai42-channel-web>=7.1,<8",
     # Loaded only by the monitoring stack's manifest.
     "tai42-monitoring-langfuse>=5.0,<6",
 
