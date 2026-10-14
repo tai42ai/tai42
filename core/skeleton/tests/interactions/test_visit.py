@@ -207,7 +207,7 @@ async def test_asks_outcome_sentinel_splits_a_mixed_step(store, fake_redis):
 
 
 async def test_asks_outcome_sentinel_carries_the_deadline_of_the_step(store, fake_redis):
-    # A run face surfaces its step with the earliest deadline; the re-park sentinel a send-up caller
+    # A run face surfaces its step with its deadline; the re-park sentinel a send-up caller
     # hands back as its own park must carry that deadline, or the caller cannot bound its park.
     deadline = datetime.now(UTC) + timedelta(minutes=45)
     await _seed_caller(store, fake_redis, "c1", expiry_at=deadline)
@@ -224,9 +224,9 @@ async def test_asks_outcome_sentinel_carries_the_deadline_of_the_step(store, fak
     assert outcome.suspended.expiry_at == deadline
 
 
-async def test_asks_outcome_sentinel_takes_the_earliest_stored_deadline_of_the_open_ids(store, fake_redis):
+async def test_asks_outcome_sentinel_takes_the_latest_stored_deadline_of_the_open_ids(store, fake_redis):
     # A sentinel that names its ids without a deadline: the re-park sentinel reads each open ask's
-    # stored deadline and carries the earliest, the moment the first of them expires.
+    # stored deadline and carries the latest, the moment past which none of them remains open.
     now = datetime.now(UTC)
     await _seed_caller(store, fake_redis, "c1", expiry_at=now + timedelta(hours=2))
     await _seed_user(store, fake_redis, "u2", expiry_at=now + timedelta(minutes=30))
@@ -238,12 +238,13 @@ async def test_asks_outcome_sentinel_takes_the_earliest_stored_deadline_of_the_o
         outcome = await visit_module.visit(target_name="t", cancel=[], resume=[], start=_start, extras={})
     assert outcome.kind == "asks"
     assert outcome.suspended is not None
-    assert outcome.suspended.expiry_at == now + timedelta(minutes=30)
+    assert outcome.suspended.expiry_at == now + timedelta(hours=2)
 
 
-async def test_asks_outcome_sentinel_keeps_an_earlier_deadline_the_run_reported(store, fake_redis):
+async def test_asks_outcome_sentinel_takes_the_later_of_stored_and_reported_deadlines(store, fake_redis):
     # An open id the interactions store does not hold (a chained key waiting on a nested call) has
-    # its deadline only on the incoming sentinel; an earlier reported deadline is kept.
+    # its deadline only on the incoming sentinel; when a stored ask's deadline is later, the step's
+    # deadline is that later stored one.
     now = datetime.now(UTC)
     await _seed_caller(store, fake_redis, "c1", expiry_at=now + timedelta(hours=2))
 
@@ -258,7 +259,28 @@ async def test_asks_outcome_sentinel_keeps_an_earlier_deadline_the_run_reported(
     with state_context(_context(_candidates())):
         outcome = await visit_module.visit(target_name="t", cancel=[], resume=[], start=_start, extras={})
     assert outcome.suspended is not None
-    assert outcome.suspended.expiry_at == now + timedelta(minutes=10)
+    assert outcome.suspended.expiry_at == now + timedelta(hours=2)
+
+
+async def test_asks_outcome_sentinel_keeps_a_later_deadline_the_run_reported(store, fake_redis):
+    # An open id the interactions store does not hold (a chained key waiting on a nested call) has
+    # its deadline only on the incoming sentinel; when that reported deadline is later than every
+    # stored ask's, the step's deadline is that later reported one.
+    now = datetime.now(UTC)
+    await _seed_caller(store, fake_redis, "c1", expiry_at=now + timedelta(hours=2))
+
+    async def _start(extras):
+        return SuspendedInteraction(
+            interaction_id="c1",
+            interaction_ids=["c1", "chained-k"],
+            caller_interaction_ids=["c1"],
+            expiry_at=now + timedelta(hours=3),
+        )
+
+    with state_context(_context(_candidates())):
+        outcome = await visit_module.visit(target_name="t", cancel=[], resume=[], start=_start, extras={})
+    assert outcome.suspended is not None
+    assert outcome.suspended.expiry_at == now + timedelta(hours=3)
 
 
 async def test_asks_outcome_sentinel_keeps_the_resume_owner_the_run_reported(store, fake_redis):

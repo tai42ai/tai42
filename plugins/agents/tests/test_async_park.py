@@ -20,10 +20,11 @@ import asyncio
 import contextlib
 import json
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from fakeredis import aioredis
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -32,6 +33,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 from pydantic import PrivateAttr
+from tai42_contract.agent.events import SuspendedFinal
 from tai42_contract.interactions import (
     EXPIRY_ANSWER,
     SUSPENDED_INTERACTION_MARKER_KEY,
@@ -41,9 +43,11 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.template import TemplatedText
 from tai42_kit.interactions.park_marker import suspended_interaction_marker
+from tests.conftest import bind_park_index
 
 from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, collect_pending_interrupts
-from tai42_agents._internal.park.drive import _park_interactions
+from tai42_agents._internal.park.capability import ParkIdentity
+from tai42_agents._internal.park.drive import _park_interactions, finalize_drive
 from tai42_agents._internal.park.middleware import AsyncParkMiddleware
 from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
 
@@ -83,6 +87,15 @@ def _park_capable_binding():
     token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
     yield
     reset_resume_continuation_tool(token)
+
+
+@pytest.fixture
+def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
+    """Route the park index at a shared in-memory fakeredis (a park-capable run), so a drive can
+    persist a super-step and surface its suspended receipt."""
+    redis = aioredis.FakeRedis(decode_responses=True)
+    bind_park_index(monkeypatch, redis)
+    return redis
 
 
 class _CountingAsk:
@@ -414,12 +427,14 @@ def test_park_inside_a_subagent_propagates_and_resumes_by_id() -> None:
     assert final["messages"][-1].content == "main done"
 
 
-def test_two_parallel_subagent_parks_surface_and_resume_by_id() -> None:
+def test_two_parallel_subagent_parks_surface_and_resume_by_id(fake_park_redis: Any) -> None:
     # Two parallel task-tool subagents that each async-ask surface TWO DISTINCT park interrupts
     # in ONE parent super-step (empirically reachable). langgraph's resume map feeds each
     # interrupt its own answers in one resume, and both subagents finalize back to the parent.
     from tai42_agents.langchain_deep_agent.spec import ResolvedSubAgentSpec
 
+    now = datetime.now(UTC)
+    deadlines = {"iA": now + timedelta(hours=1), "iB": now + timedelta(hours=2)}
     calls = {"n": 0}
     seq = ["iA", "iB"]
 
@@ -428,7 +443,7 @@ def test_two_parallel_subagent_parks_surface_and_resume_by_id() -> None:
         calls["n"] += 1
         return suspended_interaction_marker(
             interaction_id,
-            None,
+            deadlines[interaction_id],
             get_resume_continuation_tool(),
             interaction_ids=[interaction_id],
             caller_interaction_ids=[],
@@ -471,6 +486,20 @@ def test_two_parallel_subagent_parks_surface_and_resume_by_id() -> None:
     by_interaction = {next(iter(interactions)): iid for iid, interactions in parks}
     assert set(by_interaction) == {"iA", "iB"}
     assert calls["n"] == 2
+
+    # The parent drive finalizes the two parks into ONE suspended receipt whose deadline is the
+    # step's deadline: the LATEST of its parks' deadlines (iB's), not the earliest.
+    events = asyncio.run(
+        finalize_drive(
+            graph,
+            config,
+            None,
+            ParkIdentity(agent_name="langchain_deep_agent", thread_id="t-multipark", rebuild_kwargs={}, bind=True),
+        )
+    )
+    suspended = [event for event in events if isinstance(event, SuspendedFinal)]
+    assert len(suspended) == 1
+    assert suspended[0].expiry_at == deadlines["iB"].isoformat()
 
     resume_map = {by_interaction["iA"]: {"iA": "answer-a"}, by_interaction["iB"]: {"iB": "answer-b"}}
     final = asyncio.run(graph.ainvoke(Command(resume=resume_map), config))

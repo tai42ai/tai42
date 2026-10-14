@@ -550,10 +550,11 @@ async def _open_step_sentinel(
     continuation, which is not the continuation the innermost run stored on the open asks. When the
     run named no owner the sentinel falls back to the continuation stored on those interactions,
     which one step shares — and differing stored owners there is a corrupt step and raises rather
-    than picking one. ``expiry_at`` is the step's earliest deadline: the earliest of every open
-    ask's stored ``expiry_at`` and ``reported_expiry`` (the deadline the run's own sentinel
-    reported, which also covers an open id the store does not hold, such as a chained key). A caller
-    that re-parks on this sentinel bounds its own park by it. ``None`` when nothing remains.
+    than picking one. ``expiry_at`` is the step's deadline: the latest of every open ask's stored
+    ``expiry_at`` and ``reported_expiry`` (the deadline the run's own sentinel reported, which also
+    covers an open id the store does not hold, such as a chained key). A caller that parks on, or
+    releases, this step bounds that wait by it: the step's terminal comes no later than its last
+    open ask's deadline. ``None`` when nothing remains.
     """
     if not open_ids or store is None:
         return None
@@ -582,7 +583,7 @@ async def _open_step_sentinel(
         interaction_ids=list(open_ids),
         caller_interaction_ids=list(caller_ids),
         resume_owner=owner,
-        expiry_at=min(deadlines) if deadlines else None,
+        expiry_at=max(deadlines) if deadlines else None,
     )
 
 
