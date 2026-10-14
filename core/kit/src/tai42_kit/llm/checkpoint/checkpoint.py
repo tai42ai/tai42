@@ -211,7 +211,7 @@ async def _create_postgres_checkpoint(conn_string: str | None) -> tuple[Checkpoi
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # pyright: ignore[reportMissingImports]
 
     from tai42_kit.clients.impl.postgres import open_dedicated_pool
-    from tai42_kit.llm._langgraph_postgres import LANGGRAPH_CONNECTION_KWARGS
+    from tai42_kit.llm._langgraph_postgres import LANGGRAPH_CONNECTION_KWARGS, serialised_setup
 
     # An unset conn string means the base Postgres namespace: its DSN builder raises a named
     # error if that identity is also unset, and its deployment sizes size this pool.
@@ -221,7 +221,7 @@ async def _create_postgres_checkpoint(conn_string: str | None) -> tuple[Checkpoi
         # The pool's per-connection kwargs set row_factory=dict_row, so every checkout
         # yields dict rows; the shared pool type is row-agnostic, so narrow it to the
         # dict-row connection the saver needs.
-        async with pool.connection() as conn:
+        async with pool.connection() as conn, serialised_setup(conn, "checkpoint_migrations"):
             temp_saver = AsyncPostgresSaver(cast("AsyncConnection[DictRow]", conn))
             await temp_saver.setup()
         ledger = PostgresFinishedThreadLedger(pool)
