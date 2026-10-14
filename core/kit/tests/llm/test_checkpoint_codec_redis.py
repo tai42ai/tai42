@@ -196,17 +196,37 @@ async def test_a_value_above_the_threshold_round_trips_through_the_saver(redis_s
         assert got == value
 
 
-async def test_a_large_channel_value_is_stored_as_an_inflate_envelope(redis_saver: Any) -> None:
+async def _stored_large_value(saver: Any) -> dict[str, Any]:
     thread_id = f"codec-{uuid.uuid4().hex}"
     checkpoint = empty_checkpoint()
     checkpoint["channel_values"] = {"v": {"pad": _PAD}, "small": {"a": 1}}
     checkpoint["channel_versions"] = {"v": "1", "small": "1"}
-    await redis_saver.aput(_config(thread_id), checkpoint, {"source": "input", "step": 0, "parents": {}}, {})
-    key = await redis_saver._redis.get(redis_saver._make_redis_checkpoint_latest_key(thread_id, ""))
-    stored = await redis_saver._redis.json().get(key, "$.checkpoint.channel_values")
-    await redis_saver.adelete_thread(thread_id)
-    assert stored[0]["v"]["args"][0] == "inflate"
-    assert stored[0]["small"] == {"a": 1}
+    await saver.aput(_config(thread_id), checkpoint, {"source": "input", "step": 0, "parents": {}}, {})
+    key = await saver._redis.get(saver._make_redis_checkpoint_latest_key(thread_id, ""))
+    [stored] = await saver._redis.json().get(key, "$.checkpoint.channel_values")
+    assert (await saver.aget_tuple(_config(thread_id))).checkpoint["channel_values"] == checkpoint["channel_values"]
+    await saver.adelete_thread(thread_id)
+    assert stored["small"] == {"a": 1}
+    return stored["v"]
+
+
+async def test_a_large_channel_value_is_stored_once_per_thread_and_referenced(redis_saver: Any) -> None:
+    stored = await _stored_large_value(redis_saver)
+    assert stored["pad"]["args"][0] == "ref"
+
+
+async def test_with_sharing_off_a_large_channel_value_is_stored_as_an_inflate_envelope(monkeypatch) -> None:
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES", "null")
+    reset_all_settings()
+    resource, closer = await create_checkpoint_resource("redis", real_redis_url())
+    try:
+        stored = await _stored_large_value(get_saver_from_resource("redis", resource))
+    finally:
+        await closer()
+        reset_all_settings()
+    assert stored["args"][0] == "inflate"
 
 
 async def _stored_checkpoint_key(saver: Any, thread_id: str) -> str:

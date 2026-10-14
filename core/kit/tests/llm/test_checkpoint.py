@@ -17,15 +17,22 @@ import pytest
 pytest.importorskip("langgraph")
 
 from tai42_kit.llm.checkpoint import checkpoint as cp
+from tai42_kit.llm.checkpoint.value_store import PostgresCheckpointValueStore
 
 from .conftest import client_target, install_fake_named_pool, install_spy_client
 
 
 @pytest.fixture(autouse=True)
 def _no_store_side_effects(monkeypatch):
-    """Keep the resource builders off the store-format gate and the SQL ledgers (tested on their own)."""
+    """Keep the resource builders off the store-format gate, the SQL ledgers and the value table.
+
+    Each is tested on its own.
+    """
 
     async def _no_gate(resource):
+        return None
+
+    async def _no_value_table(self):
         return None
 
     class _FakeSqlLedger:
@@ -38,6 +45,7 @@ def _no_store_side_effects(monkeypatch):
     monkeypatch.setattr(cp, "ensure_store_format", _no_gate)
     monkeypatch.setattr(cp, "SqliteFinishedThreadLedger", _FakeSqlLedger)
     monkeypatch.setattr(cp, "PostgresFinishedThreadLedger", _FakeSqlLedger)
+    monkeypatch.setattr(PostgresCheckpointValueStore, "setup", _no_value_table)
 
 
 def _use_fake_redis_saver(monkeypatch, saver_cls):
@@ -552,15 +560,13 @@ def test_get_saver_sqlite_wraps_resource(monkeypatch):
     assert out.serde._codec is None
 
 
-def test_get_saver_postgres_wraps_resource_with_the_blob_codec(monkeypatch):
+async def test_get_saver_postgres_builds_the_kit_saver_with_the_blob_codec():
     from tai42_kit.llm.checkpoint.codec import BlobCompressCodec
+    from tai42_kit.llm.checkpoint.postgres_saver import GuardedAsyncPostgresSaver
 
-    saver_mod: Any = types.ModuleType("langgraph.checkpoint.postgres.aio")
-    saver_mod.AsyncPostgresSaver = _FakeSaver
-    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres.aio", saver_mod)
     out = cp.get_saver_from_resource("postgres", _resource("postgres", "pool"))
-    assert isinstance(out, _FakeSaver)
-    assert out.resource == "pool"
+    assert isinstance(out, GuardedAsyncPostgresSaver)
+    assert out.conn == "pool"
     assert isinstance(out.serde, cp._GuardedSerializer)
     assert isinstance(out.serde._codec, BlobCompressCodec)
 

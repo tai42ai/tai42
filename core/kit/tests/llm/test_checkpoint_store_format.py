@@ -45,8 +45,8 @@ async def _put_one(saver: Any) -> None:
     await saver.aput(config, empty_checkpoint(), _METADATA, {})
 
 
-def test_the_generation_is_three():
-    assert CHECKPOINT_STORE_FORMAT_GENERATION == 3
+def test_the_generation_is_four():
+    assert CHECKPOINT_STORE_FORMAT_GENERATION == 4
 
 
 async def test_memory_store_carries_no_marker():
@@ -111,6 +111,17 @@ async def test_sqlite_a_generation_two_store_is_refused(sqlite_store):
     with pytest.raises(CheckpointStoreFormatError) as excinfo:
         await ensure_store_format(resource)
     assert str(excinfo.value) == _refusal("sqlite", "2")
+
+
+async def test_sqlite_a_generation_three_store_is_refused(sqlite_store):
+    saver, resource = sqlite_store
+    await ensure_store_format(resource)
+    await _put_one(saver)
+    await resource.handle.execute("UPDATE tai42_checkpoint_format SET generation = 3")
+    await resource.handle.commit()
+    with pytest.raises(CheckpointStoreFormatError) as excinfo:
+        await ensure_store_format(resource)
+    assert str(excinfo.value) == _refusal("sqlite", "3")
 
 
 async def test_sqlite_marked_store_with_data_proceeds(sqlite_store):
@@ -187,6 +198,18 @@ async def test_postgres_another_generation_is_refused(postgres_store):
 
 
 @integration
+async def test_postgres_a_generation_three_store_is_refused(postgres_store):
+    saver, resource = postgres_store
+    await ensure_store_format(resource)
+    await _put_one(saver)
+    async with resource.handle.connection() as conn:
+        await conn.execute("UPDATE tai42_checkpoint_format SET generation = 3")
+    with pytest.raises(CheckpointStoreFormatError) as excinfo:
+        await ensure_store_format(resource)
+    assert str(excinfo.value) == _refusal("postgres", "3")
+
+
+@integration
 async def test_postgres_concurrent_first_builds_converge(postgres_store):
     from tai42_kit.llm.checkpoint import postgres_store as pg_store
 
@@ -246,6 +269,16 @@ async def test_redis_another_generation_is_refused(redis_store):
     with pytest.raises(CheckpointStoreFormatError) as excinfo:
         await ensure_store_format(resource)
     assert str(excinfo.value) == _refusal("redis", "1")
+
+
+@integration
+async def test_redis_a_generation_three_store_is_refused(redis_store):
+    saver, resource = redis_store
+    await _put_one(saver)
+    await resource.redis_client.set(store_format.REDIS_FORMAT_KEY, "3")
+    with pytest.raises(CheckpointStoreFormatError) as excinfo:
+        await ensure_store_format(resource)
+    assert str(excinfo.value) == _refusal("redis", "3")
 
 
 @integration

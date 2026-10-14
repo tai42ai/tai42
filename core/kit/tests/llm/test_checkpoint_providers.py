@@ -20,16 +20,16 @@ from tai42_kit.llm.checkpoint.providers import (
 
 def test_provider_table_states_each_provider_facts():
     assert CHECKPOINT_PROVIDERS["redis"] == CheckpointProviderFacts(
-        durable=True, retention="native_ttl", faithful_codec=True, inline_compress=True
+        durable=True, retention="native_ttl", faithful_codec=True, inline_compress=True, shared_values=True
     )
     assert CHECKPOINT_PROVIDERS["postgres"] == CheckpointProviderFacts(
-        durable=True, retention="sweep", faithful_codec=False, inline_compress=True
+        durable=True, retention="sweep", faithful_codec=False, inline_compress=True, shared_values=True
     )
     assert CHECKPOINT_PROVIDERS["sqlite"] == CheckpointProviderFacts(
-        durable=False, retention="sweep", faithful_codec=False, inline_compress=False
+        durable=False, retention="sweep", faithful_codec=False, inline_compress=False, shared_values=False
     )
     assert CHECKPOINT_PROVIDERS["memory"] == CheckpointProviderFacts(
-        durable=False, retention="process", faithful_codec=False, inline_compress=False
+        durable=False, retention="process", faithful_codec=False, inline_compress=False, shared_values=False
     )
 
 

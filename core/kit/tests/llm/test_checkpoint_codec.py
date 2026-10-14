@@ -208,6 +208,7 @@ def test_the_codec_kinds():
         "exception",
         "inflate",
         "zoneinfo",
+        "ref",
     } == CODEC_KINDS
 
 
@@ -324,8 +325,13 @@ def test_an_unencodable_integer_names_its_path():
     assert str(2**64) in str(excinfo.value)
 
 
-def test_a_non_json_result_after_the_rewrite_is_refused(monkeypatch):
-    monkeypatch.setattr(FaithfulRedisSerializer, "dumps_typed", lambda self, obj: ("msgpack", b"\x80"))
+def test_a_value_json_cannot_encode_after_the_rewrite_is_refused(monkeypatch):
+    def _refuse(*args: Any, **kwargs: Any) -> bytes:
+        raise orjson.JSONEncodeError("cannot encode")
+
+    from tai42_kit.llm.checkpoint import redis_values
+
+    monkeypatch.setattr(redis_values.orjson, "dumps", _refuse)
     with pytest.raises(CheckpointSerializationError, match="could not be JSON-encoded after the faithful rewrite"):
         RedisFaithfulCodec(None).dumps_typed(FaithfulRedisSerializer(), {"v": 1})
 
@@ -514,6 +520,10 @@ _CORRUPT: dict[str, dict[str, Any]] = {
     "inflate with another tag": _env("inflate", ["msgpack", base64.b64encode(zlib.compress(b"{}")).decode()]),
     "corrupt decimal inside inflated JSON": _inflate(orjson.dumps({"d": _env("decimal", "nan-ish")})),
     "bad bytes": _env("bytes", ["str", "AA=="]),
+    "ref with a short digest": _env("ref", ["abc", 10, []]),
+    "ref with a negative size": _env("ref", ["a" * 64, -1, []]),
+    "ref without a closure": _env("ref", ["a" * 64, 10]),
+    "ref whose closure is not digests": _env("ref", ["a" * 64, 10, ["x"]]),
     "foreign lc:2 id": {"lc": 2, "type": "constructor", "id": ["os", "getcwd"], "args": []},
     "foreign lc:2 dataclass": {"lc": 2, "type": "constructor", "id": [__name__, "Tally"], "kwargs": {"total": 1}},
     "lc:1 id the LangChain reviver refuses": {
@@ -845,3 +855,59 @@ def test_a_langchain_value_the_reviver_validator_refuses_is_refused_at_write():
         "checkpoint value at $.prompt of type PromptTemplate cannot be stored faithfully on the redis checkpointer: "
         "LangChain will not revive ('langchain', 'prompts', 'prompt', 'PromptTemplate') from a checkpoint: "
     )
+
+
+# --------------------------------------------------------------------------- #
+# Shared values: the ref kind, values the kit saver encoded, the residue's markers
+# --------------------------------------------------------------------------- #
+_DIGEST = "ab" * 32
+
+
+def test_a_ref_envelope_is_read_back_as_a_reference_on_both_paths():
+    from tai42_kit.llm.checkpoint.chunking import CheckpointValueRef
+
+    stored = {"x": _env("ref", [_DIGEST, 10, ["cd" * 32]])}
+    expected = CheckpointValueRef(_DIGEST, 10, ("cd" * 32,))
+    assert _serde().loads_typed(("json", orjson.dumps(stored))) == {"x": expected}
+    from_document, failures = _document_read(_serde(), stored)
+    assert failures == []
+    assert from_document == {"x": expected}
+
+
+def test_a_pre_encoded_value_and_checkpoint_pass_the_guard_as_encoded():
+    from tai42_kit.llm.checkpoint.checkpoint import PreEncodedCheckpoint, PreEncodedValue
+
+    serde = _serde()
+    assert serde.dumps_typed(PreEncodedValue(("json", b"[1]"))) == ("json", b"[1]")
+    checkpoint = PreEncodedCheckpoint(_checkpoint({"v": 1}), ("json", b"{}"))
+    copied = checkpoint.copy()
+    assert copied == checkpoint
+    assert serde.dumps_typed(copied) == ("json", b"{}")
+    postgres = _GuardedSerializer(JsonPlusSerializer(), BlobCompressCodec(1))
+    assert postgres.dumps_typed(PreEncodedValue(("msgpack", b"\x01"))) == ("msgpack", b"\x01")
+
+
+def test_the_residue_is_the_library_serializers_text_and_keeps_its_markers():
+    from langgraph.types import Send
+
+    from tai42_kit.llm.checkpoint.codec import _walk
+    from tai42_kit.llm.checkpoint.redis_values import RedisCheckpointEncoder
+
+    values = {
+        "interrupt": [Interrupt(value={"amount": Decimal("1")}, id="i1")],
+        "send": [Send("node", {"amount": Decimal("2")})],
+        "snapshot": _DeltaSnapshot([Decimal("3")]),
+    }
+    encoder = RedisCheckpointEncoder(None, None)
+    data = encoder.encode_checkpoint(_checkpoint(values), {}, encoder.chunker())
+    library = FaithfulRedisSerializer().dumps_typed(_walk(_checkpoint(values), "$"))[1]
+    assert orjson.loads(data) == orjson.loads(library)
+    back, failures = _document_read(_serde(), orjson.loads(data)["channel_values"])
+    assert failures == []
+    assert back == values
+
+
+def test_an_out_of_range_integer_in_a_checkpoint_names_its_path():
+    with pytest.raises(CheckpointSerializationError) as excinfo:
+        _serde().dumps_typed(_checkpoint({"v": {"count": -(2**63) - 1}}))
+    assert "['count']" in str(excinfo.value)

@@ -126,9 +126,9 @@ def test_first_column_reads_dict_and_tuple_rows():
     assert postgres_store._first(("b",)) == "b"
 
 
-def test_second_column_reads_dict_and_tuple_rows():
-    assert postgres_store._second({"thread_id": "a", "waiting_minutes": 5}) == 5
-    assert postgres_store._second(("b", 7)) == 7
+def test_a_column_by_index_reads_dict_and_tuple_rows():
+    assert postgres_store._cell({"thread_id": "a", "waiting_minutes": 5}, 1) == 5
+    assert postgres_store._cell(("b", 7), 1) == 7
 
 
 async def test_concurrent_first_builds_of_the_kit_tables_converge(saver_and_pool):
@@ -206,6 +206,7 @@ class _RecordingPool:
     [
         (postgres_store.read_format_generation, postgres_store.FORMAT_TABLE),
         (postgres_store.create_ledger_tables, postgres_store.FINISHED_TABLE),
+        (postgres_store.create_value_table, postgres_store.VALUES_TABLE),
     ],
 )
 async def test_a_first_build_creates_its_table_under_the_build_lock(build: Any, table: str) -> None:
