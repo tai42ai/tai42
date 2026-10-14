@@ -9,7 +9,9 @@ from tai42_kit.access_control import registry as identity_registry
 from tai42_kit.registry import NamedFactoryRegistry, StagedGeneration
 
 from tai42_skeleton.app import registry_staging
+from tai42_skeleton.app.mcp_endpoints import mcp_endpoint_for
 from tai42_skeleton.app.route_registry import RouteOwner, RouteRegistry
+from tai42_skeleton.app.serving_core import record_streamable_http_surface
 
 from .._staged_generations import (
     _snapshot,
@@ -102,3 +104,15 @@ def test_a_referenced_global_reaching_no_staged_primitive_fails_loudly(monkeypat
     monkeypatch.setattr(registry_staging, "route_registry", _NoStagedState())
     with pytest.raises(TypeError, match=r"registry_staging\.route_registry \(_NoStagedState\) .* no staged-registry"):
         staged_participants()
+
+
+def test_a_table_memoised_on_the_route_registry_version_is_not_served_after_the_block() -> None:
+    # The MCP endpoint map is memoised on the route registry version. Both blocks record as
+    # many routes, and nothing reads the map between them, so the second block reaches the
+    # version the first block's table carries unless the restore moves the version on.
+    with preserved_staged_generations():
+        record_streamable_http_surface("/first-block", stateless=False)
+        assert mcp_endpoint_for("/first-block") == "/first-block"
+    with preserved_staged_generations():
+        record_streamable_http_surface("/second-block", stateless=False)
+        assert mcp_endpoint_for("/second-block") == "/second-block"
