@@ -110,9 +110,18 @@ def install_fake_named_pool(monkeypatch) -> tuple[dict[str, Any], list[bool]]:
         captured["probe_dsn"] = conninfo
         return _FakeProbe()
 
+    class _FakeCursor:
+        async def fetchone(self):
+            return {"locked": True}
+
+    class _FakeConn:
+        # Answers the setup lock's statements: the try-lock is granted, the unlock accepted.
+        async def execute(self, query, params=None):
+            return _FakeCursor()
+
     class _FakeConnCtx:
         async def __aenter__(self):
-            return object()
+            return _FakeConn()
 
         async def __aexit__(self, *a):
             return False

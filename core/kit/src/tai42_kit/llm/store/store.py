@@ -60,7 +60,7 @@ async def _create_postgres_store(conn_string: str | None, store_kwargs: dict[str
     from langgraph.store.postgres import AsyncPostgresStore  # pyright: ignore[reportMissingImports]
 
     from tai42_kit.clients.impl.postgres import open_dedicated_pool
-    from tai42_kit.llm._langgraph_postgres import LANGGRAPH_CONNECTION_KWARGS
+    from tai42_kit.llm._langgraph_postgres import LANGGRAPH_CONNECTION_KWARGS, serialised_setup
 
     # An unset conn string means the base Postgres namespace: its DSN builder raises a named
     # error if that identity is also unset, and its deployment sizes size this pool.
@@ -72,7 +72,7 @@ async def _create_postgres_store(conn_string: str | None, store_kwargs: dict[str
         # Temp connection for setup. The pool's per-connection kwargs set
         # row_factory=dict_row, so every checkout yields dict rows; the shared pool
         # type is row-agnostic, so narrow it to the dict-row connection the store needs.
-        async with pool.connection() as conn:
+        async with pool.connection() as conn, serialised_setup(conn, "store_migrations"):
             temp_store = AsyncPostgresStore(cast("AsyncConnection[DictRow]", conn), **store_kwargs)
             await temp_store.setup()
     except BaseException:
