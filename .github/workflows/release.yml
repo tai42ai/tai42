@@ -150,9 +150,9 @@ jobs:
           fi
           echo "wheels=$args" >> "$GITHUB_OUTPUT"
       - name: Consumer boot gate
-        # Boot the published consumers against the candidate tree before build: a
-        # non-major skeleton release that breaks any consumer's boot fails here,
-        # never reaching PyPI.
+        # Boot the published consumers against the tagged tree before build: a tree
+        # whose core release set carries no major and breaks any consumer's boot
+        # fails here, never reaching PyPI.
         if: steps.consumers.outputs.wheels != ''
         env:
           CONSUMER_BOOT_REDIS_URL: redis://localhost:6379
@@ -162,10 +162,7 @@ jobs:
         run: |
           set -euo pipefail
           # shellcheck disable=SC2086  # WHEELS is a deliberate multi-flag string.
-          uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py \
-            --package "${{ steps.resolve.outputs.component }}" \
-            --dir "${{ steps.resolve.outputs.dir }}" \
-            --version "${{ steps.resolve.outputs.version }}" $WHEELS
+          uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py $WHEELS
       - if: steps.resolve.outputs.descriptor != 'true'
         run: uv build --package "${{ steps.resolve.outputs.component }}" --out-dir dist
       - if: steps.resolve.outputs.descriptor != 'true'

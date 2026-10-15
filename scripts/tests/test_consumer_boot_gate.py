@@ -14,64 +14,183 @@ import pytest
 import consumer_boot_gate as gate
 from _consumer_boot_gate import consumers as cbg_consumers
 
-# ------------------------------------------------------------------ bump verdict
+# ------------------------------------------------------- candidate release set
 
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
 
+def _commit(repo: Path, message: str) -> None:
+    (repo / "f").write_text(message)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", message)
+
+
 @pytest.fixture
-def tagged_repo(tmp_path: Path) -> Path:
+def core_repo(tmp_path: Path) -> Path:
+    """A git repo with a two-member release config: ``core/a`` releases ``a``, ``core/b`` releases ``b``."""
+    import json
+
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "t@t.t")
     _git(repo, "config", "user.name", "t")
-    (repo / "f").write_text("x")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-qm", "c")
-    for tag in ("pkg-v1.0.0", "pkg-v1.1.0"):
-        _git(repo, "tag", tag)
+    config = {"packages": {"core/a": {"package-name": "a"}, "core/b": {"package-name": "b"}}}
+    (repo / "release-please-config.json").write_text(json.dumps(config))
     return repo
 
 
-@pytest.mark.parametrize(
-    ("version", "expected"),
-    [("2.0.0", "major"), ("1.2.0", "minor"), ("1.1.1", "patch")],
-)
-def test_governing_bump_against_previous_tag(tagged_repo: Path, version: str, expected: str):
-    assert gate.governing_bump("pkg", version, tagged_repo) == expected
+def _manifest(repo: Path, a: str, b: str) -> None:
+    import json
+
+    (repo / ".release-please-manifest.json").write_text(json.dumps({"core/a": a, "core/b": b}))
 
 
-def test_governing_bump_first_release_is_major(tagged_repo: Path):
-    # A package with no prior tag: an unbounded first release carries any surface.
-    assert gate.governing_bump("other", "0.1.0", tagged_repo) == "major"
+_CORE = ["core/a", "core/b"]
 
 
-def test_governing_bump_unbumped_reads_last_release_class(tagged_repo: Path):
-    # Not bumped on a train: the version is the last released one, so the bump reads
-    # as that last release's class (here minor: 1.0.0 -> 1.1.0), never major.
-    assert gate.governing_bump("pkg", "1.1.0", tagged_repo) == "minor"
+def test_candidate_bump_is_the_highest_class_among_released_core_packages(core_repo: Path):
+    # `a` is published at 1.0.0 (tagged on an earlier commit); `b` 2.0.0 is released by
+    # this tree (untagged) over b-v1.3.0: the candidate is a major though `a` is not released.
+    _manifest(core_repo, "1.0.0", "1.3.0")
+    _commit(core_repo, "c1")
+    _git(core_repo, "tag", "a-v1.0.0")
+    _git(core_repo, "tag", "b-v1.3.0")
+    _manifest(core_repo, "1.0.0", "2.0.0")
+    _commit(core_repo, "c2")
+    candidate = gate.read_candidate(core_repo, _CORE)
+    assert [(m.package, m.version, m.bump) for m in candidate.members] == [
+        ("a", "1.0.0", None),
+        ("b", "2.0.0", "major"),
+    ]
+    assert candidate.bump == "major"
 
 
-def test_governing_bump_honors_voided_tag_from_config(tagged_repo: Path):
-    # The boot gate shares the api-gate's tag plumbing, so a tag the repo's api-gate
-    # config voids is skipped as a baseline here too, with no call-site change: without
-    # the void, 1.1.1 diffs against pkg-v1.1.0 (patch); voiding pkg-v1.1.0 drops the
-    # baseline to pkg-v1.0.0, so the bump reads as minor.
-    assert gate.governing_bump("pkg", "1.1.1", tagged_repo) == "patch"
-    gh = tagged_repo / ".github"
+def test_a_published_major_does_not_count_toward_the_candidate_bump(core_repo: Path):
+    # `b` 2.0.0 was published on an earlier commit; only `a`'s minor is released by this
+    # tree, so the candidate is a minor and a consumer break fails the gate.
+    _manifest(core_repo, "1.0.0", "1.0.0")
+    _commit(core_repo, "c1")
+    for tag in ("a-v1.0.0", "b-v1.0.0"):
+        _git(core_repo, "tag", tag)
+    _manifest(core_repo, "1.0.0", "2.0.0")
+    _commit(core_repo, "c2")
+    _git(core_repo, "tag", "b-v2.0.0")
+    _manifest(core_repo, "1.1.0", "2.0.0")
+    _commit(core_repo, "c3")
+    candidate = gate.read_candidate(core_repo, _CORE)
+    assert [m.bump for m in candidate.members] == ["minor", None]
+    assert candidate.bump == "minor"
+    assert gate.break_is_accepted(candidate.bump) is False
+
+
+def test_candidate_releasing_no_core_package_reads_none(core_repo: Path):
+    _manifest(core_repo, "1.0.0", "1.0.0")
+    _commit(core_repo, "c1")
+    for tag in ("a-v1.0.0", "b-v1.0.0"):
+        _git(core_repo, "tag", tag)
+    _commit(core_repo, "c2")
+    assert gate.read_candidate(core_repo, _CORE).bump == "none"
+
+
+def test_a_tag_on_head_counts_as_released_by_the_tree(core_repo: Path):
+    # The tag-time run checks out the commit a release's tags are minted on: a version
+    # tagged at HEAD is released by this tree, read against its previous tag.
+    _manifest(core_repo, "1.0.0", "1.0.0")
+    _commit(core_repo, "c1")
+    for tag in ("a-v1.0.0", "b-v1.0.0"):
+        _git(core_repo, "tag", tag)
+    _manifest(core_repo, "1.1.0", "1.0.0")
+    _commit(core_repo, "c2")
+    _git(core_repo, "tag", "a-v1.1.0")
+    candidate = gate.read_candidate(core_repo, _CORE)
+    assert [m.bump for m in candidate.members] == ["minor", None]
+    assert candidate.bump == "minor"
+    assert gate.release_bump_set(core_repo) == {"a"}
+
+
+def test_a_first_release_reads_major(core_repo: Path):
+    # No tag at all: an unbounded first release carries any surface.
+    _manifest(core_repo, "0.1.0", "0.1.0")
+    _commit(core_repo, "c1")
+    candidate = gate.read_candidate(core_repo, _CORE)
+    assert [m.bump for m in candidate.members] == ["major", "major"]
+    assert candidate.bump == "major"
+
+
+def test_candidate_bump_honors_voided_tag_from_config(core_repo: Path):
+    # The gate shares the api-gate's tag plumbing, so a tag the repo's api-gate config
+    # voids is skipped as a baseline: without the void, 1.1.1 reads against a-v1.1.0
+    # (patch); voiding a-v1.1.0 drops the baseline to a-v1.0.0, so the bump reads minor.
+    _manifest(core_repo, "1.1.1", "1.0.0")
+    _commit(core_repo, "c1")
+    for tag in ("a-v1.0.0", "a-v1.1.0", "b-v1.0.0"):
+        _git(core_repo, "tag", tag)
+    _commit(core_repo, "c2")
+    assert gate.read_candidate(core_repo, _CORE).bump == "patch"
+    gh = core_repo / ".github"
     gh.mkdir()
     (gh / "api-gate.yml").write_text(
-        "mode: label-honesty\nvoided_tags:\n  - tag: pkg-v1.1.0\n    reason: release job failed before publishing\n"
+        "mode: label-honesty\nvoided_tags:\n  - tag: a-v1.1.0\n    reason: release job failed before publishing\n"
     )
-    assert gate.governing_bump("pkg", "1.1.1", tagged_repo) == "minor"
+    assert gate.read_candidate(core_repo, _CORE).bump == "minor"
+
+
+def test_a_core_dir_without_a_release_config_entry_fails_loudly(core_repo: Path):
+    _manifest(core_repo, "1.0.0", "1.0.0")
+    _commit(core_repo, "c1")
+    with pytest.raises(SystemExit):
+        gate.read_candidate(core_repo, ["core/a", "core/c"])
+
+
+def test_a_core_dir_without_a_manifest_version_fails_loudly(core_repo: Path):
+    import json
+
+    (core_repo / ".release-please-manifest.json").write_text(json.dumps({"core/a": "1.0.0"}))
+    _commit(core_repo, "c1")
+    with pytest.raises(SystemExit):
+        gate.read_candidate(core_repo, _CORE)
+
+
+def test_previous_release_is_the_newest_core_baseline_tag(core_repo: Path):
+    # c1 publishes a 1.0.0 and b 1.0.0, c2 publishes b 1.1.0; HEAD releases a 1.0.1.
+    # Every core package sits at its last published version on b-v1.1.0's commit.
+    _manifest(core_repo, "1.0.0", "1.0.0")
+    _commit(core_repo, "c1")
+    for tag in ("a-v1.0.0", "b-v1.0.0"):
+        _git(core_repo, "tag", tag)
+    _manifest(core_repo, "1.0.0", "1.1.0")
+    _commit(core_repo, "c2")
+    _git(core_repo, "tag", "b-v1.1.0")
+    _manifest(core_repo, "1.0.1", "1.1.0")
+    _commit(core_repo, "c3")
+    candidate = gate.read_candidate(core_repo, _CORE)
+    assert [m.baseline_tag for m in candidate.members] == ["a-v1.0.0", "b-v1.1.0"]
+    assert gate.previous_release_tag(candidate, core_repo) == "b-v1.1.0"
+
+
+def test_previous_release_on_divergent_tags_fails_loudly(core_repo: Path):
+    # No baseline tag descends from all the others: the gate cannot name the previous
+    # released tree, so it fails rather than guess.
+    _manifest(core_repo, "1.0.0", "1.0.0")
+    _commit(core_repo, "c1")
+    _git(core_repo, "checkout", "-qb", "side")
+    _commit(core_repo, "side")
+    _git(core_repo, "tag", "a-v1.0.0")
+    _git(core_repo, "checkout", "-q", "-")
+    _commit(core_repo, "c2")
+    _git(core_repo, "tag", "b-v1.0.0")
+    _commit(core_repo, "c3")
+    candidate = gate.read_candidate(core_repo, _CORE)
+    with pytest.raises(SystemExit):
+        gate.previous_release_tag(candidate, core_repo)
 
 
 @pytest.mark.parametrize(
     ("bump", "accepted"),
-    [("major", True), ("minor", False), ("patch", False)],
+    [("major", True), ("minor", False), ("patch", False), ("none", False)],
 )
 def test_break_is_accepted_only_for_major(bump: str, accepted: bool):
     assert gate.break_is_accepted(bump) is accepted
@@ -339,7 +458,8 @@ def test_release_bump_set_flags_untagged_manifest_versions(tmp_path: Path):
     (repo / "f").write_text("x")
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "c")
-    _git(repo, "tag", "tai42-plug-a-v1.2.0")  # a is released; b's 2.0.0 is not tagged (being bumped)
+    _git(repo, "tag", "tai42-plug-a-v1.2.0")  # a is published; b's 2.0.0 is not tagged (being bumped)
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "c2")
     assert gate.release_bump_set(repo) == {"tai42-plug-b"}
 
 
@@ -620,10 +740,14 @@ def _one_consumer() -> list[gate.Consumer]:
     return [gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")]
 
 
+def _candidate(bump: str) -> gate.Candidate:
+    # One core package released by the tree at 12.0.1 (or 13.0.0 under a major) over pkg-v12.0.0.
+    version = "13.0.0" if bump == "major" else "12.0.1"
+    return gate.Candidate(members=(gate.CoreRelease("pkg", version, bump, "pkg-v12.0.0"),))
+
+
 def _report_kwargs(tmp_path: Path) -> dict:
     return {
-        "package": "pkg",
-        "version": "12.0.1",
         "repo_root": tmp_path,
         "core_dirs": ["core/kit"],
         "identity_package": "id-pkg",
@@ -631,11 +755,16 @@ def _report_kwargs(tmp_path: Path) -> dict:
     }
 
 
-def _reresolve_run_factory(dry_returncode: int, dry_stderr: str):
+def _reresolve_run_factory(dry_returncode: int, dry_stderr: str, calls: list | None = None):
     # Fake the worktree + dry-run seam of the previous-tag re-resolve: git worktree add/remove
-    # succeed, the dry-run install returns the configured verdict, so no real git or uv runs.
+    # succeed (recorded in ``calls``), the dry-run install returns the configured verdict, so no
+    # real git or uv runs.
+    if calls is None:
+        calls = []
+
     def _run(args, **kwargs):
         if args[:3] in (["git", "worktree", "add"], ["git", "worktree", "remove"]):
+            calls.append(args)
             return subprocess.CompletedProcess(args, 0, "", "")
         if args[:3] == ["uv", "pip", "install"]:
             return subprocess.CompletedProcess(args, dry_returncode, "", dry_stderr)
@@ -649,7 +778,7 @@ def test_report_unresolvable_major_bump_passes(tmp_path: Path, capsys):
     # break, the resolver's conclusion is quoted, and the gate passes (no raise, no
     # previous-release re-resolve).
     gate._report_unresolvable_consumers(
-        "gate: pkg 12.0.0 (major bump)", "major", _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
+        "gate", _candidate("major"), _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
     )
     out = capsys.readouterr().out
     assert "ACCEPTED as a major-bump break: some-consumer 0.44.0" in out
@@ -661,10 +790,9 @@ def test_report_unresolvable_major_bump_passes(tmp_path: Path, capsys):
 def test_report_unresolvable_non_major_preexisting_conflict_passes(tmp_path: Path, monkeypatch, capsys):
     # Conflict + patch bump + the previous released tag ALSO finds no solution: the
     # incompatibility predates the candidate, so a notice names it and the gate passes.
-    monkeypatch.setattr(gate.api_gate, "_previous_tag", lambda *a, **k: "pkg-v12.0.0")
     monkeypatch.setattr(gate.subprocess, "run", _reresolve_run_factory(1, _PREVIOUS_NO_SOLUTION_STDERR))
     gate._report_unresolvable_consumers(
-        "gate: pkg 12.0.1 (patch bump)", "patch", _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
+        "gate", _candidate("patch"), _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
     )
     out = capsys.readouterr().out
     assert "pre-existing incompatibility" in out
@@ -673,25 +801,33 @@ def test_report_unresolvable_non_major_preexisting_conflict_passes(tmp_path: Pat
     assert "not introduced by this candidate" in out
 
 
-def test_report_unresolvable_non_major_candidate_introduced_fails(tmp_path: Path, monkeypatch):
-    # Conflict + patch bump + the previous released tag RESOLVES: the candidate introduced
-    # the conflict, so it is a break not carried by a non-major bump — the gate fails.
-    monkeypatch.setattr(gate.api_gate, "_previous_tag", lambda *a, **k: "pkg-v12.0.0")
-    monkeypatch.setattr(gate.subprocess, "run", _reresolve_run_factory(0, ""))
+def test_report_unresolvable_non_major_candidate_introduced_fails(tmp_path: Path, monkeypatch, capsys):
+    # Conflict + patch bump + the previous released tree RESOLVES: the candidate introduced
+    # the conflict, so it is a break not carried by a non-major bump — the gate fails, naming
+    # the previous release it re-resolved against.
+    calls: list = []
+    monkeypatch.setattr(gate.subprocess, "run", _reresolve_run_factory(0, "", calls))
     with pytest.raises(SystemExit):
         gate._report_unresolvable_consumers(
-            "gate: pkg 12.0.1 (patch bump)", "patch", _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
+            "gate", _candidate("patch"), _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
         )
+    added = [args for args in calls if args[:3] == ["git", "worktree", "add"]]
+    assert len(added) == 1
+    assert added[0][-1] == "pkg-v12.0.0"
+    err = capsys.readouterr().err
+    assert "resolve against the previous release (pkg-v12.0.0)" in err
+    assert "not carried by a major bump" in err
+    assert "some-consumer 0.44.0" in err
+    assert "your requirements are unsatisfiable" in err
 
 
 def test_report_unresolvable_previous_resolve_other_error_fails(tmp_path: Path, monkeypatch, capsys):
     # Conflict + patch bump + the previous-tag re-resolve fails for a NON-conflict reason:
     # the conflict cannot be classified, so the gate fails loudly (never a silent pass).
-    monkeypatch.setattr(gate.api_gate, "_previous_tag", lambda *a, **k: "pkg-v12.0.0")
     monkeypatch.setattr(gate.subprocess, "run", _reresolve_run_factory(1, "error: failed to build wheel for kit"))
     with pytest.raises(SystemExit):
         gate._report_unresolvable_consumers(
-            "gate: pkg 12.0.1 (patch bump)", "patch", _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
+            "gate", _candidate("patch"), _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
         )
     err = capsys.readouterr().err
     assert "failed for a reason other than a dependency conflict" in err

@@ -1163,8 +1163,8 @@ jobs:
       CONSUMER_TAG_REGEX: ${{ vars.CONSUMER_BOOT_GATE_TAG_REGEX }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # Full history + tags: the gate reads the governing package's bump against
-        # its previous released tag, the way the API-diff gate does.
+        # Full history + tags: the gate reads each candidate core package's release
+        # against its previous released tag, the way the API-diff gate does.
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -1206,8 +1206,7 @@ jobs:
         run: |
           set -euo pipefail
           # shellcheck disable=SC2086  # WHEELS is a deliberate multi-flag string.
-          uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py \
-            --package tai42-skeleton --dir core/skeleton $WHEELS
+          uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py $WHEELS
 
   # Enumerate the first-party plugins to boot: each at its latest published PyPI
   # version that is NOT in this train's bump set (a plugin being released now boots
@@ -1287,8 +1286,7 @@ jobs:
           REQ: ${{ matrix.req }}
         run: |
           set -euo pipefail
-          uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py \
-            --package tai42-skeleton --dir core/skeleton --consumer-req "$REQ"
+          uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py --consumer-req "$REQ"
 
   ci-ok:
     needs: [reuse, changes, check, plugin-frontend, fleet, stable-resolution, first-party-npm-majors, e2e, ui-e2e, consumer-boot-gate, consumer-boot-gate-plan, consumer-boot-gate-first-party]

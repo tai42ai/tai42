@@ -35,7 +35,14 @@ from _consumer_boot_gate.boot_failure import (
     is_external_service_only,
     parse_boot_failure,
 )
-from _consumer_boot_gate.cli import _emit_matrix, _load_plugin_yaml, _resolve_version, main
+from _consumer_boot_gate.candidate import (
+    Candidate,
+    CoreRelease,
+    previous_release_tag,
+    read_candidate,
+    released_by_tree,
+)
+from _consumer_boot_gate.cli import _emit_matrix, _load_plugin_yaml, main
 from _consumer_boot_gate.consumers import (
     Consumer,
     _req_dist_name,
@@ -54,7 +61,7 @@ from _consumer_boot_gate.install import (
 )
 from _consumer_boot_gate.process import run_gate_step
 from _consumer_boot_gate.provides import Provides, read_provides
-from _consumer_boot_gate.versioning import break_is_accepted, governing_bump, read_project_version
+from _consumer_boot_gate.versioning import break_is_accepted
 
 __all__ = [
     "_BOOT_PLACEHOLDER_ENV",
@@ -62,7 +69,9 @@ __all__ = [
     "_IDENTITY_LIFECYCLE_MODULE",
     "_IDENTITY_PROVIDER_NAME",
     "BootFailure",
+    "Candidate",
     "Consumer",
+    "CoreRelease",
     "Infra",
     "Provides",
     "_ResolutionConflictError",
@@ -77,7 +86,6 @@ __all__ = [
     "_load_plugin_yaml",
     "_report_unresolvable_consumers",
     "_req_dist_name",
-    "_resolve_version",
     "_slot_env",
     "api_gate",
     "auth_providers",
@@ -88,14 +96,15 @@ __all__ = [
     "enumerate_first_party",
     "external_service_handlers",
     "first_party_plugin_names",
-    "governing_bump",
     "is_external_service_only",
     "latest_pypi_version",
     "main",
     "parse_boot_failure",
-    "read_project_version",
+    "previous_release_tag",
+    "read_candidate",
     "read_provides",
     "release_bump_set",
+    "released_by_tree",
     "run_gate_step",
     "subprocess",
     "wheel_name_version",
