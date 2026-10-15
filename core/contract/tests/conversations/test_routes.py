@@ -182,6 +182,21 @@ def test_route_exprs_carry_the_jq_expression_annotation(field: str):
     assert annotation["label"]
 
 
+def test_start_expr_catalogue_documents_the_route_key():
+    # The start_expr input catalogue documents ``route`` — the name of the conversation route the
+    # turn entered through — so a schema-driven UI offers it and a flow bound to several routes can
+    # tell them apart. It sits right after ``channel`` in the key order.
+    from tai42_contract.template import EXPRESSION_ANNOTATION_KEY
+
+    prop = ChannelConversationRouteCreate.model_json_schema()["properties"]["start_expr"]
+    keys = prop[EXPRESSION_ANNOTATION_KEY]["keys"]
+    names = [entry["name"] for entry in keys]
+    assert "route" in names
+    assert names[names.index("channel") + 1] == "route"
+    route_entry = next(entry for entry in keys if entry["name"] == "route")
+    assert route_entry["gloss"] == "the name of the conversation route the turn entered through"
+
+
 def test_route_expr_annotation_keeps_the_none_default_additive():
     # CRITICAL api-gate trap: the annotation must ride ``Annotated`` so the attribute default
     # stays the ``None`` literal — a ``Field(default=None, ...)`` redeclaration is flagged as a

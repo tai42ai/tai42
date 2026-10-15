@@ -540,6 +540,32 @@ async def test_tool_target_start_expr_our_identity_and_channel_are_null_on_the_a
     assert tools.calls[0]["arguments"] == {"oid": None, "ch": None}
 
 
+async def test_tool_target_start_expr_reads_the_route_name(env, monkeypatch):
+    # The name of the route the turn entered through reaches the tool through start_expr, so a flow
+    # bound to several routes can tell them apart.
+    route = _tool_channel_route(route_name="line-a", start_expr="{r: .route}")
+    _wire(monkeypatch, FakeManager(route), FakeChannel())
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {"r": "line-a"}
+
+
+async def test_tool_target_start_expr_reads_the_route_name_on_the_api_door(env, monkeypatch):
+    # On the api door the route name is honest too — never null — so the same start_expr works there.
+    route = _tool_api_route(route_name="chat-a", start_expr="{r: .route}")
+    _wire(monkeypatch, FakeManager(route))
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+    monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
+
+    await turn_module.submit_api_message("chat-a", "user-7", "hi", "alice", wait_seconds=5, client_connected=_connected)
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {"r": "chat-a"}
+
+
 async def test_tool_target_over_the_api_door_silent_delivers_a_signed_silent_callback(env, monkeypatch):
     # A silent api-door tool turn keeps its 202 promise through a signed callback carrying
     # the explicit silent marker and NO answer field.

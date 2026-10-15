@@ -851,6 +851,7 @@ _BASELINE_CHANNEL_PAYLOAD = {
     "sender": "+15550002222",
     "our_identity": "+15550001111",
     "channel": "twilio",
+    "route": "tool-line",
     "thread_id": "bridge:tool-line:+15550002222",
 }
 
