@@ -19,7 +19,9 @@ across all chunks. A ``Release-As: X.Y.Z`` footer overrides the computation and
 forces every touched package to ``X.Y.Z``. The pre-major rules of
 :data:`_BUMP_MINOR_PRE_MAJOR` / :data:`_BUMP_PATCH_FOR_MINOR_PRE_MAJOR`, read from
 the release-please config, apply while a package is below ``1.0.0``. A file under a
-package's path attributes the pull request to that package.
+package's path attributes the pull request to that package unless every such file
+lies under one of the package's ``exclude-paths`` (a directory that never enters the
+package's published artifact, such as its tests).
 
 For each first-party package the pull request touches, this check computes the
 version release-please would publish and runs the release API-diff gate
@@ -200,9 +202,23 @@ def load_packages(config_path: Path) -> dict[str, dict[str, object]]:
     return resolved
 
 
-def touched_dirs(changed_files: list[str], package_dirs: list[str]) -> set[str]:
-    """Package directories a change touches, each file attributed to its longest matching dir."""
-    touched: set[str] = set()
+def exclude_paths(entry: dict[str, object]) -> list[str]:
+    """A package's ``exclude-paths``, normalised as release-please does: no leading or trailing ``/``."""
+    paths = entry.get("exclude-paths", [])
+    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+        raise SystemExit(f"::error::exclude-paths must be a list of paths, got {paths!r}")
+    return [path.strip("/") for path in paths]
+
+
+def touched_dirs(
+    changed_files: list[str], package_dirs: list[str], excluded: dict[str, list[str]] | None = None
+) -> set[str]:
+    """Package directories a change touches, each file attributed to its longest matching dir.
+
+    A package none of whose attributed files lies outside its ``excluded`` paths is not touched:
+    release-please drops the commit for that package.
+    """
+    attributed: dict[str, list[str]] = {}
     for changed in changed_files:
         best: str | None = None
         for directory in package_dirs:
@@ -211,8 +227,13 @@ def touched_dirs(changed_files: list[str], package_dirs: list[str]) -> set[str]:
             ):
                 best = directory
         if best is not None:
-            touched.add(best)
-    return touched
+            attributed.setdefault(best, []).append(changed)
+    excluded = excluded or {}
+    return {
+        directory
+        for directory, files in attributed.items()
+        if not all(any(changed.startswith(f"{path}/") for path in excluded.get(directory, [])) for changed in files)
+    }
 
 
 def project_version(
@@ -304,7 +325,9 @@ def check(
     """
     bump = projected_bump(title, body)
     forced = release_as(title, body)
-    touched = touched_dirs(files, list(packages))
+    touched = touched_dirs(
+        files, list(packages), {directory: exclude_paths(entry) for directory, entry in packages.items()}
+    )
     if not touched:
         print("release-label-check: no first-party package touched — nothing to gate.")
         return 0

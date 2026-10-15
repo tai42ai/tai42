@@ -68,11 +68,12 @@ def test_configured_temperature_passes_through_unchanged():
 
 def test_checkpoint_retention_defaults():
     # Seven days for a thread its owner may still continue, one day after its owner marks it finished;
-    # large checkpoint values are compressed above 64 KiB.
+    # large checkpoint values are compressed above 64 KiB, and sub-values above 64 KiB are stored once per thread.
     provider = llm_settings_mod.LLMProviderSettings()
     assert provider.checkpoint_retention_waiting_minutes == 10080
     assert provider.checkpoint_retention_finished_minutes == 1440
     assert provider.checkpoint_inline_compress_bytes == 65536
+    assert provider.checkpoint_shared_value_bytes == 65536
 
 
 def test_checkpoint_inline_compress_bytes_none_turns_compression_off():
@@ -80,6 +81,27 @@ def test_checkpoint_inline_compress_bytes_none_turns_compression_off():
         llm_settings_mod.LLMProviderSettings(checkpoint_inline_compress_bytes=None).checkpoint_inline_compress_bytes
         is None
     )
+
+
+def test_checkpoint_shared_values_is_unset_by_default():
+    assert llm_settings_mod.LLMProviderSettings().checkpoint_shared_values is None
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("true", True), ("false", False), ("null", None), ("", None)])
+def test_checkpoint_shared_values_from_the_environment(monkeypatch, raw, expected):
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUES", raw)
+    assert llm_settings_mod.LLMProviderSettings().checkpoint_shared_values is expected
+
+
+def test_checkpoint_shared_value_bytes_null_from_the_environment_is_refused(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES", "null")
+    with pytest.raises(ValidationError, match="checkpoint_shared_value_bytes"):
+        llm_settings_mod.LLMProviderSettings()
+
+
+def test_checkpoint_shared_value_bytes_none_is_refused():
+    with pytest.raises(ValidationError, match="checkpoint_shared_value_bytes"):
+        llm_settings_mod.LLMProviderSettings(checkpoint_shared_value_bytes=None)  # pyright: ignore[reportArgumentType]
 
 
 def test_conn_strings_default_to_none():
@@ -96,6 +118,7 @@ def test_conn_strings_default_to_none():
         "checkpoint_retention_waiting_minutes",
         "checkpoint_retention_finished_minutes",
         "checkpoint_inline_compress_bytes",
+        "checkpoint_shared_value_bytes",
     ],
 )
 @pytest.mark.parametrize("bad", [0, -1, -60])

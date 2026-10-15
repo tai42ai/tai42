@@ -64,7 +64,9 @@ variables, and the `tai-plugin.yml` descriptor filename.
 Conventional Commits, scoped by package directory. release-please runs in
 manifest mode: one merged commit train, one release PR per changed package, tags
 `tai42-<name>-v<version>`. `fix:` → patch, `feat:` → minor, `feat!:` or a
-`BREAKING CHANGE:` footer → major; other types do not release. Non-conforming
+`BREAKING CHANGE:` footer → major; other types do not release. A package's
+`tests/` and `examples/` attribute nothing: a change under them alone releases
+nothing for that package. Non-conforming
 commits and PR titles fail the `commitlint` check, as does a `<` that opens
 markup (followed by a letter, `/`, `!` or `?`) in a commit header, a
 `BREAKING CHANGE:` footer or the PR title: the release notes are parsed as

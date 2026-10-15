@@ -63,6 +63,63 @@ def test_build_park_identity_refuses_non_durable_checkpoint(fake_park_redis: Any
     assert park is None
 
 
+@pytest.fixture
+def durable_store() -> Any:
+    from tai42_kit.llm.checkpoint import (
+        CheckpointProvider,
+        CheckpointProviderFacts,
+        providers,
+        register_checkpoint_provider,
+    )
+
+    class DurableStore(CheckpointProvider):
+        name = "plugin-durable-store"
+        facts = CheckpointProviderFacts(durable=True, retention="sweep", channel_storage="per_version")
+
+        async def open(self, conn_string: str | None) -> Any:
+            raise NotImplementedError
+
+        def saver(self, resource: Any) -> Any:
+            raise NotImplementedError
+
+        def value_encoding(self, saver: Any, compress_threshold: int | None) -> Any:
+            raise NotImplementedError
+
+        async def recorded_generation(self, resource: Any) -> int | None:
+            raise NotImplementedError
+
+        async def record_generation(self, resource: Any, generation: int) -> None:
+            raise NotImplementedError
+
+        async def holds_checkpoints(self, resource: Any) -> bool:
+            raise NotImplementedError
+
+    held = dict(providers._PROVIDERS._generation.committed())
+    instances = dict(providers._instances)
+    register_checkpoint_provider(DurableStore)
+    yield DurableStore.name
+    committed = providers._PROVIDERS._generation.committed()
+    committed.clear()
+    committed.update(held)
+    providers._instances.clear()
+    providers._instances.update(instances)
+
+
+def test_a_durable_store_registered_by_a_plugin_is_park_capable(fake_park_redis: Any, durable_store: str) -> None:
+    park = build_park_identity(
+        agent_name="langchain_deep_agent",
+        config={"configurable": {"thread_id": "t1"}},
+        checkpoint_provider=durable_store,
+        has_live_tools=False,
+        rebuild_kwargs={},
+        recursion_limit=50,
+        bind=True,
+    )
+    assert park is not None
+    assert park.rebuild_kwargs["checkpoint_provider"] == durable_store
+    assert park.retention_bound is not None
+
+
 def test_build_park_identity_refuses_live_tools(fake_park_redis: Any) -> None:
     park = build_park_identity(
         agent_name="langchain_deep_agent",

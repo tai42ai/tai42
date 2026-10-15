@@ -146,3 +146,7 @@ def install_fake_named_pool(monkeypatch) -> tuple[dict[str, Any], list[bool]]:
     monkeypatch.setattr(pg.AsyncConnection, "connect", _fake_connect)
     monkeypatch.setattr(pg, "_CancelSurfacingPool", _FakePool)
     return captured, closed
+
+
+# The probe checkpoint stores register at import, so every registry-wide parametrisation sees them.
+from . import probe_store  # noqa: E402,F401

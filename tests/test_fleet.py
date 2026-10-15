@@ -306,6 +306,21 @@ def test_manifest_sanity():
         )
 
 
+# A directory that never enters a member's published artifact never attributes a release to it.
+_UNPUBLISHED_SUBDIRS = ("tests", "examples")
+
+
+@pytest.mark.parametrize("member_dir", MEMBER_DIRS, ids=MEMBER_PATHS)
+def test_a_members_unpublished_trees_attribute_no_release(member_dir: Path):
+    path = member_dir.relative_to(ROOT).as_posix()
+    excluded = _root_config()["packages"][path].get("exclude-paths", [])
+    for sub in _UNPUBLISHED_SUBDIRS:
+        if (member_dir / sub).is_dir():
+            assert f"{path}/{sub}" in excluded, f"{path}: release-please exclude-paths lacks {path}/{sub}"
+    for excluded_path in excluded:
+        assert excluded_path.startswith(f"{path}/"), f"{path}: exclude-path {excluded_path} is outside the member"
+
+
 # ---------------------------------------------------- 6. descriptor-only plugins
 
 

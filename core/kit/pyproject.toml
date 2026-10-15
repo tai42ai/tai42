@@ -80,6 +80,9 @@ llm = [
     # Imported directly by llm/checkpoint/codec.py: the thread delete counts what a
     # thread still holds through the Redis saver's own search indexes.
     "redisvl>=0.15.0,<1",
+    # Imported directly by llm/checkpoint/redis_values.py: a checkpoint is encoded once,
+    # its channels' encodings assembled as JSON fragments.
+    "orjson>=3.11,<4",
 ]
 
 # jq expression compilation (utils/data/jq_util.py) — a C extension, opt-in;

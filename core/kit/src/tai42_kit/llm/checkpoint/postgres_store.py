@@ -2,7 +2,8 @@
 
 The stale-thread query reads the Postgres saver's own ``checkpoints`` table (``checkpoint JSONB``
 carrying the checkpoint's ``ts``) joined with the declared waiting retentions; the finished-thread
-ledger, the declared retentions and the store-format marker are kit tables beside it.
+ledger, the declared retentions, the store-format marker and the shared checkpoint values are kit
+tables beside it.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
     from datetime import datetime
 
     from psycopg_pool import AsyncConnectionPool
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 FINISHED_TABLE: Final = "tai42_checkpoint_finished"
 RETENTION_TABLE: Final = "tai42_checkpoint_retention"
 FORMAT_TABLE: Final = "tai42_checkpoint_format"
+VALUES_TABLE: Final = "tai42_checkpoint_values"
 
 # The transaction-scoped advisory lock every first build of a kit table takes before its DDL:
 # concurrent ``CREATE TABLE IF NOT EXISTS`` statements race in Postgres (a unique violation on the
@@ -63,6 +65,68 @@ async def create_ledger_tables(pool: AsyncConnectionPool) -> None:
             f"CREATE TABLE IF NOT EXISTS {RETENTION_TABLE} "
             "(thread_id TEXT PRIMARY KEY, waiting_minutes INTEGER NOT NULL)"
         )
+
+
+async def create_value_table(pool: AsyncConnectionPool) -> None:
+    """Create the table of shared checkpoint values: one row per thread and value digest."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(_BUILD_LOCK_SQL, (VALUES_TABLE,))
+        await conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {VALUES_TABLE} (thread_id TEXT NOT NULL, digest BYTEA NOT NULL, "
+            "type TEXT NOT NULL, blob BYTEA NOT NULL, PRIMARY KEY (thread_id, digest))"
+        )
+
+
+async def held_values(pool: AsyncConnectionPool, thread_id: str, digests: Collection[str]) -> set[str]:
+    """The hex digests among ``digests`` the value table holds for ``thread_id``."""
+    if not digests:
+        return set()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            f"SELECT digest FROM {VALUES_TABLE} WHERE thread_id = %s AND digest = ANY(%s)",  # noqa: S608 -- constant table name
+            (thread_id, [bytes.fromhex(digest) for digest in digests]),
+        )
+        rows = await cur.fetchall()
+    return {bytes(_cell(row, 0)).hex() for row in rows}
+
+
+async def insert_values(pool: AsyncConnectionPool, thread_id: str, rows: Sequence[tuple[str, str, bytes]]) -> None:
+    """Insert ``(hex digest, type, blob)`` rows for ``thread_id``; a held digest keeps its row."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.executemany(
+            f"INSERT INTO {VALUES_TABLE} (thread_id, digest, type, blob) VALUES (%s, %s, %s, %s) "  # noqa: S608 -- constant table name
+            "ON CONFLICT (thread_id, digest) DO NOTHING",
+            [(thread_id, bytes.fromhex(digest), type_, blob) for digest, type_, blob in rows],
+        )
+
+
+async def read_values(
+    pool: AsyncConnectionPool, thread_id: str, digests: Collection[str]
+) -> list[tuple[str, str, bytes]]:
+    """The ``(hex digest, type, blob)`` rows among ``digests`` the value table holds for ``thread_id``."""
+    if not digests:
+        return []
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            f"SELECT digest, type, blob FROM {VALUES_TABLE} WHERE thread_id = %s AND digest = ANY(%s)",  # noqa: S608 -- constant table name
+            (thread_id, [bytes.fromhex(digest) for digest in digests]),
+        )
+        rows = await cur.fetchall()
+    return [(bytes(_cell(row, 0)).hex(), str(_cell(row, 1)), bytes(_cell(row, 2))) for row in rows]
+
+
+async def thread_values(pool: AsyncConnectionPool, thread_id: str) -> set[str]:
+    """Every hex digest the value table holds for ``thread_id``."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(f"SELECT digest FROM {VALUES_TABLE} WHERE thread_id = %s", (thread_id,))  # noqa: S608 -- constant table name
+        rows = await cur.fetchall()
+    return {bytes(_cell(row, 0)).hex() for row in rows}
+
+
+async def delete_values(pool: AsyncConnectionPool, thread_id: str) -> None:
+    """Delete every value row of ``thread_id``."""
+    async with pool.connection() as conn:
+        await conn.execute(f"DELETE FROM {VALUES_TABLE} WHERE thread_id = %s", (thread_id,))  # noqa: S608 -- constant table name
 
 
 async def start_threads(pool: AsyncConnectionPool, thread_ids: Sequence[str], waiting_minutes: int | None) -> None:
@@ -118,7 +182,7 @@ async def declared_waiting(pool: AsyncConnectionPool, thread_ids: Sequence[str])
             (list(thread_ids),),
         )
         rows = await cur.fetchall()
-    return {_first(row): int(_second(row)) for row in rows}
+    return {_first(row): int(_cell(row, 1)) for row in rows}
 
 
 async def read_format_generation(pool: AsyncConnectionPool) -> int | None:
@@ -145,10 +209,10 @@ async def write_format_generation(pool: AsyncConnectionPool, generation: int) ->
         )
 
 
-def _second(row: object) -> Any:
+def _cell(row: object, index: int) -> Any:
     if isinstance(row, dict):
-        return list(row.values())[1]
-    return row[1]  # type: ignore[index]
+        return list(row.values())[index]
+    return row[index]  # type: ignore[index]
 
 
 def _first(row: object) -> str:

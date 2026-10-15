@@ -21,8 +21,21 @@ from prometheus_client import REGISTRY
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import CrontabCadence
 from tai42_contract.manifest import ApiToolsConfig
-from tai42_kit.llm.checkpoint import CHECKPOINT_PROVIDERS, ThreadRetention, liveness, register_live_thread_filter
+from tai42_kit.llm.checkpoint import (
+    CHECKPOINT_STORE_FORMAT_GENERATION,
+    CheckpointProvider,
+    CheckpointProviderFacts,
+    CheckpointResource,
+    MsgpackValueEncoding,
+    ThreadRetention,
+    checkpoint_providers,
+    liveness,
+    providers,
+    register_checkpoint_provider,
+    register_live_thread_filter,
+)
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
+from tai42_kit.llm.checkpoint.stores.memory import MemoryCheckpointValueStore, MemoryFinishedThreadLedger
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.operations import OperationRegistry, operation_metadata_of
@@ -259,7 +272,7 @@ def _install_store(monkeypatch: pytest.MonkeyPatch, store_env: Any, provider: st
 
 
 async def test_a_swept_store_lists_its_stale_threads_through_its_ledger(monkeypatch, store_env) -> None:
-    provider = next(name for name, facts in CHECKPOINT_PROVIDERS.items() if facts.retention == "sweep")
+    provider = next(name for name, facts in checkpoint_providers().items() if facts.retention == "sweep")
     store = _Store({"stale": 1, "parked": 1, "fresh": 1})
     ledger = _Ledger(stale=["parked", "stale"])
     _install_store(monkeypatch, store_env, provider, store, ledger)
@@ -371,3 +384,65 @@ async def test_schedulable_via_create_schedule(monkeypatch: pytest.MonkeyPatch) 
     assert result["scheduled"] == "sweep_checkpoints_schedule_task"
     assert result["arguments"]["backend_schedule"] == cadence.model_dump(mode="json")
     assert result["arguments"]["backend_schedule_name"].startswith("sweep_checkpoints_")
+
+
+class _DurableSweptStore(CheckpointProvider):
+    """A durable store registered by a plugin, its waiting horizon swept through its own ledger."""
+
+    name = "durable-swept-store"
+    facts = CheckpointProviderFacts(durable=True, retention="sweep", channel_storage="per_version")
+
+    async def open(self, conn_string: str | None) -> Any:
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        async def close() -> None:
+            return None
+
+        resource = CheckpointResource(
+            self.name, InMemorySaver(), MemoryFinishedThreadLedger(), MemoryCheckpointValueStore()
+        )
+        return resource, close
+
+    def saver(self, resource: Any) -> Any:
+        return resource.handle
+
+    def value_encoding(self, saver: Any, compress_threshold: int | None) -> Any:
+        return MsgpackValueEncoding(saver.serde, compress_threshold)
+
+    async def recorded_generation(self, resource: Any) -> int | None:
+        # A store that starts empty with its process holds nothing written in an older format.
+        return CHECKPOINT_STORE_FORMAT_GENERATION
+
+    async def record_generation(self, resource: Any, generation: int) -> None:
+        return None
+
+    async def holds_checkpoints(self, resource: Any) -> bool:
+        return False
+
+
+@pytest.fixture
+def durable_swept_store() -> Any:
+    held = dict(providers._PROVIDERS._generation.committed())
+    instances = dict(providers._instances)
+    register_checkpoint_provider(_DurableSweptStore)
+    yield _DurableSweptStore.name
+    committed = providers._PROVIDERS._generation.committed()
+    committed.clear()
+    committed.update(held)
+    providers._instances.clear()
+    providers._instances.update(instances)
+
+
+async def test_a_registered_store_is_swept_by_its_facts_and_its_ledger(store_env, durable_swept_store) -> None:
+    registry = store_env(durable_swept_store)
+    saver = await registry.get_checkpointer(durable_swept_store, None)
+    now = datetime.now(UTC)
+    await _put(saver, "stale", ts=now - timedelta(hours=3))
+    await _put(saver, "fresh", ts=now)
+
+    result = await checkpoints_ops.sweep_checkpoints()
+
+    assert result["provider"] == durable_swept_store
+    assert result["skipped"] is None
+    assert result["waiting_swept"] == ["stale"]
+    assert await _threads(saver) == {"fresh"}

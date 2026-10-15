@@ -170,7 +170,7 @@ class LLMProviderSettings(TaiBaseSettings):
     """Selects the LLM, embedding, checkpoint, and store provider implementations and their connection strings."""
 
     # ``null`` sets an optional value to ``None`` (an empty value means "unset" and keeps the default),
-    # so a deployment can turn the inline checkpoint compression off.
+    # so a deployment can turn the inline checkpoint compression off or leave the shared values to the store.
     model_config = SettingsConfigDict(env_prefix="LLM_PROVIDER_", env_parse_none_str="null")
     env_prefix_owned: ClassVar[bool] = True
 
@@ -178,9 +178,8 @@ class LLMProviderSettings(TaiBaseSettings):
     embedding: str = "openai"
     classifier: str = "typesafe"
     checkpoint: str = "redis"
-    # None: no explicit conn string. The resource factory falls back per provider
-    # to the shared connection namespace (redis -> the base Redis URL, postgres ->
-    # the base Postgres DSN); a double-None raises a named error there.
+    # None: no explicit conn string. The checkpoint store's registration falls back to
+    # its default connection (a shared connection namespace) or raises naming the setting.
     checkpoint_conn_string: str | None = None
     # Retention of a checkpoint thread, in minutes. "Waiting": a thread its owner may still continue
     # (a parked run, an open conversation, any thread not marked finished); it is kept this long after
@@ -191,6 +190,23 @@ class LLMProviderSettings(TaiBaseSettings):
     # A checkpoint value whose encoding exceeds this many bytes is stored compressed; ``None``
     # (``LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES=null``) turns the compression off.
     checkpoint_inline_compress_bytes: int | None = Field(default=65536, gt=0)
+    # Whether a checkpoint sub-value above checkpoint_shared_value_bytes is stored once per thread and
+    # referenced. Unset (or null): on for a store that copies channel values into every checkpoint, off
+    # for one that stores a channel once per version. true / false: the deployment's choice for every
+    # store it opens.
+    checkpoint_shared_values: bool | None = Field(
+        default=None,
+        description="Store large checkpoint sub-values once per thread: unset, on for a store that copies "
+        "channel values into every checkpoint and off for one that stores a channel once per version; "
+        "`true`/`false` set it for every store this deployment opens.",
+    )
+    # Where sharing is on, a sub-value whose encoding exceeds this many bytes is the unit stored once.
+    checkpoint_shared_value_bytes: int = Field(
+        default=65536,
+        gt=0,
+        description="Where large values are stored once, a sub-value whose encoding is larger than this many "
+        "bytes is stored once per thread and referenced.",
+    )
     store: str = "redis"
     store_conn_string: str | None = None
 

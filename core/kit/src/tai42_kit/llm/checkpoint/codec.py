@@ -1,4 +1,4 @@
-"""Checkpoint codecs: the faithful Redis JSON codec and the compressed Postgres blob codec.
+"""The Redis store's faithful JSON codec.
 
 The Redis checkpoint saver stores checkpoints as JSON. JSON has no encoding for most Python values a
 graph state holds (a ``Decimal``, a ``timedelta``, an int-keyed dict, a tuple, a pydantic model, an
@@ -13,15 +13,19 @@ A ``datetime`` or ``time`` is stored as its fields: the wall-clock text, its ``t
 the same offset and name) or an IANA zone (``zoneinfo.ZoneInfo``, by its key); any other ``tzinfo``, and a
 zone read from a file (which has no key), is refused at write.
 
-One envelope shape carries every kind::
+Every kind is carried by the kit envelope (:mod:`tai42_kit.llm.checkpoint.envelope`).
 
-    {"lc": 2, "type": "constructor", "id": KIT_ENVELOPE_ID, "args": [kind, payload]}
+Where large values are stored once per thread, a sub-value whose encoding is above
+``LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES`` is stored in the saver's value store and the checkpoint
+holds a ``ref`` envelope in its place (see :mod:`tai42_kit.llm.checkpoint.chunking`); decoding a ``ref``
+envelope announces it to the read in progress. A channel value or pending write whose encoding is above
+``LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES`` is stored inline as an ``inflate`` envelope: its JSON
+text, zlib compressed and base64 encoded.
 
-A large value is stored as an ``inflate`` envelope: the JSON text of the rewritten value, zlib
-compressed and base64 encoded, so the compressed value lives and expires with its checkpoint.
-
-The Postgres saver stores channel values as msgpack blobs; :class:`BlobCompressCodec` compresses a
-blob above the threshold under its own type tag.
+The saver encodes a checkpoint in one pass (:mod:`tai42_kit.llm.checkpoint.redis_values`): one faithful
+walk per channel whose version changed (an unchanged channel reuses the parent checkpoint's stored form),
+every node's encoding measured once for both thresholds and the digest, and the checkpoint text
+assembled from the channels' encodings.
 """
 
 from __future__ import annotations
@@ -34,11 +38,10 @@ import importlib
 import math
 import uuid
 import zlib
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
-from contextvars import ContextVar, Token
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 from zoneinfo import ZoneInfo
 
 import pydantic
@@ -54,12 +57,12 @@ from redisvl.query import CountQuery
 from redisvl.query.filter import Tag
 
 from tai42_kit.llm.checkpoint.checkpoint import CheckpointDeleteError, CheckpointSerializationError
+from tai42_kit.llm.checkpoint.chunking import ValueChunker
+from tai42_kit.llm.checkpoint.envelope import envelope, is_kit_envelope, reference_from_payload
+from tai42_kit.llm.checkpoint.reads import record_failure, record_reference
 
 if TYPE_CHECKING:
-    from langchain_core.runnables import RunnableConfig
-    from langgraph.checkpoint.base import CheckpointMetadata, CheckpointTuple
-
-KIT_ENVELOPE_ID: Final[tuple[str, ...]] = ("tai42_kit", "llm", "checkpoint", "codec", "value")
+    from langgraph.checkpoint.base import CheckpointMetadata
 
 CODEC_KINDS: Final[frozenset[str]] = frozenset(
     {
@@ -81,28 +84,9 @@ CODEC_KINDS: Final[frozenset[str]] = frozenset(
         "exception",
         "inflate",
         "zoneinfo",
+        "ref",
     }
 )
-
-# The type tag of a compressed Postgres blob.
-COMPRESSED_BLOB_TYPE: Final = "msgpack+zlib"
-
-_ZLIB_LEVEL: Final = 1
-
-# The decode failures of the checkpoint read in progress. The Redis saver catches every exception
-# raised while it revives a checkpoint document and returns the raw value, so the kit records each
-# failure here and the saver's read method raises it once the read finishes.
-_decode_failures: ContextVar[list[CheckpointSerializationError] | None] = ContextVar(
-    "tai42_checkpoint_decode_failures", default=None
-)
-
-
-def _envelope(kind: str, payload: Any) -> dict[str, Any]:
-    return {"lc": 2, "type": "constructor", "id": list(KIT_ENVELOPE_ID), "args": [kind, payload]}
-
-
-def _is_kit_envelope(value: dict[str, Any]) -> bool:
-    return value.get("lc") == 2 and value.get("type") == "constructor" and value.get("id") == list(KIT_ENVELOPE_ID)
 
 
 # --------------------------------------------------------------------------- #
@@ -232,7 +216,7 @@ def _walk_items(items: Any, path: str) -> list[Any]:
 def _walk_dict(value: dict[Any, Any], path: str) -> Any:
     if all(type(key) is str for key in value):
         return {key: _walk(item, f"{path}.{key}") for key, item in value.items()}
-    return _envelope(
+    return envelope(
         "int_key_dict",
         [[_walk(key, f"{path}<key>"), _walk(item, f"{path}[{key!r}]")] for key, item in value.items()],
     )
@@ -257,7 +241,7 @@ def _walk_langchain(value: Serializable, path: str) -> Any:
 
 
 def _walk_timedelta(value: timedelta) -> dict[str, Any]:
-    return _envelope("timedelta", [value.days, value.seconds, value.microseconds])
+    return envelope("timedelta", [value.days, value.seconds, value.microseconds])
 
 
 def _walk_tzinfo(tz: tzinfo, owner: Any, path: str) -> dict[str, Any]:
@@ -268,11 +252,11 @@ def _walk_tzinfo(tz: tzinfo, owner: Any, path: str) -> dict[str, Any]:
             raise _refuse(owner, path, f"its fixed-offset tzinfo of type {type(tz).__qualname__} answers no offset")
         default_name = timezone(offset).tzname(None)
         name = tz.tzname(None)
-        return _envelope("timezone", [_walk_timedelta(offset), None if name == default_name else name])
+        return envelope("timezone", [_walk_timedelta(offset), None if name == default_name else name])
     if type(tz) is ZoneInfo:
         if tz.key is None:
             raise _refuse(owner, path, "its zone was read from a file and carries no key to read it back by")
-        return _envelope("zoneinfo", tz.key)
+        return envelope("zoneinfo", tz.key)
     raise _refuse(
         owner,
         path,
@@ -283,7 +267,7 @@ def _walk_tzinfo(tz: tzinfo, owner: Any, path: str) -> dict[str, Any]:
 
 def _walk_wall_clock(kind: str, value: datetime | time, path: str) -> dict[str, Any]:
     tz = None if value.tzinfo is None else _walk_tzinfo(value.tzinfo, value, path)
-    return _envelope(kind, [value.replace(tzinfo=None).isoformat(), tz, value.fold])
+    return envelope(kind, [value.replace(tzinfo=None).isoformat(), tz, value.fold])
 
 
 def _walk_scalar(value: Any, path: str) -> Any:
@@ -291,7 +275,7 @@ def _walk_scalar(value: Any, path: str) -> Any:
     if isinstance(value, datetime):
         return _walk_wall_clock("datetime", value, path)
     if isinstance(value, date):
-        return _envelope("date", value.isoformat())
+        return envelope("date", value.isoformat())
     if isinstance(value, time):
         return _walk_wall_clock("time", value, path)
     if isinstance(value, timedelta):
@@ -299,9 +283,9 @@ def _walk_scalar(value: Any, path: str) -> Any:
     if isinstance(value, (timezone, TzInfo)) or type(value) is ZoneInfo:
         return _walk_tzinfo(value, value, path)
     if isinstance(value, Decimal):
-        return _envelope("decimal", str(value))
+        return envelope("decimal", str(value))
     if isinstance(value, uuid.UUID):
-        return _envelope("uuid", str(value))
+        return envelope("uuid", str(value))
     return None
 
 
@@ -312,9 +296,9 @@ def _walk(value: Any, path: str) -> Any:  # noqa: C901, PLR0912 -- one ordered d
     if kind is float:
         return _finite(value, path)
     if isinstance(value, BaseException):
-        return _envelope("exception", exception_record(value))
+        return envelope("exception", exception_record(value))
     if isinstance(value, enum.Enum):
-        return _envelope("enum", [*_class_ref(kind, path), _walk(value.value, f"{path}.value")])
+        return envelope("enum", [*_class_ref(kind, path), _walk(value.value, f"{path}.value")])
     if isinstance(value, Interrupt):
         return Interrupt(value=_walk(value.value, f"{path}.value"), id=value.id, response_schema=value.response_schema)
     if isinstance(value, Send):
@@ -325,24 +309,24 @@ def _walk(value: Any, path: str) -> Any:  # noqa: C901, PLR0912 -- one ordered d
         return _walk_langchain(value, path)
     if isinstance(value, pydantic.BaseModel):
         dumped = value.model_dump(by_alias=True, round_trip=True)
-        return _envelope("model", [*_class_ref(kind, path), _walk(dumped, path)])
+        return envelope("model", [*_class_ref(kind, path), _walk(dumped, path)])
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         fields = {
             field.name: _walk(getattr(value, field.name), f"{path}.{field.name}") for field in dataclasses.fields(value)
         }
-        return _envelope("dataclass", [*_class_ref(kind, path), fields])
+        return envelope("dataclass", [*_class_ref(kind, path), fields])
     scalar = _walk_scalar(value, path)
     if scalar is not None:
         return scalar
     if kind is tuple:
-        return _envelope("tuple", _walk_items(value, path))
+        return envelope("tuple", _walk_items(value, path))
     if isinstance(value, frozenset):
-        return _envelope("frozenset", _walk_items(value, path))
+        return envelope("frozenset", _walk_items(value, path))
     if isinstance(value, set):
-        return _envelope("set", _walk_items(value, path))
+        return envelope("set", _walk_items(value, path))
     if isinstance(value, (bytes, bytearray)):
         name = "bytearray" if isinstance(value, bytearray) else "bytes"
-        return _envelope("bytes", [name, base64.b64encode(bytes(value)).decode("ascii")])
+        return envelope("bytes", [name, base64.b64encode(bytes(value)).decode("ascii")])
     if isinstance(value, dict):
         return _walk_dict(value, path)
     if isinstance(value, list):
@@ -362,84 +346,32 @@ def _is_checkpoint(obj: Any) -> bool:
 
 
 class RedisFaithfulCodec:
-    """The write side of the faithful Redis codec, with the inline compressed envelope.
+    """The Redis saver serializer's write side for a value the kit saver did not encode first.
 
-    ``encode`` receives a whole checkpoint (the saver's ``_dump_checkpoint``) or one pending-write
-    value (``aput_writes``), never checkpoint metadata.
+    ``encode`` receives a whole checkpoint or one pending-write value, never checkpoint metadata. It
+    shares no value (it has no thread and no store): a value above the threshold is compressed inline.
     """
 
     def __init__(self, threshold: int | None) -> None:
         """``threshold``: the encoded size in bytes above which a value is compressed; ``None`` never compresses."""
-        self._threshold = threshold
+        from tai42_kit.llm.checkpoint.redis_values import RedisCheckpointEncoder, RedisJsonValueEncoding
 
-    def _compress_level(self, inner: FaithfulRedisSerializer, walked: Any) -> Any:
-        if self._threshold is None:
-            return walked
-        type_, json_bytes = inner.dumps_typed(walked)
-        if type_ != "json" or len(json_bytes) <= self._threshold:
-            return walked
-        text = base64.b64encode(zlib.compress(json_bytes, _ZLIB_LEVEL)).decode("ascii")
-        return _envelope("inflate", ["json", text])
+        self._encoder = RedisCheckpointEncoder(RedisJsonValueEncoding(FaithfulRedisSerializer(), threshold))
 
     def dumps_typed(self, inner: FaithfulRedisSerializer, obj: Any) -> tuple[str, bytes]:
-        """Rewrite ``obj`` into JSON-faithful form and encode it with the Redis serializer."""
-        if isinstance(obj, (bytes, bytearray)):
-            # A top-level write of bytes is stored by the saver's own bytes types.
-            return inner.dumps_typed(obj)
+        """Rewrite ``obj`` into JSON-faithful form and encode it once."""
+        chunker = ValueChunker(self._encoder.encoding, None)
         if _is_checkpoint(obj):
-            rewritten = {key: _walk(value, f"$.{key}") for key, value in obj.items() if key != "channel_values"}
-            rewritten["channel_values"] = {
-                name: self._compress_level(inner, _walk(value, f"$.channel_values.{name}"))
-                for name, value in obj["channel_values"].items()
-            }
-        else:
-            rewritten = self._compress_level(inner, _walk(obj, "$"))
-        type_, data = inner.dumps_typed(rewritten)
-        if type_ not in ("json", "null"):
-            raise CheckpointSerializationError("checkpoint value could not be JSON-encoded after the faithful rewrite")
-        return type_, data
+            return "json", self._encoder.encode_checkpoint(obj, {}, chunker)
+        return self._encoder.encode_write(obj, chunker)
+
+    def inline_form(self, inner: FaithfulRedisSerializer, encoded: tuple[str, bytes]) -> tuple[str, bytes]:
+        """The JSON text as it is: the Redis document holds it inline."""
+        return encoded
 
     def loads_typed(self, inner: FaithfulRedisSerializer, data: tuple[str, bytes]) -> Any:
         """Decode through the Redis serializer, whose reviver decodes every kit envelope."""
         return inner.loads_typed(data)
-
-
-class BlobCompressCodec:
-    """Compress a msgpack blob above the threshold under its own type tag (Postgres)."""
-
-    def __init__(self, threshold: int | None) -> None:
-        """``threshold``: the blob size in bytes above which it is compressed; ``None`` never compresses."""
-        self._threshold = threshold
-
-    def dumps_typed(self, inner: Any, obj: Any) -> tuple[str, bytes]:
-        """Encode ``obj`` with the saver's serializer; a large msgpack blob is compressed."""
-        type_, data = inner.dumps_typed(obj)
-        if type_ == "msgpack" and self._threshold is not None and len(data) > self._threshold:
-            return COMPRESSED_BLOB_TYPE, zlib.compress(data, _ZLIB_LEVEL)
-        return type_, data
-
-    def loads_typed(self, inner: Any, data: tuple[str, bytes]) -> Any:
-        """Decode a blob; a compressed one is decompressed first, and a corrupt one raises."""
-        type_, payload = data
-        if type_ != COMPRESSED_BLOB_TYPE:
-            return inner.loads_typed(data)
-        try:
-            raw = zlib.decompress(payload)
-        except zlib.error as exc:
-            raise CheckpointSerializationError(f"checkpoint blob cannot be decompressed: {exc}") from exc
-        return inner.loads_typed(("msgpack", raw))
-
-
-class CheckpointCodec(Protocol):
-    """A codec the serialization guard installs around a saver's serializer."""
-
-    def dumps_typed(self, inner: Any, obj: Any) -> tuple[str, bytes]:
-        """Encode ``obj`` through ``inner``."""
-        ...
-
-    def loads_typed(self, inner: Any, data: tuple[str, bytes]) -> Any:
-        """Decode ``data`` through ``inner``."""
-        ...
 
 
 # --------------------------------------------------------------------------- #
@@ -536,12 +468,6 @@ _SIMPLE_DECODERS: Final[dict[str, Callable[[Any], Any]]] = {
 }
 
 
-def _record_failure(error: CheckpointSerializationError) -> None:
-    failures = _decode_failures.get()
-    if failures is not None:
-        failures.append(error)
-
-
 class FaithfulRedisSerializer(JsonPlusRedisSerializer):
     """The Redis saver's serializer with the kit reviver: every kit envelope is decoded by the kit.
 
@@ -556,6 +482,10 @@ class FaithfulRedisSerializer(JsonPlusRedisSerializer):
         if not isinstance(args, list) or len(args) != 2:
             raise TypeError("a kit envelope carries [kind, payload]")
         kind, payload = args
+        if kind == "ref":
+            ref = reference_from_payload(payload)
+            record_reference(ref)
+            return ref
         if kind == "inflate":
             tag, text = payload
             if tag != "json":
@@ -567,7 +497,7 @@ class FaithfulRedisSerializer(JsonPlusRedisSerializer):
         return decoder(payload)
 
     def _reviver(self, value: dict[str, Any]) -> Any:
-        if _is_kit_envelope(value):
+        if is_kit_envelope(value):
             args = value.get("args")
             kind = args[0] if isinstance(args, list) and args else None
             try:
@@ -577,7 +507,7 @@ class FaithfulRedisSerializer(JsonPlusRedisSerializer):
                 raise
             except (Exception, binascii.Error, zlib.error) as exc:
                 error = CheckpointSerializationError(f"checkpoint envelope {kind!r} cannot be decoded: {exc}")
-                _record_failure(error)
+                record_failure(error)
                 raise error from exc
         ident = value.get("id")
         if (
@@ -588,13 +518,13 @@ class FaithfulRedisSerializer(JsonPlusRedisSerializer):
             error = CheckpointSerializationError(
                 f"checkpoint envelope {ident!r} cannot be decoded: not a value the kit codec wrote"
             )
-            _record_failure(error)
+            record_failure(error)
             raise error
         try:
             return super()._reviver(value)
         except Exception as exc:
             error = CheckpointSerializationError(f"checkpoint envelope {ident!r} cannot be decoded: {exc}")
-            _record_failure(error)
+            record_failure(error)
             raise error from exc
 
     def _reconstruct_dataclass_constructor(self, obj: dict[str, Any], cls: type[Any]) -> Any:
@@ -605,32 +535,16 @@ class FaithfulRedisSerializer(JsonPlusRedisSerializer):
 
 
 # --------------------------------------------------------------------------- #
-# The Redis saver: metadata stored as the library stores it; decode failures raise
+# The Redis saver: metadata stored as the library stores it; decode failures recorded
 # --------------------------------------------------------------------------- #
-def _open_failures() -> tuple[list[CheckpointSerializationError], Token[Any]]:
-    failures: list[CheckpointSerializationError] = []
-    return failures, _decode_failures.set(failures)
-
-
-def _raise_failures(failures: Sequence[CheckpointSerializationError], thread_id: Any) -> None:
-    if failures:
-        raise CheckpointSerializationError(
-            f"checkpoint read for thread {thread_id!r} found {len(failures)} undecodable value(s): {failures[0]}"
-        ) from failures[0]
-
-
-def _thread_of(config: RunnableConfig) -> Any:
-    return (config.get("configurable") or {}).get("thread_id")
-
-
 class GuardedAsyncRedisSaver(AsyncRedisSaver):
     """The Redis checkpoint saver the kit builds.
 
     Checkpoint metadata is stored exactly as the library stores it: the saver reads metadata back with
-    a plain JSON parse and no reviver, so no codec envelope may reach it. Every read raises
-    :class:`CheckpointSerializationError` when a stored value could not be decoded — the library
-    returns such a value raw on its checkpoint-document path. Deleting a thread removes every
-    document it holds.
+    a plain JSON parse and no reviver, so no codec envelope may reach it. A stored value the
+    serializer's reviver cannot decode is recorded for the read in progress (the library returns such
+    a value raw on its checkpoint-document path), and the kit's saver raises it once the read ends.
+    Deleting a thread removes every document it holds.
     """
 
     async def _thread_documents(self, thread_id: str) -> tuple[int, int]:
@@ -671,39 +585,3 @@ class GuardedAsyncRedisSaver(AsyncRedisSaver):
         if isinstance(obj, dict) and obj.get("__interrupt__") is True and "value" in obj:
             return self.serde._revive_if_needed(obj)  # pyright: ignore[reportAttributeAccessIssue]
         return super()._recursive_deserialize(obj)
-
-    async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
-        """Read a checkpoint tuple; an undecodable stored value raises."""
-        failures, token = _open_failures()
-        try:
-            result = await super().aget_tuple(config)
-        finally:
-            _decode_failures.reset(token)
-        _raise_failures(failures, _thread_of(config))
-        return result
-
-    async def alist(
-        self,
-        config: RunnableConfig | None,
-        *,
-        filter: dict[str, Any] | None = None,  # noqa: A002 -- the library's parameter name
-        before: RunnableConfig | None = None,
-        limit: int | None = None,
-    ) -> AsyncIterator[CheckpointTuple]:
-        """List checkpoint tuples; a tuple holding an undecodable stored value raises before it is yielded."""
-        inner = cast(
-            "AsyncGenerator[CheckpointTuple]", super().alist(config, filter=filter, before=before, limit=limit)
-        )
-        try:
-            while True:
-                failures, token = _open_failures()
-                try:
-                    item = await anext(inner)
-                except StopAsyncIteration:
-                    return
-                finally:
-                    _decode_failures.reset(token)
-                _raise_failures(failures, _thread_of(item.config))
-                yield item
-        finally:
-            await inner.aclose()

@@ -15,15 +15,16 @@ pytest.importorskip("langgraph")
 from langgraph.checkpoint.base import empty_checkpoint
 
 from tai42_kit.llm.checkpoint import checkpoint as cp
-from tai42_kit.llm.checkpoint import store_format
+from tai42_kit.llm.checkpoint import checkpoint_provider
 from tai42_kit.llm.checkpoint.checkpoint import CheckpointResource
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
-from tai42_kit.llm.checkpoint.ledger import MemoryFinishedThreadLedger
 from tai42_kit.llm.checkpoint.store_format import (
     CHECKPOINT_STORE_FORMAT_GENERATION,
     CheckpointStoreFormatError,
     ensure_store_format,
 )
+from tai42_kit.llm.checkpoint.stores import redis as redis_store_mod
+from tai42_kit.llm.checkpoint.stores.memory import MemoryCheckpointValueStore, MemoryFinishedThreadLedger
 
 from ._real_redis import real_redis_url
 
@@ -45,14 +46,71 @@ async def _put_one(saver: Any) -> None:
     await saver.aput(config, empty_checkpoint(), _METADATA, {})
 
 
-def test_the_generation_is_three():
-    assert CHECKPOINT_STORE_FORMAT_GENERATION == 3
+async def _gate(resource: CheckpointResource) -> None:
+    await ensure_store_format(checkpoint_provider(resource.provider), resource)
 
 
-async def test_memory_store_carries_no_marker():
+def test_the_generation_is_four():
+    assert CHECKPOINT_STORE_FORMAT_GENERATION == 4
+
+
+class _FakeStore:
+    """The three primitives of a store's marker over plain attributes, counting what the gate calls."""
+
+    name = "fake"
+
+    def __init__(self, recorded: int | None = None, holds: bool = False) -> None:
+        self.recorded = recorded
+        self.holds = holds
+        self.calls: list[str] = []
+
+    async def recorded_generation(self, resource: Any) -> int | None:
+        self.calls.append("recorded")
+        return self.recorded
+
+    async def record_generation(self, resource: Any, generation: int) -> None:
+        self.calls.append("record")
+        if self.recorded is None:
+            self.recorded = generation
+
+    async def holds_checkpoints(self, resource: Any) -> bool:
+        self.calls.append("holds")
+        return self.holds
+
+
+async def test_an_empty_store_records_the_generation():
+    store = _FakeStore()
+    await ensure_store_format(cast("Any", store), cast("Any", None))
+    assert store.recorded == CHECKPOINT_STORE_FORMAT_GENERATION
+    assert store.calls == ["recorded", "holds", "record", "recorded"]
+
+
+async def test_a_store_with_data_and_no_marker_is_refused():
+    store = _FakeStore(holds=True)
+    with pytest.raises(CheckpointStoreFormatError) as excinfo:
+        await ensure_store_format(cast("Any", store), cast("Any", None))
+    assert str(excinfo.value) == _refusal("fake", "none")
+    assert "record" not in store.calls
+
+
+@pytest.mark.parametrize("found", [1, 2, 3])
+async def test_another_generation_is_refused(found):
+    with pytest.raises(CheckpointStoreFormatError) as excinfo:
+        await ensure_store_format(cast("Any", _FakeStore(recorded=found, holds=True)), cast("Any", None))
+    assert str(excinfo.value) == _refusal("fake", str(found))
+
+
+async def test_a_marked_store_with_data_proceeds():
+    store = _FakeStore(recorded=CHECKPOINT_STORE_FORMAT_GENERATION, holds=True)
+    await ensure_store_format(cast("Any", store), cast("Any", None))
+    assert store.calls == ["recorded"]
+
+
+async def test_the_in_process_store_always_passes():
     from langgraph.checkpoint.memory import InMemorySaver
 
-    await ensure_store_format(CheckpointResource("memory", InMemorySaver(), MemoryFinishedThreadLedger()))
+    resource = CheckpointResource("memory", InMemorySaver(), MemoryFinishedThreadLedger(), MemoryCheckpointValueStore())
+    await ensure_store_format(checkpoint_provider("memory"), resource)
 
 
 # --------------------------------------------------------------------------- #
@@ -60,16 +118,14 @@ async def test_memory_store_carries_no_marker():
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 async def sqlite_store(tmp_path) -> AsyncIterator[tuple[Any, CheckpointResource]]:
-    aiosqlite = pytest.importorskip("aiosqlite")
+    pytest.importorskip("aiosqlite")
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    conn = await aiosqlite.connect(str(tmp_path / "store.db"))
+    resource, close = await checkpoint_provider("sqlite").open(str(tmp_path / "store.db"))
     try:
-        saver = AsyncSqliteSaver(conn)
-        await saver.setup()
-        yield saver, CheckpointResource("sqlite", conn, MemoryFinishedThreadLedger())
+        yield AsyncSqliteSaver(resource.handle), resource
     finally:
-        await conn.close()
+        await close()
 
 
 async def _sqlite_marker(conn: Any) -> int | None:
@@ -80,8 +136,8 @@ async def _sqlite_marker(conn: Any) -> int | None:
 
 async def test_sqlite_empty_store_records_the_generation(sqlite_store):
     _saver, resource = sqlite_store
-    await ensure_store_format(resource)
-    await ensure_store_format(resource)
+    await _gate(resource)
+    await _gate(resource)
     assert await _sqlite_marker(resource.handle) == CHECKPOINT_STORE_FORMAT_GENERATION
 
 
@@ -89,35 +145,46 @@ async def test_sqlite_data_without_a_marker_is_refused(sqlite_store):
     saver, resource = sqlite_store
     await _put_one(saver)
     with pytest.raises(CheckpointStoreFormatError) as excinfo:
-        await ensure_store_format(resource)
+        await _gate(resource)
     assert str(excinfo.value) == _refusal("sqlite", "none")
 
 
 async def test_sqlite_another_generation_is_refused(sqlite_store):
     _saver, resource = sqlite_store
-    await ensure_store_format(resource)
+    await _gate(resource)
     await resource.handle.execute("UPDATE tai42_checkpoint_format SET generation = 1")
     await resource.handle.commit()
     with pytest.raises(CheckpointStoreFormatError) as excinfo:
-        await ensure_store_format(resource)
+        await _gate(resource)
     assert str(excinfo.value) == _refusal("sqlite", "1")
 
 
 async def test_sqlite_a_generation_two_store_is_refused(sqlite_store):
     _saver, resource = sqlite_store
-    await ensure_store_format(resource)
+    await _gate(resource)
     await resource.handle.execute("UPDATE tai42_checkpoint_format SET generation = 2")
     await resource.handle.commit()
     with pytest.raises(CheckpointStoreFormatError) as excinfo:
-        await ensure_store_format(resource)
+        await _gate(resource)
     assert str(excinfo.value) == _refusal("sqlite", "2")
+
+
+async def test_sqlite_a_generation_three_store_is_refused(sqlite_store):
+    saver, resource = sqlite_store
+    await _gate(resource)
+    await _put_one(saver)
+    await resource.handle.execute("UPDATE tai42_checkpoint_format SET generation = 3")
+    await resource.handle.commit()
+    with pytest.raises(CheckpointStoreFormatError) as excinfo:
+        await _gate(resource)
+    assert str(excinfo.value) == _refusal("sqlite", "3")
 
 
 async def test_sqlite_marked_store_with_data_proceeds(sqlite_store):
     saver, resource = sqlite_store
-    await ensure_store_format(resource)
+    await _gate(resource)
     await _put_one(saver)
-    await ensure_store_format(resource)
+    await _gate(resource)
 
 
 # --------------------------------------------------------------------------- #
@@ -147,7 +214,7 @@ async def postgres_store() -> AsyncIterator[tuple[Any, CheckpointResource]]:
     try:
         saver = AsyncPostgresSaver(cast("Any", pool))
         await saver.setup()
-        yield saver, CheckpointResource("postgres", pool, MemoryFinishedThreadLedger())
+        yield saver, CheckpointResource("postgres", pool, MemoryFinishedThreadLedger(), MemoryCheckpointValueStore())
     finally:
         await pool.close()
         async with await AsyncConnection.connect(admin_dsn, autocommit=True) as admin:
@@ -162,7 +229,7 @@ async def test_postgres_empty_store_records_the_generation(postgres_store):
     from tai42_kit.llm.checkpoint import postgres_store as pg_store
 
     _saver, resource = postgres_store
-    await ensure_store_format(resource)
+    await _gate(resource)
     assert await pg_store.read_format_generation(resource.handle) == CHECKPOINT_STORE_FORMAT_GENERATION
 
 
@@ -171,19 +238,31 @@ async def test_postgres_data_without_a_marker_is_refused(postgres_store):
     saver, resource = postgres_store
     await _put_one(saver)
     with pytest.raises(CheckpointStoreFormatError) as excinfo:
-        await ensure_store_format(resource)
+        await _gate(resource)
     assert str(excinfo.value) == _refusal("postgres", "none")
 
 
 @integration
 async def test_postgres_another_generation_is_refused(postgres_store):
     _saver, resource = postgres_store
-    await ensure_store_format(resource)
+    await _gate(resource)
     async with resource.handle.connection() as conn:
         await conn.execute("UPDATE tai42_checkpoint_format SET generation = 1")
     with pytest.raises(CheckpointStoreFormatError) as excinfo:
-        await ensure_store_format(resource)
+        await _gate(resource)
     assert str(excinfo.value) == _refusal("postgres", "1")
+
+
+@integration
+async def test_postgres_a_generation_three_store_is_refused(postgres_store):
+    saver, resource = postgres_store
+    await _gate(resource)
+    await _put_one(saver)
+    async with resource.handle.connection() as conn:
+        await conn.execute("UPDATE tai42_checkpoint_format SET generation = 3")
+    with pytest.raises(CheckpointStoreFormatError) as excinfo:
+        await _gate(resource)
+    assert str(excinfo.value) == _refusal("postgres", "3")
 
 
 @integration
@@ -191,7 +270,7 @@ async def test_postgres_concurrent_first_builds_converge(postgres_store):
     from tai42_kit.llm.checkpoint import postgres_store as pg_store
 
     _saver, resource = postgres_store
-    await asyncio.gather(*(ensure_store_format(resource) for _ in range(4)))
+    await asyncio.gather(*(_gate(resource) for _ in range(4)))
     assert await pg_store.read_format_generation(resource.handle) == CHECKPOINT_STORE_FORMAT_GENERATION
 
 
@@ -206,17 +285,18 @@ async def redis_store(monkeypatch) -> AsyncIterator[tuple[Any, CheckpointResourc
     from tai42_kit.llm.checkpoint.codec import GuardedAsyncRedisSaver
 
     suffix = uuid.uuid4().hex[:12]
-    monkeypatch.setattr(store_format, "REDIS_FORMAT_KEY", f"tai42:checkpoint:format:{suffix}")
+    monkeypatch.setattr(redis_store_mod, "REDIS_FORMAT_KEY", f"tai42:checkpoint:format:{suffix}")
     client = AsyncRedis.from_url(url)
     saver = GuardedAsyncRedisSaver(
         redis_client=client, checkpoint_prefix=f"gate{suffix}", checkpoint_write_prefix=f"gatew{suffix}"
     )
-    cp._guard_saver_serialization(saver, cp.checkpoint_provider_facts("redis"))
+    cp._guard_saver_serialization(saver, checkpoint_provider("redis"), 65536)
     await saver.asetup()
+    handle = redis_store_mod.RedisHandle(saver, client)
     try:
-        yield saver, CheckpointResource("redis", saver, MemoryFinishedThreadLedger(), client)
+        yield saver, CheckpointResource("redis", handle, MemoryFinishedThreadLedger(), MemoryCheckpointValueStore())
     finally:
-        await client.delete(store_format.REDIS_FORMAT_KEY)
+        await client.delete(redis_store_mod.REDIS_FORMAT_KEY)
         await saver.checkpoints_index.delete(drop=True)
         await saver.checkpoint_writes_index.delete(drop=True)
         await client.aclose()
@@ -225,9 +305,9 @@ async def redis_store(monkeypatch) -> AsyncIterator[tuple[Any, CheckpointResourc
 @integration
 async def test_redis_empty_store_records_the_generation(redis_store):
     _saver, resource = redis_store
-    await ensure_store_format(resource)
-    await ensure_store_format(resource)
-    assert await resource.redis_client.get(store_format.REDIS_FORMAT_KEY) == _REDIS_MARKER
+    await _gate(resource)
+    await _gate(resource)
+    assert await resource.handle.client.get(redis_store_mod.REDIS_FORMAT_KEY) == _REDIS_MARKER
 
 
 @integration
@@ -235,37 +315,42 @@ async def test_redis_data_without_a_marker_is_refused(redis_store):
     saver, resource = redis_store
     await _put_one(saver)
     with pytest.raises(CheckpointStoreFormatError) as excinfo:
-        await ensure_store_format(resource)
+        await _gate(resource)
     assert str(excinfo.value) == _refusal("redis", "none")
 
 
 @integration
 async def test_redis_another_generation_is_refused(redis_store):
     _saver, resource = redis_store
-    await resource.redis_client.set(store_format.REDIS_FORMAT_KEY, "1")
+    await resource.handle.client.set(redis_store_mod.REDIS_FORMAT_KEY, "1")
     with pytest.raises(CheckpointStoreFormatError) as excinfo:
-        await ensure_store_format(resource)
+        await _gate(resource)
     assert str(excinfo.value) == _refusal("redis", "1")
+
+
+@integration
+async def test_redis_a_generation_three_store_is_refused(redis_store):
+    saver, resource = redis_store
+    await _put_one(saver)
+    await resource.handle.client.set(redis_store_mod.REDIS_FORMAT_KEY, "3")
+    with pytest.raises(CheckpointStoreFormatError) as excinfo:
+        await _gate(resource)
+    assert str(excinfo.value) == _refusal("redis", "3")
 
 
 @integration
 async def test_redis_a_garbage_marker_is_refused(redis_store):
     _saver, resource = redis_store
-    await resource.redis_client.set(store_format.REDIS_FORMAT_KEY, "two")
+    await resource.handle.client.set(redis_store_mod.REDIS_FORMAT_KEY, "two")
     with pytest.raises(CheckpointStoreFormatError, match="holds 'two', not a generation"):
-        await ensure_store_format(resource)
+        await _gate(resource)
 
 
 @integration
 async def test_redis_concurrent_first_builds_converge(redis_store):
     _saver, resource = redis_store
-    await asyncio.gather(*(ensure_store_format(resource) for _ in range(4)))
-    assert await resource.redis_client.get(store_format.REDIS_FORMAT_KEY) == _REDIS_MARKER
-
-
-async def test_a_redis_resource_without_its_client_is_refused():
-    with pytest.raises(ValueError, match="carries its client"):
-        await ensure_store_format(CheckpointResource("redis", object(), MemoryFinishedThreadLedger()))
+    await asyncio.gather(*(_gate(resource) for _ in range(4)))
+    assert await resource.handle.client.get(redis_store_mod.REDIS_FORMAT_KEY) == _REDIS_MARKER
 
 
 # --------------------------------------------------------------------------- #
@@ -274,8 +359,8 @@ async def test_a_redis_resource_without_its_client_is_refused():
 async def test_the_gate_runs_at_the_first_saver_build_only(monkeypatch):
     seen: list[str] = []
 
-    async def _recording_gate(resource):
-        seen.append(resource.provider)
+    async def _recording_gate(registration, resource):
+        seen.append(registration.name)
 
     monkeypatch.setattr(cp, "ensure_store_format", _recording_gate)
     registry = checkpoint_registry()
@@ -301,10 +386,11 @@ async def test_a_refused_store_is_closed_and_the_build_fails(monkeypatch, tmp_pa
         await _put_one(saver)
 
     closed: list[bool] = []
-    real_create = cp._create_sqlite_checkpoint
+    registration = checkpoint_provider("sqlite")
+    real_open = registration.open
 
-    async def _tracking_create(conn_string):
-        resource, cleanup = await real_create(conn_string)
+    async def _tracking_open(conn_string):
+        resource, cleanup = await real_open(conn_string)
 
         async def _cleanup():
             closed.append(True)
@@ -312,7 +398,7 @@ async def test_a_refused_store_is_closed_and_the_build_fails(monkeypatch, tmp_pa
 
         return resource, _cleanup
 
-    monkeypatch.setitem(cp._BUILDERS, "sqlite", _tracking_create)
+    monkeypatch.setattr(registration, "open", _tracking_open)
     with pytest.raises(CheckpointStoreFormatError):
         await cp.create_checkpoint_resource("sqlite", path)
     assert closed == [True]
