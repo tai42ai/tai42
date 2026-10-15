@@ -6,7 +6,7 @@ primitives from ``tai42_e2e.manifests`` and sets only the ``LLM_PROVIDER_*`` che
 knobs (``core/kit/src/tai42_kit/llm/settings.py``), so the profile diverges from the
 others in exactly the dimension under test — the checkpoint provider, its two retention
 horizons, and the shared values: the switch ``LLM_PROVIDER_CHECKPOINT_SHARED_VALUES`` (left
-unset, the provider's own default) and the size ``LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES``."""
+unset, the store's own default) and the size ``LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES``."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def build_checkpoint_stack(
     """MULTIWORKER(1), no backend — the ``_CORE_ROUTERS`` surface plus the checkpoints
     router (so ``sweep_checkpoints`` projects as a tool and ``POST /api/checkpoints/sweep``
     is mounted), pinned to a checkpoint provider, the two retention horizons and the
-    shared-value size; ``shared_values`` sets the switch, ``None`` leaves the provider's default."""
+    shared-value size; ``shared_values`` sets the switch, ``None`` leaves the store's default."""
     manifest = {
         "default_routers": "none",
         "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.checkpoints"],
@@ -81,6 +81,29 @@ def build_checkpoint_stack(
     suffix = "" if shared_values is None else ("-shared" if shared_values else "-inline")
     return StackConfig(
         name=f"checkpoint-{provider}{suffix}",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=env,
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=False,
+    )
+
+
+# The fixture module that registers the ``probe`` checkpoint store at its import.
+REGISTERED_STORE_MODULE = "tai42_e2e_fixtures.checkpoint_store"
+
+
+def build_registered_store_stack(res: StackResources, variants: Variants, *, provider: str) -> StackConfig:
+    """MULTIWORKER(1), no backend, the checkpoints router mounted, the fixture checkpoint store
+    registered from ``lifecycle_modules`` and ``LLM_PROVIDER_CHECKPOINT`` naming ``provider``."""
+    config = build_checkpoint_stack(res, variants, provider="sqlite")
+    manifest = {**config.manifest, "lifecycle_modules": [REGISTERED_STORE_MODULE]}
+    env = {**config.env, "LLM_PROVIDER_CHECKPOINT": provider}
+    env.pop("LLM_PROVIDER_CHECKPOINT_CONN_STRING")
+    return StackConfig(
+        name=f"checkpoint-registered-{provider}",
         topology=Topology.MULTIWORKER,
         manifest=manifest,
         env=env,

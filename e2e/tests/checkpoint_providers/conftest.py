@@ -33,7 +33,7 @@ def checkpoint_stack(
 ) -> Iterator[tuple[TaiStack, str, bool | None]]:
     """Boot the checkpoint-provider stack for each DB-backed provider in turn, yielding
     ``(stack, provider, shared_values)``. The provider and the shared-values switch (``None``:
-    the provider's default) ride through as the fixture param so one spec covers every
+    the store's default) ride through as the fixture param so one spec covers every
     configuration and the single deleting sweep branch they share."""
     provider, shared_values = request.param
     builder = functools.partial(build_checkpoint_stack, provider=provider, shared_values=shared_values)
