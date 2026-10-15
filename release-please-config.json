@@ -14,17 +14,26 @@
           "path": "src/tai42_contract/schemas/contract-schema.json",
           "jsonpath": "$.contract_version"
         }
+      ],
+      "exclude-paths": [
+        "core/contract/tests"
       ]
     },
     "core/kit": {
       "package-name": "tai42-kit",
       "component": "tai42-kit",
-      "skip-changelog": true
+      "skip-changelog": true,
+      "exclude-paths": [
+        "core/kit/tests"
+      ]
     },
     "core/cli": {
       "package-name": "tai42-cli",
       "component": "tai42-cli",
-      "skip-changelog": true
+      "skip-changelog": true,
+      "exclude-paths": [
+        "core/cli/tests"
+      ]
     },
     "core/skeleton": {
       "package-name": "tai42-skeleton",
@@ -36,6 +45,10 @@
           "path": "src/tai42_skeleton/schemas/openapi.json",
           "jsonpath": "$.info.version"
         }
+      ],
+      "exclude-paths": [
+        "core/skeleton/tests",
+        "core/skeleton/examples"
       ]
     },
     "plugins/accounts-postgres": {
@@ -53,6 +66,9 @@
           "path": "src/tai42_accounts_postgres/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/accounts-postgres/tests"
       ]
     },
     "plugins/agents": {
@@ -70,6 +86,9 @@
           "path": "src/tai42_agents/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/agents/tests"
       ]
     },
     "plugins/backend-arq": {
@@ -87,6 +106,9 @@
           "path": "src/tai42_backend_arq/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/backend-arq/tests"
       ]
     },
     "plugins/backend-celery": {
@@ -104,6 +126,9 @@
           "path": "src/tai42_backend_celery/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/backend-celery/tests"
       ]
     },
     "plugins/backend-rq": {
@@ -121,6 +146,9 @@
           "path": "src/tai42_backend_rq/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/backend-rq/tests"
       ]
     },
     "plugins/channel-slack": {
@@ -138,6 +166,9 @@
           "path": "src/tai42_channel_slack/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/channel-slack/tests"
       ]
     },
     "plugins/channel-telegram": {
@@ -155,6 +186,9 @@
           "path": "src/tai42_channel_telegram/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/channel-telegram/tests"
       ]
     },
     "plugins/channel-twilio": {
@@ -172,6 +206,9 @@
           "path": "src/tai42_channel_twilio/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/channel-twilio/tests"
       ]
     },
     "plugins/channel-web": {
@@ -194,6 +231,9 @@
           "path": "src/tai42_channel_web/studio/studio-manifest.json",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/channel-web/tests"
       ]
     },
     "plugins/channel-whatsapp": {
@@ -211,6 +251,9 @@
           "path": "src/tai42_channel_whatsapp/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/channel-whatsapp/tests"
       ]
     },
     "plugins/connector-atlassian": {
@@ -280,6 +323,9 @@
           "path": "src/tai42_identity_redis/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/identity-redis/tests"
       ]
     },
     "plugins/monitoring-langfuse": {
@@ -297,6 +343,9 @@
           "path": "src/tai42_monitoring_langfuse/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/monitoring-langfuse/tests"
       ]
     },
     "plugins/sandbox-docker": {
@@ -314,6 +363,9 @@
           "path": "src/tai42_sandbox_docker/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/sandbox-docker/tests"
       ]
     },
     "plugins/sandbox-local": {
@@ -331,6 +383,9 @@
           "path": "src/tai42_sandbox_local/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/sandbox-local/tests"
       ]
     },
     "plugins/storage-github": {
@@ -348,6 +403,10 @@
           "path": "src/tai42_storage_github/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/storage-github/tests",
+        "plugins/storage-github/examples"
       ]
     },
     "plugins/storage-local": {
@@ -365,6 +424,9 @@
           "path": "src/tai42_storage_local/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/storage-local/tests"
       ]
     },
     "plugins/storage-s3": {
@@ -382,6 +444,9 @@
           "path": "src/tai42_storage_s3/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/storage-s3/tests"
       ]
     },
     "plugins/toolbox": {
@@ -399,6 +464,9 @@
           "path": "src/tai42_toolbox/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/toolbox/tests"
       ]
     },
     "plugins/tools-github": {
@@ -416,6 +484,9 @@
           "path": "src/tai42_tools_github/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/tools-github/tests"
       ]
     },
     "plugins/tools-stripe": {
@@ -433,6 +504,9 @@
           "path": "src/tai42_tools_stripe/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/tools-stripe/tests"
       ]
     },
     "plugins/tools-twilio": {
@@ -450,6 +524,9 @@
           "path": "src/tai42_tools_twilio/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/tools-twilio/tests"
       ]
     },
     "plugins/tools-whatsapp": {
@@ -467,6 +544,9 @@
           "path": "src/tai42_tools_whatsapp/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/tools-whatsapp/tests"
       ]
     },
     "plugins/webhook-verifier-github": {
@@ -484,6 +564,9 @@
           "path": "src/tai42_webhook_verifier_github/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/webhook-verifier-github/tests"
       ]
     },
     "plugins/webhook-verifier-stripe": {
@@ -501,12 +584,18 @@
           "path": "src/tai42_webhook_verifier_stripe/tai-plugin.yml",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "plugins/webhook-verifier-stripe/tests"
       ]
     },
     "e2e": {
       "package-name": "tai42-e2e",
       "component": "tai42-e2e",
-      "skip-changelog": true
+      "skip-changelog": true,
+      "exclude-paths": [
+        "e2e/tests"
+      ]
     }
   }
 }
