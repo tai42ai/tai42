@@ -210,6 +210,7 @@ class _UpdateFlow(_InstallerBase):
                     source,
                     resolved.get("artifact_ref"),
                     resolved.get("sha256"),
+                    env_constraints=self._env_constraints,
                 )
             except Exception as install_error:
                 try:
@@ -221,6 +222,7 @@ class _UpdateFlow(_InstallerBase):
                         row.source,
                         row.artifact_ref,
                         row.sha256,
+                        env_constraints=self._env_constraints,
                     )
                 except Exception as restore_error:
                     raise InstallUnwindError(install_error, restore_error) from install_error
@@ -234,6 +236,7 @@ class _UpdateFlow(_InstallerBase):
                 source,
                 resolved.get("artifact_ref"),
                 resolved.get("sha256"),
+                env_constraints=self._env_constraints,
             )
 
         # Migrations run before the manifest patch (the new wheel is landed but inert),
@@ -248,7 +251,7 @@ class _UpdateFlow(_InstallerBase):
                 row=row,
                 saved_manifest=None,
                 env_restore=None,
-                **self._unwind_seams(),
+                **self._update_unwind_seams(),
             )
             raise
         return pip_output
@@ -322,7 +325,7 @@ class _UpdateFlow(_InstallerBase):
                 row=row,
                 saved_manifest=saved_manifest if persisted else None,
                 env_restore=env_restore,
-                **self._unwind_seams(),
+                **self._update_unwind_seams(),
             )
             raise
         return apply_result

@@ -17,6 +17,7 @@ from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.marketplace import env_apply, package_ops
 from tai42_skeleton.marketplace.errors import InstallUnwindError
 from tai42_skeleton.marketplace.pip import PipRunner
+from tai42_skeleton.marketplace.prefix import environment_constraints
 from tai42_skeleton.marketplace.store import InstallRecord
 
 
@@ -85,6 +86,7 @@ async def unwind_update(
     pip_runner: PipRunner,
     prefix: str | None,
     prefix_uninstall: Callable[[str, str], None],
+    env_constraints: Callable[[str], list[str]] = environment_constraints,
 ) -> None:
     """Reverse an update whose Step 5/6 failed.
 
@@ -111,7 +113,14 @@ async def unwind_update(
                     raise AssertionError  # noqa: TRY301 type-narrowing guard; wrapped as InstallUnwindError below
                 prefix_uninstall(new_package, prefix)
             await package_ops.pip_install(
-                pip_runner, prefix, old_package, row.version, row.source, row.artifact_ref, row.sha256
+                pip_runner,
+                prefix,
+                old_package,
+                row.version,
+                row.source,
+                row.artifact_ref,
+                row.sha256,
+                env_constraints=env_constraints,
             )
         if saved_manifest is not None:
             await svc.apply_replace(saved_manifest)

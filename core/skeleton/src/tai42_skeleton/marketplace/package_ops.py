@@ -29,6 +29,7 @@ from tai42_skeleton.marketplace.pip import (
     install_args,
     uninstall_args,
 )
+from tai42_skeleton.marketplace.prefix import environment_constraints
 
 
 async def pip_install(
@@ -39,6 +40,8 @@ async def pip_install(
     source: str,
     artifact_ref: str | None,
     sha256: str | None,
+    *,
+    env_constraints: Callable[[str], list[str]] = environment_constraints,
 ) -> str:
     """Run the ``pip install`` for a pinned version and return its output.
 
@@ -50,16 +53,26 @@ async def pip_install(
     ``git+url@tag`` clone. A checksum mismatch or fetch failure raises out of
     here with no pip call and no fallback.
 
-    When a prefix is configured, ``--prefix`` targets it: pip resolves shared
-    dependencies against the running environment and installs the plugin plus
-    only its genuinely-new dependencies under the prefix (the image's packages
-    are never duplicated there).
+    When a prefix is configured, ``--prefix`` targets it and pip is handed a
+    ``--constraint`` file of every environment distribution (``name==version``,
+    from ``env_constraints``), written into the same temporary directory kept alive
+    across the pip run. pip then treats the environment versions as already
+    satisfied, installs the plugin plus only its genuinely-new dependencies under
+    the prefix, and refuses a conflicting closure loudly before writing — never a
+    silent uninstall of an environment package replaced by a prefix copy. The
+    no-prefix door passes no constraint: pip owns the one writable environment there.
     """
-    if source == "github":
-        with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:
+        constraints: Path | None = None
+        if prefix is not None:
+            constraints = Path(tmp) / "environment-constraints.txt"
+            constraints.write_text("".join(f"{line}\n" for line in env_constraints(prefix)), encoding="utf-8")
+        if source == "github":
             verified = await fetch_verified_artifact(package, version, artifact_ref or "", sha256 or "", Path(tmp))
-            return await pip_runner(install_args(package, version, source, verified, prefix=prefix))
-    return await pip_runner(install_args(package, version, source, prefix=prefix))
+            return await pip_runner(
+                install_args(package, version, source, verified, prefix=prefix, constraints=constraints)
+            )
+        return await pip_runner(install_args(package, version, source, prefix=prefix, constraints=constraints))
 
 
 async def remove_package(

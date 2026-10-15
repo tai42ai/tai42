@@ -6,16 +6,21 @@ separate from the platform's packages).
 ``TAI_PLUGINS_PREFIX`` unset -> installs go into the running interpreter
 environment, which a container image discards on restart (the default).
 Set -> the deployment OPTS IN to persistence: the installer installs each plugin's
-OWN distribution into the prefix while pip resolves shared dependencies against the
-running environment, so a package already importable in the environment is never
+OWN distribution into the prefix, constrains the install to the environment's
+installed versions so a package already importable in the environment is never
 copied into the prefix (only genuinely-new dependencies land there), and boot adds
 the prefix's site directories to the END of ``sys.path`` so the environment shadows
 the prefix for any package present in both.
 
-The dependency rule is pip's own: ``pip install --prefix`` resolves against the
-running environment and installs only the distributions that environment does not
-already satisfy, so the image's ``tai42-contract`` / ``tai42-kit`` / … always win
-and are never duplicated in the prefix. Uninstall does NOT shell pip — pip refuses
+The dependency rule is enforced by a constraint file: a prefix install passes
+``pip install --prefix`` a ``--constraint`` file listing every environment
+distribution as ``name==version`` (:func:`environment_constraints`), so pip treats
+those versions as already satisfied, installs only genuinely-new dependencies under
+the prefix, and REFUSES a conflicting closure loudly before writing — never a silent
+uninstall of an environment package replaced by a prefix copy that processes without
+the prefix on ``sys.path`` would then fail to import. The image's ``tai42-contract``
+/ ``tai42-kit`` / … therefore always win and are never duplicated in the prefix.
+Uninstall does NOT shell pip — pip refuses
 to remove a distribution installed outside its own environment — so it removes the
 plugin's own files from the prefix directly, by the ``RECORD`` its ``.dist-info``
 ships, leaving every dependency in place (the same "only the named distribution is
@@ -156,6 +161,48 @@ def environment_distribution_version(package: str, prefix: str) -> str | None:
         if canonicalize_name(dist.name) == target:
             return dist.version
     return None
+
+
+def environment_constraints(prefix: str) -> list[str]:
+    """Every running-ENVIRONMENT distribution as a sorted ``name==version`` constraint line.
+
+    Reads the same ``sys.path`` view as :func:`environment_distribution_version` —
+    every entry that is NOT a prefix site dir — and emits one ``name==version`` per
+    distinct canonical name, the FIRST occurrence winning (mirroring import shadowing
+    order, so an entry earlier on ``sys.path`` masks a later duplicate). A distribution
+    whose metadata carries no ``Name`` is passed over — it cannot be named in a
+    constraint — while a named distribution with no version raises
+    :class:`PluginPrefixError` naming it, never a silent omission that would let the
+    resolver replace it.
+
+    Handed to ``pip install --prefix`` as a ``--constraint`` file: pip then treats
+    every environment version as already satisfied, installs only genuinely-new
+    dependencies under the prefix, and REFUSES a conflicting closure loudly before
+    writing — never a silent uninstall of an environment package into the prefix.
+    """
+    prefix_dirs = {str(Path(site)) for site in prefix_site_dirs(prefix)}
+    env_paths = [p for p in sys.path if p not in prefix_dirs]
+    seen: set[str] = set()
+    constraints: list[str] = []
+    for dist in importlib.metadata.distributions(path=env_paths):
+        # Read the headers with ``.get`` rather than the ``.name`` / ``.version``
+        # properties: those raise a deprecation warning when the header is absent,
+        # and a missing header is exactly the case this function must handle itself.
+        metadata = dist.metadata
+        name = metadata.get("Name")
+        if name is None:
+            continue
+        canonical = canonicalize_name(name)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        version = metadata.get("Version")
+        if not version:
+            raise PluginPrefixError(
+                f"environment distribution {name!r} reports no version; cannot pin it as a prefix install constraint"
+            )
+        constraints.append(f"{name}=={version}")
+    return sorted(constraints)
 
 
 def uninstall_from_prefix(package: str, prefix: str) -> None:

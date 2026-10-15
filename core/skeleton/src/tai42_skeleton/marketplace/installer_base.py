@@ -30,6 +30,7 @@ from tai42_skeleton.marketplace.pip import PipRunner, run_pip
 from tai42_skeleton.marketplace.prefix import (
     configured_prefix,
     ensure_prefix_writable,
+    environment_constraints,
     environment_distribution_version,
     prefix_has_distribution,
     uninstall_from_prefix,
@@ -56,6 +57,7 @@ class _InstallerBase:
         prefix_ensure_writable: Callable[[str], None] = ensure_prefix_writable,
         prefix_has_dist: Callable[[str, str], bool] = prefix_has_distribution,
         env_dist_version: Callable[[str, str], str | None] = environment_distribution_version,
+        env_constraints: Callable[[str], list[str]] = environment_constraints,
         owned_routes: Callable[[], list[routes_mod.OwnedRoute]] = route_preflight.live_owned_routes,
         reserved_prefixes: Callable[[], Sequence[str]] = route_preflight.live_reserved_prefixes,
     ) -> None:
@@ -73,6 +75,7 @@ class _InstallerBase:
         self._prefix_ensure_writable = prefix_ensure_writable
         self._prefix_has_dist = prefix_has_dist
         self._env_dist_version = env_dist_version
+        self._env_constraints = env_constraints
         self._owned_routes = owned_routes
         self._reserved_prefixes = reserved_prefixes
 
@@ -123,6 +126,15 @@ class _InstallerBase:
             "prefix_has_dist": self._prefix_has_dist,
             "env_dist_version": self._env_dist_version,
         }
+
+    def _update_unwind_seams(self) -> dict[str, Any]:
+        """The update unwind's seams.
+
+        :meth:`_unwind_seams` plus the ``env_constraints`` builder ``unwind_update``
+        hands the prefix reinstall of the OLD pin, so that reinstall is constrained
+        to the environment exactly like a forward prefix install.
+        """
+        return {**self._unwind_seams(), "env_constraints": self._env_constraints}
 
     async def _run_plugin_migrations(self, spec: PluginSpec) -> None:
         """Apply the installed/upgraded plugin's schema migrations, when it declares a chain.

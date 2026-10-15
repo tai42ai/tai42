@@ -22,6 +22,7 @@ from tai42_skeleton.marketplace.prefix import (
     activate_prefix,
     configured_prefix,
     ensure_prefix_writable,
+    environment_constraints,
     environment_distribution_version,
     prefix_has_distribution,
     prefix_site_dirs,
@@ -185,6 +186,74 @@ def test_environment_distribution_version_reads_env_not_prefix(tmp_path: Path) -
     _install_fake_dist(prefix, "foo", "9.9")
     assert environment_distribution_version("pytest", prefix) is not None
     assert environment_distribution_version("foo", prefix) is None
+
+
+# -- environment_constraints: the prefix-install constraint freeze -----------
+
+
+def _write_env_dist(site: Path, name: str, version: str | None) -> None:
+    """Write a minimal installed distribution (just a ``.dist-info`` with METADATA)
+    into ``site``. A ``None`` version writes METADATA with no ``Version`` line, so
+    ``importlib.metadata`` reports the distribution's version as ``None``."""
+    site.mkdir(parents=True, exist_ok=True)
+    info = site / f"{name}-{version or '0'}.dist-info"
+    info.mkdir()
+    lines = ["Metadata-Version: 2.1", f"Name: {name}"]
+    if version is not None:
+        lines.append(f"Version: {version}")
+    (info / "METADATA").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_nameless_dist(site: Path, dirname: str) -> None:
+    """Write a ``.dist-info`` whose METADATA carries no ``Name`` field, so
+    ``importlib.metadata`` reports its name as ``None``."""
+    site.mkdir(parents=True, exist_ok=True)
+    info = site / f"{dirname}-0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nVersion: 9.9\n", encoding="utf-8")
+
+
+def test_environment_constraints_excludes_prefix_first_wins_sorted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Two environment dirs plus the prefix sit on sys.path. The freeze names every
+    # ENVIRONMENT distribution as ``name==version`` — sorted, one per name with the
+    # first sys.path occurrence winning — and NEVER a distribution living under the
+    # prefix (that is what the prefix install is about to add).
+    prefix = str(tmp_path / "pfx")
+    env_a = tmp_path / "env_a"
+    env_b = tmp_path / "env_b"
+    _write_env_dist(env_a, "widget", "1.1")
+    _write_env_dist(env_a, "alpha", "0.3")
+    _write_env_dist(env_b, "widget", "9.9")  # masked: env_a precedes env_b on sys.path
+    _write_env_dist(Path(prefix_site_dirs(prefix)[0]), "pluginpkg", "5.0")  # under the prefix -> excluded
+    monkeypatch.setattr(prefix_module.sys, "path", [str(env_a), str(env_b), *prefix_site_dirs(prefix)])
+
+    assert environment_constraints(prefix) == ["alpha==0.3", "widget==1.1"]
+
+
+def test_environment_constraints_skips_a_nameless_distribution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A distribution whose metadata carries no Name cannot be named in a constraint,
+    # so it is passed over rather than raising — only the named one is emitted.
+    env = tmp_path / "env"
+    _write_env_dist(env, "widget", "1.0")
+    _write_nameless_dist(env, "mystery")
+    monkeypatch.setattr(prefix_module.sys, "path", [str(env)])
+
+    assert environment_constraints(str(tmp_path / "pfx")) == ["widget==1.0"]
+
+
+def test_environment_constraints_raises_on_versionless_named_dist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A NAMED distribution with no version is a loud failure: omitting it silently
+    # would let the resolver replace it with another version in the prefix.
+    env = tmp_path / "env"
+    _write_env_dist(env, "widget", None)
+    monkeypatch.setattr(prefix_module.sys, "path", [str(env)])
+
+    with pytest.raises(PluginPrefixError, match="no version"):
+        environment_constraints(str(tmp_path / "pfx"))
 
 
 def test_uninstall_from_prefix_removes_named_dist_and_keeps_dependencies(tmp_path: Path) -> None:

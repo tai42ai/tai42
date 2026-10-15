@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -19,6 +20,36 @@ from .test_installer import (
     _assert_no_pip,
     _tool_provides,
 )
+
+# The environment freeze a test injects as ``env_constraints`` and the exact file
+# body the chokepoint writes from it.
+_FREEZE = ["dep==2.0", "widget==1.1"]
+_FREEZE_TEXT = "dep==2.0\nwidget==1.1\n"
+
+
+def _fake_env_constraints(prefix: str) -> list[str]:
+    return list(_FREEZE)
+
+
+class ConstraintReadingPip:
+    """A pip runner that, DURING the call, reads the ``--constraint`` file the
+    chokepoint wrote — proving the freeze file exists and carries the environment
+    versions while pip runs, before the temporary directory is torn down."""
+
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+        self.calls: list[list[str]] = []
+        self.constraint_contents: list[str | None] = []
+
+    async def __call__(self, args: list[str]) -> str:
+        self.calls.append(args)
+        self._events.append("pip")
+        content: str | None = None
+        if "--constraint" in args:
+            content = Path(args[args.index("--constraint") + 1]).read_text(encoding="utf-8")
+        self.constraint_contents.append(content)
+        return "pip ok"
+
 
 # -- prefix: install into the persistent prefix, uninstall from it -----------
 
@@ -58,14 +89,18 @@ def _prefix_installer(
     *,
     env_version: str | None = None,
     prefix_has: bool = True,
+    env_constraints: Any = None,
+    pip: Any = None,
 ) -> Installer:
     # ``env_version`` fakes what the running ENVIRONMENT provides for the target
     # distribution (None = absent); ``prefix_has`` fakes whether the distribution
     # is present under the prefix. Defaults (prefix-present, env-absent) model the
-    # ordinary prefix install.
+    # ordinary prefix install. ``env_constraints`` defaults to an empty freeze so a
+    # test that is not about the constraint content stays hermetic (no real sys.path
+    # read); a constraint test injects a deterministic freeze and a reading runner.
     return Installer(
         registry=cast(Any, h.registry),
-        pip_runner=h.pip,
+        pip_runner=pip if pip is not None else h.pip,
         store=cast(Any, h.store),
         config_service=cast(Any, h.svc),
         fleet_lock=h.fleet,
@@ -75,6 +110,7 @@ def _prefix_installer(
         prefix_ensure_writable=writable,
         prefix_has_dist=lambda package, prefix: prefix_has,
         env_dist_version=lambda package, prefix: env_version,
+        env_constraints=env_constraints if env_constraints is not None else (lambda prefix: []),
     )
 
 
@@ -309,3 +345,116 @@ async def test_update_prefix_env_shadow_refused_before_removal(monkeypatch: pyte
     assert remover.calls == []
     _assert_no_pip(h)
     assert h.svc.writes == []
+
+
+# -- prefix: every install door constrains pip to the environment ------------
+
+
+async def test_install_prefix_passes_environment_constraints(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The install door's one pip call targets the prefix AND carries the environment
+    # freeze as a --constraint file, read here DURING the call (before the temp dir
+    # is torn down) so pip pins the environment versions and cannot silently replace one.
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    h = Harness()
+    spec = make_spec(provides=[{"kind": "tool", "name": "gen-uuid", "module": "pkg.tools.uuid", "description": "d"}])
+    h.registry.resolved = make_resolved(spec, version="1.0.0")
+    remover = FakePrefixUninstall(h.events)
+    writable = FakeEnsureWritable(h.events)
+    pip = ConstraintReadingPip(h.events)
+
+    await _prefix_installer(h, remover, writable, env_constraints=_fake_env_constraints, pip=pip).install(
+        "tai42/toolbox"
+    )
+
+    assert pip.calls[0][3:5] == ["--prefix", _PREFIX]
+    assert "--constraint" in pip.calls[0]
+    assert pip.constraint_contents[0] == _FREEZE_TEXT
+
+
+async def test_update_prefix_passes_environment_constraints(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The update door's new-pin install carries the same environment freeze.
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    old = make_spec(version="1.0.0", provides=_tool_provides("pkg.old"))
+    new = make_spec(version="2.0.0", provides=_tool_provides("pkg.new"))
+    h = Harness(manifest={"tools": [{"title": "pkg.old", "module": "pkg.old"}]})
+    h.store.preload(old, version="1.0.0")
+    h.registry.resolved = make_resolved(new, version="2.0.0")
+    remover = FakePrefixUninstall(h.events)
+    writable = FakeEnsureWritable(h.events)
+    pip = ConstraintReadingPip(h.events)
+
+    await _prefix_installer(h, remover, writable, env_constraints=_fake_env_constraints, pip=pip).update(
+        "tai42/toolbox"
+    )
+
+    assert pip.calls[0][-1] == "tai42-toolbox==2.0.0"
+    assert "--constraint" in pip.calls[0]
+    assert pip.constraint_contents[0] == _FREEZE_TEXT
+
+
+async def test_update_unwind_reinstall_prefix_passes_environment_constraints(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The new install lands, then the attribution write fails; the unwind reinstalls
+    # the OLD pin into the prefix — and that reinstall is constrained to the
+    # environment exactly like the forward install, through the one chokepoint.
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    old = make_spec(version="1.0.0", provides=_tool_provides("pkg.old"))
+    new = make_spec(version="2.0.0", provides=_tool_provides("pkg.new"))
+    h = Harness(manifest={"tools": [{"title": "pkg.old", "module": "pkg.old"}]})
+    h.store.preload(old, version="1.0.0")
+    h.registry.resolved = make_resolved(new, version="2.0.0")
+    h.store.record_error = RuntimeError("attribution write failed")
+    remover = FakePrefixUninstall(h.events)
+    writable = FakeEnsureWritable(h.events)
+    pip = ConstraintReadingPip(h.events)
+
+    with pytest.raises(RuntimeError, match="attribution write failed"):
+        await _prefix_installer(h, remover, writable, env_constraints=_fake_env_constraints, pip=pip).update(
+            "tai42/toolbox"
+        )
+
+    # Two pip calls: the new install, then the unwind's reinstall of the old pin —
+    # BOTH carrying the environment freeze.
+    assert len(pip.calls) == 2
+    assert pip.calls[1][-1] == "tai42-toolbox==1.0.0"
+    assert "--constraint" in pip.calls[1]
+    assert pip.constraint_contents[1] == _FREEZE_TEXT
+
+
+async def test_upgrade_all_prefix_passes_environment_constraints(monkeypatch: pytest.MonkeyPatch) -> None:
+    # upgrade-all drives the ordinary update flow through the same chokepoint, so its
+    # pip install carries the environment freeze too.
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    old = make_spec(version="1.0.0", provides=_tool_provides("pkg.old"))
+    new = make_spec(version="1.2.0", provides=_tool_provides("pkg.new"))
+    h = Harness(manifest={"tools": [{"title": "pkg.old", "module": "pkg.old"}]})
+    h.store.preload(old, version="1.0.0")
+    h.registry.versions_map = {
+        "tai42/toolbox": [
+            {"version": "1.2.0", "status": "published", "contract_range": ">=0.1,<1.0"},
+            {"version": "1.0.0", "status": "published", "contract_range": ">=0.1,<1.0"},
+        ]
+    }
+    h.registry.resolved = make_resolved(new, version="1.2.0")
+    remover = FakePrefixUninstall(h.events)
+    writable = FakeEnsureWritable(h.events)
+    pip = ConstraintReadingPip(h.events)
+
+    report = await _prefix_installer(h, remover, writable, env_constraints=_fake_env_constraints, pip=pip).upgrade_all()
+
+    assert report[0]["outcome"] == "upgraded"
+    assert "--constraint" in pip.calls[0]
+    assert pip.constraint_contents[0] == _FREEZE_TEXT
+
+
+async def test_no_prefix_install_passes_no_constraint(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The no-prefix door installs into the one writable environment pip owns, so no
+    # constraint file is written and no --constraint flag is emitted.
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    h = Harness()
+    spec = make_spec(provides=[{"kind": "tool", "name": "gen-uuid", "module": "pkg.tools.uuid", "description": "d"}])
+    h.registry.resolved = make_resolved(spec, version="1.0.0")
+
+    await h.installer().install("tai42/toolbox")
+
+    assert "--constraint" not in h.pip.calls[0]
+    assert h.pip.calls[0][:3] == ["install", "--no-input", "--disable-pip-version-check"]

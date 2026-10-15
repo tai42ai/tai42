@@ -204,6 +204,7 @@ class _InstallFlow(_InstallerBase):
             source,
             resolved.get("artifact_ref"),
             resolved.get("sha256"),
+            env_constraints=self._env_constraints,
         )
 
         # Migrations run while the plugin is inert (package landed, manifest not yet
