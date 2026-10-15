@@ -27,7 +27,7 @@ from tai42_kit.llm.checkpoint.chunking import (
     resolve_references,
     resolve_tuple,
 )
-from tai42_kit.llm.checkpoint.envelope import envelope_reference, reference_envelope
+from tai42_kit.llm.checkpoint.envelope import CheckpointCodec, envelope_reference, reference_envelope
 from tai42_kit.llm.checkpoint.ledger import (
     FinishedThreadLedger,
     as_utc,
@@ -45,6 +45,7 @@ from tai42_kit.llm.checkpoint.providers import (
     ChannelStorage,
     CheckpointProvider,
     CheckpointProviderFacts,
+    CheckpointWrite,
     RetentionMode,
     UnknownCheckpointProviderError,
     checkpoint_park_horizon,
@@ -71,6 +72,7 @@ __all__ = [
     "REDIS_CHECKPOINT_NOT_CONFIGURED_MESSAGE",
     "REFERENCING_TYPE_SUFFIX",
     "ChannelStorage",
+    "CheckpointCodec",
     "CheckpointProvider",
     "CheckpointProviderFacts",
     "CheckpointReferenceError",
@@ -79,6 +81,7 @@ __all__ = [
     "CheckpointStoreFormatError",
     "CheckpointValueRef",
     "CheckpointValueStore",
+    "CheckpointWrite",
     "FinishedThreadLedger",
     "LiveThreadFilter",
     "MsgpackValueEncoding",

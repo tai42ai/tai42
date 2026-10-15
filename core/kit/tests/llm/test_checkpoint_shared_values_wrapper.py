@@ -20,11 +20,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from tai42_kit.llm.checkpoint import (
+    CheckpointCodec,
     CheckpointProvider,
     CheckpointProviderFacts,
     CheckpointReferenceError,
     CheckpointResource,
     CheckpointSerializationError,
+    CheckpointWrite,
     MsgpackValueEncoding,
     StoredBlob,
     checkpoint_provider,
@@ -35,7 +37,6 @@ from tai42_kit.llm.checkpoint import (
 )
 from tai42_kit.llm.checkpoint.checkpoint import _GuardedSerializer
 from tai42_kit.llm.checkpoint.chunking import ValueChunker
-from tai42_kit.llm.checkpoint.providers import CheckpointWrite
 from tai42_kit.llm.checkpoint.reads import record_failure, record_reference
 from tai42_kit.llm.checkpoint.shared_values import SharedValuesSaver
 from tai42_kit.llm.checkpoint.stores.memory import MemoryFinishedThreadLedger
@@ -184,6 +185,9 @@ async def test_a_stores_own_preparation_is_what_the_inner_saver_is_handed(regist
         facts: ClassVar[CheckpointProviderFacts] = CheckpointProviderFacts(
             durable=False, retention="sweep", channel_storage="per_checkpoint"
         )
+
+        def serializer(self, saver: Any, compress_threshold: int | None) -> tuple[Any, CheckpointCodec | None]:
+            return saver.serde, None
 
         async def prepare_checkpoint(self, write: CheckpointWrite, checkpoint: Any, new_versions: Any) -> Any:
             await write.values.touch(write.thread_id, ["0" * 64])
