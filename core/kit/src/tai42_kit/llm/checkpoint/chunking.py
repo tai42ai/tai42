@@ -220,30 +220,43 @@ FetchBlobs = Callable[[Collection[str]], Awaitable[Mapping[str, StoredBlob]]]
 async def resolve_references(value: Any, encoding: ValueEncoding, fetch: FetchBlobs, thread_id: Any) -> Any:
     """``value`` with every reference inside it, and inside the values it references, resolved.
 
-    The referenced blobs are fetched one round trip per nesting depth. A blob the store does not hold,
-    or one whose encoding is not the length its reference records, raises
+    The referenced blobs, nested ones included (a reference names them), are fetched in one round trip.
+    Every place that references a value receives its own object, as if the value were stored there. A
+    blob the store does not hold, or one whose encoding is not the length its reference records, raises
     :class:`CheckpointReferenceError`; nothing is returned partially resolved.
     """
     pending: dict[str, CheckpointValueRef] = {}
     find_references(value, encoding, pending)
     if not pending:
         return value
-    decoded: dict[str, Any] = {}
-    while pending:
-        blobs = await fetch(list(pending))
-        missing = sorted(digest for digest in pending if digest not in blobs)
+    blobs: dict[str, StoredBlob] = {}
+
+    async def fetch_missing(digests: Collection[str]) -> None:
+        wanted = sorted(digest for digest in digests if digest not in blobs)
+        if not wanted:
+            return
+        fetched = await fetch(wanted)
+        missing = [digest for digest in wanted if digest not in fetched]
         if missing:
             raise CheckpointReferenceError(
                 f"checkpoint thread {thread_id!r} references a value {missing[0]} the store does not hold; "
                 "the thread cannot be read — delete it"
             )
+        blobs.update(fetched)
+
+    await fetch_missing({*pending, *(digest for ref in pending.values() for digest in ref.closure)})
+    refs: dict[str, CheckpointValueRef] = {}
+    decoded: dict[str, Any] = {}
+    while pending:
+        await fetch_missing(pending)
+        refs.update(pending)
         loaded = await asyncio.to_thread(_decode_all, encoding, blobs, pending, thread_id)
         decoded.update(loaded)
         nested: dict[str, CheckpointValueRef] = {}
         for item in loaded.values():
             find_references(item, encoding, nested)
         pending = {digest: ref for digest, ref in nested.items() if digest not in decoded}
-    return await asyncio.to_thread(_resolve_all, value, encoding, decoded)
+    return await asyncio.to_thread(_resolve_all, value, encoding, _Decoded(encoding, blobs, refs, decoded, thread_id))
 
 
 def _decode_all(
@@ -255,13 +268,25 @@ def _decode_all(
     return {digest: encoding.decode(blobs[digest], ref, thread_id) for digest, ref in refs.items()}
 
 
-def _resolve_all(value: Any, encoding: ValueEncoding, decoded: Mapping[str, Any]) -> Any:
-    resolved: dict[str, Any] = {}
+@dataclass
+class _Decoded:
+    """The fetched values of one read: the first place a value fills takes its decode, every other a fresh one."""
 
+    encoding: ValueEncoding
+    blobs: Mapping[str, StoredBlob]
+    refs: Mapping[str, CheckpointValueRef]
+    first: dict[str, Any]
+    thread_id: Any
+
+    def take(self, digest: str) -> Any:
+        if digest in self.first:
+            return self.first.pop(digest)
+        return self.encoding.decode(self.blobs[digest], self.refs[digest], self.thread_id)
+
+
+def _resolve_all(value: Any, encoding: ValueEncoding, decoded: _Decoded) -> Any:
     def lookup(digest: str) -> Any:
-        if digest not in resolved:
-            resolved[digest] = _substitute(decoded[digest], encoding, lookup)
-        return resolved[digest]
+        return _substitute(decoded.take(digest), encoding, lookup)
 
     return _substitute(value, encoding, lookup)
 

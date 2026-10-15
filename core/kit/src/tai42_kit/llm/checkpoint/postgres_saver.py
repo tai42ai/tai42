@@ -151,32 +151,42 @@ class GuardedAsyncPostgresSaver(AsyncPostgresSaver):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Store a checkpoint: the shared values of its changed channels first, then the library's write."""
+        """Store a checkpoint: the shared values of its channels first, then the library's write.
+
+        The library stores a changed channel as a blob of its version, and keeps a string channel inline
+        in every checkpoint row whatever its version. A string above the shared-value threshold is
+        therefore handed over as its reference blob on every checkpoint, with its current version: the
+        library writes that version's blob when it lacks one and keeps the string out of the row.
+        """
         thread_id = str((config.get("configurable") or {})["thread_id"])
         encoding = self._encoding()
+        current = checkpoint["channel_versions"]
 
-        def encode() -> tuple[dict[str, Any], ValueChunker]:
+        def encode() -> tuple[dict[str, Any], dict[str, Any], ValueChunker]:
             chunker = self._chunker(encoding)
             channels: dict[str, Any] = {}
+            versions: dict[str, Any] = dict(new_versions)
             for name, value in checkpoint["channel_values"].items():
-                if name not in new_versions:
+                if isinstance(value, str) and name in current:
+                    rewritten, encoded = chunker.chunk(value)
+                    if rewritten is not value:
+                        channels[name] = PreEncodedValue(encoding.compressed(encoded))
+                        versions.setdefault(name, current[name])
+                    continue
+                if name not in new_versions or _inline_primitive(value):
                     continue
                 if isinstance(value, _DeltaSnapshot):
                     # The library stores a snapshot under its own marker: its payload is chunked in place.
                     channels[name], _encoded = chunker.chunk(value)
                     continue
-                if _inline_primitive(value) and not isinstance(value, str):
-                    continue
-                rewritten, encoded = chunker.chunk(value)
-                if rewritten is value and _inline_primitive(value):
-                    continue
+                _rewritten, encoded = chunker.chunk(value)
                 channels[name] = PreEncodedValue(encoding.compressed(encoded))
-            return channels, chunker
+            return channels, versions, chunker
 
-        channels, chunker = await asyncio.to_thread(encode)
+        channels, versions, chunker = await asyncio.to_thread(encode)
         await self._store_values(thread_id, chunker, encoding)
         rewritten = {**checkpoint, "channel_values": {**checkpoint["channel_values"], **channels}}
-        return await super().aput(config, cast("Checkpoint", rewritten), metadata, new_versions)
+        return await super().aput(config, cast("Checkpoint", rewritten), metadata, cast("ChannelVersions", versions))
 
     async def aput_writes(
         self,
