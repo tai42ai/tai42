@@ -325,6 +325,16 @@ class StatesFacet(_Facet):
         """Erase ``subject``'s document under ``state``."""
         return await self._app._states_service.erase(state, subject, origin=origin)
 
+    async def clear_subject(self, target_kind: str, target_name: str, subject_kind: str, subject_key: str) -> int:
+        """Erase a subject's documents across EVERY state in one transaction; records erased.
+
+        The cross-state RTBF forget: every ``state_records`` row for the subject under every
+        state dies with its aliases, each erased state audited. Internal — no HTTP route; a
+        consumer that forgets a subject whole (the conversation reset) reaches it here. Skeleton
+        -only, off the ``AppStates`` protocol.
+        """
+        return await self._app._states_service.clear_subject(target_kind, target_name, subject_kind, subject_key)
+
     async def fold(
         self, state: str, subject: StateSubject, into: StateSubject, mode: str, *, origin: WriteOrigin
     ) -> dict[str, Any]:

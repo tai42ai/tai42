@@ -466,6 +466,63 @@ class _RecordWriteStore(_StoreBase):
                     cur, state, subject.target_kind, subject.target_name, kind, key, None, origin, [[]], None
                 )
 
+    async def clear_subject(self, subject: StateSubject, *, origin: CompletedOrigin) -> int:
+        """The cross-state RTBF delete — every state the subject appears in, in ONE txn.
+
+        Like :meth:`erase_subject` but WITHOUT the ``state`` filter: a reset that forgets the
+        subject wherever any declaration keeps its memory. Each state the subject holds a record
+        or an alias in is taken under its declaration ``FOR SHARE`` lock, the surviving record
+        dies with every alias pointing at it, and the erase is recorded (paths ``[[]]``);
+        an undeclared state falls through to a plain delete. Alias-aware and idempotent. Returns
+        the count of records erased across every state.
+        """
+        tk, tn, kind, key = _subject_cols(subject)
+        erased = 0
+        async with (
+            _pool(_settings()) as pool,
+            pool.connection() as conn,
+            conn.transaction(),
+            conn.cursor(row_factory=dict_row) as cur,
+        ):
+            await cur.execute(
+                "SELECT state FROM state_records "
+                "WHERE target_kind = %s AND target_name = %s AND subject_kind = %s AND subject_key = %s "
+                "UNION "
+                "SELECT state FROM state_subject_aliases "
+                "WHERE target_kind = %s AND target_name = %s AND alias_kind = %s AND alias_key = %s",
+                (tk, tn, kind, key, tk, tn, kind, key),
+            )
+            states = [row["state"] for row in await cur.fetchall()]
+            for state in states:
+                await cur.execute("SELECT name FROM state_declarations WHERE name = %s FOR SHARE", (state,))
+                declared = await cur.fetchone() is not None
+                if not declared:
+                    await cur.execute(
+                        "DELETE FROM state_records WHERE state = %s AND target_kind = %s AND target_name = %s "
+                        "AND subject_kind = %s AND subject_key = %s",
+                        (state, tk, tn, kind, key),
+                    )
+                    erased += cur.rowcount
+                    continue
+                canonical_kind, canonical_key = await self._resolve_subject(cur, state, subject, check_outbox=True)
+                await cur.execute(
+                    "DELETE FROM state_records WHERE state = %s AND target_kind = %s AND target_name = %s "
+                    "AND subject_kind = %s AND subject_key = %s",
+                    (state, tk, tn, canonical_kind, canonical_key),
+                )
+                deleted = cur.rowcount
+                await cur.execute(
+                    "DELETE FROM state_subject_aliases WHERE state = %s AND target_kind = %s AND target_name = %s "
+                    "AND canonical_kind = %s AND canonical_key = %s",
+                    (state, tk, tn, canonical_kind, canonical_key),
+                )
+                if deleted:
+                    await self._insert_write(
+                        cur, state, tk, tn, canonical_kind, canonical_key, None, origin, [[]], None
+                    )
+                erased += deleted
+        return erased
+
     async def fold_subject(
         self,
         state: str,

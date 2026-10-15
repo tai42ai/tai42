@@ -10131,7 +10131,7 @@
         "type": "object"
       },
       "PersonDeleteResult": {
-        "description": "A person erase.\n\n``removed`` counts the answer records deleted across the person's routes; ``erased`` says whether THIS\ncall removed the person row.",
+        "description": "A person erase.\n\n``removed`` counts the answer records deleted across the person's routes; ``erased`` says whether THIS\ncall removed the person row. ``states_erased`` counts the declared-state records this call forgot — the\nperson's own (``person``-subject) and its aggregated thread's (``thread``-subject) memory.",
         "properties": {
           "erased": {
             "title": "Erased",
@@ -10144,12 +10144,17 @@
           "removed": {
             "title": "Removed",
             "type": "integer"
+          },
+          "states_erased": {
+            "title": "States Erased",
+            "type": "integer"
           }
         },
         "required": [
           "person_id",
           "removed",
-          "erased"
+          "erased",
+          "states_erased"
         ],
         "title": "PersonDeleteResult",
         "type": "object"
@@ -17334,7 +17339,7 @@
         "type": "object"
       },
       "ThreadDeleteResult": {
-        "description": "A thread forget. ``removed`` counts the answer records this call deleted.",
+        "description": "A thread forget. ``removed`` counts the answer records this call deleted.\n\n``states_erased`` counts the thread-subject declared-state records this call forgot across the\nroutes the thread spans (0 when the states feature is off or the thread held no declared state).",
         "properties": {
           "removed": {
             "title": "Removed",
@@ -17344,6 +17349,10 @@
             "title": "Route Name",
             "type": "string"
           },
+          "states_erased": {
+            "title": "States Erased",
+            "type": "integer"
+          },
           "thread_id": {
             "title": "Thread Id",
             "type": "string"
@@ -17352,7 +17361,8 @@
         "required": [
           "removed",
           "route_name",
-          "thread_id"
+          "thread_id",
+          "states_erased"
         ],
         "title": "ThreadDeleteResult",
         "type": "object"
@@ -25312,7 +25322,7 @@
     },
     "/api/conversations/persons/{person_id}": {
       "delete": {
-        "description": "Erase a LINKED person ENTIRELY, forgetting every store that names it.\n\n- the person's aggregated ``bridge:@person:{person_id}`` thread — its agent checkpoint,\n  and across EVERY route the person wrote under its answer records, per-thread transcript\n  indexes, route-thread index memberships and per-thread mode override (the thread-delete\n  machinery, reused);\n- the person row ``conversations:person:{person_id}``;\n- every ``person_index`` ``door_address_key → person_id`` mapping of its addresses.\n\nCaller authority is the door's grantable ``write`` action — the same grant that forgets a\nthread. IDEMPOTENT and retryable: the person row is the durable marker of an owed erase and\nis deleted LAST (atomically with its index mappings), so an interruption re-reads it and a\nretry FINISHES. A person that is already gone (a retry, or one that never existed) is not a\n404 — its aggregated checkpoint is forgotten regardless (it defaults to keep-forever) and\nthe call answers ``erased=false``. A turn IN FLIGHT on the aggregated thread is a 409\n(retry once it drains), re-checked under the per-thread FIFO before any teardown so an\nadmitted turn cannot re-create memory behind the erase; a full queue is the retriable 503.\nAs a live-caller sync door the acquisition is bounded by ``sync_door_wait_seconds`` (both the\nlinked and the already-gone branch): a wait past it — behind a turn possibly HITL-paused on\nanother worker — is the loud, retriable 503 ``ThreadBusyError`` rather than a block past the\nproxy timeout. A blank ``person_id`` is a 400; no backend is a loud 501.\n\nReturns ``{\"person_id\", \"removed\", \"erased\"}``, where ``removed`` counts the answer records\nthis call deleted across the person's routes and ``erased`` says whether THIS call removed\nthe person row.",
+        "description": "Erase a LINKED person ENTIRELY, forgetting every store that names it.\n\n- the person's aggregated ``bridge:@person:{person_id}`` thread — its agent checkpoint,\n  and across EVERY route the person wrote under its answer records, per-thread transcript\n  indexes, route-thread index memberships and per-thread mode override (the thread-delete\n  machinery, reused);\n- the person row ``conversations:person:{person_id}``;\n- every ``person_index`` ``door_address_key → person_id`` mapping of its addresses.\n\nCaller authority is the door's grantable ``write`` action — the same grant that forgets a\nthread. IDEMPOTENT and retryable: the person row is the durable marker of an owed erase and\nis deleted LAST (atomically with its index mappings), so an interruption re-reads it and a\nretry FINISHES. A person that is already gone (a retry, or one that never existed) is not a\n404 — its aggregated checkpoint is forgotten regardless (it defaults to keep-forever) and\nthe call answers ``erased=false``. A turn IN FLIGHT on the aggregated thread is a 409\n(retry once it drains), re-checked under the per-thread FIFO before any teardown so an\nadmitted turn cannot re-create memory behind the erase; a full queue is the retriable 503.\nAs a live-caller sync door the acquisition is bounded by ``sync_door_wait_seconds`` (both the\nlinked and the already-gone branch): a wait past it — behind a turn possibly HITL-paused on\nanother worker — is the loud, retriable 503 ``ThreadBusyError`` rather than a block past the\nproxy timeout. A blank ``person_id`` is a 400; no backend is a loud 501.\n\nReturns ``{\"person_id\", \"removed\", \"erased\", \"states_erased\"}``, where ``removed`` counts the\nanswer records this call deleted across the person's routes, ``erased`` says whether THIS call\nremoved the person row, and ``states_erased`` counts the declared-state records forgotten —\nthe person's own (``person``-subject) and its aggregated thread's (``thread``-subject) memory.",
         "operationId": "delete_api_conversations_persons_person_id",
         "parameters": [
           {
@@ -26390,7 +26400,7 @@
     },
     "/api/conversations/{route_name}/thread": {
       "delete": {
-        "description": "Forget ONE conversation thread: its agent checkpoint, its answer records and its thread indexes.\n\nA later message on the same address starts a memory the deleted turns never touched. A LINKED\nperson's aggregated ``bridge:@person:{id}`` thread is forgotten across every route index it\nspans.\n\nForgetting is ABSOLUTE: a valid id on its own route always succeeds, even when nothing is\nstored. An aged-out thread whose answer records already expired under the retention TTL,\nor one never seen, answers ``removed=0`` and never a 404 — and its checkpoint is deleted\nregardless, because that memory defaults to keep-forever and is otherwise left behind once\nthe records lapse. A route-keyed id MUST carry the route's ``bridge:{route_name}:`` prefix;\nan id belonging to another route is a loud 400, the sole guard stopping a delete on one\nroute from wiping another route's memory. A person ``bridge:@person:{id}`` thread whose\nperson is unknown, or whose ``route_name`` is not one of the person's routes, is a loud\n404. A turn IN FLIGHT on the thread (an ``accepted`` intake still holding a live lease) is\na 409: its completion re-writes checkpoint state and re-stamps the indexes behind the\ndelete, half-forgetting the memory — retry once it drains. The guard is re-checked under\nthe FIFO, so a turn admitted while the lock is being taken is refused before any teardown,\nnever left to re-create memory behind the delete. A ``route_name`` that is not a valid\nslug, or a blank ``thread_id``, is a 400.\n\nCaller authority is the door's grantable write action — the SAME write grant that creates\na route deletes routes and forgets threads — never a per-thread owner check.\n\nThe teardown runs in an order an interruption cannot strand: the checkpoint FIRST — its\nmemory is reachable only through the indexes once this call returns, so it must go while\nthe indexes still name the thread to bring a re-run back — then the records and the indexes\ntogether, the index being the durable marker of an owed reclamation and torn down LAST.\nIdempotent under re-run, so a partial completion is FINISHED by a retry.\n\nThe whole teardown runs under the thread's per-thread FIFO (the lock an operator send and\nan in-flight turn take), so an operator send already in flight on the thread within this\nworker drains BEFORE the delete rather than half-behind it; a full queue is the loud,\nretriable 503 that FIFO raises before anything is torn down. As a live-caller sync door the\nacquisition is bounded by ``sync_door_wait_seconds``: a wait past it — behind a turn possibly\nHITL-paused on another worker — is the loud, retriable 503 ``ThreadBusyError`` rather than a\nblock past the proxy timeout.\n\nReturns ``{\"removed\", \"route_name\", \"thread_id\"}``, where ``removed`` counts the answer\nrecords this call deleted (0 when a prior run already cleared them, when their rows had\nexpired under the retention TTL, or when the id was never stored).",
+        "description": "Forget ONE conversation thread: its agent checkpoint, its answer records and its thread indexes.\n\nA later message on the same address starts a memory the deleted turns never touched. A LINKED\nperson's aggregated ``bridge:@person:{id}`` thread is forgotten across every route index it\nspans.\n\nForgetting is ABSOLUTE: a valid id on its own route always succeeds, even when nothing is\nstored. An aged-out thread whose answer records already expired under the retention TTL,\nor one never seen, answers ``removed=0`` and never a 404 — and its checkpoint is deleted\nregardless, because that memory defaults to keep-forever and is otherwise left behind once\nthe records lapse. A route-keyed id MUST carry the route's ``bridge:{route_name}:`` prefix;\nan id belonging to another route is a loud 400, the sole guard stopping a delete on one\nroute from wiping another route's memory. A person ``bridge:@person:{id}`` thread whose\nperson is unknown, or whose ``route_name`` is not one of the person's routes, is a loud\n404. A turn IN FLIGHT on the thread (an ``accepted`` intake still holding a live lease) is\na 409: its completion re-writes checkpoint state and re-stamps the indexes behind the\ndelete, half-forgetting the memory — retry once it drains. The guard is re-checked under\nthe FIFO, so a turn admitted while the lock is being taken is refused before any teardown,\nnever left to re-create memory behind the delete. A ``route_name`` that is not a valid\nslug, or a blank ``thread_id``, is a 400.\n\nCaller authority is the door's grantable write action — the SAME write grant that creates\na route deletes routes and forgets threads — never a per-thread owner check.\n\nThe teardown runs in an order an interruption cannot strand: the checkpoint FIRST — its\nmemory is reachable only through the indexes once this call returns, so it must go while\nthe indexes still name the thread to bring a re-run back — then the records and the indexes\ntogether, the index being the durable marker of an owed reclamation and torn down LAST.\nIdempotent under re-run, so a partial completion is FINISHED by a retry.\n\nThe whole teardown runs under the thread's per-thread FIFO (the lock an operator send and\nan in-flight turn take), so an operator send already in flight on the thread within this\nworker drains BEFORE the delete rather than half-behind it; a full queue is the loud,\nretriable 503 that FIFO raises before anything is torn down. As a live-caller sync door the\nacquisition is bounded by ``sync_door_wait_seconds``: a wait past it — behind a turn possibly\nHITL-paused on another worker — is the loud, retriable 503 ``ThreadBusyError`` rather than a\nblock past the proxy timeout.\n\nReturns ``{\"removed\", \"route_name\", \"thread_id\", \"states_erased\"}``, where ``removed`` counts\nthe answer records this call deleted (0 when a prior run already cleared them, when their rows\nhad expired under the retention TTL, or when the id was never stored) and ``states_erased``\ncounts the thread-subject declared-state records forgotten across the routes the thread spans\n(0 when the states feature is off or the thread held no declared state).",
         "operationId": "delete_api_conversations_route_name_thread",
         "parameters": [
           {

@@ -344,6 +344,17 @@ class FakeStatesStore:
         self.applied_origins.append(origin)
         self.records.pop((state, subject.target_kind, subject.target_name, subject.kind, subject.key), None)
 
+    async def clear_subject(self, subject, *, origin):
+        self.applied_origins.append(origin)
+        victims = [
+            key
+            for key in self.records
+            if key[1:] == (subject.target_kind, subject.target_name, subject.kind, subject.key)
+        ]
+        for key in victims:
+            del self.records[key]
+        return len(victims)
+
     async def fold_subject(self, state, subject, into, mode, *, origin, catalog):
         self.applied_origins.append(origin)
         return {

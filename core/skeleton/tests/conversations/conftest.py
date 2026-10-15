@@ -347,12 +347,21 @@ class _OpsFakePresets:
 
 class _OpsFakeApp:
     def __init__(self, agents: dict[str, Agent], tools: dict[str, Any], by_id: dict[str, str] | None = None) -> None:
+        from tai42_skeleton.app.facets import StatesFacet
+        from tai42_skeleton.states.service import StatesService
+
         self.agents = _FakeAgents(agents)
         self.tools = _OpsFakeTools(tools)
         self.presets = _OpsFakePresets()
         self._target_validator_registry = TargetBindValidatorRegistry()
         self.conversations = ConversationsFacet(self)  # pyright: ignore[reportArgumentType]
         self.storage = _FakeStorage(_FakeResourceManager(by_id))
+        # The ``app.states`` seam the widened thread/person delete ops reach to forget a
+        # forgotten subject's declared state. Inert while the states feature is unconfigured
+        # (the delete's state-erase step no-ops then); a test that wires the fake state store
+        # drives it through this real service.
+        self._states_service = StatesService()
+        self.states = StatesFacet(self)  # pyright: ignore[reportArgumentType]
 
     def target_validator(self, target_kind, target_name):
         return self._target_validator_registry.get(target_kind, target_name)

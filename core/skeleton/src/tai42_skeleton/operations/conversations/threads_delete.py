@@ -12,6 +12,7 @@ from typing import Any
 from tai42_contract.errors import UnavailableError
 from tai42_contract.states import PERSON_KIND
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.conversations.person_thread import person_routes
 from tai42_skeleton.conversations.thread_ids import (
     RouteThreadId,
@@ -23,6 +24,7 @@ from tai42_skeleton.conversations.thread_ids import (
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.errors import ConflictError, NotSupportedError
 from tai42_skeleton.operations.response_models_group_a import PersonDeleteResult, ThreadDeleteResult
+from tai42_skeleton.states import states_store_configured
 
 from .backend import _require_backend, _thread_not_found
 from .models import ThreadDeleteQuery
@@ -63,6 +65,74 @@ async def _thread_delete_routes(thread_id: str, route_name: str) -> list[str]:
     if person is None or route_name not in person_routes(person):
         raise _thread_not_found(thread_id)
     return sorted(person_routes(person))
+
+
+async def _clear_subjects(targets: list[tuple[str, str]], subjects: list[tuple[str, str]]) -> int:
+    """Erase ``subjects`` across ``targets`` through the states service; the records erased.
+
+    The forget's state half, reached ONLY through the states service seam — conversations never
+    touches ``state_records`` directly. Every target's pending state saves are DRAINED first:
+    a write-before-reply save still unapplied in the outbox has not landed a row yet, so
+    ``clear_subject`` (which discovers states from landed rows and aliases) would miss it and the
+    conversation would later ``remember`` what the reset forgot. Draining lands them first, so the
+    erase then sees and forgets them. A save that cannot be drained (held behind or itself a failed
+    save) is surfaced LOUDLY as a retriable error rather than silently left to resurface — the
+    thread/person is already forgotten, its stuck state remains, and a retry (idempotent) finishes
+    it once the save settles.
+    """
+    unsettled: list[str] = []
+    for target_kind, target_name in targets:
+        unsettled += await instance.app.states.drain_target_saves(target_kind, target_name)
+    if unsettled:
+        raise UnavailableError(
+            "conversation reset cannot forget declared state while pending saves are unsettled; "
+            "retry once they settle: " + "; ".join(unsettled)
+        )
+    erased = 0
+    for target_kind, target_name in targets:
+        for subject_kind, subject_key in subjects:
+            erased += await instance.app.states.clear_subject(target_kind, target_name, subject_kind, subject_key)
+    return erased
+
+
+async def _route_state_targets(route_names: list[str]) -> list[tuple[str, str]]:
+    """The distinct ``(target_kind, target_name)`` scopes the routes resolve to.
+
+    A turn keys a thread's state under its route's target, so the forget clears state under each
+    distinct target the thread's routes resolve to. A route no longer present resolves to no
+    target — the forget stays absolute, as the index teardown is on a route already gone.
+    """
+    manager = _require_backend()
+    targets: dict[tuple[str, str], None] = {}
+    for name in route_names:
+        route = await manager.get_route(name)
+        if route is not None:
+            targets[(route.target_kind, route.target_name)] = None
+    return list(targets)
+
+
+async def _erase_thread_state(route_names: list[str], thread_id: str) -> int:
+    """Forget the thread's own (``thread``-subject) declared-state memory across its routes' targets.
+
+    Runs LAST under the thread FIFO. A no-op (0) when the states feature is unconfigured — there
+    is then no declared state to forget, and no route lookup is made — mirroring the parked-ask
+    cascade's unconfigured no-op.
+    """
+    if not states_store_configured():
+        return 0
+    return await _clear_subjects(await _route_state_targets(route_names), [("thread", thread_id)])
+
+
+async def _erase_person_state(target_kind: str, target_name: str, thread_id: str, person_id: str) -> int:
+    """Forget a person's declared-state memory across the person's one target.
+
+    Its own (``person``-subject) cross-thread memory AND its aggregated thread's (``thread``
+    -subject) memory. A no-op (0) when the states feature is unconfigured, like
+    :func:`_erase_thread_state`.
+    """
+    if not states_store_configured():
+        return 0
+    return await _clear_subjects([(target_kind, target_name)], [("thread", thread_id), (PERSON_KIND, person_id)])
 
 
 def _not_a_thread_of(thread_id: str, route_name: str) -> BadRequestError:
@@ -142,9 +212,11 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
     HITL-paused on another worker — is the loud, retriable 503 ``ThreadBusyError`` rather than a
     block past the proxy timeout.
 
-    Returns ``{"removed", "route_name", "thread_id"}``, where ``removed`` counts the answer
-    records this call deleted (0 when a prior run already cleared them, when their rows had
-    expired under the retention TTL, or when the id was never stored).
+    Returns ``{"removed", "route_name", "thread_id", "states_erased"}``, where ``removed`` counts
+    the answer records this call deleted (0 when a prior run already cleared them, when their rows
+    had expired under the retention TTL, or when the id was never stored) and ``states_erased``
+    counts the thread-subject declared-state records forgotten across the routes the thread spans
+    (0 when the states feature is off or the thread held no declared state).
     """
     _validate_route_name(route_name)
     if not thread_id.strip():
@@ -176,7 +248,11 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
         removed = 0
         for name in route_names:
             removed += await store.drop_thread(name, thread_id)
-    return {"removed": removed, "route_name": route_name, "thread_id": thread_id}
+        # The thread's own declared-state memory, keyed on the thread id exactly as a turn wrote
+        # it (``thread``-subject only; state a flow scoped to the ``person`` is cross-thread
+        # memory that an "Erase person" clears, not a single-thread reset). Last under the lock.
+        states_erased = await _erase_thread_state(route_names, thread_id)
+    return {"removed": removed, "route_name": route_name, "thread_id": thread_id, "states_erased": states_erased}
 
 
 @operation(
@@ -208,9 +284,10 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
     another worker — is the loud, retriable 503 ``ThreadBusyError`` rather than a block past the
     proxy timeout. A blank ``person_id`` is a 400; no backend is a loud 501.
 
-    Returns ``{"person_id", "removed", "erased"}``, where ``removed`` counts the answer records
-    this call deleted across the person's routes and ``erased`` says whether THIS call removed
-    the person row.
+    Returns ``{"person_id", "removed", "erased", "states_erased"}``, where ``removed`` counts the
+    answer records this call deleted across the person's routes, ``erased`` says whether THIS call
+    removed the person row, and ``states_erased`` counts the declared-state records forgotten —
+    the person's own (``person``-subject) and its aggregated thread's (``thread``-subject) memory.
     """
     if not person_id.strip():
         raise BadRequestError("person_id must be a non-blank person identifier")
@@ -238,7 +315,10 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
 
             await cancel_parks_for_thread(thread_id, also_subjects=[(PERSON_KIND, person_id)], reason="person_erased")
             await _delete_thread_checkpoint(thread_id)
-        return {"person_id": person_id, "removed": 0, "erased": False}
+        # Already gone: a prior run (or no person at all) left nothing route-scoped to reclaim,
+        # and the person's state is erased BEFORE its row elsewhere in this door, so a missing
+        # person means its declared state is already forgotten — nothing to clear here.
+        return {"person_id": person_id, "removed": 0, "erased": False, "states_erased": 0}
     route_names = sorted(person_routes(person))
     in_flight_409 = f"conversation person {person_id!r} has a turn in flight; retry once it drains"
     if await store.thread_has_live_intake(thread_id):
@@ -260,7 +340,12 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
         removed = 0
         for name in route_names:
             removed += await store.drop_thread(name, thread_id)
+        # The person's declared-state memory, forgotten BEFORE the person row below: its own
+        # (``person``-subject) cross-thread memory AND its aggregated thread's (``thread``-subject)
+        # memory, across the person's one target. Before the row so a failure here leaves the
+        # durable marker standing and a retry re-runs the erase; the row delete must be truly last.
+        states_erased = await _erase_person_state(person.target_kind, person.target_name, thread_id, person_id)
         # The row (with its index mappings) goes LAST, atomically: it is the durable marker a
         # retry finds the owed work by, so an interrupted run re-reads it and finishes.
         erased, _fields = await person_store.erase(person)
-    return {"person_id": person_id, "removed": removed, "erased": erased}
+    return {"person_id": person_id, "removed": removed, "erased": erased, "states_erased": states_erased}

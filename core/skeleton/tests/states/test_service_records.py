@@ -79,6 +79,20 @@ async def test_erase_removes_the_record(svc: StatesService) -> None:
     assert await svc.read("alerts", _subject()) is None
 
 
+async def test_clear_subject_erases_the_subject_across_states_and_returns_the_count(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    await svc.replace("alerts", _subject(), {"n": 1}, origin=_ORIGIN)
+    await svc.replace("alerts", _subject(key="other"), {"n": 2}, origin=_ORIGIN)
+
+    erased = await svc.clear_subject("agent", "a", "thread", "t1")
+
+    assert erased == 1
+    assert await svc.read("alerts", _subject()) is None
+    survivor = await svc.read("alerts", _subject(key="other"))
+    assert survivor is not None
+    assert survivor.data == {"n": 2}
+
+
 async def test_fold_delegates_to_the_store(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     report = await svc.fold("alerts", _subject(key="old"), _subject(key="new"), "switch", origin=_ORIGIN)

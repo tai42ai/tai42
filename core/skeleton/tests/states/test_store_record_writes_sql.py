@@ -483,6 +483,69 @@ async def test_erase_undeclared_plain_delete(pg: FakeStatesPg, store: PostgresSt
     assert pg.writes == []
 
 
+async def test_clear_subject_erases_across_every_state_with_aliases_and_audit(
+    pg: FakeStatesPg, store: PostgresStatesStore
+) -> None:
+    pg.seed_declaration("alerts")
+    pg.seed_declaration("notes")
+    pg.seed_record("alerts", "agent", "a", "thread", "t1", {"n": 1})
+    pg.seed_record("notes", "agent", "a", "thread", "t1", {"n": 2})
+    # A fold in one state left an alias pointing at the subject's canonical record.
+    pg.aliases[("alerts", "agent", "a", "thread", "old")] = {
+        "state": "alerts",
+        "target_kind": "agent",
+        "target_name": "a",
+        "alias_kind": "thread",
+        "alias_key": "old",
+        "canonical_kind": "thread",
+        "canonical_key": "t1",
+        "mode": "switch",
+    }
+
+    erased = await store.clear_subject(_subj(key="t1"), origin=_ORIGIN)
+
+    assert erased == 2  # the record in EACH state
+    assert await store.read_record("alerts", _subj(key="t1")) == (None, None)
+    assert await store.read_record("notes", _subj(key="t1")) == (None, None)
+    assert pg.aliases == {}  # the alias pointing at the erased survivor died with it
+    assert sorted(w["state"] for w in pg.writes) == ["alerts", "notes"]  # one RTBF audit per erased state
+    assert all(w["paths"] == [[]] for w in pg.writes)
+
+
+async def test_clear_subject_leaves_a_different_subject_or_target_untouched(
+    pg: FakeStatesPg, store: PostgresStatesStore
+) -> None:
+    pg.seed_declaration("alerts")
+    pg.seed_record("alerts", "agent", "a", "thread", "t1", {"n": 1})
+    pg.seed_record("alerts", "agent", "a", "thread", "t2", {"n": 2})  # a different key
+    pg.seed_record("alerts", "agent", "b", "thread", "t1", {"n": 3})  # a different target_name
+    pg.seed_record("alerts", "agent", "a", "person", "t1", {"n": 4})  # a different subject kind
+
+    erased = await store.clear_subject(_subj(key="t1"), origin=_ORIGIN)
+
+    assert erased == 1
+    assert await store.read_record("alerts", _subj(key="t1")) == (None, None)
+    assert (await store.read_record("alerts", _subj(key="t2")))[0] == {"n": 2}
+    assert (await store.read_record("alerts", _subj(key="t1", tn="b")))[0] == {"n": 3}
+    assert (await store.read_record("alerts", _subj(key="t1", kind="person")))[0] == {"n": 4}
+
+
+async def test_clear_subject_idempotent_returns_zero_when_absent(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+    pg.seed_declaration("alerts")
+    assert await store.clear_subject(_subj(key="gone"), origin=_ORIGIN) == 0
+    assert pg.writes == []  # nothing deleted → no ledger row
+
+
+async def test_clear_subject_erases_an_undeclared_state_without_audit(
+    pg: FakeStatesPg, store: PostgresStatesStore
+) -> None:
+    pg.seed_record("orphan", "agent", "a", "thread", "t1", {"n": 1})
+    erased = await store.clear_subject(_subj(key="t1"), origin=_ORIGIN)
+    assert erased == 1
+    assert pg.records == {}
+    assert pg.writes == []  # undeclared state → plain delete, no audit
+
+
 async def test_fold_switch_lands_old_key_on_survivor(
     pg: FakeStatesPg, store: PostgresStatesStore, catalog: CatalogSnapshot
 ) -> None:

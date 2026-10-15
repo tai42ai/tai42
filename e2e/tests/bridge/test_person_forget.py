@@ -161,4 +161,4 @@ async def test_erasing_a_linked_person_forgets_every_person_scoped_store(
 
     # (3) a second erase of the same id is idempotent — not a 404.
     again = await bridge.api().delete(f"/api/conversations/persons/{survivor}")
-    assert again == {"person_id": survivor, "removed": 0, "erased": False}
+    assert again == {"person_id": survivor, "removed": 0, "erased": False, "states_erased": 0}

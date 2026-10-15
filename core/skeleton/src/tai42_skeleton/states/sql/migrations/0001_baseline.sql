@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS state_records (
     PRIMARY KEY (state, target_kind, target_name, subject_kind, subject_key)
 );
 CREATE INDEX IF NOT EXISTS state_records_data_gin ON state_records USING gin (data jsonb_path_ops);
+-- The subject across every state: the PK is led by `state`, so a cross-state delete of one
+-- subject (the conversation reset that forgets a thread's or person's declared-state records
+-- wherever a declaration keeps them) omits `state` and cannot use the PK. This index serves it.
+CREATE INDEX IF NOT EXISTS state_records_subject_idx
+    ON state_records (target_kind, target_name, subject_kind, subject_key);
 
 -- A subject alias: a fold leaves ONE live record and an alias row, and every record
 -- access resolves the subject through this table (one hop by invariant — a fold

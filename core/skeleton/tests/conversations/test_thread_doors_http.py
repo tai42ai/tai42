@@ -257,8 +257,8 @@ def delete_client(monkeypatch) -> tuple[TestClient, _RecordingSaver]:
     monkeypatch.setattr(importlib.import_module("tai42_skeleton.conversations.thread_lease"), "client_ctx", ctx)
     router = _router()
 
-    op_globals = router._delete_conversation_thread_op.__globals__
-    monkeypatch.setitem(op_globals, "get_conversations_manager", lambda: _DictManager())
+    seam_pkg = router._delete_conversation_thread_op.__globals__["_pkg"]
+    monkeypatch.setattr(seam_pkg, "get_conversations_manager", lambda: _DictManager())
 
     saver = _RecordingSaver()
 
@@ -325,7 +325,12 @@ async def test_delete_thread_door_answers_200_and_forgets_the_memory(delete_clie
     response = client.delete("/api/conversations/chat/thread", params={"thread_id": _DELETE_THREAD})
 
     assert response.status_code == 200
-    assert response.json()["data"] == {"removed": 1, "route_name": "chat", "thread_id": _DELETE_THREAD}
+    assert response.json()["data"] == {
+        "removed": 1,
+        "route_name": "chat",
+        "thread_id": _DELETE_THREAD,
+        "states_erased": 0,
+    }
     assert saver.deleted == [_DELETE_THREAD]
 
 
@@ -360,7 +365,12 @@ async def test_delete_thread_door_answers_200_removed_zero_for_a_never_seen_thre
     response = client.delete("/api/conversations/chat/thread", params={"thread_id": "bridge:chat:never"})
 
     assert response.status_code == 200
-    assert response.json()["data"] == {"removed": 0, "route_name": "chat", "thread_id": "bridge:chat:never"}
+    assert response.json()["data"] == {
+        "removed": 0,
+        "route_name": "chat",
+        "thread_id": "bridge:chat:never",
+        "states_erased": 0,
+    }
     assert saver.deleted == ["bridge:chat:never"]
 
 
@@ -423,8 +433,8 @@ def person_delete_client(monkeypatch) -> tuple[TestClient, _RecordingSaver]:
     monkeypatch.setattr(importlib.import_module("tai42_skeleton.conversations.thread_lease"), "client_ctx", ctx)
     router = _router()
 
-    op_globals = router._delete_conversation_person_op.__globals__
-    monkeypatch.setitem(op_globals, "get_conversations_manager", lambda: _DictManager())
+    seam_pkg = router._delete_conversation_person_op.__globals__["_pkg"]
+    monkeypatch.setattr(seam_pkg, "get_conversations_manager", lambda: _DictManager())
 
     saver = _RecordingSaver()
 
@@ -459,5 +469,5 @@ async def test_delete_person_door_erases_an_unknown_person_idempotently(person_d
     response = client.delete("/api/conversations/persons/p-unknown")
 
     assert response.status_code == 200
-    assert response.json()["data"] == {"person_id": "p-unknown", "removed": 0, "erased": False}
+    assert response.json()["data"] == {"person_id": "p-unknown", "removed": 0, "erased": False, "states_erased": 0}
     assert saver.deleted == ["bridge:@person:p-unknown"]
