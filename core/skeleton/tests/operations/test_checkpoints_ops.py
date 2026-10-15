@@ -22,6 +22,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.backend import CrontabCadence
 from tai42_contract.manifest import ApiToolsConfig
 from tai42_kit.llm.checkpoint import (
+    CHECKPOINT_STORE_FORMAT_GENERATION,
     CheckpointProvider,
     CheckpointProviderFacts,
     CheckpointResource,
@@ -33,8 +34,8 @@ from tai42_kit.llm.checkpoint import (
     register_checkpoint_provider,
     register_live_thread_filter,
 )
-from tai42_kit.llm.checkpoint.stores.memory import MemoryCheckpointValueStore, MemoryFinishedThreadLedger
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
+from tai42_kit.llm.checkpoint.stores.memory import MemoryCheckpointValueStore, MemoryFinishedThreadLedger
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.operations import OperationRegistry, operation_metadata_of
@@ -409,7 +410,8 @@ class _DurableSweptStore(CheckpointProvider):
         return MsgpackValueEncoding(saver.serde, compress_threshold)
 
     async def recorded_generation(self, resource: Any) -> int | None:
-        return None
+        # A store that starts empty with its process holds nothing written in an older format.
+        return CHECKPOINT_STORE_FORMAT_GENERATION
 
     async def record_generation(self, resource: Any, generation: int) -> None:
         return None

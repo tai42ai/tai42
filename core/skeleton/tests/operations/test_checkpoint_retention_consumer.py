@@ -214,7 +214,8 @@ async def test_the_sweep_leaves_no_document_of_a_finished_thread_with_more_write
     result = await checkpoints_ops.sweep_checkpoints()
 
     assert thread_id in result["finished_swept"]
-    remaining = [key async for key in saver._redis.scan_iter(match=f"*{thread_id}*", count=5000)]
+    client = (await checkpoint_registry().resource(provider, conn_string)).handle.client
+    remaining = [key async for key in client.scan_iter(match=f"*{thread_id}*", count=5000)]
     assert remaining == []
 
 
@@ -305,13 +306,14 @@ async def test_a_declared_waiting_is_the_key_ttl_of_every_key_on_redis(
     declared, undeclared = f"probe-ttl-short-{run}", f"probe-ttl-default-{run}"
     await _run_to_finish(saver, declared)
     await _run_to_finish(default, undeclared)
+    client = (await registry.resource(provider, conn_string)).handle.client
     try:
-        declared_keys = [key async for key in saver._redis.scan_iter(match=f"*{declared}*")]
+        declared_keys = [key async for key in client.scan_iter(match=f"*{declared}*")]
         assert declared_keys
         for key in declared_keys:
-            assert 60 < await saver._redis.ttl(key) <= 120, key
-        for key in [key async for key in saver._redis.scan_iter(match=f"*{undeclared}*")]:
-            assert await saver._redis.ttl(key) > 120, key
+            assert 60 < await client.ttl(key) <= 120, key
+        for key in [key async for key in client.scan_iter(match=f"*{undeclared}*")]:
+            assert await client.ttl(key) > 120, key
     finally:
         await default.adelete_thread(declared)
         await default.adelete_thread(undeclared)
