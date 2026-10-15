@@ -5,7 +5,8 @@ by both this dir's ``conftest`` and its spec module. Reuses the shared manifest
 primitives from ``tai42_e2e.manifests`` and sets only the ``LLM_PROVIDER_*`` checkpoint
 knobs (``core/kit/src/tai42_kit/llm/settings.py``), so the profile diverges from the
 others in exactly the dimension under test — the checkpoint provider, its two retention
-horizons and the shared-value threshold."""
+horizons, and the shared values: the switch ``LLM_PROVIDER_CHECKPOINT_SHARED_VALUES`` (left
+unset, the provider's own default) and the size ``LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES``."""
 
 from __future__ import annotations
 
@@ -27,8 +28,8 @@ from tai42_e2e.variants import Variants
 WAITING_MINUTES = 60
 FINISHED_MINUTES = 30
 
-# A checkpoint sub-value above this many bytes is stored once per thread and referenced: low
-# enough that the spec's threads carry shared values on the providers that store them.
+# Where sharing is on, a checkpoint sub-value above this many bytes is stored once per thread and
+# referenced: low enough that the spec's threads carry shared values there.
 SHARED_VALUE_BYTES = 1024
 
 
@@ -50,11 +51,13 @@ def checkpoint_conn_string(provider: str, res: StackResources) -> str:
     raise ValueError(f"unsupported checkpoint provider: {provider!r}")
 
 
-def build_checkpoint_stack(res: StackResources, variants: Variants, *, provider: str) -> StackConfig:
+def build_checkpoint_stack(
+    res: StackResources, variants: Variants, *, provider: str, shared_values: bool | None = None
+) -> StackConfig:
     """MULTIWORKER(1), no backend — the ``_CORE_ROUTERS`` surface plus the checkpoints
     router (so ``sweep_checkpoints`` projects as a tool and ``POST /api/checkpoints/sweep``
     is mounted), pinned to a checkpoint provider, the two retention horizons and the
-    shared-value threshold."""
+    shared-value size; ``shared_values`` sets the switch, ``None`` leaves the provider's default."""
     manifest = {
         "default_routers": "none",
         "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.checkpoints"],
@@ -73,8 +76,11 @@ def build_checkpoint_stack(res: StackResources, variants: Variants, *, provider:
     env["LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES"] = str(WAITING_MINUTES)
     env["LLM_PROVIDER_CHECKPOINT_RETENTION_FINISHED_MINUTES"] = str(FINISHED_MINUTES)
     env["LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES"] = str(SHARED_VALUE_BYTES)
+    if shared_values is not None:
+        env["LLM_PROVIDER_CHECKPOINT_SHARED_VALUES"] = "true" if shared_values else "false"
+    suffix = "" if shared_values is None else ("-shared" if shared_values else "-inline")
     return StackConfig(
-        name=f"checkpoint-{provider}",
+        name=f"checkpoint-{provider}{suffix}",
         topology=Topology.MULTIWORKER,
         manifest=manifest,
         env=env,

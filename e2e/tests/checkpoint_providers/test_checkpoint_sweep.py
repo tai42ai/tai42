@@ -11,8 +11,9 @@ the harness then opens the SAME store through the kit's own resource builder on 
 the SUT is pinned to, seeds threads — one with its newest checkpoint backdated past the waiting
 horizon, one marked finished past the finished horizon, one fresh — and sweeps again. Ageing is
 by backdating the checkpoint ``ts`` and the finished mark's due time — no wall-clock sleeps.
-Every seeded thread carries a value above the stack's shared-value threshold, so on ``redis`` and
-``postgres`` it holds a shared value, which leaves with the thread.
+Every seeded thread carries a value above the stack's shared-value size, so where the stack stores
+values once (``redis`` by default, ``postgres`` with the switch on) it holds a shared value, which
+leaves with the thread.
 
 A thread's owner may declare a shorter retention for it: the harness writes such a thread through
 the kit's saver view (``redis``: its keys carry the declared waiting as their TTL) or records the
@@ -44,11 +45,14 @@ _DOCUMENT = {"title": "document", "a": "a" * (SHARED_VALUE_BYTES // 2), "b": "b"
 
 
 @contextlib.asynccontextmanager
-async def _harness_store(provider: str, conn_string: str, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
+async def _harness_store(
+    provider: str, conn_string: str, monkeypatch: pytest.MonkeyPatch, shared_values: bool | None = None
+) -> AsyncIterator[Any]:
     """The stack's checkpoint store opened through the kit, as the SUT opens it: ``(saver, ledger, client, resource)``.
 
-    The harness process carries the stack's retention settings, so a thread it writes on the
-    ``redis`` provider carries the same waiting TTL the SUT's writes do.
+    The harness process carries the stack's retention and shared-value settings, so a thread it
+    writes on the ``redis`` provider carries the same waiting TTL the SUT's writes do, and every
+    write stores its values as the SUT's do.
     """
     from tai42_kit.llm.checkpoint.checkpoint import create_checkpoint_resource, get_saver_from_resource
     from tai42_kit.settings import reset_all_settings
@@ -56,6 +60,10 @@ async def _harness_store(provider: str, conn_string: str, monkeypatch: pytest.Mo
     monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES", str(WAITING_MINUTES))
     monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_FINISHED_MINUTES", str(FINISHED_MINUTES))
     monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES", str(SHARED_VALUE_BYTES))
+    if shared_values is None:
+        monkeypatch.delenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUES", raising=False)
+    else:
+        monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUES", "true" if shared_values else "false")
     reset_all_settings()
     resource, close = await create_checkpoint_resource(provider, conn_string)
     try:
@@ -84,7 +92,7 @@ async def _write_thread(saver: Any, thread_id: str, ts: datetime) -> None:
 
 
 async def _shared_values(provider: str, resource: Any, thread_id: str) -> int:
-    """How many shared values ``thread_id`` holds in the store (``sqlite`` stores none)."""
+    """How many shared values ``thread_id`` holds in the store (a provider with no value store holds none)."""
     if provider == "redis":
         pattern = f"tai42:checkpoint:value:{{{thread_id}}}:*"
         return len([key async for key in resource.redis_client.scan_iter(match=pattern)])
@@ -102,9 +110,11 @@ async def _sweep(stack: TaiStack) -> dict[str, Any]:
 
 @pytest.mark.needs("store:postgres", "files", "setting:LLM_PROVIDER_CHECKPOINT")
 async def test_sweep_deletes_threads_past_each_horizon(
-    checkpoint_stack: tuple[TaiStack, str], uniq: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+    checkpoint_stack: tuple[TaiStack, str, bool | None], uniq: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    stack, provider = checkpoint_stack
+    from tai42_kit.llm.checkpoint import shared_value_threshold
+
+    stack, provider, shared_values = checkpoint_stack
     conn_string = checkpoint_conn_string(provider, stack.resources)
     await _sweep(stack)
 
@@ -116,12 +126,12 @@ async def test_sweep_deletes_threads_past_each_horizon(
     # unambiguous for the aged threads and the fresh one is inside both.
     aged = now - timedelta(hours=3)
 
-    async with _harness_store(provider, conn_string, monkeypatch) as (saver, ledger, _client, resource):
+    async with _harness_store(provider, conn_string, monkeypatch, shared_values) as (saver, ledger, _client, resource):
         await _write_thread(saver, stale_id, aged)
         await _write_thread(saver, finished_id, now)
         await _write_thread(saver, fresh_id, now)
-        if provider == "postgres":
-            assert await _shared_values(provider, resource, stale_id) == 1
+        expected = 1 if shared_value_threshold(provider) is not None else 0
+        assert await _shared_values(provider, resource, stale_id) == expected
         await ledger.mark([finished_id], aged)
         for thread_id in (stale_id, finished_id, fresh_id):
             assert await saver.aget_tuple(_thread_config(thread_id)) is not None
@@ -183,11 +193,11 @@ async def test_redis_sweep_deletes_finished_threads_and_leaves_waiting_ones_to_t
 
 @pytest.mark.needs("store:postgres", "files", "setting:LLM_PROVIDER_CHECKPOINT")
 async def test_sweep_applies_a_thread_declared_retention(
-    checkpoint_stack: tuple[TaiStack, str], uniq: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+    checkpoint_stack: tuple[TaiStack, str, bool | None], uniq: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from tai42_kit.llm.checkpoint import ThreadRetention
 
-    stack, provider = checkpoint_stack
+    stack, provider, shared_values = checkpoint_stack
     conn_string = checkpoint_conn_string(provider, stack.resources)
     await _sweep(stack)
 
@@ -199,7 +209,12 @@ async def test_sweep_applies_a_thread_declared_retention(
     recent = now - timedelta(minutes=5)
     short = ThreadRetention(waiting_minutes=2, finished_minutes=1)
 
-    async with _harness_store(provider, conn_string, monkeypatch) as (saver, ledger, _client, _resource):
+    async with _harness_store(provider, conn_string, monkeypatch, shared_values) as (
+        saver,
+        ledger,
+        _client,
+        _resource,
+    ):
         await ledger.start([declared_id, finished_id], short)
         await _write_thread(saver, declared_id, recent)
         await _write_thread(saver, undeclared_id, recent)
