@@ -341,7 +341,7 @@ def _postgres_stored(saver: Any, value: Any) -> tuple[dict[str, tuple[str, bytes
     rewritten, encoded = chunker.chunk(value)
     assert rewritten is not value
     store = FakeValueStore({digest: encoding.store_form(enc) for digest, enc in chunker.blobs.items()})
-    return {"v": saver.serde.dumps_typed(PreEncodedValue(encoding.inline_form(encoded), references=True))}, store
+    return {"v": saver.serde.dumps_typed(PreEncodedValue(saver.serde.inline_form(encoded), references=True))}, store
 
 
 async def test_a_postgres_read_without_references_walks_nothing(monkeypatch, walks):

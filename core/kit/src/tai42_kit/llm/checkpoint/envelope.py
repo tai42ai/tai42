@@ -72,10 +72,18 @@ def envelope_reference(value: Any) -> CheckpointValueRef | None:
 
 
 class CheckpointCodec(Protocol):
-    """A codec the serialization guard installs around a saver's serializer."""
+    """A codec the serialization guard installs around a saver's serializer.
+
+    Every value the saver stores is written by the codec, and read back by it: a value the kit
+    encoded ahead of the saver takes the codec's :meth:`inline_form`.
+    """
 
     def dumps_typed(self, inner: Any, obj: Any) -> tuple[str, bytes]:
         """Encode ``obj`` through ``inner``."""
+        ...
+
+    def inline_form(self, inner: Any, encoded: tuple[str, bytes]) -> tuple[str, bytes]:
+        """The ``(type, bytes)`` the saver stores for a value ``inner`` encoded as ``encoded``."""
         ...
 
     def loads_typed(self, inner: Any, data: tuple[str, bytes]) -> Any:
@@ -92,10 +100,14 @@ class BlobCompressCodec:
 
     def dumps_typed(self, inner: Any, obj: Any) -> tuple[str, bytes]:
         """Encode ``obj`` with the saver's serializer; a large msgpack blob is compressed."""
-        type_, data = inner.dumps_typed(obj)
+        return self.inline_form(inner, inner.dumps_typed(obj))
+
+    def inline_form(self, inner: Any, encoded: tuple[str, bytes]) -> tuple[str, bytes]:
+        """``encoded``, compressed under its own type tag when it is a msgpack blob above the threshold."""
+        type_, data = encoded
         if type_ == "msgpack" and self._threshold is not None and len(data) > self._threshold:
             return COMPRESSED_BLOB_TYPE, zlib.compress(data, ZLIB_LEVEL)
-        return type_, data
+        return encoded
 
     def loads_typed(self, inner: Any, data: tuple[str, bytes]) -> Any:
         """Decode a blob; a compressed one is decompressed first, and a corrupt one raises."""

@@ -118,7 +118,8 @@ class _GuardedSerializer:
     value that holds a reference to a shared value is stored under its type tag with
     :data:`REFERENCING_TYPE_SUFFIX`; reading such a value strips the suffix and announces the
     reference to the read in progress. ``dumps_plain_typed`` and ``dumps_metadata_typed`` encode
-    through the inner serializer alone (no codec). All other serializer methods delegate unchanged.
+    through the inner serializer alone (no codec); :meth:`inline_form` gives such an encoding the form
+    the codec stores. All other serializer methods delegate unchanged.
     """
 
     def __init__(self, inner: Any, codec: CheckpointCodec | None = None) -> None:
@@ -152,6 +153,13 @@ class _GuardedSerializer:
 
     def dumps_metadata_typed(self, obj: Any) -> tuple[str, bytes]:
         return self.dumps_plain_typed(obj)
+
+    def inline_form(self, encoded: tuple[str, bytes]) -> tuple[str, bytes]:
+        """The form this serializer stores for a value its inner serializer encoded as ``encoded``.
+
+        It is the codec's, so :meth:`loads_typed` reads it back; without a codec, ``encoded`` itself.
+        """
+        return self._codec.inline_form(self._inner, encoded) if self._codec is not None else encoded
 
     def dumps(self, obj: Any) -> bytes:
         try:

@@ -24,7 +24,7 @@ class MsgpackValueEncoding:
     """A store's msgpack encoding, for the chunker, its value store and the resolver."""
 
     def __init__(self, serde: Any, compress_threshold: int | None) -> None:
-        """Encode through ``serde``'s inner serializer; a msgpack blob above ``compress_threshold`` is compressed.
+        """Encode through ``serde``'s inner serializer; a value-store blob above ``compress_threshold`` is compressed.
 
         ``serde`` is the guarded serializer the kit installs on the saver.
         """
@@ -43,16 +43,11 @@ class MsgpackValueEncoding:
         """A reference as msgpack reads it back: the ``ref`` envelope dictionary."""
         return envelope_reference(value)
 
-    def inline_form(self, encoded: tuple[str, bytes]) -> tuple[str, bytes]:
-        """``encoded``, zlib compressed under its own type tag when it is msgpack above the compress threshold."""
+    def store_form(self, encoded: tuple[str, bytes]) -> StoredBlob:
+        """The blob, zlib compressed under its own type tag when it is msgpack above the compress threshold."""
         type_, data = encoded
         if type_ == _MSGPACK and self._compress_threshold is not None and len(data) > self._compress_threshold:
-            return COMPRESSED_BLOB_TYPE, zlib.compress(data, ZLIB_LEVEL)
-        return encoded
-
-    def store_form(self, encoded: tuple[str, bytes]) -> StoredBlob:
-        """The blob, compressed above the compress threshold."""
-        type_, data = self.inline_form(encoded)
+            return StoredBlob(COMPRESSED_BLOB_TYPE, zlib.compress(data, ZLIB_LEVEL))
         return StoredBlob(type_, data)
 
     def decode(self, blob: StoredBlob, ref: CheckpointValueRef, thread_id: Any) -> Any:

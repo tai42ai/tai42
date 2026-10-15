@@ -590,6 +590,26 @@ def test_the_guard_routes_blobs_through_the_codec():
     assert serde.loads_typed((type_, data)) == {"pad": "z" * 100}
 
 
+@pytest.mark.parametrize("codec", [None, BlobCompressCodec(10)], ids=["no codec", "blob compression"])
+def test_a_value_encoded_ahead_of_the_saver_takes_the_form_its_serializer_reads_back(codec):
+    from tai42_kit.llm.checkpoint.checkpoint import PreEncodedValue
+
+    serde = _GuardedSerializer(JsonPlusSerializer(), codec)
+    value = {"pad": "z" * 100}
+    stored = serde.dumps_typed(PreEncodedValue(serde.inline_form(serde.dumps_plain_typed(value))))
+    assert stored == serde.dumps_typed(value)
+    assert stored[0] == ("msgpack" if codec is None else COMPRESSED_BLOB_TYPE)
+    assert serde.loads_typed(stored) == value
+
+
+def test_the_redis_codec_keeps_a_value_encoded_ahead_of_the_saver_as_its_text():
+    from tai42_kit.llm.checkpoint.codec import FaithfulRedisSerializer, RedisFaithfulCodec
+
+    encoded = ("json", b'{"pad": "' + b"z" * 100 + b'"}')
+    serde = _GuardedSerializer(FaithfulRedisSerializer(), RedisFaithfulCodec(10))
+    assert serde.inline_form(encoded) == encoded
+
+
 # --------------------------------------------------------------------------- #
 # A read announces the references it decodes
 # --------------------------------------------------------------------------- #

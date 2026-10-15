@@ -70,7 +70,7 @@ async def _prepare_whole(write: CheckpointWrite, checkpoint: Checkpoint) -> Chec
         if not rewritten:
             return checkpoint, chunker.blobs
         whole = {**checkpoint, "channel_values": channels}
-        encoded = write.encoding.inline_form(write.encoding.encode(whole))
+        encoded = write.inline_form(write.encoding.encode(whole))
         return cast("Checkpoint", PreEncodedCheckpoint(whole, encoded, references=True)), chunker.blobs
 
     prepared, blobs = await asyncio.to_thread(encode)
@@ -96,7 +96,7 @@ async def _prepare_per_version(
                 channels[name], _encoded = chunker.chunk(value)
                 continue
             rewritten, encoded = chunker.chunk(value)
-            channels[name] = PreEncodedValue(write.encoding.inline_form(encoded), references=rewritten is not value)
+            channels[name] = PreEncodedValue(write.inline_form(encoded), references=rewritten is not value)
         return channels, chunker.blobs
 
     channels, blobs = await asyncio.to_thread(encode)
@@ -113,7 +113,7 @@ async def prepare_writes(write: CheckpointWrite, writes: Sequence[tuple[str, Any
         for channel, value in writes:
             rewritten, encoded = chunker.chunk(value)
             encoded_writes.append(
-                (channel, PreEncodedValue(write.encoding.inline_form(encoded), references=rewritten is not value))
+                (channel, PreEncodedValue(write.inline_form(encoded), references=rewritten is not value))
             )
         return encoded_writes, chunker.blobs
 

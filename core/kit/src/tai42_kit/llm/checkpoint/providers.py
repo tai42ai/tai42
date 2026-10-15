@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import timedelta
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, cast, get_args
 
 from tai42_kit.llm.settings import llm_provider_settings
 from tai42_kit.registry.staged import NamedFactoryRegistry
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
     from langgraph.checkpoint.base import BaseCheckpointSaver, ChannelVersions, Checkpoint
 
-    from tai42_kit.llm.checkpoint.checkpoint import CheckpointResource
+    from tai42_kit.llm.checkpoint.checkpoint import CheckpointResource, _GuardedSerializer
     from tai42_kit.llm.checkpoint.chunking import ValueChunker, ValueEncoding
     from tai42_kit.llm.checkpoint.envelope import CheckpointCodec
     from tai42_kit.llm.checkpoint.retention import ThreadRetention
@@ -99,6 +99,13 @@ class CheckpointWrite:
 
         return ValueChunker(self.encoding, self.threshold)
 
+    def inline_form(self, encoded: tuple[str, bytes]) -> tuple[str, bytes]:
+        """The ``(type, bytes)`` to hand the saver for a value the store's encoding encoded as ``encoded``.
+
+        It is the form the saver's guarded serializer stores, so the saver reads it back.
+        """
+        return cast("_GuardedSerializer", self.saver.serde).inline_form(encoded)
+
     async def store(self, digests: Collection[str], blobs: Mapping[str, tuple[str, bytes]]) -> None:
         """Re-arm every digest of ``digests`` and store the missing ones from ``blobs``, in their store form.
 
@@ -164,8 +171,9 @@ class CheckpointProvider(ABC):
     ) -> tuple[Any, CheckpointCodec | None]:
         """The serializer the kit guards on ``saver`` and the codec it installs around it.
 
-        ``compress_threshold`` is ``LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES``. Default: the
-        saver's own serializer and no codec.
+        The codec writes and reads back every value the saver stores, a value the kit encoded ahead of
+        the saver included. ``compress_threshold`` is ``LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES``.
+        Default: the saver's own serializer and no codec.
         """
         return saver.serde, None
 

@@ -84,10 +84,6 @@ class RedisJsonValueEncoding:
         """A reference as the reviver reads it back."""
         return value if isinstance(value, CheckpointValueRef) else None
 
-    def inline_form(self, encoded: tuple[str, bytes]) -> tuple[str, bytes]:
-        """The JSON text as it is: the Redis document holds it inline."""
-        return encoded
-
     def store_form(self, encoded: tuple[str, bytes]) -> StoredBlob:
         """The JSON text, zlib compressed above the compress threshold."""
         data = encoded[1]

@@ -365,6 +365,10 @@ class RedisFaithfulCodec:
             return "json", self._encoder.encode_checkpoint(obj, {}, chunker)
         return self._encoder.encode_write(obj, chunker)
 
+    def inline_form(self, inner: FaithfulRedisSerializer, encoded: tuple[str, bytes]) -> tuple[str, bytes]:
+        """The JSON text as it is: the Redis document holds it inline."""
+        return encoded
+
     def loads_typed(self, inner: FaithfulRedisSerializer, data: tuple[str, bytes]) -> Any:
         """Decode through the Redis serializer, whose reviver decodes every kit envelope."""
         return inner.loads_typed(data)

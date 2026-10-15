@@ -72,10 +72,6 @@ class ValueEncoding(Protocol):
         """The blob the value store holds for a value encoded as ``encoded``."""
         ...
 
-    def inline_form(self, encoded: tuple[str, bytes]) -> tuple[str, bytes]:
-        """The ``(type, bytes)`` the saver stores for a value encoded as ``encoded`` and handed to it pre-encoded."""
-        ...
-
     def decode(self, blob: StoredBlob, ref: CheckpointValueRef, thread_id: Any) -> Any:
         """The value ``blob`` holds; a blob whose encoding is not ``ref.size`` long raises."""
         ...

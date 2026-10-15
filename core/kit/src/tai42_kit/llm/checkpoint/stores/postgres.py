@@ -191,7 +191,6 @@ class PostgresCheckpointProvider(CheckpointProvider):
 
         values = checkpoint["channel_values"]
         current = checkpoint["channel_versions"]
-        encoding = write.encoding
 
         def encode() -> tuple[dict[str, Any], dict[str, Any], Mapping[str, tuple[str, bytes]]]:
             chunker = write.chunker()
@@ -201,7 +200,7 @@ class PostgresCheckpointProvider(CheckpointProvider):
                 if isinstance(value, str) and name in current:
                     rewritten, encoded = chunker.chunk(value)
                     if rewritten is not value:
-                        channels[name] = PreEncodedValue(encoding.inline_form(encoded), references=True)
+                        channels[name] = PreEncodedValue(write.inline_form(encoded), references=True)
                         versions.setdefault(name, current[name])
                     continue
                 if name not in new_versions or value is None or isinstance(value, (str, int, float, bool)):
@@ -211,7 +210,7 @@ class PostgresCheckpointProvider(CheckpointProvider):
                     channels[name], _encoded = chunker.chunk(value)
                     continue
                 rewritten, encoded = chunker.chunk(value)
-                channels[name] = PreEncodedValue(encoding.inline_form(encoded), references=rewritten is not value)
+                channels[name] = PreEncodedValue(write.inline_form(encoded), references=rewritten is not value)
             return channels, versions, chunker.blobs
 
         channels, versions, blobs = await asyncio.to_thread(encode)

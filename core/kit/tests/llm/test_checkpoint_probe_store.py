@@ -149,6 +149,41 @@ async def test_a_store_that_keeps_a_channel_once_per_version_shares_only_when_sw
     assert final["steps"] == [DOC, "yes"]
 
 
+async def test_at_default_settings_a_checkpoint_above_the_inline_compress_bytes_reads_back(
+    monkeypatch: pytest.MonkeyPatch, registry: CheckpointRegistry
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT", "probe")
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_CONN_STRING", f"probe-{uuid.uuid4().hex}")
+    for name in (
+        "LLM_PROVIDER_CHECKPOINT_SHARED_VALUES",
+        "LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES",
+        "LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    reset_all_settings()
+    try:
+        saver, resource = await _deployment_saver(registry)
+        shared = llm_provider_settings().checkpoint_shared_value_bytes
+        compress = llm_provider_settings().checkpoint_inline_compress_bytes
+        assert compress is not None
+        # One channel held once; two kept inline, each below the shared-value bytes, together above the compress bytes.
+        small = compress // 2 + 4096
+        assert small < shared
+        values = {"big": "a" * (shared + 4096), "left": "b" * small, "right": "c" * small}
+        thread_id = f"probe-{uuid.uuid4().hex}"
+        checkpoint = empty_checkpoint()
+        versions: Any = dict.fromkeys(values, saver.get_next_version(None, None))
+        checkpoint["channel_values"] = values
+        checkpoint["channel_versions"] = versions
+        config: Any = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        saved = await saver.aput(config, checkpoint, {"source": "loop", "step": 0, "parents": {}}, versions)
+        assert len(await resource.values.held_digests(thread_id)) == 1
+        tup = await saver.aget_tuple(saved)
+        assert tup.checkpoint["channel_values"] == values
+    finally:
+        reset_all_settings()
+
+
 async def test_the_stale_thread_walk_lists_an_aged_thread_of_the_store(settings, registry) -> None:
     settings("probe")
     saver, resource = await _deployment_saver(registry)

@@ -31,6 +31,7 @@ from ._real_redis import real_redis_url
 
 SWITCH_ENV = "LLM_PROVIDER_CHECKPOINT_SHARED_VALUES"
 SIZE_ENV = "LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES"
+COMPRESS_ENV = "LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES"
 _METADATA: dict[str, Any] = {"source": "loop", "step": 0, "parents": {}}
 _REAL: frozenset[str] = frozenset({"redis", "postgres"})
 
@@ -151,6 +152,29 @@ async def test_a_pending_write_shares_the_value_its_thread_holds(store: Store) -
         assert await store.held(thread_id) == held
         tup = await saver.aget_tuple(_config(thread_id))
         assert [(channel, value) for _task, channel, value in tup.pending_writes] == [("doc", DOC)]
+    finally:
+        await saver.adelete_thread(thread_id)
+
+
+async def test_a_value_kept_inline_above_the_inline_compress_bytes_reads_back(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(COMPRESS_ENV, "256")
+    saver = await store.open("true")
+    thread_id = f"contract-{uuid.uuid4().hex}"
+    # The document is held once; the note stays inline, below the shared-value bytes and above the compress bytes.
+    note = "n" * 900
+    try:
+        version = _version(saver)
+        saved, _previous = await _put(
+            saver, _config(thread_id), None, {"doc": DOC, "note": note}, {"doc": version, "note": version}
+        )
+        await saver.aput_writes(saved, [("note", note)], task_id="task-1")
+        tup = await saver.aget_tuple(_config(thread_id))
+        assert tup.checkpoint["channel_values"] == {"doc": DOC, "note": note}
+        assert [(channel, value) for _task, channel, value in tup.pending_writes] == [("note", note)]
+        listed = [item.checkpoint["channel_values"] async for item in saver.alist(_config(thread_id))]
+        assert listed == [{"doc": DOC, "note": note}]
     finally:
         await saver.adelete_thread(thread_id)
 
