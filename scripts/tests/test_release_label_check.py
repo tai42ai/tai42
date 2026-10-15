@@ -10,6 +10,8 @@ version.
 
 from __future__ import annotations
 
+import pytest
+
 import release_label_check as rlc  # importable via the scripts/ path conftest.py injects
 from release_label_check import Bump
 
@@ -131,6 +133,70 @@ def test_scripts_and_workflow_change_touches_no_package() -> None:
     dirs = ["core/cli", "plugins/agents", "e2e"]
     files = ["scripts/release_label_check.py", ".github/workflows/release-label.yml"]
     assert rlc.touched_dirs(files, dirs) == set()
+
+
+def test_a_package_whose_changed_files_all_lie_under_its_exclude_paths_is_not_touched() -> None:
+    # A package's test tree never enters its published artifact: a change to it alone
+    # attributes no release, as release-please drops the commit for that package.
+    dirs = ["core/kit", "core/skeleton"]
+    files = ["core/kit/src/tai42_kit/x.py", "core/skeleton/tests/test_y.py"]
+    assert rlc.touched_dirs(files, dirs, {"core/skeleton": ["core/skeleton/tests"]}) == {"core/kit"}
+
+
+def test_a_package_with_one_changed_file_outside_its_exclude_paths_is_touched() -> None:
+    dirs = ["core/kit", "core/skeleton"]
+    files = ["core/kit/src/tai42_kit/x.py", "core/skeleton/tests/test_y.py", "core/skeleton/src/z.py"]
+    assert rlc.touched_dirs(files, dirs, {"core/skeleton": ["core/skeleton/tests"]}) == {"core/kit", "core/skeleton"}
+
+
+def test_a_package_without_exclude_paths_is_attributed_by_its_path_alone() -> None:
+    dirs = ["core/kit", "core/skeleton"]
+    files = ["core/skeleton/tests/test_y.py"]
+    assert rlc.touched_dirs(files, dirs, {"core/kit": ["core/kit/tests"]}) == {"core/skeleton"}
+
+
+def test_exclude_paths_are_normalised_and_must_be_a_list_of_paths() -> None:
+    assert rlc.exclude_paths({"exclude-paths": ["/core/kit/tests/", "core/kit/examples"]}) == [
+        "core/kit/tests",
+        "core/kit/examples",
+    ]
+    assert rlc.exclude_paths({}) == []
+    with pytest.raises(SystemExit, match="exclude-paths must be a list of paths"):
+        rlc.exclude_paths({"exclude-paths": "core/kit/tests"})
+
+
+def test_check_gates_no_package_whose_change_lies_under_its_exclude_paths(monkeypatch, tmp_path) -> None:
+    packages = {
+        "core/kit": {
+            "package-name": "tai42-kit",
+            "exclude-paths": ["core/kit/tests"],
+            rlc._BUMP_MINOR_PRE_MAJOR: False,
+            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
+        },
+        "core/skeleton": {
+            "package-name": "tai42-skeleton",
+            "exclude-paths": ["core/skeleton/tests", "core/skeleton/examples"],
+            rlc._BUMP_MINOR_PRE_MAJOR: False,
+            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
+        },
+    }
+    manifest = {"core/kit": "9.0.2", "core/skeleton": "26.0.0"}
+    _packaged(tmp_path, "core/kit", "core/skeleton")
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_gate(package: str, directory: str, version: str, repo_root) -> tuple[int, str]:
+        calls.append((package, directory, version))
+        return 0, f"{package}: gate passes.\n"
+
+    monkeypatch.setattr(rlc, "_run_gate", fake_gate)
+    files = [
+        "core/kit/src/a.py",
+        "core/kit/tests/test_a.py",
+        "core/skeleton/tests/test_b.py",
+        "core/skeleton/examples/m.yml",
+    ]
+    assert rlc.check("feat(kit)!: drop symbols", "", files, packages, manifest, tmp_path) == 0
+    assert calls == [("tai42-kit", "core/kit", "10.0.0")]
 
 
 def test_project_version_semver_for_a_one_point_x_package() -> None:
