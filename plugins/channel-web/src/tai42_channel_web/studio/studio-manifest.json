@@ -2,9 +2,9 @@
   "name": "tai42_channel_web",
   "version": "8.0.2",
   "api_version": 1,
-  "entry": "tai42-channel-web-BPPYAwfD.js",
+  "entry": "tai42-channel-web-GuiTU_sM.js",
   "integrity": {
-    "tai42-channel-web-BPPYAwfD.js": "sha384-VZ4u/Y7cEpxlj7KfP26OC8OiTo8Mm/LkH/9BsxhBgBiD38XYb5NAEJODcDxEEsGo"
+    "tai42-channel-web-GuiTU_sM.js": "sha384-M8DyC04Jnwcyjn50WUOnqmr23phe4gDbKpfVdPoNUifPSkUlApm74KjGFvWgecSj"
   },
   "contributions": {
     "tool_panels": {},
