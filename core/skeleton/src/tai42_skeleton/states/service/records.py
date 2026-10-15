@@ -290,6 +290,23 @@ class _RecordMixin(_StatesServiceBase):
         completed = self._complete_origin(origin)
         await drained(self, lambda: self._store.erase_subject(state, subject, origin=completed))
 
+    async def clear_subject(self, target_kind: str, target_name: str, subject_kind: str, subject_key: str) -> int:
+        """Erase a subject's records across EVERY state in one transaction; records erased.
+
+        The cross-state RTBF forget a conversation reset drives: every ``state_records`` row for
+        ``(target_kind, target_name, subject_kind, subject_key)`` under every state dies with its
+        aliases, each erased state auditing the delete (paths ``[[]]``). Alias-aware and
+        idempotent, like :meth:`erase` but spanning every state the subject appears in rather than
+        one named state — so the subject is NOT admitted against a single declaration. The
+        provenance chokepoint stamps the door/actor of the erase.
+        """
+        self._ensure_available()
+        subject = StateSubject.model_validate(
+            {"target_kind": target_kind, "target_name": target_name, "kind": subject_kind, "key": subject_key}
+        )
+        completed = self._complete_origin(WriteOrigin())
+        return await drained(self, lambda: self._store.clear_subject(subject, origin=completed))
+
     async def fold(
         self, state: str, subject: StateSubject, into: StateSubject, mode: str, *, origin: WriteOrigin
     ) -> dict[str, Any]:

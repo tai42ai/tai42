@@ -882,6 +882,25 @@ def _update_record_data(cur, pg, norm, params):
 
 
 @_on(
+    r"SELECT state FROM state_records WHERE target_kind = %s AND target_name = %s AND subject_kind = %s "
+    r"AND subject_key = %s UNION SELECT state FROM state_subject_aliases WHERE target_kind = %s "
+    r"AND target_name = %s AND alias_kind = %s AND alias_key = %s$"
+)
+def _clear_subject_states(cur, pg, norm, params):
+    # The cross-state clear's candidate states: every state the subject holds a record OR an
+    # alias in. A UNION of distinct states (Postgres de-duplicates), order-independent.
+    tk, tn, kind, key = params[:4]
+    states: set[str] = set()
+    for rec in pg.records.values():
+        if (rec["target_kind"], rec["target_name"], rec["subject_kind"], rec["subject_key"]) == (tk, tn, kind, key):
+            states.add(rec["state"])
+    for alias in pg.aliases.values():
+        if (alias["target_kind"], alias["target_name"], alias["alias_kind"], alias["alias_key"]) == (tk, tn, kind, key):
+            states.add(alias["state"])
+    cur._all = [{"state": s} for s in sorted(states)]
+
+
+@_on(
     r"DELETE FROM state_records WHERE state = %s AND target_kind = %s AND target_name = %s AND subject_kind = %s "
     r"AND subject_key = %s$"
 )
@@ -1423,6 +1442,19 @@ def _outbox_outstanding_on_subjects(cur, pg, norm, params):
         {"id": o["id"], "status": o["status"], "subject_keys": list(o["subject_keys"])}
         for _i, o in sorted(pg.outbox.items())
         if _outstanding(o) and _overlaps(o["subject_keys"], keys)
+    ]
+
+
+@_exact(
+    "SELECT id, status, subject_keys FROM state_outbox WHERE targets @> ARRAY[%s]::text[] "
+    "AND status IN ('pending', 'calls', 'running', 'failed') ORDER BY id"
+)
+def _outbox_outstanding_on_target(cur, pg, norm, params):
+    (target,) = params
+    cur._all = [
+        {"id": o["id"], "status": o["status"], "subject_keys": list(o["subject_keys"])}
+        for _i, o in sorted(pg.outbox.items())
+        if _outstanding(o) and target in o["targets"]
     ]
 
 

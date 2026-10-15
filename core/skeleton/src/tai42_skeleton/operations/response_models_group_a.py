@@ -354,23 +354,30 @@ class RouteRemoveResult(BaseModel):
 
 
 class ThreadDeleteResult(BaseModel):
-    """A thread forget. ``removed`` counts the answer records this call deleted."""
+    """A thread forget. ``removed`` counts the answer records this call deleted.
+
+    ``states_erased`` counts the thread-subject declared-state records this call forgot across the
+    routes the thread spans (0 when the states feature is off or the thread held no declared state).
+    """
 
     removed: int
     route_name: str
     thread_id: str
+    states_erased: int
 
 
 class PersonDeleteResult(BaseModel):
     """A person erase.
 
     ``removed`` counts the answer records deleted across the person's routes; ``erased`` says whether THIS
-    call removed the person row.
+    call removed the person row. ``states_erased`` counts the declared-state records this call forgot — the
+    person's own (``person``-subject) and its aggregated thread's (``thread``-subject) memory.
     """
 
     person_id: str
     removed: int
     erased: bool
+    states_erased: int
 
 
 class ThreadMessageAck(BaseModel):

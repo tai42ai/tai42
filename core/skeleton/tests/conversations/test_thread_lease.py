@@ -495,7 +495,7 @@ async def test_door_delete_thread_blocks_behind_a_turn(fake, monkeypatch):
         assert saver.deleted == []  # nothing torn down while it waits on the lease
 
     result = await _aio.wait_for(delete, 2)
-    assert result == {"removed": 0, "route_name": "chat", "thread_id": thread_id}
+    assert result == {"removed": 0, "route_name": "chat", "thread_id": thread_id, "states_erased": 0}
     assert saver.deleted == [thread_id]
 
 
@@ -512,7 +512,7 @@ async def test_door_person_gone_branch_serializes_behind_a_turn(fake, monkeypatc
         assert saver.deleted == []
 
     result = await _aio.wait_for(delete, 2)
-    assert result == {"person_id": "PID1", "removed": 0, "erased": False}
+    assert result == {"person_id": "PID1", "removed": 0, "erased": False, "states_erased": 0}
     assert saver.deleted == [thread_id]
 
 

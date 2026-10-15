@@ -7,12 +7,14 @@ from __future__ import annotations
 import time
 
 import pytest
+from pydantic import ValidationError
 
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, ConflictError, NotFoundError
+from tai42_skeleton.operations.response_models_group_a import PersonDeleteResult, ThreadDeleteResult
 
 from .conftest import _assert_park_cancelled, _seed_park, serve_stores
 
@@ -117,7 +119,7 @@ async def test_delete_thread_clears_checkpoint_records_and_indexes(wired, record
 
     result = await ops.delete_conversation_thread("chat", _THREAD)
 
-    assert result == {"removed": 1, "route_name": "chat", "thread_id": _THREAD}
+    assert result == {"removed": 1, "route_name": "chat", "thread_id": _THREAD, "states_erased": 0}
     # a. the agent checkpoint — adelete_thread asked to forget exactly this thread.
     assert checkpoint_saver.deleted == [_THREAD]
     # b. the answer record itself.
@@ -128,7 +130,7 @@ async def test_delete_thread_clears_checkpoint_records_and_indexes(wired, record
     # Forgetting is absolute: a re-run of a now-empty id on its own route succeeds with
     # removed=0 and forgets the checkpoint again, never a 404.
     rerun = await ops.delete_conversation_thread("chat", _THREAD)
-    assert rerun == {"removed": 0, "route_name": "chat", "thread_id": _THREAD}
+    assert rerun == {"removed": 0, "route_name": "chat", "thread_id": _THREAD, "states_erased": 0}
     assert checkpoint_saver.deleted == [_THREAD, _THREAD]
 
 
@@ -148,7 +150,7 @@ async def test_delete_never_seen_thread_on_its_route_forgets_the_checkpoint_with
     )
     result = await ops.delete_conversation_thread("chat", "bridge:chat:never")
 
-    assert result == {"removed": 0, "route_name": "chat", "thread_id": "bridge:chat:never"}
+    assert result == {"removed": 0, "route_name": "chat", "thread_id": "bridge:chat:never", "states_erased": 0}
     assert checkpoint_saver.deleted == ["bridge:chat:never"]
 
 
@@ -235,7 +237,7 @@ async def test_delete_thread_waits_behind_an_in_flight_operator_send(wired, reco
     await holder
     result = await delete
 
-    assert result == {"removed": 1, "route_name": "chat", "thread_id": _THREAD}
+    assert result == {"removed": 1, "route_name": "chat", "thread_id": _THREAD, "states_erased": 0}
     assert checkpoint_saver.deleted == [_THREAD]
 
 
@@ -337,7 +339,7 @@ async def test_delete_thread_proceeds_when_the_target_thread_intake_lease_has_la
 
     result = await ops.delete_conversation_thread("chat", _THREAD)
 
-    assert result == {"removed": 1, "route_name": "chat", "thread_id": _THREAD}
+    assert result == {"removed": 1, "route_name": "chat", "thread_id": _THREAD, "states_erased": 0}
     assert checkpoint_saver.deleted == [_THREAD]
 
 
@@ -386,7 +388,7 @@ async def test_delete_person_thread_clears_every_route_index(wired, record_redis
     # The supplied route governs authz only; the delete spans every route the person wrote under.
     result = await ops.delete_conversation_thread("chat-a", _PERSON_THREAD)
 
-    assert result == {"removed": 2, "route_name": "chat-a", "thread_id": _PERSON_THREAD}
+    assert result == {"removed": 2, "route_name": "chat-a", "thread_id": _PERSON_THREAD, "states_erased": 0}
     # One aggregated checkpoint thread, forgotten once.
     assert checkpoint_saver.deleted == [_PERSON_THREAD]
     # Every route index that carried the thread is reclaimed — else a member strands under one.
@@ -527,6 +529,19 @@ async def test_an_interrupted_thread_delete_is_finished_by_a_retry_not_404d(
     assert checkpoint_saver.deleted == [_THREAD, _THREAD]
 
 
+def test_delete_result_models_carry_a_required_states_erased_count():
+    thread = ThreadDeleteResult(removed=1, route_name="chat", thread_id="bridge:chat:x", states_erased=2)
+    assert thread.states_erased == 2
+    person = PersonDeleteResult(person_id="p1", removed=1, erased=True, states_erased=3)
+    assert person.states_erased == 3
+    # The field is required: a result that omits the count is a loud validation error, never a
+    # silent default that would mask a door that forgot to forget state.
+    with pytest.raises(ValidationError):
+        ThreadDeleteResult(removed=1, route_name="chat", thread_id="bridge:chat:x")  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        PersonDeleteResult(person_id="p1", removed=1, erased=True)  # type: ignore[call-arg]
+
+
 async def test_delete_thread_rejects_a_blank_thread_id(wired):
     with pytest.raises(BadRequestError, match="thread_id"):
         await ops.delete_conversation_thread("chat", "   ")
@@ -558,7 +573,7 @@ async def test_delete_thread_cascade_cancels_a_parked_ask(wired, record_redis, c
 
     result = await ops.delete_conversation_thread("chat", _THREAD)
 
-    assert result == {"removed": 1, "route_name": "chat", "thread_id": _THREAD}
+    assert result == {"removed": 1, "route_name": "chat", "thread_id": _THREAD, "states_erased": 0}
     await _assert_park_cancelled(store, fake, interaction_id="i1", thread_id=_THREAD)
     # The unrelated thread's park is fully intact.
     assert await store.get_state(fake, "keep") is not None
@@ -580,7 +595,7 @@ async def test_delete_thread_cascade_is_idempotent_on_rerun(wired, record_redis,
     await ops.delete_conversation_thread("chat", _THREAD)
     # A retry of the absolute-forget delete re-runs the cascade cleanly (a no-op second time).
     rerun = await ops.delete_conversation_thread("chat", _THREAD)
-    assert rerun == {"removed": 0, "route_name": "chat", "thread_id": _THREAD}
+    assert rerun == {"removed": 0, "route_name": "chat", "thread_id": _THREAD, "states_erased": 0}
     await _assert_park_cancelled(store, fake, interaction_id="i1", thread_id=_THREAD)
 
 
@@ -623,5 +638,5 @@ async def test_delete_person_cascade_cancels_a_parked_ask(
 
     result = await ops.delete_conversation_person("p1")
 
-    assert result == {"person_id": "p1", "removed": 1, "erased": True}
+    assert result == {"person_id": "p1", "removed": 1, "erased": True, "states_erased": 0}
     await _assert_park_cancelled(store, fake, interaction_id="i1", thread_id=_PERSON_THREAD)

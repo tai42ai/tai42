@@ -200,7 +200,7 @@ async def test_delete_person_erases_every_person_scoped_store(fake, checkpoint_s
 
     result = await ops.delete_conversation_person(_PERSON_ID)
 
-    assert result == {"person_id": _PERSON_ID, "removed": 2, "erased": True}
+    assert result == {"person_id": _PERSON_ID, "removed": 2, "erased": True, "states_erased": 0}
     # a. the aggregated agent checkpoint — forgotten once.
     assert checkpoint_saver.deleted == [_PERSON_THREAD]
     # b. the answer records + both route indexes + the thread's mode override.
@@ -229,14 +229,14 @@ async def test_delete_person_is_idempotent(fake, checkpoint_saver):
     # The row is gone; a retry is not a 404 — the checkpoint is forgotten again and erased is
     # False, so a partial run is finished rather than surfacing an error.
     second = await ops.delete_conversation_person(_PERSON_ID)
-    assert second == {"person_id": _PERSON_ID, "removed": 0, "erased": False}
+    assert second == {"person_id": _PERSON_ID, "removed": 0, "erased": False, "states_erased": 0}
     assert checkpoint_saver.deleted == [_PERSON_THREAD, _PERSON_THREAD]
 
 
 async def test_delete_unknown_person_forgets_the_checkpoint_with_erased_false(fake, checkpoint_saver):
     result = await ops.delete_conversation_person("never-seen")
 
-    assert result == {"person_id": "never-seen", "removed": 0, "erased": False}
+    assert result == {"person_id": "never-seen", "removed": 0, "erased": False, "states_erased": 0}
     assert checkpoint_saver.deleted == ["bridge:@person:never-seen"]
 
 
