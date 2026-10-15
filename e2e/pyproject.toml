@@ -28,16 +28,16 @@ dependencies = [
     # own ranges predate the current fleet, so the published harness stays resolvable
     # even where a member floor still admits an older patch.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
-    "tai42-contract>=18.0,<19",
+    "tai42-contract>=19.0,<20",
     # The hosted LLM providers' extras: the real ``llm`` leg runs against whichever one
     # REAL_E2E_LLM_PROVIDER selects, in this process and in the stack it boots.
-    "tai42-kit[llm,anthropic,google,mistral,xai,jq,uvicorn,redis,postgres,curl,monitoring]>=8.0,<9",
-    "tai42-skeleton[toolbox,files]>=24.0,<25",
+    "tai42-kit[llm,anthropic,google,mistral,xai,jq,uvicorn,redis,postgres,curl,monitoring]>=9.0,<10",
+    "tai42-skeleton[toolbox,files]>=25.0,<26",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy,classifier]>=5.0,<6",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
     "tai42-tools-stripe>=2.0,<3",
-    "tai42-agents>=10.0,<11",
+    "tai42-agents>=11.0,<12",
     # The sandbox provider plugins the sandbox-axis stacks boot: the Docker-backed
     # provider and the in-process local provider. Workspace siblings, floated at
     # their checkouts by the source overrides below.
