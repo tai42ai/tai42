@@ -260,6 +260,65 @@ async def test_a_value_removed_behind_the_savers_back_fails_every_read(store: St
 
 
 # --------------------------------------------------------------------------- #
+# Postgres: a large string channel, which the library keeps inline in every checkpoint row
+# --------------------------------------------------------------------------- #
+_TEXT = "".join(f"paragraph {index}. " for index in range(400))
+
+
+async def _checkpoint_rows(store: Store, thread_id: str) -> list[str]:
+    async with store.resource.handle.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT checkpoint::text AS c FROM checkpoints WHERE thread_id = %s ORDER BY checkpoint_id", (thread_id,)
+        )
+        rows = await cur.fetchall()
+    return [row["c"] for row in rows]
+
+
+async def test_a_large_string_channel_is_stored_once_on_postgres(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened, closer = await _open("postgres", monkeypatch, "1024")
+    thread_id = f"text-{uuid.uuid4().hex}"
+    config = _config(thread_id)
+    try:
+        saved, previous = await _put(opened.saver, config, None, {"text": _TEXT, "n": 0}, {"text": "1", "n": "1"})
+        for step in range(1, 4):
+            saved, previous = await _put(
+                opened.saver, saved, previous, {"text": _TEXT, "n": step}, {"n": str(step + 1)}
+            )
+        rows = await _checkpoint_rows(opened, thread_id)
+        assert len(rows) == 4
+        assert all("paragraph 399" not in row for row in rows)
+        assert len(await opened.digests(thread_id)) == 1
+        tuples = [t async for t in opened.saver.alist(config)]
+        assert [t.checkpoint["channel_values"] for t in tuples] == [{"text": _TEXT, "n": n} for n in (3, 2, 1, 0)]
+    finally:
+        await opened.saver.adelete_thread(thread_id)
+        await closer()
+        reset_all_settings()
+
+
+async def test_a_string_channel_stored_inline_is_shared_at_the_next_checkpoint_on_postgres(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inline, close_inline = await _open("postgres", monkeypatch, "null")
+    thread_id = f"text-{uuid.uuid4().hex}"
+    config = _config(thread_id)
+    saved, previous = await _put(inline.saver, config, None, {"text": _TEXT, "n": 0}, {"text": "1", "n": "1"})
+    await close_inline()
+    shared, close_shared = await _open("postgres", monkeypatch, "1024")
+    try:
+        await _put(shared.saver, saved, previous, {"text": _TEXT, "n": 1}, {"n": "2"})
+        first, second = await _checkpoint_rows(shared, thread_id)
+        assert "paragraph 399" in first
+        assert "paragraph 399" not in second
+        tuples = [t async for t in shared.saver.alist(config)]
+        assert [t.checkpoint["channel_values"] for t in tuples] == [{"text": _TEXT, "n": 1}, {"text": _TEXT, "n": 0}]
+    finally:
+        await shared.saver.adelete_thread(thread_id)
+        await close_shared()
+        reset_all_settings()
+
+
+# --------------------------------------------------------------------------- #
 # Redis retention: the waiting TTL on every value, re-armed by a referencing write
 # --------------------------------------------------------------------------- #
 @pytest.fixture
@@ -367,18 +426,27 @@ def _incompressible(rng: random.Random, size: int) -> str:
     return base64.b64encode(rng.randbytes(size)).decode()
 
 
-async def _conversation(store: Store, thread_id: str, steps: int) -> list[float]:
+# The raw sizes of the eight documents; their JSON is about a third larger. "uniform": every document
+# just above the default threshold, so each is shared on its own — the best case. "mixed": documents
+# spread across 33-75 KB, so those below the default stay inside their dictionary's shared value.
+DOCUMENT_SIZES = {
+    "uniform": [50_000] * 8,
+    "mixed": [25_000 + index * 4_400 for index in range(8)],
+}
+
+
+async def _conversation(store: Store, thread_id: str, steps: int, sizes: list[int]) -> list[float]:
     """``steps`` checkpoints: a constant result, a dictionary of documents with one changed per step, and
     small bookkeeping values changed every step; a pending write per step. Returns each aput's CPU time."""
     rng = random.Random(7)
-    documents = {f"doc{i}": {"index": i, "body": _incompressible(rng, 50_000)} for i in range(8)}
+    documents = {f"doc{i}": {"index": i, "body": _incompressible(rng, size)} for i, size in enumerate(sizes)}
     result = {"rows": [_incompressible(rng, 2_000) for _ in range(100)]}
     config: Any = _config(thread_id)
     previous = None
     cpu: list[float] = []
     for step in range(steps):
-        name = f"doc{step % 8}"
-        documents = {**documents, name: {"index": step, "body": _incompressible(rng, 50_000)}}
+        index = step % len(sizes)
+        documents = {**documents, f"doc{index}": {"index": step, "body": _incompressible(rng, sizes[index])}}
         values = {
             "documents": documents,
             "result": result,
@@ -397,23 +465,27 @@ async def _conversation(store: Store, thread_id: str, steps: int) -> list[float]
     return cpu
 
 
+@pytest.mark.parametrize("shape", list(DOCUMENT_SIZES))
 @pytest.mark.parametrize("provider", ["redis", "postgres"])
-async def test_a_conversation_stores_at_most_a_quarter_of_its_unshared_bytes(
-    provider: str, monkeypatch: pytest.MonkeyPatch
+async def test_a_conversation_stores_less_with_its_values_shared(
+    provider: str, shape: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sizes: dict[str, int] = {}
     for label, shared in (("shared", "65536"), ("inline", "null")):
         opened, closer = await _open(provider, monkeypatch, shared)
         thread_id = f"size-{label}-{uuid.uuid4().hex}"
         try:
-            cpu = await _conversation(opened, thread_id, 30)
+            cpu = await _conversation(opened, thread_id, 30, DOCUMENT_SIZES[shape])
             sizes[label] = await opened.stored_bytes(thread_id)
             print(  # the measurement is reported, not asserted
-                f"{provider} {label}: {sizes[label]} bytes stored, aput CPU mean "
+                f"{provider} {shape} {label}: {sizes[label]} bytes stored, aput CPU mean "
                 f"{sum(cpu) / len(cpu) * 1000:.2f} ms, max {max(cpu) * 1000:.2f} ms"
             )
         finally:
             await opened.saver.adelete_thread(thread_id)
             await closer()
     reset_all_settings()
-    assert sizes["shared"] <= sizes["inline"] / 4, sizes
+    if shape == "uniform":
+        assert sizes["shared"] <= sizes["inline"] / 4, sizes
+    else:
+        assert sizes["shared"] < sizes["inline"], sizes

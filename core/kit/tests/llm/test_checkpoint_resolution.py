@@ -6,6 +6,8 @@ a reference); the Postgres side reads the msgpack blobs back as plain dictionari
 
 from __future__ import annotations
 
+import copy
+import hashlib
 from collections.abc import Collection, Mapping
 from typing import Any
 
@@ -112,12 +114,54 @@ async def test_a_value_with_nested_bytes_is_restored_on_redis():
     assert resolved.checkpoint["channel_values"]["v"]["document"]["v"] == original
 
 
-async def test_references_inside_a_blob_are_resolved_one_fetch_per_depth():
+async def test_references_inside_a_blob_are_fetched_in_the_same_round_trip():
     inner = {"big": {"a": "a" * 700, "b": "b" * 700}, **{f"k{i}": "s" * 100 for i in range(30)}}
     tup, store, encoding = _redis_tuple({"outer": inner}, [])
     resolved = await resolve_tuple(tup, encoding, store.get)
     assert resolved.checkpoint["channel_values"]["outer"] == inner
-    assert len(store.fetches) == 2
+    assert len(store.fetches) == 1
+    assert len(store.fetches[0]) == 2
+
+
+async def test_a_nested_value_missing_from_the_store_raises():
+    inner = {"big": {"a": "a" * 700, "b": "b" * 700}, **{f"k{i}": "s" * 100 for i in range(30)}}
+    tup, store, encoding = _redis_tuple({"outer": inner}, [])
+    nested = hashlib.sha256(encoding.encode({"a": "a" * 700, "b": "b" * 700})[1]).hexdigest()
+    del store.blobs[nested]
+    with pytest.raises(CheckpointReferenceError, match=f"references a value {nested} the store does not hold"):
+        await resolve_tuple(tup, encoding, store.get)
+
+
+_DOCUMENT = {"p": "x" * 600, "q": "y" * 600, "k": "original"}
+
+
+async def test_every_place_holding_the_same_value_gets_its_own_object_on_redis():
+    nested = {"inner": copy.deepcopy(_DOCUMENT), **{f"k{i}": "s" * 100 for i in range(30)}}
+    values = {"a": copy.deepcopy(_DOCUMENT), "b": copy.deepcopy(_DOCUMENT), "c": nested, "d": copy.deepcopy(nested)}
+    tup, store, encoding = _redis_tuple(values, [("a", copy.deepcopy(_DOCUMENT))])
+    assert len(store.blobs) == 2
+    resolved = await resolve_tuple(tup, encoding, store.get)
+    channels = resolved.checkpoint["channel_values"]
+    assert resolved.pending_writes is not None
+    written = resolved.pending_writes[0][2]
+    places = [channels["a"], channels["b"], written, channels["c"]["inner"], channels["d"]["inner"]]
+    assert len({id(place) for place in places}) == len(places)
+    assert channels["c"] is not channels["d"]
+    channels["a"]["k"] = "changed in place"
+    channels["c"]["inner"]["k"] = "changed in place"
+    assert channels["b"] == written == channels["d"]["inner"] == _DOCUMENT
+
+
+async def test_every_place_holding_the_same_value_gets_its_own_object_on_postgres():
+    encoding = _postgres_encoding()
+    chunker = ValueChunker(encoding, THRESHOLD)
+    rewritten, _ = chunker.chunk({"a": copy.deepcopy(_DOCUMENT), "b": copy.deepcopy(_DOCUMENT)})
+    store = FakeValueStore({digest: encoding.store_form(enc) for digest, enc in chunker.blobs.items()})
+    assert len(store.blobs) == 1
+    resolved = await resolve_references(rewritten, encoding, store.get, THREAD)
+    assert resolved["a"] is not resolved["b"]
+    resolved["a"]["k"] = "changed in place"
+    assert resolved["b"] == _DOCUMENT
 
 
 async def test_a_tuple_without_references_is_returned_as_it_is():
