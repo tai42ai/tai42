@@ -230,12 +230,12 @@ def views(monkeypatch):
     async def _fake_create(provider, conn_string):
         return (_FakeResource(provider), None)
 
-    async def _fake_view(resource, waiting_minutes):
+    async def _fake_view(provider, resource, waiting_minutes):
         built.append((resource, waiting_minutes))
         return ("view", resource, waiting_minutes)
 
     monkeypatch.setattr(reg_mod, "create_checkpoint_resource", _fake_create)
-    monkeypatch.setattr(reg_mod, "create_redis_saver_view", _fake_view)
+    monkeypatch.setattr(reg_mod, "create_saver_with_waiting", _fake_view)
     monkeypatch.setattr(reg_mod, "get_saver_from_resource", lambda provider, resource: ("handle", resource))
     yield built
     reset_all_settings()
@@ -293,10 +293,19 @@ async def test_the_views_go_with_close_all(views):
     assert reg.has_live_resources is False
 
 
-async def test_a_saver_view_needs_a_redis_resource():
-    from tai42_kit.llm.checkpoint.checkpoint import CheckpointResource, create_redis_saver_view
-    from tai42_kit.llm.checkpoint.ledger import MemoryFinishedThreadLedger
+async def test_a_saver_with_its_own_waiting_needs_a_store_kept_by_key_ttl():
+    from tai42_kit.llm.checkpoint.checkpoint import CheckpointResource, create_saver_with_waiting
+    from tai42_kit.llm.checkpoint.stores.memory import MemoryCheckpointValueStore, MemoryFinishedThreadLedger
 
-    resource = CheckpointResource("memory", object(), MemoryFinishedThreadLedger())
-    with pytest.raises(ValueError, match="a Redis saver view needs a redis checkpoint resource, got 'memory'"):
-        await create_redis_saver_view(resource, 2)
+    resource = CheckpointResource("memory", object(), MemoryFinishedThreadLedger(), MemoryCheckpointValueStore())
+    with pytest.raises(NotImplementedError, match="the 'memory' checkpoint provider has no saver with its own waiting"):
+        await create_saver_with_waiting("memory", resource, 2)
+
+
+async def test_a_saver_with_its_own_waiting_refuses_a_resource_of_another_store():
+    from tai42_kit.llm.checkpoint.checkpoint import CheckpointResource, create_saver_with_waiting
+    from tai42_kit.llm.checkpoint.stores.memory import MemoryCheckpointValueStore, MemoryFinishedThreadLedger
+
+    resource = CheckpointResource("memory", object(), MemoryFinishedThreadLedger(), MemoryCheckpointValueStore())
+    with pytest.raises(ValueError, match="of provider 'memory' cannot serve provider 'redis'"):
+        await create_saver_with_waiting("redis", resource, 2)

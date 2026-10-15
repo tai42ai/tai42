@@ -42,15 +42,13 @@ from tai42_kit.llm.checkpoint import codec, reads
 from tai42_kit.llm.checkpoint.checkpoint import CheckpointSerializationError, _GuardedSerializer
 from tai42_kit.llm.checkpoint.codec import (
     CODEC_KINDS,
-    COMPRESSED_BLOB_TYPE,
-    KIT_ENVELOPE_ID,
-    BlobCompressCodec,
     CheckpointedException,
     FaithfulRedisSerializer,
     GuardedAsyncRedisSaver,
     RedisFaithfulCodec,
     exception_record,
 )
+from tai42_kit.llm.checkpoint.envelope import COMPRESSED_BLOB_TYPE, KIT_ENVELOPE_ID, BlobCompressCodec
 
 THRESHOLD = 65536
 PAD = "x" * 70_000
@@ -139,9 +137,7 @@ def _document_saver(serde: Any) -> GuardedAsyncRedisSaver:
     """The kit's Redis saver over ``serde``; building it does no I/O, and its document walk needs no server."""
     from redis.asyncio import Redis as AsyncRedis
 
-    saver = GuardedAsyncRedisSaver(
-        redis_client=AsyncRedis.from_url("redis://127.0.0.1:1/0"), shared_value_threshold=None
-    )
+    saver = GuardedAsyncRedisSaver(redis_client=AsyncRedis.from_url("redis://127.0.0.1:1/0"))
     saver.serde = serde
     return saver
 
@@ -563,7 +559,7 @@ def test_an_interrupt_at_document_level_revives():
 
 
 # --------------------------------------------------------------------------- #
-# Postgres: compressed blobs
+# Compressed msgpack blobs
 # --------------------------------------------------------------------------- #
 def test_a_large_msgpack_blob_is_compressed_and_read_back():
     inner = JsonPlusSerializer()
@@ -587,7 +583,7 @@ def test_a_corrupt_compressed_blob_raises():
         BlobCompressCodec(1024).loads_typed(JsonPlusSerializer(), (COMPRESSED_BLOB_TYPE, b"not zlib"))
 
 
-def test_the_guard_routes_postgres_blobs_through_the_codec():
+def test_the_guard_routes_blobs_through_the_codec():
     serde = _GuardedSerializer(JsonPlusSerializer(), BlobCompressCodec(10))
     type_, data = serde.dumps_typed({"pad": "z" * 100})
     assert type_ == COMPRESSED_BLOB_TYPE
@@ -597,15 +593,26 @@ def test_the_guard_routes_postgres_blobs_through_the_codec():
 # --------------------------------------------------------------------------- #
 # A read announces the references it decodes
 # --------------------------------------------------------------------------- #
-def test_a_shared_snapshot_blob_is_tagged_as_referencing():
+@pytest.mark.parametrize("codec", [None, BlobCompressCodec(1024)], ids=["no codec", "blob compression"])
+def test_a_shared_snapshot_is_stored_under_the_referencing_tag(codec):
     from tai42_kit.llm.checkpoint.chunking import SharedSnapshot
 
-    inner = JsonPlusSerializer()
+    serde = _GuardedSerializer(JsonPlusSerializer(), codec)
     small = SharedSnapshot([{"a": 1}])
     large = SharedSnapshot([{"pad": "z" * 5000}])
-    assert BlobCompressCodec(1024).dumps_typed(inner, small)[0] == "msgpack+ref"
-    assert BlobCompressCodec(1024).dumps_typed(inner, large)[0] == "msgpack+zlib+ref"
-    assert BlobCompressCodec(1024).dumps_typed(inner, _DeltaSnapshot([{"a": 1}]))[0] == "msgpack"
+    assert serde.dumps_typed(small)[0] == "msgpack+ref"
+    assert serde.dumps_typed(large)[0] == ("msgpack+ref" if codec is None else "msgpack+zlib+ref")
+    assert serde.dumps_typed(_DeltaSnapshot([{"a": 1}]))[0] == "msgpack"
+
+
+def test_a_pre_encoded_value_holding_a_reference_is_stored_under_the_referencing_tag():
+    from tai42_kit.llm.checkpoint.checkpoint import PreEncodedCheckpoint, PreEncodedValue
+
+    serde = _GuardedSerializer(JsonPlusSerializer())
+    assert serde.dumps_typed(PreEncodedValue(("msgpack", b"\x01"), references=True)) == ("msgpack+ref", b"\x01")
+    assert serde.dumps_typed(PreEncodedValue(("msgpack", b"\x01"))) == ("msgpack", b"\x01")
+    whole = PreEncodedCheckpoint(_checkpoint({"v": 1}), ("msgpack", b"\x02"), references=True)
+    assert serde.dumps_typed(whole.copy()) == ("msgpack+ref", b"\x02")
 
 
 @pytest.mark.parametrize("tag", ["msgpack+ref", "msgpack+zlib+ref"])
@@ -615,27 +622,41 @@ def test_a_referencing_blob_announces_and_decodes_as_its_plain_tag(tag):
     _plain, data = inner.dumps_typed(value)
     if tag.startswith(COMPRESSED_BLOB_TYPE):
         data = zlib.compress(data)
+    serde = _GuardedSerializer(inner, BlobCompressCodec(1024))
     with reads.CheckpointRead() as read:
-        assert BlobCompressCodec(1024).loads_typed(inner, (tag, data)) == value
+        assert serde.loads_typed((tag, data)) == value
     assert read.references
 
 
-def test_a_plain_blob_announces_nothing():
+def test_any_store_announces_a_referencing_value_through_the_guard():
     inner = JsonPlusSerializer()
+    _plain, data = inner.dumps_typed({"a": 1})
     with reads.CheckpointRead() as read:
-        assert BlobCompressCodec(1024).loads_typed(inner, inner.dumps_typed({"a": 1})) == {"a": 1}
+        assert _GuardedSerializer(inner).loads_typed(("msgpack+ref", data)) == {"a": 1}
+    assert read.references
+
+
+def test_the_blob_codec_knows_no_reference_tag():
+    inner = JsonPlusSerializer()
+    assert BlobCompressCodec(1024).dumps_typed(inner, {"a": 1})[0] == "msgpack"
+
+
+def test_a_plain_blob_announces_nothing():
+    serde = _GuardedSerializer(JsonPlusSerializer(), BlobCompressCodec(1024))
+    with reads.CheckpointRead() as read:
+        assert serde.loads_typed(serde.dumps_typed({"a": 1})) == {"a": 1}
     assert read.references == []
 
 
-def test_a_referencing_blob_read_with_no_collector_open_decodes_as_today():
+def test_a_referencing_blob_read_with_no_collector_open_decodes_as_its_plain_tag():
     inner = JsonPlusSerializer()
     _plain, data = inner.dumps_typed({"a": 1})
-    assert BlobCompressCodec(1024).loads_typed(inner, ("msgpack+ref", data)) == {"a": 1}
+    assert _GuardedSerializer(inner, BlobCompressCodec(1024)).loads_typed(("msgpack+ref", data)) == {"a": 1}
 
 
 def test_the_redis_reviver_announces_a_reference():
     from tai42_kit.llm.checkpoint.chunking import CheckpointValueRef
-    from tai42_kit.llm.checkpoint.codec import reference_envelope
+    from tai42_kit.llm.checkpoint.envelope import reference_envelope
 
     ref = CheckpointValueRef("a" * 64, 10, ())
     stored = orjson.dumps({"v": reference_envelope(ref), "n": 1})
@@ -837,9 +858,9 @@ def test_an_exception_attribute_holding_a_json_object_is_kept_as_is():
 
 def test_a_saver_without_a_codec_reads_through_its_own_serializer():
     from tai42_kit.llm.checkpoint.checkpoint import _guard_saver_serialization
-    from tai42_kit.llm.checkpoint.providers import checkpoint_provider_facts
+    from tai42_kit.llm.checkpoint.providers import checkpoint_provider
 
-    saver = _guard_saver_serialization(InMemorySaver(), checkpoint_provider_facts("memory"))
+    saver = _guard_saver_serialization(InMemorySaver(), checkpoint_provider("memory"), 65536)
     serde: Any = saver.serde
     assert serde.loads_typed(serde.dumps_typed({"n": Decimal("1.5")})) == {"n": Decimal("1.5")}
     assert serde.with_msgpack_allowlist == serde._inner.with_msgpack_allowlist
@@ -949,16 +970,17 @@ def test_a_pre_encoded_value_and_checkpoint_pass_the_guard_as_encoded():
 def test_the_residue_is_the_library_serializers_text_and_keeps_its_markers():
     from langgraph.types import Send
 
+    from tai42_kit.llm.checkpoint.chunking import ValueChunker
     from tai42_kit.llm.checkpoint.codec import _walk
-    from tai42_kit.llm.checkpoint.redis_values import RedisCheckpointEncoder
+    from tai42_kit.llm.checkpoint.redis_values import RedisCheckpointEncoder, RedisJsonValueEncoding
 
     values = {
         "interrupt": [Interrupt(value={"amount": Decimal("1")}, id="i1")],
         "send": [Send("node", {"amount": Decimal("2")})],
         "snapshot": _DeltaSnapshot([Decimal("3")]),
     }
-    encoder = RedisCheckpointEncoder(None, None)
-    data = encoder.encode_checkpoint(_checkpoint(values), {}, encoder.chunker())
+    encoder = RedisCheckpointEncoder(RedisJsonValueEncoding(FaithfulRedisSerializer(), None))
+    data = encoder.encode_checkpoint(_checkpoint(values), {}, ValueChunker(encoder.encoding, None))
     library = FaithfulRedisSerializer().dumps_typed(_walk(_checkpoint(values), "$"))[1]
     assert orjson.loads(data) == orjson.loads(library)
     back, failures = _document_read(_serde(), orjson.loads(data)["channel_values"])

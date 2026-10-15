@@ -16,14 +16,10 @@ pytest.importorskip("langgraph")
 from tai42_kit.llm.checkpoint import ThreadRetention
 from tai42_kit.llm.checkpoint import ledger as ledger_mod
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
-from tai42_kit.llm.checkpoint.ledger import (
-    REDIS_FINISHED_THREADS_KEY,
-    MemoryFinishedThreadLedger,
-    RedisFinishedThreadLedger,
-    SqliteFinishedThreadLedger,
-    mark_threads_active,
-    mark_threads_finished,
-)
+from tai42_kit.llm.checkpoint.ledger import mark_threads_active, mark_threads_finished
+from tai42_kit.llm.checkpoint.stores.memory import MemoryFinishedThreadLedger
+from tai42_kit.llm.checkpoint.stores.redis import REDIS_FINISHED_THREADS_KEY, RedisFinishedThreadLedger
+from tai42_kit.llm.checkpoint.stores.sqlite import SqliteFinishedThreadLedger
 from tai42_kit.settings import reset_all_settings
 
 from ._real_redis import real_redis_url
@@ -77,7 +73,7 @@ async def _postgres_ledger(_tmp: Path) -> AsyncIterator[Any]:
     from tai42_kit.db import database_settings
     from tai42_kit.llm._langgraph_postgres import LANGGRAPH_CONNECTION_KWARGS
     from tai42_kit.llm.checkpoint import postgres_store
-    from tai42_kit.llm.checkpoint.ledger import PostgresFinishedThreadLedger
+    from tai42_kit.llm.checkpoint.stores.postgres import PostgresFinishedThreadLedger
 
     pool = await open_dedicated_pool(
         database_settings("default").pg_dsn, role="test", connection_kwargs=dict(LANGGRAPH_CONNECTION_KWARGS)

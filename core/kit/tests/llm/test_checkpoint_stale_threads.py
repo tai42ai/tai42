@@ -21,7 +21,7 @@ pytest.importorskip("langgraph")
 
 from langgraph.checkpoint.base import empty_checkpoint
 
-from tai42_kit.llm.checkpoint import CHECKPOINT_PROVIDERS, ThreadRetention, checkpoint_provider_facts
+from tai42_kit.llm.checkpoint import ThreadRetention, checkpoint_provider_facts, checkpoint_providers
 from tai42_kit.llm.checkpoint.checkpoint_registry import CheckpointRegistry
 
 from ._real_redis import real_redis_url
@@ -53,7 +53,7 @@ _LOCAL: frozenset[str] = frozenset({"memory", "sqlite"})
 @pytest.fixture(
     params=[
         provider if provider in _LOCAL else pytest.param(provider, marks=pytest.mark.integration)
-        for provider in sorted(CHECKPOINT_PROVIDERS)
+        for provider in checkpoint_providers()
     ]
 )
 async def store(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[tuple[str, Any, Any]]:

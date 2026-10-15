@@ -32,8 +32,8 @@ from langgraph.graph import END, START, StateGraph
 
 from tai42_kit.llm.checkpoint.checkpoint import create_checkpoint_resource, get_saver_from_resource
 from tai42_kit.llm.checkpoint.chunking import CheckpointReferenceError
-from tai42_kit.llm.checkpoint.codec import envelope_reference
-from tai42_kit.llm.checkpoint.value_store import REDIS_VALUE_INDEX_PREFIX, REDIS_VALUE_KEY_PREFIX
+from tai42_kit.llm.checkpoint.envelope import envelope_reference
+from tai42_kit.llm.checkpoint.stores.redis import REDIS_VALUE_INDEX_PREFIX, REDIS_VALUE_KEY_PREFIX
 from tai42_kit.settings import reset_all_settings
 
 from ._real_redis import REAL_REDIS_ENV
@@ -71,22 +71,13 @@ class Store:
     resource: Any
 
     async def digests(self, thread_id: str) -> set[str]:
-        if self.provider == "redis":
-            prefix = f"{REDIS_VALUE_KEY_PREFIX}{{{thread_id}}}:"
-            keys = [key async for key in self.resource.redis_client.scan_iter(match=f"{prefix}*", count=1000)]
-            return {(key.decode() if isinstance(key, bytes) else key)[len(prefix) :] for key in keys}
-        async with self.resource.handle.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                "SELECT encode(digest, 'hex') FROM tai42_checkpoint_values WHERE thread_id = %s", (thread_id,)
-            )
-            rows = await cur.fetchall()
-        return {next(iter(row.values())) if isinstance(row, dict) else row[0] for row in rows}
+        return await self.resource.values.held_digests(thread_id)
 
     async def stored_channel(self, thread_id: str, channel: str) -> Any:
         """The latest stored form of ``channel``: the Redis document's value, the Postgres blob decoded."""
         if self.provider == "redis":
-            client = self.resource.redis_client
-            key = await client.get(self.saver._make_redis_checkpoint_latest_key(thread_id, ""))
+            client = self.resource.handle.client
+            key = await client.get(self.saver.inner._make_redis_checkpoint_latest_key(thread_id, ""))
             [values] = await client.json().get(key, "$.checkpoint.channel_values")
             return values[channel]
         async with self.resource.handle.connection() as conn, conn.cursor() as cur:
@@ -101,7 +92,7 @@ class Store:
 
     async def drop_value(self, thread_id: str, digest: str) -> None:
         if self.provider == "redis":
-            await self.resource.redis_client.delete(f"{REDIS_VALUE_KEY_PREFIX}{{{thread_id}}}:{digest}")
+            await self.resource.handle.client.delete(f"{REDIS_VALUE_KEY_PREFIX}{{{thread_id}}}:{digest}")
             return
         async with self.resource.handle.connection() as conn:
             await conn.execute(
@@ -112,7 +103,7 @@ class Store:
     async def stored_bytes(self, thread_id: str) -> int:
         """What the thread occupies: Redis key memory, or the bytes of its Postgres rows."""
         if self.provider == "redis":
-            client = self.resource.redis_client
+            client = self.resource.handle.client
             total = 0
             async for key in client.scan_iter(match=f"*{thread_id}*", count=1000):
                 total += await client.memory_usage(key) or 0
@@ -253,7 +244,7 @@ async def test_deleting_the_thread_removes_its_values(store: Store) -> None:
     assert await store.digests(thread_id) == set()
     assert await store.saver.aget_tuple(_config(thread_id)) is None
     if store.provider == "redis":
-        assert not await store.resource.redis_client.exists(f"{REDIS_VALUE_INDEX_PREFIX}{{{thread_id}}}")
+        assert not await store.resource.handle.client.exists(f"{REDIS_VALUE_INDEX_PREFIX}{{{thread_id}}}")
 
 
 async def test_a_value_removed_behind_the_savers_back_fails_every_read(store: Store) -> None:
@@ -346,7 +337,7 @@ async def redis_store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Store]:
 
 
 async def _value_ttls(store: Store, thread_id: str) -> dict[str, int]:
-    client = store.resource.redis_client
+    client = store.resource.handle.client
     keys = [key async for key in client.scan_iter(match=f"tai42:checkpoint:value*{{{thread_id}}}*", count=1000)]
     return {(key.decode() if isinstance(key, bytes) else key): await client.ttl(key) for key in keys}
 
@@ -354,7 +345,7 @@ async def _value_ttls(store: Store, thread_id: str) -> dict[str, int]:
 async def test_every_value_and_the_index_carry_the_waiting_ttl_and_a_write_rearms_them(redis_store: Store) -> None:
     thread_id = f"ttl-{uuid.uuid4().hex}"
     waiting = 10080 * 60
-    client = redis_store.resource.redis_client
+    client = redis_store.resource.handle.client
     try:
         saved, previous = await _put(redis_store.saver, _config(thread_id), None, {"docs": DOCS}, {"docs": "1"})
         ttls = await _value_ttls(redis_store, thread_id)
@@ -370,10 +361,10 @@ async def test_every_value_and_the_index_carry_the_waiting_ttl_and_a_write_rearm
 
 
 async def test_a_view_stamps_its_own_waiting_on_the_values_it_writes(redis_store: Store) -> None:
-    from tai42_kit.llm.checkpoint.checkpoint import create_redis_saver_view
+    from tai42_kit.llm.checkpoint.checkpoint import create_saver_with_waiting
 
     thread_id = f"view-{uuid.uuid4().hex}"
-    view = await create_redis_saver_view(redis_store.resource, 2)
+    view = await create_saver_with_waiting("redis", redis_store.resource, 2)
     try:
         await _put(view, _config(thread_id), None, {"docs": DOCS}, {"docs": "1"})
         ttls = await _value_ttls(redis_store, thread_id)
@@ -386,16 +377,16 @@ async def test_a_view_stamps_its_own_waiting_on_the_values_it_writes(redis_store
 
 async def test_the_values_expire_with_the_threads_retention(redis_store: Store) -> None:
     from tai42_kit.llm.checkpoint import checkpoint as cp
+    from tai42_kit.llm.checkpoint import checkpoint_provider
     from tai42_kit.llm.checkpoint.codec import GuardedAsyncRedisSaver
+    from tai42_kit.llm.checkpoint.stores.redis import RedisCheckpointValueStore
 
     thread_id = f"expiry-{uuid.uuid4().hex}"
-    short = GuardedAsyncRedisSaver(
-        redis_client=redis_store.resource.redis_client,
-        ttl={"default_ttl": 0.05, "refresh_on_read": False},
-        shared_value_threshold=cp.shared_value_threshold("redis"),
-    )
-    cp._guard_saver_serialization(short, cp.checkpoint_provider_facts("redis"))
-    await short.asetup()
+    client = redis_store.resource.handle.client
+    library = GuardedAsyncRedisSaver(redis_client=client, ttl={"default_ttl": 0.05, "refresh_on_read": False})
+    await library.asetup()
+    # A saver whose writes, values included, carry a three-second waiting.
+    short = cp._apply_features(checkpoint_provider("redis"), library, RedisCheckpointValueStore(client, 3))
     saved, _previous = await _put(short, _config(thread_id), None, {"docs": DOCS}, {"docs": "1"})
     await short.aput_writes(saved, [("docs", {"d9": _doc(9)})], task_id="task-1")
     assert len(await redis_store.digests(thread_id)) == 4
@@ -549,7 +540,7 @@ async def test_a_conversation_stores_less_with_its_values_shared(
 async def test_postgres_stores_every_value_inline_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-    from tai42_kit.llm.checkpoint.postgres_saver import PostgresMsgpackValueEncoding
+    from tai42_kit.llm.checkpoint.value_encoding import MsgpackValueEncoding
 
     opened, closer = await _open("postgres", monkeypatch, None)
     thread_id = f"default-{uuid.uuid4().hex}"
@@ -557,7 +548,7 @@ async def test_postgres_stores_every_value_inline_by_default(monkeypatch: pytest
     handed: list[Any] = []
     encodes: list[int] = []
     library_aput = AsyncPostgresSaver.aput
-    original_encode = PostgresMsgpackValueEncoding.encode
+    original_encode = MsgpackValueEncoding.encode
 
     async def spy_aput(self: Any, config: Any, checkpoint: Any, metadata: Any, new_versions: Any) -> Any:
         handed.append(checkpoint)
@@ -568,7 +559,7 @@ async def test_postgres_stores_every_value_inline_by_default(monkeypatch: pytest
         return original_encode(self, value)
 
     monkeypatch.setattr(AsyncPostgresSaver, "aput", spy_aput)
-    monkeypatch.setattr(PostgresMsgpackValueEncoding, "encode", counting_encode)
+    monkeypatch.setattr(MsgpackValueEncoding, "encode", counting_encode)
     try:
         checkpoint = empty_checkpoint()
         checkpoint["channel_values"] = {"docs": DOCS, "n": 1}
@@ -606,7 +597,7 @@ async def test_redis_shares_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_redis_with_the_switch_off_stores_inline(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tai42_kit.llm.checkpoint.value_store import RedisCheckpointValueStore
+    from tai42_kit.llm.checkpoint.stores.redis import RedisCheckpointValueStore
 
     opened, closer = await _open("redis", monkeypatch, "false", "65536")
     thread_id = f"off-{uuid.uuid4().hex}"

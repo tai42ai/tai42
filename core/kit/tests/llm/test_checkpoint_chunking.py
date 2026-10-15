@@ -21,24 +21,24 @@ from langgraph.types import Interrupt, Send
 
 from tai42_kit.llm.checkpoint.checkpoint import _GuardedSerializer
 from tai42_kit.llm.checkpoint.chunking import CheckpointValueRef, ValueChunker
-from tai42_kit.llm.checkpoint.codec import (
-    BlobCompressCodec,
-    FaithfulRedisSerializer,
-    RedisFaithfulCodec,
-    envelope_reference,
-)
-from tai42_kit.llm.checkpoint.postgres_saver import PostgresMsgpackValueEncoding
-from tai42_kit.llm.checkpoint.redis_values import RedisCheckpointEncoder
+from tai42_kit.llm.checkpoint.codec import FaithfulRedisSerializer, RedisFaithfulCodec
+from tai42_kit.llm.checkpoint.envelope import BlobCompressCodec, envelope_reference
+from tai42_kit.llm.checkpoint.redis_values import RedisCheckpointEncoder, RedisJsonValueEncoding
+from tai42_kit.llm.checkpoint.value_encoding import MsgpackValueEncoding
 
 THRESHOLD = 1024
 
 
+def _redis_encoder() -> RedisCheckpointEncoder:
+    return RedisCheckpointEncoder(RedisJsonValueEncoding(FaithfulRedisSerializer(), 65536))
+
+
 def _redis_encoding() -> Any:
-    return RedisCheckpointEncoder(THRESHOLD, 65536).encoding
+    return _redis_encoder().encoding
 
 
 def _postgres_encoding() -> Any:
-    return PostgresMsgpackValueEncoding(_GuardedSerializer(JsonPlusSerializer(), BlobCompressCodec(65536)), 65536)
+    return MsgpackValueEncoding(_GuardedSerializer(JsonPlusSerializer(), BlobCompressCodec(65536)), 65536)
 
 
 ENCODINGS = {"redis": _redis_encoding, "postgres": _postgres_encoding}
@@ -179,7 +179,8 @@ def test_a_snapshot_whose_payload_stays_inline_is_the_original_object(store):
 
 
 async def test_a_resolved_shared_snapshot_is_a_plain_snapshot():
-    from tai42_kit.llm.checkpoint.chunking import StoredBlob, resolve_references
+    from tai42_kit.llm.checkpoint.chunking import resolve_references
+    from tai42_kit.llm.checkpoint.value_store import StoredBlob
 
     encoding = _postgres_encoding()
     chunker = ValueChunker(encoding, THRESHOLD)
@@ -288,9 +289,9 @@ def test_a_write_value_is_encoded_once_when_nothing_is_shared(monkeypatch):
 
 def test_each_byte_is_encoded_once_per_nesting_level_above_the_threshold(monkeypatch):
     calls = _counting_default_handler(monkeypatch)
-    encoder = RedisCheckpointEncoder(THRESHOLD, 65536)
+    encoder = _redis_encoder()
     checkpoint = _checkpoint({"v": {"doc": {"probe": Send("probe", 1), "a": "a" * 700, "b": "b" * 700}}})
-    data = encoder.encode_checkpoint(checkpoint, {}, encoder.chunker())
+    data = encoder.encode_checkpoint(checkpoint, {}, ValueChunker(encoder.encoding, THRESHOLD))
     # The channel level, the document level and the marker's own level; the document becomes a blob
     # from the bytes measured, the channel is encoded again around its reference, and the checkpoint
     # text reuses the channel's encoding.
@@ -301,9 +302,9 @@ def test_each_byte_is_encoded_once_per_nesting_level_above_the_threshold(monkeyp
 
 def test_a_channel_reused_from_the_parent_is_not_walked_or_encoded(monkeypatch):
     calls = _counting_default_handler(monkeypatch)
-    encoder = RedisCheckpointEncoder(THRESHOLD, 65536)
+    encoder = _redis_encoder()
     stored = {"kept": [1, 2, 3]}
     checkpoint = _checkpoint({"v": {"probe": Send("probe", 1)}, "kept": object()})
-    data = encoder.encode_checkpoint(checkpoint, {"kept": stored}, encoder.chunker())
+    data = encoder.encode_checkpoint(checkpoint, {"kept": stored}, ValueChunker(encoder.encoding, THRESHOLD))
     assert orjson.loads(data)["channel_values"]["kept"] == stored
     assert calls == ["probe"]

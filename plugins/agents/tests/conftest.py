@@ -427,7 +427,7 @@ class LedgerBook:
     """The finished-thread ledgers a run's marks land in, one in-process ledger per checkpoint store."""
 
     def __init__(self) -> None:
-        from tai42_kit.llm.checkpoint.ledger import MemoryFinishedThreadLedger
+        from tai42_kit.llm.checkpoint.stores.memory import MemoryFinishedThreadLedger
 
         self._factory = MemoryFinishedThreadLedger
         self.ledgers: dict[tuple[str, str | None], Any] = {}

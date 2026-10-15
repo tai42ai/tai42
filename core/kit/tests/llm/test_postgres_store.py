@@ -79,7 +79,7 @@ async def test_stale_threads_are_those_whose_newest_checkpoint_is_older_than_the
 
 async def _declare(pool: Any, thread_id: str, waiting_minutes: int) -> None:
     from tai42_kit.llm.checkpoint import ThreadRetention
-    from tai42_kit.llm.checkpoint.ledger import PostgresFinishedThreadLedger
+    from tai42_kit.llm.checkpoint.stores.postgres import PostgresFinishedThreadLedger
 
     await PostgresFinishedThreadLedger(pool).start([thread_id], ThreadRetention(waiting_minutes, 1))
 
