@@ -14,10 +14,12 @@ from tai42_kit.llm.checkpoint.liveness import (
 from tai42_kit.llm.checkpoint.providers import (
     CHECKPOINT_PROVIDERS,
     CheckpointProviderFacts,
+    CheckpointSharedValuesError,
     UnknownCheckpointProviderError,
     checkpoint_park_horizon,
     checkpoint_provider_facts,
     durable_checkpoint_providers,
+    shared_value_threshold,
 )
 from tai42_kit.llm.checkpoint.retention import (
     ThreadRetention,
@@ -29,6 +31,7 @@ from tai42_kit.llm.checkpoint.retention import (
 __all__ = [
     "CHECKPOINT_PROVIDERS",
     "CheckpointProviderFacts",
+    "CheckpointSharedValuesError",
     "FinishedThreadLedger",
     "LiveThreadFilter",
     "ThreadRetention",
@@ -44,4 +47,5 @@ __all__ = [
     "platform_retention",
     "register_live_thread_filter",
     "resolve_retention",
+    "shared_value_threshold",
 ]

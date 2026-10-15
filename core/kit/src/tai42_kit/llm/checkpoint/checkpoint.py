@@ -19,7 +19,11 @@ from tai42_kit.llm.checkpoint.ledger import (
     RedisFinishedThreadLedger,
     SqliteFinishedThreadLedger,
 )
-from tai42_kit.llm.checkpoint.providers import CheckpointProviderFacts, checkpoint_provider_facts
+from tai42_kit.llm.checkpoint.providers import (
+    CheckpointProviderFacts,
+    checkpoint_provider_facts,
+    shared_value_threshold,
+)
 from tai42_kit.llm.checkpoint.store_format import ensure_store_format
 from tai42_kit.llm.settings import llm_provider_settings
 from tai42_kit.settings import not_configured_message
@@ -315,7 +319,9 @@ async def _create_redis_checkpoint(conn_string: str | None) -> tuple[CheckpointR
     # unreachable. ``connection_args`` is deliberately not passed: the saver
     # consults it only while building a client of its own.
     client = async_redis_from_url(conn_string)
-    saver = GuardedAsyncRedisSaver(redis_client=client, ttl=ttl_config)
+    saver = GuardedAsyncRedisSaver(
+        redis_client=client, ttl=ttl_config, shared_value_threshold=shared_value_threshold("redis")
+    )
     _guard_saver_serialization(saver, checkpoint_provider_facts("redis"))
 
     async def close_redis():
@@ -380,6 +386,7 @@ def get_saver_from_resource(provider: str, resource: CheckpointResource) -> Base
     facts = checkpoint_provider_facts(provider)
     if resource.provider != provider:
         raise ValueError(f"checkpoint resource of provider {resource.provider!r} cannot serve provider {provider!r}")
+    threshold = shared_value_threshold(provider)
     # Every branch returns through the serialization guard: this is the single
     # choke point that yields the saver a graph checkpoints through, so no saver
     # can serialize a checkpoint value unguarded.
@@ -391,7 +398,7 @@ def get_saver_from_resource(provider: str, resource: CheckpointResource) -> Base
         case "postgres":
             from tai42_kit.llm.checkpoint.postgres_saver import GuardedAsyncPostgresSaver
 
-            saver = GuardedAsyncPostgresSaver(resource.handle)
+            saver = GuardedAsyncPostgresSaver(resource.handle, shared_value_threshold=threshold)
         case _:
             saver = resource.handle
     return _guard_saver_serialization(saver, facts)
@@ -423,7 +430,11 @@ async def create_redis_saver_view(resource: CheckpointResource, waiting_minutes:
         raise ValueError(f"a Redis saver view needs a redis checkpoint resource, got {resource.provider!r}")
     from tai42_kit.llm.checkpoint.codec import GuardedAsyncRedisSaver
 
-    view = GuardedAsyncRedisSaver(redis_client=resource.redis_client, ttl=_redis_ttl_config(waiting_minutes))
+    view = GuardedAsyncRedisSaver(
+        redis_client=resource.redis_client,
+        ttl=_redis_ttl_config(waiting_minutes),
+        shared_value_threshold=shared_value_threshold("redis"),
+    )
     _guard_saver_serialization(view, checkpoint_provider_facts("redis"))
     await _setup_redis_saver(view)
     return view

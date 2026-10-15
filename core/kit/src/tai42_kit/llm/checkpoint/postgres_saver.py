@@ -1,18 +1,19 @@
 """The Postgres checkpoint saver the kit builds: shared values stored once per thread beside the saver's tables.
 
-The library saver stores a blob per changed channel version; a large sub-value inside a channel (one
-document of a dictionary of documents, one result of a dictionary of results) is stored once per
-thread in the kit table ``tai42_checkpoint_values`` and the channel's blob holds a ``ref`` envelope in
-its place. The values are written before the library writes the checkpoint or the pending writes that
-reference them, every read resolves the references, and deleting a thread deletes its values after the
-library's own delete.
+The library saver stores a blob per changed channel version. Where sharing is on, a large sub-value
+inside a channel (one document of a dictionary of documents, one result of a dictionary of results) is
+stored once per thread in the kit table ``tai42_checkpoint_values`` and the channel's blob holds a
+``ref`` envelope in its place, under a type tag ending in ``+ref``. The values are written before the
+library writes the checkpoint or the pending writes that reference them. With sharing off a write is
+the library's own. A read that decoded a ``+ref`` blob resolves its references, whatever the switch, and
+deleting a thread deletes its values after the library's own delete.
 """
 
 from __future__ import annotations
 
 import asyncio
 import zlib
-from collections.abc import AsyncIterator, Collection, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -30,10 +31,12 @@ from tai42_kit.llm.checkpoint.chunking import (
 from tai42_kit.llm.checkpoint.codec import (
     _ZLIB_LEVEL,
     COMPRESSED_BLOB_TYPE,
+    _raise_failures,
+    _ReadCollector,
     envelope_reference,
     reference_envelope,
+    referencing_type,
 )
-from tai42_kit.llm.checkpoint.providers import checkpoint_provider_facts
 from tai42_kit.llm.checkpoint.value_store import PostgresCheckpointValueStore
 from tai42_kit.llm.settings import llm_provider_settings
 
@@ -104,6 +107,13 @@ class PostgresMsgpackValueEncoding:
         return self._serde.loads_typed((type_, data))
 
 
+def _pre_encoded(encoding: PostgresMsgpackValueEncoding, value: Any, chunker: ValueChunker) -> PreEncodedValue:
+    """``value`` chunked and encoded as its blob; a blob holding a reference is tagged as one."""
+    rewritten, encoded = chunker.chunk(value)
+    stored = encoding.compressed(encoded)
+    return PreEncodedValue(stored if rewritten is value else referencing_type(stored))
+
+
 def _inline_primitive(value: Any) -> bool:
     # The library stores these inline in the checkpoint row, never as a blob.
     return value is None or isinstance(value, (str, int, float, bool))
@@ -112,13 +122,15 @@ def _inline_primitive(value: Any) -> bool:
 class GuardedAsyncPostgresSaver(AsyncPostgresSaver):
     """The Postgres checkpoint saver the kit builds, with the thread value store beside it.
 
-    ``conn`` is the checkpoint pool. Values are chunked off the event loop; the library stores the
-    channel blobs and pending writes as they are encoded here.
+    ``conn`` is the checkpoint pool. With ``shared_value_threshold`` set, values are chunked off the
+    event loop and the library stores the channel blobs and pending writes as they are encoded here;
+    with ``None`` the library encodes and stores them itself.
     """
 
-    def __init__(self, conn: Any, **kwargs: Any) -> None:
+    def __init__(self, conn: Any, *, shared_value_threshold: int | None, **kwargs: Any) -> None:
         """Build the library saver over ``conn`` and the thread value store over the same pool."""
         super().__init__(conn, **kwargs)
+        self._shared_value_threshold = shared_value_threshold
         self._values = PostgresCheckpointValueStore(conn)
 
     def _encoding(self) -> PostgresMsgpackValueEncoding:
@@ -126,12 +138,7 @@ class GuardedAsyncPostgresSaver(AsyncPostgresSaver):
         return PostgresMsgpackValueEncoding(self.serde, llm_provider_settings().checkpoint_inline_compress_bytes)
 
     def _chunker(self, encoding: PostgresMsgpackValueEncoding) -> ValueChunker:
-        shared = (
-            llm_provider_settings().checkpoint_shared_value_bytes
-            if checkpoint_provider_facts("postgres").shared_values
-            else None
-        )
-        return ValueChunker(encoding, shared)
+        return ValueChunker(encoding, self._shared_value_threshold)
 
     async def _store_values(
         self, thread_id: str, chunker: ValueChunker, encoding: PostgresMsgpackValueEncoding
@@ -158,6 +165,8 @@ class GuardedAsyncPostgresSaver(AsyncPostgresSaver):
         therefore handed over as its reference blob on every checkpoint, with its current version: the
         library writes that version's blob when it lacks one and keeps the string out of the row.
         """
+        if self._shared_value_threshold is None:
+            return await super().aput(config, checkpoint, metadata, new_versions)
         thread_id = str((config.get("configurable") or {})["thread_id"])
         encoding = self._encoding()
         current = checkpoint["channel_versions"]
@@ -170,7 +179,7 @@ class GuardedAsyncPostgresSaver(AsyncPostgresSaver):
                 if isinstance(value, str) and name in current:
                     rewritten, encoded = chunker.chunk(value)
                     if rewritten is not value:
-                        channels[name] = PreEncodedValue(encoding.compressed(encoded))
+                        channels[name] = PreEncodedValue(referencing_type(encoding.compressed(encoded)))
                         versions.setdefault(name, current[name])
                     continue
                 if name not in new_versions or _inline_primitive(value):
@@ -179,8 +188,7 @@ class GuardedAsyncPostgresSaver(AsyncPostgresSaver):
                     # The library stores a snapshot under its own marker: its payload is chunked in place.
                     channels[name], _encoded = chunker.chunk(value)
                     continue
-                _rewritten, encoded = chunker.chunk(value)
-                channels[name] = PreEncodedValue(encoding.compressed(encoded))
+                channels[name] = _pre_encoded(encoding, value, chunker)
             return channels, versions, chunker
 
         channels, versions, chunker = await asyncio.to_thread(encode)
@@ -196,14 +204,15 @@ class GuardedAsyncPostgresSaver(AsyncPostgresSaver):
         task_path: str = "",
     ) -> None:
         """Store pending writes: their shared values first, then the library's write."""
+        if self._shared_value_threshold is None:
+            await super().aput_writes(config, writes, task_id, task_path)
+            return
         thread_id = str((config.get("configurable") or {})["thread_id"])
         encoding = self._encoding()
 
         def encode() -> tuple[list[tuple[str, Any]], ValueChunker]:
             chunker = self._chunker(encoding)
-            encoded = [
-                (channel, PreEncodedValue(encoding.compressed(chunker.chunk(value)[1]))) for channel, value in writes
-            ]
+            encoded = [(channel, _pre_encoded(encoding, value, chunker)) for channel, value in writes]
             return encoded, chunker
 
         encoded, chunker = await asyncio.to_thread(encode)
@@ -220,8 +229,12 @@ class GuardedAsyncPostgresSaver(AsyncPostgresSaver):
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Read a checkpoint tuple with its shared values; a missing value raises."""
-        result = await super().aget_tuple(config)
-        return None if result is None else await self._resolve(result)
+        with _ReadCollector() as read:
+            result = await super().aget_tuple(config)
+        _raise_failures(read.failures, (config.get("configurable") or {}).get("thread_id"))
+        if result is None or not read.references:
+            return result
+        return await self._resolve(result)
 
     async def alist(
         self,
@@ -231,16 +244,36 @@ class GuardedAsyncPostgresSaver(AsyncPostgresSaver):
         before: RunnableConfig | None = None,
         limit: int | None = None,
     ) -> AsyncIterator[CheckpointTuple]:
-        """List checkpoint tuples with their shared values; a tuple holding a missing value raises."""
-        async for item in super().alist(config, filter=filter, before=before, limit=limit):
-            yield await self._resolve(item)
+        """List checkpoint tuples with their shared values; a tuple holding a missing value raises.
+
+        The library decodes each tuple as it yields it, so each tuple is resolved when its own decode
+        announced a reference.
+        """
+        inner = cast(
+            "AsyncGenerator[CheckpointTuple]", super().alist(config, filter=filter, before=before, limit=limit)
+        )
+        try:
+            while True:
+                with _ReadCollector() as read:
+                    try:
+                        item = await anext(inner)
+                    except StopAsyncIteration:
+                        return
+                _raise_failures(read.failures, (item.config.get("configurable") or {}).get("thread_id"))
+                yield await self._resolve(item) if read.references else item
+        finally:
+            await inner.aclose()
 
     async def aget_delta_channel_history(
         self, *, config: RunnableConfig, channels: Sequence[str]
     ) -> Mapping[str, DeltaChannelHistory]:
         """The delta channels' writes and seeds along the parent chain, with their shared values resolved."""
-        history = await super().aget_delta_channel_history(config=config, channels=channels)
+        with _ReadCollector() as read:
+            history = await super().aget_delta_channel_history(config=config, channels=channels)
         thread_id = str((config.get("configurable") or {})["thread_id"])
+        _raise_failures(read.failures, thread_id)
+        if not read.references:
+            return history
 
         async def fetch(digests: Collection[str]) -> Mapping[str, StoredBlob]:
             return await self._values.get(thread_id, digests)

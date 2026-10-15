@@ -3,28 +3,32 @@
 Redis stores values once by default and Postgres stores every value inline by default; the deployment's
 switch turns it on or off. A value above the threshold is stored once per thread and referenced; a later
 checkpoint carrying it adds nothing; reads restore it whatever the switch says now; deletes and retention
-remove it; a value removed behind the saver's back fails the read loudly. Opt-in like the kit's other real-store tests: ``TAI42_KIT_REAL_REDIS_URL``
-for Redis, ``TAI42_KIT_REAL_PG=1`` and the ``TAI_DATABASE_DEFAULT_PG_*`` env for Postgres.
+remove it; a value removed behind the saver's back fails the read loudly. Opt-in like the kit's other
+real-store tests: ``TAI42_KIT_REAL_REDIS_URL`` for Redis, ``TAI42_KIT_REAL_PG=1`` and the
+``TAI_DATABASE_DEFAULT_PG_*`` env for Postgres.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import operator
 import os
 import random
 import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any, TypedDict
 
 import pytest
 
 pytest.importorskip("langgraph.checkpoint.redis")
 pytest.importorskip("langgraph.checkpoint.postgres.aio")
 
+from langgraph.channels.delta import DeltaChannel
 from langgraph.checkpoint.base import create_checkpoint, empty_checkpoint
+from langgraph.graph import END, START, StateGraph
 
 from tai42_kit.llm.checkpoint.checkpoint import create_checkpoint_resource, get_saver_from_resource
 from tai42_kit.llm.checkpoint.chunking import CheckpointReferenceError
@@ -33,6 +37,7 @@ from tai42_kit.llm.checkpoint.value_store import REDIS_VALUE_INDEX_PREFIX, REDIS
 from tai42_kit.settings import reset_all_settings
 
 from ._real_redis import REAL_REDIS_ENV
+from .test_checkpoint_codec_redis import _extend
 
 pytestmark = pytest.mark.integration
 
@@ -402,10 +407,40 @@ async def test_the_values_expire_with_the_threads_retention(redis_store: Store) 
 # --------------------------------------------------------------------------- #
 # Postgres: the delta channel history resolves its shared values
 # --------------------------------------------------------------------------- #
+class _SnapshotState(TypedDict):
+    items: Annotated[list, DeltaChannel(_extend, snapshot_frequency=1)]
+    note: Annotated[list, operator.add]
+
+
+def _snapshot_first(state: _SnapshotState) -> dict[str, Any]:
+    return {"items": ["a"], "note": ["first"]}
+
+
+def _snapshot_second(state: _SnapshotState) -> dict[str, Any]:
+    from langgraph.types import interrupt
+
+    return {"items": [interrupt("continue?")], "note": ["second"]}
+
+
+def _snapshot_third(state: _SnapshotState) -> dict[str, Any]:
+    return {"items": ["c"], "note": ["third"]}
+
+
+def _snapshotting_delta_graph() -> Any:
+    """A delta-channel graph that snapshots the channel at every step."""
+    builder = StateGraph(_SnapshotState)
+    builder.add_node("first", _snapshot_first)
+    builder.add_node("second", _snapshot_second)
+    builder.add_node("third", _snapshot_third)
+    builder.add_edge(START, "first")
+    builder.add_edge("first", "second")
+    builder.add_edge("second", "third")
+    builder.add_edge("third", END)
+    return builder
+
+
 async def test_a_delta_channel_graph_rebuilds_its_shared_values_on_postgres(monkeypatch: pytest.MonkeyPatch) -> None:
     from langgraph.checkpoint.memory import InMemorySaver
-
-    from .test_checkpoint_codec_redis import _delta_graph
 
     opened, closer = await _open("postgres", monkeypatch, "true")
     big = "p" * 3000
@@ -413,7 +448,7 @@ async def test_a_delta_channel_graph_rebuilds_its_shared_values_on_postgres(monk
     async def run(checkpointer: Any, thread_id: str) -> Any:
         from langgraph.types import Command
 
-        graph = _delta_graph().compile(checkpointer=checkpointer)
+        graph = _snapshotting_delta_graph().compile(checkpointer=checkpointer)
         config: Any = {"configurable": {"thread_id": thread_id}}
         await graph.ainvoke({"items": [big], "note": []}, config)
         return await graph.ainvoke(Command(resume=big + "b"), config)

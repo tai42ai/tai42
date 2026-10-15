@@ -218,7 +218,7 @@ async def test_redis_resource_saver_is_built_with_the_resolved_threshold(monkeyp
     reset_all_settings()
     _use_fake_redis_saver(monkeypatch, _FakeSaver)
     try:
-        _resource_, closer = await cp.create_checkpoint_resource("redis", "redis://h:6379/0")
+        _created, closer = await cp.create_checkpoint_resource("redis", "redis://h:6379/0")
         await closer()
     finally:
         reset_all_settings()
@@ -313,7 +313,7 @@ async def test_redis_saver_is_handed_a_client_built_from_the_resolved_url(monkey
 
     # A client, never a URL — and no ``connection_args``, which the saver reads
     # only while building a client of its own.
-    assert set(captured) == {"redis_client", "ttl"}
+    assert set(captured) == {"redis_client", "ttl", "shared_value_threshold"}
     from redis.asyncio import Redis as AsyncRedis
     from redis.asyncio.connection import SSLConnection
 
@@ -661,17 +661,6 @@ def test_get_saver_memory_with_the_switch_on_is_refused_naming_the_provider(shar
     shared_values_switch("true")
     with pytest.raises(CheckpointSharedValuesError, match=r"LLM_PROVIDER_CHECKPOINT_SHARED_VALUES=true: the 'memory'"):
         cp.get_saver_from_resource("memory", _resource("memory", _FakeSaver()))
-
-
-def test_get_saver_sqlite_with_the_switch_on_is_refused_naming_the_provider(shared_values_switch, monkeypatch):
-    from tai42_kit.llm.checkpoint.providers import CheckpointSharedValuesError
-
-    saver_mod: Any = types.ModuleType("langgraph.checkpoint.sqlite.aio")
-    saver_mod.AsyncSqliteSaver = _FakeSaver
-    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.sqlite.aio", saver_mod)
-    shared_values_switch("true")
-    with pytest.raises(CheckpointSharedValuesError, match=r"the 'sqlite' checkpoint provider keeps no value store"):
-        cp.get_saver_from_resource("sqlite", _resource("sqlite", "conn"))
 
 
 def test_get_saver_memory_with_the_switch_unset_is_the_bare_saver(shared_values_switch):

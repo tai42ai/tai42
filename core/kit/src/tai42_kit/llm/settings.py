@@ -170,7 +170,7 @@ class LLMProviderSettings(TaiBaseSettings):
     """Selects the LLM, embedding, checkpoint, and store provider implementations and their connection strings."""
 
     # ``null`` sets an optional value to ``None`` (an empty value means "unset" and keeps the default),
-    # so a deployment can turn the inline checkpoint compression or the shared checkpoint values off.
+    # so a deployment can turn the inline checkpoint compression off or leave the shared values to the provider.
     model_config = SettingsConfigDict(env_prefix="LLM_PROVIDER_", env_parse_none_str="null")
     env_prefix_owned: ClassVar[bool] = True
 
@@ -191,10 +191,23 @@ class LLMProviderSettings(TaiBaseSettings):
     # A checkpoint value whose encoding exceeds this many bytes is stored compressed; ``None``
     # (``LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES=null``) turns the compression off.
     checkpoint_inline_compress_bytes: int | None = Field(default=65536, gt=0)
-    # On the redis and postgres providers, a checkpoint sub-value whose encoding exceeds this many bytes
-    # is stored once per thread and referenced from every checkpoint and pending write that carries it;
-    # ``None`` (``LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES=null``) stores every value inline.
-    checkpoint_shared_value_bytes: int | None = Field(default=65536, gt=0)
+    # Whether a checkpoint sub-value above checkpoint_shared_value_bytes is stored once per thread and
+    # referenced. Unset (or null): the provider's own default from the provider table. true / false: the
+    # deployment's choice for every store it opens; true on a provider whose saver keeps no value store is
+    # refused at the saver's first build, naming the provider.
+    checkpoint_shared_values: bool | None = Field(
+        default=None,
+        description="Store large checkpoint sub-values once per thread: unset takes the provider's default "
+        "(`redis` on, `postgres` off), `true`/`false` override it; `true` on a provider without a value store "
+        "is refused at first use.",
+    )
+    # Where sharing is on, a sub-value whose encoding exceeds this many bytes is the unit stored once.
+    checkpoint_shared_value_bytes: int = Field(
+        default=65536,
+        gt=0,
+        description="Where large values are stored once, a sub-value whose encoding is larger than this many "
+        "bytes is stored once per thread and referenced.",
+    )
     store: str = "redis"
     store_conn_string: str | None = None
 

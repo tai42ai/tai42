@@ -2,11 +2,11 @@
 
 A checkpoint is encoded once, off the event loop: one faithful walk per channel whose version changed
 (an unchanged channel reuses the parent checkpoint's stored form), every node's encoding measured once
-for both thresholds and the digest, and the checkpoint text assembled from the channels' encodings. A
-sub-value above ``LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES`` is stored once per thread in the
-saver's value store (see :mod:`tai42_kit.llm.checkpoint.chunking`), before the library writes the
+for both thresholds and the digest, and the checkpoint text assembled from the channels' encodings.
+Where sharing is on, a sub-value above the saver's shared-value threshold is stored once per thread in
+the saver's value store (see :mod:`tai42_kit.llm.checkpoint.chunking`), before the library writes the
 checkpoint or the pending write that references it; every write re-arms the retention of every value it
-references, and every read resolves the references.
+references, and a read that decoded a reference resolves it.
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ from tai42_kit.llm.checkpoint.codec import (
     envelope_reference,
     reference_envelope,
 )
-from tai42_kit.llm.checkpoint.providers import checkpoint_provider_facts
 from tai42_kit.llm.checkpoint.value_store import RedisCheckpointValueStore
 from tai42_kit.llm.settings import llm_provider_settings
 from tai42_kit.utils.data.json_schema_util import MSGPACK_INT_MAX, MSGPACK_INT_MIN, find_oversized_int
@@ -206,12 +205,12 @@ class RedisSharedValues:
     The value store writes through the saver's client and stamps the saver's waiting retention.
     """
 
-    def __init__(self, saver: GuardedAsyncRedisSaver) -> None:
-        """Serve ``saver``, reading the thresholds from the settings and the provider table."""
-        settings = llm_provider_settings()
-        shared = settings.checkpoint_shared_value_bytes if checkpoint_provider_facts("redis").shared_values else None
+    def __init__(self, saver: GuardedAsyncRedisSaver, shared_value_threshold: int | None) -> None:
+        """Serve ``saver``, sharing sub-values above ``shared_value_threshold`` bytes; ``None`` shares none."""
         self._saver = saver
-        self.encoder = RedisCheckpointEncoder(shared, settings.checkpoint_inline_compress_bytes)
+        self.encoder = RedisCheckpointEncoder(
+            shared_value_threshold, llm_provider_settings().checkpoint_inline_compress_bytes
+        )
         ttl_minutes = (saver.ttl_config or {}).get("default_ttl")
         self.store = RedisCheckpointValueStore(saver._redis, None if ttl_minutes is None else int(ttl_minutes * 60))
 

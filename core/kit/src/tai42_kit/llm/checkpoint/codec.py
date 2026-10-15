@@ -17,9 +17,10 @@ One envelope shape carries every kind::
 
     {"lc": 2, "type": "constructor", "id": KIT_ENVELOPE_ID, "args": [kind, payload]}
 
-A sub-value whose encoding is above ``LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES`` is stored once per
-thread in the saver's value store and the checkpoint holds a ``ref`` envelope in its place (see
-:mod:`tai42_kit.llm.checkpoint.chunking`). A channel value or pending write whose encoding is above
+Where large values are stored once per thread, a sub-value whose encoding is above
+``LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES`` is stored in the saver's value store and the checkpoint
+holds a ``ref`` envelope in its place (see :mod:`tai42_kit.llm.checkpoint.chunking`); decoding a ``ref``
+envelope announces it to the read in progress. A channel value or pending write whose encoding is above
 ``LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES`` is stored inline as an ``inflate`` envelope: its JSON
 text, zlib compressed and base64 encoded.
 
@@ -29,7 +30,8 @@ every node's encoding measured once for both thresholds and the digest, and the 
 assembled from the channels' encodings.
 
 The Postgres saver stores channel values as msgpack blobs; :class:`BlobCompressCodec` compresses a
-blob above the threshold under its own type tag.
+blob above the threshold under its own type tag, and a blob holding a reference carries the type suffix
+``+ref``, which announces it to the read in progress.
 """
 
 from __future__ import annotations
@@ -62,7 +64,7 @@ from redisvl.query import CountQuery
 from redisvl.query.filter import Tag
 
 from tai42_kit.llm.checkpoint.checkpoint import CheckpointDeleteError, CheckpointSerializationError
-from tai42_kit.llm.checkpoint.chunking import CheckpointValueRef
+from tai42_kit.llm.checkpoint.chunking import CheckpointValueRef, SharedSnapshot
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -97,6 +99,9 @@ CODEC_KINDS: Final[frozenset[str]] = frozenset(
 # The type tag of a compressed Postgres blob.
 COMPRESSED_BLOB_TYPE: Final = "msgpack+zlib"
 
+# The suffix of a Postgres blob's type tag when the blob holds a reference.
+REFERENCING_TYPE_SUFFIX: Final = "+ref"
+
 _ZLIB_LEVEL: Final = 1
 
 # The decode failures of the checkpoint read in progress. The Redis saver catches every exception
@@ -105,6 +110,38 @@ _ZLIB_LEVEL: Final = 1
 _decode_failures: ContextVar[list[CheckpointSerializationError] | None] = ContextVar(
     "tai42_checkpoint_decode_failures", default=None
 )
+
+# The references the checkpoint read in progress decoded: a saver resolves a read only when it holds one.
+_read_references: ContextVar[list[Any] | None] = ContextVar("tai42_checkpoint_read_references", default=None)
+
+
+def _record_reference(item: Any) -> None:
+    references = _read_references.get()
+    if references is not None:
+        references.append(item)
+
+
+class _ReadCollector:
+    """The decode failures and the announced references of one checkpoint read, open inside its ``with``."""
+
+    def __init__(self) -> None:
+        self.failures: list[CheckpointSerializationError] = []
+        self.references: list[Any] = []
+
+    def __enter__(self) -> _ReadCollector:
+        self._tokens = (_decode_failures.set(self.failures), _read_references.set(self.references))
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        failures, references = self._tokens
+        _read_references.reset(references)
+        _decode_failures.reset(failures)
+
+
+def referencing_type(encoded: tuple[str, bytes]) -> tuple[str, bytes]:
+    """``encoded`` under the type tag that marks a Postgres blob holding a reference."""
+    type_, data = encoded
+    return type_ + REFERENCING_TYPE_SUFFIX, data
 
 
 def _envelope(kind: str, payload: Any) -> dict[str, Any]:
@@ -440,15 +477,27 @@ class BlobCompressCodec:
         self._threshold = threshold
 
     def dumps_typed(self, inner: Any, obj: Any) -> tuple[str, bytes]:
-        """Encode ``obj`` with the saver's serializer; a large msgpack blob is compressed."""
+        """Encode ``obj`` with the saver's serializer; a large msgpack blob is compressed.
+
+        A :class:`~tai42_kit.llm.checkpoint.chunking.SharedSnapshot` is tagged as holding a reference.
+        """
         type_, data = inner.dumps_typed(obj)
         if type_ == "msgpack" and self._threshold is not None and len(data) > self._threshold:
-            return COMPRESSED_BLOB_TYPE, zlib.compress(data, _ZLIB_LEVEL)
+            type_, data = COMPRESSED_BLOB_TYPE, zlib.compress(data, _ZLIB_LEVEL)
+        if isinstance(obj, SharedSnapshot):
+            return referencing_type((type_, data))
         return type_, data
 
     def loads_typed(self, inner: Any, data: tuple[str, bytes]) -> Any:
-        """Decode a blob; a compressed one is decompressed first, and a corrupt one raises."""
+        """Decode a blob; a compressed one is decompressed first, and a corrupt one raises.
+
+        A blob tagged as holding a reference announces it to the read in progress.
+        """
         type_, payload = data
+        if type_.endswith(REFERENCING_TYPE_SUFFIX):
+            type_ = type_.removesuffix(REFERENCING_TYPE_SUFFIX)
+            _record_reference(type_)
+            data = (type_, payload)
         if type_ != COMPRESSED_BLOB_TYPE:
             return inner.loads_typed(data)
         try:
@@ -585,7 +634,9 @@ class FaithfulRedisSerializer(JsonPlusRedisSerializer):
             raise TypeError("a kit envelope carries [kind, payload]")
         kind, payload = args
         if kind == "ref":
-            return reference_from_payload(payload)
+            ref = reference_from_payload(payload)
+            _record_reference(ref)
+            return ref
         if kind == "inflate":
             tag, text = payload
             if tag != "json":
@@ -662,17 +713,19 @@ class GuardedAsyncRedisSaver(AsyncRedisSaver):
     returns such a value raw on its checkpoint-document path. Deleting a thread removes every
     document and every shared value it holds.
 
-    A checkpoint and a pending write are encoded off the event loop before the library stores them,
-    their shared values written to the thread's value store first, and every read resolves the
-    references before it returns (:class:`~tai42_kit.llm.checkpoint.redis_values.RedisSharedValues`).
+    A checkpoint and a pending write are encoded off the event loop before the library stores them.
+    With ``shared_value_threshold`` set, their sub-values above it are written to the thread's value
+    store first; with ``None`` every value is stored inline. A read resolves references only when its
+    decode announced one, whatever the threshold
+    (:class:`~tai42_kit.llm.checkpoint.redis_values.RedisSharedValues`).
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, shared_value_threshold: int | None, **kwargs: Any) -> None:
         """Build the library saver and its shared values over the same client and waiting retention."""
         from tai42_kit.llm.checkpoint.redis_values import RedisSharedValues
 
         super().__init__(*args, **kwargs)
-        self._shared = RedisSharedValues(self)
+        self._shared = RedisSharedValues(self, shared_value_threshold)
 
     async def _thread_documents(self, thread_id: str) -> tuple[int, int]:
         """The number of checkpoint and pending-write documents ``thread_id`` holds, across namespaces."""
@@ -741,13 +794,12 @@ class GuardedAsyncRedisSaver(AsyncRedisSaver):
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Read a checkpoint tuple with its shared values; an undecodable or missing stored value raises."""
-        failures, token = _open_failures()
-        try:
+        with _ReadCollector() as read:
             result = await super().aget_tuple(config)
-        finally:
-            _decode_failures.reset(token)
-        _raise_failures(failures, _thread_of(config))
-        return None if result is None else await self._shared.resolve(result)
+        _raise_failures(read.failures, _thread_of(config))
+        if result is None or not read.references:
+            return result
+        return await self._shared.resolve(result)
 
     async def alist(
         self,
@@ -757,20 +809,24 @@ class GuardedAsyncRedisSaver(AsyncRedisSaver):
         before: RunnableConfig | None = None,
         limit: int | None = None,
     ) -> AsyncIterator[CheckpointTuple]:
-        """List checkpoint tuples with their shared values; a tuple holding an undecodable or missing value raises."""
+        """List checkpoint tuples with their shared values; a tuple holding an undecodable or missing value raises.
+
+        The library decodes a page of tuples before it yields the first, so a reference is announced no
+        later than the tuple holding it: from the first announcement on, every tuple of the read is resolved.
+        """
         inner = cast(
             "AsyncGenerator[CheckpointTuple]", super().alist(config, filter=filter, before=before, limit=limit)
         )
+        announced = False
         try:
             while True:
-                failures, token = _open_failures()
-                try:
-                    item = await anext(inner)
-                except StopAsyncIteration:
-                    return
-                finally:
-                    _decode_failures.reset(token)
-                _raise_failures(failures, _thread_of(item.config))
-                yield await self._shared.resolve(item)
+                with _ReadCollector() as read:
+                    try:
+                        item = await anext(inner)
+                    except StopAsyncIteration:
+                        return
+                _raise_failures(read.failures, _thread_of(item.config))
+                announced = announced or bool(read.references)
+                yield await self._shared.resolve(item) if announced else item
         finally:
             await inner.aclose()

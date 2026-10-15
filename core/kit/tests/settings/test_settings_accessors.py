@@ -101,7 +101,7 @@ def test_checkpoint_shared_value_bytes_null_from_the_environment_is_refused(monk
 
 def test_checkpoint_shared_value_bytes_none_is_refused():
     with pytest.raises(ValidationError, match="checkpoint_shared_value_bytes"):
-        llm_settings_mod.LLMProviderSettings(checkpoint_shared_value_bytes=None)
+        llm_settings_mod.LLMProviderSettings(checkpoint_shared_value_bytes=None)  # pyright: ignore[reportArgumentType]
 
 
 def test_conn_strings_default_to_none():

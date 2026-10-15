@@ -14,6 +14,9 @@ where the store reads back a plain container. Nothing here depends on a channel 
 
 A reference carries its blob's digest, the blob's encoded length and the digests of every reference
 inside the blob, transitively, so a write that carries the reference can keep all of them alive.
+
+A stored value announces, as it is decoded, that it holds a reference; the resolver runs only then. A
+``_DeltaSnapshot`` rebuilt around a reference is a :class:`SharedSnapshot`, so the store can mark it.
 """
 
 from __future__ import annotations
@@ -81,18 +84,29 @@ class ValueEncoding(Protocol):
         ...
 
 
+class SharedSnapshot(_DeltaSnapshot):
+    """A ``_DeltaSnapshot`` whose payload holds a reference."""
+
+    __slots__ = ()
+
+
 def _is_serialized_object(value: dict[Any, Any]) -> bool:
     return value.get("lc") in (1, 2) and "type" in value
 
 
-def _marker_payload(value: Any) -> tuple[Any, Callable[[Any], Any]] | None:
-    """The payload of a LangGraph marker object and a rebuild of the marker around a new payload."""
+def _marker_payload(
+    value: Any, snapshot: Callable[[Any], Any] = _DeltaSnapshot
+) -> tuple[Any, Callable[[Any], Any]] | None:
+    """The payload of a LangGraph marker object and a rebuild of the marker around a new payload.
+
+    A ``_DeltaSnapshot`` is rebuilt by ``snapshot``.
+    """
     if isinstance(value, Interrupt):
         return value.value, lambda payload: dataclasses.replace(value, value=payload)
     if isinstance(value, Send):
         return value.arg, lambda payload: Send(value.node, payload)
     if isinstance(value, _DeltaSnapshot):
-        return value.value, _DeltaSnapshot
+        return value.value, snapshot
     return None
 
 
@@ -163,7 +177,7 @@ class ValueChunker:
                 closure |= item_closure
                 changed = changed or new is not item
             return (elements if changed else value), closure
-        marker = _marker_payload(value)
+        marker = _marker_payload(value, SharedSnapshot)
         if marker is not None:
             payload, rebuild = marker
             new, _encoded, closure = self._node(payload, threshold)
