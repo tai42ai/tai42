@@ -301,6 +301,10 @@
                 "name": "channel"
               },
               {
+                "gloss": "the name of the conversation route the turn entered through",
+                "name": "route"
+              },
+              {
                 "gloss": "the turn's canonical thread id (the thread doors' id)",
                 "name": "thread_id"
               },
@@ -692,6 +696,10 @@
               {
                 "gloss": "door=channel: the registry channel name",
                 "name": "channel"
+              },
+              {
+                "gloss": "the name of the conversation route the turn entered through",
+                "name": "route"
               },
               {
                 "gloss": "the turn's canonical thread id (the thread doors' id)",
@@ -1089,6 +1097,10 @@
                 "name": "channel"
               },
               {
+                "gloss": "the name of the conversation route the turn entered through",
+                "name": "route"
+              },
+              {
                 "gloss": "the turn's canonical thread id (the thread doors' id)",
                 "name": "thread_id"
               },
@@ -1474,6 +1486,10 @@
               {
                 "gloss": "door=channel: the registry channel name",
                 "name": "channel"
+              },
+              {
+                "gloss": "the name of the conversation route the turn entered through",
+                "name": "route"
               },
               {
                 "gloss": "the turn's canonical thread id (the thread doors' id)",

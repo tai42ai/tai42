@@ -126,6 +126,7 @@ class _ConversationRouteFields(ParkableDoorMixin):
                         ("sender", "the sending address"),
                         ("our_identity", "door=channel: the medium address we are texted at"),
                         ("channel", "door=channel: the registry channel name"),
+                        ("route", "the name of the conversation route the turn entered through"),
                         ("thread_id", "the turn's canonical thread id (the thread doors' id)"),
                         ("person_id", "multichannel only: the linked person's id"),
                         ("person_addresses", "multichannel only: the person's known addresses"),

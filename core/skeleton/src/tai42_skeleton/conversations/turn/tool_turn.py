@@ -95,8 +95,10 @@ def _tool_payload(
 ) -> dict[str, object]:
     """Assemble the dispatch payload dict for a tool turn.
 
-    Carries the message/sender/event/person/params/form/form_tag/attachments/location
-    fields plus the generic ``turn`` block. An event turn nulls
+    Carries the message/sender/route/event/person/params/form/form_tag/attachments/location
+    fields plus the generic ``turn`` block. ``route`` is the name of the conversation
+    route the turn entered through — a required non-blank string on every door, so a flow
+    bound to several routes can tell them apart. An event turn nulls
     ``message``/``sender`` and carries its structured ``event``; the person and
     the optional structured fields ride only when present. Under ``deliver="all"``
     (a message turn only) the payload gains ``messages`` — the batch in order — and,
@@ -108,6 +110,7 @@ def _tool_payload(
         "sender": client_address,
         "our_identity": route.our_identity,
         "channel": route.channel,
+        "route": route.route_name,
         "thread_id": thread_id,
         "turn": _turn_block(record, route, person=person, thread_id=thread_id),
     }

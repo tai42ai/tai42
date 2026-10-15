@@ -152,6 +152,22 @@ async def test_turn_block_on_the_event_door(env, monkeypatch):
     assert result.thread_id == thread_id
 
 
+async def test_event_door_start_expr_reads_the_route_name(env, monkeypatch):
+    # The route name rides the event-door payload too — never nulled — so an event route's
+    # start_expr can read ``.route`` and tell several routes apart, the same as a message turn.
+    channel = FakeChannel()
+    route = _tool_channel_route(start_expr="{r: .route}")
+    _wire(monkeypatch, FakeManager(route), channel)
+    await _seed_channel_thread(monkeypatch, env, channel)
+
+    tools = _wire_tool(monkeypatch, lambda kw: "handled")
+    submission = _event_submission(address="+15550002222", event=_event(payload={"amount": 5}))
+    await turn_module.submit_event("tool-line", submission, "svc-int", client_connected=_connected)
+    await _settle()
+
+    assert tools.calls[-1]["arguments"] == {"r": "tool-line"}
+
+
 async def test_event_channel_thread_delivers_the_reply_to_the_address(env, monkeypatch):
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
