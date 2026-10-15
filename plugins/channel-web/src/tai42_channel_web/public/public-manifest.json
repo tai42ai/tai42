@@ -1,14 +1,13 @@
 {
   "name": "tai42_channel_web",
   "version": "8.0.2",
-  "entry": "tai42-channel-web-C7DDIopw.js",
+  "entry": "tai42-channel-web-p1Krd1rF.js",
   "styles": [
     "tai42-channel-web-mVLCC1aR.css"
   ],
   "integrity": {
     "tai42-channel-web-BOeWTOD4.woff2": "sha384-swBecAL27qLsDDPbdyf4m+eOb3hVqthbGOSWWsQAWGQRrC7Mv26pPhoNQD/pG+fc",
     "tai42-channel-web-Bwz-egvJ.woff2": "sha384-jD+2tV8PS0ZpEIfiAhBqoCBwVMpmiMHRKP4tlQ4zx8YgACGy5A+J+UQlKh0a+z65",
-    "tai42-channel-web-C7DDIopw.js": "sha384-NukvdPvKhWDW8dYV7nHBeBVJjH+Wc+cfc0pCd02ffE6pmreGQnNRz+UV7Hq+HEKo",
     "tai42-channel-web-CBcvBZtf.woff2": "sha384-Add/AMGDcvhLuCRrQsVxY4SzrdqLkUv2MC9f/lB3IYYM5dCHI0PdX2L2YQmKtcb0",
     "tai42-channel-web-CO5SzqOn.woff2": "sha384-aX5Q+/q04jYtOh47yjtEY5w8d3foriFN9lBrZRkfXy5gg96QYD8KOcCKL4PlH4iX",
     "tai42-channel-web-CkhJZR-_.woff2": "sha384-JIq1RpVIyHblvpj3nIzOJN4M1Rpvmej5lX/2ofexSTmh6hYB7ir+QOlIf6IJUzqh",
@@ -20,6 +19,7 @@
     "tai42-channel-web-Dx4kXJAl.woff2": "sha384-l0ql7Q1zqvX5klAVRwYjcMVCkCxg5dMTdghsIlC3pYkX6wwEHerh2bP/4yAao3Im",
     "tai42-channel-web-XN7g48iV.woff2": "sha384-RVJo9B5Jc+P3Ui7wi5DRbBmgJIXrBsLbQY3LzTpIDB4qGB2vU9eFtN0B0zWEu/JL",
     "tai42-channel-web-X_5orZeX.woff2": "sha384-x3pMS/kFlfJtrz2jhnRb6GvbzD1uhPRdFuhWMa3dIa941ckaWEQ/+L1W1HWcwvaU",
-    "tai42-channel-web-mVLCC1aR.css": "sha384-wjriY630QcQe9SaH9BHXKsaxUZU3+FdhGwO/U50dE/9D8G18yAO79oDwSgzBbbMv"
+    "tai42-channel-web-mVLCC1aR.css": "sha384-wjriY630QcQe9SaH9BHXKsaxUZU3+FdhGwO/U50dE/9D8G18yAO79oDwSgzBbbMv",
+    "tai42-channel-web-p1Krd1rF.js": "sha384-Bz1msECWc3sCfXwFvr7xyMKBMAbhWqnWFAvMvZ18Ad/rcFGKhjRVJRK5f0RgE6zU"
   }
 }

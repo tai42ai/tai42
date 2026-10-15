@@ -167,7 +167,7 @@ function ke(e, t, n) {
 	let r = !1, i;
 	return Object.defineProperty(e, "signal", {
 		enumerable: !0,
-		get: () => (i ??= t(), r ? i : (r = !0, i.aborted ? n() : i.addEventListener("abort", n, { once: !0 }), i))
+		get: () => (i ??= t(), r || (r = !0, i.aborted ? n() : i.addEventListener("abort", n, { once: !0 })), i)
 	}), e;
 }
 //#endregion
@@ -351,13 +351,9 @@ function Be(e) {
 		Promise.resolve(r).then(m).catch((r) => {
 			if (c()) return;
 			let i = e.retry ?? (je() ? 0 : 3), a = e.retryDelay ?? Le, o = typeof a == "function" ? a(n, r) : a, s = i === !0 || typeof i == "number" && n < i || typeof i == "function" && i(n, r);
-			if (t || !s) {
-				h(r);
-				return;
-			}
-			n++, e.onFail?.(n, r), Se(o).then(() => f() ? void 0 : g(f)).then(() => {
+			t || !s ? h(r) : (n++, e.onFail?.(n, r), Se(o).then(() => f() ? void 0 : g(f)).then(() => {
 				t ? h(r) : _();
-			});
+			}));
 		});
 	};
 	return {
@@ -2088,11 +2084,7 @@ var Cn, R = !1, wn = {
 };
 function z(e, t, n) {
 	let r = Object.getPrototypeOf(e._zod);
-	if (t in r && Cn !== e._zod) {
-		Cn = void 0;
-		return;
-	}
-	Cn = e._zod, Object.defineProperty(r, t, {
+	t in r && Cn !== e._zod ? Cn = void 0 : (Cn = e._zod, Object.defineProperty(r, t, {
 		configurable: !0,
 		get() {
 			Object.defineProperty(this, t, wn);
@@ -2116,7 +2108,7 @@ function z(e, t, n) {
 				value: e
 			});
 		}
-	});
+	}));
 }
 function Tn(e, t, n, r) {
 	let i = Sn(e, t);
@@ -3049,16 +3041,12 @@ function Ki(e, t, n, r, i, a) {
 			if (i !== void 0 && s && !o) return;
 			t.issues.push(...ln(n, e.issues));
 		}
-		if (!o && i === void 0) {
-			e.issues.length || t.issues.push({
-				code: "invalid_type",
-				expected: "nonoptional",
-				input: void 0,
-				path: [n]
-			});
-			return;
-		}
-		e.value === void 0 ? (o || i === "defaulted" && !s) && (t.value[n] = void 0) : t.value[n] = e.value;
+		!o && i === void 0 ? e.issues.length || t.issues.push({
+			code: "invalid_type",
+			expected: "nonoptional",
+			input: void 0,
+			path: [n]
+		}) : e.value === void 0 ? (o || i === "defaulted" && !s) && (t.value[n] = void 0) : t.value[n] = e.value;
 	}
 }
 var qi = [];
@@ -4392,26 +4380,17 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
 	}
 	for (let n of e.seen.entries()) {
 		let r = n[1];
-		if (t === n[0]) {
-			a(n);
-			continue;
-		}
-		if (e.external) {
-			let r = e.external.registry.get(n[0])?.id;
-			if (t !== n[0] && r) {
-				a(n);
-				continue;
+		if (t === n[0]) a(n);
+		else {
+			if (e.external) {
+				let r = e.external.registry.get(n[0])?.id;
+				if (t !== n[0] && r) {
+					a(n);
+					continue;
+				}
 			}
+			(e.metadataRegistry.get(n[0])?.id || r.cycle || r.count > 1 && e.reused === "ref") && a(n);
 		}
-		if (e.metadataRegistry.get(n[0])?.id) {
-			a(n);
-			continue;
-		}
-		if (r.cycle) {
-			a(n);
-			continue;
-		}
-		r.count > 1 && e.reused === "ref" && a(n);
 	}
 	e.external && (e.sharedDefsExtractedFor = e.external);
 }
@@ -4671,11 +4650,7 @@ var ms = {
 	n.not = {};
 }, bs = (e, t, n, r) => {
 	let i = e._zod.def, a = kt(i.entries);
-	if (a.length === 0) {
-		n.not = {};
-		return;
-	}
-	a.every((e) => typeof e == "number") && (n.type = "number"), a.every((e) => typeof e == "string") && (n.type = "string"), n.enum = a;
+	a.length === 0 ? n.not = {} : (a.every((e) => typeof e == "number") && (n.type = "number"), a.every((e) => typeof e == "string") && (n.type = "string"), n.enum = a);
 }, xs = (e, t, n, r) => {
 	let i = e._zod.def;
 	if (i.values.length === 0) {
@@ -5729,11 +5704,7 @@ function Al(e, t) {
 			}
 		}),
 		onToggle: (e) => {
-			if (u.reset(), e && c.data?.codes.length === 0) {
-				a(!0);
-				return;
-			}
-			u.mutate(e);
+			u.reset(), e && c.data?.codes.length === 0 ? a(!0) : u.mutate(e);
 		},
 		confirmEnable: i,
 		setConfirmEnable: a,
