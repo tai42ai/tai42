@@ -133,10 +133,14 @@ async def test_turn_block_on_the_event_door(env, monkeypatch):
     await _settle()
 
     kwargs = tools.calls[-1]["arguments"]
-    # An event turn nulls message/sender and carries the structured event; the turn block
-    # names the event id and an ``event:{kind}`` source.
+    # An event turn nulls message/sender and carries the structured event; the default kwargs
+    # still carry the line (our_identity/channel) and route the event arrived on, and the turn
+    # block names the event id and an ``event:{kind}`` source.
     assert kwargs["message"] is None
     assert kwargs["sender"] is None
+    assert kwargs["our_identity"] == "+15550001111"
+    assert kwargs["channel"] == "twilio"
+    assert kwargs["route"] == "tool-line"
     assert kwargs["turn"] == {
         "id": result.message_id,
         "inbound": {"id": "evt-1", "kind": "event", "source": "event:provider.update"},

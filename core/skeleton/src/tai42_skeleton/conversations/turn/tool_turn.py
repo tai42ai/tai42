@@ -264,7 +264,8 @@ async def _run_tool_turn(
 
     The outcome is a :class:`_SilentOutcome` or a :class:`_ResolvedOutcome`.
     Stateless per message — no conversation memory. The inbound payload maps to
-    the tool kwargs (``start_expr`` or a fixed ``{message, sender, turn}``), the tool runs under
+    the tool kwargs (``start_expr`` or a fixed
+    ``{message, sender, our_identity, channel, route, turn}``), the tool runs under
     the bound execution identity (whose ``run_tool`` seam authorizes the dispatch), and the
     result maps to the reply (``reply_expr`` or a null/string pass-through). The payload
     always carries ``thread_id`` — this turn's canonical thread id, the same opaque string the
@@ -276,8 +277,8 @@ async def _run_tool_turn(
     A structured inbound ``form`` (an ask-less form's submission) rides the payload under a
     ``form`` key ONLY when the inbound carried one, so an existing ``start_expr`` over a
     form-less inbound sees a byte-identical payload; the default no-``start_expr`` kwargs
-    stay the fixed ``{message, sender, turn}`` either way — a route maps the form deliberately or
-    not at all. The caller-set opaque ``form_tag`` that rode back with that submission rides the
+    stay the fixed ``{message, sender, our_identity, channel, route, turn}`` either way — a route maps the form
+    deliberately or not at all. The caller-set opaque ``form_tag`` that rode back with that submission rides the
     payload under a ``form_tag`` key beside ``form``, present under the SAME rule — ONLY when the
     submission carried one. Structured inbound ``attachments`` (the participant's media, as JSON ``MediaItem``
     objects) and a ``location`` (a JSON ``LocationElement``) ride the payload under those stable
@@ -372,10 +373,20 @@ async def _run_tool_turn(
 
 
 def _default_tool_kwargs(payload: dict[str, object]) -> dict[str, object]:
-    """The fixed ``{message, sender, turn}`` (plus ``event``) a route with no ``start_expr`` dispatches."""
+    """The fixed default kwargs a route with no ``start_expr`` dispatches.
+
+    The set is ``{message, sender, our_identity, channel, route, turn}`` (plus ``event``
+    on an event turn). ``our_identity`` and ``channel`` are the line the turn arrived on (both null on
+    the api door, which carries no line); ``route`` is the conversation route's name,
+    a non-blank string on every door — so a flow with no custom mapping still sees
+    which line and route the turn entered through.
+    """
     kwargs: dict[str, object] = {
         "message": payload["message"],
         "sender": payload["sender"],
+        "our_identity": payload["our_identity"],
+        "channel": payload["channel"],
+        "route": payload["route"],
         "turn": payload["turn"],
     }
     if "event" in payload:
