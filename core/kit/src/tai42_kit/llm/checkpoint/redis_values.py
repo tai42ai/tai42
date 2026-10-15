@@ -30,15 +30,13 @@ from tai42_kit.llm.checkpoint.chunking import (
 from tai42_kit.llm.checkpoint.codec import (
     _ZLIB_LEVEL,
     FaithfulRedisSerializer,
-    _decode_failures,
     _envelope,
     _is_kit_envelope,
-    _open_failures,
-    _raise_failures,
     _walk,
     envelope_reference,
     reference_envelope,
 )
+from tai42_kit.llm.checkpoint.reads import decode_failures, open_failures, raise_failures
 from tai42_kit.llm.checkpoint.value_store import RedisCheckpointValueStore
 from tai42_kit.llm.settings import llm_provider_settings
 from tai42_kit.utils.data.json_schema_util import MSGPACK_INT_MAX, MSGPACK_INT_MIN, find_oversized_int
@@ -120,12 +118,12 @@ class RedisJsonValueEncoding:
                 f"checkpoint thread {thread_id!r} value {ref.digest} is {len(data)} bytes, its reference "
                 f"records {ref.size}; the thread cannot be read — delete it"
             )
-        failures, token = _open_failures()
+        failures, token = open_failures()
         try:
             value = self._serializer.loads_typed(("json", data))
         finally:
-            _decode_failures.reset(token)
-        _raise_failures(failures, thread_id)
+            decode_failures.reset(token)
+        raise_failures(failures, thread_id)
         return value
 
 

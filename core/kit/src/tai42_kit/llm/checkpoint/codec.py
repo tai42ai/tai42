@@ -45,7 +45,6 @@ import math
 import uuid
 import zlib
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
-from contextvars import ContextVar, Token
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
@@ -65,6 +64,7 @@ from redisvl.query.filter import Tag
 
 from tai42_kit.llm.checkpoint.checkpoint import CheckpointDeleteError, CheckpointSerializationError
 from tai42_kit.llm.checkpoint.chunking import CheckpointValueRef, SharedSnapshot
+from tai42_kit.llm.checkpoint.reads import CheckpointRead, raise_failures, record_failure, record_reference
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -103,39 +103,6 @@ COMPRESSED_BLOB_TYPE: Final = "msgpack+zlib"
 REFERENCING_TYPE_SUFFIX: Final = "+ref"
 
 _ZLIB_LEVEL: Final = 1
-
-# The decode failures of the checkpoint read in progress. The Redis saver catches every exception
-# raised while it revives a checkpoint document and returns the raw value, so the kit records each
-# failure here and the saver's read method raises it once the read finishes.
-_decode_failures: ContextVar[list[CheckpointSerializationError] | None] = ContextVar(
-    "tai42_checkpoint_decode_failures", default=None
-)
-
-# The references the checkpoint read in progress decoded: a saver resolves a read only when it holds one.
-_read_references: ContextVar[list[Any] | None] = ContextVar("tai42_checkpoint_read_references", default=None)
-
-
-def _record_reference(item: Any) -> None:
-    references = _read_references.get()
-    if references is not None:
-        references.append(item)
-
-
-class _ReadCollector:
-    """The decode failures and the announced references of one checkpoint read, open inside its ``with``."""
-
-    def __init__(self) -> None:
-        self.failures: list[CheckpointSerializationError] = []
-        self.references: list[Any] = []
-
-    def __enter__(self) -> _ReadCollector:
-        self._tokens = (_decode_failures.set(self.failures), _read_references.set(self.references))
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        failures, references = self._tokens
-        _read_references.reset(references)
-        _decode_failures.reset(failures)
 
 
 def referencing_type(encoded: tuple[str, bytes]) -> tuple[str, bytes]:
@@ -496,7 +463,7 @@ class BlobCompressCodec:
         type_, payload = data
         if type_.endswith(REFERENCING_TYPE_SUFFIX):
             type_ = type_.removesuffix(REFERENCING_TYPE_SUFFIX)
-            _record_reference(type_)
+            record_reference(type_)
             data = (type_, payload)
         if type_ != COMPRESSED_BLOB_TYPE:
             return inner.loads_typed(data)
@@ -613,12 +580,6 @@ _SIMPLE_DECODERS: Final[dict[str, Callable[[Any], Any]]] = {
 }
 
 
-def _record_failure(error: CheckpointSerializationError) -> None:
-    failures = _decode_failures.get()
-    if failures is not None:
-        failures.append(error)
-
-
 class FaithfulRedisSerializer(JsonPlusRedisSerializer):
     """The Redis saver's serializer with the kit reviver: every kit envelope is decoded by the kit.
 
@@ -635,7 +596,7 @@ class FaithfulRedisSerializer(JsonPlusRedisSerializer):
         kind, payload = args
         if kind == "ref":
             ref = reference_from_payload(payload)
-            _record_reference(ref)
+            record_reference(ref)
             return ref
         if kind == "inflate":
             tag, text = payload
@@ -658,7 +619,7 @@ class FaithfulRedisSerializer(JsonPlusRedisSerializer):
                 raise
             except (Exception, binascii.Error, zlib.error) as exc:
                 error = CheckpointSerializationError(f"checkpoint envelope {kind!r} cannot be decoded: {exc}")
-                _record_failure(error)
+                record_failure(error)
                 raise error from exc
         ident = value.get("id")
         if (
@@ -669,13 +630,13 @@ class FaithfulRedisSerializer(JsonPlusRedisSerializer):
             error = CheckpointSerializationError(
                 f"checkpoint envelope {ident!r} cannot be decoded: not a value the kit codec wrote"
             )
-            _record_failure(error)
+            record_failure(error)
             raise error
         try:
             return super()._reviver(value)
         except Exception as exc:
             error = CheckpointSerializationError(f"checkpoint envelope {ident!r} cannot be decoded: {exc}")
-            _record_failure(error)
+            record_failure(error)
             raise error from exc
 
     def _reconstruct_dataclass_constructor(self, obj: dict[str, Any], cls: type[Any]) -> Any:
@@ -688,18 +649,6 @@ class FaithfulRedisSerializer(JsonPlusRedisSerializer):
 # --------------------------------------------------------------------------- #
 # The Redis saver: metadata stored as the library stores it; decode failures raise
 # --------------------------------------------------------------------------- #
-def _open_failures() -> tuple[list[CheckpointSerializationError], Token[Any]]:
-    failures: list[CheckpointSerializationError] = []
-    return failures, _decode_failures.set(failures)
-
-
-def _raise_failures(failures: Sequence[CheckpointSerializationError], thread_id: Any) -> None:
-    if failures:
-        raise CheckpointSerializationError(
-            f"checkpoint read for thread {thread_id!r} found {len(failures)} undecodable value(s): {failures[0]}"
-        ) from failures[0]
-
-
 def _thread_of(config: RunnableConfig) -> Any:
     return (config.get("configurable") or {}).get("thread_id")
 
@@ -794,9 +743,9 @@ class GuardedAsyncRedisSaver(AsyncRedisSaver):
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Read a checkpoint tuple with its shared values; an undecodable or missing stored value raises."""
-        with _ReadCollector() as read:
+        with CheckpointRead() as read:
             result = await super().aget_tuple(config)
-        _raise_failures(read.failures, _thread_of(config))
+        raise_failures(read.failures, _thread_of(config))
         if result is None or not read.references:
             return result
         return await self._shared.resolve(result)
@@ -820,12 +769,12 @@ class GuardedAsyncRedisSaver(AsyncRedisSaver):
         announced = False
         try:
             while True:
-                with _ReadCollector() as read:
+                with CheckpointRead() as read:
                     try:
                         item = await anext(inner)
                     except StopAsyncIteration:
                         return
-                _raise_failures(read.failures, _thread_of(item.config))
+                raise_failures(read.failures, _thread_of(item.config))
                 announced = announced or bool(read.references)
                 yield await self._shared.resolve(item) if announced else item
         finally:

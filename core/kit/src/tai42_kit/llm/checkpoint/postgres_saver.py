@@ -31,12 +31,11 @@ from tai42_kit.llm.checkpoint.chunking import (
 from tai42_kit.llm.checkpoint.codec import (
     _ZLIB_LEVEL,
     COMPRESSED_BLOB_TYPE,
-    _raise_failures,
-    _ReadCollector,
     envelope_reference,
     reference_envelope,
     referencing_type,
 )
+from tai42_kit.llm.checkpoint.reads import CheckpointRead, raise_failures
 from tai42_kit.llm.checkpoint.value_store import PostgresCheckpointValueStore
 from tai42_kit.llm.settings import llm_provider_settings
 
@@ -229,9 +228,9 @@ class GuardedAsyncPostgresSaver(AsyncPostgresSaver):
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Read a checkpoint tuple with its shared values; a missing value raises."""
-        with _ReadCollector() as read:
+        with CheckpointRead() as read:
             result = await super().aget_tuple(config)
-        _raise_failures(read.failures, (config.get("configurable") or {}).get("thread_id"))
+        raise_failures(read.failures, (config.get("configurable") or {}).get("thread_id"))
         if result is None or not read.references:
             return result
         return await self._resolve(result)
@@ -254,12 +253,12 @@ class GuardedAsyncPostgresSaver(AsyncPostgresSaver):
         )
         try:
             while True:
-                with _ReadCollector() as read:
+                with CheckpointRead() as read:
                     try:
                         item = await anext(inner)
                     except StopAsyncIteration:
                         return
-                _raise_failures(read.failures, (item.config.get("configurable") or {}).get("thread_id"))
+                raise_failures(read.failures, (item.config.get("configurable") or {}).get("thread_id"))
                 yield await self._resolve(item) if read.references else item
         finally:
             await inner.aclose()
@@ -268,10 +267,10 @@ class GuardedAsyncPostgresSaver(AsyncPostgresSaver):
         self, *, config: RunnableConfig, channels: Sequence[str]
     ) -> Mapping[str, DeltaChannelHistory]:
         """The delta channels' writes and seeds along the parent chain, with their shared values resolved."""
-        with _ReadCollector() as read:
+        with CheckpointRead() as read:
             history = await super().aget_delta_channel_history(config=config, channels=channels)
         thread_id = str((config.get("configurable") or {})["thread_id"])
-        _raise_failures(read.failures, thread_id)
+        raise_failures(read.failures, thread_id)
         if not read.references:
             return history
 

@@ -38,7 +38,7 @@ from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.pregel._algo import _coerce_pending_error
 from langgraph.types import Interrupt
 
-from tai42_kit.llm.checkpoint import codec
+from tai42_kit.llm.checkpoint import codec, reads
 from tai42_kit.llm.checkpoint.checkpoint import CheckpointSerializationError, _GuardedSerializer
 from tai42_kit.llm.checkpoint.codec import (
     CODEC_KINDS,
@@ -148,11 +148,11 @@ def _document_saver(serde: Any) -> GuardedAsyncRedisSaver:
 
 def _document_read(serde: Any, stored: Any) -> tuple[Any, list[CheckpointSerializationError]]:
     failures: list[CheckpointSerializationError] = []
-    token = codec._decode_failures.set(failures)
+    token = reads.decode_failures.set(failures)
     try:
         return _document_saver(serde)._recursive_deserialize(stored), failures
     finally:
-        codec._decode_failures.reset(token)
+        reads.decode_failures.reset(token)
 
 
 def _checkpoint(values: dict[str, Any]) -> dict[str, Any]:
@@ -615,14 +615,14 @@ def test_a_referencing_blob_announces_and_decodes_as_its_plain_tag(tag):
     _plain, data = inner.dumps_typed(value)
     if tag.startswith(COMPRESSED_BLOB_TYPE):
         data = zlib.compress(data)
-    with codec._ReadCollector() as read:
+    with reads.CheckpointRead() as read:
         assert BlobCompressCodec(1024).loads_typed(inner, (tag, data)) == value
     assert read.references
 
 
 def test_a_plain_blob_announces_nothing():
     inner = JsonPlusSerializer()
-    with codec._ReadCollector() as read:
+    with reads.CheckpointRead() as read:
         assert BlobCompressCodec(1024).loads_typed(inner, inner.dumps_typed({"a": 1})) == {"a": 1}
     assert read.references == []
 
@@ -639,14 +639,14 @@ def test_the_redis_reviver_announces_a_reference():
 
     ref = CheckpointValueRef("a" * 64, 10, ())
     stored = orjson.dumps({"v": reference_envelope(ref), "n": 1})
-    with codec._ReadCollector() as read:
+    with reads.CheckpointRead() as read:
         assert FaithfulRedisSerializer().loads_typed(("json", stored)) == {"v": ref, "n": 1}
     assert read.references == [ref]
 
 
 def test_the_redis_reviver_announces_nothing_for_a_value_without_references():
     stored = orjson.dumps({"v": _env("decimal", "1.5")})
-    with codec._ReadCollector() as read:
+    with reads.CheckpointRead() as read:
         assert FaithfulRedisSerializer().loads_typed(("json", stored)) == {"v": Decimal("1.5")}
     assert read.references == []
 
