@@ -227,6 +227,7 @@ def install_args(
     verified_path: Path | None = None,
     *,
     prefix: str | None = None,
+    constraints: Path | None = None,
 ) -> list[str]:
     """Validate the registry-supplied pin fields, then build the ``pip install`` argv.
 
@@ -238,17 +239,21 @@ def install_args(
     mutable tag. A validation deviation raises :class:`RegistryResponseError`
     (``status=None``) — these are registry data, not caller input.
 
-    When ``prefix`` is set, ``--prefix <prefix>`` is added: pip resolves against the
-    running environment and installs the plugin plus only its genuinely-new
-    dependencies UNDER the prefix, so a package the environment already provides is
-    never duplicated there. ``prefix`` is a deployment path, not registry data, so
-    it is not shape-validated here.
+    When ``prefix`` is set, ``--prefix <prefix>`` is added. A ``constraints`` path
+    then appends ``--constraint <path>`` after it: the file pins every environment
+    distribution to its installed version, so pip installs only the plugin's
+    genuinely-new dependencies under the prefix and refuses a conflicting closure
+    loudly rather than silently replacing an environment package with a prefix copy.
+    Both ``prefix`` and ``constraints`` are deployment paths, not registry data, so
+    they are not shape-validated here.
     """
     _validate_package(package)
     _validate_version(version)
     flags = ["install", "--no-input", "--disable-pip-version-check"]
     if prefix is not None:
         flags += ["--prefix", prefix]
+    if constraints is not None:
+        flags += ["--constraint", str(constraints)]
     if source == "pypi":
         return [*flags, f"{package}=={version}"]
     if source == "github":

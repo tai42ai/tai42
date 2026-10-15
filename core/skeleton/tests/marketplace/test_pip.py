@@ -89,6 +89,31 @@ def test_github_install_args_with_prefix_targets_the_prefix(tmp_path: Path) -> N
     ]
 
 
+def test_prefix_install_args_append_constraint_after_prefix(tmp_path: Path) -> None:
+    # A prefix install with a constraints file adds ``--constraint <path>`` right
+    # after the ``--prefix`` pair, so pip pins the environment versions and refuses a
+    # conflicting closure instead of silently replacing an environment package.
+    cfile = tmp_path / "environment-constraints.txt"
+    args = install_args("tai42-toolbox", "1.2.3", "pypi", prefix="/opt/plugins", constraints=cfile)
+    assert args == [
+        "install",
+        "--no-input",
+        "--disable-pip-version-check",
+        "--prefix",
+        "/opt/plugins",
+        "--constraint",
+        str(cfile),
+        "tai42-toolbox==1.2.3",
+    ]
+
+
+def test_install_args_without_constraints_emit_none(tmp_path: Path) -> None:
+    # No constraints path (the no-prefix door, or a prefix install given none):
+    # no ``--constraint`` flag is emitted at all.
+    assert "--constraint" not in install_args("tai42-toolbox", "1.2.3", "pypi")
+    assert "--constraint" not in install_args("tai42-toolbox", "1.2.3", "pypi", prefix="/opt/plugins")
+
+
 def test_uninstall_args() -> None:
     assert uninstall_args("tai42-toolbox") == ["uninstall", "--yes", "tai42-toolbox"]
 
