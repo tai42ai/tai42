@@ -33,6 +33,7 @@ from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.types import Interrupt, Send
 
 from tai42_kit.llm.checkpoint.checkpoint import CheckpointSerializationError
+from tai42_kit.llm.checkpoint.value_store import StoredBlob
 
 
 class CheckpointReferenceError(CheckpointSerializationError):
@@ -52,14 +53,6 @@ class CheckpointValueRef:
     closure: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class StoredBlob:
-    """A value as its thread's value store holds it: a type tag and the stored bytes."""
-
-    type: str
-    data: bytes
-
-
 class ValueEncoding(Protocol):
     """One store's encoding of checkpoint values, as the chunker and the resolver use it."""
 
@@ -77,6 +70,10 @@ class ValueEncoding(Protocol):
 
     def store_form(self, encoded: tuple[str, bytes]) -> StoredBlob:
         """The blob the value store holds for a value encoded as ``encoded``."""
+        ...
+
+    def inline_form(self, encoded: tuple[str, bytes]) -> tuple[str, bytes]:
+        """The ``(type, bytes)`` the saver stores for a value encoded as ``encoded`` and handed to it pre-encoded."""
         ...
 
     def decode(self, blob: StoredBlob, ref: CheckpointValueRef, thread_id: Any) -> Any:

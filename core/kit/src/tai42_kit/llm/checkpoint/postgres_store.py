@@ -115,6 +115,14 @@ async def read_values(
     return [(bytes(_cell(row, 0)).hex(), str(_cell(row, 1)), bytes(_cell(row, 2))) for row in rows]
 
 
+async def thread_values(pool: AsyncConnectionPool, thread_id: str) -> set[str]:
+    """Every hex digest the value table holds for ``thread_id``."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(f"SELECT digest FROM {VALUES_TABLE} WHERE thread_id = %s", (thread_id,))  # noqa: S608 -- constant table name
+        rows = await cur.fetchall()
+    return {bytes(_cell(row, 0)).hex() for row in rows}
+
+
 async def delete_values(pool: AsyncConnectionPool, thread_id: str) -> None:
     """Delete every value row of ``thread_id``."""
     async with pool.connection() as conn:

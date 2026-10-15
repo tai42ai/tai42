@@ -1,9 +1,9 @@
 """The checkpoint read in progress: the values it failed to decode and the references it decoded.
 
-A saver opens a :class:`CheckpointRead` around the library's read. The Redis saver's library catches
-every exception raised while it revives a checkpoint document and returns the raw value, so the kit
-records each decode failure here and the saver raises it once the read finishes. A stored value that
-holds a reference announces it here as it is decoded, and a saver resolves a read only when it holds one.
+The kit's saver opens a :class:`CheckpointRead` around the library's read. A serializer whose library
+swallows an exception raised while it decodes a stored value records the decode failure here, and the
+saver raises it once the read finishes. A stored value that holds a reference announces it here as it
+is decoded, and the saver resolves a read only when it holds one.
 """
 
 from __future__ import annotations

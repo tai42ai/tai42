@@ -6,7 +6,7 @@ from tai42_kit.llm._resource_registry import LoopRegistryMap, ResourceRegistry
 from tai42_kit.llm.checkpoint.checkpoint import (
     CheckpointResource,
     create_checkpoint_resource,
-    create_redis_saver_view,
+    create_saver_with_waiting,
     get_saver_from_resource,
     saver_view_waiting,
 )
@@ -46,7 +46,7 @@ class CheckpointRegistry(ResourceRegistry):
             return get_saver_from_resource(provider, resource)
 
         async def _build_view() -> tuple[BaseCheckpointSaver, None]:
-            return await create_redis_saver_view(resource, waiting), None
+            return await create_saver_with_waiting(provider, resource, waiting), None
 
         return await self._get_or_init_resource(f"{provider}::{conn_string}::waiting={waiting}", _build_view)
 
