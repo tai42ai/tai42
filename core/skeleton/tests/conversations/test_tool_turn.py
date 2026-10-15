@@ -49,7 +49,8 @@ async def test_tool_target_delivers_its_string_reply(env, monkeypatch):
     message_id = await turn_module.accept("twilio", "+15550001111", " +15550002222 ", " +15550002222 ", "hi", "PID1")
     await _settle()
 
-    # The default kwargs are {message, sender, turn} — canonical address for the sender, the
+    # The default kwargs are {message, sender, our_identity, channel, route, turn} — canonical
+    # address for the sender, the line (channel identity) and route the turn arrived on, and the
     # generic turn block naming this channel message — and the sync tool is offloaded off
     # the event loop.
     assert tools.calls == [
@@ -58,6 +59,9 @@ async def test_tool_target_delivers_its_string_reply(env, monkeypatch):
             "arguments": {
                 "message": "hi",
                 "sender": "+15550002222",
+                "our_identity": "+15550001111",
+                "channel": "twilio",
+                "route": "tool-line",
                 "turn": {
                     "id": message_id,
                     "inbound": {"id": "PID1", "kind": "message", "source": "twilio"},
@@ -564,6 +568,24 @@ async def test_tool_target_start_expr_reads_the_route_name_on_the_api_door(env, 
     await _settle()
 
     assert tools.calls[0]["arguments"] == {"r": "chat-a"}
+
+
+async def test_tool_target_default_kwargs_on_the_api_door_null_line_honest_route(env, monkeypatch):
+    # A no-start_expr tool route on the api door dispatches the default kwargs: the api door carries
+    # no line, so our_identity and channel are null, while the route name is honest (never null).
+    route = _tool_api_route(route_name="chat-a")
+    _wire(monkeypatch, FakeManager(route))
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+    monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
+
+    await turn_module.submit_api_message("chat-a", "user-7", "hi", "alice", wait_seconds=5, client_connected=_connected)
+    await _settle()
+
+    kwargs = tools.calls[0]["arguments"]
+    assert kwargs["message"] == "hi"
+    assert kwargs["our_identity"] is None
+    assert kwargs["channel"] is None
+    assert kwargs["route"] == "chat-a"
 
 
 async def test_tool_target_over_the_api_door_silent_delivers_a_signed_silent_callback(env, monkeypatch):

@@ -392,6 +392,9 @@ async def test_turn_block_on_the_channel_door(env, monkeypatch):
     kwargs = tools.calls[-1]["arguments"]
     assert kwargs["message"] == "hi"
     assert kwargs["sender"] == "+15550002222"
+    assert kwargs["our_identity"] == "+15550001111"
+    assert kwargs["channel"] == "twilio"
+    assert kwargs["route"] == "tool-line"
     assert kwargs["turn"] == {
         "id": message_id,
         "inbound": {"id": "PID1", "kind": "message", "source": "twilio"},
@@ -417,6 +420,11 @@ async def test_turn_block_on_the_api_door(env, monkeypatch):
     await _settle()
 
     kwargs = tools.calls[-1]["arguments"]
+    # The api door carries no line, so the default kwargs null our_identity and channel; the
+    # route name is honest (never null).
+    assert kwargs["our_identity"] is None
+    assert kwargs["channel"] is None
+    assert kwargs["route"] == "tool-api"
     # An api-door message has no provider id, so the inbound id is the record id, source "api".
     assert kwargs["turn"] == {
         "id": result.message_id,
