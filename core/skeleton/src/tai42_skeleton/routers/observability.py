@@ -23,13 +23,14 @@ The reader is fetched per request from the process monitoring registry
 capture; with no backend registered the no-op reader answers with EMPTY data
 (not an error). The reader's methods are async and awaited directly.
 
-Errors are loud. Only two typed monitoring errors are mapped:
-``MonitoringReadNotSupportedError`` → 501 with a ``code`` the UI keys its
-dedicated state on, and ``TraceNotFoundError`` → 404 on the trace routes. Every
-other exception propagates as a 500 — no blanket catch, no silent degrade. The
-by-model panel is driven by the backend's declared capability, not a swallowed
-query error (see ``get_metrics``). Success bodies are ``{"data": ...}``; failures
-are ``{"error": "<message>"}``.
+Errors are loud. Three typed monitoring errors are mapped: a read the backend
+cannot serve at all is ``MonitoringReadNotSupportedError`` → 501 and a read whose
+window/paging is too broad is ``MonitoringReadTooBroadError`` → 400 — each with a
+``code`` the UI keys its dedicated state on; ``TraceNotFoundError`` → 404 on the
+trace routes. Every other exception propagates as a 500 — no blanket catch, no
+silent degrade. The by-model panel is driven by the backend's declared capability,
+not a swallowed query error (see ``get_metrics``). Success bodies are
+``{"data": ...}``; failures are ``{"error": "<message>"}``.
 """
 
 from __future__ import annotations
@@ -43,7 +44,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.monitoring import (
+    MonitoringError,
     MonitoringReadNotSupportedError,
+    MonitoringReadTooBroadError,
     MonitoringTraceSummary,
     PayloadRefUnresolvedError,
     TraceNotFoundError,
@@ -55,7 +58,7 @@ from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.monitoring.registry import get_monitoring
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.adapter import validation_error_fields
-from tai42_skeleton.operations.observability import ExportRunsQuery
+from tai42_skeleton.operations.observability import _READ_NOT_SUPPORTED_CODE, _READ_TOO_BROAD_CODE, ExportRunsQuery
 from tai42_skeleton.operations.observability import get_metrics as _get_metrics_op
 from tai42_skeleton.operations.observability import (
     get_observability_capabilities as _get_observability_capabilities_op,
@@ -99,16 +102,22 @@ def _error(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
 
 
-def _not_supported(exc: MonitoringReadNotSupportedError) -> JSONResponse:
-    """The backend cannot serve reads — a distinct 501 carrying ``code`` for the UI.
+def _monitoring_read_error_response(exc: MonitoringError) -> JSONResponse:
+    """Map a typed monitoring READ fault to its enveloped answer, carrying ``code`` for the UI.
 
-    The ``code`` lets the UI render its dedicated 'read not supported' state (not a
-    generic error).
+    The single seam the handler-native download routes funnel their reader faults
+    through (mirroring the enveloped reads' ``_translate_reader_errors``): a read the
+    backend cannot serve at all is a 501 the UI renders its dedicated 'read not
+    supported' state on; a read whose window/paging is too broad is a 400 the caller
+    narrows (the ``code`` the UI renders its 'narrow the request' state on). Each
+    carries the backend's own guidance verbatim. Any other monitoring error is not a
+    read fault and propagates loudly rather than being mislabelled.
     """
-    return JSONResponse(
-        {"error": str(exc), "code": "monitoring-read-not-supported"},
-        status_code=501,
-    )
+    if isinstance(exc, MonitoringReadTooBroadError):
+        return JSONResponse({"error": str(exc), "code": _READ_TOO_BROAD_CODE}, status_code=400)
+    if isinstance(exc, MonitoringReadNotSupportedError):
+        return JSONResponse({"error": str(exc), "code": _READ_NOT_SUPPORTED_CODE}, status_code=501)
+    raise exc
 
 
 # ---------------------------------------------------------------------------
@@ -246,8 +255,8 @@ async def export_run_trace(request: Request) -> Response:
                     ]
                 }
             )
-    except MonitoringReadNotSupportedError as exc:
-        return _not_supported(exc)
+    except (MonitoringReadTooBroadError, MonitoringReadNotSupportedError) as exc:
+        return _monitoring_read_error_response(exc)
     except TraceNotFoundError:
         return _error("Run trace not found", 404)
     except PayloadRefUnresolvedError as exc:
@@ -313,8 +322,8 @@ async def export_runs(request: Request) -> Response:
             if len(batch) < chunk:
                 break
             page += 1
-    except MonitoringReadNotSupportedError as exc:
-        return _not_supported(exc)
+    except (MonitoringReadTooBroadError, MonitoringReadNotSupportedError) as exc:
+        return _monitoring_read_error_response(exc)
 
     truncated = len(summaries) > _EXPORT_CAP
     rows = [derive_run(t) for t in summaries[:_EXPORT_CAP]]

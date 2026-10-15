@@ -11,6 +11,7 @@ from __future__ import annotations
 from tai42_contract.monitoring.errors import (
     MonitoringError,
     MonitoringReadNotSupportedError,
+    MonitoringReadTooBroadError,
     ObservationNotFoundError,
     PayloadRefUnresolvedError,
     TraceNotFoundError,
@@ -100,6 +101,7 @@ __all__ = [
     "MonitoringLevel",
     "MonitoringObservation",
     "MonitoringReadNotSupportedError",
+    "MonitoringReadTooBroadError",
     "MonitoringReader",
     "MonitoringTrace",
     "MonitoringTraceSummary",

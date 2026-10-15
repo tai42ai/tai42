@@ -38,6 +38,23 @@ class MonitoringReadNotSupportedError(MonitoringError):
     __tai_error_kind__ = ErrorKind.UNAVAILABLE
 
 
+class MonitoringReadTooBroadError(MonitoringError):
+    """A read request is too broad for the backend to resolve, not a missing capability.
+
+    The backend CAN read; the request asks over too wide a window or too deep a
+    page for it to answer within its bounded budget (a metric-ranked page the
+    listing walk cannot cover, a window whose token or error enrichment overruns
+    the page cap). The caller's fault, so the caller narrows it — a tighter time
+    range or a shallower page. Distinct from
+    :class:`MonitoringReadNotSupportedError` (the backend cannot read at all).
+    Carries the backend's human guidance (e.g. "narrow the time range") verbatim.
+    """
+
+    # The caller's request was too broad — a client input fault, not a backend
+    # capability gap (maps to a 4xx the caller corrects, never a 501).
+    __tai_error_kind__ = ErrorKind.BAD_INPUT
+
+
 class ObservationNotFoundError(MonitoringError):
     """An observation id is absent from a trace the backend holds."""
 
