@@ -11,6 +11,7 @@ from tai42_contract.monitoring import (
     MonitoringFilter,
     MonitoringLevel,
     MonitoringReadNotSupportedError,
+    MonitoringReadTooBroadError,
     OrderBy,
 )
 
@@ -162,7 +163,7 @@ async def test_metric_sort_row_limit_cap_inclusive(manager, mock_client, route_m
     r = LangfuseReader(manager)
     await r.list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=100, page=10)
     assert metric_query()["config"]["row_limit"] == 1000
-    with pytest.raises(MonitoringReadNotSupportedError):
+    with pytest.raises(MonitoringReadTooBroadError):
         await r.list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=100, page=11)
 
 
@@ -234,7 +235,7 @@ async def test_metric_sort_ranked_id_absent_from_window_raises(
     route_metrics(ranking=[{"id": "ghost", "sum_totalCost": 9}], tokens={})
     list_returns([])  # a single short page ends the walk
     errors_for([])
-    with pytest.raises(MonitoringReadNotSupportedError):
+    with pytest.raises(MonitoringReadTooBroadError):
         await LangfuseReader(manager).list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=5)
     mock_client.api.trace.get.assert_not_called()
 
@@ -251,7 +252,7 @@ async def test_metric_sort_walk_page_budget_raises(manager, mock_client, route_m
         data=full, meta=SimpleNamespace(total_pages=_METRIC_LIST_PAGE_BUDGET + 5)
     )
     errors_for([])
-    with pytest.raises(MonitoringReadNotSupportedError):
+    with pytest.raises(MonitoringReadTooBroadError):
         await LangfuseReader(manager).list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=5)
     assert mock_client.api.trace.list.call_count <= _METRIC_LIST_PAGE_BUDGET + 1
 

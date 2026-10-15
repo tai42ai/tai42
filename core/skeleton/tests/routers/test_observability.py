@@ -1,7 +1,7 @@
 """Observability router: metrics composition, run list filter/sort/paging
-parsing, single-trace detail + 404, the two typed monitoring-error mappings
-(501 read-not-supported / 404 not-found), loud propagation of any other reader
-error, per-request reader fetch, and the CSV/JSON exports.
+parsing, single-trace detail + 404, the typed monitoring-error mappings
+(501 read-not-supported / 400 read-too-broad / 404 not-found), loud propagation
+of any other reader error, per-request reader fetch, and the CSV/JSON exports.
 
 Handlers are driven directly as coroutines with real ``Request`` objects
 carrying a query string. The monitoring backend is a fake in-memory reader
@@ -28,6 +28,7 @@ from tai42_contract.monitoring import (
     MonitoringLevel,
     MonitoringObservation,
     MonitoringReadNotSupportedError,
+    MonitoringReadTooBroadError,
     MonitoringTrace,
     MonitoringTraceSummary,
     ObservationNotFoundError,
@@ -587,6 +588,19 @@ async def test_trace_read_not_supported_501():
     assert _json(resp)["code"] == "monitoring-read-not-supported"
 
 
+async def test_runs_read_too_broad_400():
+    # A read the backend CAN serve but whose window/paging is too broad for it to
+    # resolve is the caller's to narrow: a 400 carrying its own ``code`` and the
+    # backend's guidance verbatim, never the 501 a missing capability answers.
+    reader = _install(_FakeReader())
+    reader.list_error = MonitoringReadTooBroadError("narrow the time range")
+    resp = await router.list_runs(_req(""))
+    assert resp.status_code == 400
+    body = _json(resp)
+    assert body["code"] == "monitoring-read-too-broad"
+    assert body["error"] == "narrow the time range"
+
+
 async def test_noop_reader_yields_empty_not_501():
     # No backend installed → the process no-op reader answers with empty data.
     resp = await router.get_metrics(_req(""))
@@ -680,7 +694,7 @@ async def test_export_runs_bad_format_400():
 
 async def test_export_trace_read_not_supported_501():
     # The native trace-download handler maps a read-not-supported backend to the same
-    # 501 + ``code`` the enveloped reads answer (via the module-local ``_not_supported``).
+    # 501 + ``code`` the enveloped reads answer (via ``_monitoring_read_error_response``).
     reader = _install(_FakeReader())
     reader.get_trace_error = MonitoringReadNotSupportedError("read disabled")
     resp = await router.export_run_trace(_req("", trace_id="t1"))
@@ -694,6 +708,18 @@ async def test_export_runs_read_not_supported_501():
     resp = await router.export_runs(_req(""))
     assert resp.status_code == 501
     assert _json(resp)["code"] == "monitoring-read-not-supported"
+
+
+async def test_export_runs_read_too_broad_400():
+    # The runs-export handler maps a too-broad listing to the same 400 + ``code``
+    # the enveloped run list answers, carrying the backend's guidance verbatim.
+    reader = _install(_FakeReader())
+    reader.list_error = MonitoringReadTooBroadError("narrow the time range")
+    resp = await router.export_runs(_req(""))
+    assert resp.status_code == 400
+    body = _json(resp)
+    assert body["code"] == "monitoring-read-too-broad"
+    assert body["error"] == "narrow the time range"
 
 
 def test_the_published_sort_keys_are_the_ones_the_edge_maps():

@@ -21,6 +21,7 @@ from tai42_contract.monitoring import (
     MonitoringFilter,
     MonitoringObservation,
     MonitoringReadNotSupportedError,
+    MonitoringReadTooBroadError,
     MonitoringTrace,
     MonitoringTraceSummary,
     ObservationNotFoundError,
@@ -250,7 +251,7 @@ class TraceQuery(_LangfuseQuery):
         list_page = 1
         while wanted - found.keys():
             if list_page > _METRIC_LIST_PAGE_BUDGET:
-                raise MonitoringReadNotSupportedError(
+                raise MonitoringReadTooBroadError(
                     "metric-sorted listing could not resolve the page within the bounded window; narrow the time range"
                 )
             batch = await self._list_page(
@@ -272,7 +273,7 @@ class TraceQuery(_LangfuseQuery):
 
         missing = wanted - found.keys()
         if missing:
-            raise MonitoringReadNotSupportedError(
+            raise MonitoringReadTooBroadError(
                 "metric-sorted listing could not locate every ranked row within the bounded window; "
                 "narrow the time range"
             )
@@ -309,7 +310,7 @@ class TraceQuery(_LangfuseQuery):
         # query must reach the whole prefix up to the requested page's end.
         reach = ((page or 1) - 1) * limit + limit
         if reach > _METRIC_ROW_LIMIT_MAX:
-            raise MonitoringReadNotSupportedError(
+            raise MonitoringReadTooBroadError(
                 f"metric sort paging beyond the {_METRIC_ROW_LIMIT_MAX}-row metrics cap (reach {reach})"
             )
 
@@ -435,7 +436,7 @@ class TraceQuery(_LangfuseQuery):
         if len(rows) >= _METRIC_ROW_LIMIT_MAX:
             uncovered = [tid for tid in page_ids if tid not in covered_ids]
             if uncovered:
-                raise MonitoringReadNotSupportedError(
+                raise MonitoringReadTooBroadError(
                     "token totals could not be resolved within the bounded window; narrow the time range"
                 )
         return tokens_by_id
@@ -471,14 +472,14 @@ class TraceQuery(_LangfuseQuery):
             total_pages = getattr(meta, "total_pages", None) if meta else None
             if total_pages is None:
                 if len(data) >= PAGE_SIZE:
-                    raise MonitoringReadNotSupportedError(
+                    raise MonitoringReadTooBroadError(
                         "error status could not be resolved within the bounded window; narrow the time range"
                     )
                 break
             if page >= total_pages:
                 break
             if page >= _ERROR_PAGE_BUDGET:
-                raise MonitoringReadNotSupportedError(
+                raise MonitoringReadTooBroadError(
                     "error status could not be resolved within the bounded window; narrow the time range"
                 )
             page += 1

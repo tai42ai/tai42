@@ -8,18 +8,23 @@ filterable run list, and single-run trace detail. A "run" is a monitoring
 The reader is fetched per operation from the process monitoring registry
 (``get_monitoring().reader``) so a reload swaps the backend without stale
 capture; with no backend registered the no-op reader answers with EMPTY data
-(not an error). Two typed monitoring errors are mapped: a read the backend
-cannot serve becomes ``NotSupportedError`` (501, carrying the ``code`` the UI
-keys its dedicated state on) and an absent trace becomes ``NotFoundError`` (404).
-Every other reader error propagates loudly as a 500. The query string is decoded
-into the neutral filter/paging types at the HTTP edge (the router's context
-extractors, which raise ``BadRequestError`` → 400); these operations receive the
-already-parsed flat params and stay request-free.
+(not an error). Three typed monitoring errors are mapped: through the shared
+``_translate_reader_errors`` seam every read door funnels its reader call
+through, a read the backend cannot serve at all becomes ``NotSupportedError``
+(501) and a read whose window/paging is too broad becomes ``BadRequestError``
+(400) the caller narrows — each carrying the ``code`` the UI keys its dedicated
+state on; an absent trace becomes ``NotFoundError`` (404). Every other reader
+error propagates loudly as a 500. The query string is decoded into the neutral
+filter/paging types at the HTTP edge (the router's context extractors, which
+raise ``BadRequestError`` → 400); these operations receive the already-parsed
+flat params and stay request-free.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Literal
 
@@ -30,6 +35,7 @@ from tai42_contract.monitoring import (
     MetricsQuery,
     MonitoringFilter,
     MonitoringReadNotSupportedError,
+    MonitoringReadTooBroadError,
     ObservationNotFoundError,
     OrderBy,
     PayloadRefUnresolvedError,
@@ -69,6 +75,30 @@ _MEASURES = [Measure.COUNT, Measure.COST, Measure.TOKENS, Measure.LATENCY]
 # The ``code`` a monitoring read-not-supported answer carries so the UI can
 # render its dedicated 'read not supported' state (not a generic error).
 _READ_NOT_SUPPORTED_CODE = "monitoring-read-not-supported"
+
+# The ``code`` a monitoring read-too-broad answer carries so the UI can render
+# its dedicated 'narrow the request' state (the filters stay; not the install page).
+_READ_TOO_BROAD_CODE = "monitoring-read-too-broad"
+
+
+@contextmanager
+def _translate_reader_errors() -> Iterator[None]:
+    """Map the two typed monitoring READ faults to this layer's typed errors.
+
+    The single seam every observability read door funnels its reader call through,
+    so the translation holds identically on each door with no per-door copy. A read
+    the backend cannot serve at all becomes a 501 ``NotSupportedError``; a read
+    whose window or paging is too broad for the backend to resolve becomes a 400
+    ``BadRequestError`` the caller narrows. Each carries the ``code`` the UI keys
+    its dedicated state on, and the backend's own guidance as the message. Every
+    other reader error propagates untouched (loud).
+    """
+    try:
+        yield
+    except MonitoringReadTooBroadError as exc:
+        raise BadRequestError(str(exc), extra={"code": _READ_TOO_BROAD_CODE}) from exc
+    except MonitoringReadNotSupportedError as exc:
+        raise NotSupportedError(str(exc), extra={"code": _READ_NOT_SUPPORTED_CODE}) from exc
 
 
 class MetricsQuerySpec(BaseModel):
@@ -194,10 +224,8 @@ async def get_metrics(t0: datetime, t1: datetime, granularity: str) -> dict:
         model_query = MetricsQuery(measures=_MEASURES, from_timestamp=t0, to_timestamp=t1, dimensions=[Dimension.MODEL])
         pending.append(reader.query_metrics(model_query))
 
-    try:
+    with _translate_reader_errors():
         results = await asyncio.gather(*pending)
-    except MonitoringReadNotSupportedError as exc:
-        raise NotSupportedError(str(exc), extra={"code": _READ_NOT_SUPPORTED_CODE}) from exc
 
     model_res = results[2] if by_model_available else None
     return {
@@ -250,7 +278,7 @@ async def list_observability_runs(
     """
     reader = get_monitoring().reader
     page_size = min(page_size, reader.max_page_size())
-    try:
+    with _translate_reader_errors():
         summaries = await reader.list_traces(
             from_timestamp=t0,
             to_timestamp=t1,
@@ -259,8 +287,6 @@ async def list_observability_runs(
             filter_=run_filter,
             order_by=order_by,
         )
-    except MonitoringReadNotSupportedError as exc:
-        raise NotSupportedError(str(exc), extra={"code": _READ_NOT_SUPPORTED_CODE}) from exc
 
     items = [derive_run(s) for s in summaries]
     next_page = page + 1 if len(summaries) >= page_size else None
@@ -282,9 +308,8 @@ async def get_run_trace(trace_id: str) -> dict:
     """
     reader = get_monitoring().reader
     try:
-        trace = await reader.get_trace(trace_id)
-    except MonitoringReadNotSupportedError as exc:
-        raise NotSupportedError(str(exc), extra={"code": _READ_NOT_SUPPORTED_CODE}) from exc
+        with _translate_reader_errors():
+            trace = await reader.get_trace(trace_id)
     except TraceNotFoundError as exc:
         raise NotFoundError("Run trace not found") from exc
     return map_trace(trace)
@@ -303,9 +328,8 @@ async def get_run_trace_outline(trace_id: str) -> dict:
     """
     reader = get_monitoring().reader
     try:
-        trace = await reader.get_trace(trace_id)
-    except MonitoringReadNotSupportedError as exc:
-        raise NotSupportedError(str(exc), extra={"code": _READ_NOT_SUPPORTED_CODE}) from exc
+        with _translate_reader_errors():
+            trace = await reader.get_trace(trace_id)
     except TraceNotFoundError as exc:
         raise NotFoundError("Run trace not found") from exc
     return map_trace_outline(trace)
@@ -347,10 +371,11 @@ async def get_resolved_span_value(
     """
     reader = get_monitoring().reader
     try:
-        await reader.get_observation(trace_id, span_id)
-        value = await resolve_refs(payload_ref(span_id, field, pointer, trace_id=trace_id), reader, trace_id=trace_id)
-    except MonitoringReadNotSupportedError as exc:
-        raise NotSupportedError(str(exc), extra={"code": _READ_NOT_SUPPORTED_CODE}) from exc
+        with _translate_reader_errors():
+            await reader.get_observation(trace_id, span_id)
+            value = await resolve_refs(
+                payload_ref(span_id, field, pointer, trace_id=trace_id), reader, trace_id=trace_id
+            )
     except (TraceNotFoundError, ObservationNotFoundError) as exc:
         raise NotFoundError("Run span not found") from exc
     except PayloadRefUnresolvedError as exc:

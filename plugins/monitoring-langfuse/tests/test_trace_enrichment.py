@@ -8,7 +8,12 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from tai42_contract.monitoring import MonitoringFilter, MonitoringLevel, MonitoringReadNotSupportedError
+from tai42_contract.monitoring import (
+    MonitoringFilter,
+    MonitoringLevel,
+    MonitoringReadNotSupportedError,
+    MonitoringReadTooBroadError,
+)
 
 from tai42_monitoring_langfuse.reader import LangfuseReader
 
@@ -51,7 +56,7 @@ async def test_list_traces_token_truncation_raises(manager, mock_client, list_re
 
     mock_client.api.legacy.metrics_v1.metrics.side_effect = _call
     errors_for([])
-    with pytest.raises(MonitoringReadNotSupportedError):
+    with pytest.raises(MonitoringReadTooBroadError):
         await LangfuseReader(manager).list_traces()
 
 
@@ -205,7 +210,7 @@ async def test_list_traces_error_pages_exceed_budget_raises(
     mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(
         [obs(id="e", trace_id="a", level="ERROR")], total_pages=_ERROR_PAGE_BUDGET + 5
     )
-    with pytest.raises(MonitoringReadNotSupportedError):
+    with pytest.raises(MonitoringReadTooBroadError):
         await LangfuseReader(manager).list_traces()
     assert mock_client.api.legacy.observations_v1.get_many.call_count <= _ERROR_PAGE_BUDGET
 
@@ -221,7 +226,7 @@ async def test_list_traces_error_full_page_without_count_raises(
     route_metrics(tokens={"a": 1})
     full = [obs(id=f"e{i}", trace_id="a", level="ERROR") for i in range(PAGE_SIZE)]
     mock_client.api.legacy.observations_v1.get_many.return_value = SimpleNamespace(data=full, meta=None)
-    with pytest.raises(MonitoringReadNotSupportedError):
+    with pytest.raises(MonitoringReadTooBroadError):
         await LangfuseReader(manager).list_traces()
 
 
