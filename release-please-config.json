@@ -7,6 +7,7 @@
     "core/contract": {
       "package-name": "tai42-contract",
       "component": "tai42-contract",
+      "release-as": "19.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -29,6 +30,7 @@
     "core/skeleton": {
       "package-name": "tai42-skeleton",
       "component": "tai42-skeleton",
+      "release-as": "25.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
