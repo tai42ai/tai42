@@ -139,7 +139,9 @@ def _document_saver(serde: Any) -> GuardedAsyncRedisSaver:
     """The kit's Redis saver over ``serde``; building it does no I/O, and its document walk needs no server."""
     from redis.asyncio import Redis as AsyncRedis
 
-    saver = GuardedAsyncRedisSaver(redis_client=AsyncRedis.from_url("redis://127.0.0.1:1/0"))
+    saver = GuardedAsyncRedisSaver(
+        redis_client=AsyncRedis.from_url("redis://127.0.0.1:1/0"), shared_value_threshold=None
+    )
     saver.serde = serde
     return saver
 
@@ -590,6 +592,63 @@ def test_the_guard_routes_postgres_blobs_through_the_codec():
     type_, data = serde.dumps_typed({"pad": "z" * 100})
     assert type_ == COMPRESSED_BLOB_TYPE
     assert serde.loads_typed((type_, data)) == {"pad": "z" * 100}
+
+
+# --------------------------------------------------------------------------- #
+# A read announces the references it decodes
+# --------------------------------------------------------------------------- #
+def test_a_shared_snapshot_blob_is_tagged_as_referencing():
+    from tai42_kit.llm.checkpoint.chunking import SharedSnapshot
+
+    inner = JsonPlusSerializer()
+    small = SharedSnapshot([{"a": 1}])
+    large = SharedSnapshot([{"pad": "z" * 5000}])
+    assert BlobCompressCodec(1024).dumps_typed(inner, small)[0] == "msgpack+ref"
+    assert BlobCompressCodec(1024).dumps_typed(inner, large)[0] == "msgpack+zlib+ref"
+    assert BlobCompressCodec(1024).dumps_typed(inner, _DeltaSnapshot([{"a": 1}]))[0] == "msgpack"
+
+
+@pytest.mark.parametrize("tag", ["msgpack+ref", "msgpack+zlib+ref"])
+def test_a_referencing_blob_announces_and_decodes_as_its_plain_tag(tag):
+    inner = JsonPlusSerializer()
+    value = {"pad": "z" * 5000}
+    _plain, data = inner.dumps_typed(value)
+    if tag.startswith(COMPRESSED_BLOB_TYPE):
+        data = zlib.compress(data)
+    with codec._ReadCollector() as read:
+        assert BlobCompressCodec(1024).loads_typed(inner, (tag, data)) == value
+    assert read.references
+
+
+def test_a_plain_blob_announces_nothing():
+    inner = JsonPlusSerializer()
+    with codec._ReadCollector() as read:
+        assert BlobCompressCodec(1024).loads_typed(inner, inner.dumps_typed({"a": 1})) == {"a": 1}
+    assert read.references == []
+
+
+def test_a_referencing_blob_read_with_no_collector_open_decodes_as_today():
+    inner = JsonPlusSerializer()
+    _plain, data = inner.dumps_typed({"a": 1})
+    assert BlobCompressCodec(1024).loads_typed(inner, ("msgpack+ref", data)) == {"a": 1}
+
+
+def test_the_redis_reviver_announces_a_reference():
+    from tai42_kit.llm.checkpoint.chunking import CheckpointValueRef
+    from tai42_kit.llm.checkpoint.codec import reference_envelope
+
+    ref = CheckpointValueRef("a" * 64, 10, ())
+    stored = orjson.dumps({"v": reference_envelope(ref), "n": 1})
+    with codec._ReadCollector() as read:
+        assert FaithfulRedisSerializer().loads_typed(("json", stored)) == {"v": ref, "n": 1}
+    assert read.references == [ref]
+
+
+def test_the_redis_reviver_announces_nothing_for_a_value_without_references():
+    stored = orjson.dumps({"v": _env("decimal", "1.5")})
+    with codec._ReadCollector() as read:
+        assert FaithfulRedisSerializer().loads_typed(("json", stored)) == {"v": Decimal("1.5")}
+    assert read.references == []
 
 
 # --------------------------------------------------------------------------- #

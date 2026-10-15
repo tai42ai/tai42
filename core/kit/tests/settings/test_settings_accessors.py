@@ -83,14 +83,25 @@ def test_checkpoint_inline_compress_bytes_none_turns_compression_off():
     )
 
 
-def test_checkpoint_shared_value_bytes_none_stores_every_value_inline():
-    provider = llm_settings_mod.LLMProviderSettings(checkpoint_shared_value_bytes=None)
-    assert provider.checkpoint_shared_value_bytes is None
+def test_checkpoint_shared_values_is_unset_by_default():
+    assert llm_settings_mod.LLMProviderSettings().checkpoint_shared_values is None
 
 
-def test_checkpoint_shared_value_bytes_null_from_the_environment_is_none(monkeypatch):
+@pytest.mark.parametrize(("raw", "expected"), [("true", True), ("false", False), ("null", None), ("", None)])
+def test_checkpoint_shared_values_from_the_environment(monkeypatch, raw, expected):
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUES", raw)
+    assert llm_settings_mod.LLMProviderSettings().checkpoint_shared_values is expected
+
+
+def test_checkpoint_shared_value_bytes_null_from_the_environment_is_refused(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES", "null")
-    assert llm_settings_mod.LLMProviderSettings().checkpoint_shared_value_bytes is None
+    with pytest.raises(ValidationError, match="checkpoint_shared_value_bytes"):
+        llm_settings_mod.LLMProviderSettings()
+
+
+def test_checkpoint_shared_value_bytes_none_is_refused():
+    with pytest.raises(ValidationError, match="checkpoint_shared_value_bytes"):
+        llm_settings_mod.LLMProviderSettings(checkpoint_shared_value_bytes=None)
 
 
 def test_conn_strings_default_to_none():

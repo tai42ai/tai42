@@ -121,7 +121,7 @@ async def test_redis_none_conn_string_resolves_from_tai_default(monkeypatch):
     class _FakeSaver:
         # Keyword-only ``redis_client``, no ``redis_url``: a kit that went back to
         # handing over a URL would not construct.
-        def __init__(self, *, redis_client, ttl=None):
+        def __init__(self, *, redis_client, ttl=None, shared_value_threshold):
             self.redis_client = redis_client
 
         async def asetup(self):
@@ -173,7 +173,7 @@ async def test_redis_resource_setup_called(monkeypatch):
     setups = []
 
     class _FakeSaver:
-        def __init__(self, *, redis_client, ttl=None):
+        def __init__(self, *, redis_client, ttl=None, shared_value_threshold):
             self.redis_client = redis_client
             self.ttl = ttl
             self.closed = False
@@ -194,9 +194,67 @@ async def test_redis_resource_setup_called(monkeypatch):
     assert resource.handle.closed is True
 
 
+@pytest.mark.parametrize(("switch", "expected"), [(None, 65536), ("false", None), ("true", 65536)])
+async def test_redis_resource_saver_is_built_with_the_resolved_threshold(monkeypatch, switch, expected):
+    from tai42_kit.settings import reset_all_settings
+
+    built = []
+
+    class _FakeSaver:
+        def __init__(self, *, redis_client, ttl=None, shared_value_threshold):
+            self.redis_client = redis_client
+            built.append(shared_value_threshold)
+
+        async def asetup(self):
+            pass
+
+        async def __aexit__(self, *exc):
+            pass
+
+    if switch is None:
+        monkeypatch.delenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUES", raising=False)
+    else:
+        monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUES", switch)
+    reset_all_settings()
+    _use_fake_redis_saver(monkeypatch, _FakeSaver)
+    try:
+        _resource_, closer = await cp.create_checkpoint_resource("redis", "redis://h:6379/0")
+        await closer()
+    finally:
+        reset_all_settings()
+    assert built == [expected]
+
+
+@pytest.mark.parametrize(("switch", "expected"), [(None, 65536), ("false", None)])
+async def test_a_redis_saver_view_is_built_with_the_resolved_threshold(monkeypatch, switch, expected):
+    from tai42_kit.settings import reset_all_settings
+
+    built = []
+
+    class _FakeSaver:
+        def __init__(self, *, redis_client, ttl=None, shared_value_threshold):
+            built.append(shared_value_threshold)
+
+        async def asetup(self):
+            pass
+
+    if switch is None:
+        monkeypatch.delenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUES", raising=False)
+    else:
+        monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUES", switch)
+    reset_all_settings()
+    _use_fake_redis_saver(monkeypatch, _FakeSaver)
+    resource = cp.CheckpointResource("redis", object(), ledger=object(), redis_client=object())  # type: ignore[arg-type]
+    try:
+        await cp.create_redis_saver_view(resource, 2)
+    finally:
+        reset_all_settings()
+    assert built == [expected]
+
+
 async def test_redis_setup_ignores_already_exists(monkeypatch):
     class _FakeSaver:
-        def __init__(self, *, redis_client, ttl=None):
+        def __init__(self, *, redis_client, ttl=None, shared_value_threshold):
             pass
 
         async def asetup(self):
@@ -212,7 +270,7 @@ async def test_redis_setup_reraises_other_errors(monkeypatch):
     closed = []
 
     class _FakeSaver:
-        def __init__(self, *, redis_client, ttl=None):
+        def __init__(self, *, redis_client, ttl=None, shared_value_threshold):
             pass
 
         async def asetup(self):
@@ -297,7 +355,7 @@ async def test_redis_closer_closes_the_injected_client_exactly_once(monkeypatch)
     exits = []
 
     class _FakeSaver:
-        def __init__(self, *, redis_client, ttl=None):
+        def __init__(self, *, redis_client, ttl=None, shared_value_threshold):
             pass
 
         async def asetup(self):
@@ -323,7 +381,7 @@ async def test_redis_setup_failure_closes_the_injected_client(monkeypatch):
     built = install_spy_client(monkeypatch)
 
     class _FakeSaver:
-        def __init__(self, *, redis_client, ttl=None):
+        def __init__(self, *, redis_client, ttl=None, shared_value_threshold):
             pass
 
         async def asetup(self):
@@ -345,7 +403,7 @@ async def test_redis_client_closes_even_when_saver_teardown_raises(monkeypatch):
     built = install_spy_client(monkeypatch)
 
     class _FakeSaver:
-        def __init__(self, *, redis_client, ttl=None):
+        def __init__(self, *, redis_client, ttl=None, shared_value_threshold):
             pass
 
         async def asetup(self):
@@ -367,7 +425,7 @@ def _install_fake_redis_saver(monkeypatch) -> dict[str, Any]:
     captured: dict[str, Any] = {}
 
     class _FakeSaver:
-        def __init__(self, *, redis_client, ttl=None):
+        def __init__(self, *, redis_client, ttl=None, shared_value_threshold):
             captured["ttl"] = ttl
 
         async def asetup(self):
@@ -579,6 +637,54 @@ def test_get_saver_redis_installs_the_faithful_codec():
     serde: Any = saver.serde
     assert isinstance(serde._inner, FaithfulRedisSerializer)
     assert isinstance(serde._codec, RedisFaithfulCodec)
+
+
+@pytest.fixture
+def shared_values_switch(monkeypatch):
+    """Set ``LLM_PROVIDER_CHECKPOINT_SHARED_VALUES`` (``None`` leaves it unset) and read the settings afresh."""
+    from tai42_kit.settings import reset_all_settings
+
+    def set_switch(value):
+        if value is None:
+            monkeypatch.delenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUES", raising=False)
+        else:
+            monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUES", value)
+        reset_all_settings()
+
+    yield set_switch
+    reset_all_settings()
+
+
+def test_get_saver_memory_with_the_switch_on_is_refused_naming_the_provider(shared_values_switch):
+    from tai42_kit.llm.checkpoint.providers import CheckpointSharedValuesError
+
+    shared_values_switch("true")
+    with pytest.raises(CheckpointSharedValuesError, match=r"LLM_PROVIDER_CHECKPOINT_SHARED_VALUES=true: the 'memory'"):
+        cp.get_saver_from_resource("memory", _resource("memory", _FakeSaver()))
+
+
+def test_get_saver_sqlite_with_the_switch_on_is_refused_naming_the_provider(shared_values_switch, monkeypatch):
+    from tai42_kit.llm.checkpoint.providers import CheckpointSharedValuesError
+
+    saver_mod: Any = types.ModuleType("langgraph.checkpoint.sqlite.aio")
+    saver_mod.AsyncSqliteSaver = _FakeSaver
+    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.sqlite.aio", saver_mod)
+    shared_values_switch("true")
+    with pytest.raises(CheckpointSharedValuesError, match=r"the 'sqlite' checkpoint provider keeps no value store"):
+        cp.get_saver_from_resource("sqlite", _resource("sqlite", "conn"))
+
+
+def test_get_saver_memory_with_the_switch_unset_is_the_bare_saver(shared_values_switch):
+    shared_values_switch(None)
+    memory_saver = _FakeSaver()
+    assert cp.get_saver_from_resource("memory", _resource("memory", memory_saver)) is memory_saver
+
+
+@pytest.mark.parametrize(("switch", "expected"), [(None, None), ("true", 65536), ("false", None)])
+async def test_get_saver_postgres_is_built_with_the_resolved_threshold(shared_values_switch, switch, expected):
+    shared_values_switch(switch)
+    out: Any = cp.get_saver_from_resource("postgres", _resource("postgres", "pool"))
+    assert out._shared_value_threshold == expected
 
 
 def test_get_saver_unknown_provider_raises():

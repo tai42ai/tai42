@@ -43,6 +43,11 @@ def test_a_misspelled_shared_value_setting_is_refused_naming_it() -> None:
         refuse_unknown_owned_env({"LLM_PROVIDER_CHECKPOINT_SHARED_VALUES_BYTES": "1024"}, source="boot")
 
 
+def test_a_misspelled_shared_values_switch_is_refused_naming_it() -> None:
+    with pytest.raises(UnknownOwnedSettingError, match=r"LLM_PROVIDER_CHECKPOINT_SHARED_VALUE \(prefix"):
+        refuse_unknown_owned_env({"LLM_PROVIDER_CHECKPOINT_SHARED_VALUE": "true"}, source="boot")
+
+
 def test_every_setting_of_the_group_passes() -> None:
     refuse_unknown_owned_env(
         [
@@ -54,6 +59,7 @@ def test_every_setting_of_the_group_passes() -> None:
             "LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES",
             "LLM_PROVIDER_CHECKPOINT_RETENTION_FINISHED_MINUTES",
             "LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES",
+            "LLM_PROVIDER_CHECKPOINT_SHARED_VALUES",
             "LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES",
             "LLM_PROVIDER_STORE",
             "LLM_PROVIDER_STORE_CONN_STRING",

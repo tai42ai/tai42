@@ -232,7 +232,10 @@ async def redis_store(monkeypatch) -> AsyncIterator[tuple[Any, CheckpointResourc
     monkeypatch.setattr(store_format, "REDIS_FORMAT_KEY", f"tai42:checkpoint:format:{suffix}")
     client = AsyncRedis.from_url(url)
     saver = GuardedAsyncRedisSaver(
-        redis_client=client, checkpoint_prefix=f"gate{suffix}", checkpoint_write_prefix=f"gatew{suffix}"
+        redis_client=client,
+        checkpoint_prefix=f"gate{suffix}",
+        checkpoint_write_prefix=f"gatew{suffix}",
+        shared_value_threshold=cp.shared_value_threshold("redis"),
     )
     cp._guard_saver_serialization(saver, cp.checkpoint_provider_facts("redis"))
     await saver.asetup()

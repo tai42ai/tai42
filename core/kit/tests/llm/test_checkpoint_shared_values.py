@@ -1,8 +1,9 @@
 """Shared checkpoint values through the real Redis and Postgres savers the kit builds.
 
-A value above the threshold is stored once per thread and referenced; a later checkpoint carrying it
-adds nothing; reads restore it; deletes and retention remove it; a value removed behind the saver's
-back fails the read loudly. Opt-in like the kit's other real-store tests: ``TAI42_KIT_REAL_REDIS_URL``
+Redis stores values once by default and Postgres stores every value inline by default; the deployment's
+switch turns it on or off. A value above the threshold is stored once per thread and referenced; a later
+checkpoint carrying it adds nothing; reads restore it whatever the switch says now; deletes and retention
+remove it; a value removed behind the saver's back fails the read loudly. Opt-in like the kit's other real-store tests: ``TAI42_KIT_REAL_REDIS_URL``
 for Redis, ``TAI42_KIT_REAL_PG=1`` and the ``TAI_DATABASE_DEFAULT_PG_*`` env for Postgres.
 """
 
@@ -35,7 +36,8 @@ from ._real_redis import REAL_REDIS_ENV
 
 pytestmark = pytest.mark.integration
 
-SHARED_ENV = "LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES"
+SWITCH_ENV = "LLM_PROVIDER_CHECKPOINT_SHARED_VALUES"
+SIZE_ENV = "LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES"
 _PG_OPT_IN = "TAI42_KIT_REAL_PG"
 _METADATA: dict[str, Any] = {"source": "loop", "step": 0, "parents": {}}
 
@@ -125,8 +127,15 @@ class Store:
         return total
 
 
-async def _open(provider: str, monkeypatch: pytest.MonkeyPatch, shared: str) -> tuple[Store, Any]:
-    monkeypatch.setenv(SHARED_ENV, shared)
+async def _open(
+    provider: str, monkeypatch: pytest.MonkeyPatch, shared: str | None, size: str = "1024"
+) -> tuple[Store, Any]:
+    """Open ``provider`` with the switch set to ``shared`` (``None`` leaves it unset) and the size ``size``."""
+    if shared is None:
+        monkeypatch.delenv(SWITCH_ENV, raising=False)
+    else:
+        monkeypatch.setenv(SWITCH_ENV, shared)
+    monkeypatch.setenv(SIZE_ENV, size)
     reset_all_settings()
     resource, closer = await create_checkpoint_resource(provider, _conn_string(provider))
     return Store(provider, get_saver_from_resource(provider, resource), resource), closer
@@ -134,7 +143,7 @@ async def _open(provider: str, monkeypatch: pytest.MonkeyPatch, shared: str) -> 
 
 @pytest.fixture(params=["redis", "postgres"])
 async def store(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Store]:
-    opened, closer = await _open(str(request.param), monkeypatch, "1024")
+    opened, closer = await _open(str(request.param), monkeypatch, "true")
     try:
         yield opened
     finally:
@@ -275,7 +284,7 @@ async def _checkpoint_rows(store: Store, thread_id: str) -> list[str]:
 
 
 async def test_a_large_string_channel_is_stored_once_on_postgres(monkeypatch: pytest.MonkeyPatch) -> None:
-    opened, closer = await _open("postgres", monkeypatch, "1024")
+    opened, closer = await _open("postgres", monkeypatch, "true")
     thread_id = f"text-{uuid.uuid4().hex}"
     config = _config(thread_id)
     try:
@@ -299,12 +308,12 @@ async def test_a_large_string_channel_is_stored_once_on_postgres(monkeypatch: py
 async def test_a_string_channel_stored_inline_is_shared_at_the_next_checkpoint_on_postgres(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    inline, close_inline = await _open("postgres", monkeypatch, "null")
+    inline, close_inline = await _open("postgres", monkeypatch, "false")
     thread_id = f"text-{uuid.uuid4().hex}"
     config = _config(thread_id)
     saved, previous = await _put(inline.saver, config, None, {"text": _TEXT, "n": 0}, {"text": "1", "n": "1"})
     await close_inline()
-    shared, close_shared = await _open("postgres", monkeypatch, "1024")
+    shared, close_shared = await _open("postgres", monkeypatch, "true")
     try:
         await _put(shared.saver, saved, previous, {"text": _TEXT, "n": 1}, {"n": "2"})
         first, second = await _checkpoint_rows(shared, thread_id)
@@ -323,7 +332,7 @@ async def test_a_string_channel_stored_inline_is_shared_at_the_next_checkpoint_o
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 async def redis_store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Store]:
-    opened, closer = await _open("redis", monkeypatch, "1024")
+    opened, closer = await _open("redis", monkeypatch, "true")
     try:
         yield opened
     finally:
@@ -376,7 +385,9 @@ async def test_the_values_expire_with_the_threads_retention(redis_store: Store) 
 
     thread_id = f"expiry-{uuid.uuid4().hex}"
     short = GuardedAsyncRedisSaver(
-        redis_client=redis_store.resource.redis_client, ttl={"default_ttl": 0.05, "refresh_on_read": False}
+        redis_client=redis_store.resource.redis_client,
+        ttl={"default_ttl": 0.05, "refresh_on_read": False},
+        shared_value_threshold=cp.shared_value_threshold("redis"),
     )
     cp._guard_saver_serialization(short, cp.checkpoint_provider_facts("redis"))
     await short.asetup()
@@ -396,7 +407,7 @@ async def test_a_delta_channel_graph_rebuilds_its_shared_values_on_postgres(monk
 
     from .test_checkpoint_codec_redis import _delta_graph
 
-    opened, closer = await _open("postgres", monkeypatch, "1024")
+    opened, closer = await _open("postgres", monkeypatch, "true")
     big = "p" * 3000
 
     async def run(checkpointer: Any, thread_id: str) -> Any:
@@ -411,6 +422,12 @@ async def test_a_delta_channel_graph_rebuilds_its_shared_values_on_postgres(monk
     try:
         final = await run(opened.saver, thread_id)
         assert await opened.digests(thread_id)
+        async with opened.resource.handle.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT type FROM checkpoint_blobs WHERE thread_id = %s AND channel = 'items'", (thread_id,)
+            )
+            types = {row["type"] for row in await cur.fetchall()}
+        assert any(type_.endswith("+ref") for type_ in types), types
         assert final == await run(InMemorySaver(), "reference")
         assert final["items"] == [big, "a", big + "b", "c"]
     finally:
@@ -471,8 +488,8 @@ async def test_a_conversation_stores_less_with_its_values_shared(
     provider: str, shape: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sizes: dict[str, int] = {}
-    for label, shared in (("shared", "65536"), ("inline", "null")):
-        opened, closer = await _open(provider, monkeypatch, shared)
+    for label, shared in (("shared", "true"), ("inline", "false")):
+        opened, closer = await _open(provider, monkeypatch, shared, "65536")
         thread_id = f"size-{label}-{uuid.uuid4().hex}"
         try:
             cpu = await _conversation(opened, thread_id, 30, DOCUMENT_SIZES[shape])
@@ -489,3 +506,184 @@ async def test_a_conversation_stores_less_with_its_values_shared(
         assert sizes["shared"] <= sizes["inline"] / 4, sizes
     else:
         assert sizes["shared"] < sizes["inline"], sizes
+
+
+# --------------------------------------------------------------------------- #
+# Each store's default, the switch, and a thread read back after the switch changed
+# --------------------------------------------------------------------------- #
+async def test_postgres_stores_every_value_inline_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    from tai42_kit.llm.checkpoint.postgres_saver import PostgresMsgpackValueEncoding
+
+    opened, closer = await _open("postgres", monkeypatch, None)
+    thread_id = f"default-{uuid.uuid4().hex}"
+    config = _config(thread_id)
+    handed: list[Any] = []
+    encodes: list[int] = []
+    library_aput = AsyncPostgresSaver.aput
+    original_encode = PostgresMsgpackValueEncoding.encode
+
+    async def spy_aput(self: Any, config: Any, checkpoint: Any, metadata: Any, new_versions: Any) -> Any:
+        handed.append(checkpoint)
+        return await library_aput(self, config, checkpoint, metadata, new_versions)
+
+    def counting_encode(self: Any, value: Any) -> Any:
+        encodes.append(1)
+        return original_encode(self, value)
+
+    monkeypatch.setattr(AsyncPostgresSaver, "aput", spy_aput)
+    monkeypatch.setattr(PostgresMsgpackValueEncoding, "encode", counting_encode)
+    try:
+        checkpoint = empty_checkpoint()
+        checkpoint["channel_values"] = {"docs": DOCS, "n": 1}
+        checkpoint["channel_versions"] = {"docs": "1", "n": "1"}
+        await opened.saver.aput(config, checkpoint, _METADATA, {"docs": "1", "n": "1"})
+        assert handed == [checkpoint]
+        assert handed[0] is checkpoint
+        assert encodes == []
+        async with opened.resource.handle.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT type FROM checkpoint_blobs WHERE thread_id = %s AND channel = 'docs'", (thread_id,)
+            )
+            assert [row["type"] for row in await cur.fetchall()] == ["msgpack"]
+        assert await opened.digests(thread_id) == set()
+        assert (await opened.saver.aget_tuple(config)).checkpoint["channel_values"] == {"docs": DOCS, "n": 1}
+        assert [t.checkpoint["channel_values"] async for t in opened.saver.alist(config)] == [{"docs": DOCS, "n": 1}]
+    finally:
+        await opened.saver.adelete_thread(thread_id)
+        await closer()
+        reset_all_settings()
+
+
+async def test_redis_shares_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened, closer = await _open("redis", monkeypatch, None)
+    thread_id = f"default-{uuid.uuid4().hex}"
+    try:
+        await _put(opened.saver, _config(thread_id), None, {"docs": DOCS}, {"docs": "1"})
+        assert len(await opened.digests(thread_id)) == 3
+        stored = await opened.stored_channel(thread_id, "docs")
+        assert all(envelope_reference(item) is not None for item in stored.values())
+    finally:
+        await opened.saver.adelete_thread(thread_id)
+        await closer()
+        reset_all_settings()
+
+
+async def test_redis_with_the_switch_off_stores_inline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_kit.llm.checkpoint.value_store import RedisCheckpointValueStore
+
+    opened, closer = await _open("redis", monkeypatch, "false", "65536")
+    thread_id = f"off-{uuid.uuid4().hex}"
+    calls: list[str] = []
+    original_touch = RedisCheckpointValueStore.touch
+    original_put = RedisCheckpointValueStore.put
+
+    async def counting_touch(self: Any, *args: Any) -> Any:
+        calls.append("touch")
+        return await original_touch(self, *args)
+
+    async def counting_put(self: Any, *args: Any) -> Any:
+        calls.append("put")
+        return await original_put(self, *args)
+
+    monkeypatch.setattr(RedisCheckpointValueStore, "touch", counting_touch)
+    monkeypatch.setattr(RedisCheckpointValueStore, "put", counting_put)
+    large = {"pad": "z" * 70_000}
+    try:
+        saved, _previous = await _put(opened.saver, _config(thread_id), None, {"v": large}, {"v": "1"})
+        await opened.saver.aput_writes(saved, [("v", large)], task_id="task-1")
+        stored = await opened.stored_channel(thread_id, "v")
+        assert stored["args"][0] == "inflate"
+        assert await opened.digests(thread_id) == set()
+        assert calls == []
+        assert (await opened.saver.aget_tuple(_config(thread_id))).checkpoint["channel_values"] == {"v": large}
+    finally:
+        await opened.saver.adelete_thread(thread_id)
+        await closer()
+        reset_all_settings()
+
+
+@pytest.mark.parametrize("provider", ["redis", "postgres"])
+async def test_a_thread_written_with_sharing_on_reads_back_with_it_off(
+    provider: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    on, close_on = await _open(provider, monkeypatch, "true")
+    thread_id = f"switch-{uuid.uuid4().hex}"
+    config = _config(thread_id)
+    saved, previous = await _put(on.saver, config, None, {"docs": DOCS, "n": 1}, {"docs": "1", "n": "1"})
+    await on.saver.aput_writes(saved, [("docs", {"d9": _doc(9)})], task_id="task-1")
+    await _put(on.saver, saved, previous, {"docs": DOCS, "n": 2}, {"n": "2"})
+    await close_on()
+    off, close_off = await _open(provider, monkeypatch, "false")
+    try:
+        assert await off.digests(thread_id)
+        tup = await off.saver.aget_tuple(config)
+        assert tup.checkpoint["channel_values"] == {"docs": DOCS, "n": 2}
+        listed = [t async for t in off.saver.alist(config)]
+        assert [t.checkpoint["channel_values"] for t in listed] == [{"docs": DOCS, "n": 2}, {"docs": DOCS, "n": 1}]
+        assert listed[1].pending_writes == [("task-1", "docs", {"d9": _doc(9)})]
+        if provider == "postgres":
+            history = await off.saver.aget_delta_channel_history(config=listed[0].config, channels=["docs"])
+            assert all(envelope_reference(item) is None for item in _leaves(history))
+        await off.saver.adelete_thread(thread_id)
+        assert await off.digests(thread_id) == set()
+    finally:
+        await off.saver.adelete_thread(thread_id)
+        await close_off()
+        reset_all_settings()
+
+
+def _leaves(value: Any) -> list[Any]:
+    """Every dictionary inside ``value``."""
+    if isinstance(value, dict):
+        return [value, *(leaf for item in value.values() for leaf in _leaves(item))]
+    if isinstance(value, (list, tuple)):
+        return [leaf for item in value for leaf in _leaves(item)]
+    return []
+
+
+@pytest.mark.parametrize("provider", ["redis", "postgres"])
+async def test_a_read_without_references_costs_only_the_savers_own_read(
+    provider: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reports the wall per ``aget_tuple`` of a reference-free checkpoint, with the switch on and off."""
+    for shared in ("true", "false"):
+        opened, closer = await _open(provider, monkeypatch, shared, "65536")
+        thread_id = f"read-{shared}-{uuid.uuid4().hex}"
+        try:
+            await _put(opened.saver, _config(thread_id), None, {"docs": DOCS, "n": 1}, {"docs": "1", "n": "1"})
+            start = time.perf_counter()
+            for _ in range(50):
+                await opened.saver.aget_tuple(_config(thread_id))
+            print(  # the measurement is reported, not asserted
+                f"{provider} switch {shared}: aget_tuple without references "
+                f"{(time.perf_counter() - start) / 50 * 1000:.2f} ms"
+            )
+        finally:
+            await opened.saver.adelete_thread(thread_id)
+            await closer()
+    reset_all_settings()
+
+
+@pytest.mark.parametrize("held_by", ["channel", "pending write"])
+async def test_alist_resolves_a_reference_held_only_by_the_oldest_tuple(store: Store, held_by: str) -> None:
+    thread_id = f"oldest-{uuid.uuid4().hex}"
+    config = _config(thread_id)
+    try:
+        if held_by == "channel":
+            saved, previous = await _put(store.saver, config, None, {"docs": DOCS}, {"docs": "1"})
+        else:
+            saved, previous = await _put(store.saver, config, None, {"n": 0}, {"n": "1"})
+            await store.saver.aput_writes(saved, [("docs", DOCS)], task_id="task-1")
+        saved, previous = await _put(store.saver, saved, previous, {"n": 1}, {"n": "2"})
+        await _put(store.saver, saved, previous, {"n": 2}, {"n": "3"})
+        listed = [t async for t in store.saver.alist(config)]
+        assert len(listed) == 3
+        oldest = listed[-1]
+        if held_by == "channel":
+            assert oldest.checkpoint["channel_values"] == {"docs": DOCS}
+        else:
+            assert oldest.pending_writes == [("task-1", "docs", DOCS)]
+    finally:
+        await store.saver.adelete_thread(thread_id)

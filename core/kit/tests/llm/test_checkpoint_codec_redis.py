@@ -215,20 +215,6 @@ async def test_a_large_channel_value_is_stored_once_per_thread_and_referenced(re
     assert stored["pad"]["args"][0] == "ref"
 
 
-async def test_with_sharing_off_a_large_channel_value_is_stored_as_an_inflate_envelope(monkeypatch) -> None:
-    from tai42_kit.settings import reset_all_settings
-
-    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES", "null")
-    reset_all_settings()
-    resource, closer = await create_checkpoint_resource("redis", real_redis_url())
-    try:
-        stored = await _stored_large_value(get_saver_from_resource("redis", resource))
-    finally:
-        await closer()
-        reset_all_settings()
-    assert stored["args"][0] == "inflate"
-
-
 async def _stored_checkpoint_key(saver: Any, thread_id: str) -> str:
     key = await saver._redis.get(saver._make_redis_checkpoint_latest_key(thread_id, ""))
     return key.decode() if isinstance(key, bytes) else key

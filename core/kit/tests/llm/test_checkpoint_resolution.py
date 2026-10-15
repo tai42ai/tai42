@@ -249,31 +249,348 @@ def _whole_ref(encoded: tuple[str, bytes]) -> Any:
     return CheckpointValueRef("0" * 64, len(encoded[1]))
 
 
-async def test_the_postgres_delta_history_resolves_its_writes_and_seeds(monkeypatch):
+# --------------------------------------------------------------------------- #
+# The savers' doors: a read resolves only what its decode announced; nothing shared, nothing walked
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def walks(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Counts every top-level resolver walk (``find_references`` over a read's tuple or value)."""
+    from tai42_kit.llm.checkpoint import chunking
+
+    calls: list[int] = []
+    original = chunking.find_references
+
+    def counting(value: Any, encoding: Any, found: Any) -> None:
+        calls.append(1)
+        original(value, encoding, found)
+
+    monkeypatch.setattr(chunking, "find_references", counting)
+    return calls
+
+
+def _guarded(saver: Any, provider: str) -> Any:
+    from tai42_kit.llm.checkpoint import checkpoint as cp
+
+    cp._guard_saver_serialization(saver, cp.checkpoint_provider_facts(provider))
+    return saver
+
+
+class _ThreadValues:
+    """A thread value store over a fake: ``get`` reads it, ``touch`` and ``put`` record what a write asks."""
+
+    def __init__(self, store: FakeValueStore | None = None) -> None:
+        self.store = store or FakeValueStore({})
+        self.touched: list[Any] = []
+        self.put_values: dict[str, StoredBlob] = {}
+
+    async def get(self, thread_id: str, digests: Collection[str]) -> Mapping[str, StoredBlob]:
+        assert thread_id == THREAD
+        return await self.store.get(digests)
+
+    async def touch(self, thread_id: str, digests: Collection[str]) -> set[str]:
+        self.touched.append(sorted(digests))
+        return {digest for digest in digests if digest not in self.put_values}
+
+    async def put(self, thread_id: str, blobs: Mapping[str, StoredBlob]) -> None:
+        self.put_values.update(blobs)
+        self.store.blobs.update(blobs)
+
+
+_CONFIG: Any = {"configurable": {"thread_id": THREAD, "checkpoint_ns": "", "checkpoint_id": "c1"}}
+_LARGE = {"documents": {f"d{i}": {"a": f"{i}" * 700, "b": "b" * 700} for i in range(3)}}
+
+
+def _postgres_saver(threshold: int | None, values: _ThreadValues | None = None) -> GuardedAsyncPostgresSaver:
+    saver = _guarded(GuardedAsyncPostgresSaver(object(), shared_value_threshold=threshold), "postgres")
+    saver._values = values or _ThreadValues()  # pyright: ignore[reportAttributeAccessIssue]
+    return saver
+
+
+def _postgres_tuple(saver: Any, blobs: Mapping[str, tuple[str, bytes]]) -> CheckpointTuple:
+    """A tuple read the way the library reads one: every blob decoded by the saver's serializer."""
+    return CheckpointTuple(
+        config=_CONFIG,
+        checkpoint={"v": 4, "id": "c1", "channel_values": {k: saver.serde.loads_typed(b) for k, b in blobs.items()}},
+        metadata={"source": "loop", "step": 1, "parents": {}},
+        pending_writes=[],
+    )
+
+
+def _postgres_stored(saver: Any, value: Any) -> tuple[dict[str, tuple[str, bytes]], FakeValueStore]:
+    """``value`` as the kit saver stores a channel with sharing on: its blob and the thread's value store."""
+    from tai42_kit.llm.checkpoint.codec import referencing_type
+
+    encoding = saver._encoding()
+    chunker = ValueChunker(encoding, THRESHOLD)
+    rewritten, encoded = chunker.chunk(value)
+    assert rewritten is not value
+    store = FakeValueStore({digest: encoding.store_form(enc) for digest, enc in chunker.blobs.items()})
+    return {"v": referencing_type(encoding.compressed(encoded))}, store
+
+
+async def test_a_postgres_read_without_references_walks_nothing(monkeypatch, walks):
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-    encoding = _postgres_encoding()
-    chunker = ValueChunker(encoding, THRESHOLD)
+    saver = _postgres_saver(THRESHOLD)
+    stored = {"v": saver.serde.dumps_typed(_LARGE), "n": saver.serde.dumps_typed(1)}
+
+    async def library_get(self: Any, config: Any) -> Any:
+        return _postgres_tuple(self, stored)
+
+    async def library_list(self: Any, config: Any, **kwargs: Any) -> Any:
+        for _ in range(2):
+            yield _postgres_tuple(self, stored)
+
+    monkeypatch.setattr(AsyncPostgresSaver, "aget_tuple", library_get)
+    monkeypatch.setattr(AsyncPostgresSaver, "alist", library_list)
+    tup = await saver.aget_tuple(_CONFIG)
+    assert tup is not None
+    assert tup.checkpoint["channel_values"] == {"v": _LARGE, "n": 1}
+    assert [t.checkpoint["channel_values"] async for t in saver.alist(_CONFIG)] == [{"v": _LARGE, "n": 1}] * 2
+    assert walks == []
+
+
+async def test_a_postgres_read_with_references_resolves_them(monkeypatch, walks):
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    saver = _postgres_saver(None)
+    stored, store = _postgres_stored(saver, _LARGE)
+    saver._values = _ThreadValues(store)  # pyright: ignore[reportAttributeAccessIssue]
+    plain = {"v": saver.serde.dumps_typed({"small": 1})}
+
+    async def library_get(self: Any, config: Any) -> Any:
+        return _postgres_tuple(self, stored)
+
+    async def library_list(self: Any, config: Any, **kwargs: Any) -> Any:
+        yield _postgres_tuple(self, plain)
+        yield _postgres_tuple(self, stored)
+
+    monkeypatch.setattr(AsyncPostgresSaver, "aget_tuple", library_get)
+    monkeypatch.setattr(AsyncPostgresSaver, "alist", library_list)
+    tup = await saver.aget_tuple(_CONFIG)
+    assert tup is not None
+    assert tup.checkpoint["channel_values"] == {"v": _LARGE}
+    assert len(walks) == 1
+    listed = [t.checkpoint["channel_values"] async for t in saver.alist(_CONFIG)]
+    assert listed == [{"v": {"small": 1}}, {"v": _LARGE}]
+    assert len(walks) == 2
+
+
+async def test_the_postgres_delta_history_resolves_only_what_it_announced(monkeypatch, walks):
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    saver = _postgres_saver(None)
     seed_value = {"items": ["s" * 2000]}
     write_value = ["w" * 2000]
-    seed, _ = chunker.chunk(seed_value)
-    write, _ = chunker.chunk(write_value)
-    store = FakeValueStore({digest: encoding.store_form(enc) for digest, enc in chunker.blobs.items()})
+    seed_blob, store = _postgres_stored(saver, seed_value)
+    write_blob, write_store = _postgres_stored(saver, write_value)
+    store.blobs.update(write_store.blobs)
+    saver._values = _ThreadValues(store)  # pyright: ignore[reportAttributeAccessIssue]
+    plain_seed = saver.serde.dumps_typed(seed_value)
+    shared = True
 
     async def library_history(self: Any, *, config: Any, channels: Any) -> Any:
-        return {"items": {"writes": [("task-1", "items", write)], "seed": seed}}
+        if not shared:
+            return {"items": {"writes": [], "seed": self.serde.loads_typed(plain_seed)}}
+        write = self.serde.loads_typed(write_blob["v"])
+        return {"items": {"writes": [("task-1", "items", write)], "seed": self.serde.loads_typed(seed_blob["v"])}}
 
     monkeypatch.setattr(AsyncPostgresSaver, "aget_delta_channel_history", library_history)
-    saver = GuardedAsyncPostgresSaver(object())
-    saver.serde = _GuardedSerializer(JsonPlusSerializer(), BlobCompressCodec(2048))
-
-    class _Values:
-        async def get(self, thread_id: str, digests: Collection[str]) -> Mapping[str, StoredBlob]:
-            assert thread_id == THREAD
-            return await store.get(digests)
-
-    saver._values = _Values()  # pyright: ignore[reportAttributeAccessIssue]
-    history = await saver.aget_delta_channel_history(
-        config={"configurable": {"thread_id": THREAD, "checkpoint_ns": ""}}, channels=["items"]
-    )
+    history = await saver.aget_delta_channel_history(config=_CONFIG, channels=["items"])
     assert history == {"items": {"writes": [("task-1", "items", write_value)], "seed": seed_value}}
+    assert len(walks) == 1
+    shared = False
+    history = await saver.aget_delta_channel_history(config=_CONFIG, channels=["items"])
+    assert history == {"items": {"writes": [], "seed": seed_value}}
+    assert len(walks) == 1
+
+
+def _redis_saver(threshold: int | None, values: FakeValueStore | None = None) -> Any:
+    from redis.asyncio import Redis as AsyncRedis
+
+    from tai42_kit.llm.checkpoint.codec import GuardedAsyncRedisSaver
+
+    saver = _guarded(
+        GuardedAsyncRedisSaver(redis_client=AsyncRedis.from_url("redis://127.0.0.1:1/0"), shared_value_threshold=threshold),
+        "redis",
+    )
+    saver._shared.store = _ThreadValues(values)
+    return saver
+
+
+def _redis_stored(values: dict[str, Any]) -> tuple[bytes, FakeValueStore]:
+    """A checkpoint document as the kit's Redis saver stores it with sharing on, and its value store."""
+    encoder = RedisCheckpointEncoder(THRESHOLD, 65536)
+    chunker = encoder.chunker()
+    checkpoint = {"v": 4, "id": "c1", "channel_values": values, "channel_versions": dict.fromkeys(values, "1")}
+    data = encoder.encode_checkpoint(checkpoint, {}, chunker)
+    return data, FakeValueStore({digest: encoder.encoding.store_form(enc) for digest, enc in chunker.blobs.items()})
+
+
+def _redis_tuple_read(saver: Any, data: bytes) -> CheckpointTuple:
+    """A tuple read the way the library reads one: the document decoded through the saver's serializer."""
+    return CheckpointTuple(
+        config=_CONFIG,
+        checkpoint=saver.serde.loads_typed(("json", data)),
+        metadata={"source": "loop", "step": 1, "parents": {}},
+        pending_writes=[],
+    )
+
+
+async def test_a_redis_read_without_references_walks_nothing(monkeypatch, walks):
+    from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+
+    saver = _redis_saver(THRESHOLD)
+    data, _store = _redis_stored({"n": 1, "small": {"a": "x" * 100}})
+
+    async def library_get(self: Any, config: Any) -> Any:
+        return _redis_tuple_read(self, data)
+
+    async def library_list(self: Any, config: Any, **kwargs: Any) -> Any:
+        # The library decodes every document of a listing before it yields the first.
+        read = [_redis_tuple_read(self, data) for _ in range(3)]
+        for tup in read:
+            yield tup
+
+    monkeypatch.setattr(AsyncRedisSaver, "aget_tuple", library_get)
+    monkeypatch.setattr(AsyncRedisSaver, "alist", library_list)
+    tup = await saver.aget_tuple(_CONFIG)
+    assert tup is not None
+    assert tup.checkpoint["channel_values"]["n"] == 1
+    assert len([t async for t in saver.alist(_CONFIG)]) == 3
+    assert walks == []
+
+
+async def test_a_redis_read_with_references_resolves_every_listed_tuple(monkeypatch, walks):
+    from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+
+    shared, store = _redis_stored({"docs": _LARGE})
+    plain, _ = _redis_stored({"n": 1})
+    saver = _redis_saver(None, store)
+
+    async def library_get(self: Any, config: Any) -> Any:
+        return _redis_tuple_read(self, shared)
+
+    async def library_list(self: Any, config: Any, **kwargs: Any) -> Any:
+        # The library decodes every document of a listing before it yields the first.
+        read = [_redis_tuple_read(self, plain), _redis_tuple_read(self, shared), _redis_tuple_read(self, shared)]
+        for tup in read:
+            yield tup
+
+    monkeypatch.setattr(AsyncRedisSaver, "aget_tuple", library_get)
+    monkeypatch.setattr(AsyncRedisSaver, "alist", library_list)
+    tup = await saver.aget_tuple(_CONFIG)
+    assert tup is not None
+    assert tup.checkpoint["channel_values"] == {"docs": _LARGE}
+    assert len(walks) == 1
+    listed = [t.checkpoint["channel_values"] async for t in saver.alist(_CONFIG)]
+    assert listed == [{"n": 1}, {"docs": _LARGE}, {"docs": _LARGE}]
+
+
+# --------------------------------------------------------------------------- #
+# The savers' write doors with sharing off: the library's own path, nothing of the value store
+# --------------------------------------------------------------------------- #
+def _checkpoint_with(values: dict[str, Any]) -> Any:
+    return {
+        "v": 4,
+        "id": "c2",
+        "ts": "2026-01-01T00:00:00+00:00",
+        "channel_values": values,
+        "channel_versions": dict.fromkeys(values, "1"),
+        "versions_seen": {},
+        "updated_channels": None,
+    }
+
+
+class _NoValueStore:
+    """A value store no write may reach."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"the value store was used: {name}")
+
+
+async def test_a_postgres_write_with_sharing_off_is_the_librarys_own(monkeypatch):
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    handed: list[Any] = []
+    encodes: list[int] = []
+
+    async def library_aput(self: Any, config: Any, checkpoint: Any, metadata: Any, new_versions: Any) -> Any:
+        handed.append((checkpoint, new_versions))
+        return config
+
+    async def library_aput_writes(self: Any, config: Any, writes: Any, task_id: str, task_path: str = "") -> None:
+        handed.append(writes)
+
+    original_encode = PostgresMsgpackValueEncoding.encode
+
+    def counting_encode(self: Any, value: Any) -> Any:
+        encodes.append(1)
+        return original_encode(self, value)
+
+    monkeypatch.setattr(AsyncPostgresSaver, "aput", library_aput)
+    monkeypatch.setattr(AsyncPostgresSaver, "aput_writes", library_aput_writes)
+    monkeypatch.setattr(PostgresMsgpackValueEncoding, "encode", counting_encode)
+    saver = _postgres_saver(None)
+    saver._values = _NoValueStore()  # pyright: ignore[reportAttributeAccessIssue]
+    checkpoint = _checkpoint_with({"docs": _LARGE, "text": "t" * 5000})
+    versions: Any = {"docs": "1", "text": "1"}
+    writes = [("docs", _LARGE)]
+    await saver.aput(_CONFIG, checkpoint, {"source": "loop", "step": 1, "parents": {}}, versions)
+    await saver.aput_writes(_CONFIG, writes, "task-1")
+    assert handed[0][0] is checkpoint
+    assert handed[0][1] is versions
+    assert handed[1] is writes
+    assert encodes == []
+
+
+async def test_a_postgres_write_with_sharing_on_tags_the_blobs_that_reference(monkeypatch):
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    from tai42_kit.llm.checkpoint.checkpoint import PreEncodedValue
+
+    handed: list[Any] = []
+
+    async def library_aput(self: Any, config: Any, checkpoint: Any, metadata: Any, new_versions: Any) -> Any:
+        handed.append(checkpoint["channel_values"])
+        return config
+
+    async def library_aput_writes(self: Any, config: Any, writes: Any, task_id: str, task_path: str = "") -> None:
+        handed.append(dict(writes))
+
+    monkeypatch.setattr(AsyncPostgresSaver, "aput", library_aput)
+    monkeypatch.setattr(AsyncPostgresSaver, "aput_writes", library_aput_writes)
+    values = _ThreadValues()
+    saver = _postgres_saver(THRESHOLD, values)
+    checkpoint = _checkpoint_with({"docs": _LARGE, "small": {"a": 1}, "text": "t" * 5000})
+    versions: Any = {"docs": "1", "small": "1", "text": "1"}
+    await saver.aput(_CONFIG, checkpoint, {"source": "loop", "step": 1, "parents": {}}, versions)
+    await saver.aput_writes(_CONFIG, [("docs", _LARGE), ("small", {"a": 1})], "task-1")
+    channels, written = handed
+    tags = {name: value.encoded[0] for name, value in channels.items() if isinstance(value, PreEncodedValue)}
+    assert tags == {"docs": "msgpack+ref", "small": "msgpack", "text": "msgpack+ref"}
+    assert {name: value.encoded[0] for name, value in written.items()} == {"docs": "msgpack+ref", "small": "msgpack"}
+    assert values.put_values
+
+
+async def test_a_redis_write_with_sharing_off_never_reaches_the_value_store(monkeypatch):
+    from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+
+    handed: list[Any] = []
+
+    async def library_aput(self: Any, config: Any, checkpoint: Any, metadata: Any, new_versions: Any, *args: Any) -> Any:
+        handed.append(checkpoint)
+        return config
+
+    async def library_aput_writes(self: Any, config: Any, writes: Any, task_id: str, task_path: str = "") -> None:
+        handed.append(writes)
+
+    monkeypatch.setattr(AsyncRedisSaver, "aput", library_aput)
+    monkeypatch.setattr(AsyncRedisSaver, "aput_writes", library_aput_writes)
+    saver = _redis_saver(None)
+    saver._shared.store = _NoValueStore()
+    config: Any = {"configurable": {"thread_id": THREAD, "checkpoint_ns": ""}}
+    await saver.aput(config, _checkpoint_with({"docs": _LARGE}), {"source": "loop", "step": 1, "parents": {}}, {})
+    await saver.aput_writes(config, [("docs", _LARGE)], "task-1")
+    assert orjson.loads(handed[0].encoded[1])["channel_values"]["docs"] == _LARGE
+    assert [orjson.loads(value.encoded[1]) for _channel, value in handed[1]] == [_LARGE]

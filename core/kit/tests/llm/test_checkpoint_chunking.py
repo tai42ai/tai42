@@ -162,6 +162,39 @@ def test_the_library_markers_are_descended_on_postgres():
 
 
 @pytest.mark.parametrize("store", list(ENCODINGS))
+def test_a_snapshot_rebuilt_around_a_reference_is_a_shared_snapshot(store):
+    from tai42_kit.llm.checkpoint.chunking import SharedSnapshot
+
+    rewritten, _ = _chunker(store).chunk({"snapshot": _DeltaSnapshot([_doc(3)])})
+    assert type(rewritten["snapshot"]) is SharedSnapshot
+    assert isinstance(rewritten["snapshot"], _DeltaSnapshot)
+    assert _ref(rewritten["snapshot"].value[0]) is not None
+
+
+@pytest.mark.parametrize("store", list(ENCODINGS))
+def test_a_snapshot_whose_payload_stays_inline_is_the_original_object(store):
+    snapshot = _DeltaSnapshot([{"small": 1}])
+    rewritten, _ = _chunker(store).chunk({"snapshot": snapshot})
+    assert rewritten["snapshot"] is snapshot
+
+
+async def test_a_resolved_shared_snapshot_is_a_plain_snapshot():
+    from tai42_kit.llm.checkpoint.chunking import StoredBlob, resolve_references
+
+    encoding = _postgres_encoding()
+    chunker = ValueChunker(encoding, THRESHOLD)
+    rewritten, _ = chunker.chunk(_DeltaSnapshot([_doc(3)]))
+    blobs = {digest: StoredBlob(*encoded) for digest, encoded in chunker.blobs.items()}
+
+    async def fetch(digests: Any) -> Any:
+        return {digest: blobs[digest] for digest in digests}
+
+    resolved = await resolve_references(rewritten, encoding, fetch, "t1")
+    assert type(resolved) is _DeltaSnapshot
+    assert resolved.value == [_doc(3)]
+
+
+@pytest.mark.parametrize("store", list(ENCODINGS))
 def test_a_serialized_object_is_replaced_whole_never_descended(store):
     chunker = _chunker(store)
     serialized = {"lc": 1, "type": "constructor", "id": ["x", "Y"], "kwargs": {"a": _doc(1), "b": _doc(2)}}
