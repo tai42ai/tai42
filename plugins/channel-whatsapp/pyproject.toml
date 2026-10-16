@@ -28,7 +28,8 @@ dependencies = [
     # The contract floor is rewritten by scripts/range_sync.py at release.
     "tai42-contract>=19.3,<20",
     # HttpxClient (pooled outbound HTTP), RedisClient (correlation store),
-    # TaiBaseSettings + the settings cache registry. [redis] pulls redis-py.
+    # TaiBaseSettings + the settings cache registry. [redis] pulls redis-py, whose
+    # Lock error types the Flow resolve lock imports directly.
     "tai42-kit[redis]>=10.0,<11",
     # Imported directly (transport error types).
     "httpx>=0.28",

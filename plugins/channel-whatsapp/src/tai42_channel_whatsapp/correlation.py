@@ -18,10 +18,12 @@ A select ask also carries its ``options`` and ``interaction_id`` so an inbound
 interactive tap (whose id is ``{interaction_id}:{index}``) maps back to the exact
 option text under the exact ask it was sent for.
 
-A published-Flow cache maps ``(waba_id, schema_hash)`` to a Meta flow id with NO
-TTL — a published Flow persists on Meta, so the id is reused for every form ask
-sharing that answer schema; a cache miss triggers a create + publish + store.
-Beside it, a schema sidecar maps the same ``(waba_id, schema_hash)`` to the answer
+A published-Flow cache maps ``(waba_id, flow_identity)`` to a Meta flow id with NO
+TTL — a published Flow persists on Meta, so the id is reused for every form send
+sharing that Flow; a cache miss resolves the Flow on the WABA (found by name, else
+created and published) and stores it. The miss runs under a per-``(waba_id,
+flow_identity)`` redis lock so concurrent first sends resolve one Flow.
+Beside it, a schema sidecar maps ``(waba_id, schema_hash)`` to the answer
 schema itself PLUS the reverse of its schema-key → completion-payload-key map (each
 completion-payload key back to its schema key), for ask-less form notifications whose
 reply carries only the hash (inside its flow token) and no reservation — the map decodes
@@ -42,10 +44,13 @@ from __future__ import annotations
 import json
 import logging
 import math
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
+from redis.exceptions import LockError, LockNotOwnedError
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError, Correlation
 from tai42_contract.interactions.models import AnswerMismatchPolicy, Wording
@@ -124,8 +129,12 @@ def _pending_key(phone_number_id: str, wa_id: str) -> str:
     return f"channel:whatsapp:pending:{correlation_key(phone_number_id, wa_id)}"
 
 
-def _flow_key(waba_id: str, schema_hash: str) -> str:
-    return f"channel:whatsapp:flow:{waba_id}:{schema_hash}"
+def _flow_key(waba_id: str, flow_identity: str) -> str:
+    return f"channel:whatsapp:flow:{waba_id}:{flow_identity}"
+
+
+def _flow_lock_key(waba_id: str, flow_identity: str) -> str:
+    return f"channel:whatsapp:flow-lock:{waba_id}:{flow_identity}"
 
 
 def _flow_schema_key(waba_id: str, schema_hash: str) -> str:
@@ -349,19 +358,54 @@ def _pending_key_from_opaque(key: str) -> str:
 whatsapp_correlation_store = WhatsAppCorrelationStore()
 
 
-async def get_cached_flow_id(waba_id: str, schema_hash: str) -> str | None:
-    """The published flow id for this ``(waba_id, schema_hash)``, or ``None``."""
+async def get_cached_flow_id(waba_id: str, flow_identity: str) -> str | None:
+    """The published flow id for this ``(waba_id, flow_identity)``, or ``None``."""
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
-        raw = await redis.get(_flow_key(waba_id, schema_hash))
+        raw = await redis.get(_flow_key(waba_id, flow_identity))
     if raw is None:
         return None
     return raw.decode("utf-8") if isinstance(raw, bytes) else raw
 
 
-async def cache_flow_id(waba_id: str, schema_hash: str, flow_id: str) -> None:
+async def cache_flow_id(waba_id: str, flow_identity: str, flow_id: str) -> None:
     """Store the published flow id with NO TTL (a published Flow persists on Meta)."""
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
-        await redis.set(_flow_key(waba_id, schema_hash), flow_id)
+        await redis.set(_flow_key(waba_id, flow_identity), flow_id)
+
+
+@asynccontextmanager
+async def flow_resolve_lock(waba_id: str, flow_identity: str, *, ttl_seconds: float) -> AsyncIterator[None]:
+    """Hold the redis lock that lets one send at a time resolve this Flow on this WABA.
+
+    redis-py's ``Lock`` (``SET NX PX`` acquire, compare-and-delete release) under
+    ``channel:whatsapp:flow-lock:{waba_id}:{flow_identity}``, held at most
+    ``ttl_seconds`` and waited for at most as long. A wait that runs out raises a
+    retryable ``ChannelDeliveryError`` (the other send is still publishing). Any other
+    lock failure raises ``ChannelDeliveryError``; redis connection errors propagate.
+    """
+    key = _flow_lock_key(waba_id, flow_identity)
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        lock = redis.lock(key, timeout=ttl_seconds, blocking_timeout=ttl_seconds)
+        try:
+            acquired = await lock.acquire()
+        except LockError as exc:
+            raise ChannelDeliveryError(f"acquiring the WhatsApp Flow resolve lock {key} failed: {exc}") from exc
+        if not acquired:
+            raise ChannelDeliveryError(
+                f"another send is still publishing the WhatsApp Flow for this form (waited {ttl_seconds:.0f}s)",
+                retryable=True,
+            )
+        try:
+            yield
+        finally:
+            try:
+                await lock.release()
+            except LockNotOwnedError:
+                # The lock's TTL ran out first: nothing holds it, so there is nothing to
+                # release, and the Flow resolved and cached under it stands without the release.
+                logger.exception("flow resolve lock %s expired before release", key)
+            except LockError as exc:
+                raise ChannelDeliveryError(f"releasing the WhatsApp Flow resolve lock {key} failed: {exc}") from exc
 
 
 async def cache_flow_form(waba_id: str, schema_hash: str, schema: dict[str, Any], names: dict[str, str]) -> None:

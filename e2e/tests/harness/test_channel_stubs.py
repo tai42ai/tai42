@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from tai42_e2e import StackResources
-from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio
+from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio, FakeWhatsApp
 from tai42_e2e.manifests import build_auth_stack, build_bare_stack, build_channel_stack
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.variants import resolve_variants
@@ -124,6 +124,38 @@ def _sentinel() -> StackResources:
         # completes it across every backend variant.
         broker_url="amqp://guest:guest@127.0.0.1:5672/tai42_e2e_probe",
     )
+
+
+async def test_fake_whatsapp_lists_flows_with_their_status() -> None:
+    # The flow list a form delivery reads on a cache miss reflects the stub's own record:
+    # each created flow of that WABA, PUBLISHED once its publish landed, else DRAFT, on one
+    # last page (no ``paging.next``).
+    stub = FakeWhatsApp()
+    stub.start()
+    try:
+        async with httpx.AsyncClient(base_url=stub.api_base_url, timeout=5.0) as client:
+            empty = await client.get("/WABA-1/flows")
+            assert empty.status_code == 200
+            assert empty.json() == {"data": [], "paging": {"cursors": {}}}
+
+            draft = (await client.post("/WABA-1/flows", json={"name": "tai42-form-a", "flow_json": "{}"})).json()["id"]
+            live = (await client.post("/WABA-1/flows", json={"name": "tai42-form-b", "flow_json": "{}"})).json()["id"]
+            await client.post("/WABA-2/flows", json={"name": "tai42-form-c", "flow_json": "{}"})
+            assert (await client.post(f"/{live}/publish", json={})).status_code == 200
+
+            listed = (await client.get("/WABA-1/flows")).json()
+            assert [(item["id"], item["name"], item["status"]) for item in listed["data"]] == [
+                (draft, "tai42-form-a", "DRAFT"),
+                (live, "tai42-form-b", "PUBLISHED"),
+            ]
+            assert "next" not in listed["paging"]
+            assert listed["paging"]["cursors"]["after"]
+
+        stub.reset()
+        assert stub.flows == []
+        assert stub.published_flows == []
+    finally:
+        stub.stop()
 
 
 def test_channel_modules_render_per_profile() -> None:

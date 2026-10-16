@@ -7,6 +7,7 @@ collection, before any test imports the plugin) satisfies all three.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -17,6 +18,7 @@ from typing import Any
 
 import httpx
 import pytest
+from redis.exceptions import LockNotOwnedError
 from starlette.requests import Request
 from starlette.responses import Response
 from tai42_contract.app import tai42_app
@@ -325,9 +327,11 @@ class FakeHttpx:
         self.typing_response: httpx.Response | Exception | None = None
         self.events = events if events is not None else []
 
-    async def get(self, url: str, *, headers: dict[str, str] | None = None) -> httpx.Response:
+    async def get(
+        self, url: str, *, params: dict[str, str] | None = None, headers: dict[str, str] | None = None
+    ) -> httpx.Response:
         self.events.append(("http_get", url))
-        self.get_calls.append({"url": url, "headers": headers})
+        self.get_calls.append({"url": url, "params": params, "headers": headers})
         if not self.get_responses:
             raise AssertionError("FakeHttpx: no queued response for get")
         item = self.get_responses.pop(0)
@@ -369,6 +373,43 @@ class FakeHttpx:
         return item
 
 
+class FakeRedisLock:
+    """In-memory stand-in for redis-py's ``Lock``: one ``asyncio.Lock`` per lock name.
+
+    ``acquire`` yields to the loop once, then waits up to ``blocking_timeout`` for the
+    name's mutex and answers ``False`` when it cannot get it, as redis-py's does.
+    ``release`` raises ``LockNotOwnedError`` while the owning fake's ``lock_expired``
+    flag is set, the way redis-py's does once the lock's TTL ran out before release. The
+    owning fake's ``lock_acquire_error`` / ``lock_release_error`` make either step raise.
+    """
+
+    def __init__(self, owner: FakeRedis, name: str, timeout: float | None, blocking_timeout: float | None) -> None:
+        self._owner = owner
+        self.name = name
+        self.timeout = timeout
+        self.blocking_timeout = blocking_timeout
+
+    async def acquire(self) -> bool:
+        await asyncio.sleep(0)
+        if self._owner.lock_acquire_error is not None:
+            raise self._owner.lock_acquire_error
+        mutex = self._owner.lock_mutexes.setdefault(self.name, asyncio.Lock())
+        try:
+            await asyncio.wait_for(mutex.acquire(), timeout=self.blocking_timeout)
+        except TimeoutError:
+            return False
+        self._owner.events.append(("redis_lock", self.name))
+        return True
+
+    async def release(self) -> None:
+        self._owner.events.append(("redis_unlock", self.name))
+        self._owner.lock_mutexes[self.name].release()
+        if self._owner.lock_expired:
+            raise LockNotOwnedError("Cannot release a lock that's no longer owned")
+        if self._owner.lock_release_error is not None:
+            raise self._owner.lock_release_error
+
+
 class FakeRedis:
     """In-memory stand-in for the async redis commands the correlation store uses."""
 
@@ -376,6 +417,26 @@ class FakeRedis:
         self.store: dict[str, str] = {}
         self.ttls: dict[str, int] = {}
         self.events = events if events is not None else []
+        self.lock_mutexes: dict[str, asyncio.Lock] = {}
+        self.locks: list[FakeRedisLock] = []
+        # Set by a test to make every lock release answer as an expired lock does.
+        self.lock_expired = False
+        self.lock_acquire_error: Exception | None = None
+        self.lock_release_error: Exception | None = None
+
+    def lock(
+        self,
+        name: str,
+        timeout: float | None = None,
+        sleep: float = 0.1,
+        blocking: bool = True,
+        blocking_timeout: float | None = None,
+        lock_class: Any = None,
+        thread_local: bool = True,
+    ) -> FakeRedisLock:
+        lock = FakeRedisLock(self, name, timeout, blocking_timeout)
+        self.locks.append(lock)
+        return lock
 
     async def set(self, key: str, value: str, nx: bool = False, ex: int | None = None) -> bool | None:
         self.events.append(("redis_set", key))
@@ -820,3 +881,41 @@ _UNLISTED = "15559999999"
 def _accepted(wamid: str = "wamid.OUT") -> httpx.Response:
     """A Cloud-API accept carrying one message id."""
     return response(200, json={"messages": [{"id": wamid}]})
+
+
+# --- WhatsApp Flow lifecycle helpers (shared across the form suites) ----------------
+
+
+def expected_flow_identity(schema_hash: str, endpoint_uri: str | None = None) -> str:
+    """The published Flow's identity, computed independently of the plugin: sha256 hex over the
+    compact sorted JSON of the schema hash and the endpoint URI. It is the Flow name's suffix on
+    Meta and the flow-id cache key, so it is pinned here as the wire-visible value it is."""
+    canonical = json.dumps(
+        {"schema_hash": schema_hash, "endpoint_uri": endpoint_uri}, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def expected_flow_name(schema_hash: str, endpoint_uri: str | None = None) -> str:
+    """The name the plugin gives (and looks up) a published Flow on the WABA."""
+    return f"tai42-form-{expected_flow_identity(schema_hash, endpoint_uri)}"
+
+
+def listed_flow(flow_id: str, name: str, status: str) -> dict[str, Any]:
+    """One item of Meta's ``GET /{waba_id}/flows`` list, in the documented default shape."""
+    return {"id": flow_id, "name": name, "status": status, "categories": ["OTHER"], "validation_errors": []}
+
+
+def flow_list_page(*flows: dict[str, Any], after: str | None = None, more: bool = False) -> httpx.Response:
+    """One page of Meta's ``GET /{waba_id}/flows`` answer.
+
+    ``after`` is the page's ``paging.cursors.after``; ``more`` adds the ``paging.next`` URL Meta
+    sends when another page follows (absent on the last page).
+    """
+    cursors: dict[str, str] = {"before": "cursor-before"}
+    if after is not None:
+        cursors["after"] = after
+    paging: dict[str, Any] = {"cursors": cursors}
+    if more:
+        paging["next"] = "https://graph.facebook.com/v23.0/next-page-of-flows"
+    return response(200, json={"data": list(flows), "paging": paging})

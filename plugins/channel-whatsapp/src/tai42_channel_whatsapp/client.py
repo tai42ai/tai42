@@ -12,9 +12,9 @@ it to the single ``_post`` send seam (auth, transport, error mapping, wamid
 extraction); each returns the send's ``wamid`` (``messages[0].id``). The
 interactive builders take an optional pre-built media ``header`` and text
 ``footer``; the template builder maps the template's named components
-(``header_media`` / ``body_parameters`` / ``buttons``). The Flow lifecycle builders
-(``create_flow``, ``publish_flow``, ``delete_flow``) share the same auth +
-transport + error policy through ``_send`` but target the graph object
+(``header_media`` / ``body_parameters`` / ``buttons``). The Flow lifecycle wrappers
+(``list_flows``, ``create_flow``, ``publish_flow``, ``delete_flow``) share the same
+auth + transport + error policy through ``_send`` but target the graph object
 endpoints, not ``/messages``.
 """
 
@@ -53,22 +53,30 @@ if TYPE_CHECKING:
 _RATE_LIMIT_CODES = frozenset({4, 80007, 130429, 131048, 131056})
 
 
-async def _send(url: str, payload: dict[str, object] | None = None, *, method: str = "post") -> httpx.Response:
-    """Send one already-built payload to a graph ``url`` and return its 2xx response.
+async def _send(
+    url: str,
+    payload: dict[str, object] | None = None,
+    *,
+    method: str = "post",
+    params: dict[str, str] | None = None,
+) -> httpx.Response:
+    """Send one already-built request to a graph ``url`` and return its 2xx response.
 
-    The single auth + transport + error-classification seam shared by every send.
-    ``method`` is ``"post"`` (JSON ``payload`` body) or ``"delete"`` (no body).
-    Raises ``ChannelDeliveryError`` on a missing access token (checked before any
-    network work), transport failure, or a non-2xx response. Never retries: the
-    raised error carries the transient/hard classification the central caller
-    retries on. Body extraction (wamid, flow id) is the caller's.
+    The single auth + transport + error-classification seam shared by every Graph call.
+    ``method`` is ``"post"`` (JSON ``payload`` body), ``"get"`` (query ``params``, no
+    body) or ``"delete"`` (no body). Raises ``ChannelDeliveryError`` on a missing access
+    token (checked before any network work), transport failure, or a non-2xx response.
+    Never retries: the raised error carries the transient/hard classification the
+    central caller retries on. Body extraction (wamid, flow id, list page) is the caller's.
     """
     settings = whatsapp_settings()
     access_token = require_delivery_secret(settings.access_token, "CHANNEL_WHATSAPP_ACCESS_TOKEN")
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
         async with tai42_app.clients.client_ctx(HttpxClient, timeout=settings.http_timeout_seconds) as client:
-            if method == "delete":
+            if method == "get":
+                response = await client.get(url, params=params, headers=headers)
+            elif method == "delete":
                 response = await client.delete(url, headers=headers)
             else:
                 response = await client.post(url, json=payload, headers=headers)
@@ -468,6 +476,74 @@ async def send_template(phone_number_id: str, to: str, template: ChannelTemplate
     return await _post(phone_number_id, payload)
 
 
+# A loud bound on the flow-list page walk, whose end is the vendor's ``paging.next``.
+_MAX_FLOW_LIST_PAGES = 1000
+
+
+class FlowSummary(NamedTuple):
+    """One Flow as Meta's flow list answers it; ``status`` is Meta's spelling (``PUBLISHED`` …)."""
+
+    flow_id: str
+    name: str
+    status: str
+
+
+def _flow_list_page(body: Any) -> tuple[list[FlowSummary], str | None]:
+    """The Flows on one list page and the ``after`` cursor of the page that follows, if any.
+
+    Meta marks a following page with ``paging.next``; its absence marks the last page.
+    Raises ``ChannelDeliveryError`` on a body that is not a JSON object, a ``data`` that
+    is not a list, an item without a string ``id``/``name``/``status``, or a ``next``
+    without a string ``paging.cursors.after``.
+    """
+    if not isinstance(body, dict):
+        raise ChannelDeliveryError("WhatsApp answered the flow list with a body that is not a JSON object")
+    data = body.get("data")
+    if not isinstance(data, list):
+        raise ChannelDeliveryError("WhatsApp answered the flow list without a data array")
+    flows: list[FlowSummary] = []
+    for item in data:
+        if not isinstance(item, dict) or not all(isinstance(item.get(key), str) for key in ("id", "name", "status")):
+            raise ChannelDeliveryError(
+                "WhatsApp's flow list carries an item without a string id, name and status: "
+                + json.dumps(item, sort_keys=True, separators=(",", ":"))[:300]
+            )
+        flows.append(FlowSummary(flow_id=item["id"], name=item["name"], status=item["status"]))
+    paging = body.get("paging", {})
+    if not isinstance(paging, dict):
+        raise ChannelDeliveryError("WhatsApp answered the flow list with a paging value that is not a JSON object")
+    if "next" not in paging:
+        return flows, None
+    cursors = paging.get("cursors")
+    after = cursors.get("after") if isinstance(cursors, dict) else None
+    if not isinstance(after, str) or not after:
+        raise ChannelDeliveryError("WhatsApp's flow list announces a next page without an after cursor")
+    return flows, after
+
+
+async def list_flows(waba_id: str) -> list[FlowSummary]:
+    """Every Flow under ``waba_id``: GET ``{api}/{waba_id}/flows``, walked page by page.
+
+    Each following page is requested on this same URL with ``after=<paging.cursors.after>``,
+    never by following the vendor-supplied ``paging.next`` URL, so the Bearer token only
+    ever goes to the configured API base. The walk stops on the page without ``next``. A
+    pure Graph wrapper: it returns what Meta listed and decides nothing. Raises
+    ``ChannelDeliveryError`` on the ``_send`` failure modes, an unreadable page, or a walk
+    past ``_MAX_FLOW_LIST_PAGES`` pages.
+    """
+    url = f"{whatsapp_settings().api_base_url}/{waba_id}/flows"
+    flows: list[FlowSummary] = []
+    params: dict[str, str] | None = None
+    for _ in range(_MAX_FLOW_LIST_PAGES):
+        response = await _send(url, method="get", params=params)
+        page, after = _flow_list_page(_parse_json(response))
+        flows.extend(page)
+        if after is None:
+            return flows
+        params = {"after": after}
+    raise ChannelDeliveryError(f"WhatsApp's flow list for WABA {waba_id} runs past {_MAX_FLOW_LIST_PAGES} pages")
+
+
 class FlowCreateResult(NamedTuple):
     """The create response the Flow lifecycle owner acts on.
 
@@ -526,9 +602,10 @@ async def publish_flow(flow_id: str) -> None:
 async def delete_flow(flow_id: str) -> None:
     """Delete a draft Flow; DELETE ``{api}/{flow_id}``.
 
-    Cleans up a draft stranded when a publish or cache write fails after create;
-    Meta deletes only unpublished flows. Raises ``ChannelDeliveryError`` on
-    failure like every builder — the caller decides whether to swallow it.
+    Cleans up a draft stranded when a publish or cache write fails after create, and
+    a draft found on the WABA under a Flow's name before that Flow is created; Meta
+    deletes only unpublished flows. Raises ``ChannelDeliveryError`` on failure like
+    every builder; the caller decides what the failure means for its step.
     """
     url = f"{whatsapp_settings().api_base_url}/{flow_id}"
     await _send(url, method="delete")

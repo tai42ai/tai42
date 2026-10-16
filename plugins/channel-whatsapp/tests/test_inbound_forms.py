@@ -38,8 +38,12 @@ from .conftest import (
     FakeRedis,
     _pending_intact,
     _seed_pending_form,
+    expected_flow_identity,
+    expected_flow_name,
+    flow_list_page,
     form_reply_payload,
     interactive_payload,
+    listed_flow,
     make_delivery,
     message_payload,
     response,
@@ -104,7 +108,7 @@ def test_merged_range_object_splits_onto_the_two_date_keys():
 
 def _flow_cache_key() -> str:
     _, schema_hash = build_form_flow(_FORM_SCHEMA)
-    return f"channel:whatsapp:flow:{_WABA_ID}:{schema_hash}"
+    return f"channel:whatsapp:flow:{_WABA_ID}:{expected_flow_identity(schema_hash)}"
 
 
 def _flow_created(flow_id: str = "flow-remade") -> httpx.Response:
@@ -358,6 +362,7 @@ async def test_form_rejection_resend_reuses_the_submit_and_title(
     )
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
     channels.inbound_retry_reason = "note: must not be blank"
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-resend"))
     fake_httpx.responses.append(response(200, json={"success": True}))
     fake_httpx.responses.append(_flow_accepted())
@@ -517,6 +522,7 @@ async def test_form_rejection_cache_miss_recreates_flow_and_re_sends(
     # re-sends it — never a stale-lookup raise — and re-caches it under the same key.
     await _seed_pending_form()  # no flow-cache entry seeded
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-remade"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_flow_accepted())
@@ -524,6 +530,7 @@ async def test_form_rejection_cache_miss_recreates_flow_and_re_sends(
     result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
 
     assert result.status_code == 200
+    assert [call["url"] for call in fake_httpx.get_calls] == [f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"]
     assert [call["url"] for call in fake_httpx.calls] == [
         f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows",
         "https://graph.facebook.com/v23.0/flow-remade/publish",
@@ -542,6 +549,30 @@ async def test_form_rejection_cache_miss_recreates_flow_and_re_sends(
     assert fake_redis.store[_flow_cache_key()] == "flow-remade"
 
 
+async def test_form_rejection_cache_miss_finds_published_flow_by_name(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The re-send door with the cache lost while the Flow still lives on the WABA: the one
+    # sender finds the published Flow by its name, re-sends it and re-caches it — no create.
+    await _seed_pending_form()  # no flow-cache entry seeded
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(
+        flow_list_page(listed_flow("flow-live", expected_flow_name(schema_hash), "PUBLISHED"))
+    )
+    fake_httpx.responses.append(_flow_accepted())
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert result.status_code == 200
+    assert [call["url"] for call in fake_httpx.get_calls] == [f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"]
+    assert [call["url"] for call in fake_httpx.calls] == [
+        f"https://graph.facebook.com/v23.0/{PHONE_NUMBER_ID}/messages"
+    ]
+    assert fake_httpx.calls[0]["json"]["interactive"]["action"]["parameters"]["flow_id"] == "flow-live"
+    assert fake_redis.store[_flow_cache_key()] == "flow-live"
+
+
 async def test_form_deliver_then_rejection_reuses_the_same_flow_through_the_real_key(
     waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
@@ -558,6 +589,7 @@ async def test_form_deliver_then_rejection_reuses_the_same_flow_through_the_real
     pages = [FormPage(title="Plan", fields=["tier"]), FormPage(title="Say", fields=["note"])]
 
     # Deliver: cache miss → create + publish + send.
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-e2e"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_flow_accepted("wamid.SENT"))
