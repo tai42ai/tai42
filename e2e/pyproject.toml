@@ -32,7 +32,7 @@ dependencies = [
     # The hosted LLM providers' extras: the real ``llm`` leg runs against whichever one
     # REAL_E2E_LLM_PROVIDER selects, in this process and in the stack it boots.
     "tai42-kit[llm,anthropic,google,mistral,xai,jq,uvicorn,redis,postgres,curl,monitoring]>=10.0,<11",
-    "tai42-skeleton[toolbox,files]>=26.3,<27",
+    "tai42-skeleton[toolbox,files]>=26.4,<27",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy,classifier]>=5.0,<6",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
