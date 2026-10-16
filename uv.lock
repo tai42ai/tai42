@@ -5498,7 +5498,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "8.0.6"
+version = "9.0.0"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "cryptography" },
@@ -5617,7 +5617,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "19.0.3"
+version = "20.0.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
