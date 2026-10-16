@@ -53,8 +53,6 @@ from tai42_contract.states.models import (
     ConsumerLister,
     ConsumerRow,
     PathSegment,
-    RecordCheckItem,
-    RecordValidation,
     RegimeName,
     StateBatchWrite,
     StateContext,
@@ -75,7 +73,6 @@ from tai42_contract.states.models import (
     TemplateJqApplyResult,
     TemplateJqResult,
     UnitCommitResult,
-    ValidationReason,
     WriteEntry,
     WriteOrigin,
     WritesPage,
@@ -108,6 +105,11 @@ from tai42_contract.states.rendered import (
     RenderedTemplateJq,
     ResolvedTemplateJq,
     TemplateJqReference,
+)
+from tai42_contract.states.validation import (
+    RecordCheckItem,
+    RecordValidation,
+    ValidationReason,
 )
 
 __all__ = [

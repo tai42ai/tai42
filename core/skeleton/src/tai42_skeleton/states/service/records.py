@@ -26,8 +26,6 @@ from tai42_contract.states.models import (
     MAX_RETENTION_DAYS,
     ApplyResult,
     CompletedOrigin,
-    RecordCheckItem,
-    RecordValidation,
     StateBatchWrite,
     StateRecord,
     StateSubject,
@@ -36,6 +34,7 @@ from tai42_contract.states.models import (
     WritesPage,
 )
 from tai42_contract.states.pending import HeldPendingSave, PruneResult, RecordCheckPage
+from tai42_contract.states.validation import RecordCheckItem, RecordValidation
 
 from tai42_skeleton.states.db import states_settings
 from tai42_skeleton.states.outbox.drain import (

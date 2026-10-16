@@ -20,7 +20,6 @@ if TYPE_CHECKING:
         AttachReconciler,
         CompletedOrigin,
         ConsumerRow,
-        RecordValidation,
         StateBatchWrite,
         StateContext,
         StateDeclaration,
@@ -31,6 +30,7 @@ if TYPE_CHECKING:
         WriteOrigin,
     )
     from tai42_contract.states.pending import RecordCheckPage
+    from tai42_contract.states.validation import RecordValidation
     from tai42_contract.template import TemplatedText
 
     from tai42_skeleton.states.seeds import StateTemplateSeedRegistry

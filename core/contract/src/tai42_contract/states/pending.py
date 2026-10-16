@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from tai42_contract.states.models import RecordCheckItem, StateDeclaration, StateSubject
+from tai42_contract.states.models import StateDeclaration, StateSubject
+from tai42_contract.states.validation import RecordCheckItem
 
 
 class HeldPendingSave(BaseModel):

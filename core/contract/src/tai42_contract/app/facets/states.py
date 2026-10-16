@@ -14,7 +14,6 @@ from tai42_contract.states.models import (
     AttachValidator,
     ConsumerLister,
     ConsumerRow,
-    RecordValidation,
     StateBatchWrite,
     StateContext,
     StateDeclaration,
@@ -39,6 +38,7 @@ from tai42_contract.states.rendered import (
     ResolvedTemplateJq,
     TemplateJqReference,
 )
+from tai42_contract.states.validation import RecordValidation
 
 
 @runtime_checkable

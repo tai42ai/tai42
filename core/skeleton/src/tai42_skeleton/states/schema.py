@@ -17,7 +17,7 @@ import jsonschema
 import referencing.exceptions
 from jsonschema import Draft202012Validator
 from tai42_contract.states.errors import SchemaValidationError, ValueValidationError
-from tai42_contract.states.models import ValidationReason
+from tai42_contract.states.validation import ValidationReason
 
 
 def _canonical(value: Any) -> str:
