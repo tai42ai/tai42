@@ -1136,6 +1136,53 @@ def _search_records(cur, pg, norm, params):
     cur._all = _subject_page(pg, state, (t0, t1, t2, t3), limit, containment=_unwrap(containment))
 
 
+def _record_page(pg, state, after, limit, *, kind=None):
+    """The subject page plus each row's ``data`` document — the ``list_records`` projection."""
+    rows = [r for r in pg.records.values() if r["state"] == state]
+    if kind is not None:
+        rows = [r for r in rows if r["subject_kind"] == kind]
+    rows.sort(key=lambda r: (r["target_kind"], r["target_name"], r["subject_kind"], r["subject_key"]))
+    out = []
+    for r in rows:
+        ident = (r["target_kind"], r["target_name"], r["subject_kind"], r["subject_key"])
+        if ident > tuple(after):
+            out.append(
+                {
+                    "target_kind": r["target_kind"],
+                    "target_name": r["target_name"],
+                    "subject_kind": r["subject_kind"],
+                    "subject_key": r["subject_key"],
+                    "data": r["data"],
+                    "updated_at": _seq(r["updated_at"]),
+                }
+            )
+        if len(out) >= limit:
+            break
+    return out
+
+
+@_on(
+    r"SELECT target_kind, target_name, subject_kind, subject_key, data, extract\(epoch FROM updated_at\)::float8 "
+    r"AS updated_at FROM state_records WHERE state = %s "
+    r"AND \(target_kind, target_name, subject_kind, subject_key\) > \(%s, %s, %s, %s\) "
+    r"ORDER BY target_kind, target_name, subject_kind, subject_key LIMIT %s$"
+)
+def _list_records_all(cur, pg, norm, params):
+    state, t0, t1, t2, t3, limit = params
+    cur._all = _record_page(pg, state, (t0, t1, t2, t3), limit)
+
+
+@_on(
+    r"SELECT target_kind, target_name, subject_kind, subject_key, data, extract\(epoch FROM updated_at\)::float8 "
+    r"AS updated_at FROM state_records WHERE state = %s "
+    r"AND \(target_kind, target_name, subject_kind, subject_key\) > \(%s, %s, %s, %s\) "
+    r"AND subject_kind = %s ORDER BY target_kind, target_name, subject_kind, subject_key LIMIT %s$"
+)
+def _list_records_kind(cur, pg, norm, params):
+    state, t0, t1, t2, t3, kind, limit = params
+    cur._all = _record_page(pg, state, (t0, t1, t2, t3), limit, kind=kind)
+
+
 # -- writes page -------------------------------------------------------------
 def _writes_page(pg, state, tk, tn, kind, key, before, limit):
     rows = [

@@ -23,6 +23,8 @@ if TYPE_CHECKING:
         ConsumerRow,
         HeldPendingSave,
         PruneResult,
+        RecordCheckPage,
+        RecordValidation,
         RenderedAttachment,
         RenderedStateTemplate,
         StateBatchWrite,
@@ -352,6 +354,16 @@ class StatesFacet(_Facet):
     ) -> dict[str, Any]:
         """Page the documents under ``state`` matching ``filters``."""
         return await self._app._states_service.search(state, filters, limit=limit, cursor=cursor)
+
+    async def validate_record(self, state: str, data: dict[str, Any]) -> RecordValidation:
+        """Check ``data`` against ``state``'s effective schema as a write would; the fit and every misfit reason."""
+        return await self._app._states_service.validate_record(state, data)
+
+    async def check_records(
+        self, state: str, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
+    ) -> RecordCheckPage:
+        """Page ``state``'s stored records checked against its effective schema; the misfits and the checked count."""
+        return await self._app._states_service.check_records(state, kind=kind, limit=limit, cursor=cursor)
 
     async def writes(
         self, state: str, subject: StateSubject, *, limit: int | None = None, cursor: str | None = None

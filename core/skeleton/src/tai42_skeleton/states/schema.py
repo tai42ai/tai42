@@ -17,6 +17,7 @@ import jsonschema
 import referencing.exceptions
 from jsonschema import Draft202012Validator
 from tai42_contract.states.errors import SchemaValidationError, ValueValidationError
+from tai42_contract.states.validation import ValidationReason
 
 
 def _canonical(value: Any) -> str:
@@ -123,6 +124,23 @@ def _validate_document(validator: Draft202012Validator, doc: dict[str, Any], *, 
         raise ValueValidationError(f"{prefix}the state schema carries an unresolvable $ref: {exc}") from exc
 
 
+def _document_reasons(validator: Draft202012Validator, doc: dict[str, Any]) -> list[ValidationReason]:
+    """EVERY way ``doc`` fails ``validator``'s effective schema, ordered by JSON path.
+
+    The read-only sibling of :func:`_validate_document`: where the write path raises on the first
+    failure, this collects them all through ``validator.iter_errors`` so a caller reports the whole
+    misfit at once. Each reason carries the offending node's ``json_path`` and the validator's
+    message; an empty list means the document fits. An unresolvable ``$ref`` surfaced during
+    iteration is raised loudly as a :class:`ValueValidationError`, never swallowed.
+    """
+    try:
+        errors = list(validator.iter_errors(doc))
+    except referencing.exceptions.Unresolvable as exc:
+        raise ValueValidationError(f"the state schema carries an unresolvable $ref: {exc}") from exc
+    errors.sort(key=lambda error: (error.json_path, error.message))
+    return [ValidationReason(path=error.json_path, message=error.message) for error in errors]
+
+
 def _is_narrowing(old_schema: dict[str, Any], new_schema: dict[str, Any]) -> bool:
     """Whether ``new_schema`` removes or changes any top-level property of ``old_schema``.
 
@@ -143,6 +161,7 @@ def _is_narrowing(old_schema: dict[str, Any], new_schema: dict[str, Any]) -> boo
 __all__ = [
     "_anchor_exists",
     "_canonical",
+    "_document_reasons",
     "_is_narrowing",
     "_iter_refs",
     "_uses_key",

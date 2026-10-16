@@ -60,6 +60,32 @@ async def test_list_subjects_filtered_by_kind(pg: FakeStatesPg, store: PostgresS
     assert [r["subject_key"] for r in rows] == ["p1"]
 
 
+async def test_list_records_carries_the_data_and_pages_like_list_subjects(
+    pg: FakeStatesPg, store: PostgresStatesStore
+) -> None:
+    pg.seed_declaration("alerts")
+    pg.seed_record("alerts", "agent", "a", "thread", "t1", {"n": 1})
+    pg.seed_record("alerts", "agent", "a", "thread", "t2", {"n": 2})
+    listed: list[tuple[str, dict]] = []
+    cursor: str | None = None
+    while True:
+        rows = await store.list_records("alerts", kind=None, limit=1, cursor=cursor)
+        if not rows:
+            break
+        listed.extend((r["subject_key"], r["data"]) for r in rows)
+        last = rows[-1]
+        cursor = make_cursor(last["target_kind"], last["target_name"], last["subject_kind"], last["subject_key"])
+    assert listed == [("t1", {"n": 1}), ("t2", {"n": 2})]
+
+
+async def test_list_records_filtered_by_kind(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+    pg.seed_declaration("alerts", subject_kinds=["thread", "person"])
+    pg.seed_record("alerts", "agent", "a", "thread", "t1", {"n": 1})
+    pg.seed_record("alerts", "agent", "a", "person", "p1", {"n": 2})
+    rows = await store.list_records("alerts", kind="person", limit=10, cursor=None)
+    assert [(r["subject_key"], r["data"]) for r in rows] == [("p1", {"n": 2})]
+
+
 async def test_search_records_containment(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     pg.seed_declaration("alerts")
     pg.seed_record("alerts", "agent", "a", "thread", "t1", {"n": 1, "tag": "x"})

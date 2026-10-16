@@ -92,7 +92,12 @@ from tai42_contract.states.ops import (
     validate_path,
     value_at_path,
 )
-from tai42_contract.states.pending import HeldPendingSave, PruneResult, StateDeclarationSaved
+from tai42_contract.states.pending import (
+    HeldPendingSave,
+    PruneResult,
+    RecordCheckPage,
+    StateDeclarationSaved,
+)
 from tai42_contract.states.rendered import (
     RenderedAttachment,
     RenderedStateTemplate,
@@ -100,6 +105,11 @@ from tai42_contract.states.rendered import (
     RenderedTemplateJq,
     ResolvedTemplateJq,
     TemplateJqReference,
+)
+from tai42_contract.states.validation import (
+    RecordCheckItem,
+    RecordValidation,
+    ValidationReason,
 )
 
 __all__ = [
@@ -133,6 +143,9 @@ __all__ = [
     "NonAdditiveRedeclareError",
     "PathSegment",
     "PruneResult",
+    "RecordCheckItem",
+    "RecordCheckPage",
+    "RecordValidation",
     "RegimeName",
     "RegimeViolationError",
     "RenderedAttachment",
@@ -177,6 +190,7 @@ __all__ = [
     "TemplateJqResult",
     "TemplateValidationError",
     "UnitCommitResult",
+    "ValidationReason",
     "ValueValidationError",
     "WriteEntry",
     "WriteOrigin",

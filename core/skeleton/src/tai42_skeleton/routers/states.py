@@ -23,7 +23,7 @@ from starlette.requests import Request
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
-from tai42_skeleton.operations.adapter import read_json_object
+from tai42_skeleton.operations.adapter import JSON_PARSE_ERRORS, read_json_object
 from tai42_skeleton.operations.states import (
     apply_state_record as _apply_state_record_op,
 )
@@ -32,6 +32,9 @@ from tai42_skeleton.operations.states import (
 )
 from tai42_skeleton.operations.states import (
     attach_state_template as _attach_state_template_op,
+)
+from tai42_skeleton.operations.states import (
+    check_state_records as _check_state_records_op,
 )
 from tai42_skeleton.operations.states import (
     delete_state as _delete_state_op,
@@ -104,6 +107,9 @@ from tai42_skeleton.operations.states import (
 )
 from tai42_skeleton.operations.states import (
     update_state_attachment as _update_state_attachment_op,
+)
+from tai42_skeleton.operations.states import (
+    validate_state_record as _validate_state_record_op,
 )
 from tai42_skeleton.operations.states_outbox import (
     discard_state_pending_save as _discard_state_pending_save_op,
@@ -192,6 +198,19 @@ async def _extract_search(request: Request) -> dict[str, Any]:
     if cursor is not None and not isinstance(cursor, str):
         raise BadRequestError("'cursor' must be a string")
     return {"filters": filters, "limit": limit, "cursor": cursor}
+
+
+async def _extract_validate_body(request: Request) -> dict[str, Any]:
+    """The whole request body AS the candidate document — any JSON value, object or not.
+
+    A non-object document is NOT refused here: the operation answers a non-object body with a
+    422 (the schema check's own verdict), so only an unparseable body is a 400 at the edge.
+    """
+    try:
+        body = await request.json()
+    except JSON_PARSE_ERRORS as exc:
+        raise BadRequestError("invalid JSON body") from exc
+    return {"data": body}
 
 
 async def _extract_record_body(request: Request) -> dict[str, Any]:
@@ -399,6 +418,27 @@ search_state_records = register_operation_route(
     # A POST search reads records but its authz class follows its method (the platform
     # ties POST to the write class, as the preset dry-run door does) — never a POST=read.
     action="write",
+)
+# The record-validator doors sit beside ``search`` under ``/records`` — a literal segment
+# each, registered BEFORE the ``_RECORD_PATH`` doors so the literal wins over the
+# ``{target_kind}`` parameter. ``validate`` is a POST whose body IS the candidate document
+# (its authz follows its method, the write class, as the ``search`` POST does); ``check`` is
+# a GET reading the stored records against the schema.
+validate_state_record = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_validate_state_record_op),
+    path="/api/states/{name}/records/validate",
+    method="POST",
+    context_extractor=_extract_validate_body,
+    action="write",
+)
+check_state_records = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_check_state_records_op),
+    path="/api/states/{name}/records/check",
+    method="GET",
+    context_extractor=_extract_subjects_query,
+    action="read",
 )
 read_state_record = register_operation_route(
     tai42_app, operation_metadata_of(_read_state_record_op), path=_RECORD_PATH, method="GET", action="read"
