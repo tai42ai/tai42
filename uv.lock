@@ -2258,16 +2258,16 @@ wheels = [
 
 [[package]]
 name = "langchain-huggingface"
-version = "1.2.2"
+version = "1.2.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "langchain-core" },
     { name = "tokenizers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2c/e8/4068ad02179253f55958e59e442e5b6e8cb95ffc5e805cc4db0b1ef61d4e/langchain_huggingface-1.2.2.tar.gz", hash = "sha256:1dd91ec415190d2704e93ec149618e3145075863ba37e74afc9080d685dc2743", size = 255513, upload-time = "2026-04-16T19:57:41.046Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fd/35/17f59f4a1202de947797b76a1b898a0e040dd3ee7060255d0efbeebeb0b1/langchain_huggingface-1.2.3.tar.gz", hash = "sha256:9848339ce197d48dd95668c2aac32a4523ca879840a31ebcef59a5b616315826", size = 282933, upload-time = "2026-10-07T20:09:49.481Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0a/ed/648b87f9b67153ade616f360bf4145b76ed428b4adb89525938f611e9828/langchain_huggingface-1.2.2-py3-none-any.whl", hash = "sha256:f94944b0c0d5afc687568d426c87ed5236907464c41e72108ed76eee1a690f6d", size = 31926, upload-time = "2026-04-16T19:57:40.079Z" },
+    { url = "https://files.pythonhosted.org/packages/66/f8/222ada54c99a512bd497f3526f6c14a55f6c0bc39ba9a05a4170ebbfe561/langchain_huggingface-1.2.3-py3-none-any.whl", hash = "sha256:d687cd9554a20edb6af86aceae2465b4d0f73557acfb9b9c6778cb0e6d5929a7", size = 34219, upload-time = "2026-10-07T20:09:48.134Z" },
 ]
 
 [[package]]
@@ -5971,7 +5971,7 @@ requires-dist = [
     { name = "langchain-anthropic", marker = "extra == 'anthropic'", specifier = ">=1.7.5" },
     { name = "langchain-core", marker = "extra == 'llm'", specifier = ">=1.2,<2" },
     { name = "langchain-google-genai", marker = "extra == 'google'", specifier = ">=4.4.0" },
-    { name = "langchain-huggingface", marker = "extra == 'huggingface'", specifier = ">=1.2" },
+    { name = "langchain-huggingface", marker = "extra == 'huggingface'", specifier = ">=1.2.3" },
     { name = "langchain-mistralai", marker = "extra == 'mistral'", specifier = ">=1.1" },
     { name = "langchain-ollama", marker = "extra == 'ollama'", specifier = ">=1.0" },
     { name = "langchain-openai", marker = "extra == 'llm'", specifier = ">=1.6.7" },
