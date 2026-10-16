@@ -3,10 +3,15 @@ any key outside them, and the pure compose/regime transforms."""
 
 from __future__ import annotations
 
+import dataclasses
+import re
+
 import pytest
-from tai42_contract.states.errors import AttachConflictError, TemplateValidationError
+from jsonschema import Draft202012Validator
+from tai42_contract.states.errors import AttachConflictError, SchemaValidationError, TemplateValidationError
 from tai42_contract.template import TemplatedText
 
+from tai42_skeleton.states.schema import _validate_schema
 from tai42_skeleton.states.templates import (
     StateTemplate,
     compose_effective_schema,
@@ -179,6 +184,308 @@ def test_compose_effective_schema_overlap_refused() -> None:
     base = {"type": "object", "properties": {}}
     with pytest.raises(AttachConflictError, match="overlaps"):
         compose_effective_schema(base, [(template, ["a"], {}), (template, ["a", "b"], {})])
+
+
+_BASE = {"type": "object", "properties": {"n": {"type": "integer"}}}
+_RECURSIVE_FRAGMENT = {
+    "type": "object",
+    "properties": {"tag": {"$ref": "#/$defs/t"}, "child": {"$ref": "#"}},
+    "$defs": {"t": {"type": "string"}},
+}
+
+
+def _paths(effective: dict, doc: dict) -> list[str]:
+    return sorted(error.json_path for error in Draft202012Validator(effective).iter_errors(doc))
+
+
+def test_compose_rebases_fragment_pointer_refs_to_the_attach_path() -> None:
+    template = validate_template(_doc(name="m", schema=_RECURSIVE_FRAGMENT))
+    effective = compose_effective_schema(_BASE, [(template, ["box"], {})])
+    box = effective["properties"]["box"]
+    assert box["properties"]["tag"] == {"$ref": "#/properties/box/$defs/t"}
+    assert box["properties"]["child"] == {"$ref": "#/properties/box"}
+    _validate_schema(effective)
+    assert _paths(effective, {"box": {"tag": 1}}) == ["$.box.tag"]
+    assert _paths(effective, {"box": {"child": {"tag": 5}}}) == ["$.box.child.tag"]
+    # ``#`` is the fragment's own root, never the state's: a base field name inside the child is free.
+    assert _paths(effective, {"box": {"child": {"n": "s"}}}) == []
+
+
+def test_compose_rebases_refs_at_a_nested_path() -> None:
+    template = validate_template(_doc(name="m", schema=_RECURSIVE_FRAGMENT))
+    effective = compose_effective_schema(_BASE, [(template, ["x", "y"], {})])
+    tag = effective["properties"]["x"]["properties"]["y"]["properties"]["tag"]
+    assert tag == {"$ref": "#/properties/x/properties/y/$defs/t"}
+    _validate_schema(effective)
+    assert _paths(effective, {"x": {"y": {"tag": 1}}}) == ["$.x.y.tag"]
+
+
+def test_compose_rebases_refs_escaping_the_path_segment() -> None:
+    template = validate_template(_doc(name="m", schema=_RECURSIVE_FRAGMENT))
+    effective = compose_effective_schema(_BASE, [(template, ["a/b c"], {})])
+    assert effective["properties"]["a/b c"]["properties"]["tag"] == {"$ref": "#/properties/a~1b%20c/$defs/t"}
+    _validate_schema(effective)
+    assert _paths(effective, {"a/b c": {"tag": 1}}) == ["$['a/b c'].tag"]
+
+
+_ANCHOR_FRAGMENT = {
+    "type": "object",
+    "properties": {"tag": {"$ref": "#t"}},
+    "$defs": {"t": {"$anchor": "t", "type": "string"}},
+}
+
+
+def test_compose_leaves_anchor_refs_untouched_and_resolvable() -> None:
+    template = validate_template(_doc(name="m", schema=_ANCHOR_FRAGMENT))
+    effective = compose_effective_schema(_BASE, [(template, ["box"], {})])
+    assert effective["properties"]["box"]["properties"]["tag"] == {"$ref": "#t"}
+    _validate_schema(effective)
+    assert _paths(effective, {"box": {"tag": 1}}) == ["$.box.tag"]
+
+
+def test_compose_refuses_a_duplicate_anchor_across_attachments() -> None:
+    first = validate_template(_doc(name="a", schema=_ANCHOR_FRAGMENT))
+    second = validate_template(_doc(name="b", schema=_ANCHOR_FRAGMENT))
+    with pytest.raises(SchemaValidationError, match="declared more than once"):
+        compose_effective_schema(_BASE, [(first, ["a"], {}), (second, ["b"], {})])
+
+
+def test_compose_refuses_a_fragment_id_placed_below_the_root() -> None:
+    template = validate_template(
+        _doc(name="m", schema={"$id": "urn:example:box", "type": "object", "properties": {"tag": {"type": "string"}}})
+    )
+    with pytest.raises(SchemaValidationError, match="\\$id below the root"):
+        compose_effective_schema(_BASE, [(template, ["box"], {})])
+
+
+def test_compose_leaves_ref_shaped_data_untouched() -> None:
+    fragment = {"type": "object", "properties": {"link": {"const": {"$ref": "#"}}}}
+    template = validate_template(_doc(name="m", schema=fragment))
+    effective = compose_effective_schema(_BASE, [(template, ["box"], {})])
+    assert effective["properties"]["box"]["properties"]["link"] == {"const": {"$ref": "#"}}
+    assert _paths(effective, {"box": {"link": {"$ref": "#"}}}) == []
+
+
+def test_compose_refuses_an_anchor_name_shared_with_a_dynamic_anchor_across_attachments() -> None:
+    first = validate_template(_doc(name="a", schema=_ANCHOR_FRAGMENT))
+    second = validate_template(
+        _doc(
+            name="b",
+            schema={
+                "type": "object",
+                "properties": {"tag": {"$ref": "#t"}},
+                "$defs": {"t": {"$dynamicAnchor": "t", "type": "integer"}},
+            },
+        )
+    )
+    for order in ([(first, ["a"], {}), (second, ["b"], {})], [(second, ["b"], {}), (first, ["a"], {})]):
+        with pytest.raises(SchemaValidationError, match="declared more than once"):
+            compose_effective_schema(_BASE, order)
+
+
+@pytest.mark.parametrize("ref", ["#", "#/properties", "#/$defs"])
+def test_compose_root_attach_refuses_a_ref_that_cannot_keep_its_meaning(ref: str) -> None:
+    template = validate_template(
+        _doc(
+            name="m",
+            schema={
+                "type": "object",
+                "properties": {"tag": {"type": "string"}, "child": {"$ref": ref}},
+                "required": ["tag"],
+                "$defs": {"t": {"type": "string"}},
+            },
+        )
+    )
+    base = {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}
+    with pytest.raises(AttachConflictError, match=re.escape(f"carries $ref '{ref}'") + ".*attach it at a path"):
+        compose_effective_schema(base, [(template, [], {})])
+
+
+def test_compose_root_attach_keeps_property_and_defs_refs() -> None:
+    template = validate_template(
+        _doc(
+            name="m",
+            schema={
+                "type": "object",
+                "properties": {"tag": {"$ref": "#/$defs/t"}, "copy": {"$ref": "#/properties/tag"}},
+                "$defs": {"t": {"type": "string"}},
+            },
+        )
+    )
+    effective = compose_effective_schema(_BASE, [(template, [], {})])
+    assert _paths(effective, {"tag": 1, "copy": 2}) == ["$.copy", "$.tag"]
+
+
+_POINTER_TARGET_FRAGMENT = {
+    "type": "object",
+    "properties": {"a": {"$ref": "#/x/t"}},
+    "x": {"t": {"properties": {"c": {"$ref": "#"}}}},
+}
+
+
+def test_compose_rebases_refs_inside_a_pointer_target() -> None:
+    template = validate_template(_doc(name="m", schema=_POINTER_TARGET_FRAGMENT))
+    effective = compose_effective_schema(_BASE, [(template, ["box"], {})])
+    box = effective["properties"]["box"]
+    assert box["properties"]["a"] == {"$ref": "#/properties/box/x/t"}
+    assert box["x"]["t"]["properties"]["c"] == {"$ref": "#/properties/box"}
+    # ``c`` is the fragment's root again, never the state's: a base field name inside it is free.
+    assert _paths(effective, {"box": {"a": {"c": {"n": "s"}}}}) == []
+
+
+def test_compose_root_attach_refuses_a_root_ref_inside_a_pointer_target() -> None:
+    fragment = {
+        "type": "object",
+        "properties": {"a": {"$ref": "#/properties/a/x/t", "x": {"t": {"properties": {"c": {"$ref": "#"}}}}}},
+    }
+    template = validate_template(_doc(name="m", schema=fragment))
+    with pytest.raises(AttachConflictError, match=re.escape("carries $ref '#'")):
+        compose_effective_schema(_BASE, [(template, [], {})])
+
+
+def test_compose_refuses_a_fragment_ref_cycle() -> None:
+    fragment = {"type": "object", "properties": {"v": {"$ref": "#/$defs/x"}}, "$defs": {"x": {"$ref": "#/$defs/x"}}}
+    template = validate_template(_doc(name="m", schema={"type": "object", "properties": {"v": {"type": "string"}}}))
+    # Built past the upload check, so the composer itself is what refuses the cycle.
+    cyclic = dataclasses.replace(template, schema=fragment)
+    with pytest.raises(SchemaValidationError, match="cycle"):
+        compose_effective_schema(_BASE, [(cyclic, ["box"], {})])
+
+
+def test_compose_checks_a_large_fragment_a_bounded_number_of_times(monkeypatch: pytest.MonkeyPatch) -> None:
+    big = {"type": "object", "properties": {f"f{i}": {"type": "string"} for i in range(200)}}
+    fragment = {
+        "type": "object",
+        "properties": {f"p{i}": {"$ref": "#/$defs/big"} for i in range(300)},
+        "$defs": {"big": big},
+    }
+    template = validate_template(_doc(name="m", schema=fragment))
+    calls = [0]
+    original = Draft202012Validator.check_schema.__func__  # type: ignore[attr-defined]
+
+    def counting(cls, schema, format_checker=None):
+        calls[0] += 1
+        return original(cls, schema)
+
+    monkeypatch.setattr(Draft202012Validator, "check_schema", classmethod(counting))
+    compose_effective_schema(_BASE, [(template, ["box"], {})])
+    assert calls[0] == 2  # the substituted fragment once, the composed schema once
+
+
+def test_compose_root_attach_refuses_a_root_type_its_parameters_make_non_object() -> None:
+    template = validate_template(
+        _doc(
+            name="m",
+            schema={"type": {"$parameter": "t"}, "properties": {"a": {"type": "string"}}, "required": ["a"]},
+            parameters={"t": {"schema": {"type": "string"}, "default": "object"}},
+        )
+    )
+    with pytest.raises(AttachConflictError, match="template 'm' at the root has root type 'array'"):
+        compose_effective_schema(_BASE, [(template, [], {"t": "array"})])
+
+
+def test_validate_template_refuses_a_fragment_in_another_schema_dialect() -> None:
+    with pytest.raises(TemplateValidationError, match="draft 2020-12 document"):
+        validate_template(
+            _doc(
+                name="m",
+                schema={
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                },
+            )
+        )
+
+
+@pytest.mark.parametrize("keyword", ["enum", "const"])
+def test_compose_refuses_rebasing_a_ref_inside_a_const_or_enum_value(keyword: str) -> None:
+    value = {"$ref": "#/$defs/s"}
+    target = "#/properties/k/enum/0" if keyword == "enum" else "#/properties/k/const"
+    fragment = {
+        "type": "object",
+        "properties": {"t": {"$ref": target}, "k": {keyword: [value] if keyword == "enum" else value}},
+        "$defs": {"s": {"type": "string"}},
+    }
+    template = validate_template(_doc(name="m", schema=fragment))
+    with pytest.raises(SchemaValidationError, match=re.escape("template 'm'") + ".*" + re.escape("'#/$defs/s'")):
+        compose_effective_schema(_BASE, [(template, ["box"], {})])
+
+
+def test_compose_root_attach_merges_defs_and_drops_annotations() -> None:
+    template = validate_template(
+        _doc(
+            name="m",
+            schema={
+                "type": "object",
+                "description": "a root fragment",
+                "properties": {"tag": {"$ref": "#/$defs/t"}},
+                "required": ["tag"],
+                "$defs": {"t": {"type": "string"}},
+            },
+        )
+    )
+    effective = compose_effective_schema(_BASE, [(template, [], {})])
+    assert effective == {
+        "type": "object",
+        "properties": {"n": {"type": "integer"}, "tag": {"$ref": "#/$defs/t"}},
+        "required": ["tag"],
+        "$defs": {"t": {"type": "string"}},
+    }
+    assert _paths(effective, {"tag": 1}) == ["$.tag"]
+
+
+def test_compose_root_attach_refuses_a_colliding_defs_key() -> None:
+    base = {**_BASE, "$defs": {"t": {"type": "integer"}}}
+    template = validate_template(
+        _doc(
+            name="m",
+            schema={"type": "object", "properties": {"tag": {"$ref": "#/$defs/t"}}, "$defs": {"t": {"type": "string"}}},
+        )
+    )
+    with pytest.raises(AttachConflictError, match="'m' at the root collides with existing \\$defs key 't'"):
+        compose_effective_schema(base, [(template, [], {})])
+
+
+@pytest.mark.parametrize(("keyword", "value"), [("allOf", [{"required": ["tag"]}]), ("additionalProperties", False)])
+def test_compose_root_attach_refuses_a_root_keyword_it_cannot_merge(keyword: str, value: object) -> None:
+    template = validate_template(
+        _doc(name="m", schema={"type": "object", "properties": {"tag": {"type": "string"}}, keyword: value})
+    )
+    with pytest.raises(AttachConflictError, match=f"carries '{keyword}' at its root"):
+        compose_effective_schema(_BASE, [(template, [], {})])
+
+
+_D2020 = "https://json-schema.org/draft/2020-12/schema"
+
+
+def _dialect_template() -> StateTemplate:
+    return validate_template(
+        _doc(
+            name="m",
+            schema={
+                "$schema": {"$parameter": "d"},
+                "type": "object",
+                "properties": {"a": {"type": "object", "dependencies": {"x": ["y"]}}},
+            },
+            parameters={"d": {"schema": {"type": "string"}, "default": _D2020}},
+        )
+    )
+
+
+def test_compose_root_attach_refuses_a_root_schema_dialect_its_parameters_set() -> None:
+    draft_07 = "http://json-schema.org/draft-07/schema#"
+    with pytest.raises(
+        SchemaValidationError, match=re.escape("template 'm'") + ".*" + re.escape(f"$schema {draft_07!r}")
+    ):
+        compose_effective_schema(_BASE, [(_dialect_template(), [], {"d": draft_07})])
+
+
+@pytest.mark.parametrize("dialect", [_D2020, _D2020 + "#"])
+def test_compose_root_attach_drops_a_draft_2020_12_root_schema(dialect: str) -> None:
+    effective = compose_effective_schema(_BASE, [(_dialect_template(), [], {"d": dialect})])
+    assert "$schema" not in effective
+    assert _paths(effective, {"a": {"x": 1}}) == []  # ``dependencies`` is not a 2020-12 keyword
 
 
 def test_compose_injects_trace_under_tracing_mount() -> None:

@@ -35696,6 +35696,16 @@
             },
             "description": "Conflict with the current resource state."
           },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Request failed validation."
+          },
           "501": {
             "content": {
               "application/json": {

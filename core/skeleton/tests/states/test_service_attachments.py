@@ -4,19 +4,23 @@ driven against the in-memory ``FakeStatesStore`` with a fake resource manager bo
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.states.errors import (
     AttachConflictError,
+    SchemaValidationError,
     StateNotFoundError,
     TemplateValidationError,
 )
-from tai42_contract.states.models import AttachBody
+from tai42_contract.states.models import AttachBody, StateDeclaration
 
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
 from tai42_skeleton.states.templates import validate_template
 
+from . import fake_service_store
 from .fake_service_store import _STATE, FakeStatesStore, _FakeApp, _template_doc
 
 
@@ -241,3 +245,116 @@ def test_validate_attach_path_refusals(svc: StatesService) -> None:
         svc._validate_attach_path([""])
     with pytest.raises(AttachConflictError, match="non-empty object key"):
         svc._validate_attach_path([123])
+
+
+# A fragment carrying ``$id`` at its root: valid alone, refused once placed below a state's root.
+_ID_FRAGMENT = {"$id": "urn:example:box", "type": "object", "properties": {"tag": {"type": "string"}}}
+_PLAIN_FRAGMENT = {"type": "object", "properties": {"tag": {"type": "string"}}}
+
+
+async def _attach_by_id_fragment(svc: StatesService, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Declare ``alerts`` and attach the by-id template ``byid`` at ``box`` over a plain stored fragment."""
+    monkeypatch.setitem(fake_service_store._CHECK_RESOURCES, "box-fragment", json.dumps(_PLAIN_FRAGMENT))
+    await svc.put_declaration(_STATE)
+    await svc.put_template(_template_doc("byid", schema={"id": "box-fragment"}), replace=False)
+    await svc.attach("alerts", "byid", AttachBody(path=["box"]))
+
+
+def _store_an_id_rooted_fragment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Change ``byid``'s stored fragment to one whose root carries ``$id``; the next composition nests it."""
+    monkeypatch.setitem(fake_service_store._CHECK_RESOURCES, "box-fragment", json.dumps(_ID_FRAGMENT))
+
+
+async def test_attach_refuses_a_composition_the_declare_rules_refuse(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    before = await svc.effective_schema_for("alerts")
+    await svc.put_template(_template_doc("m", schema=_ID_FRAGMENT), replace=False)
+    with pytest.raises(SchemaValidationError, match="\\$id below the root"):
+        await svc.attach("alerts", "m", AttachBody(path=["box"]))
+    assert await svc.list_attachments("alerts") == []
+    assert await svc.effective_schema_for("alerts") == before
+
+
+async def test_update_attachment_declarations_refuses_a_composition_the_declare_rules_refuse(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _attach_by_id_fragment(svc, monkeypatch)
+    _store_an_id_rooted_fragment(monkeypatch)
+    before = await svc.effective_schema_for("alerts")
+    with pytest.raises(SchemaValidationError, match="\\$id below the root"):
+        await svc.update_attachment_declarations("alerts", "byid", {})
+    assert await svc.effective_schema_for("alerts") == before
+
+
+async def test_detach_refuses_a_composition_the_declare_rules_refuse(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _attach_by_id_fragment(svc, monkeypatch)
+    await svc.put_template(_template_doc("other"), replace=False)
+    await svc.attach("alerts", "other", AttachBody(path=["sub"]))
+    _store_an_id_rooted_fragment(monkeypatch)
+    before = await svc.effective_schema_for("alerts")
+    with pytest.raises(SchemaValidationError, match="\\$id below the root"):
+        await svc.detach("alerts", "other")
+    assert sorted(a["template"] for a in await svc.list_attachments("alerts")) == ["byid", "other"]
+    assert await svc.effective_schema_for("alerts") == before
+
+
+async def test_redeclare_refuses_a_composition_the_declare_rules_refuse(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _attach_by_id_fragment(svc, monkeypatch)
+    _store_an_id_rooted_fragment(monkeypatch)
+    before = await svc.effective_schema_for("alerts")
+    widened = StateDeclaration(
+        name="alerts",
+        schema={"type": "object", "properties": {"n": {"type": "integer"}, "m": {"type": "string"}}},
+        subject_kinds=["thread"],
+        default_subject_kind="thread",
+    )
+    with pytest.raises(SchemaValidationError, match="\\$id below the root"):
+        await svc.put_declaration(widened)
+    assert await svc.effective_schema_for("alerts") == before
+
+
+async def test_put_declaration_refuses_a_dangling_ref_inside_a_pointer_target(svc: StatesService) -> None:
+    schema = {"type": "object", "properties": {"a": {"$ref": "#/x/t"}}, "x": {"t": {"$ref": "#/nowhere"}}}
+    with pytest.raises(SchemaValidationError, match="does not resolve"):
+        await svc.put_declaration(
+            StateDeclaration(name="alerts", schema=schema, subject_kinds=["thread"], default_subject_kind="thread")
+        )
+
+
+@pytest.mark.parametrize("path", [["box"], []])
+@pytest.mark.parametrize(
+    ("fragment", "default", "value", "match"),
+    [
+        (
+            {"type": "object", "properties": {"t": {"type": "array", "prefixItems": {"$parameter": "p"}}}},
+            [{"type": "string"}],
+            3,
+            "3 is not of type 'array'",
+        ),
+        (
+            {"type": "object", "properties": {"t": {"type": "object", "properties": {"$parameter": "p"}}}},
+            {},
+            [1],
+            "is not of type 'object'",
+        ),
+        (
+            {"type": "object", "properties": {"t": {"type": "string"}}, "$defs": {"$parameter": "p"}},
+            {},
+            "x",
+            "is not of type 'object'",
+        ),
+    ],
+)
+async def test_attach_refuses_a_fragment_its_parameters_make_malformed(
+    svc: StatesService, path: list[str], fragment: dict, default: object, value: object, match: str
+) -> None:
+    await svc.put_declaration(_STATE)
+    template = _template_doc("m", schema=fragment, parameters={"p": {"schema": {}, "default": default}})
+    await svc.put_template(template, replace=False)
+    with pytest.raises(SchemaValidationError, match=f"template 'm'.*{match}"):
+        await svc.attach("alerts", "m", AttachBody(path=path, parameters={"p": value}))
+    assert await svc.list_attachments("alerts") == []

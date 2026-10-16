@@ -12,12 +12,13 @@ from tai42_contract.states.errors import (
     SubjectFoldError,
     ValueValidationError,
 )
-from tai42_contract.states.models import StateBatchWrite, StateDeclaration, WriteOrigin
+from tai42_contract.states.models import AttachBody, StateBatchWrite, StateDeclaration, WriteOrigin
 
+from tai42_skeleton.states import RecordValidator
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
 
-from .fake_service_store import _ORIGIN, _STATE, FakeStatesStore, _FakeApp, _subject
+from .fake_service_store import _ORIGIN, _STATE, FakeStatesStore, _FakeApp, _subject, _template_doc
 
 
 @pytest.fixture
@@ -161,6 +162,92 @@ async def test_validate_record_refuses_a_non_object(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     with pytest.raises(ValueValidationError, match="must be a JSON object"):
         await svc.validate_record("alerts", ["not", "an", "object"])  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("doc", "fits"),
+    [
+        ({"n": 5, "box": {"y": 1, "_trace": {"at": "2026-01-01T00:00:00Z"}}}, True),
+        ({"n": "not-an-integer", "box": {"y": "not-an-integer"}}, False),
+    ],
+)
+async def test_validate_record_matches_the_store_free_validator(svc: StatesService, doc: dict, fits: bool) -> None:
+    # The effective schema carries a tracing attachment at ``box``, so the parity covers the
+    # composed fragment and its stamped ``_trace`` member, not the base schema alone.
+    await svc.put_declaration(_STATE)
+    await svc.put_template(_template_doc("box-mod", trace={"enabled": True}), replace=False)
+    await svc.attach("alerts", "box-mod", AttachBody(path=["box"]))
+    offline = RecordValidator(await svc.effective_schema_for("alerts"))
+    live = await svc.validate_record("alerts", doc)
+    assert live.fits is fits
+    assert live == offline.validate(doc)
+
+
+def _defs_fragment(kind: str) -> dict:
+    """A fragment whose ``tag`` field refers into the fragment's own ``$defs``."""
+    return {"type": "object", "properties": {"tag": {"$ref": "#/$defs/t"}}, "$defs": {"t": {"type": kind}}}
+
+
+@pytest.mark.parametrize(("doc", "fits"), [({"n": 5, "box": {"tag": "x"}}, True), ({"n": 5, "box": {"tag": 1}}, False)])
+async def test_validate_record_matches_the_store_free_validator_after_a_template_replace(
+    svc: StatesService, doc: dict, fits: bool
+) -> None:
+    await svc.put_declaration(_STATE)
+    await svc.put_template(_template_doc("box-mod"), replace=False)
+    await svc.attach("alerts", "box-mod", AttachBody(path=["box"]))
+    await svc.put_template(_template_doc("box-mod", schema=_defs_fragment("string")), replace=True)
+    offline = RecordValidator(await svc.effective_schema_for("alerts"))
+    live = await svc.validate_record("alerts", doc)
+    assert live.fits is fits
+    assert live == offline.validate(doc)
+    if not fits:
+        assert [r.path for r in live.reasons] == ["$.box.tag"]
+
+
+async def test_every_door_stores_an_effective_schema_the_store_free_validator_accepts(svc: StatesService) -> None:
+    store: FakeStatesStore = svc._store  # type: ignore[assignment]
+
+    def constructs() -> None:
+        RecordValidator(store.declarations["alerts"]["effective_schema"])
+
+    declared = {"schema": {"type": "object", "properties": {"k": {"type": "integer"}}}}
+    await svc.put_declaration(_STATE)
+    constructs()
+    await svc.put_template(
+        _template_doc("box-mod", schema=_defs_fragment("string"), declarations=declared), replace=False
+    )
+    await svc.attach("alerts", "box-mod", AttachBody(path=["box"], declarations={"k": 1}))
+    constructs()
+    await svc.update_attachment_declarations("alerts", "box-mod", {"k": 2})
+    constructs()
+    await svc.put_template(
+        _template_doc("box-mod", schema=_defs_fragment("integer"), declarations=declared), replace=True
+    )
+    constructs()
+    await svc.put_template(_template_doc("sub-mod", schema=_defs_fragment("string")), replace=False)
+    await svc.attach("alerts", "sub-mod", AttachBody(path=["sub"]))
+    constructs()
+    await svc.detach("alerts", "sub-mod")
+    constructs()
+    await svc.put_declaration(
+        StateDeclaration(
+            name="alerts",
+            schema={"type": "object", "properties": {"n": {"type": "integer"}, "m": {"type": "string"}}},
+            subject_kinds=["thread"],
+            default_subject_kind="thread",
+        )
+    )
+    constructs()
+
+
+async def test_validate_record_non_object_refusal_matches_the_store_free_validator(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    offline = RecordValidator(await svc.effective_schema_for("alerts"))
+    with pytest.raises(ValueValidationError) as live:
+        await svc.validate_record("alerts", ["not", "an", "object"])  # type: ignore[arg-type]
+    with pytest.raises(ValueValidationError) as store_free:
+        offline.validate(["not", "an", "object"])
+    assert str(live.value) == str(store_free.value)
 
 
 async def test_validate_record_undeclared_raises(svc: StatesService) -> None:

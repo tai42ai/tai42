@@ -7,7 +7,9 @@ governed by a ``composing`` regime), then drive the record doors — a whole-pat
 ``set`` over the composing path is refused (422), the keyed ``set_by_key`` op is
 accepted, the write ledger records the ``api`` door with the touched paths, a
 content search finds the subject, a fold aliases one subject onto another, and an
-additive migration re-validates every record. A second leg pins the OFF contract:
+additive migration re-validates every record. A validate leg pins that the record
+validate door answers exactly what the skeleton's store-free ``RecordValidator`` answers
+over the served ``effective_schema``. A second leg pins the OFF contract:
 with no states database bound (``off_stack``), every door — a read and a write
 alike — refuses ``501`` with the stable ``states-not-configured`` code rather than
 serving an empty or forged answer. A binding door leg saves hooks whose state binding
@@ -24,6 +26,7 @@ from urllib.parse import quote
 
 import httpx
 import pytest
+from tai42_skeleton.states import RecordValidator
 
 from tai42_e2e import Infra
 from tai42_e2e.httpapi import ApiClient
@@ -166,6 +169,82 @@ async def test_core_stack_composed_state_store_path(core_stack: TaiStack, uniq: 
     )
     folded = await api.get(record)
     assert folded["canonical_subject"]["key"] == "t2"
+
+
+@pytest.mark.needs("kind:states")
+async def test_core_stack_record_validate_matches_the_store_free_validator(
+    core_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """The validate door's answer over a composed state equals the skeleton's store-free
+    ``RecordValidator`` built from the ``effective_schema`` the declaration read serves:
+    the same verdict and the same reasons, for a misfit only the attached fragment refuses
+    and for a document carrying the stamped ``_trace`` member a tracing attach admits, then
+    again after a template replace whose fragment refers into its own ``$defs``."""
+    api = core_stack.api()
+    state = uniq("status")
+    template = uniq("box-mod").replace("_", "-")
+
+    await api.put(
+        f"/api/states/{state}",
+        json={
+            "description": "e2e validate parity",
+            "schema": {"type": "object", "properties": {"note": {"type": "string"}}},
+            "subject_kinds": ["thread"],
+            "default_subject_kind": "thread",
+        },
+    )
+    await api.put(
+        f"/api/state-templates/{template}",
+        json={
+            "kind": "state-template",
+            "name": template,
+            "schema": {"type": "object", "properties": {"items": {"type": "array"}}, "additionalProperties": False},
+            "trace": {"enabled": True},
+        },
+    )
+    await api.put(
+        f"/api/states/{state}/attachments/{template}",
+        json={"path": ["box"], "parameters": {}, "declarations": {}},
+    )
+    served = await api.get(f"/api/states/{state}")
+    store_free = RecordValidator(served["effective_schema"])
+
+    misfit = {"note": "x", "box": {"items": "not-a-list"}}
+    # The base schema alone admits it; only the attached fragment refuses it.
+    assert RecordValidator(served["schema"]).validate(misfit).fits is True
+    answer = await api.post(f"/api/states/{state}/records/validate", json=misfit)
+    assert answer["fits"] is False
+    assert answer == store_free.validate(misfit).model_dump(mode="json")
+
+    stamped = {"note": "x", "box": {"items": [], "_trace": {"at": "2026-01-01T00:00:00Z"}}}
+    answer = await api.post(f"/api/states/{state}/records/validate", json=stamped)
+    assert answer["fits"] is True
+    assert answer == store_free.validate(stamped).model_dump(mode="json")
+
+    # -- a template replace whose fragment refers into its own ``$defs`` ------------
+    # The stored effective schema rebases the reference to the attach path, so it resolves
+    # after the jsonb round trip and the live answer still equals the store-free one.
+    await api.put(
+        f"/api/state-templates/{template}?replace=true",
+        json={
+            "kind": "state-template",
+            "name": template,
+            "schema": {
+                "type": "object",
+                "properties": {"items": {"type": "array"}, "tag": {"$ref": "#/$defs/t"}},
+                "$defs": {"t": {"type": "string"}},
+                "additionalProperties": False,
+            },
+            "trace": {"enabled": True},
+        },
+    )
+    served = await api.get(f"/api/states/{state}")
+    assert served["effective_schema"]["properties"]["box"]["properties"]["tag"] == {"$ref": "#/properties/box/$defs/t"}
+    replaced = {"box": {"tag": 1}}
+    answer = await api.post(f"/api/states/{state}/records/validate", json=replaced)
+    assert answer["fits"] is False
+    assert [reason["path"] for reason in answer["reasons"]] == ["$.box.tag"]
+    assert answer == RecordValidator(served["effective_schema"]).validate(replaced).model_dump(mode="json")
 
 
 @pytest.mark.needs("kind:states")

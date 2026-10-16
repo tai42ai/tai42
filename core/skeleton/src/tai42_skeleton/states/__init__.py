@@ -5,15 +5,17 @@ through this store.
 
 This package owns the Postgres seam (:mod:`.store`), the validate + apply service
 (:mod:`.service`) with the write-provenance chokepoint, the platform template document
-model (:mod:`.templates`), the pure op/path engine (:mod:`.paths`), the component
-identity and boot gate (:mod:`.db`), the shipped-template seed applier (:mod:`.seeds`),
-and the backup section (:mod:`.backup`). The doors, routers and builtin tools live in
+model (:mod:`.templates`), the pure op/path engine (:mod:`.paths`), the public record
+validator (:class:`RecordValidator`, :mod:`.schema`), the component identity and boot
+gate (:mod:`.db`), the shipped-template seed applier (:mod:`.seeds`), and the backup
+section (:mod:`.backup`). The doors, routers and builtin tools live in
 their neighbouring feature packages, reaching the store through the service and facet.
 """
 
 from __future__ import annotations
 
 from tai42_skeleton.states.db import STATES_COMPONENT, states_store_configured
+from tai42_skeleton.states.schema import RecordValidator
 from tai42_skeleton.states.service import (
     StatesAttachReconcilerRegistry,
     StatesAttachValidatorRegistry,
@@ -27,6 +29,7 @@ from tai42_skeleton.states.store import PostgresStatesStore
 __all__ = [
     "STATES_COMPONENT",
     "PostgresStatesStore",
+    "RecordValidator",
     "StatesAttachReconcilerRegistry",
     "StatesAttachValidatorRegistry",
     "StatesConsumerListerRegistry",

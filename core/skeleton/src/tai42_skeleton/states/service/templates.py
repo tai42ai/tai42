@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import ValidationError
 from tai42_contract.app import tai42_app
 from tai42_contract.states.errors import (
+    SchemaValidationError,
     StateNotFoundError,
     TemplateExistsError,
     TemplateInUseError,
@@ -320,7 +321,7 @@ class _TemplateMixin(_StatesServiceBase):
                     ],
                 )
                 await self._run_attach_validators(row["state"], template_doc, attachment_declarations, effective)
-            except TemplateValidationError as exc:
+            except (TemplateValidationError, SchemaValidationError) as exc:
                 raise TemplateInUseError(
                     f"template {template.name!r} cannot be replaced: its attach on state {row['state']!r} no longer "
                     f"validates: {exc}"

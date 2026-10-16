@@ -335,7 +335,7 @@ async def _detach_referees(state: str, template: str) -> list[str]:
     summary="Detach a template from a state",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ConflictError],
+    errors=[NotSupportedError, NotFoundError, ConflictError, ValidationRejectedError],
     response_model=DetachAck,
 )
 async def detach_state_template(name: str, template: str) -> dict[str, Any]:

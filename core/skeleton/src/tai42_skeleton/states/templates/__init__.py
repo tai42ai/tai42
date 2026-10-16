@@ -17,7 +17,9 @@ Three pure entry points carry the feature:
   ``{"$parameter": "<name>"}`` markers in a fragment with supplied values.
 - :func:`~tai42_skeleton.states.templates.compose.compose_effective_schema` places each
   attachment's substituted (and, when the template traces, ``_trace``-stamped) fragment into a
-  base schema, refusing collisions.
+  base schema, refusing collisions: a fragment's ``#`` / ``#/…`` references are rebased to its
+  attach path, a root attach merges only ``properties``, ``required`` and ``$defs``, and the
+  composed schema is checked by the declaration rules.
 """
 
 from __future__ import annotations
