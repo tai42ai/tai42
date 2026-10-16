@@ -26,6 +26,8 @@ from tai42_contract.states.models import (
     MAX_RETENTION_DAYS,
     ApplyResult,
     CompletedOrigin,
+    RecordCheckItem,
+    RecordValidation,
     StateBatchWrite,
     StateRecord,
     StateSubject,
@@ -33,7 +35,7 @@ from tai42_contract.states.models import (
     WriteOrigin,
     WritesPage,
 )
-from tai42_contract.states.pending import HeldPendingSave, PruneResult
+from tai42_contract.states.pending import HeldPendingSave, PruneResult, RecordCheckPage
 
 from tai42_skeleton.states.db import states_settings
 from tai42_skeleton.states.outbox.drain import (
@@ -46,6 +48,7 @@ from tai42_skeleton.states.outbox.drain import (
 )
 from tai42_skeleton.states.outbox.keys import record_key
 from tai42_skeleton.states.paths import validate_op
+from tai42_skeleton.states.schema import _document_reasons
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.rows import _page_limit, _subject_from_row
 from tai42_skeleton.states.service.unit import current_state_unit
@@ -386,6 +389,63 @@ class _RecordMixin(_StatesServiceBase):
             "next_cursor": next_cursor,
             "held": [h.model_dump(mode="json") for h in held],
         }
+
+    async def validate_record(self, state: str, data: dict[str, Any]) -> RecordValidation:
+        """Check ``data`` against ``state``'s effective schema as a write would, reporting every misfit reason.
+
+        Uses the catalog's cached per-version validator — the SAME object a write validates with — so
+        the answer matches what a store write would accept, with no schema recompile. A non-object
+        ``data`` is a loud client error; an undeclared state raises :class:`StateNotFoundError`; an
+        unresolvable ``$ref`` in the effective schema raises loudly.
+        """
+        self._ensure_available()
+        if not isinstance(data, dict):
+            raise ValueValidationError("a record document must be a JSON object")
+        entry = await self._catalog.catalog_entry(state)
+        if entry is None:
+            raise StateNotFoundError(f"no state declared as {state!r}")
+        reasons = _document_reasons(entry.validator, data)
+        return RecordValidation(fits=not reasons, reasons=reasons)
+
+    async def check_records(
+        self, state: str, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
+    ) -> RecordCheckPage:
+        """One keyset page of ``state``'s stored records checked against its current effective schema.
+
+        Reads one keyset page (optionally one ``kind``) through the catalog's cached per-version
+        validator, returning ONLY the records that do not fit in ``items`` while ``checked`` reports
+        how many the page read. Pages like :meth:`list_subjects`; a save held by a failed pending
+        save is skipped and named in ``held`` (the check serves over committed records).
+        """
+        self._ensure_available()
+        page = _page_limit(limit)
+        entry = await self._catalog.catalog_entry(state)
+        if entry is None:
+            raise StateNotFoundError(f"no state declared as {state!r}")
+        held = await drain_state(self, state, _deadline(), held="skip", scan="check_records")
+        rows = await self._store.list_records(state, kind=kind, limit=page, cursor=cursor)
+        items = [
+            RecordCheckItem(
+                subject=StateSubject(
+                    target_kind=row["target_kind"],
+                    target_name=row["target_name"],
+                    kind=row["subject_kind"],
+                    key=row["subject_key"],
+                ),
+                updated_at=row["updated_at"],
+                reasons=reasons,
+            )
+            for row in rows
+            if (reasons := _document_reasons(entry.validator, row["data"]))
+        ]
+        next_cursor = (
+            make_cursor(
+                rows[-1]["target_kind"], rows[-1]["target_name"], rows[-1]["subject_kind"], rows[-1]["subject_key"]
+            )
+            if len(rows) == page
+            else None
+        )
+        return RecordCheckPage(checked=len(rows), items=items, next_cursor=next_cursor, held=held)
 
     async def writes(
         self, state: str, subject: StateSubject, *, limit: int | None = None, cursor: str | None = None

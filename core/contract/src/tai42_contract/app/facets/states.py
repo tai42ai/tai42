@@ -14,6 +14,7 @@ from tai42_contract.states.models import (
     AttachValidator,
     ConsumerLister,
     ConsumerRow,
+    RecordValidation,
     StateBatchWrite,
     StateContext,
     StateDeclaration,
@@ -26,7 +27,12 @@ from tai42_contract.states.models import (
     WriteOrigin,
     WritesPage,
 )
-from tai42_contract.states.pending import HeldPendingSave, PruneResult, StateDeclarationSaved
+from tai42_contract.states.pending import (
+    HeldPendingSave,
+    PruneResult,
+    RecordCheckPage,
+    StateDeclarationSaved,
+)
 from tai42_contract.states.rendered import (
     RenderedAttachment,
     RenderedStateTemplate,
@@ -364,6 +370,30 @@ class AppStates(Protocol):
 
         ``{"matches": [...], "next_cursor": <cursor|None>, "held": [...]}`` — ``held`` as for
         :meth:`list_subjects`.
+        """
+        ...
+
+    async def validate_record(self, state: str, data: dict[str, Any]) -> RecordValidation:
+        """Check ``data`` against ``state``'s effective schema exactly as a write would, without storing it.
+
+        Returns a :class:`~tai42_contract.states.RecordValidation`: ``fits`` with EVERY reason it
+        does not (ordered by JSON path), never only the first. A misfit is a returned answer, not a
+        raise. A non-object ``data`` is a :class:`~tai42_contract.states.ValueValidationError`; an
+        undeclared ``state`` is a :class:`~tai42_contract.states.StateNotFoundError`; an effective
+        schema carrying an unresolvable ``$ref`` raises
+        :class:`~tai42_contract.states.ValueValidationError` loudly.
+        """
+        ...
+
+    async def check_records(
+        self, state: str, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
+    ) -> RecordCheckPage:
+        """One keyset page of ``state``'s stored records checked against its current effective schema.
+
+        Pages like :meth:`list_subjects` (optionally one ``kind``): ``checked`` is how many records
+        the page read and ``items`` are ONLY those that do not fit, each with every reason. ``held``
+        names the saves held by a failed pending save whose subjects were skipped. An undeclared
+        ``state`` is a :class:`~tai42_contract.states.StateNotFoundError`.
         """
         ...
 

@@ -25,6 +25,8 @@ from tai42_contract.errors import UnavailableError
 from tai42_contract.states import (
     ApplyResult,
     AttachBody,
+    RecordCheckPage,
+    RecordValidation,
     StateDeclaration,
     StateRecord,
     StateSubject,
@@ -383,6 +385,44 @@ async def search_state_records(
     """A keyset page of records whose document contains ``filters`` (a JSON containment match)."""
     with _states_door():
         return await _states().search(name, filters, limit=limit, cursor=cursor)
+
+
+@operation(
+    summary="Validate a candidate record against a state's schema",
+    tags=["states"],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
+    response_model=RecordValidation,
+)
+async def validate_state_record(name: str, data: Any) -> dict[str, Any]:
+    """Check a candidate document against the state's effective schema without storing it.
+
+    The request body IS the document (any JSON). A document that does not fit is answered with a
+    ``200`` body ``{fits: false, reasons: [...]}`` naming every misfit; a non-object body or an
+    effective schema with a broken ``$ref`` is a ``422``, and an undeclared state a ``404``.
+    """
+    with _states_door():
+        result = await _states().validate_record(name, data)
+    return result.model_dump()
+
+
+@operation(
+    summary="Check a state's stored records against its schema",
+    tags=["states"],
+    errors=[NotSupportedError, NotFoundError, UnavailableError],
+    response_model=RecordCheckPage,
+)
+async def check_state_records(
+    name: str, kind: str | None = None, limit: int | None = None, cursor: str | None = None
+) -> dict[str, Any]:
+    """A keyset page of the stored records that do NOT fit the state's current effective schema.
+
+    ``checked`` reports how many records the page read; ``items`` are only the misfits, each with
+    every reason. Pages like the subjects listing (optionally one ``kind``); ``held`` names the
+    saves held by a failed pending save that the page skipped.
+    """
+    with _states_door():
+        page = await _states().check_records(name, kind=kind, limit=limit, cursor=cursor)
+    return page.model_dump(mode="json")
 
 
 @operation(

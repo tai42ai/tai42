@@ -237,6 +237,44 @@ def test_search_omits_absent_paging(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0, result.output
 
 
+def test_validate_posts_the_candidate_document(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/states/status/records/validate"
+        assert json.loads(request.content) == {"count": 1}
+        return data_response({"fits": True, "reasons": []})
+
+    result = run_cli(monkeypatch, handler, ["states", "validate", "status", "--data", '{"count": 1}'])
+    assert result.exit_code == 0, result.output
+
+
+def test_check_pages_with_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/states/status/records/check"
+        assert request.url.params["kind"] == "person"
+        assert request.url.params["limit"] == "2"
+        assert request.url.params["cursor"] == "c1"
+        return data_response({"checked": 0, "items": [], "next_cursor": None, "held": []})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["states", "check", "status", "--kind", "person", "--limit", "2", "--cursor", "c1"],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_check_omits_absent_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/states/status/records/check"
+        assert not request.url.params
+        return data_response({"checked": 0, "items": [], "next_cursor": None, "held": []})
+
+    result = run_cli(monkeypatch, handler, ["states", "check", "status"])
+    assert result.exit_code == 0, result.output
+
+
 def test_read_gets_the_record(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"

@@ -75,6 +75,8 @@ _EXPECTED: set[tuple[str, str]] = {
     ("DELETE", "/api/states/{name}/attachments/{template}"),
     ("GET", "/api/states/{name}/subjects"),
     ("POST", "/api/states/{name}/records/search"),
+    ("POST", "/api/states/{name}/records/validate"),
+    ("GET", "/api/states/{name}/records/check"),
     ("GET", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"),
     ("PUT", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"),
     ("PATCH", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"),
@@ -142,6 +144,78 @@ def test_route_answers_501_body_with_the_stable_code_when_unbound() -> None:
     assert resp.status_code == 501
     body = json.loads(bytes(resp.body))
     assert body["code"] == "states-not-configured"
+
+
+def test_validate_record_operation_refuses_501_when_unbound() -> None:
+    with pytest.raises(NotSupportedError) as excinfo:
+        asyncio.run(ops.validate_state_record("alerts", {"n": 1}))
+    assert excinfo.value.status == 501
+    assert excinfo.value.extra.get("code") == "states-not-configured"
+
+
+def test_check_records_operation_refuses_501_when_unbound() -> None:
+    with pytest.raises(NotSupportedError) as excinfo:
+        asyncio.run(ops.check_state_records("alerts"))
+    assert excinfo.value.status == 501
+    assert excinfo.value.extra.get("code") == "states-not-configured"
+
+
+class _ValidatorStates:
+    """A facet stand-in for the record-validator doors: ``validate_record`` answers a misfit (or
+    raises on a non-object), ``check_records`` answers a page."""
+
+    def __init__(self) -> None:
+        from tai42_contract.states import RecordCheckItem, RecordCheckPage, RecordValidation, ValidationReason
+
+        self._misfit = RecordValidation(fits=False, reasons=[ValidationReason(path="$.n", message="bad")])
+        subject = _held().subjects[0]
+        self._page = RecordCheckPage(
+            checked=2,
+            items=[RecordCheckItem(subject=subject, updated_at=1.0, reasons=[ValidationReason(path="$", message="x")])],
+            next_cursor="cur",
+            held=[_held()],
+        )
+
+    async def validate_record(self, state, data):
+        from tai42_contract.states.errors import ValueValidationError
+
+        if not isinstance(data, dict):
+            raise ValueValidationError("a record document must be a JSON object")
+        return self._misfit
+
+    async def check_records(self, state, *, kind=None, limit=None, cursor=None):
+        return self._page
+
+
+def test_validate_record_door_returns_the_misfit_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ops, "_states", lambda: _ValidatorStates())
+    out = asyncio.run(ops.validate_state_record("alerts", {"n": "bad"}))
+    assert out == {"fits": False, "reasons": [{"path": "$.n", "message": "bad"}]}
+
+
+def test_validate_record_door_maps_a_non_object_to_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ops, "_states", lambda: _ValidatorStates())
+    with pytest.raises(ValidationRejectedError) as excinfo:
+        asyncio.run(ops.validate_state_record("alerts", ["not", "an", "object"]))
+    assert excinfo.value.status == 422
+
+
+def test_check_records_door_dumps_the_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ops, "_states", lambda: _ValidatorStates())
+    out = asyncio.run(ops.check_state_records("alerts", kind="thread", limit=2))
+    assert out["checked"] == 2
+    assert out["next_cursor"] == "cur"
+    assert out["items"][0]["reasons"] == [{"path": "$", "message": "x"}]
+    assert out["held"] == [_HELD_WIRE]
+
+
+def test_validate_body_extractor_passes_a_non_object_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The edge reader does NOT refuse a non-object document: it hands it to the op, which
+    # answers 422 (the schema check's verdict) rather than a 400 at the edge.
+    extracted = asyncio.run(
+        router._extract_validate_body(_request_with_body("POST", "/api/states/alerts/records/validate", {"n": 1}))
+    )
+    assert extracted == {"data": {"n": 1}}
 
 
 # --------------------------------------------------------------------------- #

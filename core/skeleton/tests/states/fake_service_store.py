@@ -373,6 +373,21 @@ class FakeStatesStore:
         ]
         return rows[:limit]
 
+    async def list_records(self, state, *, kind, limit, cursor, conn=None):
+        rows = [
+            {
+                "target_kind": tk,
+                "target_name": tn,
+                "subject_kind": sk,
+                "subject_key": key,
+                "data": copy.deepcopy(data),
+                "updated_at": 1.0,
+            }
+            for (s, tk, tn, sk, key), data in self.records.items()
+            if s == state and (kind is None or sk == kind)
+        ]
+        return rows[:limit]
+
     async def search_records(self, state, containment, *, limit, cursor):
         rows = [
             {"target_kind": tk, "target_name": tn, "subject_kind": sk, "subject_key": key, "updated_at": 1.0}

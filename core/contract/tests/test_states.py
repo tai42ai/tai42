@@ -21,6 +21,10 @@ from tai42_contract.states import (
     CompletedOrigin,
     ConsumerRow,
     DeclarationInUseError,
+    HeldPendingSave,
+    RecordCheckItem,
+    RecordCheckPage,
+    RecordValidation,
     StateBatchWrite,
     StateContext,
     StateDeclaration,
@@ -36,6 +40,7 @@ from tai42_contract.states import (
     TemplateJqApplyResult,
     TemplateJqResult,
     TemplateValidationError,
+    ValidationReason,
     WriteEntry,
     WriteOrigin,
     WritesPage,
@@ -475,6 +480,46 @@ def test_attach_reconcile_context_is_frozen_and_defaults_options():
 
 
 # --------------------------------------------------------------------------- #
+# The record-validator models
+# --------------------------------------------------------------------------- #
+def test_record_validation_round_trips_and_is_frozen():
+    fit = RecordValidation(fits=True)
+    assert fit.fits is True
+    assert fit.reasons == []
+    with pytest.raises(ValidationError):
+        fit.fits = False  # type: ignore[misc]
+    misfit = RecordValidation(fits=False, reasons=[ValidationReason(path="$.n", message="is not of type 'integer'")])
+    assert [(r.path, r.message) for r in misfit.reasons] == [("$.n", "is not of type 'integer'")]
+
+
+def test_record_validation_forbids_extra_keys():
+    with pytest.raises(ValidationError):
+        RecordValidation.model_validate({"fits": True, "reasons": [], "unexpected": 1})
+
+
+def test_record_check_page_carries_misfits_checked_cursor_and_held():
+    subject = StateSubject.model_validate(_subject())
+    page = RecordCheckPage(
+        checked=3,
+        items=[RecordCheckItem(subject=subject, updated_at=1.5, reasons=[ValidationReason(path="$", message="no")])],
+        next_cursor="cursor-1",
+        held=[HeldPendingSave(save_id="7", held_by="7", subjects=[subject])],
+    )
+    assert page.checked == 3
+    assert page.items[0].subject == subject
+    assert page.items[0].updated_at == 1.5
+    assert page.next_cursor == "cursor-1"
+    assert page.held[0].save_id == "7"
+
+
+def test_record_check_page_defaults_are_empty():
+    page = RecordCheckPage(checked=0)
+    assert page.items == []
+    assert page.next_cursor is None
+    assert page.held == []
+
+
+# --------------------------------------------------------------------------- #
 # The facet surface
 # --------------------------------------------------------------------------- #
 def test_appstates_enumerates_its_members():
@@ -511,6 +556,8 @@ def test_appstates_enumerates_its_members():
         "fold",
         "list_subjects",
         "search",
+        "validate_record",
+        "check_records",
         "writes",
         "prune_expired",
         "context",

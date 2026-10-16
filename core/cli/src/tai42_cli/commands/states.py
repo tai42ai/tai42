@@ -230,6 +230,37 @@ def search_state_records(
         emit_result(ctx_obj, client.post(f"/api/states/{seg(name)}/records/search", json=body))
 
 
+@app.command("validate")
+@covers(("POST", "/api/states/{name}/records/validate"))
+def validate_state_record(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="The state name.")],
+    data: Annotated[str | None, typer.Option("--data", help="The candidate document JSON.")] = None,
+    file: Annotated[Path | None, typer.Option("--file", help="A file holding the candidate document JSON.")] = None,
+) -> None:
+    """Check a candidate document against a state's effective schema without storing it."""
+    ctx_obj = app_context(ctx)
+    body = _read_document(data, file)
+    with ctx_obj.client() as client:
+        emit_result(ctx_obj, client.post(f"/api/states/{seg(name)}/records/validate", json=body))
+
+
+@app.command("check")
+@covers(("GET", "/api/states/{name}/records/check"))
+def check_state_records(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="The state name.")],
+    kind: Annotated[str | None, typer.Option("--kind", help="Restrict to one subject kind.")] = None,
+    limit: Annotated[int | None, typer.Option("--limit", help="Page size.")] = None,
+    cursor: Annotated[str | None, typer.Option("--cursor", help="A keyset cursor from a prior page.")] = None,
+) -> None:
+    """Page a state's stored records that do not fit its current effective schema."""
+    ctx_obj = app_context(ctx)
+    params = {k: v for k, v in {"kind": kind, "limit": limit, "cursor": cursor}.items() if v is not None}
+    with ctx_obj.client() as client:
+        emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/records/check", params=params or None))
+
+
 @app.command("read")
 @covers(("GET", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"))
 def read_state_record(

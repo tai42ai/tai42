@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from tai42_contract.states.models import StateDeclaration, StateSubject
+from tai42_contract.states.models import RecordCheckItem, StateDeclaration, StateSubject
 
 
 class HeldPendingSave(BaseModel):
@@ -41,4 +41,24 @@ class StateDeclarationSaved(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     declaration: StateDeclaration
+    held: list[HeldPendingSave] = Field(default_factory=list[HeldPendingSave])
+
+
+class RecordCheckPage(BaseModel):
+    """One keyset page of a state's records checked against its current effective schema.
+
+    ``checked`` is how many records the page read; ``items`` are ONLY the records that do not fit
+    (each a :class:`~tai42_contract.states.RecordCheckItem`), so a fully-fitting page has an empty
+    ``items`` and a non-zero ``checked``. ``next_cursor`` is the cursor the next page reads from
+    (``None`` on the last page), paging like ``list_subjects``/``search``; ``held`` names the saves
+    held by a failed pending save whose subjects the page did not read over their uncommitted
+    writes. Beside :class:`PruneResult` and :class:`StateDeclarationSaved`: a scan answer that
+    names the held saves it skipped.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    checked: int
+    items: list[RecordCheckItem] = Field(default_factory=list[RecordCheckItem])
+    next_cursor: str | None = None
     held: list[HeldPendingSave] = Field(default_factory=list[HeldPendingSave])

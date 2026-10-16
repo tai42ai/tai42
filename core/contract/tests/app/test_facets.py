@@ -181,7 +181,7 @@ EXPECTED_FACADE = {
     "used_by",
     # tool_meta (2) — `store` shared with versioning and presets above
     "patch",
-    # states (39)
+    # states (41)
     "list_declarations",
     "get_declaration",
     "put_declaration",
@@ -213,6 +213,8 @@ EXPECTED_FACADE = {
     "fold",
     "list_subjects",
     "search",
+    "validate_record",
+    "check_records",
     "writes",
     "prune_expired",
     "context",
@@ -348,11 +350,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 158 (sub-protocol, member) pairs over 154 distinct names — ``store`` is exposed
+    # 160 (sub-protocol, member) pairs over 156 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 154, f"union={len(union)}"
-    assert total == 158 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 156, f"union={len(union)}"
+    assert total == 160 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_five_namespaces():

@@ -8,10 +8,11 @@ from tai42_contract.app import tai42_app
 from tai42_contract.states.errors import (
     InvalidPathError,
     StateNotFoundError,
+    StatesNotConfiguredError,
     SubjectFoldError,
     ValueValidationError,
 )
-from tai42_contract.states.models import StateBatchWrite, WriteOrigin
+from tai42_contract.states.models import StateBatchWrite, StateDeclaration, WriteOrigin
 
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
@@ -140,6 +141,88 @@ async def test_search_refuses_empty_filters(svc: StatesService) -> None:
 async def test_search_undeclared_raises(svc: StatesService) -> None:
     with pytest.raises(StateNotFoundError):
         await svc.search("nope", {"n": 1})
+
+
+async def test_validate_record_fits(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    result = await svc.validate_record("alerts", {"n": 5})
+    assert result.fits is True
+    assert result.reasons == []
+
+
+async def test_validate_record_misfit_reports_every_reason(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    result = await svc.validate_record("alerts", {"n": "not-an-integer"})
+    assert result.fits is False
+    assert any(r.path == "$.n" for r in result.reasons)
+
+
+async def test_validate_record_refuses_a_non_object(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    with pytest.raises(ValueValidationError, match="must be a JSON object"):
+        await svc.validate_record("alerts", ["not", "an", "object"])  # type: ignore[arg-type]
+
+
+async def test_validate_record_undeclared_raises(svc: StatesService) -> None:
+    with pytest.raises(StateNotFoundError):
+        await svc.validate_record("nope", {"n": 1})
+
+
+async def test_validate_record_501_when_off(svc: StatesService, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service_mod, "states_store_configured", lambda: False)
+    with pytest.raises(StatesNotConfiguredError):
+        await svc.validate_record("alerts", {"n": 1})
+
+
+async def test_check_records_returns_only_misfits_with_a_checked_count(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    store: FakeStatesStore = svc._store  # type: ignore[assignment]
+    # Two records seeded directly (bypassing the write-time check): one fits, one does not.
+    store.records[("alerts", "agent", "a", "thread", "t1")] = {"n": 1}
+    store.records[("alerts", "agent", "a", "thread", "t2")] = {"n": "bad"}
+    page = await svc.check_records("alerts")
+    assert page.checked == 2  # every record on the page was checked
+    assert [item.subject.key for item in page.items] == ["t2"]  # only the misfit is listed
+    assert any(r.path == "$.n" for r in page.items[0].reasons)
+    assert page.held == []
+
+
+async def test_check_records_filters_by_kind(svc: StatesService) -> None:
+    await svc.put_declaration(
+        StateDeclaration(
+            name="alerts",
+            schema={"type": "object", "properties": {"n": {"type": "integer"}}},
+            subject_kinds=["thread", "person"],
+            default_subject_kind="thread",
+        )
+    )
+    store: FakeStatesStore = svc._store  # type: ignore[assignment]
+    store.records[("alerts", "agent", "a", "thread", "t1")] = {"n": "bad"}
+    store.records[("alerts", "agent", "a", "person", "p1")] = {"n": "bad"}
+    page = await svc.check_records("alerts", kind="person")
+    assert page.checked == 1
+    assert [item.subject.kind for item in page.items] == ["person"]
+
+
+async def test_check_records_pages_with_a_next_cursor(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    store: FakeStatesStore = svc._store  # type: ignore[assignment]
+    store.records[("alerts", "agent", "a", "thread", "t1")] = {"n": "bad"}
+    store.records[("alerts", "agent", "a", "thread", "t2")] = {"n": "bad"}
+    page = await svc.check_records("alerts", limit=1)
+    assert page.checked == 1
+    assert page.next_cursor is not None  # a full page hands back a cursor
+
+
+async def test_check_records_undeclared_raises(svc: StatesService) -> None:
+    with pytest.raises(StateNotFoundError):
+        await svc.check_records("nope")
+
+
+async def test_check_records_501_when_off(svc: StatesService, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service_mod, "states_store_configured", lambda: False)
+    with pytest.raises(StatesNotConfiguredError):
+        await svc.check_records("alerts")
 
 
 async def test_prune_expired_reports_counts(svc: StatesService) -> None:

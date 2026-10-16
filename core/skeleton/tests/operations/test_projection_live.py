@@ -4,8 +4,8 @@ Boots the app through the real ``app.app_context`` harness with an ``api_tools``
 manifest that loads no management tool modules and enables projection, then
 asserts the projected surface end-to-end:
 
-1. the projected tool surface is exactly the expected op surface — the 166
-   default-projected ops (219 total - 47 tier-2 default-excluded - 4 tier-1
+1. the projected tool surface is exactly the expected op surface — the 180
+   default-projected ops (235 total - 51 tier-2 default-excluded - 4 tier-1
    hardcode-blocked);
 2. ``destructiveHint`` is present on destructive ops (a DELETE, a mutating POST)
    and absent on reads (a GET);
@@ -131,18 +131,18 @@ def test_projected_surface_is_the_expected_op_count():
             tier2 = sorted(op.name for op in ops if is_tier2(op) and not is_tier1(op))
 
             # The registered surface decomposes by projection tier (each asserted below):
-            # 233 total = 4 tier-1 (hardcode-blocked from projection) + 51 tier-2
-            # (default-excluded, includable) + 178 tier-0 (default-projected). A destructive
+            # 235 total = 4 tier-1 (hardcode-blocked from projection) + 51 tier-2
+            # (default-excluded, includable) + 180 tier-0 (default-projected). A destructive
             # tier-0 op is still default-projected under ``expose_destructive`` — a data write
             # or purge (``delete_*``, ``erase_*``, ``prune_runs``, ``prune_state_retention``)
             # is destructive but not authority_changing, so it stays tier-0 like
             # ``delete_conversation_config``; authority_changing writes (roles, api keys,
-            # api_tools) and the ``/api/auth/`` family are the tier-2 set. The 27 states-surface
+            # api_tools) and the ``/api/auth/`` family are the tier-2 set. The 29 states-surface
             # doors (module + state ``list``/``get``/``put``/``delete``, the record CRUD plus
-            # ``search``/``fold``/``apply`` doors, the mount/subjects/consumers/stats
-            # reads, ``prune_state_retention``, and the pending-save ``list``/``retry``/``discard``
-            # doors) are all tier-0 CRUD over the states service.
-            assert total == 233, total
+            # ``search``/``fold``/``apply`` doors, the schema ``validate``/``check`` doors, the
+            # mount/subjects/consumers/stats reads, ``prune_state_retention``, and the pending-save
+            # ``list``/``retry``/``discard`` doors) are all tier-0 CRUD over the states service.
+            assert total == 235, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -219,28 +219,28 @@ def test_projected_surface_is_the_expected_op_count():
                 "validate_condition",
             }, tier2
 
-            # The default-projected surface = 178 (every op that is neither tier-1 nor
+            # The default-projected surface = 180 (every op that is neither tier-1 nor
             # tier-2, destructive tier-0 ops included under the default ``expose_destructive``),
             # measured two ways.
             recorder = _RecordingApp()
             projected = project_operations(recorder, ApiToolsConfig(), registry=reg)
-            assert len(projected) == 178, len(projected)
-            assert total - len(tier2) - len(tier1) == 178
+            assert len(projected) == 180, len(projected)
+            assert total - len(tier2) - len(tier1) == 180
 
-            # The LIVE booted tool surface is the 178 projected ops PLUS the two
+            # The LIVE booted tool surface is the 180 projected ops PLUS the two
             # force-registered hidden mechanism tools the conversations router installs at
             # startup: ``conversation_deliver`` (a parked AGENT turn's resumed answer) and
             # ``deliver_tool_completion`` (a parked TOOL turn's terminal, mapped via reply_expr),
             # both fired through ``run_tool`` by the resumer. Neither is an api_tools projection
-            # (``projected`` stays 178) — they are mandatory bridges registered independently of
+            # (``projected`` stays 180) — they are mandatory bridges registered independently of
             # the api_tools toggle and carried on the live surface like any hidden tool, so the
-            # live count is 180.
+            # live count is 182.
             hidden_bridges = {"conversation_deliver", "deliver_tool_completion"}
             live = await app.tools.get_tools()
             assert set(live) == set(projected) | hidden_bridges
             for name in hidden_bridges:
                 assert (live[name].meta or {}).get("tai42/hidden") is True
-            assert len(live) == 180
+            assert len(live) == 182
 
             # Tier-1 and default tier-2 never appear on the live surface.
             assert "run_tool" not in live
@@ -443,13 +443,13 @@ def test_user_tools_curation_coexists_with_api_tools():
             }
         )
         async with app.app_context(manifest):
-            # api_tools projected the surface: the 178 projected ops plus the two
+            # api_tools projected the surface: the 180 projected ops plus the two
             # force-registered hidden completion mechanisms the conversations router installs at
-            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 180 live.
+            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 182 live.
             live = await app.tools.get_tools()
             assert "remove_tool" in live
             assert "list_hooks" in live
-            assert len(live) == 180
+            assert len(live) == 182
 
             # user_tools curation is preserved and surfaced to the flow builder (the
             # read-time view over the registered set). It lives on the LIVE in-process

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         AttachReconciler,
         CompletedOrigin,
         ConsumerRow,
+        RecordValidation,
         StateBatchWrite,
         StateContext,
         StateDeclaration,
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
         TemplateJqApplyResult,
         WriteOrigin,
     )
+    from tai42_contract.states.pending import RecordCheckPage
     from tai42_contract.template import TemplatedText
 
     from tai42_skeleton.states.seeds import StateTemplateSeedRegistry
@@ -233,6 +235,12 @@ class _StatesServiceBase:
         cursor: str | None = None,
         conn: AsyncConnection[Any] | None = None,
     ) -> dict[str, Any]: ...
+
+    async def validate_record(self, state: str, data: dict[str, Any]) -> RecordValidation: ...
+
+    async def check_records(
+        self, state: str, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
+    ) -> RecordCheckPage: ...
 
     async def clear_subject(self, target_kind: str, target_name: str, subject_kind: str, subject_key: str) -> int: ...
 

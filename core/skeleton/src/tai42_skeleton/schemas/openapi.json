@@ -11995,6 +11995,95 @@
         "title": "PublicRouteUnpin",
         "type": "object"
       },
+      "RecordCheckItem": {
+        "additionalProperties": false,
+        "description": "One stored record that does not fit its state's current effective schema.\n\nThe ``subject`` it belongs to, the ``updated_at`` epoch seconds of its last write, and every\n``reasons`` entry it fails on (ordered by JSON path). Frozen.",
+        "properties": {
+          "reasons": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationReason"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/StateSubject"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "number"
+          }
+        },
+        "required": [
+          "subject",
+          "updated_at"
+        ],
+        "title": "RecordCheckItem",
+        "type": "object"
+      },
+      "RecordCheckPage": {
+        "additionalProperties": false,
+        "description": "One keyset page of a state's records checked against its current effective schema.\n\n``checked`` is how many records the page read; ``items`` are ONLY the records that do not fit\n(each a :class:`~tai42_contract.states.RecordCheckItem`), so a fully-fitting page has an empty\n``items`` and a non-zero ``checked``. ``next_cursor`` is the cursor the next page reads from\n(``None`` on the last page), paging like ``list_subjects``/``search``; ``held`` names the saves\nheld by a failed pending save whose subjects the page did not read over their uncommitted\nwrites. Beside :class:`PruneResult` and :class:`StateDeclarationSaved`: a scan answer that\nnames the held saves it skipped.",
+        "properties": {
+          "checked": {
+            "title": "Checked",
+            "type": "integer"
+          },
+          "held": {
+            "items": {
+              "$ref": "#/components/schemas/HeldPendingSave"
+            },
+            "title": "Held",
+            "type": "array"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RecordCheckItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "checked"
+        ],
+        "title": "RecordCheckPage",
+        "type": "object"
+      },
+      "RecordValidation": {
+        "additionalProperties": false,
+        "description": "Whether a candidate document fits a state's effective schema, with every reason it does not.\n\n``fits`` is true exactly when ``reasons`` is empty; ``reasons`` lists EVERY way the document\nfails, ordered by JSON path, so a misfit is one answer rather than one-failure-at-a-time.",
+        "properties": {
+          "fits": {
+            "title": "Fits",
+            "type": "boolean"
+          },
+          "reasons": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationReason"
+            },
+            "title": "Reasons",
+            "type": "array"
+          }
+        },
+        "required": [
+          "fits"
+        ],
+        "title": "RecordValidation",
+        "type": "object"
+      },
       "RecycleEntry": {
         "description": "One worker line in a profile-apply report.\n\n``status`` is ``recycled`` (confirmed on reality), ``timed-out`` or ``failed`` (the\ntarget the roll stopped at), or ``self-deferred`` (the applier's own post-response\nself-exit). ``detail`` names why a ``timed-out`` / ``failed`` target did not\nconverge, and is ``null`` otherwise.",
         "properties": {
@@ -18931,6 +19020,26 @@
           "updated"
         ],
         "title": "UserUpdateAck",
+        "type": "object"
+      },
+      "ValidationReason": {
+        "additionalProperties": false,
+        "description": "One way a record document does not fit a state's effective schema.\n\n``path`` is the JSON path of the offending node (``$`` for the document root) and\n``message`` the schema validator's reason. A document that fits has none. Frozen.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "message"
+        ],
+        "title": "ValidationReason",
         "type": "object"
       },
       "Wording": {
@@ -35990,6 +36099,91 @@
         ]
       }
     },
+    "/api/states/{name}/records/check": {
+      "get": {
+        "description": "A keyset page of the stored records that do NOT fit the state's current effective schema.\n\n``checked`` reports how many records the page read; ``items`` are only the misfits, each with\nevery reason. Pages like the subjects listing (optionally one ``kind``); ``held`` names the\nsaves held by a failed pending save that the page skipped.",
+        "operationId": "get_api_states_name_records_check",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/RecordCheckPage"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Check a state's stored records against its schema",
+        "tags": [
+          "states"
+        ]
+      }
+    },
     "/api/states/{name}/records/search": {
       "post": {
         "description": "A keyset page of records whose document contains ``filters`` (a JSON containment match).",
@@ -36070,6 +36264,91 @@
           }
         ],
         "summary": "Search a state's records",
+        "tags": [
+          "states"
+        ]
+      }
+    },
+    "/api/states/{name}/records/validate": {
+      "post": {
+        "description": "Check a candidate document against the state's effective schema without storing it.\n\nThe request body IS the document (any JSON). A document that does not fit is answered with a\n``200`` body ``{fits: false, reasons: [...]}`` naming every misfit; a non-object body or an\neffective schema with a broken ``$ref`` is a ``422``, and an undeclared state a ``404``.",
+        "operationId": "post_api_states_name_records_validate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/RecordValidation"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Request failed validation."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Validate a candidate record against a state's schema",
         "tags": [
           "states"
         ]

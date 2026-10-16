@@ -53,6 +53,8 @@ from tai42_contract.states.models import (
     ConsumerLister,
     ConsumerRow,
     PathSegment,
+    RecordCheckItem,
+    RecordValidation,
     RegimeName,
     StateBatchWrite,
     StateContext,
@@ -73,6 +75,7 @@ from tai42_contract.states.models import (
     TemplateJqApplyResult,
     TemplateJqResult,
     UnitCommitResult,
+    ValidationReason,
     WriteEntry,
     WriteOrigin,
     WritesPage,
@@ -92,7 +95,12 @@ from tai42_contract.states.ops import (
     validate_path,
     value_at_path,
 )
-from tai42_contract.states.pending import HeldPendingSave, PruneResult, StateDeclarationSaved
+from tai42_contract.states.pending import (
+    HeldPendingSave,
+    PruneResult,
+    RecordCheckPage,
+    StateDeclarationSaved,
+)
 from tai42_contract.states.rendered import (
     RenderedAttachment,
     RenderedStateTemplate,
@@ -133,6 +141,9 @@ __all__ = [
     "NonAdditiveRedeclareError",
     "PathSegment",
     "PruneResult",
+    "RecordCheckItem",
+    "RecordCheckPage",
+    "RecordValidation",
     "RegimeName",
     "RegimeViolationError",
     "RenderedAttachment",
@@ -177,6 +188,7 @@ __all__ = [
     "TemplateJqResult",
     "TemplateValidationError",
     "UnitCommitResult",
+    "ValidationReason",
     "ValueValidationError",
     "WriteEntry",
     "WriteOrigin",
