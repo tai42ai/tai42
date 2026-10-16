@@ -17,6 +17,7 @@ from tai42_contract.template import TemplatedText
 from tai42_kit.utils.render import SchemaBodyError
 
 from tai42_skeleton.states import service as service_mod
+from tai42_skeleton.states.schema import _validate_schema
 from tai42_skeleton.states.service import StatesService
 
 from .fake_service_store import _STATE, FakeStatesStore, _FakeApp, _template_doc
@@ -73,6 +74,36 @@ async def test_put_template_replace_refused_when_a_validator_now_rejects(svc: St
     svc.register_attach_validator(refusing)
     with pytest.raises(TemplateInUseError, match="no longer validates"):
         await svc.put_template(_template_doc("m"), replace=True)
+
+
+# A fragment whose field refers into the fragment's own ``$defs``.
+_DEFS_FRAGMENT = {
+    "type": "object",
+    "properties": {"tag": {"$ref": "#/$defs/t"}},
+    "$defs": {"t": {"type": "string"}},
+}
+# A fragment carrying ``$id`` at its root: valid alone, refused once placed below a state's root.
+_ID_FRAGMENT = {"$id": "urn:example:box", "type": "object", "properties": {"tag": {"type": "string"}}}
+
+
+async def test_put_template_replace_stores_an_effective_schema_the_declare_rules_accept(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    await svc.put_template(_template_doc("m"), replace=False)
+    await svc.attach("alerts", "m", AttachBody(path=["box"]))
+    await svc.put_template(_template_doc("m", schema=_DEFS_FRAGMENT), replace=True)
+    effective = await svc.effective_schema_for("alerts")
+    _validate_schema(effective)
+    assert effective["properties"]["box"]["properties"]["tag"] == {"$ref": "#/properties/box/$defs/t"}
+
+
+async def test_put_template_replace_refuses_a_composition_the_declare_rules_refuse(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    await svc.put_template(_template_doc("m"), replace=False)
+    await svc.attach("alerts", "m", AttachBody(path=["box"]))
+    before = await svc.effective_schema_for("alerts")
+    with pytest.raises(TemplateInUseError, match=r"on state 'alerts' no longer validates: .*\$id below the root"):
+        await svc.put_template(_template_doc("m", schema=_ID_FRAGMENT), replace=True)
+    assert await svc.effective_schema_for("alerts") == before
 
 
 async def test_delete_template_paths(svc: StatesService) -> None:

@@ -32,7 +32,6 @@ from tai42_kit.utils.data.jq_util import run_jq_first
 
 from tai42_skeleton.states.db import states_settings
 from tai42_skeleton.states.outbox.drain import drain_state
-from tai42_skeleton.states.schema import _validate_schema
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.catalog import StateEntry, served_row
 from tai42_skeleton.states.service.rows import _resolve_state_schema, _row_to_declaration
@@ -160,7 +159,6 @@ class _AttachmentMixin(_StatesServiceBase):
             await _resolve_state_schema(f"state {state!r} schema", decl["schema"]),
             [*[(m, p, pa) for m, p, pa, _d in existing], (template, list(path), resolved)],
         )
-        _validate_schema(effective)
         template_doc = StateTemplateDocument.model_validate(template.to_document())
         await self._run_attach_validators(state, template_doc, declarations, effective)
         reconcilers = [] if skip_reconcilers else self._attach_reconcilers.all()
