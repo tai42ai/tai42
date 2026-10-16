@@ -34,22 +34,26 @@ install-only-vs-broken decision reads only the declared network permission and t
 error class, never a distribution name.
 
 Rule: a boot failure of a previously published consumer against the candidate is
-a BREAKING change. The gate fails unless the governing release is a MAJOR bump —
-the bump read the same way ``tai42_cli.api_gate`` reads it, the governing package's
-version against its previous released tag. Under a major bump the same failure is
-reported as an ACCEPTED break (a printed notice) rather than a gate failure.
+a BREAKING change. The gate fails unless the candidate is a MAJOR bump. The candidate's
+bump is read from its core release set: for each core member dir, the release-please
+package it releases and its manifest version; a version whose tag is absent or points at
+HEAD is released by this tree and classed the way ``tai42_cli.api_gate`` classes a
+release, against the package's previous released tag; a version tagged on another commit
+is already published. The candidate's bump is the highest class among the core packages
+the tree releases (``none`` when it releases none). Under a major bump the same failure
+is reported as an ACCEPTED break (a printed notice) rather than a gate failure.
 
 A consumer whose declared dependency range excludes the candidate cannot even be
 installed into the boot venv; the resolver's ``No solution found`` is the most
-explicit form of a consumer break. Whether it is a break of THIS candidate is decided
-against the same baseline the bump uses — the previous released tag. Under a major
-bump the conflict is an accepted break (a notice, the gate passes). Under a non-major
-bump the same install set is re-resolved against the previous released tag's tree: if
-it resolves there, the candidate introduced the conflict and the gate fails; if it
-also finds no solution there, the incompatibility predates the candidate (it is
-carried from the previous release) and is not a new break, so a notice names the
-consumers and the gate passes. Any other install failure (network, a bad wheel, a
-build error), here or in the re-resolve, is always a hard failure, never reclassified.
+explicit form of a consumer break. Under a major bump the conflict is an accepted
+break (a notice, the gate passes). Under a non-major bump the same install set is
+re-resolved against the previous release's tree — the core baseline tag every other
+one is an ancestor of, where each core package sits at its last published version: if
+it resolves there, the candidate introduced the conflict and the gate fails; if it also
+finds no solution there, the incompatibility predates the candidate (it is carried from
+the previous release) and is not a new break, so a notice names the consumers and the
+gate passes. Any other install failure (network, a bad wheel, a build error), here or in
+the re-resolve, is always a hard failure, never reclassified.
 
 Consumers come from two sources. Supplied ones are wheels (``--consumer-wheel``)
 or requirement specs (``--consumer-req``); the gate names no specific consumer, so
@@ -65,10 +69,8 @@ loudly — a download that failed upstream can never read as a silent pass.
 
 CLI::
 
-    consumer_boot_gate.py --package tai42-skeleton --dir core/skeleton \\
-        --version 11.2.0 --consumer-wheel dist/some_consumer-1.4.0-py3-none-any.whl
-    consumer_boot_gate.py --package tai42-skeleton --dir core/skeleton \\
-        --consumer-req tai42-some-plugin==1.4.0
+    consumer_boot_gate.py --consumer-wheel dist/some_consumer-1.4.0-py3-none-any.whl
+    consumer_boot_gate.py --consumer-req tai42-some-plugin==1.4.0
     consumer_boot_gate.py --emit-matrix   # a CI matrix of the first-party consumers
 """
 
@@ -88,6 +90,7 @@ from _consumer_boot_gate.boot import (
     boot_consumer,
 )
 from _consumer_boot_gate.boot_failure import BootFailure, external_service_handlers, is_external_service_only
+from _consumer_boot_gate.candidate import Candidate, read_candidate
 from _consumer_boot_gate.consumers import Consumer, collect_consumers, enumerate_first_party
 from _consumer_boot_gate.install import (
     _install_venv,
@@ -96,7 +99,7 @@ from _consumer_boot_gate.install import (
 )
 from _consumer_boot_gate.process import DESCRIPTOR_TIMEOUT_S, run_gate_step
 from _consumer_boot_gate.provides import read_provides
-from _consumer_boot_gate.versioning import _fail, break_is_accepted, governing_bump, read_project_version
+from _consumer_boot_gate.versioning import _fail, break_is_accepted
 
 # The core packages installed editable from the candidate tree: the platform the
 # consumers boot against. Overridable so a fork with a different layout can point
@@ -141,12 +144,6 @@ def _load_plugin_yaml(venv_bin: Path, dist_name: str) -> dict:
     return yaml.safe_load(result.stdout) or {}
 
 
-def _resolve_version(args: argparse.Namespace, repo_root: Path) -> str:
-    if args.version is not None:
-        return args.version
-    return read_project_version(repo_root / args.dir)
-
-
 def _emit_matrix(repo_root: Path) -> None:
     """Print a GitHub-Actions matrix of the first-party consumers to boot, plus skip notices.
 
@@ -163,11 +160,13 @@ def _emit_matrix(repo_root: Path) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--package", help="governing release-please package-name (the bump owner)")
-    parser.add_argument("--dir", help="the governing package's member dir")
-    parser.add_argument("--version", help="governing version (default: read from the member's pyproject.toml)")
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
-    parser.add_argument("--core-dir", action="append", dest="core_dirs", help="editable core member dir (repeatable)")
+    parser.add_argument(
+        "--core-dir",
+        action="append",
+        dest="core_dirs",
+        help="core member dir: installed editable, its release read for the bump (repeatable)",
+    )
     parser.add_argument("--consumer-wheel", action="append", default=[], help="path to a consumer wheel (repeatable)")
     parser.add_argument("--consumer-req", action="append", default=[], help="a consumer requirement spec (repeatable)")
     parser.add_argument(
@@ -244,7 +243,7 @@ def _boot_all(
 
 def _report_and_exit(
     header: str,
-    bump: str,
+    candidate: Candidate,
     booted: int,
     install_only: int,
     external_only: int,
@@ -260,7 +259,7 @@ def _report_and_exit(
         return
 
     lines = [f"{consumer.label}: {failure.summary()}" for consumer, failure in failures]
-    if break_is_accepted(bump):
+    if break_is_accepted(candidate.bump):
         print(f"::notice::{header}: {len(failures)} consumer(s) fail to boot, ACCEPTED as a major-bump break:")
         for line in lines:
             print(f"  - {line}")
@@ -279,14 +278,11 @@ def main() -> None:
     if args.emit_matrix:
         _emit_matrix(repo_root)
         return
-    if not args.package or not args.dir:
-        _fail("--package and --dir are required to boot a consumer (omit them only with --emit-matrix)")
-    core_dirs = args.core_dirs or list(_DEFAULT_CORE_DIRS)
-    version = _resolve_version(args, repo_root)
-    bump = governing_bump(args.package, version, repo_root)
+    core_dirs: list[str] = args.core_dirs or list(_DEFAULT_CORE_DIRS)
+    candidate = read_candidate(repo_root, core_dirs)
 
     consumers = collect_consumers(args.consumer_wheel, args.consumer_req)
-    header = f"consumer-boot-gate: {args.package} {version} ({bump} bump)"
+    header = f"consumer-boot-gate: {candidate.describe()}"
     if not consumers:
         print(f"{header}: no previously published consumer supplied — nothing to boot, gate passes.")
         return
@@ -300,11 +296,9 @@ def main() -> None:
     except _ResolutionConflictError as conflict:
         _report_unresolvable_consumers(
             header,
-            bump,
+            candidate,
             consumers,
             conflict.resolver_stderr,
-            package=args.package,
-            version=version,
             repo_root=repo_root,
             core_dirs=core_dirs,
             identity_package=args.identity_package,
@@ -319,4 +313,4 @@ def main() -> None:
 
         shutil.rmtree(workdir, ignore_errors=True)
 
-    _report_and_exit(header, bump, booted, install_only, external_only, failures)
+    _report_and_exit(header, candidate, booted, install_only, external_only, failures)

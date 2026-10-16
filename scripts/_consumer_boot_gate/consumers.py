@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from _consumer_boot_gate.process import GIT_TIMEOUT_S, run_gate_step
+from _consumer_boot_gate.candidate import read_release_layout, released_by_tree
 from _consumer_boot_gate.versioning import _fail
 
 _WHEEL_NAME_RE = re.compile(r"^(?P<name>.+?)-(?P<version>\d[^-]*)-")
@@ -77,33 +77,20 @@ def first_party_plugin_names(repo_root: Path) -> dict[str, str]:
 
 
 def release_bump_set(repo_root: Path) -> set[str]:
-    """The distribution names being RELEASED in this train.
+    """The distribution names being RELEASED by this tree.
 
-    A package whose release-please manifest version has no matching tag yet (a pending bump). Read the
-    way the API gate reads versions: the manifest version against the package's tags.
-    Booting such a package's stale published version is pointless (its new code is the
-    candidate, its new version unpublished), so the caller excludes it.
+    Each release-please package whose manifest version the tree releases (its tag absent or at HEAD).
+    Booting such a package's stale published version is pointless (its new code is the candidate, its
+    new version unpublished), so the caller excludes it.
     """
-    import json
-
-    manifest = json.loads((repo_root / ".release-please-manifest.json").read_text())
-    config = json.loads((repo_root / "release-please-config.json").read_text())
+    packages, manifest = read_release_layout(repo_root)
     bumped: set[str] = set()
-    for path, entry in config["packages"].items():
+    for path, entry in packages.items():
         package = entry.get("package-name")
         version = manifest.get(path)
         if not package or not version:
             continue
-        tags = run_gate_step(
-            ["git", "tag", "--list", f"{package}-v{version}"],
-            what=f"listing tags for {package} {version}",
-            timeout=GIT_TIMEOUT_S,
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        if not tags:
+        if released_by_tree(package, version, repo_root):
             bumped.add(package)
     return bumped
 
