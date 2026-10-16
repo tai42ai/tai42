@@ -165,9 +165,11 @@ image, each static or a reaction-filled slot) render ahead of its inputs, a
 **review** page shows a generic readback of the entered values, and a field with
 a `visibleWhen` predicate is shown/hidden by client-side `If`s — one per value
 when it is shown for several of a controlling field's values (a single `If`
-condition cannot test membership), each under a distinct per-case name. The Flow is
-created and published once per distinct answer schema
-(cached by a schema hash under `CHANNEL_WHATSAPP_WABA_ID`) and reused; the
+condition cannot test membership), each under a distinct per-case name. One Flow is
+published per distinct answer schema and data endpoint, named on the WABA by a hash
+of both and cached under `CHANNEL_WHATSAPP_WABA_ID`; when the cache has no entry the
+channel first looks the Flow up on the WABA by that name and reuses a published one
+(a stale draft under the name is deleted), and only otherwise creates and publishes it. The
 completed form returns as an `nfm_reply`, its values coerced to the schema's
 types before the answer object is forwarded. When the callback door **rejects**
 a forwarded form answer (`400` — a schema rule the Flow could not enforce, e.g. a
@@ -265,8 +267,8 @@ correlation**: the flow token is minted in the `tai42-nf:` namespace
 `nfm_reply` by that prefix *before* any pending-question lookup, so a submission
 enters the conversation as a structured participant message (rendered `label: value`
 text plus the structured copy) and can never answer — or disturb — a question
-pending on the same pair. The answer schema is cached durably beside the
-published-flow id under the schema hash; a reply carries only the hash, so a
+pending on the same pair. The answer schema is cached durably under the schema
+hash, beside the published-flow cache; a reply carries only the hash, so a
 lost cache entry cannot be repopulated from it — the reply then degrades to its
 raw (uncoerced) values, and is still accepted. Like every freeform send, a form
 notification delivers only inside Meta's 24-hour customer-service window — out

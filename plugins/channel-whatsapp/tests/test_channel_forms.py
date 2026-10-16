@@ -29,6 +29,10 @@ from .conftest import (
     FakeHttpx,
     FakeRedis,
     _accepted,
+    expected_flow_identity,
+    expected_flow_name,
+    flow_list_page,
+    listed_flow,
     make_delivery,
     response,
 )
@@ -68,29 +72,36 @@ def _form_delivery(**overrides):
     return make_delivery(**fields)
 
 
+def _http_order(fake_httpx: FakeHttpx) -> list[tuple[str, str]]:
+    """Every Graph call in the order it was made, across GET/POST/DELETE."""
+    return [(kind.removeprefix("http_"), url) for kind, url in fake_httpx.events if kind.startswith("http_")]
+
+
 def _flow_cache_key(schema_hash: str) -> str:
-    return f"channel:whatsapp:flow:{_WABA_ID}:{schema_hash}"
+    return f"channel:whatsapp:flow:{_WABA_ID}:{expected_flow_identity(schema_hash)}"
 
 
 async def test_form_cache_miss_creates_publishes_then_sends(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     flow_json, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-1"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.FORM"))
 
     await WhatsAppChannel().deliver(_form_delivery())
 
-    assert [call["url"] for call in fake_httpx.calls] == [
-        f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows",
-        "https://graph.facebook.com/v23.0/flow-1/publish",
-        _MESSAGES_URL,
+    assert _http_order(fake_httpx) == [
+        ("get", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", "https://graph.facebook.com/v23.0/flow-1/publish"),
+        ("post", _MESSAGES_URL),
     ]
     # create_flow: exact wire shape, flow_json serialized as a JSON string.
     import json
 
     create = fake_httpx.calls[0]["json"]
     assert create == {
-        "name": f"tai42-form-{schema_hash}",
+        "name": expected_flow_name(schema_hash),
         "categories": ["OTHER"],
         "flow_json": json.dumps(flow_json),
     }
@@ -153,6 +164,7 @@ async def test_form_with_pages_and_data_publishes_once_and_carries_data_per_send
     )
 
     # First send: cache miss → create + publish + send. Second send: cache hit → send only.
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-multi"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.ONE"))
@@ -167,12 +179,12 @@ async def test_form_with_pages_and_data_publishes_once_and_carries_data_per_send
 
     # One create+publish for the (schema, pages) pair, then a send per delivery — never a
     # new Flow per send.
-    urls = [call["url"] for call in fake_httpx.calls]
-    assert urls == [
-        f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows",
-        "https://graph.facebook.com/v23.0/flow-multi/publish",
-        _MESSAGES_URL,
-        _MESSAGES_URL,
+    assert _http_order(fake_httpx) == [
+        ("get", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", "https://graph.facebook.com/v23.0/flow-multi/publish"),
+        ("post", _MESSAGES_URL),
+        ("post", _MESSAGES_URL),
     ]
     assert fake_redis.store[_flow_cache_key(ask_hash)] == "flow-multi"
     # The send carries the per-send values/options through the Flow action payload's data.
@@ -236,6 +248,7 @@ async def test_form_title_is_the_page_less_screen_title_and_rekeys_the_flow(
     assert flow_json["screens"][0]["title"] == "Your details"
     # The titled flow keys its own published Flow (distinct from the untitled one), so a cache miss
     # creates+publishes against the titled hash.
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-titled"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.FORM"))
@@ -263,6 +276,7 @@ async def test_form_submit_draws_the_page_less_footer_and_rekeys_the_flow(
     _, default_hash = build_form_flow(_FORM_SCHEMA)
     assert schema_hash != default_hash  # the submit label re-keys the Flow
 
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-submit"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.FORM"))
@@ -372,6 +386,7 @@ async def test_notify_form_submit_draws_the_page_less_footer(waba_env, fake_redi
     # re-keys the published Flow, so a cache miss creates against the submit-keyed hash and the
     # created Flow JSON's terminal Footer carries the caller's label.
     _, schema_hash = build_form_flow(_FORM_SCHEMA, form_submit="Send it")
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-nf-submit"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.FLOW"))
@@ -434,6 +449,7 @@ async def test_form_send_failure_releases_reservation(waba_env, fake_redis: Fake
 
 async def test_form_create_failure_releases_reservation(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     # A create/publish failure after the reservation frees the pair and raises.
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(response(500, text="graph down"))
 
     with pytest.raises(ChannelDeliveryError, match="HTTP 500"):
@@ -448,6 +464,7 @@ async def test_form_publish_failure_deletes_orphan_draft_and_raises(
     # Create succeeds, publish fails — the stranded draft is deleted by its id and
     # the original publish error surfaces; nothing is cached, the pair is freed.
     _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-1"))
     fake_httpx.responses.append(response(500, text="publish down"))
     fake_httpx.responses.append(_published())  # delete succeeds (its 2xx body is unused)
@@ -467,6 +484,7 @@ async def test_form_orphan_delete_failure_is_logged_and_original_error_raised(
     # Publish fails AND the cleanup delete fails: the delete failure is logged
     # without masking, and the ORIGINAL publish error is the one that surfaces.
     _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-1"))
     fake_httpx.responses.append(response(500, text="publish down"))
     fake_httpx.responses.append(response(500, text="delete down"))
@@ -491,6 +509,7 @@ async def test_form_create_with_validation_errors_refuses_and_deletes_draft(
     import json
 
     errors = [{"error_type": "INVALID_PROPERTY", "message": "id has a digit", "pointer": "/screens/0/id"}]
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(response(200, json={"id": "flow-bad", "validation_errors": errors}))
     fake_httpx.responses.append(_published())  # the cleanup delete (its 2xx body is unused)
 
@@ -500,9 +519,10 @@ async def test_form_create_with_validation_errors_refuses_and_deletes_draft(
     # The full rendered vendor list rides the message.
     assert json.dumps(errors, sort_keys=True, separators=(",", ":")) in str(excinfo.value)
     # Create then delete of the stranded draft — never a publish.
-    assert [call["url"] for call in fake_httpx.calls] == [
-        f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows",
-        "https://graph.facebook.com/v23.0/flow-bad",
+    assert _http_order(fake_httpx) == [
+        ("get", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("delete", "https://graph.facebook.com/v23.0/flow-bad"),
     ]
     assert ("http_delete", "https://graph.facebook.com/v23.0/flow-bad") in fake_httpx.events
     _, schema_hash = build_form_flow(_FORM_SCHEMA)
@@ -514,16 +534,18 @@ async def test_form_clean_create_still_publishes_and_caches(waba_env, fake_redis
     # A create with no validation_errors (an empty array is the clean case) publishes
     # and caches exactly as before — the refusal is scoped to a non-empty list.
     _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(response(200, json={"id": "flow-ok", "validation_errors": []}))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.FORM"))
 
     await WhatsAppChannel().deliver(_form_delivery())
 
-    assert [call["url"] for call in fake_httpx.calls] == [
-        f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows",
-        "https://graph.facebook.com/v23.0/flow-ok/publish",
-        _MESSAGES_URL,
+    assert _http_order(fake_httpx) == [
+        ("get", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", "https://graph.facebook.com/v23.0/flow-ok/publish"),
+        ("post", _MESSAGES_URL),
     ]
     assert fake_redis.store[_flow_cache_key(schema_hash)] == "flow-ok"
 
@@ -590,6 +612,7 @@ async def test_validate_form_schema_hook_refuses_over_long_question(
 
 async def test_form_create_without_id_raises_and_releases(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     # A 2xx flow-create that carries no id is a loud failure (mirrors no-message-id).
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(response(200, json={}))
 
     with pytest.raises(ChannelDeliveryError, match="no flow id"):
@@ -673,6 +696,7 @@ async def test_notify_form_cache_miss_creates_publishes_then_sends(
 ):
     # The one-published-Flow-per-schema resolve is the SAME machinery the form ask uses.
     _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(response(200, json={"id": "flow-new"}))
     fake_httpx.responses.append(response(200, json={"success": True}))
     fake_httpx.responses.append(_accepted("wamid.FLOW"))
@@ -680,10 +704,11 @@ async def test_notify_form_cache_miss_creates_publishes_then_sends(
     ids = await WhatsAppChannel().notify(_form_notification())
 
     assert ids == ["wamid.FLOW"]
-    assert [call["url"] for call in fake_httpx.calls] == [
-        f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows",
-        "https://graph.facebook.com/v23.0/flow-new/publish",
-        _MESSAGES_URL,
+    assert _http_order(fake_httpx) == [
+        ("get", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", "https://graph.facebook.com/v23.0/flow-new/publish"),
+        ("post", _MESSAGES_URL),
     ]
     assert fake_redis.store[_flow_cache_key(schema_hash)] == "flow-new"
 
@@ -854,6 +879,7 @@ async def test_reacting_form_publishes_endpoint_driven_and_caches_its_sidecar(
     flow_json, _hash = build_form_flow(_REACT_SCHEMA, None, {"tier"}, reactions)
     assert flow_json["data_api_version"] == "3.0"
 
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-react"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.R"))
@@ -900,3 +926,394 @@ async def test_reacting_form_without_endpoint_uri_refuses_loudly(
     with pytest.raises(ChannelDeliveryError, match="CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI"):
         await WhatsAppChannel().deliver(_reacting_delivery())
     assert fake_httpx.calls == []
+
+
+# --- Flow resolve: lookup by name on a cache miss, adopt / clean up, one publisher ---------
+
+_GRAPH = "https://graph.facebook.com/v23.0"
+_FLOWS_URL = f"{_GRAPH}/{_WABA_ID}/flows"
+_ENDPOINT_URI = "https://app.example/api/channels/whatsapp/flow-data"
+
+
+def _identity_cache_key(schema_hash: str, endpoint_uri: str | None = None) -> str:
+    return f"channel:whatsapp:flow:{_WABA_ID}:{expected_flow_identity(schema_hash, endpoint_uri)}"
+
+
+def _pending_key(recipient: str = ALLOWED_A) -> str:
+    return f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{recipient}"
+
+
+async def test_form_cache_miss_lists_flows_before_creating(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-1"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    await WhatsAppChannel().deliver(_form_delivery())
+
+    assert _http_order(fake_httpx) == [
+        ("get", _FLOWS_URL),
+        ("post", _FLOWS_URL),
+        ("post", f"{_GRAPH}/flow-1/publish"),
+        ("post", _MESSAGES_URL),
+    ]
+    assert fake_httpx.get_calls[0]["params"] is None  # the first page carries no cursor
+    assert fake_httpx.get_calls[0]["headers"] == {"Authorization": "Bearer test-access-token"}
+    assert fake_httpx.calls[0]["json"]["name"] == expected_flow_name(schema_hash)
+    assert fake_redis.store[_identity_cache_key(schema_hash)] == "flow-1"
+
+
+async def test_form_reuses_published_flow_found_by_name(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # The cache is empty (the store was recreated) while the WABA already holds the Flow under
+    # its name: the plugin adopts that Flow instead of creating a second one Meta would refuse.
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(
+        flow_list_page(
+            listed_flow("flow-other", "tai42-form-someone-else", "PUBLISHED"),
+            listed_flow("flow-live", expected_flow_name(schema_hash), "PUBLISHED"),
+        )
+    )
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    await WhatsAppChannel().deliver(_form_delivery())
+
+    assert _http_order(fake_httpx) == [("get", _FLOWS_URL), ("post", _MESSAGES_URL)]  # no create, no publish
+    assert fake_httpx.calls[0]["json"]["interactive"]["action"]["parameters"]["flow_id"] == "flow-live"
+    assert fake_redis.store[_identity_cache_key(schema_hash)] == "flow-live"
+    assert _identity_cache_key(schema_hash) not in fake_redis.ttls
+
+
+@pytest.mark.parametrize("status", ["THROTTLED", "BLOCKED"])
+async def test_form_adopts_throttled_and_blocked_flow(
+    status: str, waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # An unhealthy-endpoint state is still the plugin's published Flow; Meta lifts it by itself.
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(flow_list_page(listed_flow("flow-held", expected_flow_name(schema_hash), status)))
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    await WhatsAppChannel().deliver(_form_delivery())
+
+    assert _http_order(fake_httpx) == [("get", _FLOWS_URL), ("post", _MESSAGES_URL)]
+    assert fake_httpx.calls[0]["json"]["interactive"]["action"]["parameters"]["flow_id"] == "flow-held"
+    assert fake_redis.store[_identity_cache_key(schema_hash)] == "flow-held"
+
+
+async def test_form_found_draft_is_deleted_then_recreated(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A draft under the name is an orphan whose content its name does not vouch for: it is
+    # deleted, then a fresh Flow is created and published.
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(flow_list_page(listed_flow("flow-draft", expected_flow_name(schema_hash), "DRAFT")))
+    fake_httpx.responses.append(_published())  # the draft delete (its 2xx body is unused)
+    fake_httpx.responses.append(_flow_created("flow-new"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    await WhatsAppChannel().deliver(_form_delivery())
+
+    assert _http_order(fake_httpx) == [
+        ("get", _FLOWS_URL),
+        ("delete", f"{_GRAPH}/flow-draft"),
+        ("post", _FLOWS_URL),
+        ("post", f"{_GRAPH}/flow-new/publish"),
+        ("post", _MESSAGES_URL),
+    ]
+    assert fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]["flow_id"] == "flow-new"
+    assert fake_redis.store[_identity_cache_key(schema_hash)] == "flow-new"
+
+
+async def test_form_found_draft_delete_failure_raises_without_create(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(flow_list_page(listed_flow("flow-draft", expected_flow_name(schema_hash), "DRAFT")))
+    fake_httpx.responses.append(response(500, text="delete down"))
+
+    with pytest.raises(ChannelDeliveryError, match="delete down"):
+        await WhatsAppChannel().deliver(_form_delivery())
+
+    assert _http_order(fake_httpx) == [("get", _FLOWS_URL), ("delete", f"{_GRAPH}/flow-draft")]
+    assert _identity_cache_key(schema_hash) not in fake_redis.store
+    assert _pending_key() not in fake_redis.store
+
+
+async def test_form_deprecated_match_is_logged_and_create_proceeds(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(
+        flow_list_page(listed_flow("flow-retired", expected_flow_name(schema_hash), "DEPRECATED"))
+    )
+    fake_httpx.responses.append(_flow_created("flow-new"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    with caplog.at_level(logging.WARNING, logger="tai42_channel_whatsapp.channel.forms"):
+        await WhatsAppChannel().deliver(_form_delivery())
+
+    assert _http_order(fake_httpx) == [
+        ("get", _FLOWS_URL),
+        ("post", _FLOWS_URL),
+        ("post", f"{_GRAPH}/flow-new/publish"),
+        ("post", _MESSAGES_URL),
+    ]
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "flow-retired" in warnings[0].getMessage()
+    assert fake_redis.store[_identity_cache_key(schema_hash)] == "flow-new"
+
+
+async def test_form_create_clash_after_lookup_propagates_meta_error(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The listing found nothing, yet the create clashes (a race, or a name Meta still reserves):
+    # Meta's own refusal surfaces unchanged and is never interpreted into another path.
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(
+        response(
+            400,
+            json={
+                "error": {
+                    "message": "Invalid parameter",
+                    "type": "OAuthException",
+                    "code": 100,
+                    "error_subcode": 4016019,
+                    "error_user_title": "Flow name is not unique",
+                    "error_user_msg": "Flow name should be unique within one WhatsApp Business Account. "
+                    "Please select another name for your Flow.",
+                }
+            },
+        )
+    )
+
+    with pytest.raises(ChannelDeliveryError, match="Flow name is not unique") as excinfo:
+        await WhatsAppChannel().deliver(_form_delivery())
+
+    assert excinfo.value.retryable is False
+    assert _http_order(fake_httpx) == [("get", _FLOWS_URL), ("post", _FLOWS_URL)]  # no publish, no delete
+    assert _identity_cache_key(schema_hash) not in fake_redis.store
+    assert _pending_key() not in fake_redis.store
+
+
+async def test_form_two_live_matches_raise_ambiguous(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    name = expected_flow_name(schema_hash)
+    fake_httpx.get_responses.append(
+        flow_list_page(listed_flow("flow-a", name, "PUBLISHED"), listed_flow("flow-b", name, "THROTTLED"))
+    )
+
+    with pytest.raises(ChannelDeliveryError, match=r"flow-a.*flow-b"):
+        await WhatsAppChannel().deliver(_form_delivery())
+
+    assert _http_order(fake_httpx) == [("get", _FLOWS_URL)]  # no create
+    assert _identity_cache_key(schema_hash) not in fake_redis.store
+    assert _pending_key() not in fake_redis.store
+
+
+async def test_form_unknown_flow_status_raises(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(
+        flow_list_page(listed_flow("flow-odd", expected_flow_name(schema_hash), "ARCHIVED"))
+    )
+
+    with pytest.raises(ChannelDeliveryError, match=r"flow-odd.*ARCHIVED"):
+        await WhatsAppChannel().deliver(_form_delivery())
+
+    assert _http_order(fake_httpx) == [("get", _FLOWS_URL)]
+    assert _identity_cache_key(schema_hash) not in fake_redis.store
+
+
+async def test_form_list_pagination_follows_after_cursor(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # Pages are walked by the ``after`` cursor on the plugin's own URL (never the vendor's
+    # ``next`` URL, which would carry the Bearer token wherever it points) until ``next`` is gone.
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(
+        flow_list_page(listed_flow("flow-other", "tai42-form-other", "PUBLISHED"), after="c1", more=True)
+    )
+    fake_httpx.get_responses.append(
+        flow_list_page(listed_flow("flow-live", expected_flow_name(schema_hash), "PUBLISHED"), after="c2")
+    )
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    await WhatsAppChannel().deliver(_form_delivery())
+
+    assert [call["url"] for call in fake_httpx.get_calls] == [_FLOWS_URL, _FLOWS_URL]
+    assert fake_httpx.get_calls[0]["params"] is None
+    assert fake_httpx.get_calls[1]["params"] == {"after": "c1"}
+    assert fake_httpx.calls[0]["json"]["interactive"]["action"]["parameters"]["flow_id"] == "flow-live"
+    assert fake_redis.store[_identity_cache_key(schema_hash)] == "flow-live"
+
+
+async def test_form_list_next_without_after_cursor_raises(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.get_responses.append(flow_list_page(more=True))
+
+    with pytest.raises(ChannelDeliveryError, match="cursor"):
+        await WhatsAppChannel().deliver(_form_delivery())
+
+    assert _http_order(fake_httpx) == [("get", _FLOWS_URL)]
+    assert _pending_key() not in fake_redis.store
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(["not", "an", "object"], id="non-dict-body"),
+        pytest.param({"data": {"id": "flow-1"}, "paging": {}}, id="data-not-a-list"),
+        pytest.param({"data": [{"id": "flow-1", "name": "tai42-form-x"}], "paging": {}}, id="item-missing-status"),
+        pytest.param({"data": [], "paging": ["next"]}, id="paging-not-an-object"),
+    ],
+)
+async def test_form_unreadable_flow_list_raises(body, waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.get_responses.append(response(200, json=body))
+
+    with pytest.raises(ChannelDeliveryError, match="flow list"):
+        await WhatsAppChannel().deliver(_form_delivery())
+
+    assert _http_order(fake_httpx) == [("get", _FLOWS_URL)]  # no create
+    assert _pending_key() not in fake_redis.store
+
+
+async def test_reacting_form_identity_covers_endpoint_uri(
+    reacting_env, monkeypatch: pytest.MonkeyPatch, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A published Flow's endpoint cannot be changed, so the endpoint is part of its identity:
+    # the same reacting form under another data-endpoint URI is another Flow, by name and by key.
+    from tai42_kit.settings import reset_all_settings
+
+    reactions = {"field_changed": ["tier"], "page_advanced": [], "submitted": True, "choices": ["tier"]}
+    _, react_hash = build_form_flow(_REACT_SCHEMA, None, set(), reactions)  # the delivery carries no per-send options
+    other_uri = "https://other.example/api/channels/whatsapp/flow-data"
+    for flow_id in ("flow-one", "flow-two"):
+        fake_httpx.get_responses.append(flow_list_page())
+        fake_httpx.responses.append(_flow_created(flow_id))
+        fake_httpx.responses.append(_published())
+        fake_httpx.responses.append(_accepted(f"wamid.{flow_id}"))
+
+    await WhatsAppChannel().deliver(_reacting_delivery())
+    monkeypatch.setenv("CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI", other_uri)
+    reset_all_settings()
+    await WhatsAppChannel().deliver(_reacting_delivery(interaction_id="int-2", recipient=ALLOWED_B))
+
+    creates = [call["json"] for call in fake_httpx.calls if call["url"] == _FLOWS_URL]
+    assert [create["name"] for create in creates] == [
+        expected_flow_name(react_hash, _ENDPOINT_URI),
+        expected_flow_name(react_hash, other_uri),
+    ]
+    assert [create["endpoint_uri"] for create in creates] == [_ENDPOINT_URI, other_uri]
+    assert fake_redis.store[_identity_cache_key(react_hash, _ENDPOINT_URI)] == "flow-one"
+    assert fake_redis.store[_identity_cache_key(react_hash, other_uri)] == "flow-two"
+    # The endpoint-less identity of the same hash is a third, distinct name.
+    assert expected_flow_name(react_hash) not in {create["name"] for create in creates}
+
+
+async def test_concurrent_first_sends_publish_one_flow(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # Two first sends of one form race on a cold cache: the resolve lock lets exactly one list,
+    # create and publish; the other re-reads the cache under the lock and reuses that Flow.
+    import asyncio
+
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-1"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.ONE"))
+    fake_httpx.responses.append(_accepted("wamid.TWO"))
+
+    await asyncio.gather(
+        WhatsAppChannel().deliver(_form_delivery(interaction_id="int-1", recipient=ALLOWED_A)),
+        WhatsAppChannel().deliver(_form_delivery(interaction_id="int-2", recipient=ALLOWED_B)),
+    )
+
+    assert _http_order(fake_httpx) == [
+        ("get", _FLOWS_URL),
+        ("post", _FLOWS_URL),
+        ("post", f"{_GRAPH}/flow-1/publish"),
+        ("post", _MESSAGES_URL),
+        ("post", _MESSAGES_URL),
+    ]
+    sends = [call["json"] for call in fake_httpx.calls if call["url"] == _MESSAGES_URL]
+    assert [send["interactive"]["action"]["parameters"]["flow_id"] for send in sends] == ["flow-1", "flow-1"]
+    lock_key = f"channel:whatsapp:flow-lock:{_WABA_ID}:{expected_flow_identity(schema_hash)}"
+    lock_events = [event for event in fake_redis.events if event[0] in ("redis_lock", "redis_unlock")]
+    assert lock_events == [
+        ("redis_lock", lock_key),
+        ("redis_unlock", lock_key),
+        ("redis_lock", lock_key),
+        ("redis_unlock", lock_key),
+    ]
+
+
+async def test_resolve_lock_timeout_raises_retryable(
+    waba_env, monkeypatch: pytest.MonkeyPatch, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # Another send holds the resolve lock past the wait: a retryable delivery error, no Graph call.
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("CHANNEL_WHATSAPP_HTTP_TIMEOUT_SECONDS", "0.01")
+    reset_all_settings()
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    lock_key = f"channel:whatsapp:flow-lock:{_WABA_ID}:{expected_flow_identity(schema_hash)}"
+    assert await fake_redis.lock(lock_key).acquire()  # held by the other send
+
+    with pytest.raises(ChannelDeliveryError, match="publishing the WhatsApp Flow") as excinfo:
+        await WhatsAppChannel().deliver(_form_delivery())
+
+    assert excinfo.value.retryable is True
+    assert fake_redis.locks[-1].timeout == pytest.approx(0.06)
+    assert fake_redis.locks[-1].blocking_timeout == pytest.approx(0.06)
+    assert _http_order(fake_httpx) == []
+    assert _pending_key() not in fake_redis.store
+
+
+async def test_resolve_lock_expired_before_release_logs_and_result_stands(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_redis.lock_expired = True
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-1"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    with caplog.at_level(logging.ERROR, logger="tai42_channel_whatsapp.correlation"):
+        await WhatsAppChannel().deliver(_form_delivery())
+
+    assert fake_redis.store[_identity_cache_key(schema_hash)] == "flow-1"
+    assert fake_httpx.calls[-1]["url"] == _MESSAGES_URL
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "expired before release" in errors[0].getMessage()
+
+
+async def test_form_list_walk_past_the_page_bound_raises(
+    waba_env, monkeypatch: pytest.MonkeyPatch, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The walk's end is the vendor's ``paging.next``; a list that never ends is a loud bound, not a hang.
+    monkeypatch.setattr("tai42_channel_whatsapp.client._MAX_FLOW_LIST_PAGES", 2)
+    fake_httpx.get_responses.append(flow_list_page(after="c1", more=True))
+    fake_httpx.get_responses.append(flow_list_page(after="c2", more=True))
+
+    with pytest.raises(ChannelDeliveryError, match="runs past 2 pages"):
+        await WhatsAppChannel().deliver(_form_delivery())
+
+    assert _http_order(fake_httpx) == [("get", _FLOWS_URL), ("get", _FLOWS_URL)]
+    assert _pending_key() not in fake_redis.store
+
+
+@pytest.mark.parametrize("step", ["acquire", "release"])
+async def test_resolve_lock_failure_raises_delivery_error(
+    step: str, waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A lock failure other than an expired release surfaces as the channel's own delivery error.
+    from redis.exceptions import LockError
+
+    setattr(fake_redis, f"lock_{step}_error", LockError("lock trouble"))
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-1"))
+    fake_httpx.responses.append(_published())
+
+    with pytest.raises(ChannelDeliveryError, match=f"{step[:-1]}ing the WhatsApp Flow resolve lock .*lock trouble"):
+        await WhatsAppChannel().deliver(_form_delivery())
+
+    assert _pending_key() not in fake_redis.store

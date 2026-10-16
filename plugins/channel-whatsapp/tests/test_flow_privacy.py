@@ -32,6 +32,10 @@ from .conftest import (
     FakeHttpx,
     FakeRedis,
     _accepted,
+    expected_flow_identity,
+    expected_flow_name,
+    flow_list_page,
+    listed_flow,
     make_delivery,
     response,
 )
@@ -78,8 +82,8 @@ def _published() -> httpx.Response:
     return response(200, json={"success": True})
 
 
-def _flow_cache_key(schema_hash: str) -> str:
-    return f"channel:whatsapp:flow:{_WABA_ID}:{schema_hash}"
+def _flow_cache_key(schema_hash: str, endpoint_uri: str | None = None) -> str:
+    return f"channel:whatsapp:flow:{_WABA_ID}:{expected_flow_identity(schema_hash, endpoint_uri)}"
 
 
 def _form_delivery(**overrides):
@@ -97,6 +101,7 @@ async def test_same_form_to_different_recipients_publishes_one_flow(
     # Two form asks of the SAME form to DIFFERENT recipients (different recipient wa_id and
     # interaction id). The first is a cache miss (create + publish + send); the second a
     # cache hit (send only). create_flow must run exactly ONCE — never a new Flow per send.
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-1"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.ONE"))
@@ -107,6 +112,7 @@ async def test_same_form_to_different_recipients_publishes_one_flow(
 
     urls = [call["url"] for call in fake_httpx.calls]
     assert urls.count(_FLOWS_URL) == 1  # exactly one create across the two sends
+    assert [call["url"] for call in fake_httpx.get_calls] == [_FLOWS_URL]  # one lookup, on the miss
     assert urls == [_FLOWS_URL, "https://graph.facebook.com/v23.0/flow-1/publish", _MESSAGES_URL, _MESSAGES_URL]
 
 
@@ -117,6 +123,7 @@ async def test_notify_same_form_to_different_recipients_publishes_one_flow(
     # the same form to different recipients publish one Flow, then a send each.
     from tai42_contract.channels import ChannelNotification
 
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-nf"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.ONE"))
@@ -127,6 +134,7 @@ async def test_notify_same_form_to_different_recipients_publishes_one_flow(
 
     urls = [call["url"] for call in fake_httpx.calls]
     assert urls.count(_FLOWS_URL) == 1
+    assert [call["url"] for call in fake_httpx.get_calls] == [_FLOWS_URL]
     assert urls == [_FLOWS_URL, "https://graph.facebook.com/v23.0/flow-nf/publish", _MESSAGES_URL, _MESSAGES_URL]
 
 
@@ -147,6 +155,7 @@ async def test_published_flow_carries_no_recipient_identifier(waba_env, fake_red
     # interaction id (the flow token). Neither may appear in the published Flow name or flow_json.
     recipient_phone = ALLOWED_A
     interaction_id = "int-1"
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-1"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.FORM"))
@@ -162,7 +171,7 @@ async def test_published_flow_carries_no_recipient_identifier(waba_env, fake_red
     # pure builder output, which the recipient never touches.
     flow_json, schema_hash = build_form_flow(_SCHEMA)
     create_body = json.loads(artefact)
-    assert create_body["name"] == f"tai42-form-{schema_hash}"
+    assert create_body["name"] == expected_flow_name(schema_hash)
     assert recipient_phone not in create_body["name"]
     assert json.loads(create_body["flow_json"]) == flow_json
 
@@ -195,6 +204,7 @@ async def test_published_reacting_flow_carries_no_recipient_identifier(
     recipient_phone = ALLOWED_A
     interaction_id = "int-1"
     reactions = FormReactions(field_changed=["tier"], submitted=True, choices=["tier"])
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-react"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.R"))
@@ -225,6 +235,7 @@ async def test_notify_two_different_form_tags_publish_one_flow(waba_env, fake_re
     # the SAME form carrying DIFFERENT tags resolve one cached Flow id, so create_flow runs ONCE.
     from tai42_contract.channels import ChannelNotification
 
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-nf"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.ONE"))
@@ -239,6 +250,7 @@ async def test_notify_two_different_form_tags_publish_one_flow(waba_env, fake_re
 
     urls = [call["url"] for call in fake_httpx.calls]
     assert urls.count(_FLOWS_URL) == 1
+    assert [call["url"] for call in fake_httpx.get_calls] == [_FLOWS_URL]
     assert urls == [_FLOWS_URL, "https://graph.facebook.com/v23.0/flow-nf/publish", _MESSAGES_URL, _MESSAGES_URL]
 
 
@@ -249,6 +261,7 @@ async def test_notify_form_tag_rides_the_token_not_the_published_flow(
     # flow token (its 4th segment) and NEVER appear in the published Flow artefact.
     from tai42_contract.channels import ChannelNotification
 
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-nf"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.NF"))
@@ -280,6 +293,7 @@ async def test_published_flow_with_prefill_and_options_carries_no_recipient_iden
     pages = [FormPage(title="Plan", fields=["tier"]), FormPage(title="Say", fields=["note"])]
     recipient_phone = ALLOWED_A
     interaction_id = "int-1"
+    fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-multi"))
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.ONE"))
@@ -295,3 +309,22 @@ async def test_published_flow_with_prefill_and_options_carries_no_recipient_iden
     assert "prefill-xyzzy" not in artefact
     send_data = fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]["flow_action_payload"]["data"]
     assert send_data["note__init"] == "prefill-xyzzy"
+
+
+async def test_notify_reuses_published_flow_found_by_name(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # The ask-less notify door resolves through the same lookup: with the cache empty, a
+    # PUBLISHED Flow already listed under the form's name is adopted, never re-created.
+    from tai42_contract.channels import ChannelNotification
+
+    _, schema_hash = build_form_flow(_SCHEMA)
+    fake_httpx.get_responses.append(
+        flow_list_page(listed_flow("flow-live", expected_flow_name(schema_hash), "PUBLISHED"))
+    )
+    fake_httpx.responses.append(_accepted("wamid.NF"))
+
+    await WhatsAppChannel().notify(ChannelNotification(message="Fill this.", recipient=ALLOWED_A, schema=_SCHEMA))
+
+    assert [call["url"] for call in fake_httpx.get_calls] == [_FLOWS_URL]
+    assert [call["url"] for call in fake_httpx.calls] == [_MESSAGES_URL]  # no create, no publish
+    assert fake_httpx.calls[0]["json"]["interactive"]["action"]["parameters"]["flow_id"] == "flow-live"
+    assert fake_redis.store[_flow_cache_key(schema_hash)] == "flow-live"

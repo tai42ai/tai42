@@ -663,10 +663,12 @@ class FakeWhatsApp:
     Serves ``POST /{phone_number_id}/messages`` (minting a ``wamid`` for EVERY message
     type — text, interactive buttons/list/flow, image, template — and recording the full
     JSON ``payload`` alongside the plain-text ``body``), recording the ``phone_number_id``
-    the bridge sent FROM. It also serves the two Flow-lifecycle graph endpoints a form
-    delivery hits when the schema is uncached — ``POST /{waba_id}/flows`` (minting a flow
-    id, recorded in ``flows``) and ``POST /{flow_id}/publish`` (recorded in
-    ``published_flows``). Any other path answers a loud 500. The Cloud API has no boot-time
+    the bridge sent FROM. It also serves the three Flow-lifecycle graph endpoints a form
+    delivery hits when its Flow is uncached — ``GET /{waba_id}/flows`` (one page listing
+    every recorded flow of that WABA, ``PUBLISHED`` once published, else ``DRAFT``),
+    ``POST /{waba_id}/flows`` (minting a flow id, recorded in ``flows``) and
+    ``POST /{flow_id}/publish`` (recorded in ``published_flows``). Any other path answers a
+    loud 500. The Cloud API has no boot-time
     call (the webhook is configured in the Meta dashboard), so nothing is served for
     startup. The builders synthesize the requests aimed at the SUT's own
     ``/api/channels/whatsapp/inbound`` door: the GET verify handshake, a genuinely
@@ -677,9 +679,9 @@ class FakeWhatsApp:
         self.host = host
         self.port = allocate_port()
         self.sent: list[dict[str, Any]] = []
-        # The Flows created / published on the form-delivery path (schema uncached):
+        # The Flows created / published on the form-delivery path (Flow uncached):
         # ``flows`` records each create's ``{waba_id, name, flow_json, id}``,
-        # ``published_flows`` the ids the publish step confirmed.
+        # ``published_flows`` the ids the publish step confirmed. The flow list serves both.
         self.flows: list[dict[str, Any]] = []
         self.published_flows: list[str] = []
         # Per-``media_id`` inbound-media config for the ingest suites. ``media_meta`` holds the
@@ -931,6 +933,23 @@ class FakeWhatsApp:
                     "messages": [{"id": wamid}],
                 }
             )
+
+        @app.get("/{waba_id}/flows")
+        async def list_flows(waba_id: str) -> JSONResponse:
+            # Meta's List Flows answer as one last page (no ``paging.next``).
+            data = [
+                {
+                    "id": flow["id"],
+                    "name": flow["name"],
+                    "status": "PUBLISHED" if flow["id"] in self.published_flows else "DRAFT",
+                    "categories": ["OTHER"],
+                    "validation_errors": [],
+                }
+                for flow in self.flows
+                if flow["waba_id"] == waba_id
+            ]
+            cursors = {"before": "cursor-first", "after": "cursor-last"} if data else {}
+            return JSONResponse({"data": data, "paging": {"cursors": cursors}})
 
         @app.post("/{waba_id}/flows")
         async def create_flow(waba_id: str, request: Request) -> JSONResponse:
