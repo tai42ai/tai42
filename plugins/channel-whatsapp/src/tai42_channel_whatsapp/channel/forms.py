@@ -303,16 +303,21 @@ def _form_values_and_options(
 ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     """The form's per-send ``values`` and ``options`` as plain JSON.
 
-    Each option is ``{"value", "label"?}`` (label omitted when absent). Empty when
-    the send carried no data. Shared by the form ask and the ask-less form
-    notification, whose ``data`` field is the identical shape.
+    Each option is ``{"value", "label"?, "description"?}`` (``label`` and the second-line
+    ``description`` each omitted when absent). Empty when the send carried no data.
+    Shared by the form ask and the ask-less form notification, whose ``data`` field is
+    the identical shape.
     """
     if send.data is None:
         return {}, {}
     options: dict[str, list[dict[str, Any]]] = {}
     for name, choices in send.data.options.items():
         options[name] = [
-            {"value": choice.value, **({"label": choice.label} if choice.label is not None else {})}
+            {
+                "value": choice.value,
+                **({"label": choice.label} if choice.label is not None else {}),
+                **({"description": choice.description} if choice.description is not None else {}),
+            }
             for choice in choices
         ]
     return dict(send.data.values), options

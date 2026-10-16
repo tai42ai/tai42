@@ -85,74 +85,115 @@ def _attr(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _string_choices(prop: dict[str, Any], options: list[dict[str, Any]] | None) -> list[tuple[str, str]] | None:
-    # The ``(value, label)`` choice pairs for a string property: the per-send option list when
-    # given (it replaces the enum for this send), else the property's own ``enum``, else None
-    # (a free-text string).
+def _second_line(text: Any) -> str | None:
+    # A non-blank secondary line (a field's or an option's ``description``), else None. A
+    # blank/whitespace-only value counts as absent — the same rule a blank ``title`` gets.
+    return text if isinstance(text, str) and text.strip() else None
+
+
+def _string_choices(
+    prop: dict[str, Any], options: list[dict[str, Any]] | None
+) -> list[tuple[str, str, str | None]] | None:
+    # The ``(value, label, description)`` choice triples for a string property: the per-send option
+    # list when given (it replaces the enum for this send), else the property's own ``enum``, else
+    # None (a free-text string). A schema ``enum`` carries no labels or second lines.
     if options is not None:
-        return [(str(option["value"]), str(option.get("label") or option["value"])) for option in options]
+        return [
+            (str(option["value"]), str(option.get("label") or option["value"]), _second_line(option.get("description")))
+            for option in options
+        ]
     enum = prop.get("enum")
     if enum is not None:
-        return [(str(choice), str(choice)) for choice in enum]
+        return [(str(choice), str(choice), None) for choice in enum]
     return None
 
 
-def _array_choices(prop: dict[str, Any], options: list[dict[str, Any]] | None) -> list[tuple[str, str]] | None:
-    # The choice pairs for an array-of-strings property: the per-send option list, else the
+def _array_choices(
+    prop: dict[str, Any], options: list[dict[str, Any]] | None
+) -> list[tuple[str, str, str | None]] | None:
+    # The choice triples for an array-of-strings property: the per-send option list, else the
     # string ``items`` enum, else None (a free list the human types one entry per line).
     if options is not None:
-        return [(str(option["value"]), str(option.get("label") or option["value"])) for option in options]
+        return [
+            (str(option["value"]), str(option.get("label") or option["value"]), _second_line(option.get("description")))
+            for option in options
+        ]
     items = prop.get("items")
     enum = items.get("enum") if isinstance(items, dict) else None
     if isinstance(enum, list):
-        return [(str(choice), str(choice)) for choice in enum]
+        return [(str(choice), str(choice), None) for choice in enum]
     return None
 
 
+def _option_text(label: str, description: str | None) -> str:
+    # A single-line option caption for a control that has no second-line slot (a ``<select>``
+    # row): the second line is folded onto the label after an em dash so its content is never
+    # dropped. A control that CAN draw a second line (radio/checkbox/chip) uses ``description`` directly.
+    if description is None:
+        return html.escape(label)
+    return f"{html.escape(label)} — {html.escape(description)}"
+
+
 def _string_select(
-    esc_name: str, req_attr: str, choices: list[tuple[str, str]], value: Any, placeholder: str | None = None
+    esc_name: str,
+    req_attr: str,
+    choices: list[tuple[str, str, str | None]],
+    value: Any,
+    placeholder: str | None = None,
 ) -> str:
-    # A ``<select>`` over ``(value, label)`` pairs: a leading blank option lets an
-    # optional select stay empty and forces a required one to a real choice on submit.
-    # Its label is the caller's ``wording.form.fields[name].choice_label`` when set, else a dash.
+    # A ``<select>`` over ``(value, label, description)`` triples: a leading blank option lets an
+    # optional select stay empty and forces a required one to a real choice on submit. Its label
+    # is the caller's ``wording.form.fields[name].choice_label`` when set, else a dash. A native
+    # ``<option>`` has no second-line slot, so a description folds onto the option text.
     blank_label = html.escape(placeholder) if placeholder else "—"
     parts = [f'<option value="">{blank_label}</option>']
-    for opt_value, opt_label in choices:
+    for opt_value, opt_label, opt_desc in choices:
         selected = " selected" if value is not None and str(value) == opt_value else ""
-        parts.append(f'<option value="{_attr(opt_value)}"{selected}>{html.escape(opt_label)}</option>')
+        parts.append(f'<option value="{_attr(opt_value)}"{selected}>{_option_text(opt_label, opt_desc)}</option>')
     return f'<select data-field="{esc_name}" data-kind="string"{req_attr}>' + "".join(parts) + "</select>"
 
 
-def _string_radio(esc_name: str, req_attr: str, choices: list[tuple[str, str]], value: Any) -> str:
-    # A radio group over ``(value, label)`` pairs — the short-list control. ``required`` on
-    # every radio makes the browser demand one selection in the group.
+def _choice_second_line(description: str | None) -> str:
+    # The ``<small>`` second line under a radio/checkbox/chip option label, or empty when absent.
+    return f'<small class="choice-desc">{html.escape(description)}</small>' if description is not None else ""
+
+
+def _string_radio(esc_name: str, req_attr: str, choices: list[tuple[str, str, str | None]], value: Any) -> str:
+    # A radio group over ``(value, label, description)`` triples — the short-list control.
+    # ``required`` on every radio makes the browser demand one selection in the group; a
+    # description renders as a ``<small>`` second line under the option label.
     parts = []
-    for opt_value, opt_label in choices:
+    for opt_value, opt_label, opt_desc in choices:
         checked = " checked" if value is not None and str(value) == opt_value else ""
         parts.append(
             f'<label class="choice"><input type="radio" name="{esc_name}" data-field="{esc_name}" '
-            f'data-kind="string" value="{_attr(opt_value)}"{checked}{req_attr}> {html.escape(opt_label)}</label>'
+            f'data-kind="string" value="{_attr(opt_value)}"{checked}{req_attr}> {html.escape(opt_label)}'
+            f"{_choice_second_line(opt_desc)}</label>"
         )
     return "".join(parts)
 
 
-def _checkbox_group(esc_name: str, choices: list[tuple[str, str]], value: Any) -> str:
+def _checkbox_group(esc_name: str, choices: list[tuple[str, str, str | None]], value: Any) -> str:
     # A checkbox group for an array-of-strings (multiple-choice) field: each checked box
-    # contributes its value to the submitted list.
+    # contributes its value to the submitted list; a description renders as a ``<small>`` second
+    # line under the option label.
     selected = {str(item) for item in value} if isinstance(value, list) else set()
     parts = []
-    for opt_value, opt_label in choices:
+    for opt_value, opt_label, opt_desc in choices:
         checked = " checked" if opt_value in selected else ""
         parts.append(
             f'<label class="choice"><input type="checkbox" data-field="{esc_name}" data-kind="array" '
-            f'value="{_attr(opt_value)}"{checked}> {html.escape(opt_label)}</label>'
+            f'value="{_attr(opt_value)}"{checked}> {html.escape(opt_label)}{_choice_second_line(opt_desc)}</label>'
         )
     return "".join(parts)
 
 
-def _chip_group(esc_name: str, req_attr: str, choices: list[tuple[str, str]], value: Any, *, multi: bool) -> str:
-    # A choice drawn as a chip grid: tap-to-select pills over ``(value, label)`` pairs. Each pill
-    # is a ``label.choice.chip`` whose input is hidden by the page CSS and tinted when checked. A
+def _chip_group(
+    esc_name: str, req_attr: str, choices: list[tuple[str, str, str | None]], value: Any, *, multi: bool
+) -> str:
+    # A choice drawn as a chip grid: tap-to-select pills over ``(value, label, description)``
+    # triples. Each pill is a ``label.choice.chip`` whose input is hidden by the page CSS and tinted
+    # when checked; a description renders as a ``<small>`` second line inside the pill. A
     # string chooses ONE (radios, ``data-kind="string"``), an array of strings several (checkboxes,
     # ``data-kind="array"``). The ``choice`` class and the ``data-field``/``data-kind`` markup match
     # the radio/checkbox group, so the submit script and its ``rebuildChoices`` read a chip field
@@ -162,7 +203,7 @@ def _chip_group(esc_name: str, req_attr: str, choices: list[tuple[str, str]], va
     name_attr = "" if multi else f' name="{esc_name}"'
     selected = {str(item) for item in value} if multi and isinstance(value, list) else set()
     parts = []
-    for opt_value, opt_label in choices:
+    for opt_value, opt_label, opt_desc in choices:
         if multi:
             checked = " checked" if opt_value in selected else ""
             req = ""
@@ -171,7 +212,8 @@ def _chip_group(esc_name: str, req_attr: str, choices: list[tuple[str, str]], va
             req = req_attr
         parts.append(
             f'<label class="choice chip"><input type="{input_type}"{name_attr} data-field="{esc_name}" '
-            f'data-kind="{kind}" value="{_attr(opt_value)}"{checked}{req}> {html.escape(opt_label)}</label>'
+            f'data-kind="{kind}" value="{_attr(opt_value)}"{checked}{req}> {html.escape(opt_label)}'
+            f"{_choice_second_line(opt_desc)}</label>"
         )
     return "".join(parts)
 
@@ -204,7 +246,8 @@ def _textarea_control(esc_name: str, req_attr: str, prop: dict[str, Any], value:
 def _date_range_group(start: str, end: str, field_by_name: dict[str, tuple[dict[str, Any], bool]], values: Any) -> str:
     # A drawable ``rangeStart`` pair as ONE ``<fieldset>``: the two native date inputs side by side,
     # each keeping its own ``data-field``, bounds, unavailable days, ``required`` and prefilled
-    # value, under a legend naming both ends. The submit script collects the two ``data-field``
+    # value and its own second line (its schema ``description``) under its label, under a legend
+    # naming both ends. The submit script collects the two ``data-field``
     # strings exactly as it does two separate date inputs — the answer stays the two date strings.
     start_prop, start_required = field_by_name[start]
     end_prop, end_required = field_by_name[end]
@@ -213,7 +256,11 @@ def _date_range_group(start: str, end: str, field_by_name: dict[str, tuple[dict[
     start_input = _date_input(_attr(start), " required" if start_required else "", start_prop, values.get(start))
     end_input = _date_input(_attr(end), " required" if end_required else "", end_prop, values.get(end))
     legend = f"{start_label} {chr(0x2013)} {end_label}"  # an en dash between the two end labels
-    inner = f"<label>{start_label}<br>{start_input}</label><label>{end_label}<br>{end_input}</label>"
+    start_hint = _field_hint(_second_line(start_prop.get("description")))
+    end_hint = _field_hint(_second_line(end_prop.get("description")))
+    inner = (
+        f"<label>{start_label}<br>{start_hint}{start_input}</label><label>{end_label}<br>{end_hint}{end_input}</label>"
+    )
     return f'<fieldset class="daterange"><legend>{legend}</legend>{inner}</fieldset>'
 
 
@@ -265,14 +312,30 @@ def _date_input(esc_name: str, req_attr: str, prop: dict[str, Any], value: Any) 
     return f'<input data-field="{esc_name}" data-kind="string" type="date"{bounds}{val_attr}{req_attr}>'
 
 
-def _labelled(esc_label: str, control: str, *, grouped: bool, group_attr: str = "", fieldset_class: str = "") -> str:
+def _field_hint(hint: str | None) -> str:
+    # A field's second line (its schema ``description``) as a ``<small class="hint">``, or empty.
+    return f'<small class="hint">{html.escape(hint)}</small>' if hint is not None else ""
+
+
+def _labelled(
+    esc_label: str,
+    control: str,
+    *,
+    grouped: bool,
+    group_attr: str = "",
+    fieldset_class: str = "",
+    hint: str | None = None,
+) -> str:
     # Wrap a control in its label — a ``<fieldset>``/``<legend>`` for a radio/checkbox/chip group
     # (one label cannot own several inputs), a ``<label>`` for a single control. ``fieldset_class``
-    # names the group's style (``chips`` for a chip grid) so the page CSS can draw it as pills.
+    # names the group's style (``chips`` for a chip grid) so the page CSS can draw it as pills. A
+    # field's second line (its schema ``description``) renders as a ``<small class="hint">``
+    # between the label text and the control.
+    hint_html = _field_hint(hint)
     if grouped:
         cls = f' class="{fieldset_class}"' if fieldset_class else ""
-        return f"<fieldset{cls}{group_attr}><legend>{esc_label}</legend>{control}</fieldset>"
-    return f"<label>{esc_label}<br>{control}</label>"
+        return f"<fieldset{cls}{group_attr}><legend>{esc_label}</legend>{hint_html}{control}</fieldset>"
+    return f"<label>{esc_label}<br>{hint_html}{control}</label>"
 
 
 def _render_array_field(
@@ -283,9 +346,11 @@ def _render_array_field(
     is_required: bool,
     value: Any,
     options: list[dict[str, Any]] | None,
+    hint: str | None,
 ) -> str:
     # An array-of-strings property: a chip grid (``control: chips``) or a checkbox group over its
-    # choices, else a one-entry-per-line free text area when it declares none.
+    # choices, else a one-entry-per-line free text area when it declares none. ``hint`` is the
+    # field's second line, drawn under its label.
     choices = _array_choices(prop, options)
     if choices is not None:
         group_attr = ' data-array-required="1"' if is_required else ""
@@ -296,11 +361,14 @@ def _render_array_field(
                 grouped=True,
                 group_attr=group_attr,
                 fieldset_class="chips",
+                hint=hint,
             )
-        return _labelled(esc_label, _checkbox_group(esc_name, choices, value), grouped=True, group_attr=group_attr)
+        return _labelled(
+            esc_label, _checkbox_group(esc_name, choices, value), grouped=True, group_attr=group_attr, hint=hint
+        )
     text = "\n".join(str(item) for item in value) if isinstance(value, list) else ""
     control = f'<textarea data-field="{esc_name}" data-kind="arraytext"{req_attr}>{html.escape(text)}</textarea>'
-    return _labelled(esc_label, control, grouped=False)
+    return _labelled(esc_label, control, grouped=False, hint=hint)
 
 
 def _render_string_field(
@@ -310,10 +378,12 @@ def _render_string_field(
     prop: dict[str, Any],
     value: Any,
     options: list[dict[str, Any]] | None,
+    hint: str | None,
     choice_label: str | None = None,
 ) -> str:
     # A string property: a choice (chips / radio group / select), a multi-line text area
     # (``control: textarea``), a native date input, or a plain text input keyed by its inputMode.
+    # ``hint`` is the field's second line, drawn under its label.
     choices = _string_choices(prop, options)
     if choices is not None:
         if prop.get("control") == FormControl.CHIPS:
@@ -322,19 +392,22 @@ def _render_string_field(
                 _chip_group(esc_name, req_attr, choices, value, multi=False),
                 grouped=True,
                 fieldset_class="chips",
+                hint=hint,
             )
         if len(choices) <= RADIO_OPTION_THRESHOLD:
-            return _labelled(esc_label, _string_radio(esc_name, req_attr, choices, value), grouped=True)
-        return _labelled(esc_label, _string_select(esc_name, req_attr, choices, value, choice_label), grouped=False)
+            return _labelled(esc_label, _string_radio(esc_name, req_attr, choices, value), grouped=True, hint=hint)
+        return _labelled(
+            esc_label, _string_select(esc_name, req_attr, choices, value, choice_label), grouped=False, hint=hint
+        )
     if prop.get("control") == FormControl.TEXTAREA:
-        return _labelled(esc_label, _textarea_control(esc_name, req_attr, prop, value), grouped=False)
+        return _labelled(esc_label, _textarea_control(esc_name, req_attr, prop, value), grouped=False, hint=hint)
     if prop.get("format") == "date":
-        return _labelled(esc_label, _date_input(esc_name, req_attr, prop, value), grouped=False)
+        return _labelled(esc_label, _date_input(esc_name, req_attr, prop, value), grouped=False, hint=hint)
     val_attr = f' value="{_attr(value)}"' if value is not None else ""
-    bounds, hint = _length_bounds(prop)
+    bounds, length_hint = _length_bounds(prop)
     attrs = f"{_text_input_attrs(prop)}{bounds}{val_attr}{req_attr}"
-    control = f'<input data-field="{esc_name}" data-kind="string" {attrs}>{hint}'
-    return _labelled(esc_label, control, grouped=False)
+    control = f'<input data-field="{esc_name}" data-kind="string" {attrs}>{length_hint}'
+    return _labelled(esc_label, control, grouped=False, hint=hint)
 
 
 def _render_field(
@@ -361,23 +434,24 @@ def _render_field(
     """
     esc_name = _attr(name)
     esc_label = html.escape(str(prop.get("title") or name))
+    hint = _second_line(prop.get("description"))
     req_attr = " required" if is_required else ""
     ptype = prop.get("type")
     if ptype == "array":
-        return _render_array_field(esc_name, esc_label, req_attr, prop, is_required, value, options)
+        return _render_array_field(esc_name, esc_label, req_attr, prop, is_required, value, options, hint)
     if ptype == "string":
-        return _render_string_field(esc_name, esc_label, req_attr, prop, value, options, choice_label)
+        return _render_string_field(esc_name, esc_label, req_attr, prop, value, options, hint, choice_label)
     if ptype == "boolean":
         # A checkbox always submits a boolean (checked/unchecked), so the field is always
         # present — no ``required`` attribute, which would force it checked.
         checked = " checked" if value is True else ""
         control = f'<input data-field="{esc_name}" data-kind="boolean" type="checkbox"{checked}>'
-        return _labelled(esc_label, control, grouped=False)
+        return _labelled(esc_label, control, grouped=False, hint=hint)
     if ptype in ("integer", "number"):
         step = ' step="1"' if ptype == "integer" else ' step="any"'
         val_attr = f' value="{_attr(value)}"' if value is not None else ""
         control = f'<input data-field="{esc_name}" data-kind="number" type="number"{step}{val_attr}{req_attr}>'
-        return _labelled(esc_label, control, grouped=False)
+        return _labelled(esc_label, control, grouped=False, hint=hint)
     raise _FormRenderError(f"form schema property {name!r} has unsupported type {ptype!r}")
 
 
@@ -570,12 +644,14 @@ def _render_form_page(format_payload: dict[str, Any] | None) -> str:
         "<style>body{font-family:system-ui,sans-serif;margin:3rem;max-width:40rem}"
         "label{display:block;margin:1rem 0}label.choice{display:block;margin:.3rem 0}"
         "input,select,textarea{font-size:1rem;margin-top:.3rem}"
+        "small.choice-desc{display:block;font-size:.85rem;color:#666}"
         "fieldset{margin:1rem 0;border:1px solid #ccc;padding:.5rem 1rem}"
         "fieldset.chips{border:0;padding:0;margin:1rem 0}"
         "fieldset.chips label.chip{display:inline-block;margin:.3rem .4rem 0 0;padding:.35rem .8rem;"
         "border:1px solid #888;border-radius:1rem;cursor:pointer}"
         "fieldset.chips label.chip input{position:absolute;width:1px;height:1px;opacity:0}"
         "fieldset.chips label.chip:has(:checked){background:#0b57d0;color:#fff;border-color:#0b57d0}"
+        "fieldset.chips label.chip:has(:checked) small.choice-desc{color:inherit}"
         "fieldset.daterange label{display:inline-block;margin:.3rem 1rem 0 0}"
         "small.hint{display:block;color:#555;margin-top:.2rem;font-size:.85rem}"
         "h2{font-size:1.1rem;margin-top:1.5rem}h3{font-size:1rem;margin:1rem 0 .3rem}"

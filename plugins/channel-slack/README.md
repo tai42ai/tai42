@@ -192,6 +192,13 @@ refused loudly at delivery — never silently truncated. Slack's `email_text_inp
 `url_text_input` (the `email`/`url` input modes) accept no length bound, so a declared
 `maxLength`/`minLength` is not drawn on them; it stays enforced at the answer door.
 
+**Second lines.** A field may carry a **second line** of text (its schema
+`description`), drawn as the input block's **hint** under the control; a per-send
+option may carry a **second line** too (its `description`), drawn as the option's
+**description** under its label. Both are capped at Slack's own per-element limits
+(an option description at 75 characters) and an over-cap value is refused loudly,
+naming the field — never truncated, never dropped.
+
 **Dates (the Slack degrade).** Slack's date picker draws **no** minimum,
 maximum or disabled dates, and Slack has **no** range picker. So a declared date
 bound, an unavailable-days rule, or a range (two date fields — an end field naming

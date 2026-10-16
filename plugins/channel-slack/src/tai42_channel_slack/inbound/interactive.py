@@ -26,6 +26,7 @@ from tai42_kit.utils.data.form_text import render_form_text
 from tai42_channel_slack.blocks import decode_reply_value, is_option_tap, is_reply_action
 from tai42_channel_slack.channel import open_modal_view, update_modal_view
 from tai42_channel_slack.correlation import get_form_record, slack_form_correlation_store
+from tai42_channel_slack.form_blocks import FormSchemaError
 from tai42_channel_slack.forms import (
     FIELD_ACTION_ID,
     FORM_OPEN_ACTION_ID,
@@ -278,11 +279,21 @@ async def _open_form_modal(payload: dict[str, Any], action: dict[str, Any]) -> R
 
 
 def _normalize_options(option_list: list[Any]) -> list[dict[str, Any]]:
-    """A reaction's replaced choice list as the ``{value, label?}`` shape the modal renders from."""
+    """A reaction's replaced choice list as the ``{value, label?, description?}`` shape the modal renders from.
+
+    The option's second line (``description``) is kept when it is a non-blank string — a blank
+    one counts as absent — so the re-render draws it through the same option builder (and the
+    same loud length cap) as the first render.
+    """
     normalized: list[dict[str, Any]] = []
     for option in option_list:
-        value = option["value"]
-        normalized.append({"value": value, **({"label": option["label"]} if option.get("label") else {})})
+        entry: dict[str, Any] = {"value": option["value"]}
+        if option.get("label"):
+            entry["label"] = option["label"]
+        description = option.get("description")
+        if isinstance(description, str) and description.strip():
+            entry["description"] = description
+        normalized.append(entry)
     return normalized
 
 
@@ -331,7 +342,9 @@ async def _handle_form_field_action(payload: dict[str, Any], action: dict[str, A
     When the field triggers a consumer reaction, its update is folded in (values/options/errors/
     display); the conditional show/hide is re-evaluated here (platform logic, never a consumer
     call) because the rebuilt blocks hide the fields their predicate hides for the new values.
-    A view the plugin did not stamp, or whose record lapsed, is acked without a re-render.
+    A view the plugin did not stamp, or whose record lapsed, is acked without a re-render. A
+    reaction update the modal cannot draw (a value past a Slack cap) is handled as a failing
+    reaction: a logged exception and the failure banner over the pre-reaction modal.
     """
     view = payload.get("view")
     if not isinstance(view, dict):
@@ -359,25 +372,45 @@ async def _handle_form_field_action(payload: dict[str, Any], action: dict[str, A
     banner: str | None = None
     values_update: dict[str, Any] = {}
     changed = action.get("block_id")
-    if reactions and isinstance(changed, str) and changed in (reactions.get("field_changed") or []):
+    reacted = bool(reactions) and isinstance(changed, str) and changed in (reactions.get("field_changed") or [])
+    # The pre-reaction state, kept so an update the modal cannot draw falls back to it.
+    before = (dict(merged_options), dict(meta_options), dict(merged_display), dict(meta_display))
+    if reacted:
         values_update, field_errors, banner = await _run_field_reaction(
-            interaction_id, changed, entered, merged_options, meta_options, merged_display, meta_display
+            interaction_id, str(changed), entered, merged_options, meta_options, merged_display, meta_display
         )
-    render_values = {**entered, **values_update}
-    view_out = build_modal_view(
-        interaction_id,
-        record["question"],
-        schema,
-        render_values,
-        merged_options,
-        record.get("pages"),
-        reactions=reactions,
-        display_values=merged_display,
-        field_errors=field_errors,
-        metadata_options=meta_options or None,
-        metadata_display=meta_display or None,
-        form_wording=_form_wording(record),
-    )
+
+    def render() -> dict[str, Any]:
+        return build_modal_view(
+            interaction_id,
+            record["question"],
+            schema,
+            {**entered, **values_update},
+            merged_options,
+            record.get("pages"),
+            reactions=reactions,
+            display_values=merged_display,
+            field_errors=field_errors,
+            metadata_options=meta_options or None,
+            metadata_display=meta_display or None,
+            form_wording=_form_wording(record),
+        )
+
+    try:
+        view_out = render()
+    except FormSchemaError:
+        if not reacted:
+            raise
+        # The reaction returned something Slack cannot draw: the same loud path as a failing
+        # handler — a logged exception and the banner over the pre-reaction modal.
+        logger.exception(
+            "slack interactive: reaction for form %s field %r returned an update the modal cannot draw",
+            interaction_id,
+            changed,
+        )
+        merged_options, meta_options, merged_display, meta_display = before
+        values_update, field_errors, banner = {}, {}, _REACTION_FAILURE_TEXT
+        view_out = render()
     if banner is not None:
         view_out["blocks"].insert(1, {"type": "section", "text": {"type": "mrkdwn", "text": banner}})
     await update_modal_view(view_id, view_hash if isinstance(view_hash, str) else None, view_out)

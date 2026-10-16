@@ -224,6 +224,12 @@ describe('formPrefillOf', () => {
       values: { a: 1 },
       options: { f: [{ value: 'v', label: null }] },
     });
+    expect(
+      formPrefillOf({ values: {}, options: { f: [{ value: 'v', description: '2-3 days' }] } }),
+    ).toEqual({
+      values: {},
+      options: { f: [{ value: 'v', label: null, description: '2-3 days' }] },
+    });
   });
 });
 
@@ -238,12 +244,34 @@ describe('formUpdateOf', () => {
     expect(formUpdateOf({ options: 123 })).toBeUndefined();
     expect(formUpdateOf({ options: { f: [{ value: '' }] } })).toBeUndefined();
     expect(formUpdateOf({ options: { f: [123] } })).toBeUndefined();
+    expect(formUpdateOf({ options: { f: [{ value: 'v', description: 7 }] } })).toBeUndefined();
     expect(formUpdateOf({ errors: 123 })).toBeUndefined();
     expect(formUpdateOf({ errors: { f: 123 } })).toBeUndefined();
   });
 
   it('rejects a form option with a non-string label', () => {
     expect(formUpdateOf({ options: { f: [{ value: 'v', label: 123 }] } })).toBeUndefined();
+  });
+
+  it('treats a null label or description as absent (a JSON-dumped option)', () => {
+    expect(
+      formUpdateOf({ options: { f: [{ value: 'a', label: 'A', description: null }] } })?.options,
+    ).toEqual({ f: [{ value: 'a', label: 'A' }] });
+    expect(
+      formUpdateOf({ options: { f: [{ value: 'a', label: null, description: 'later' }] } })
+        ?.options,
+    ).toEqual({ f: [{ value: 'a', label: null, description: 'later' }] });
+    expect(
+      formPrefillOf({
+        values: {},
+        options: { f: [{ value: 'a', label: null, description: null }] },
+      }),
+    ).toEqual({ values: {}, options: { f: [{ value: 'a', label: null }] } });
+  });
+
+  it('rejects a form option with a non-string non-null description', () => {
+    expect(formUpdateOf({ options: { f: [{ value: 'v', description: 7 }] } })).toBeUndefined();
+    expect(formUpdateOf({ options: { f: [{ value: 'v', description: '  ' }] } })).toBeUndefined();
   });
 
   it('fills every absent part with an empty default', () => {

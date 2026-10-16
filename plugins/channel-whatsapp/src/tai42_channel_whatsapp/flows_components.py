@@ -5,19 +5,39 @@ one page display block) onto the pieces of Flow JSON that render it — the
 identifier-safe component names and human-readable labels, the control classification
 (choice / date / text / opt-in), the field control itself, its screen-``data``
 declarations and forward-carriers, the display components, and the client-side
-visibility wrapper. The screen/footer assembly and the public ``build_form_flow`` /
-``build_flow_data`` entry points consume these builders from :mod:`tai42_channel_whatsapp.flows`.
+visibility wrapper. The choice classification lives in :mod:`tai42_channel_whatsapp.flows_choices`
+and a field's or option's second line in :mod:`tai42_channel_whatsapp.flows_second_line`. The
+screen/footer assembly and the public ``build_form_flow`` / ``build_flow_data`` entry points consume these builders from
+:mod:`tai42_channel_whatsapp.flows`.
 """
 
 from __future__ import annotations
 
+import copy
 import datetime
 import re
 from typing import Any, assert_never
 
 from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import FormControl, FormInputMode
-from tai42_kit.interactions import DATE_CONSTRAINT_KEYS, FORM_WEEKDAYS, RADIO_OPTION_THRESHOLD
+from tai42_kit.interactions import DATE_CONSTRAINT_KEYS, FORM_WEEKDAYS
+
+from tai42_channel_whatsapp.flows_choices import (
+    _CHIPS_MAX_CHOICES,
+    _chips_single_pick,
+    _choice_component_type,
+    _choice_options_enum,
+    _draws_chips,
+    _is_array_of_strings,
+    _is_choice_field,
+)
+from tai42_channel_whatsapp.flows_second_line import (
+    _CHIPS_DS_ITEM_EXAMPLE,
+    _CHIPS_DS_ITEM_PROPERTIES,
+    _DS_ITEM_EXAMPLE,
+    _DS_ITEM_PROPERTIES,
+    _with_helper_text,
+)
 
 # Meta injects ``flow_token`` into every Flow response to correlate the reply, so a
 # form property of that name is unanswerable on this channel: the reply handler
@@ -34,18 +54,12 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # check then rejects an impossible date (e.g. ``2026-13-40``).
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-# The platform's form vocabulary, from ``tai42_kit.interactions``: the radio/dropdown threshold,
-# the date-constraint keys whose presence makes a date field a bounded CalendarPicker, and the
-# weekday names an ``unavailableDates`` entry may carry. Each weekday maps onto Meta's
-# CalendarPicker ``include-days`` enum code below; an excluded weekday is dropped from
-# ``include-days`` (the days that STAY selectable).
+# The platform's form vocabulary, from ``tai42_kit.interactions``: the date-constraint keys whose
+# presence makes a date field a bounded CalendarPicker, and the weekday names an
+# ``unavailableDates`` entry may carry. Each weekday maps onto Meta's CalendarPicker
+# ``include-days`` enum code below; an excluded weekday is dropped from ``include-days`` (the
+# days that STAY selectable).
 
-# Meta's ``ChipsSelector`` option bounds: it renders at least 2 and at most 20 choices. A
-# ``control: chips`` choice whose declared list falls outside this range cannot render as a
-# ChipsSelector, so it DEGRADES to the shape's default control (a radio group / dropdown for a
-# string, a checkbox group for an array) — a named, documented degrade, never a silent drop.
-_CHIPS_MIN_CHOICES = 2
-_CHIPS_MAX_CHOICES = 20
 
 _WEEKDAY_CODES = {
     "monday": "Mon",
@@ -157,73 +171,6 @@ def payload_labels(properties: dict[str, Any]) -> dict[str, str]:
         used.add(candidate)
         mapping[name] = candidate
     return mapping
-
-
-def _is_array_of_strings(prop: dict[str, Any]) -> bool:
-    """Whether a property is an array whose ``items`` are strings — a multiple-choice field."""
-    items = prop.get("items")
-    return prop.get("type") == "array" and isinstance(items, dict) and items.get("type") == "string"
-
-
-def _choice_options_enum(prop: dict[str, Any]) -> list[Any] | None:
-    """A choice property's schema option list — a string's ``enum`` or an array's ``items.enum`` — else ``None``."""
-    enum = prop["items"].get("enum") if _is_array_of_strings(prop) else prop.get("enum")
-    return enum if isinstance(enum, list) else None
-
-
-def _is_choice_field(name: str, prop: dict[str, Any], option_fields: set[str]) -> bool:
-    """Whether a property renders as a dynamic CHOICE control (reads a per-send ``data-source``).
-
-    A string that carries a schema ``enum`` or is marked option-bearing by the ask, OR an
-    array of strings (multiple choice). Dropdown, RadioButtonsGroup and CheckboxGroup all read
-    their options from the per-send ``${data.<field>__ds}`` list.
-    """
-    if _is_array_of_strings(prop):
-        return True
-    if prop.get("type") != "string":
-        return False
-    return prop.get("enum") is not None or name in option_fields
-
-
-def _choice_component_type(prop: dict[str, Any]) -> str:
-    """The Flow control a choice property renders as.
-
-    An array of strings is a ``CheckboxGroup`` (multiple selection). A string choice with a
-    schema ``enum`` of at most :data:`RADIO_OPTION_THRESHOLD` options is a ``RadioButtonsGroup``
-    (the short-list control); any other string choice — a longer enum, or an option-bearing
-    field whose per-send list length is not fixed at publish — stays the dynamic ``Dropdown``.
-    """
-    if _is_array_of_strings(prop):
-        return "CheckboxGroup"
-    enum = prop.get("enum")
-    if isinstance(enum, list) and len(enum) <= RADIO_OPTION_THRESHOLD:
-        return "RadioButtonsGroup"
-    return "Dropdown"
-
-
-def _draws_chips(prop: dict[str, Any]) -> bool:
-    """Whether a ``control: chips`` choice property renders as a ``ChipsSelector`` on this channel.
-
-    A ChipsSelector draws Meta's 2..20 choices. A ``chips`` choice whose declared list
-    (:func:`_choice_options_enum` — a string's ``enum`` or an array's ``items.enum``, which the
-    schema always carries for ``chips``) falls outside that range cannot render as one and DEGRADES
-    to the shape's default control; a property not marked ``chips`` never draws one.
-    """
-    if prop.get("control") != FormControl.CHIPS:
-        return False
-    enum = _choice_options_enum(prop)
-    return enum is not None and _CHIPS_MIN_CHOICES <= len(enum) <= _CHIPS_MAX_CHOICES
-
-
-def _chips_single_pick(prop: dict[str, Any]) -> bool:
-    """Whether a property renders as a SINGLE-pick ``ChipsSelector`` — a ``string`` chips choice.
-
-    Its control value is a one-element LIST (``max-selected-items: 1``), so its screen-``data``
-    ``init``/``__val`` carriers are array-typed and the inbound decode unwraps the one-element list
-    back to the string. An ARRAY chips choice is already a list answer and needs no unwrap; a chips
-    choice that degrades (outside Meta's 2..20) draws a scalar default control and is not this.
-    """
-    return prop.get("type") == "string" and _draws_chips(prop)
 
 
 def _chips_component(cname: str, label: str, required: bool, prop: dict[str, Any], init: str) -> dict[str, Any]:
@@ -648,8 +595,17 @@ def _dynamic_component(
     choice field reads a dynamic ``data-source``, so the send injects the values/options. An
     array of strings renders a CheckboxGroup, a short string enum a RadioButtonsGroup (else a
     Dropdown), and a date field with platform constraints a bounded CalendarPicker. Raises
-    ``ChannelInputError`` naming a property outside the supported subset.
+    ``ChannelInputError`` naming a property outside the supported subset. A field's second line
+    (its schema ``description``) rides the control as ``helper-text`` where Meta allows it
+    (:func:`_with_helper_text`); elsewhere :func:`field_caption` draws it beside the control.
     """
+    return _with_helper_text(name, _field_control(name, prop, required, option_fields, names), prop)
+
+
+def _field_control(
+    name: str, prop: dict[str, Any], required: bool, option_fields: set[str], names: dict[str, str]
+) -> dict[str, Any]:
+    """The bare Flow control for one field (see :func:`_dynamic_component`), before its second line."""
     label = _field_label(name, prop)
     cname = names[name]
     prop_type = prop.get("type")
@@ -690,9 +646,6 @@ def _dynamic_component(
     )
 
 
-_DS_ITEM_EXAMPLE = [{"id": "a", "title": "a"}]
-
-
 def _value_type_decl(prop: dict[str, Any]) -> dict[str, Any]:
     """The screen-``data`` type declaration for a field's value.
 
@@ -723,13 +676,14 @@ def _field_data_decls(
     init_decl = _range_value_type_decl() if merged_start else _value_type_decl(prop)
     decls: dict[str, Any] = {f"{cname}__init": init_decl}
     if not merged_start and _is_choice_field(name, prop, option_fields):
+        chips = _draws_chips(prop)
         decls[f"{cname}__ds"] = {
             "type": "array",
             "items": {
                 "type": "object",
-                "properties": {"id": {"type": "string"}, "title": {"type": "string"}},
+                "properties": copy.deepcopy(_CHIPS_DS_ITEM_PROPERTIES if chips else _DS_ITEM_PROPERTIES),
             },
-            "__example__": _DS_ITEM_EXAMPLE,
+            "__example__": copy.deepcopy(_CHIPS_DS_ITEM_EXAMPLE if chips else _DS_ITEM_EXAMPLE),
         }
     return decls
 
