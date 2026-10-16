@@ -75,21 +75,42 @@ async def test_too_broad_metric_page_is_400_not_the_install_path(monitoring_stac
     assert body.get("error"), body
 
 
+# A valid run-list value for each filter query param the metrics traces view may
+# declare incompatible with a metric sort, so the read is refused for the filter
+# combination — never rejected as a malformed value. ``status=error`` sets the
+# level clause; each cost/token/latency range is single-sided (never inverted).
+_INCOMPATIBLE_FILTER_SAMPLES: dict[str, str] = {
+    "status": "error",
+    "version": "v1",
+    "minCost": "0",
+    "maxCost": "1",
+    "minTokens": "0",
+    "maxTokens": "1",
+    "minLatencyMs": "0",
+    "maxLatencyMs": "1000",
+}
+
+
 async def test_unsupported_metric_sort_filter_is_501_install_path(monitoring_stack: TaiStack) -> None:
-    # A metric sort combined with a status=error filter is a capability the metrics
-    # traces view does not have: the ``status`` query param maps to a trace ``level``
-    # clause, and the metrics traces view carries no level column. The backend declares
-    # the incompatibility, the reader raises MonitoringReadNotSupportedError, and the
-    # skeleton maps it to 501 monitoring-read-not-supported (the install path).
+    # A metric sort ranks globally through the Langfuse metrics traces view, which carries
+    # only a subset of the run-list filter columns. Combining a metric sort with a filter
+    # that view has no column for is a capability the backend does not have: it declares the
+    # incompatibility, the reader raises MonitoringReadNotSupportedError, and the skeleton
+    # maps it to 501 monitoring-read-not-supported (the install path).
     api: ApiClient = monitoring_stack.api()
     caps = await api.get("/api/observability/capabilities", retry_on_reloading=True)
-    # The backend's own declaration: cost sort is incompatible with the ``level`` clause
-    # (what ``status=error`` sets). The capability names the filter FIELD, ``level``.
-    assert "level" in caps["incompatibleFilters"].get("cost", []), caps["incompatibleFilters"]
+    assert "cost" in caps["sortKeys"], caps["sortKeys"]
+    # The capability names each sort's incompatible filters by their run-list WIRE param
+    # (camelCase), not the neutral contract field — so drive one the backend actually lists.
+    incompatible = caps["incompatibleFilters"].get("cost", [])
+    param = next((p for p in _INCOMPATIBLE_FILTER_SAMPLES if p in incompatible), None)
+    assert param is not None, incompatible
 
     # page 1 stays within the rank row cap, so the read is refused for the unsupported
     # filter combination, not for being too broad.
-    query = urlencode({"from": _window_start(), "sort": "cost", "dir": "desc", "status": "error", "page": 1})
+    query = urlencode(
+        {"from": _window_start(), "sort": "cost", "dir": "desc", param: _INCOMPATIBLE_FILTER_SAMPLES[param], "page": 1}
+    )
     body = await api.request("GET", f"/api/observability/runs?{query}", expect=501, retry_on_reloading=True)
 
     assert body["code"] == _READ_NOT_SUPPORTED_CODE, body
