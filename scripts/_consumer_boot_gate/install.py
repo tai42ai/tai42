@@ -1,6 +1,8 @@
 """Assemble the boot venv and classify a dependency-resolution conflict by the candidate's bump.
 
-The venv holds the editable candidate core + identity provider + consumers.
+The venv holds the editable candidate core + identity provider + consumers. The identity provider is
+the tree's own plugin member, installed editable beside the core, so its first-party requirements
+resolve from the workspace exactly as the core's do.
 """
 
 from __future__ import annotations
@@ -8,8 +10,9 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from _consumer_boot_gate.boot import IdentityFixture
 from _consumer_boot_gate.candidate import Candidate, previous_release_tag
-from _consumer_boot_gate.consumers import Consumer
+from _consumer_boot_gate.consumers import Consumer, canonical_dist_name
 from _consumer_boot_gate.process import (
     GIT_TIMEOUT_S,
     INSTALL_TIMEOUT_S,
@@ -29,6 +32,9 @@ _KIT_EXTRAS = "jq,llm,postgres,redis,langgraph-checkpoint-postgres,uvicorn,curl"
 # candidate core, so the boot venv cannot be assembled — the most explicit form of a
 # consumer break, classified by the candidate's bump like a boot failure.
 _NO_SOLUTION_MARKER = "No solution found when resolving dependencies"
+
+# The bound on the resolver text quoted in a notice or failure; the classification reads it whole.
+_EXCERPT_CHARS = 800
 
 
 class _ResolutionConflictError(Exception):
@@ -51,14 +57,41 @@ def _is_resolution_conflict(install_stderr: str) -> bool:
     return _NO_SOLUTION_MARKER in install_stderr
 
 
+def _excerpt(text: str) -> str:
+    """The tail of ``text`` bounded to :data:`_EXCERPT_CHARS`, marked with a leading ellipsis when cut."""
+    text = text.strip()
+    return text if len(text) <= _EXCERPT_CHARS else f"… {text[-_EXCERPT_CHARS:]}"
+
+
 def _resolver_conclusion(resolver_stderr: str) -> str:
-    """The resolver's own conclusion, from the ``No solution found`` line onward, quoted in the notice."""
+    """The resolver's own conclusion, quoted in the notice.
+
+    From the ``No solution found`` line onward, bounded to its tail: uv states its conclusion last.
+    """
     idx = resolver_stderr.find(_NO_SOLUTION_MARKER)
-    return resolver_stderr[idx:].strip() if idx != -1 else resolver_stderr.strip()
+    return _excerpt(resolver_stderr[idx:] if idx != -1 else resolver_stderr)
+
+
+def _install_set(root: Path, core_dirs: list[str], identity: IdentityFixture, consumers: list[Consumer]) -> list[str]:
+    """The ``uv pip install`` arguments of the boot venv for the tree at ``root``.
+
+    The core dirs and the identity fixture editable from ``root``, then the consumers. A consumer that
+    is the fixture's distribution provides it itself, so the fixture is not added (one distribution, one
+    source).
+    """
+    args: list[str] = []
+    for core_dir in core_dirs:
+        extras = f"[{_KIT_EXTRAS}]" if core_dir.endswith("/kit") else ""
+        args += ["-e", f"{root / core_dir}{extras}"]
+    fixture_name = canonical_dist_name(identity.dist_name)
+    if not any(canonical_dist_name(consumer.dist_name) == fixture_name for consumer in consumers):
+        args += ["-e", str(root / identity.dir)]
+    args += [consumer.install_arg for consumer in consumers]
+    return args
 
 
 def _install_venv(
-    repo_root: Path, core_dirs: list[str], identity_package: str, consumers: list[Consumer], venv: Path
+    repo_root: Path, core_dirs: list[str], identity: IdentityFixture, consumers: list[Consumer], venv: Path
 ) -> Path:
     """Create the boot venv and install the candidate core, identity provider, and consumers; return its ``bin``.
 
@@ -74,12 +107,14 @@ def _install_venv(
         capture_output=True,
     )
     venv_bin = venv / "bin"
-    install_args = ["uv", "pip", "install", "--python", str(venv_bin / "python")]
-    for core_dir in core_dirs:
-        extras = f"[{_KIT_EXTRAS}]" if core_dir.endswith("/kit") else ""
-        install_args += ["-e", f"{core_dir}{extras}"]
-    install_args.append(identity_package)
-    install_args += [consumer.install_arg for consumer in consumers]
+    install_args = [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        str(venv_bin / "python"),
+        *_install_set(repo_root, core_dirs, identity, consumers),
+    ]
     result = run_gate_step(
         install_args,
         what="installing the boot venv (candidate core + consumers)",
@@ -89,10 +124,10 @@ def _install_venv(
         text=True,
     )
     if result.returncode != 0:
-        stderr = result.stderr.strip()[-800:]
+        stderr = result.stderr.strip()
         if _is_resolution_conflict(stderr):
             raise _ResolutionConflictError(stderr)
-        _fail(f"boot venv install failed: {stderr}")
+        _fail(f"boot venv install failed: {_excerpt(stderr)}")
     return venv_bin
 
 
@@ -100,7 +135,7 @@ def _reresolve_against_previous_release(
     previous_tag: str,
     repo_root: Path,
     core_dirs: list[str],
-    identity_package: str,
+    identity: IdentityFixture,
     consumers: list[Consumer],
     venv: Path,
 ) -> str | None:
@@ -124,12 +159,15 @@ def _reresolve_against_previous_release(
             capture_output=True,
             text=True,
         )
-        install_args = ["uv", "pip", "install", "--dry-run", "--python", str(venv / "bin" / "python")]
-        for core_dir in core_dirs:
-            extras = f"[{_KIT_EXTRAS}]" if core_dir.endswith("/kit") else ""
-            install_args += ["-e", f"{worktree / core_dir}{extras}"]
-        install_args.append(identity_package)
-        install_args += [consumer.install_arg for consumer in consumers]
+        install_args = [
+            "uv",
+            "pip",
+            "install",
+            "--dry-run",
+            "--python",
+            str(venv / "bin" / "python"),
+            *_install_set(worktree, core_dirs, identity, consumers),
+        ]
         result = run_gate_step(
             install_args,
             what=f"re-resolving the boot install set against the previous release ({previous_tag})",
@@ -140,12 +178,12 @@ def _reresolve_against_previous_release(
         )
         if result.returncode == 0:
             return None
-        stderr = result.stderr.strip()[-800:]
+        stderr = result.stderr.strip()
         if _is_resolution_conflict(stderr):
             return stderr
         _fail(
             f"re-resolving the boot install set against the previous release {previous_tag} failed for a reason "
-            f"other than a dependency conflict, so the conflict cannot be classified: {stderr}"
+            f"other than a dependency conflict, so the conflict cannot be classified: {_excerpt(stderr)}"
         )
     finally:
         run_gate_step(
@@ -169,7 +207,7 @@ def _report_unresolvable_consumers(
     *,
     repo_root: Path,
     core_dirs: list[str],
-    identity_package: str,
+    identity: IdentityFixture,
     venv: Path,
 ) -> None:
     """Classify a boot-venv resolution conflict.
@@ -198,9 +236,7 @@ def _report_unresolvable_consumers(
             f"{header}: {len(consumers)} consumer(s) cannot resolve against the candidate and no core package "
             f"has a previous release to re-resolve against: {names}. {conclusion}"
         )
-    prior_stderr = _reresolve_against_previous_release(
-        previous_tag, repo_root, core_dirs, identity_package, consumers, venv
-    )
+    prior_stderr = _reresolve_against_previous_release(previous_tag, repo_root, core_dirs, identity, consumers, venv)
     if prior_stderr is None:
         _fail(
             f"{header}: {len(consumers)} consumer(s) cannot resolve against the candidate but resolve against the "

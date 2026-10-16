@@ -12,6 +12,12 @@ boots the app the real way (the ``tai serve`` entrypoint, access control on,
 health awaited), and asserts, for each consumer, that every route registers, no
 lifecycle handler raises, and health becomes ready.
 
+Access control is served by the gate's own identity provider: the tree's plugin member
+at ``--identity-dir``, installed editable beside the core and resolved like it (its
+first-party requirements from the workspace), its distribution, provider and module read
+from the dir's ``pyproject.toml`` and ``tai-plugin.yml``. A supplied consumer that is that
+distribution provides the identity provider itself, so the venv holds one source of it.
+
 Each consumer is mounted the way a deployment layers it: its additive surface
 (routers/tools/channels/extensions/identity providers/lifecycle) plus the exclusive
 provider slot it selects — ``backend_module`` / ``storage_module`` / ``sandbox_module``
@@ -84,10 +90,11 @@ import tempfile
 from pathlib import Path
 
 from _consumer_boot_gate.boot import (
-    _DEFAULT_IDENTITY_PACKAGE,
+    IdentityFixture,
     Infra,
     _infra_from_args,
     boot_consumer,
+    read_identity_fixture,
 )
 from _consumer_boot_gate.boot_failure import BootFailure, external_service_handlers, is_external_service_only
 from _consumer_boot_gate.candidate import Candidate, read_candidate
@@ -105,6 +112,10 @@ from _consumer_boot_gate.versioning import _fail, break_is_accepted
 # consumers boot against. Overridable so a fork with a different layout can point
 # the gate at its own core member dirs.
 _DEFAULT_CORE_DIRS = ("core/contract", "core/kit", "core/skeleton", "core/cli")
+
+# The plugin member dir that serves the boots' access control (the gate's identity
+# fixture). Overridable so a fork points the gate at its own identity plugin.
+_DEFAULT_IDENTITY_DIR = "plugins/identity-redis"
 
 
 def _load_plugin_yaml(venv_bin: Path, dist_name: str) -> dict:
@@ -174,7 +185,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="enumerate first-party consumers (minus the bump set) and print a CI matrix, then exit",
     )
-    parser.add_argument("--identity-package", default=_DEFAULT_IDENTITY_PACKAGE)
+    parser.add_argument(
+        "--identity-dir",
+        default=_DEFAULT_IDENTITY_DIR,
+        help=(
+            "the identity-provider plugin member dir, installed editable from the tree, its provider the boot's "
+            "auth chain head; its first-party requirements resolve through its tool.uv.sources workspace entries"
+        ),
+    )
     parser.add_argument("--redis-url", default=os.environ.get("CONSUMER_BOOT_REDIS_URL", "redis://127.0.0.1:6379"))
     parser.add_argument("--pg-host", default=os.environ.get("CONSUMER_BOOT_PG_HOST", "127.0.0.1"))
     parser.add_argument("--pg-port", default=os.environ.get("CONSUMER_BOOT_PG_PORT", "5432"))
@@ -186,7 +204,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _boot_all(
-    header: str, consumers: list[Consumer], venv_bin: Path, workdir: Path, infra: Infra
+    header: str,
+    consumers: list[Consumer],
+    venv_bin: Path,
+    identity: IdentityFixture,
+    workdir: Path,
+    infra: Infra,
 ) -> tuple[int, int, int, list[tuple[Consumer, BootFailure]]]:
     """Boot every supplied consumer against the candidate core.
 
@@ -223,7 +246,7 @@ def _boot_all(
             )
         boot_dir = workdir / f"boot-{index}"
         boot_dir.mkdir(parents=True, exist_ok=True)
-        failure = boot_consumer(consumer, venv_bin, provides, boot_dir, infra)
+        failure = boot_consumer(consumer, venv_bin, provides, identity, boot_dir, infra)
         if failure is None:
             print(f"  - {consumer.label}: booted, health ready.")
             booted += 1
@@ -287,12 +310,13 @@ def main() -> None:
         print(f"{header}: no previously published consumer supplied — nothing to boot, gate passes.")
         return
 
+    identity = read_identity_fixture(repo_root, args.identity_dir)
     workdir = args.workdir.resolve() if args.workdir else Path(tempfile.mkdtemp(prefix="consumer-boot-"))
     workdir.mkdir(parents=True, exist_ok=True)
     infra = _infra_from_args(args)
     venv = workdir / "venv"
     try:
-        venv_bin = _install_venv(repo_root, core_dirs, args.identity_package, consumers, venv)
+        venv_bin = _install_venv(repo_root, core_dirs, identity, consumers, venv)
     except _ResolutionConflictError as conflict:
         _report_unresolvable_consumers(
             header,
@@ -301,12 +325,12 @@ def main() -> None:
             conflict.resolver_stderr,
             repo_root=repo_root,
             core_dirs=core_dirs,
-            identity_package=args.identity_package,
+            identity=identity,
             venv=venv,
         )
         return
 
-    booted, install_only, external_only, failures = _boot_all(header, consumers, venv_bin, workdir, infra)
+    booted, install_only, external_only, failures = _boot_all(header, consumers, venv_bin, identity, workdir, infra)
 
     if not args.keep and args.workdir is None:
         import shutil

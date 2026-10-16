@@ -299,30 +299,44 @@ def test_db_binding_env_pins_component_to_default():
     assert gate._db_binding_env(gate.Provides()) == {}
 
 
+def _identity() -> gate.IdentityFixture:
+    """The gate's identity fixture as read from a member dir ``plugins/id`` of the candidate tree."""
+    return gate.IdentityFixture(
+        dir="plugins/id", dist_name="id-plugin", providers=("id-provider",), lifecycle=("id_plugin.provider",)
+    )
+
+
 def test_auth_providers_chains_identity_plus_consumer_providers():
-    assert gate.auth_providers(gate.Provides(providers=["pkg-provider"])) == [
-        gate._IDENTITY_PROVIDER_NAME,
+    assert gate.auth_providers(gate.Provides(providers=["pkg-provider"]), _identity()) == [
+        "id-provider",
         "pkg-provider",
     ]
 
 
+def test_auth_providers_names_a_provider_once_when_the_consumer_is_the_fixture():
+    assert gate.auth_providers(gate.Provides(providers=["id-provider"]), _identity()) == ["id-provider"]
+
+
 def test_build_manifest_mounts_channels_and_extensions():
-    manifest = gate.build_manifest(gate.Provides(channels=[("web", "pkg.register")], extensions=["pkg.ext"]))
+    provides = gate.Provides(channels=[("web", "pkg.register")], extensions=["pkg.ext"])
+    manifest = gate.build_manifest(provides, _identity())
     assert manifest["channel_modules"] == ["pkg.register"]
     assert manifest["extensions_modules"] == ["pkg.ext"]
 
 
 def test_build_manifest_mounts_core_and_consumer_surface():
-    manifest = gate.build_manifest(gate.Provides(routers=["pkg.routes"], tools=["pkg.tools"], lifecycle=["pkg.life"]))
+    manifest = gate.build_manifest(
+        gate.Provides(routers=["pkg.routes"], tools=["pkg.tools"], lifecycle=["pkg.life"]), _identity()
+    )
     assert manifest["routers_modules"][: len(gate._CORE_ROUTERS)] == list(gate._CORE_ROUTERS)
     assert "pkg.routes" in manifest["routers_modules"]
-    assert manifest["lifecycle_modules"] == [gate._IDENTITY_LIFECYCLE_MODULE, "pkg.life"]
+    assert manifest["lifecycle_modules"] == ["id_plugin.provider", "pkg.life"]
     assert manifest["tools"] == [{"title": "pkg.tools", "module": "pkg.tools"}]
     assert manifest["api_tools"] == {"enabled": False}
 
 
 def test_build_manifest_omits_tools_when_none_declared():
-    manifest = gate.build_manifest(gate.Provides(routers=["pkg.routes"]))
+    manifest = gate.build_manifest(gate.Provides(routers=["pkg.routes"]), _identity())
     assert "tools" not in manifest
 
 
@@ -383,7 +397,9 @@ def test_has_boot_surface_false_when_nothing_declared():
     ],
 )
 def test_build_manifest_mounts_each_scalar_slot(kind: str, module: str, slot: str, value: str):
-    manifest = gate.build_manifest(gate.read_provides({"provides": [{"kind": kind, "name": "x", "module": module}]}))
+    manifest = gate.build_manifest(
+        gate.read_provides({"provides": [{"kind": kind, "name": "x", "module": module}]}), _identity()
+    )
     assert manifest[slot] == value
 
 
@@ -391,14 +407,14 @@ def test_build_manifest_mounts_agents_as_one_entry_per_name():
     provides = gate.read_provides(
         {"provides": [{"kind": "agent", "name": "tools_agent", "module": "pkg_agents.tools_agent"}]}
     )
-    manifest = gate.build_manifest(provides)
+    manifest = gate.build_manifest(provides, _identity())
     assert manifest["agents"] == [
         {"title": "tools_agent", "module": "pkg_agents.tools_agent", "include": ["tools_agent"]}
     ]
 
 
 def test_build_manifest_omits_scalar_slots_when_none_declared():
-    manifest = gate.build_manifest(gate.Provides(routers=["pkg.routes"]))
+    manifest = gate.build_manifest(gate.Provides(routers=["pkg.routes"]), _identity())
     for slot in ("backend_module", "storage_module", "sandbox_module", "monitoring_module", "agents"):
         assert slot not in manifest
 
@@ -646,7 +662,7 @@ def test_install_venv_raises_conflict_on_no_solution(tmp_path: Path, monkeypatch
         gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")
     ]
     with pytest.raises(gate._ResolutionConflictError) as excinfo:
-        gate._install_venv(tmp_path, ["core/contract"], "id-pkg", consumers, tmp_path / "venv")
+        gate._install_venv(tmp_path, ["core/contract"], _identity(), consumers, tmp_path / "venv")
     assert "No solution found when resolving dependencies" in excinfo.value.resolver_stderr
 
 
@@ -658,7 +674,7 @@ def test_install_venv_fails_on_non_resolution_error(tmp_path: Path, monkeypatch)
         gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")
     ]
     with pytest.raises(SystemExit):
-        gate._install_venv(tmp_path, ["core/contract"], "id-pkg", consumers, tmp_path / "venv")
+        gate._install_venv(tmp_path, ["core/contract"], _identity(), consumers, tmp_path / "venv")
 
 
 def test_run_gate_step_forwards_timeout_and_returns(monkeypatch):
@@ -720,7 +736,7 @@ def test_install_venv_fails_loudly_when_install_hangs(tmp_path: Path, monkeypatc
         gate.Consumer(dist_name="some-consumer", label="some-consumer 0.44.0", install_arg="some-consumer==0.44.0")
     ]
     with pytest.raises(SystemExit):
-        gate._install_venv(tmp_path, ["core/contract"], "id-pkg", consumers, tmp_path / "venv")
+        gate._install_venv(tmp_path, ["core/contract"], _identity(), consumers, tmp_path / "venv")
     assert "installing the boot venv" in capsys.readouterr().err
 
 
@@ -750,7 +766,7 @@ def _report_kwargs(tmp_path: Path) -> dict:
     return {
         "repo_root": tmp_path,
         "core_dirs": ["core/kit"],
-        "identity_package": "id-pkg",
+        "identity": _identity(),
         "venv": tmp_path / "venv",
     }
 
@@ -767,6 +783,7 @@ def _reresolve_run_factory(dry_returncode: int, dry_stderr: str, calls: list | N
             calls.append(args)
             return subprocess.CompletedProcess(args, 0, "", "")
         if args[:3] == ["uv", "pip", "install"]:
+            calls.append(args)
             return subprocess.CompletedProcess(args, dry_returncode, "", dry_stderr)
         return subprocess.CompletedProcess(args, 0, "", "")
 
@@ -832,3 +849,145 @@ def test_report_unresolvable_previous_resolve_other_error_fails(tmp_path: Path, 
     err = capsys.readouterr().err
     assert "failed for a reason other than a dependency conflict" in err
     assert "failed to build wheel for kit" in err
+
+
+# ------------------------------------------------- the gate's identity fixture
+
+
+def _recording_install_run(calls: list, install_returncode: int = 0, install_stderr: str = ""):
+    # The venv step succeeds; every ``uv pip install`` argv is recorded and returns the configured result.
+    def _run(args, **kwargs):
+        if args[:3] == ["uv", "pip", "install"]:
+            calls.append(args)
+            return subprocess.CompletedProcess(args, install_returncode, "", install_stderr)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    return _run
+
+
+def _editables(argv: list[str]) -> list[str]:
+    return [argv[i + 1] for i, arg in enumerate(argv) if arg == "-e"]
+
+
+def test_install_venv_installs_the_identity_fixture_editable_from_the_tree(tmp_path: Path, monkeypatch):
+    # The fixture is a member dir of the candidate tree, installed editable beside the core —
+    # never a published distribution name resolved from the index.
+    calls: list = []
+    monkeypatch.setattr(gate.subprocess, "run", _recording_install_run(calls))
+    gate._install_venv(tmp_path, ["core/contract"], _identity(), _one_consumer(), tmp_path / "venv")
+    (argv,) = calls
+    assert _editables(argv) == [str(tmp_path / "core/contract"), str(tmp_path / "plugins/id")]
+    assert "id-plugin" not in argv
+    assert argv[-1] == "some-consumer==0.44.0"
+
+
+@pytest.mark.parametrize("dist_name", ["id-plugin", "id_plugin", "ID.Plugin"])
+def test_install_venv_lets_a_consumer_that_is_the_fixture_distribution_provide_it(
+    tmp_path: Path, monkeypatch, dist_name: str
+):
+    # One distribution, one source: the published consumer is installed and the tree's fixture is not.
+    calls: list = []
+    monkeypatch.setattr(gate.subprocess, "run", _recording_install_run(calls))
+    consumer = gate.Consumer(dist_name=dist_name, label=f"{dist_name} 1.0.0", install_arg=f"{dist_name}==1.0.0")
+    gate._install_venv(tmp_path, ["core/contract"], _identity(), [consumer], tmp_path / "venv")
+    (argv,) = calls
+    assert _editables(argv) == [str(tmp_path / "core/contract")]
+    assert f"{dist_name}==1.0.0" in argv
+
+
+def test_reresolve_installs_the_previous_trees_core_and_identity_fixture(tmp_path: Path, monkeypatch):
+    # The re-resolve is the same install set against the previous release's tree: its core
+    # dirs and its own identity fixture, both from the worktree.
+    calls: list = []
+    monkeypatch.setattr(gate.subprocess, "run", _reresolve_run_factory(1, _PREVIOUS_NO_SOLUTION_STDERR, calls))
+    gate._report_unresolvable_consumers(
+        "gate", _candidate("patch"), _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
+    )
+    (added,) = [args for args in calls if args[:3] == ["git", "worktree", "add"]]
+    worktree = Path(added[-2])
+    (argv,) = [args for args in calls if args[:3] == ["uv", "pip", "install"]]
+    assert "--dry-run" in argv
+    assert _editables(argv) == [f"{worktree / 'core/kit'}[{gate._KIT_EXTRAS}]", str(worktree / "plugins/id")]
+    assert "id-plugin" not in argv
+
+
+def _long_no_solution_stderr() -> str:
+    # uv states the marker first, then enumerates every candidate version before its conclusion.
+    explanation = "".join(
+        f"  And because some-consumer=={n}.0.0 depends on tai42-kit>=0.{n},<0.{n + 1}, ...\n" for n in range(60)
+    )
+    return (
+        "  \N{MULTIPLICATION SIGN} No solution found when resolving dependencies:\n"
+        f"{explanation}"
+        "  And because you require some-consumer, we can conclude that your requirements are unsatisfiable.\n"
+    )
+
+
+def test_install_venv_classifies_a_long_resolver_explanation_as_a_conflict(tmp_path: Path, monkeypatch):
+    # The classification reads uv's whole output: a marker followed by a long explanation is
+    # still a no-solution conflict, carried whole for the verdict.
+    stderr = _long_no_solution_stderr()
+    assert len(stderr) - stderr.index("No solution found") > 800
+    monkeypatch.setattr(gate.subprocess, "run", _recording_install_run([], 1, stderr))
+    with pytest.raises(gate._ResolutionConflictError) as excinfo:
+        gate._install_venv(tmp_path, ["core/contract"], _identity(), _one_consumer(), tmp_path / "venv")
+    assert excinfo.value.resolver_stderr == stderr.strip()
+
+
+def test_reresolve_classifies_a_long_resolver_explanation_as_a_conflict(tmp_path: Path, monkeypatch, capsys):
+    # The previous release's long no-solution output is a pre-existing incompatibility, not a hard failure.
+    monkeypatch.setattr(gate.subprocess, "run", _reresolve_run_factory(1, _long_no_solution_stderr()))
+    gate._report_unresolvable_consumers(
+        "gate", _candidate("patch"), _one_consumer(), _NO_SOLUTION_STDERR, **_report_kwargs(tmp_path)
+    )
+    out = capsys.readouterr().out
+    assert "pre-existing incompatibility" in out
+    assert "gate passes" in out
+
+
+def test_resolver_conclusion_quotes_the_end_of_a_long_explanation():
+    conclusion = gate._resolver_conclusion(_long_no_solution_stderr())
+    assert conclusion.endswith("we can conclude that your requirements are unsatisfiable.")
+    assert len(conclusion) <= 802
+
+
+def _write_identity_dir(root: Path, *, pyproject: bool = True, descriptor: dict | None = None) -> None:
+    import yaml
+
+    member = root / "plugins" / "id"
+    member.mkdir(parents=True)
+    if pyproject:
+        (member / "pyproject.toml").write_text('[project]\nname = "id-plugin"\nversion = "1.0.0"\n')
+    if descriptor is not None:
+        (member / "tai-plugin.yml").write_text(yaml.safe_dump(descriptor))
+
+
+_IDENTITY_DESCRIPTOR = {"provides": [{"kind": "identity", "name": "id-provider", "module": "id_plugin.provider"}]}
+
+
+def test_read_identity_fixture_reads_the_member_dir(tmp_path: Path):
+    _write_identity_dir(tmp_path, descriptor=_IDENTITY_DESCRIPTOR)
+    fixture = gate.read_identity_fixture(tmp_path, "plugins/id")
+    assert fixture == _identity()
+    provides = gate.Provides(providers=["pkg-provider"], lifecycle=["pkg.life"])
+    assert gate.auth_providers(provides, fixture) == ["id-provider", "pkg-provider"]
+    assert gate.build_manifest(provides, fixture)["lifecycle_modules"] == ["id_plugin.provider", "pkg.life"]
+
+
+@pytest.mark.parametrize(
+    ("pyproject", "descriptor", "message"),
+    [
+        (False, _IDENTITY_DESCRIPTOR, "pyproject.toml"),
+        (True, None, "tai-plugin.yml"),
+        (True, {"provides": [{"kind": "tool", "module": "id_plugin.tools"}]}, "identity provider"),
+    ],
+)
+def test_read_identity_fixture_fails_loudly_on_an_incomplete_dir(
+    tmp_path: Path, capsys, pyproject: bool, descriptor: dict | None, message: str
+):
+    _write_identity_dir(tmp_path, pyproject=pyproject, descriptor=descriptor)
+    with pytest.raises(SystemExit):
+        gate.read_identity_fixture(tmp_path, "plugins/id")
+    err = capsys.readouterr().err
+    assert "plugins/id" in err
+    assert message in err

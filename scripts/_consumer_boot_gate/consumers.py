@@ -62,17 +62,26 @@ def collect_consumers(wheels: list[str], reqs: list[str]) -> list[Consumer]:
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
+def canonical_dist_name(name: str) -> str:
+    """The normalized form of a distribution name, so two spellings of one distribution compare equal."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def member_dist_name(pyproject: Path) -> str:
+    """The distribution name a member's ``pyproject.toml`` declares (``[project].name``)."""
+    import tomllib
+
+    return tomllib.loads(pyproject.read_text())["project"]["name"]
+
+
 def first_party_plugin_names(repo_root: Path) -> dict[str, str]:
     """Every packaged first-party plugin, mapping its distribution name to its member dir.
 
     A descriptor-only plugin dir (no ``pyproject.toml``) ships no distribution and is skipped.
     """
-    import tomllib
-
     names: dict[str, str] = {}
     for pyproject in sorted(repo_root.glob("plugins/*/pyproject.toml")):
-        name = tomllib.loads(pyproject.read_text())["project"]["name"]
-        names[name] = str(pyproject.parent.relative_to(repo_root))
+        names[member_dist_name(pyproject)] = str(pyproject.parent.relative_to(repo_root))
     return names
 
 
