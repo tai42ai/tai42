@@ -5105,7 +5105,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-agents"
-version = "11.0.6"
+version = "11.0.7"
 source = { editable = "plugins/agents" }
 dependencies = [
     { name = "deepagents" },
@@ -5617,7 +5617,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "19.0.2"
+version = "19.0.3"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
