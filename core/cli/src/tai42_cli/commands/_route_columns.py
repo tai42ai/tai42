@@ -552,6 +552,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         items_key=None, columns=("version", "body", "tags", "created_at", "is_current", "fanout")
     ),
     ("POST", "/api/states/{name}/records/search"): RouteShape(items_key="matches", columns=("subject", "updated_at")),
+    ("POST", "/api/states/{name}/records/validate"): RouteShape(items_key="reasons", columns=("path", "message")),
     ("POST", "/api/sub-mcp"): RouteShape(items_key=None, columns=("slug", "tools", "transport")),
     ("POST", "/api/tools-config/entries"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("POST", "/api/tools/reload"): RouteShape(

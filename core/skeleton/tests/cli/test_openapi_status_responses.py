@@ -138,6 +138,7 @@ _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
     ("PATCH", "/api/states/{name}/attachments/{template}"),
     ("PUT", "/api/states/{name}/attachments/{template}"),
     ("POST", "/api/states/{name}/records/search"),
+    ("GET", "/api/states/{name}/records/check"),
     ("DELETE", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"),
     ("GET", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"),
     ("PATCH", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"),

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-channel-telegram"
-version = "6.0.4"
+version = "6.0.6"
 description = "Telegram channel plugin for the TAI ecosystem — delivers ask questions to a Telegram chat and bridges the typed reply back to the interactions callback door."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -26,7 +26,7 @@ dependencies = [
     # The pure interface contract — Channel, ChannelDelivery, ChannelDeliveryError,
     # and the tai42_app handle the plugin registers through.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=19.2,<20",
+    "tai42-contract>=19.3,<20",
     # HttpxClient + RedisClient (redis extra) + TaiBaseSettings + the settings
     # cache registry + RedisConnectionSettings.
     "tai42-kit[redis]>=10.0,<11",

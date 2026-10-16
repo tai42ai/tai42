@@ -48,6 +48,35 @@ class _RecordQueryStore(_StoreBase):
                 )
             return list(await cur.fetchall())
 
+    async def list_records(
+        self, state: str, *, kind: str | None, limit: int, cursor: str | None, conn: AsyncConnection[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """One keyset page of a state's records — :meth:`list_subjects` plus each row's ``data`` document.
+
+        Ordered and cursored identically to :meth:`list_subjects` (the subjects page stays doc-free;
+        this is the read a schema check pages over), each row
+        ``{target_kind, target_name, subject_kind, subject_key, data, updated_at}``.
+        """
+        after = ("", "", "", "") if cursor is None else _split_cursor(cursor)
+        async with self._read_cursor(conn) as cur:
+            if kind is None:
+                await cur.execute(
+                    "SELECT target_kind, target_name, subject_kind, subject_key, data, "
+                    "extract(epoch FROM updated_at)::float8 AS updated_at FROM state_records "
+                    "WHERE state = %s AND (target_kind, target_name, subject_kind, subject_key) > (%s, %s, %s, %s) "
+                    "ORDER BY target_kind, target_name, subject_kind, subject_key LIMIT %s",
+                    (state, *after, limit),
+                )
+            else:
+                await cur.execute(
+                    "SELECT target_kind, target_name, subject_kind, subject_key, data, "
+                    "extract(epoch FROM updated_at)::float8 AS updated_at FROM state_records "
+                    "WHERE state = %s AND (target_kind, target_name, subject_kind, subject_key) > (%s, %s, %s, %s) "
+                    "AND subject_kind = %s ORDER BY target_kind, target_name, subject_kind, subject_key LIMIT %s",
+                    (state, *after, kind, limit),
+                )
+            return list(await cur.fetchall())
+
     async def search_records(
         self, state: str, containment: dict[str, Any], *, limit: int, cursor: str | None
     ) -> list[dict[str, Any]]:

@@ -6,8 +6,15 @@ import pytest
 from jsonschema import Draft202012Validator
 from tai42_contract.states.errors import SchemaValidationError, ValueValidationError
 
-from tai42_skeleton.states.schema import _validate_document, _validate_schema
+from tai42_skeleton.states.schema import _document_reasons, _validate_document, _validate_schema
 from tai42_skeleton.states.service.rows import _page_limit
+
+_RECORD_SCHEMA = {
+    "type": "object",
+    "properties": {"n": {"type": "integer"}, "tag": {"type": "string"}},
+    "required": ["n", "tag"],
+    "additionalProperties": False,
+}
 
 
 def test_validate_schema_shape_refusals() -> None:
@@ -97,6 +104,37 @@ def test_validate_document_reports_unresolvable_ref() -> None:
     schema = {"type": "object", "properties": {"a": {"$ref": "#/$defs/missing"}}}
     with pytest.raises(ValueValidationError):
         _validate_document(Draft202012Validator(schema), {"a": 1})
+
+
+def test_document_reasons_empty_when_the_document_fits() -> None:
+    validator = Draft202012Validator(_RECORD_SCHEMA)
+    assert _document_reasons(validator, {"n": 1, "tag": "x"}) == []
+
+
+def test_document_reasons_lists_every_failure_sorted_by_json_path() -> None:
+    validator = Draft202012Validator(_RECORD_SCHEMA)
+    # Two independent failures: the wrong type on ``n`` and an undeclared extra key. Both are
+    # reported (never only the first), ordered by json_path.
+    reasons = _document_reasons(validator, {"n": "nope", "extra": 1})
+    paths = [r.path for r in reasons]
+    assert paths == sorted(paths)
+    joined = " ".join(f"{r.path} {r.message}" for r in reasons)
+    assert "'tag' is a required property" in joined
+    assert "extra" in joined  # additionalProperties refusal
+    assert any(r.path == "$.n" for r in reasons)  # the type failure names the node
+
+
+def test_document_reasons_reports_a_root_non_object() -> None:
+    validator = Draft202012Validator(_RECORD_SCHEMA)
+    reasons = _document_reasons(validator, ["not", "an", "object"])  # type: ignore[arg-type]
+    assert reasons
+    assert all(r.path == "$" for r in reasons)
+
+
+def test_document_reasons_raises_loudly_on_an_unresolvable_ref() -> None:
+    schema = {"type": "object", "properties": {"a": {"$ref": "#/$defs/missing"}}}
+    with pytest.raises(ValueValidationError, match="unresolvable"):
+        _document_reasons(Draft202012Validator(schema), {"a": 1})
 
 
 def test_page_limit_clamps_and_refuses() -> None:

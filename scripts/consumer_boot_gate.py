@@ -16,8 +16,7 @@ from tai42_cli import api_gate  # re-exported so a caller can patch consumer_boo
 from _consumer_boot_gate.boot import (
     _BOOT_PLACEHOLDER_ENV,
     _CORE_ROUTERS,
-    _IDENTITY_LIFECYCLE_MODULE,
-    _IDENTITY_PROVIDER_NAME,
+    IdentityFixture,
     Infra,
     _boot_env,
     _channel_env,
@@ -28,6 +27,7 @@ from _consumer_boot_gate.boot import (
     auth_providers,
     boot_consumer,
     build_manifest,
+    read_identity_fixture,
 )
 from _consumer_boot_gate.boot_failure import (
     BootFailure,
@@ -54,10 +54,12 @@ from _consumer_boot_gate.consumers import (
     wheel_name_version,
 )
 from _consumer_boot_gate.install import (
+    _KIT_EXTRAS,
     _install_venv,
     _is_resolution_conflict,
     _report_unresolvable_consumers,
     _ResolutionConflictError,
+    _resolver_conclusion,
 )
 from _consumer_boot_gate.process import run_gate_step
 from _consumer_boot_gate.provides import Provides, read_provides
@@ -66,12 +68,12 @@ from _consumer_boot_gate.versioning import break_is_accepted
 __all__ = [
     "_BOOT_PLACEHOLDER_ENV",
     "_CORE_ROUTERS",
-    "_IDENTITY_LIFECYCLE_MODULE",
-    "_IDENTITY_PROVIDER_NAME",
+    "_KIT_EXTRAS",
     "BootFailure",
     "Candidate",
     "Consumer",
     "CoreRelease",
+    "IdentityFixture",
     "Infra",
     "Provides",
     "_ResolutionConflictError",
@@ -86,6 +88,7 @@ __all__ = [
     "_load_plugin_yaml",
     "_report_unresolvable_consumers",
     "_req_dist_name",
+    "_resolver_conclusion",
     "_slot_env",
     "api_gate",
     "auth_providers",
@@ -102,6 +105,7 @@ __all__ = [
     "parse_boot_failure",
     "previous_release_tag",
     "read_candidate",
+    "read_identity_fixture",
     "read_provides",
     "release_bump_set",
     "released_by_tree",

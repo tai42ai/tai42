@@ -12,16 +12,52 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from _consumer_boot_gate.boot_failure import BootFailure, parse_boot_failure
-from _consumer_boot_gate.consumers import Consumer
+from _consumer_boot_gate.consumers import Consumer, member_dist_name
 from _consumer_boot_gate.process import MIGRATE_TIMEOUT_S, VENV_PY_TIMEOUT_S, run_gate_step
-from _consumer_boot_gate.provides import Provides
+from _consumer_boot_gate.provides import Provides, read_provides
 from _consumer_boot_gate.versioning import _fail
 
-_DEFAULT_IDENTITY_PACKAGE = "tai42-identity-redis"
-_IDENTITY_PROVIDER_NAME = "redis"
-_IDENTITY_LIFECYCLE_MODULE = "tai42_identity_redis"
-
 _HEALTH_DEADLINE_S = 90.0
+
+
+@dataclass(frozen=True)
+class IdentityFixture:
+    """The gate's own identity provider: a plugin member dir of the candidate tree.
+
+    Installed editable beside the core so access control is on for every boot. ``dir`` is the member dir
+    relative to the tree root, ``dist_name`` its distribution, ``providers`` the identity providers it
+    registers (the head of the auth-provider chain) and ``lifecycle`` the modules mounted so they register.
+    """
+
+    dir: str
+    dist_name: str
+    providers: tuple[str, ...]
+    lifecycle: tuple[str, ...]
+
+
+def read_identity_fixture(repo_root: Path, identity_dir: str) -> IdentityFixture:
+    """Read the identity fixture from its member dir's ``pyproject.toml`` and ``tai-plugin.yml``.
+
+    A dir without either file, or whose descriptor provides no identity provider, fails loudly.
+    """
+    import yaml
+
+    member = repo_root / identity_dir
+    pyproject = member / "pyproject.toml"
+    descriptor = member / "tai-plugin.yml"
+    if not pyproject.is_file():
+        _fail(f"identity dir {identity_dir}: no pyproject.toml at {pyproject}, so it ships no distribution to install")
+    if not descriptor.is_file():
+        _fail(f"identity dir {identity_dir}: no tai-plugin.yml at {descriptor}, so it declares no provider to mount")
+    provides = read_provides(yaml.safe_load(descriptor.read_text()) or {})
+    if not provides.providers:
+        _fail(f"identity dir {identity_dir}: its tai-plugin.yml provides no identity provider (kind 'identity')")
+    return IdentityFixture(
+        dir=identity_dir,
+        dist_name=member_dist_name(pyproject),
+        providers=tuple(provides.providers),
+        lifecycle=tuple(provides.lifecycle),
+    )
 
 
 def _db_binding_env(provides: Provides) -> dict[str, str]:
@@ -36,13 +72,13 @@ def _db_binding_env(provides: Provides) -> dict[str, str]:
     return {f"TAI_DB_BINDING_{slug}": "default"}
 
 
-def auth_providers(provides: Provides) -> list[str]:
+def auth_providers(provides: Provides, identity: IdentityFixture) -> list[str]:
     """The access-control auth-provider chain for a boot.
 
     The gate's own identity provider plus every provider the consumer registers (so the
-    accounts-provider boot check passes for an accounts/identity plugin).
+    accounts-provider boot check passes for an accounts/identity plugin), each named once.
     """
-    return [_IDENTITY_PROVIDER_NAME, *dict.fromkeys(provides.providers)]
+    return list(dict.fromkeys([*identity.providers, *provides.providers]))
 
 
 # The platform routers a served app always mounts, plus the access-control doors
@@ -58,16 +94,16 @@ _CORE_ROUTERS = (
 )
 
 
-def build_manifest(provides: Provides) -> dict:
+def build_manifest(provides: Provides, identity: IdentityFixture) -> dict:
     """The serve manifest for one consumer: the core routers plus the consumer's declared surface.
 
     The additive modules (routers, tools, channels, extensions, lifecycle) AND the exclusive
     slots it selects (``backend_module`` / ``storage_module`` / ``sandbox_module`` /
     ``monitoring_module`` / ``agents``), so the plugin's module is imported and registers. The
-    identity provider's lifecycle module is always present so access control resolves a
-    provider.
+    identity fixture's lifecycle modules are always present so access control resolves a
+    provider; a module is mounted once.
     """
-    lifecycle = [_IDENTITY_LIFECYCLE_MODULE, *provides.lifecycle]
+    lifecycle = list(dict.fromkeys([*identity.lifecycle, *provides.lifecycle]))
     routers = [*_CORE_ROUTERS, *provides.routers]
     manifest: dict = {
         "default_routers": "none",
@@ -317,7 +353,7 @@ def _allocate_port() -> int:
 
 
 def boot_consumer(
-    consumer: Consumer, venv_bin: Path, provides: Provides, workdir: Path, infra: Infra
+    consumer: Consumer, venv_bin: Path, provides: Provides, identity: IdentityFixture, workdir: Path, infra: Infra
 ) -> BootFailure | None:
     """Boot one consumer against the candidate core and wait for health.
 
@@ -335,12 +371,12 @@ def boot_consumer(
     config_dir = workdir / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = config_dir / "manifest.yml"
-    manifest_path.write_text(yaml.safe_dump(build_manifest(provides), sort_keys=False))
+    manifest_path.write_text(yaml.safe_dump(build_manifest(provides, identity), sort_keys=False))
 
     db_name = _create_database(venv_bin, infra)
     blackhole_url = f"http://127.0.0.1:{_allocate_port()}"
     env = {
-        **_boot_env(config_dir, manifest_path, venv_bin, db_name, infra, auth_providers(provides)),
+        **_boot_env(config_dir, manifest_path, venv_bin, db_name, infra, auth_providers(provides, identity)),
         **_channel_env(provides, infra.redis_url),
         **_db_binding_env(provides),
         **_slot_env(provides, consumer.dist_name, infra),
