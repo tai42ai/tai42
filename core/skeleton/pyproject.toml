@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-skeleton"
-version = "26.1.0"
+version = "26.2.0"
 description = "Open-source implementation of tai42-contract: the extended MCP server hosting tools, agents, extensions, connectors, hooks, and storage for the TAI ecosystem."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -33,7 +33,7 @@ dependencies = [
     # holds around every reload body, and `tai42_kit.signals` + `tai42_kit.backend`
     # (signal_chain, BackendDispatchSettings), which the backend CLI and the
     # dispatch settings use.
-    "tai42-kit[llm,jq,uvicorn,redis,postgres]>=9.0,<10",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres]>=10.0,<11",
     # The `tai` command client. The server owns no console script; it contributes
     # its local/runtime commands to the CLI through the `tai.commands` entry point.
     "tai42-cli>=15.0,<16",
@@ -149,7 +149,7 @@ dev = [
     "tai42-identity-redis>=4.0,<5",
     # The monitoring feature's OpenTelemetry writer: the masking and counting tests
     # record through it over an in-memory exporter.
-    "tai42-kit[monitoring]>=9.0,<10",
+    "tai42-kit[monitoring]>=10.0,<11",
     # The LangGraph Postgres checkpoint saver, for the checkpoint-retention integration
     # tests that run the sweep against a real Postgres store.
     "tai42-kit[langgraph-checkpoint-postgres]",

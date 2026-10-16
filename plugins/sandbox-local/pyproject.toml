@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-sandbox-local"
-version = "2.0.4"
+version = "2.0.5"
 description = "Direct/host sandbox provider for the TAI ecosystem — runs a session's code as a plain host subprocess, no container and no isolation."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -32,7 +32,7 @@ dependencies = [
     # and the session-create policy chokepoint), SandboxDispatchSettings, and the
     # importable conformance suite. The floor names the first release carrying
     # `tai42_kit.sandbox`, which this provider builds on.
-    "tai42-kit>=9.0,<10",
+    "tai42-kit>=10.0,<11",
     # SettingsConfigDict / SecretStr for the settings model and the env credential
     # channel; imported directly, so declared directly rather than leaned on as a
     # transitive.

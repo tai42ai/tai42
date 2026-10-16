@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-channel-whatsapp"
-version = "8.0.3"
+version = "8.0.4"
 description = "Meta WhatsApp API channel plugin for the TAI ecosystem — delivers ask questions to a human on WhatsApp and bridges the reply back."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -29,7 +29,7 @@ dependencies = [
     "tai42-contract>=19.2,<20",
     # HttpxClient (pooled outbound HTTP), RedisClient (correlation store),
     # TaiBaseSettings + the settings cache registry. [redis] pulls redis-py.
-    "tai42-kit[redis]>=9.0,<10",
+    "tai42-kit[redis]>=10.0,<11",
     # Imported directly (transport error types).
     "httpx>=0.28",
     # Imported directly by inbound.py (Request/Response handler types).
