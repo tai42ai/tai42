@@ -26,13 +26,22 @@ from pathlib import Path
 # the in-process mutex class) the first time it is imported, choosing mmap only
 # when ``PROMETHEUS_MULTIPROC_DIR`` is already set. The writer entry points assert
 # the mmap backend is active, mirroring production where the launcher sets this
-# before any import. Set it to a fresh per-session dir here — at conftest
-# module-import time, before any test module imports ``prometheus_client`` — so a
-# package-scoped skeleton run freezes mmap. A whole-repo run's rootdir conftest
-# sets it first, and this guard then defers to that shared dir. No test writes
-# counters here; render tests point the collector at their own tmp dirs.
-if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
-    os.environ["PROMETHEUS_MULTIPROC_DIR"] = tempfile.mkdtemp(prefix="tai42_prometheus_")
+# before any import. Point it at a fresh dir here — at conftest module-import
+# time, before any test module imports ``prometheus_client`` — so a package-scoped
+# skeleton run freezes mmap.
+#
+# The monitoring tests write real counters into that dir, and the health watch
+# sums every per-pid file in it and keeps its alert state there, so each test
+# process owns its own dir: the dir name carries the owning pid, and a value
+# inherited from another process (the pytest-xdist controller, a shell export, a
+# parent test run) is replaced, never shared. In a whole-repo run the rootdir
+# conftest has already created this process's dir, and it stands. Tests that
+# exercise the multiproc dir itself (render, wipe, the forked-family probe) point
+# at their own tmp dirs.
+if not os.path.basename(os.environ.get("PROMETHEUS_MULTIPROC_DIR", "")).startswith(
+    _own_prefix := f"tai42_prometheus_{os.getpid()}_"
+):
+    os.environ["PROMETHEUS_MULTIPROC_DIR"] = tempfile.mkdtemp(prefix=_own_prefix)
     atexit.register(shutil.rmtree, os.environ["PROMETHEUS_MULTIPROC_DIR"], ignore_errors=True)
 
 # The manifest-driven suites name fixture packages by dotted path
