@@ -28,9 +28,10 @@ jobs:
         run: node --test commitlint.config.test.mjs
       - name: Lint commits
         uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6.2.1
-      # The PR title becomes the squash subject, so it carries the same
-      # markup-angle constraint as commit headers; the pattern and its error
-      # text come from the commitlint config.
+      # The PR title becomes the squash subject of a multi-commit PR and a single
+      # commit's subject that of a single-commit PR, so both carry the same
+      # markup-angle constraint; the pattern and its error text come from the
+      # commitlint config.
       - name: Read the PR-title subject constraint
         id: title-constraint
         run: |

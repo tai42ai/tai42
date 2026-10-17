@@ -1,15 +1,20 @@
 name: release-label
 
-# A pull request's conventional title and body decide the version release-please
-# will publish per touched package. This gate projects that version and runs the
-# release API-diff gate against it before the merge — the same gate release.yml
-# runs on the tag — so a breaking public-API change under a bump its label could
-# not honestly carry is refused here, never after the tag.
+# Refuses a pull request whose release would publish a public-API change its
+# version cannot carry, before the merge rather than after the tag. GitHub's
+# default squash text for the PR is fed to release-please over main at the base
+# SHA, so every unreleased commit on main counts as it will in the release train;
+# release-please's own release-train PR is gated at its manifest's versions. Each version runs the
+# release API-diff gate release.yml runs on the tag.
 on:
   pull_request:
+    # `edited`: a title edit changes the squash headline of a multi-commit PR
+    # without a new commit.
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   release-label:
@@ -17,8 +22,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # Full history + tags: the gate diffs each projected version against its
-        # previous released tag, the way the API-diff gate on the tag does.
+        # Full history + tags: release-please finds each package's last release
+        # from its tag, and the gate diffs each version against that tag.
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -26,24 +31,64 @@ jobs:
           version: "0.11.26"
           enable-cache: true
       - run: uv python install 3.13
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: scripts/release-please/package-lock.json
+      - name: Install release-please
+        working-directory: scripts/release-please
+        run: npm ci
+      - name: Read the squash message GitHub will write
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          NAME: ${{ github.event.repository.name }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          QUERY: |
+            query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                squashMergeAllowed
+                mergeCommitAllowed
+                rebaseMergeAllowed
+                pullRequest(number: $number) {
+                  viewerMergeHeadlineText(mergeType: SQUASH)
+                  viewerMergeBodyText(mergeType: SQUASH)
+                }
+              }
+            }
+        run: |
+          set -euo pipefail
+          gh api graphql -F owner="$OWNER" -F name="$NAME" -F number="$NUMBER" -f query="$QUERY" \
+            > "$RUNNER_TEMP/squash.json"
       - name: Refuse a mislabelled release
-        # The title and body reach the script through the environment, never
-        # interpolated into the shell, so a backtick or ``$(...)`` in a pull
-        # request body cannot run on the runner. The api-gate extra carries the
-        # gate's griffe/pyyaml the same way release.yml installs them; the
+        # The PR body and branch names reach the script through the
+        # environment, never interpolated into the shell, so a backtick or
+        # ``$(...)`` in them cannot run on the runner. The api-gate extra carries
+        # the gate's griffe/pyyaml the same way release.yml installs them; the
         # tai42-api-gate console script the extra registers is on PATH for the
-        # script's per-package gate calls. No secret or org value is read — the
-        # package list and versions come from the repo's own release-please
-        # config and manifest — so this runs unchanged on a fork.
+        # script's per-package gate calls. GITHUB_TOKEN (read-only on a fork's
+        # pull request) reads the pull requests GitHub associates with main's
+        # unreleased commits; otherwise only the repo's own config, manifest and
+        # tags are read, so this runs unchanged on a fork.
         # Sync is --frozen, not --locked: a release pull request's first head
         # carries bumped package versions with the lock refreshed by a follow-up
-        # commit. The projection reads versions from the release manifest, and
-        # the lock as it stands only supplies the environment (the repo's own
+        # commit. The versions come from release-please and the manifest, and the
+        # lock as it stands only supplies the environment (the repo's own
         # packages and the extra's tools).
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_BRANCH: ${{ github.base_ref }}
         run: >-
           uv run --frozen --package tai42-cli --extra api-gate
           python scripts/release_label_check.py
           --base-ref ${{ github.event.pull_request.base.sha }}
+          --pr-number ${{ github.event.pull_request.number }}
+          --repository "$GITHUB_REPOSITORY"
+          --base-branch "$BASE_BRANCH"
+          --head-ref "$HEAD_REF"
+          --head-repository "$HEAD_REPOSITORY"
+          --squash-json "$RUNNER_TEMP/squash.json"
