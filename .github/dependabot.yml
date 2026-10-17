@@ -34,3 +34,13 @@ updates:
       npm:
         patterns:
           - "*"
+  # release-please, pinned once for the release-label check and the release
+  # workflow, so a bump moves projecting and minting together.
+  - package-ecosystem: npm
+    directory: /scripts/release-please
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns:
+          - "*"

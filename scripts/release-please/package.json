@@ -1,0 +1,14 @@
+{
+  "name": "release-please-runner",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "release-please": "17.6.0"
+  }
+}

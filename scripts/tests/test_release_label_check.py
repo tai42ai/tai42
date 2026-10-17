@@ -1,411 +1,416 @@
-"""Unit tests for scripts/release_label_check.py — the projection the pre-merge gate runs on.
+"""Tests for scripts/release_label_check.py — which versions the pre-merge gate checks, and how.
 
-Hermetic: every case drives the pure projection helpers with synthetic titles,
-bodies, changed-file lists and release-please config/manifest fragments. The
-``tai42-api-gate`` subprocess the orchestration runs is not exercised here — the
-gate has its own suite; these tests pin the title/body -> bump -> version and
-file -> package attribution that decide which gate calls happen and at what
-version.
+The ``tai42-api-gate`` subprocess is stubbed throughout (the gate has its own suite).
+The release-please projection is stubbed where a test is about the orchestration,
+and run for real once, over a synthetic repository, to hold the contract between
+this script and ``scripts/release-please/projection.js``.
 """
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
+import sys
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any
+
 import pytest
 
 import release_label_check as rlc  # importable via the scripts/ path conftest.py injects
-from release_label_check import Bump
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RELEASE_PLEASE = REPO_ROOT / "scripts" / "release-please"
+REPOSITORY = "acme/widgets"
+TRAIN_BRANCH = "release-please--branches--main"
 
 
-def _packaged(root, *dirs: str) -> None:
+def _pr(
+    headline: str = "fix(kit): x (#7)",
+    *,
+    body: str = "",
+    pr_body: str = "",
+    head_ref: str = "topic",
+    head_repository: str = REPOSITORY,
+) -> rlc.PullRequest:
+    return rlc.PullRequest(
+        number=7,
+        headline=headline,
+        body=body,
+        pr_body=pr_body,
+        head_ref=head_ref,
+        head_repository=head_repository,
+        base_branch="main",
+    )
+
+
+MANIFEST = ".release-please-manifest.json"
+CONFIG = "release-please-config.json"
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "user.name=Alice", "-c", "user.email=alice@example.com", "-c", "commit.gpgsign=false", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def _commit(repo: Path, message: str, files: dict[str, str]) -> str:
+    for name, content in files.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(content)
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "--quiet", "--allow-empty", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _repo(tmp_path: Path, manifest: dict[str, str], packages: dict[str, dict[str, object]] | None = None) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "--quiet", "--initial-branch=main")
+    packages = packages or {path: {"package-name": f"tai42-{Path(path).name}"} for path in manifest}
+    config = {"release-type": "python", "include-component-in-tag": True, "packages": packages}
+    _commit(repo, "chore: release main (#1)", {CONFIG: json.dumps(config, indent=2), MANIFEST: json.dumps(manifest)})
+    return repo
+
+
+def _packaged(root: Path, *dirs: str) -> None:
     """Give each dir a pyproject.toml under ``root`` so the check treats it as a packaged member."""
     for directory in dirs:
         (root / directory).mkdir(parents=True, exist_ok=True)
         (root / directory / "pyproject.toml").write_text("[project]\n")
 
 
-def test_title_only_fix_is_a_patch() -> None:
-    assert rlc.projected_bump("fix(cli): correct a typo", "") == Bump.PATCH
-
-
-def test_title_only_feat_is_a_minor() -> None:
-    assert rlc.projected_bump("feat(kit): add a helper", "") == Bump.MINOR
-
-
-def test_non_releasing_type_projects_nothing() -> None:
-    assert rlc.projected_bump("chore: bump a dev dependency", "") == Bump.NONE
-    assert rlc.projected_bump("docs: expand the readme", "") == Bump.NONE
-
-
-def test_blank_line_then_whitelisted_header_starts_a_chunk() -> None:
-    # A patch title with a plain feat chunk a blank line below projects the higher minor:
-    # the body chunk begins at a whitelisted "type(scope): " header, so release-please splits it.
-    assert rlc.projected_bump("fix(kit): a fix", "feat(kit): and also a feature") == Bump.MINOR
-
-
-def test_bang_on_the_header_is_a_major() -> None:
-    assert rlc.projected_bump("feat(kit)!: drop a public symbol", "") == Bump.MAJOR
-    assert rlc.projected_bump("fix!: a breaking fix", "") == Bump.MAJOR
-
-
-def test_bang_on_a_body_line_is_not_a_major() -> None:
-    # release-please's chunk split excludes the "!" marker, so a "type!:" body line
-    # starts no chunk and stays plain body text: the title's fix keeps it a patch.
-    assert rlc.projected_bump("fix(kit): tidy", "refactor(kit)!: remove a method") == Bump.PATCH
-
-
-def test_bang_line_after_a_blank_line_still_starts_no_chunk() -> None:
-    # Even preceded by a blank line, "feat(kit)!:" is not in the split lookahead (the "!"),
-    # so it never becomes a chunk header and never lifts the bump above the title's patch.
-    assert rlc.projected_bump("fix: a fix", "\nfeat(kit)!: add a thing") == Bump.PATCH
-
-
-def test_bang_line_after_a_non_whitelisted_line_stays_plain_body() -> None:
-    # A "feat!:" line that follows a non-whitelisted body line (no blank-line + whitelisted
-    # header before it) is plain body text: the title's fix decides — a patch.
-    assert rlc.projected_bump("fix: a fix", "some free-form context\nfeat!: add") == Bump.PATCH
-
-
-def test_breaking_change_footer_in_a_chunk_is_a_major() -> None:
-    assert rlc.projected_bump("fix(kit): tidy up", "BREAKING CHANGE: removed the deprecated router") == Bump.MAJOR
-
-
-def test_breaking_change_hyphen_footer_is_a_major() -> None:
-    assert rlc.projected_bump("feat: add", "BREAKING-CHANGE: the shape changed") == Bump.MAJOR
-
-
-def test_commit_override_replaces_the_whole_message_down_to_patch() -> None:
-    # A BEGIN_COMMIT_OVERRIDE block replaces the title too: a feat! title is discarded.
-    body = "BEGIN_COMMIT_OVERRIDE\nfix: tidy\nEND_COMMIT_OVERRIDE"
-    assert rlc.projected_bump("feat!: rewrite everything", body) == Bump.PATCH
-
-
-def test_commit_override_replaces_the_whole_message_up_to_major() -> None:
-    body = "BEGIN_COMMIT_OVERRIDE\nfeat!: a breaking change\nEND_COMMIT_OVERRIDE"
-    assert rlc.projected_bump("fix: tidy", body) == Bump.MAJOR
-
-
-def test_commit_override_carrying_a_breaking_footer_is_a_major() -> None:
-    body = "BEGIN_COMMIT_OVERRIDE\nfix: tidy\n\nBREAKING CHANGE: it moved\nEND_COMMIT_OVERRIDE"
-    assert rlc.projected_bump("fix: tidy", body) == Bump.MAJOR
-
-
-def test_nested_commit_block_contributes_its_own_bump() -> None:
-    # A nested feat! block beside a fix: title lifts the projection to a major.
-    body = "some context\n\nBEGIN_NESTED_COMMIT\nfeat!: a nested breaking change\nEND_NESTED_COMMIT"
-    assert rlc.projected_bump("fix: tidy", body) == Bump.MAJOR
-
-
-def test_nested_commit_block_of_plain_text_adds_no_bump() -> None:
-    body = "BEGIN_NESTED_COMMIT\njust some prose, no conventional header\nEND_NESTED_COMMIT"
-    assert rlc.projected_bump("chore: housekeeping", body) == Bump.NONE
-
-
-def test_commit_override_stops_at_the_second_begin_marker() -> None:
-    # release-please reads the slice between the FIRST and SECOND BEGIN markers, then up to
-    # the first END; a breaking footer after the second BEGIN is outside the override text.
-    body = "BEGIN_COMMIT_OVERRIDE\nfix: tidy\nBEGIN_COMMIT_OVERRIDE\n\nBREAKING CHANGE: gone\nEND_COMMIT_OVERRIDE"
-    assert rlc.projected_bump("feat!: rewrite", body) == Bump.PATCH
-
-
-def test_release_as_inside_an_override_wins() -> None:
-    body = "Release-As: 1.2.3\n\nBEGIN_COMMIT_OVERRIDE\nfix: tidy\n\nRelease-As: 4.5.6\nEND_COMMIT_OVERRIDE"
-    assert rlc.release_as("fix: tidy", body) == "4.5.6"
-
-
-def test_touched_dirs_attributes_files_to_their_package() -> None:
-    dirs = ["core/cli", "core/kit", "plugins/agents", "e2e"]
-    files = [
-        "core/kit/src/tai42_kit/app.py",
-        "plugins/agents/tai-plugin.yml",
-        "README.md",
-        ".github/workflows/ci.yml",
-    ]
-    assert rlc.touched_dirs(files, dirs) == {"core/kit", "plugins/agents"}
-
-
-def test_touched_dirs_picks_the_longest_matching_dir() -> None:
-    # A nested package dir wins over a shorter ancestor that also matches.
-    dirs = ["plugins", "plugins/agents"]
-    assert rlc.touched_dirs(["plugins/agents/src/x.py"], dirs) == {"plugins/agents"}
-
-
-def test_scripts_and_workflow_change_touches_no_package() -> None:
-    dirs = ["core/cli", "plugins/agents", "e2e"]
-    files = ["scripts/release_label_check.py", ".github/workflows/release-label.yml"]
-    assert rlc.touched_dirs(files, dirs) == set()
-
-
-def test_a_package_whose_changed_files_all_lie_under_its_exclude_paths_is_not_touched() -> None:
-    # A package's test tree never enters its published artifact: a change to it alone
-    # attributes no release, as release-please drops the commit for that package.
-    dirs = ["core/kit", "core/skeleton"]
-    files = ["core/kit/src/tai42_kit/x.py", "core/skeleton/tests/test_y.py"]
-    assert rlc.touched_dirs(files, dirs, {"core/skeleton": ["core/skeleton/tests"]}) == {"core/kit"}
-
-
-def test_a_package_with_one_changed_file_outside_its_exclude_paths_is_touched() -> None:
-    dirs = ["core/kit", "core/skeleton"]
-    files = ["core/kit/src/tai42_kit/x.py", "core/skeleton/tests/test_y.py", "core/skeleton/src/z.py"]
-    assert rlc.touched_dirs(files, dirs, {"core/skeleton": ["core/skeleton/tests"]}) == {"core/kit", "core/skeleton"}
-
-
-def test_a_package_without_exclude_paths_is_attributed_by_its_path_alone() -> None:
-    dirs = ["core/kit", "core/skeleton"]
-    files = ["core/skeleton/tests/test_y.py"]
-    assert rlc.touched_dirs(files, dirs, {"core/kit": ["core/kit/tests"]}) == {"core/skeleton"}
-
-
-def test_exclude_paths_are_normalised_and_must_be_a_list_of_paths() -> None:
-    assert rlc.exclude_paths({"exclude-paths": ["/core/kit/tests/", "core/kit/examples"]}) == [
-        "core/kit/tests",
-        "core/kit/examples",
-    ]
-    assert rlc.exclude_paths({}) == []
-    with pytest.raises(SystemExit, match="exclude-paths must be a list of paths"):
-        rlc.exclude_paths({"exclude-paths": "core/kit/tests"})
-
-
-def test_check_gates_no_package_whose_change_lies_under_its_exclude_paths(monkeypatch, tmp_path) -> None:
-    packages = {
-        "core/kit": {
-            "package-name": "tai42-kit",
-            "exclude-paths": ["core/kit/tests"],
-            rlc._BUMP_MINOR_PRE_MAJOR: False,
-            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
-        },
-        "core/skeleton": {
-            "package-name": "tai42-skeleton",
-            "exclude-paths": ["core/skeleton/tests", "core/skeleton/examples"],
-            rlc._BUMP_MINOR_PRE_MAJOR: False,
-            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
-        },
+def _squash_json(tmp_path: Path, *, merge: bool = False, rebase: bool = False, pull_request: object = None) -> Path:
+    if pull_request is None:
+        pull_request = {"viewerMergeHeadlineText": "fix(kit): x (#7)", "viewerMergeBodyText": "Body."}
+    document = {
+        "data": {
+            "repository": {
+                "squashMergeAllowed": True,
+                "mergeCommitAllowed": merge,
+                "rebaseMergeAllowed": rebase,
+                "pullRequest": pull_request,
+            }
+        }
     }
-    manifest = {"core/kit": "9.0.2", "core/skeleton": "26.0.0"}
-    _packaged(tmp_path, "core/kit", "core/skeleton")
+    path = tmp_path / "squash.json"
+    path.write_text(json.dumps(document))
+    return path
+
+
+# --- the release-train path -------------------------------------------------------------
+
+
+def _train_repo(tmp_path: Path) -> tuple[Path, str]:
+    repo = _repo(tmp_path, {"core/kit": "7.0.2", "core/cli": "11.0.2", "core/skeleton": "3.0.0"})
+    base = _git(repo, "rev-parse", "HEAD")
+    manifest = {"core/kit": "8.0.0", "core/cli": "11.0.2", "core/skeleton": "3.0.0", "plugins/agents": "1.0.0"}
+    _commit(repo, "chore: release main (#9)", {MANIFEST: json.dumps(manifest)})
+    return repo, base
+
+
+def test_a_release_train_is_gated_at_its_manifest_versions(tmp_path) -> None:
+    repo, base = _train_repo(tmp_path)
+
+    gated = rlc.versions_to_gate(
+        repo, base, "HEAD", _pr(head_ref=TRAIN_BRANCH), repository=REPOSITORY, release_please=RELEASE_PLEASE
+    )
+
+    assert gated == {
+        "core/kit": ("8.0.0", "the release train's manifest"),
+        "plugins/agents": ("1.0.0", "the release train's manifest"),
+    }
+
+
+def test_a_pull_request_that_adds_a_package_is_projected_not_taken_for_a_train(monkeypatch, tmp_path) -> None:
+    # Adding a package edits the manifest; every package the pull request touches is still gated.
+    repo, base = _train_repo(tmp_path)
+    requests = _projected(
+        monkeypatch,
+        {
+            "core/kit": {"component": "tai42-kit", "version": "7.0.3", "touched": True},
+            "plugins/agents": {"component": "tai42-agents", "version": "1.1.0", "touched": True},
+        },
+        [MANIFEST, "core/kit/src/a.py", "plugins/agents/src/b.py"],
+    )
+
+    gated = rlc.versions_to_gate(repo, base, "HEAD", _pr(), repository=REPOSITORY, release_please=RELEASE_PLEASE)
+
+    assert len(requests) == 1
+    assert gated == {
+        "core/kit": ("7.0.3", "projected by release-please 17.6.0"),
+        "plugins/agents": ("1.1.0", "projected by release-please 17.6.0"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("head_ref", "head_repository"),
+    [
+        (TRAIN_BRANCH, "someone/widgets"),
+        ("release-please--branches--develop", REPOSITORY),
+        (f"{TRAIN_BRANCH}-copy", REPOSITORY),
+        (f"{TRAIN_BRANCH}--components--tai42-kit", REPOSITORY),
+    ],
+)
+def test_a_branch_that_only_looks_like_the_train_is_projected(monkeypatch, tmp_path, head_ref, head_repository) -> None:
+    repo, base = _train_repo(tmp_path)
+    requests = _projected(
+        monkeypatch,
+        {"core/kit": {"component": "tai42-kit", "version": "7.0.3", "touched": True}},
+        [MANIFEST, "core/kit/src/a.py"],
+    )
+    pr = _pr(head_ref=head_ref, head_repository=head_repository)
+    gated = rlc.versions_to_gate(repo, base, "HEAD", pr, repository=REPOSITORY, release_please=RELEASE_PLEASE)
+    assert gated == {"core/kit": ("7.0.3", "projected by release-please 17.6.0")}
+    assert len(requests) == 1
+
+
+# --- the projection path ----------------------------------------------------------------
+
+
+def _projected(monkeypatch, paths: dict[str, dict[str, object]], files: list[str]) -> list[dict[str, object]]:
+    requests: list[dict[str, object]] = []
+
+    real_run_node = rlc._run_node
+
+    def fake_run_node(script: Path, request: dict[str, object]) -> Any:
+        if script.name != "projection.js":
+            return real_run_node(script, request)
+        requests.append(request)
+        return {"releasePlease": "17.6.0", "paths": paths}
+
+    monkeypatch.setattr(rlc, "_run_node", fake_run_node)
+    monkeypatch.setattr(rlc, "changed_files", lambda base, repo_root: files)
+    return requests
+
+
+def test_touched_packages_with_a_version_are_gated_at_the_projection(monkeypatch, tmp_path, capsys) -> None:
+    repo, base = _train_repo(tmp_path)
+    requests = _projected(
+        monkeypatch,
+        {
+            "core/kit": {"component": "tai42-kit", "version": "8.0.0", "touched": True},
+            "core/cli": {"component": "tai42-cli", "version": "11.0.3", "touched": False},
+            "core/skeleton": {"component": "tai42-skeleton", "version": None, "touched": True},
+        },
+        ["core/kit/src/a.py", "core/skeleton/src/b.py"],
+    )
+    pr = _pr("feat(kit)!: x (#7)", body="Body.", pr_body="PR body")
+
+    gated = rlc.versions_to_gate(repo, base, "HEAD", pr, repository=REPOSITORY, release_please=RELEASE_PLEASE)
+
+    assert gated == {"core/kit": ("8.0.0", "projected by release-please 17.6.0")}
+    assert requests == [
+        {
+            "repo": str(repo),
+            "repository": REPOSITORY,
+            "tree": "HEAD",
+            "base": base,
+            "pullRequest": {
+                "number": 7,
+                "headline": "feat(kit)!: x (#7)",
+                "body": "Body.",
+                "prBody": "PR body",
+                "files": ["core/kit/src/a.py", "core/skeleton/src/b.py"],
+            },
+        }
+    ]
+    assert "core/cli projects 11.0.3, pending in the train, not touched by this pull request" in capsys.readouterr().out
+
+
+def test_a_projection_failure_carries_its_stderr(tmp_path) -> None:
+    failing = tmp_path / "failing.js"
+    failing.write_text("process.stderr.write('no tag for core/kit'); process.exit(1);\n")
+    with pytest.raises(SystemExit, match="no tag for core/kit"):
+        rlc._run_node(failing, {"repo": str(tmp_path)})
+
+
+def test_the_projection_is_fed_its_request_on_stdin(tmp_path) -> None:
+    echo = tmp_path / "echo.js"
+    echo.write_text(
+        "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>"
+        "process.stdout.write(JSON.stringify({releasePlease:'x',paths:JSON.parse(s)})));\n"
+    )
+    assert rlc._run_node(echo, {"repo": "r"})["paths"] == {"repo": "r"}
+
+
+@pytest.fixture
+def fake_github(monkeypatch) -> Iterator[list[dict[str, object]]]:
+    """A local GraphQL endpoint that associates no pull request with any commit."""
+    requests: list[dict[str, object]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append({"authorization": self.headers["Authorization"], **payload})
+            aliases = [alias for alias in payload["variables"] if alias[0] == "c"]
+            commits = {alias: {"associatedPullRequests": {"nodes": []}} for alias in aliases}
+            body = json.dumps({"data": {"repository": commits}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002 the http.server signature
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("GITHUB_GRAPHQL_URL", f"http://127.0.0.1:{server.server_address[1]}/graphql")
+    yield requests
+    server.shutdown()
+    server.server_close()
+
+
+def test_projection_runs_for_real_on_a_synthetic_repository(tmp_path, fake_github) -> None:
+    if not (RELEASE_PLEASE / "node_modules").is_dir():
+        pytest.fail("run npm ci in scripts/release-please")
+    if shutil.which("node") is None:
+        pytest.fail("node is required to run scripts/release-please/projection.js")
+    repo = _repo(tmp_path, {"core/kit": "7.0.2", "core/cli": "11.0.2"})
+    _git(repo, "tag", "tai42-kit-v7.0.2")
+    _git(repo, "tag", "tai42-cli-v11.0.2")
+    _commit(repo, "fix(cli): y (#5)", {"core/cli/src/y.py": "y\n"})
+    base = _git(repo, "rev-parse", "HEAD")
+    _commit(repo, "Merge pull request into main", {"core/kit/src/a.py": "a\n"})
+    pr = _pr("feat(kit)!: drop a method (#7)")
+
+    gated = rlc.versions_to_gate(repo, base, "HEAD", pr, repository=REPOSITORY, release_please=RELEASE_PLEASE)
+
+    assert gated == {"core/kit": ("8.0.0", "projected by release-please 17.6.0")}
+    assert fake_github
+    assert all(request["authorization"] == "token test-token" for request in fake_github)
+
+
+# --- the squash message GitHub will write -----------------------------------------------
+
+
+def test_the_squash_text_is_read_from_the_graphql_response(tmp_path) -> None:
+    assert rlc.read_squash(_squash_json(tmp_path)) == ("fix(kit): x (#7)", "Body.")
+
+
+@pytest.mark.parametrize(
+    "pull_request",
+    [
+        {"viewerMergeHeadlineText": "fix(kit): x (#7)"},
+        {"viewerMergeBodyText": "Body."},
+        {"viewerMergeHeadlineText": "", "viewerMergeBodyText": "Body."},
+        {"viewerMergeHeadlineText": "fix(kit): x (#7)", "viewerMergeBodyText": None},
+    ],
+)
+def test_an_incomplete_squash_response_is_refused(tmp_path, pull_request) -> None:
+    with pytest.raises(SystemExit, match="::error::"):
+        rlc.read_squash(_squash_json(tmp_path, pull_request=pull_request))
+
+
+def test_a_missing_squash_response_is_refused(tmp_path) -> None:
+    with pytest.raises(SystemExit, match="::error::"):
+        rlc.read_squash(tmp_path / "absent.json")
+
+
+def test_main_without_a_squash_response_is_refused(monkeypatch, tmp_path) -> None:
+    argv = [
+        "release_label_check.py",
+        "--repo-root",
+        str(tmp_path),
+        "--base-ref",
+        "abc123",
+        "--pr-number",
+        "7",
+        "--repository",
+        REPOSITORY,
+        "--base-branch",
+        "main",
+        "--head-ref",
+        "topic",
+        "--head-repository",
+        REPOSITORY,
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit, match=r"::error::.*--squash-json"):
+        rlc.main()
+
+
+@pytest.mark.parametrize(("merge", "rebase"), [(True, False), (False, True), (True, True)])
+def test_a_repository_that_allows_another_merge_method_is_refused(tmp_path, merge, rebase) -> None:
+    with pytest.raises(SystemExit, match="::error::this check projects a squash merge"):
+        rlc.read_squash(_squash_json(tmp_path, merge=merge, rebase=rebase))
+
+
+# --- gating -----------------------------------------------------------------------------
+
+
+def _record_gate(monkeypatch, code: int = 0) -> list[tuple[str, str, str]]:
     calls: list[tuple[str, str, str]] = []
 
     def fake_gate(package: str, directory: str, version: str, repo_root) -> tuple[int, str]:
         calls.append((package, directory, version))
-        return 0, f"{package}: gate passes.\n"
+        return code, f"{package}: gate output.\n"
 
     monkeypatch.setattr(rlc, "_run_gate", fake_gate)
-    files = [
-        "core/kit/src/a.py",
-        "core/kit/tests/test_a.py",
-        "core/skeleton/tests/test_b.py",
-        "core/skeleton/examples/m.yml",
-    ]
-    assert rlc.check("feat(kit)!: drop symbols", "", files, packages, manifest, tmp_path) == 0
-    assert calls == [("tai42-kit", "core/kit", "10.0.0")]
+    return calls
 
 
-def test_project_version_semver_for_a_one_point_x_package() -> None:
-    kw = {"bump_minor_pre_major": False, "bump_patch_for_minor_pre_major": False}
-    assert rlc.project_version("7.0.2", Bump.PATCH, **kw) == "7.0.3"
-    assert rlc.project_version("7.0.2", Bump.MINOR, **kw) == "7.1.0"
-    assert rlc.project_version("7.0.2", Bump.MAJOR, **kw) == "8.0.0"
+PACKAGES = {"core/kit": "tai42-kit", "plugins/agents": "tai42-agents", "core/cli": "tai42-cli"}
 
 
-def test_project_version_none_bump_is_no_release() -> None:
-    assert (
-        rlc.project_version("7.0.2", Bump.NONE, bump_minor_pre_major=False, bump_patch_for_minor_pre_major=False)
-        is None
-    )
-
-
-def test_project_version_zero_x_default_flags_follow_plain_semver() -> None:
-    # Both pre-major flags off (the repo's configured default): a breaking change on a
-    # 0.x package graduates it to 1.0.0, a feat is a minor, a fix a patch.
-    kw = {"bump_minor_pre_major": False, "bump_patch_for_minor_pre_major": False}
-    assert rlc.project_version("0.5.2", Bump.MAJOR, **kw) == "1.0.0"
-    assert rlc.project_version("0.5.2", Bump.MINOR, **kw) == "0.6.0"
-    assert rlc.project_version("0.5.2", Bump.PATCH, **kw) == "0.5.3"
-
-
-def test_project_version_zero_x_pre_major_flags_redirect_the_bump() -> None:
-    # bump-minor-pre-major sends a breaking change to a minor; bump-patch-for-minor-pre-major
-    # sends a feat to a patch — both only while below 1.0.0.
-    assert (
-        rlc.project_version("0.5.2", Bump.MAJOR, bump_minor_pre_major=True, bump_patch_for_minor_pre_major=False)
-        == "0.6.0"
-    )
-    assert (
-        rlc.project_version("0.5.2", Bump.MINOR, bump_minor_pre_major=False, bump_patch_for_minor_pre_major=True)
-        == "0.5.3"
-    )
-
-
-def test_load_packages_applies_global_pre_major_defaults(tmp_path) -> None:
-    config = tmp_path / "release-please-config.json"
-    config.write_text('{"bump-minor-pre-major": true, "packages": {"core/kit": {"package-name": "tai42-kit"}}}')
-    packages = rlc.load_packages(config)
-    assert packages["core/kit"]["package-name"] == "tai42-kit"
-    assert packages["core/kit"][rlc._BUMP_MINOR_PRE_MAJOR] is True
-    assert packages["core/kit"][rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR] is False
-
-
-def test_load_packages_lets_a_package_override_the_global_flag(tmp_path) -> None:
-    config = tmp_path / "release-please-config.json"
-    config.write_text(
-        '{"bump-minor-pre-major": true, "packages": {"a": {"package-name": "a", "bump-minor-pre-major": false}}}'
-    )
-    packages = rlc.load_packages(config)
-    assert packages["a"][rlc._BUMP_MINOR_PRE_MAJOR] is False
-
-
-def test_check_gates_every_touched_releasing_package(monkeypatch, tmp_path) -> None:
-    # Multi-package attribution: a breaking PR touching two packages runs the gate for
-    # each at its projected major version; a touched package that projects no release
-    # (and an untouched one) are not gated.
-    packages = {
-        "core/kit": {
-            "package-name": "tai42-kit",
-            rlc._BUMP_MINOR_PRE_MAJOR: False,
-            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
-        },
-        "plugins/agents": {
-            "package-name": "tai42-agents",
-            rlc._BUMP_MINOR_PRE_MAJOR: False,
-            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
-        },
-        "core/cli": {
-            "package-name": "tai42-cli",
-            rlc._BUMP_MINOR_PRE_MAJOR: False,
-            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
-        },
-    }
-    manifest = {"core/kit": "7.0.2", "plugins/agents": "8.0.2", "core/cli": "11.0.2"}
+def test_check_gates_every_version_it_is_given(monkeypatch, tmp_path) -> None:
     _packaged(tmp_path, "core/kit", "plugins/agents", "core/cli")
-    calls: list[tuple[str, str, str]] = []
-
-    def fake_gate(package: str, directory: str, version: str, repo_root) -> tuple[int, str]:
-        calls.append((package, directory, version))
-        return 0, f"{package}: gate passes.\n"
-
-    monkeypatch.setattr(rlc, "_run_gate", fake_gate)
-    code = rlc.check(
-        "feat!: drop symbols",
-        "",
-        ["core/kit/src/a.py", "plugins/agents/src/b.py"],
-        packages,
-        manifest,
-        tmp_path,
-    )
-    assert code == 0
+    calls = _record_gate(monkeypatch)
+    gated = {"core/kit": ("8.0.0", "label"), "plugins/agents": ("9.0.0", "label")}
+    assert rlc.check(gated, PACKAGES, tmp_path) == 0
     assert sorted(calls) == [("tai42-agents", "plugins/agents", "9.0.0"), ("tai42-kit", "core/kit", "8.0.0")]
 
 
-def test_check_fails_when_a_gate_refuses(monkeypatch, tmp_path) -> None:
-    packages = {
-        "core/kit": {
-            "package-name": "tai42-kit",
-            rlc._BUMP_MINOR_PRE_MAJOR: False,
-            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
-        }
-    }
-    manifest = {"core/kit": "7.0.2"}
+def test_check_fails_when_a_gate_refuses(monkeypatch, tmp_path, capsys) -> None:
     _packaged(tmp_path, "core/kit")
-    monkeypatch.setattr(
-        rlc,
-        "_run_gate",
-        lambda *a: (1, "::error::tai42-kit 7.0.3 is a patch bump but carries breaking surface changes\n"),
-    )
-    code = rlc.check("fix(kit): remove a public method", "", ["core/kit/src/a.py"], packages, manifest, tmp_path)
-    assert code == 1
+    _record_gate(monkeypatch, code=1)
+    assert rlc.check({"core/kit": ("7.0.3", "label")}, PACKAGES, tmp_path) == 1
+    assert "the PR body is not part of the squash message" in capsys.readouterr().out
 
 
-def test_check_passes_when_no_package_is_touched(monkeypatch, tmp_path) -> None:
-    packages = {
-        "core/kit": {
-            "package-name": "tai42-kit",
-            rlc._BUMP_MINOR_PRE_MAJOR: False,
-            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
-        }
-    }
-
-    def fail_gate(*_a) -> tuple[int, str]:
-        raise AssertionError("the gate must not run when no package is touched")
-
-    monkeypatch.setattr(rlc, "_run_gate", fail_gate)
-    code = rlc.check(
-        "ci: add a workflow", "", ["scripts/x.py", ".github/workflows/y.yml"], packages, {"core/kit": "7.0.2"}, tmp_path
-    )
-    assert code == 0
-
-
-def test_check_passes_when_a_touched_package_projects_no_release(monkeypatch, tmp_path) -> None:
-    packages = {
-        "core/kit": {
-            "package-name": "tai42-kit",
-            rlc._BUMP_MINOR_PRE_MAJOR: False,
-            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
-        }
-    }
-
-    def fail_gate(*_a) -> tuple[int, str]:
-        raise AssertionError("a chore touch projects no release, so the gate must not run")
-
-    monkeypatch.setattr(rlc, "_run_gate", fail_gate)
-    code = rlc.check(
-        "chore(kit): reformat comments", "", ["core/kit/src/a.py"], packages, {"core/kit": "7.0.2"}, tmp_path
-    )
-    assert code == 0
-
-
-def test_release_as_footer_forces_the_version() -> None:
-    assert rlc.release_as("fix: a fix", "Release-As: 9.9.9") == "9.9.9"
-    assert rlc.release_as("fix: a fix", "Release-As: v9.9.9") == "9.9.9"  # a leading v is stripped
-    assert rlc.release_as("fix: a fix", "no footer here") is None
-
-
-def test_check_release_as_forces_every_touched_package_version(monkeypatch, tmp_path) -> None:
-    # A Release-As footer overrides the projected bump: the gate runs at the forced
-    # version for each touched package, whatever the title's bump would have been.
-    (tmp_path / "core" / "kit").mkdir(parents=True)
-    (tmp_path / "core" / "kit" / "pyproject.toml").write_text("[project]\n")
-    packages = {
-        "core/kit": {
-            "package-name": "tai42-kit",
-            rlc._BUMP_MINOR_PRE_MAJOR: False,
-            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
-        }
-    }
-    manifest = {"core/kit": "7.0.2"}
-    calls: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(rlc, "_run_gate", lambda p, d, v, r: (calls.append((p, d, v)), (0, "gate passes.\n"))[1])
-    code = rlc.check("fix(kit): a small fix", "Release-As: 12.0.0", ["core/kit/src/a.py"], packages, manifest, tmp_path)
-    assert code == 0
-    assert calls == [("tai42-kit", "core/kit", "12.0.0")]
+def test_check_passes_when_nothing_is_gated(monkeypatch, tmp_path) -> None:
+    calls = _record_gate(monkeypatch)
+    assert rlc.check({}, PACKAGES, tmp_path) == 0
+    assert calls == []
 
 
 def test_check_skips_a_descriptor_only_package(monkeypatch, tmp_path) -> None:
-    # A touched dir without a pyproject.toml is descriptor-only (no Python surface): the
-    # gate is not run for it, but a packaged sibling in the same PR still is.
-    (tmp_path / "core" / "kit").mkdir(parents=True)
-    (tmp_path / "core" / "kit" / "pyproject.toml").write_text("[project]\n")
-    (tmp_path / "plugins" / "connector-atlassian").mkdir(parents=True)  # no pyproject.toml
-    packages = {
-        "core/kit": {
-            "package-name": "tai42-kit",
-            rlc._BUMP_MINOR_PRE_MAJOR: False,
-            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
-        },
-        "plugins/connector-atlassian": {
-            "package-name": "tai42-connector-atlassian",
-            rlc._BUMP_MINOR_PRE_MAJOR: False,
-            rlc._BUMP_PATCH_FOR_MINOR_PRE_MAJOR: False,
-        },
-    }
-    manifest = {"core/kit": "7.0.2", "plugins/connector-atlassian": "2.0.12"}
-    calls: list[str] = []
-    monkeypatch.setattr(rlc, "_run_gate", lambda p, d, v, r: (calls.append(p), (0, "gate passes.\n"))[1])
-    code = rlc.check(
-        "fix: a fix",
-        "",
-        ["core/kit/src/a.py", "plugins/connector-atlassian/tai-plugin.yml"],
-        packages,
-        manifest,
-        tmp_path,
-    )
-    assert code == 0
-    assert calls == ["tai42-kit"]  # the descriptor-only connector was skipped, not gated
+    # A dir without a pyproject.toml is descriptor-only (no Python surface): the gate is
+    # not run for it, but a packaged sibling in the same pull request still is.
+    _packaged(tmp_path, "core/kit")
+    (tmp_path / "plugins" / "connector-atlassian").mkdir(parents=True)
+    calls = _record_gate(monkeypatch)
+    packages = {**PACKAGES, "plugins/connector-atlassian": "tai42-connector-atlassian"}
+    gated = {"core/kit": ("7.0.3", "label"), "plugins/connector-atlassian": ("2.0.13", "label")}
+    assert rlc.check(gated, packages, tmp_path) == 0
+    assert calls == [("tai42-kit", "core/kit", "7.0.3")]
+
+
+def test_check_refuses_a_path_the_config_does_not_declare(monkeypatch, tmp_path) -> None:
+    _record_gate(monkeypatch)
+    with pytest.raises(SystemExit, match="::error::plugins/unknown"):
+        rlc.check({"plugins/unknown": ("1.0.0", "label")}, PACKAGES, tmp_path)
+
+
+def test_load_packages_maps_each_path_to_its_package_name(tmp_path) -> None:
+    config = tmp_path / CONFIG
+    config.write_text(json.dumps({"packages": {"core/kit": {"package-name": "tai42-kit", "exclude-paths": ["x"]}}}))
+    assert rlc.load_packages(config) == {"core/kit": "tai42-kit"}
+
+
+def test_load_packages_refuses_a_config_without_packages(tmp_path) -> None:
+    config = tmp_path / CONFIG
+    config.write_text("{}")
+    with pytest.raises(SystemExit, match="declares no packages"):
+        rlc.load_packages(config)

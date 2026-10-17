@@ -62,19 +62,38 @@ variables, and the `tai-plugin.yml` descriptor filename.
 ## Commits and releases
 
 Conventional Commits, scoped by package directory. release-please runs in
-manifest mode: one merged commit train, one release PR per changed package, tags
-`tai42-<name>-v<version>`. `fix:` → patch, `feat:` → minor, `feat!:` or a
-`BREAKING CHANGE:` footer → major; other types do not release. A package's
-`tests/` and `examples/` attribute nothing: a change under them alone releases
-nothing for that package. Non-conforming
-commits and PR titles fail the `commitlint` check, as does a `<` that opens
-markup (followed by a letter, `/`, `!` or `?`) in a commit header, a
-`BREAKING CHANGE:` footer or the PR title: the release notes are parsed as
-HTML, so write placeholders without angle brackets. The `release-label` check
-projects the version each touched package would publish from the pull request's
-title and body and runs the release API-diff gate against it, so a breaking
-public-API change under a bump its label could not honestly carry is refused
-before the merge, not after the tag.
+manifest mode: one combined release PR carries every changed package, and
+merging it tags each one `tai42-<name>-v<version>`. Pull requests are
+squash-merged, and release-please reads the squash commit GitHub writes: a
+single-commit PR squashes to that commit's message, a multi-commit PR to the PR
+title followed by the commits' messages. The PR body is never part of it; a
+`BEGIN_COMMIT_OVERRIDE` … `END_COMMIT_OVERRIDE` block in the PR body replaces
+the message. The bump follows release-please's rules for each package's release
+type. Every type: a breaking change (`!` on the type or a `BREAKING CHANGE:`
+footer) → major, `feat:` → minor, `fix:`, `perf:` and `revert:` → patch.
+`docs:` and `deps:` → patch for the `python` packages and nothing for the
+descriptor-only `simple` connector plugins. Other types release nothing. A
+package's `tests/` and `examples/` attribute nothing: a change under them alone
+releases nothing for that package. Non-conforming commits and PR titles fail the
+`commitlint` check, as does a `<` that opens markup (followed by a letter, `/`,
+`!` or `?`) in a commit header, a `BREAKING CHANGE:` footer or the PR title: the
+release notes are parsed as HTML, so write placeholders without angle brackets.
+
+The `release-label` check asks release-please what it would mint for the pull
+request on top of everything unreleased on main and runs the release API-diff
+gate at that version; release-please's own release PR (its
+`release-please--branches--main` branch in this repository) is gated at the
+versions in its manifest. A breaking public-API change under a version that
+cannot carry it is refused before the merge, not after the tag. The check reads,
+with the workflow's `GITHUB_TOKEN`, the pull request GitHub associates with each
+unreleased commit on main, as release-please does. It models one combined
+release PR and a squash merge, so it refuses to run while the release-please
+config opens separate release PRs or the repository allows merge commits or
+rebase merges.
+
+release-please is pinned once, in `scripts/release-please/package-lock.json`,
+for both the `release-label` check and the release workflow. Install it with
+`npm ci --prefix scripts/release-please` before running `pytest scripts/tests`.
 
 ## Cross-repo e2e
 
