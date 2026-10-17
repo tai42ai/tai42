@@ -28,15 +28,26 @@ from tai42_channel_whatsapp.client import (
     send_flow,
 )
 from tai42_channel_whatsapp.correlation import (
+    EndpointForm,
+    cache_endpoint_form,
     cache_flow_form,
     cache_flow_id,
-    cache_reaction_form,
+    drop_endpoint_form,
     flow_resolve_lock,
     get_cached_flow_id,
     release_pending,
     reserve_pending,
 )
-from tai42_channel_whatsapp.flows import FORM_ENTRY_SCREEN, build_flow_data, build_form_flow, payload_labels
+from tai42_channel_whatsapp.flows import (
+    FORM_ENTRY_SCREEN,
+    build_flow_data,
+    build_form_flow,
+    component_names,
+    form_needs_endpoint,
+    payload_labels,
+)
+from tai42_channel_whatsapp.flows_components import _field_control
+from tai42_channel_whatsapp.flows_shapes import ERROR_MESSAGE_MAX_CHARS
 from tai42_channel_whatsapp.settings import (
     WhatsAppSettings,
     require_delivery_secret,
@@ -106,6 +117,41 @@ def _guard_open_label(label: str | None) -> None:
             f"form open-button label is {len(label)} characters; WhatsApp caps the flow button "
             f"(flow_cta) at {_OPEN_LABEL_MAX_CHARS} characters"
         )
+
+
+def _field_invalid(send: ChannelDelivery | ChannelNotification) -> dict[str, str]:
+    """The caller's per-field ``wording.form.fields[<name>].invalid`` sentences, by property name."""
+    form = _form_wording(send)
+    if form is None:
+        return {}
+    return {name: words.invalid for name, words in form.fields.items() if words.invalid is not None}
+
+
+def _guard_invalid_sentences(schema: dict[str, Any], option_fields: set[str], invalid: dict[str, str]) -> None:
+    """Refuse a caller ``invalid`` sentence over Meta's ``error-message`` cap for its field's control, up front.
+
+    The data endpoint shows the sentence in the failing field's ``error-message``, which Meta caps
+    per control (:data:`~tai42_channel_whatsapp.flows_shapes.ERROR_MESSAGE_MAX_CHARS` — 30 characters
+    on a text input or text area, 80 on a calendar or choice control). A sentence over its field's
+    cap is a permanent input refusal (:class:`ChannelInputError`) naming the field and the cap,
+    checked before any store or send — never truncated. A field drawn without an ``error-message``
+    (an opt-in, a chip grid) shows its sentence only in the screen's error line, which takes no cap here.
+    """
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return
+    names = component_names(properties)
+    for name, sentence in invalid.items():
+        prop = properties.get(name)
+        if not isinstance(prop, dict):
+            continue
+        control = _field_control(name, prop, False, option_fields, names)["type"]
+        cap = ERROR_MESSAGE_MAX_CHARS.get(control)
+        if cap is not None and len(sentence) > cap:
+            raise ChannelInputError(
+                f"wording.form.fields[{name!r}].invalid is {len(sentence)} characters; WhatsApp caps the error "
+                f"message of a {control} at {cap}"
+            )
 
 
 def _guard_rejected_template(template: str | None) -> None:
@@ -199,7 +245,7 @@ async def _resolve_flow_id(
     it names the Flow on Meta and keys the flow-id cache. The cached id, else — under the
     resolve lock, re-reading the cache once held — the live Flow found on the WABA by name
     (see :func:`_find_named_flow`), else create + publish + store a new Flow.
-    ``endpoint_uri`` links an endpoint-driven (reacting) Flow to the plugin's data
+    ``endpoint_uri`` links an endpoint-driven Flow to the plugin's data
     endpoint at create; a static Flow passes none. Every step is loud — a list, delete,
     create, publish, or store failure raises and never falls back to another answer format.
 
@@ -286,13 +332,14 @@ def _reactions_dict(reactions: FormReactions | None) -> dict[str, Any] | None:
 
 
 def _require_reaction_settings(settings: WhatsAppSettings) -> str:
-    """The data-endpoint URI a reacting form publishes against; raise loudly when key material is missing.
+    """The data-endpoint URI an endpoint-driven form publishes against; raise loudly when key material is missing.
 
-    A reacting form CANNOT publish or be served without the business private key (to decrypt the
-    endpoint's requests) and the public endpoint URI (configured on the Flow so Meta routes
-    data-exchange back here). Either unset is refused loudly — never a silent fall back to a
-    non-reacting flow. The public key must also be registered for the sending number (operator
-    step; see :mod:`tai42_channel_whatsapp.provisioning_route`).
+    An endpoint-driven form (one that reacts, or carries a shape no Meta control checks natively)
+    CANNOT publish or be served without the business private key (to decrypt the endpoint's
+    requests) and the public endpoint URI (configured on the Flow so Meta routes data-exchange back
+    here). Either unset is refused loudly — never a silent fall back to a static flow that would let
+    a broken shape leave the form. The public key must also be registered for the sending number
+    (operator step; see :mod:`tai42_channel_whatsapp.provisioning_route`).
     """
     require_delivery_secret(settings.flow_private_key, "CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY")
     return require_delivery_setting(settings.flow_endpoint_uri, "CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI")
@@ -336,6 +383,7 @@ async def send_form_ask_flow(
     open_label: str | None = None,
     form_title: str | None = None,
     form_submit: str | None = None,
+    field_invalid: dict[str, str] | None = None,
 ) -> str:
     """Build, resolve and send a form ask's Flow; return its ``wamid``.
 
@@ -344,10 +392,12 @@ async def send_form_ask_flow(
     resolves the SAME published Flow through the same Flow identity — found on the WABA
     by name, else re-created, if the cache was lost, never raising a stale-lookup miss —
     and navigates to the entry screen with the same prefill and option lists the first
-    send carried. ``reactions`` (present for a reacting form) publishes the Flow as
-    ENDPOINT-DRIVEN against the configured data endpoint; the reacting flow and the
-    endpoint URI fold into the Flow identity, so its published Flow is distinct from the
-    static one and from one bound to another endpoint.
+    send carried. An endpoint-driven form (``reactions`` declared, or a shape no Meta control
+    checks natively — :func:`~tai42_channel_whatsapp.flows.form_needs_endpoint`) publishes the
+    Flow against the configured data endpoint; the endpoint-driven flow and the endpoint URI fold
+    into the Flow identity, so its published Flow is distinct from a static one and from one bound
+    to another endpoint. ``field_invalid`` is the caller's per-field ``invalid`` sentence (the
+    helper text a native pattern field without a second line shows).
 
     ``open_label`` is the caller's text for the chat button that opens the Flow, drawn as the
     message ``flow_cta`` (not Flow JSON, so it never re-keys the Flow); ``form_title`` is the
@@ -355,11 +405,14 @@ async def send_form_ask_flow(
     form (both Flow JSON, so they DO re-key). The re-send passes the stored values of all three, so
     the correction message draws the same button, title and submit label.
     """
-    flow_json, schema_hash = build_form_flow(schema, pages, set(options), reactions, form_title, form_submit)
+    flow_json, schema_hash = build_form_flow(
+        schema, pages, set(options), reactions, form_title, form_submit, field_invalid=field_invalid
+    )
     flow_data = build_flow_data(schema, values, options, pages)
     settings = whatsapp_settings()
     waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
-    endpoint_uri = _require_reaction_settings(settings) if reactions is not None else None
+    endpoint = form_needs_endpoint(schema, pages, set(options), reactions)
+    endpoint_uri = _require_reaction_settings(settings) if endpoint else None
     flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json, endpoint_uri)
     return await send_flow(
         phone_number_id=phone_number_id,
@@ -391,12 +444,16 @@ async def _deliver_form(
     properties render as dropdowns) and the data-endpoint URI, and REUSED across sends
     (found on the WABA by name, else created, and cached under the WABA id); the prefilled values and
     per-send option lists ride the send's ``flow_action_payload.data`` (a dynamic
-    data-source), never a new Flow. A REACTING form (one carrying ``reactions`` triggers)
-    publishes the Flow endpoint-driven and refuses loudly, before any reservation, when the
-    data-endpoint key material is missing (:func:`_require_reaction_settings`); its schema +
-    per-send inputs are cached under the ``interaction_id`` so the data endpoint can serve its
-    reactions. The send goes through the one sender :func:`send_form_ask_flow`; a failure
-    resolving the Flow or sending releases the reservation and raises — never a fallback format.
+    data-source), never a new Flow. An ENDPOINT-DRIVEN form (one carrying ``reactions`` triggers
+    or a shape no Meta control checks natively) publishes the Flow endpoint-driven and refuses
+    loudly, before any reservation, when the data-endpoint key material is missing
+    (:func:`_require_reaction_settings`); its :class:`~tai42_channel_whatsapp.correlation.EndpointForm`
+    (schema, pages, reactions, option fields and the caller's ``invalid`` sentences) is cached under
+    the ``interaction_id`` so the data endpoint can check its steps. A caller ``invalid`` sentence
+    over its control's ``error-message`` cap is refused before any reservation. The send goes
+    through the one sender :func:`send_form_ask_flow`; a failure writing the sidecar, resolving
+    the Flow or sending releases the reservation, drops the sidecar and raises — never a fallback
+    format.
     """
     if delivery.schema is None:
         raise ChannelDeliveryError(f"form delivery {delivery.interaction_id} is missing its schema")
@@ -413,14 +470,19 @@ async def _deliver_form(
     # unmappable per-send option, an unknown page field, an unrenderable reaction trigger, an
     # over-cap open-button label / footer label, or an over-cap rejection template), so an
     # unrenderable send reserves nothing.
+    field_invalid = _field_invalid(delivery)
     _guard_open_label(open_label)
     _guard_rejected_template(rejected_template)
-    build_form_flow(delivery.schema, pages, set(options), reactions, form_title, form_submit)
+    _guard_invalid_sentences(delivery.schema, set(options), field_invalid)
+    build_form_flow(
+        delivery.schema, pages, set(options), reactions, form_title, form_submit, field_invalid=field_invalid
+    )
     build_flow_data(delivery.schema, values, options, pages)
     require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
-    # A reacting form cannot publish or be served without its data-endpoint key material —
-    # refuse loudly up front (never a silent fall back to a non-reacting flow).
-    if reactions is not None:
+    # An endpoint-driven form cannot publish or be served without its data-endpoint key material —
+    # refuse loudly up front (never a silent fall back to a static flow).
+    endpoint = form_needs_endpoint(delivery.schema, pages, set(options), reactions)
+    if endpoint:
         _require_reaction_settings(settings)
 
     await reserve_pending(
@@ -439,11 +501,18 @@ async def _deliver_form(
         on_mismatch=delivery.on_mismatch,
         wording=delivery.wording,
     )
-    # A reacting form's data endpoint recovers its schema + inputs from this sidecar by the
-    # flow token (the interaction id); it expires with the ask's own deadline.
-    if reactions is not None:
-        await cache_reaction_form(delivery.interaction_id, delivery.schema, pages, values, options, delivery.timeout_at)
     try:
+        # An endpoint-driven form's data endpoint recovers its schema and inputs from this sidecar
+        # by the flow token (the interaction id); it expires with the ask's own deadline.
+        if endpoint:
+            endpoint_form = EndpointForm(
+                schema=delivery.schema,
+                pages=pages,
+                reactions=reactions,
+                option_fields=sorted(options),
+                invalid=field_invalid,
+            )
+            await cache_endpoint_form(delivery.interaction_id, endpoint_form, delivery.timeout_at)
         await send_form_ask_flow(
             phone_number_id=phone_number_id,
             to=target,
@@ -457,11 +526,17 @@ async def _deliver_form(
             open_label=open_label,
             form_title=form_title,
             form_submit=form_submit,
+            field_invalid=field_invalid,
         )
     except Exception:
-        # Any create/publish/store/send failure frees the pair instead of holding
-        # it until its TTL.
-        await release_pending(phone_number_id=phone_number_id, wa_id=target)
+        # Any sidecar-write/create/publish/store/send failure frees the pair instead of holding it
+        # until its TTL, and drops the sidecar (the id is this ask's own, so no other ask's entry
+        # is touched; a missing one is a no-op); the original error then propagates.
+        try:
+            await release_pending(phone_number_id=phone_number_id, wa_id=target)
+        finally:
+            if endpoint:
+                await drop_endpoint_form(delivery.interaction_id)
         raise
 
 
@@ -484,6 +559,13 @@ async def _send_form_notification(
     hash + a random suffix — routes the reply, not the pair, so any number of forms
     may be outstanding and a pending ask on the same pair is never touched.
 
+    An ENDPOINT-DRIVEN form (one carrying a shape no Meta control checks natively) publishes
+    against the data endpoint, which reads this sidecar's pages and option fields to check each
+    step; the caller's ``invalid`` sentences ride the send data as ``__invalid`` carriers (the
+    sidecar is per schema hash, never per send). It refuses loudly, before any send, when the
+    data-endpoint key material is missing, and a caller ``invalid`` sentence over its control's
+    ``error-message`` cap is refused before any send too.
+
     A caller-set ``form_tag`` rides the token as a 4th ``:``-delimited segment
     (``tai42-nf:{hash}:{nonce}:{form_tag}``) when set — its charset excludes ``:`` so it
     stays one segment. It NEVER enters the published Flow artefact, the schema hash, the
@@ -503,18 +585,38 @@ async def _send_form_notification(
     open_label = form.open if form is not None else None
     form_title = form.title if form is not None else None
     form_submit = form.submit if form is not None else None
+    field_invalid = _field_invalid(notification)
     _guard_open_label(open_label)
+    _guard_invalid_sentences(notification.schema, set(options), field_invalid)
+    endpoint = form_needs_endpoint(notification.schema, pages, set(options))
     flow_json, schema_hash = build_form_flow(
-        notification.schema, pages, set(options), form_title=form_title, form_submit=form_submit
+        notification.schema,
+        pages,
+        set(options),
+        form_title=form_title,
+        form_submit=form_submit,
+        field_invalid=field_invalid,
+        carry_invalid=endpoint,
     )
-    flow_data = build_flow_data(notification.schema, values, options, pages)
+    flow_data = build_flow_data(
+        notification.schema, values, options, pages, field_invalid=field_invalid, carry_invalid=endpoint
+    )
     waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
+    endpoint_uri = _require_reaction_settings(settings) if endpoint else None
 
     sent = await _send_media_prelude(phone_number_id, target, list(notification.media or []))
-    flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json)
+    flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json, endpoint_uri)
     # Written beside every flow-id use — the reply side cannot repopulate it. The
-    # payload-label reverse map rides with the schema so the reply decodes to schema keys.
-    await cache_flow_form(waba_id, schema_hash, notification.schema, _reverse_payload_labels(notification.schema))
+    # payload-label reverse map rides with the schema so the reply decodes to schema keys; the
+    # pages and option fields let the data endpoint check an endpoint-driven form's steps.
+    await cache_flow_form(
+        waba_id,
+        schema_hash,
+        notification.schema,
+        _reverse_payload_labels(notification.schema),
+        pages,
+        sorted(options),
+    )
     flow_token = f"{_NOTIFY_FORM_TOKEN_PREFIX}{schema_hash}:{uuid4().hex}"
     if notification.form_tag is not None:
         # The caller-set tag rides as the 4th token segment; it never touches the Flow

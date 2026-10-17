@@ -13,11 +13,19 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from starlette.responses import Response
-from tai42_contract.interactions import FieldChangedEvent
+from tai42_contract.interactions import (
+    AnswerFormat,
+    FieldChangedEvent,
+    FormShapeError,
+    FormShapeKind,
+    PageAdvancedEvent,
+    SubmittedEvent,
+)
 from tai42_kit.settings import reset_all_settings
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (registers the /flow-data route on the bound stub app)
-from tai42_channel_whatsapp.correlation import cache_reaction_form
+from tai42_channel_whatsapp.correlation import EndpointForm, cache_endpoint_form, cache_flow_form
+from tai42_channel_whatsapp.flows_shapes import channel_word
 from tai42_channel_whatsapp.inbound.flow_data import _partial_values
 
 from .conftest import APP_SECRET, FakeRedis, _StubApp, build_request, compute_signature
@@ -112,8 +120,21 @@ def _decrypt_response(response: Response, aes_key: bytes, iv: bytes) -> dict[str
     return json.loads(AESGCM(aes_key).decrypt(flipped, ciphertext, None))
 
 
+def _reacting_form(schema: dict[str, Any], pages: list[dict[str, Any]] | None) -> EndpointForm:
+    # A reacting form declaring every trigger these legs fire: each field's change, each page's
+    # advance (the page-less form's one page is "Form") and the submit.
+    titles = [page["title"] for page in pages] if pages else ["Form"]
+    reactions = {
+        "field_changed": list(schema["properties"]),
+        "page_advanced": titles,
+        "submitted": True,
+        "choices": [],
+    }
+    return EndpointForm(schema=schema, pages=pages, reactions=reactions, option_fields=[], invalid={})
+
+
 async def _seed(fake_redis: FakeRedis, *, pages: list[dict[str, Any]] | None = None) -> None:
-    await cache_reaction_form(_TOKEN, _SCHEMA, pages, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    await cache_endpoint_form(_TOKEN, _reacting_form(_SCHEMA, pages), datetime.now(UTC) + timedelta(minutes=5))
 
 
 async def test_ping_returns_the_health_response(flow_env, flow_handler, fake_redis: FakeRedis):
@@ -175,6 +196,67 @@ async def test_field_changed_routes_to_react_and_applies_the_update(
     assert out["data"]["tier__ds"] == [{"id": "g", "title": "Gold"}]
 
 
+async def test_a_field_changed_answer_is_the_screens_whole_data_with_the_update_applied(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed(fake_redis)
+    stub_app.interactions.react_result = {"options": {"tier": [{"value": "g", "label": "Gold"}]}}
+    screen_data = {
+        "tier__init": "",
+        "tier__ds": [{"id": "g", "title": "g"}, {"id": "s", "title": "s"}],
+        "qty__init": "",
+        "qty__err": "",
+        "total__init": "preset",
+        "total__err": "",
+    }
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {
+            "tai42_event": "field_changed",
+            "tai42_field": "tier",
+            "tier": "g",
+            "qty": "5",
+            "total": "typed",
+            **screen_data,
+        },
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out == {
+        "screen": "SCREEN_A",
+        "data": {
+            **screen_data,
+            "tier__init": "g",
+            "tier__ds": [{"id": "g", "title": "Gold"}],
+            "qty__init": "5",
+            "total__init": "typed",
+        },
+    }
+
+
+async def test_a_failed_reaction_keeps_the_screens_whole_data(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed(fake_redis)
+    stub_app.interactions.react_error = RuntimeError("handler blew up")
+    screen_data = {"tier__init": "", "tier__ds": [{"id": "g", "title": "g"}], "qty__init": "", "total__init": ""}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "field_changed", "tai42_field": "tier", "tier": "g", **screen_data},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"] == {
+        **screen_data,
+        "tier__init": "g",
+        "error_message": "Sorry, this form could not be updated right now. Please try again.",
+    }
+
+
 async def test_reaction_option_second_line_rides_the_data_source(
     flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
 ):
@@ -213,7 +295,7 @@ async def test_reaction_option_second_line_folds_onto_a_chip_title(
             "qty": {"type": "integer"},
         },
     }
-    await cache_reaction_form(_TOKEN, schema, None, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    await cache_endpoint_form(_TOKEN, _reacting_form(schema, None), datetime.now(UTC) + timedelta(minutes=5))
     stub_app.interactions.react_result = {
         "options": {"tier": [{"value": "g", "label": "Gold", "description": "2 hours, 50"}, {"value": "s"}]}
     }
@@ -257,7 +339,7 @@ async def test_reaction_chips_option_list_past_meta_max_surfaces_the_vendor_erro
 ):
     # A reaction that replaces a chips field's choices with 21 options cannot be drawn by a
     # ChipsSelector: the open screen gets the vendor error surface and the failure is logged.
-    await cache_reaction_form(_TOKEN, _CHIPS_SCHEMA, None, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    await cache_endpoint_form(_TOKEN, _reacting_form(_CHIPS_SCHEMA, None), datetime.now(UTC) + timedelta(minutes=5))
     stub_app.interactions.react_result = {"options": {"pick": [{"value": f"v{n}"} for n in range(21)]}}
     payload = {
         "action": "data_exchange",
@@ -363,6 +445,28 @@ async def test_page_advance_moves_to_the_next_screen_with_collected_values(
     # The collected values ride forward as their __val carriers.
     assert out["data"]["tier__val"] == "g"
     assert out["data"]["qty__val"] == "5"
+
+
+async def test_page_advance_answers_the_next_screens_display_slots(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # The next screen's data is whole: a display slot no reaction filled reads empty.
+    pages = [
+        {"title": "First", "fields": ["tier", "qty"], "kind": "input", "display": [{"kind": "body", "slot": "a"}]},
+        {"title": "Second", "fields": ["total"], "kind": "input", "display": [{"kind": "body", "slot": "b"}]},
+    ]
+    await _seed(fake_redis, pages=pages)
+    stub_app.interactions.react_result = {}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "page_advanced", "tai42_page": "First", "tier": "g", "qty": "5", "slot_a": "x"},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["slot_b"] == ""
+    assert "slot_a" not in out["data"]
 
 
 async def test_missing_app_secret_is_a_loud_500(flow_handler, fake_redis: FakeRedis, no_whatsapp_env):
@@ -511,7 +615,7 @@ async def test_page_advance_carries_a_single_pick_chips_val_as_a_one_element_lis
         {"title": "First", "fields": ["pick"], "kind": "input", "display": []},
         {"title": "Second", "fields": ["note"], "kind": "input", "display": []},
     ]
-    await cache_reaction_form(_TOKEN, _CHIPS_SCHEMA, pages, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    await cache_endpoint_form(_TOKEN, _reacting_form(_CHIPS_SCHEMA, pages), datetime.now(UTC) + timedelta(minutes=5))
     stub_app.interactions.react_result = {}
     payload = {
         "action": "data_exchange",
@@ -530,7 +634,7 @@ async def test_reaction_values_set_a_single_pick_chips_init_as_a_one_element_lis
 ):
     # A reaction that SETS a single-pick chips field emits its ``__init`` as a one-element list too,
     # so the ChipsSelector's array carrier is fed the shape it expects (not a scalar).
-    await cache_reaction_form(_TOKEN, _CHIPS_SCHEMA, None, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    await cache_endpoint_form(_TOKEN, _reacting_form(_CHIPS_SCHEMA, None), datetime.now(UTC) + timedelta(minutes=5))
     stub_app.interactions.react_result = {"values": {"pick": "c"}}
     payload = {
         "action": "data_exchange",
@@ -572,7 +676,7 @@ async def test_reaction_error_message_uses_the_field_title_not_the_key(
         "properties": {"qty": {"type": "integer", "title": "Quantity"}},
         "required": ["qty"],
     }
-    await cache_reaction_form(_TOKEN, schema, None, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    await cache_endpoint_form(_TOKEN, _reacting_form(schema, None), datetime.now(UTC) + timedelta(minutes=5))
     stub_app.interactions.react_result = {"errors": {"qty": "must be at least 1"}}
     payload = {
         "action": "data_exchange",
@@ -594,7 +698,7 @@ async def test_reaction_error_message_falls_back_to_the_key_without_a_title(
         "properties": {"qty": {"type": "integer"}},
         "required": ["qty"],
     }
-    await cache_reaction_form(_TOKEN, schema, None, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    await cache_endpoint_form(_TOKEN, _reacting_form(schema, None), datetime.now(UTC) + timedelta(minutes=5))
     stub_app.interactions.react_result = {"errors": {"qty": "must be at least 1"}}
     payload = {
         "action": "data_exchange",
@@ -626,7 +730,7 @@ async def test_page_advance_forwards_a_merged_range_val_carrier(
         {"title": "Dates", "fields": ["start", "end"], "kind": "input", "display": []},
         {"title": "Note", "fields": ["note"], "kind": "input", "display": []},
     ]
-    await cache_reaction_form(_TOKEN, schema, pages, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    await cache_endpoint_form(_TOKEN, _reacting_form(schema, pages), datetime.now(UTC) + timedelta(minutes=5))
     stub_app.interactions.react_result = {}
     payload = {
         "action": "data_exchange",
@@ -643,3 +747,277 @@ async def test_page_advance_forwards_a_merged_range_val_carrier(
     assert out["screen"] == "SCREEN_B"
     assert out["data"]["start__val"] == {"start-date": "2026-05-01", "end-date": "2026-05-04"}
     assert "end__val" not in out["data"]
+
+
+# --- the in-form shape check: a broken shape keeps the person on the screen ---------------
+
+_SHAPE_TOKEN = "int-shape-1"
+_SHAPE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "title": "Name"},
+        "email": {"type": "string", "format": "email", "title": "Email address"},
+        "qty": {"type": "integer", "minimum": 1, "title": "Quantity"},
+        "note": {"type": "string", "pattern": "^[a-z]+$"},
+    },
+    "required": ["name", "email"],
+}
+_SHAPE_PAGES = [
+    {"title": "Contact", "fields": ["name", "email"], "kind": "input", "display": []},
+    {"title": "Amounts", "fields": ["qty", "note"], "kind": "input", "display": []},
+]
+
+
+def _shape_error(field: str, kind: FormShapeKind, message: str, **params: Any) -> FormShapeError:
+    return FormShapeError(field=field, kind=kind, params=params, message=message)
+
+
+async def _seed_shaped(*, reactions: dict[str, Any] | None = None, invalid: dict[str, str] | None = None) -> None:
+    form = EndpointForm(
+        schema=_SHAPE_SCHEMA, pages=_SHAPE_PAGES, reactions=reactions, option_fields=[], invalid=invalid or {}
+    )
+    await cache_endpoint_form(_SHAPE_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
+
+
+def _shape_exchange(data: dict[str, Any], *, screen: str = "SCREEN_A", token: str = _SHAPE_TOKEN) -> dict[str, Any]:
+    return {"action": "data_exchange", "flow_token": token, "screen": screen, "data": data}
+
+
+# The entry screen's whole data, as its footer carries it to the endpoint.
+_CONTACT_DATA = {
+    "name__init": "",
+    "name__err": "",
+    "email__init": "",
+    "email__err": "",
+    "qty__init": "",
+    "qty__err": "",
+    "note__init": "",
+    "note__err": "",
+}
+_SHAPE_ADVANCE = {
+    "tai42_event": "page_advanced",
+    "tai42_page": "Contact",
+    "name": "alice",
+    "email": "dhdhdh",
+    **_CONTACT_DATA,
+}
+# The second screen's whole data, as its footer carries it to the endpoint.
+_AMOUNTS_DATA = {
+    "qty__init": "",
+    "qty__err": "",
+    "note__init": "",
+    "note__err": "",
+    "name__val": "alice",
+    "email__val": "alice@example.org",
+}
+
+
+async def test_a_step_with_a_bad_email_stays_on_the_screen_with_the_field_sentence(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_shaped()
+    stub = stub_app.interactions
+    stub.shape_errors = [_shape_error("email", FormShapeKind.FORMAT, "Enter a valid email address", format="email")]
+    request, aes_key, iv = _request(_shape_exchange(_SHAPE_ADVANCE))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    # The answer is the screen's whole data: what the footer carried, each control's value as the
+    # person left it, and the refusal's sentences.
+    assert out == {
+        "screen": "SCREEN_A",
+        "data": {
+            **_CONTACT_DATA,
+            "name__init": "alice",
+            "email__init": "dhdhdh",
+            "email__err": "Use name@example.com",
+            "error_message": "Email address: Enter a valid email address",
+        },
+    }
+    call = stub.shape_calls[-1]
+    assert call["partial"] is True
+    assert call["fields"] == ["name", "email"]
+    assert call["values"] == {"name": "alice", "email": "dhdhdh"}
+    assert call["question"].answer_format is AnswerFormat.FORM
+    assert call["question"].format_payload["schema"] == _SHAPE_SCHEMA
+    # No reaction is declared, so none runs.
+    assert stub.react_calls == []
+
+
+async def test_the_callers_sentence_wins_over_the_channel_word(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_shaped(invalid={"email": "Use your work address"})
+    stub_app.interactions.shape_errors = [_shape_error("email", FormShapeKind.FORMAT, "Enter a valid email address")]
+    request, aes_key, iv = _request(_shape_exchange(_SHAPE_ADVANCE))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["email__err"] == "Use your work address"
+    assert out["data"]["error_message"] == "Email address: Use your work address"
+
+
+async def test_a_clean_step_advances_to_a_next_screen_built_from_the_payload(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_shaped()
+    data = {**_SHAPE_ADVANCE, "email": "alice@example.org", "qty__init": "3", "email__err": "Use name@example.com"}
+    request, aes_key, iv = _request(_shape_exchange(data))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out == {
+        "screen": "SCREEN_B",
+        "data": {
+            "qty__init": "3",
+            "qty__err": "",
+            "note__init": "",
+            "note__err": "",
+            "name__val": "alice",
+            "email__val": "alice@example.org",
+        },
+    }
+    assert stub_app.interactions.react_calls == []
+
+
+async def test_a_submit_with_a_bad_minimum_refuses_on_the_screen(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_shaped()
+    stub = stub_app.interactions
+    stub.shape_errors = [_shape_error("qty", FormShapeKind.MINIMUM, "Enter a number of at least 1", minimum=1)]
+    data = {
+        "tai42_event": "submitted",
+        "qty": "0",
+        "note": "ok",
+        "name": "alice",
+        "email": "alice@example.org",
+        **_AMOUNTS_DATA,
+        "note__err": "Not in the expected form",
+    }
+    request, aes_key, iv = _request(_shape_exchange(data, screen="SCREEN_B"))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    # The earlier answers' carriers stay, each control keeps the person's value, and only the
+    # failing field shows a sentence.
+    assert out == {
+        "screen": "SCREEN_B",
+        "data": {
+            **_AMOUNTS_DATA,
+            "qty__init": "0",
+            "note__init": "ok",
+            "qty__err": channel_word(FormShapeKind.MINIMUM, {"minimum": 1}),
+            "note__err": "",
+            "error_message": "Quantity: Enter a number of at least 1",
+        },
+    }
+    call = stub.shape_calls[-1]
+    assert call["partial"] is False
+    assert call["fields"] is None
+    assert call["values"] == {"qty": 0, "note": "ok", "name": "alice", "email": "alice@example.org"}
+
+
+async def test_a_clean_submit_completes_without_any_reaction(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_shaped()
+    data = {"tai42_event": "submitted", "qty": "2", "note": "", "name": "alice", "email": "alice@example.org"}
+    request, aes_key, iv = _request(_shape_exchange(data, screen="SCREEN_B"))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SUCCESS"
+    # An empty optional text field is unfilled: neither checked nor sent.
+    assert out["data"]["extension_message_response"]["params"] == {
+        "flow_token": _SHAPE_TOKEN,
+        "Name": "alice",
+        "Email address": "alice@example.org",
+        "Quantity": 2,
+    }
+    assert stub_app.interactions.shape_calls[-1]["values"] == {"qty": 2, "name": "alice", "email": "alice@example.org"}
+    assert stub_app.interactions.react_calls == []
+
+
+async def test_a_clean_submit_a_reaction_refuses_clears_the_screens_field_sentences(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_shaped(reactions={"submitted": True})
+    stub_app.interactions.react_result = {"errors": {"qty": "sold out"}}
+    data = {
+        "tai42_event": "submitted",
+        "qty": "2",
+        "note": "ok",
+        "name": "alice",
+        "email": "alice@example.org",
+        **_AMOUNTS_DATA,
+        "qty__err": "Enter a number",
+    }
+    request, aes_key, iv = _request(_shape_exchange(data, screen="SCREEN_B"))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out == {
+        "screen": "SCREEN_B",
+        "data": {**_AMOUNTS_DATA, "qty__init": "2", "note__init": "ok", "error_message": "Quantity: sold out"},
+    }
+
+
+async def test_a_declared_reaction_runs_only_after_a_clean_shape_check(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_shaped(reactions={"page_advanced": ["Contact"], "submitted": True})
+    stub = stub_app.interactions
+    stub.shape_errors = [_shape_error("email", FormShapeKind.FORMAT, "Enter a valid email address")]
+    request, aes_key, iv = _request(_shape_exchange(_SHAPE_ADVANCE))
+    _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert stub.react_calls == []
+    stub.shape_errors = []
+    request, aes_key, iv = _request(_shape_exchange({**_SHAPE_ADVANCE, "email": "alice@example.org"}))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    assert stub.react_calls[-1]["event"] == PageAdvancedEvent(page="Contact")
+    data = {"tai42_event": "submitted", "qty": "2", "name": "alice", "email": "alice@example.org"}
+    request, aes_key, iv = _request(_shape_exchange(data, screen="SCREEN_B"))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SUCCESS"
+    assert stub.react_calls[-1]["event"] == SubmittedEvent()
+
+
+async def test_an_undeclared_page_advance_is_a_shape_check_only_advance(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_shaped(reactions={"page_advanced": ["Amounts"]})
+    request, aes_key, iv = _request(_shape_exchange({**_SHAPE_ADVANCE, "email": "alice@example.org"}))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    assert stub_app.interactions.react_calls == []
+
+
+async def test_a_picker_fed_per_send_is_never_refused_for_membership(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    schema = {"type": "object", "properties": {"slot": {"type": "string", "enum": ["9am"]}, "on": {"type": "string"}}}
+    form = EndpointForm(schema=schema, pages=None, reactions=None, option_fields=["slot"], invalid={})
+    await cache_endpoint_form(_SHAPE_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
+    # The per-send list the picker drew replaced the schema enum; the door judges membership.
+    stub_app.interactions.shape_errors = [_shape_error("slot", FormShapeKind.ENUM, "Choose one of the offered options")]
+    request, aes_key, iv = _request(_shape_exchange({"tai42_event": "submitted", "slot": "10am"}))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SUCCESS"
+
+
+async def test_a_notify_form_resolves_its_sidecar_and_reads_its_sentences_from_the_payload(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, monkeypatch
+):
+    monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "waba-1")
+    reset_all_settings()
+    names = {"Name": "name", "Email address": "email", "Quantity": "qty", "note": "note"}
+    await cache_flow_form("waba-1", "hash1", _SHAPE_SCHEMA, names, _SHAPE_PAGES, [])
+    token = "tai42-nf:hash1:nonce1"
+    stub_app.interactions.shape_errors = [_shape_error("email", FormShapeKind.FORMAT, "Enter a valid email address")]
+    data = {**_SHAPE_ADVANCE, "email__invalid": "Use your work address", "qty__invalid": ""}
+    request, aes_key, iv = _request(_shape_exchange(data, token=token))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["email__err"] == "Use your work address"
+    stub_app.interactions.shape_errors = []
+    data = {"tai42_event": "submitted", "qty": "2", "name": "alice", "email": "a@b.co", "qty__invalid": ""}
+    request, aes_key, iv = _request(_shape_exchange(data, screen="SCREEN_B", token=token))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SUCCESS"
+    assert out["data"]["extension_message_response"]["params"]["flow_token"] == token
+    assert stub_app.interactions.react_calls == []
+
+
+async def test_a_notify_token_with_no_sidecar_is_427(flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis):
+    request, _, _ = _request(_shape_exchange(_SHAPE_ADVANCE, token="tai42-nf:missing:nonce"))
+    response = await flow_handler(request)
+    assert response.status_code == 427

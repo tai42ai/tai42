@@ -80,9 +80,9 @@ async def test_post_valid_body_wakes_caller(wired):
 
 
 async def test_post_form_answer_schema_mismatch_400_carries_field(wired):
-    # The callback door's form-answer 400 body carries the failing field's dotted
-    # path as an optional ``field`` key (the same string the message embeds) so a
-    # channel can pin the error on the right control.
+    # The callback door's form-answer 400 body carries the platform's plain sentence for the
+    # failing field and its name as an optional ``field`` key, so a channel can pin the
+    # sentence on the right control.
     schema = {"type": "object", "properties": {"count": {"type": "integer"}}}
     await _seed_form(wired, schema=schema)
     resp = await router.callback(
@@ -90,22 +90,37 @@ async def test_post_form_answer_schema_mismatch_400_carries_field(wired):
     )
     assert resp.status_code == 400
     body = _json(resp)
-    assert body["error"] == "answer does not match schema at count: 'abc' is not of type 'integer'"
+    assert body["error"] == "Enter a whole number"
     assert body["field"] == "count"
     # The door signals a correlated channel that this rejection is re-answerable in
     # place — the live ask stands, so the participant can answer again.
     assert body["retry_in_place"] is True
 
 
-async def test_post_form_answer_root_mismatch_400_omits_field(wired):
-    # A root-level mismatch (a missing required field) has no answer-field location,
-    # so the 400 body carries NO ``field`` key.
+async def test_post_form_answer_missing_required_field_400_names_the_field(wired):
     schema = {"type": "object", "required": ["count"], "properties": {"count": {"type": "integer"}}}
     await _seed_form(wired, schema=schema)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": {}}'))
     assert resp.status_code == 400
     body = _json(resp)
-    assert body["error"] == "answer does not match schema: 'count' is a required property"
+    assert body["error"] == "This field is required"
+    assert body["field"] == "count"
+    assert body["retry_in_place"] is True
+
+
+async def test_post_form_answer_root_mismatch_400_omits_field(wired):
+    # A fault on the answer object itself (an undeclared key under ``additionalProperties: false``)
+    # has no answer-field location, so the 400 body carries NO ``field`` key.
+    schema = {"type": "object", "additionalProperties": False, "properties": {"count": {"type": "integer"}}}
+    await _seed_form(wired, schema=schema)
+    resp = await router.callback(
+        make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": {"count": 1, "extra": 2}}')
+    )
+    assert resp.status_code == 400
+    body = _json(resp)
+    assert (
+        body["error"] == "answer does not match schema: Additional properties are not allowed ('extra' was unexpected)"
+    )
     assert "field" not in body
     # The retry-in-place policy signal is present even when the failing field is
     # unlocated (no ``field`` key).
@@ -297,7 +312,8 @@ async def test_post_form_answer_rejects_value_outside_per_send_options(wired):
         make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": {"color": "red"}}')
     )
     assert resp.status_code == 400
-    assert "does not match schema" in _json(resp)["error"]
+    assert _json(resp)["error"] == "Choose one of the offered options"
+    assert _json(resp)["field"] == "color"
 
 
 async def test_get_answered_form_ticket_returns_done_page(wired):

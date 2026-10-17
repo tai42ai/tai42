@@ -3,11 +3,17 @@ keyword enforced faithfully, the meta-schema check first, and the two-path proof
 that the validator enforces oneOf-XOR and 'not' the converters collapse.
 """
 
+import json
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
 import pytest
 
 from tai42_kit.utils.data.json_schema_util import (
     InvalidJsonSchemaError,
     JsonSchemaValidationError,
+    check_json_schema,
     validate_against_json_schema,
 )
 
@@ -92,3 +98,150 @@ def test_two_path_proof_not_still_fails_validator():
     validate_against_json_schema(42, schema)  # a non-string satisfies not-string
     with pytest.raises(JsonSchemaValidationError):
         validate_against_json_schema("a string", schema)
+
+
+@pytest.fixture
+def schema_server():
+    """A local schema server: its base URL and the paths it was asked for."""
+    asked: list[str] = []
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            asked.append(self.path)
+            body = json.dumps({"type": "integer"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}", asked
+    server.shutdown()
+    thread.join()
+    server.server_close()
+
+
+def test_validator_refuses_a_reference_outside_the_schema_and_fetches_nothing(schema_server):
+    url, asked = schema_server
+    schema = {"type": "object", "properties": {"a": {"$ref": f"{url}/a.json"}}}
+    refusal = f"JSON schema property 'a' breaks the JSON Schema rules: $ref '{url}/a.json' does not resolve"
+    with pytest.raises(InvalidJsonSchemaError, match=re.escape(refusal)):
+        validate_against_json_schema({"a": 1}, schema)
+    assert asked == []
+
+
+def test_validator_follows_a_reference_inside_the_schema():
+    schema = {"$defs": {"n": {"type": "integer"}}, "type": "object", "properties": {"a": {"$ref": "#/$defs/n"}}}
+    validate_against_json_schema({"a": 1}, schema)
+    with pytest.raises(JsonSchemaValidationError, match=r"value does not match schema at \$\.a"):
+        validate_against_json_schema({"a": "x"}, schema)
+
+
+_CYCLE = (
+    "forms a cycle of references that never descends into the instance, so checking an instance that follows it "
+    "would never end"
+)
+_META_ANCHOR = "https://json-schema.org/draft/2020-12/schema#meta"
+_M20 = "https://json-schema.org/draft/2020-12/schema"
+_APPLICATOR = "https://json-schema.org/draft/2020-12/meta/applicator"
+_CORE = "https://json-schema.org/draft/2020-12/meta/core"
+_X_TO_Y = {"x": {"$dynamicAnchor": "meta", "$ref": "#/$defs/y"}, "y": {"type": "object"}}
+_ENTERED = (
+    "JSON schema breaks the JSON Schema rules at $defs/x/$dynamicAnchor: $dynamicAnchor 'meta' below the root "
+    "is not allowed when the schema has an $id and refers into a JSON Schema meta-schema: "
+    f"{{keyword}} '{_META_ANCHOR}' names the meta-schema's $dynamicAnchor 'meta', which would re-enter the schema "
+    "here and resolve its references against the meta-schema — rename the anchor"
+)
+
+
+def _entering(keyword: str, defs: dict) -> dict:
+    # A property naming the meta-schema's own dynamic anchor, beside an anchor of that name below a
+    # root ``$id``: the lookup enters the meta-schema and comes back into the schema at ``$defs/x``.
+    return {"$id": "https://e.com/r", "type": "object", "properties": {"m": {keyword: _META_ANCHOR}}, "$defs": defs}
+
+
+@pytest.mark.parametrize(
+    ("schema", "refusal"),
+    [
+        (
+            {"properties": {"a": {"$ref": "#/nope"}}},
+            "JSON schema property 'a' breaks the JSON Schema rules: $ref '#/nope' does not resolve: nothing at '/nope'",
+        ),
+        (
+            {"properties": {"a": {"$ref": "#/properties/b/type"}, "b": {"type": "string"}}},
+            "JSON schema property 'a' breaks the JSON Schema rules: "
+            "$ref '#/properties/b/type' points at a value that is not a schema",
+        ),
+        ({"$ref": "#"}, f"JSON schema breaks the JSON Schema rules at $ref: $ref '#' {_CYCLE}"),
+        (
+            {"anyOf": [{"type": "string"}, {"$ref": "#"}]},
+            f"JSON schema breaks the JSON Schema rules at anyOf/1/$ref: $ref '#' {_CYCLE}",
+        ),
+        (
+            {
+                "$id": "https://e.com/r",
+                "type": "object",
+                "properties": {"m": {"$ref": "https://json-schema.org/draft/2020-12/schema"}},
+                "$defs": {"x": {"$dynamicAnchor": "meta", "$ref": "#/$defs/y"}, "y": {"type": "object"}},
+            },
+            "JSON schema breaks the JSON Schema rules at $defs/x/$dynamicAnchor: $dynamicAnchor 'meta' below the root "
+            "is not allowed when the schema has an $id and refers into a JSON Schema meta-schema: the meta-schema's "
+            "$dynamicRef '#meta' would re-enter the schema here and resolve its references against the meta-schema "
+            "— rename the anchor",
+        ),
+        (
+            _entering("$ref", {"x": {"$dynamicAnchor": "meta", "$ref": "#/$defs/y"}, "y": {"type": "object"}}),
+            _ENTERED.format(keyword="$ref"),
+        ),
+        (
+            _entering("$dynamicRef", {"x": {"$dynamicAnchor": "meta", "$ref": "#/$defs/y"}, "y": {"type": "object"}}),
+            _ENTERED.format(keyword="$dynamicRef"),
+        ),
+        (_entering("$ref", {"x": {"$dynamicAnchor": "meta", "type": "object"}}), _ENTERED.format(keyword="$ref")),
+        (
+            {
+                "type": "object",
+                "properties": {"a": {"anyOf": [{"type": "string"}]}, "b": {"$ref": "#/properties/a/anyOf/-1"}},
+            },
+            "JSON schema property 'b' breaks the JSON Schema rules: $ref '#/properties/a/anyOf/-1' indexes an array "
+            "with '-1', which is not a JSON Pointer array index: write the index as a whole number like 0 or 2",
+        ),
+        (
+            {"$id": _APPLICATOR, "type": "object", "properties": {"m": {"$ref": _M20}}},
+            f"JSON schema breaks the JSON Schema rules at $id: $id '{_APPLICATOR}' names a JSON Schema meta-schema: "
+            "a schema cannot take a meta-schema's identifier — give it an identifier of its own, or drop the $id",
+        ),
+    ],
+    ids=[
+        "pointer-to-nowhere",
+        "not-a-schema",
+        "cycle",
+        "partial-cycle",
+        "meta-schema-re-entry",
+        "meta-anchor-ref",
+        "meta-anchor-dynamic-ref",
+        "meta-anchor-without-references",
+        "negative-array-index",
+        "meta-schema-identifier",
+    ],
+)
+@pytest.mark.parametrize("instance", [{}, {"a": 1}, 1], ids=["reaches-no-ref", "reaches-the-ref", "scalar"])
+def test_validator_refuses_every_reference_it_cannot_follow_before_any_instance(schema, refusal, instance):
+    with pytest.raises(InvalidJsonSchemaError, match=re.escape(refusal)):
+        validate_against_json_schema(instance, schema)
+    with pytest.raises(InvalidJsonSchemaError, match=re.escape(refusal)):
+        check_json_schema(schema)
+
+
+def test_validator_admits_a_pointer_into_a_meta_schema_subschema_binding_no_dynamic_name():
+    # The meta-schema subschema ``anchorString`` refers to nothing, so the anchor below the root stays unreached.
+    schema = {"$id": "https://e.com/r", "properties": {"p": {"$ref": f"{_CORE}#/$defs/anchorString"}}, "$defs": _X_TO_Y}
+    check_json_schema(schema)
+    validate_against_json_schema({"p": "ab"}, schema)
+    with pytest.raises(JsonSchemaValidationError):
+        validate_against_json_schema({"p": 5}, schema)

@@ -753,6 +753,8 @@ async def test_notify_form_sends_media_prelude_then_flow_last_no_reservation(
     assert json.loads(fake_redis.store[_schema_cache_key(schema_hash)]) == {
         "schema": _FORM_SCHEMA,
         "names": expected_labels,
+        "pages": None,
+        "option_fields": [],
     }
     assert _schema_cache_key(schema_hash) not in fake_redis.ttls
 
@@ -956,9 +958,11 @@ async def test_reacting_form_publishes_endpoint_driven_and_caches_its_sidecar(
     create = fake_httpx.calls[0]["json"]
     assert create["endpoint_uri"] == "https://app.example/api/channels/whatsapp/flow-data"
     assert json.loads(create["flow_json"])["data_api_version"] == "3.0"
-    # The reacting form's schema + inputs are cached under the interaction id for the endpoint.
-    sidecar = json.loads(fake_redis.store["channel:whatsapp:reaction-form:int-1"])
+    # The reacting form's schema, reactions and option fields are cached under the interaction id.
+    sidecar = json.loads(fake_redis.store["channel:whatsapp:endpoint-form:int-1"])
     assert sidecar["schema"] == _REACT_SCHEMA
+    assert sidecar["reactions"] == reactions
+    assert sidecar["option_fields"] == []
     # The pending record carries the reaction triggers so a re-send reproduces the same Flow.
     pending = json.loads(fake_redis.store[f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}"])
     assert pending["form_reactions"] == reactions
@@ -992,6 +996,158 @@ async def test_reacting_form_without_endpoint_uri_refuses_loudly(
     with pytest.raises(ChannelDeliveryError, match="CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI"):
         await WhatsAppChannel().deliver(_reacting_delivery())
     assert fake_httpx.calls == []
+
+
+# --- shape-checked forms: endpoint-driven by their shape alone ---------------------------
+
+_SHAPED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "email": {"type": "string", "format": "email", "title": "Email address"},
+        "on": {"type": "string", "format": "date"},
+    },
+    "required": ["email"],
+}
+
+
+def _shaped_delivery(**overrides):
+    from tai42_contract.interactions.models import FieldWording, FormWording, Wording
+
+    fields = {
+        "answer_format": "form",
+        "schema": _SHAPED_SCHEMA,
+        "question": "Your address?",
+        "wording": Wording(form=FormWording(fields={"email": FieldWording(invalid="Use your work address")})),
+    }
+    fields.update(overrides)
+    return make_delivery(**fields)
+
+
+async def test_a_shape_checked_ask_publishes_endpoint_driven_and_caches_its_sidecar(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-shaped"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.S"))
+
+    await WhatsAppChannel().deliver(_shaped_delivery())
+
+    create = fake_httpx.calls[0]["json"]
+    assert create["endpoint_uri"] == "https://app.example/api/channels/whatsapp/flow-data"
+    footer = json.loads(create["flow_json"])["screens"][0]["layout"]["children"][-1]
+    assert footer["on-click-action"]["name"] == "data_exchange"
+    sidecar = json.loads(fake_redis.store["channel:whatsapp:endpoint-form:int-1"])
+    assert sidecar == {
+        "schema": _SHAPED_SCHEMA,
+        "pages": None,
+        "reactions": None,
+        "option_fields": [],
+        "invalid": {"email": "Use your work address"},
+    }
+
+
+async def test_a_failed_sidecar_write_frees_the_pair_and_raises_the_store_error(
+    reacting_env, monkeypatch: pytest.MonkeyPatch, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from redis.exceptions import RedisError
+
+    real_set = fake_redis.set
+
+    async def set_failing_on_the_sidecar(key: str, value: str, nx: bool = False, ex: int | None = None) -> bool | None:
+        if key.startswith("channel:whatsapp:endpoint-form:"):
+            raise RedisError("connection reset")
+        return await real_set(key, value, nx=nx, ex=ex)
+
+    monkeypatch.setattr(fake_redis, "set", set_failing_on_the_sidecar)
+
+    with pytest.raises(RedisError, match="connection reset"):
+        await WhatsAppChannel().deliver(_shaped_delivery(interaction_id="int-A"))
+    # Nothing was sent, and neither the pair's hold nor a sidecar is left behind.
+    assert fake_httpx.calls == []
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+    assert "channel:whatsapp:endpoint-form:int-A" not in fake_redis.store
+
+    # The pair is free: the next ask on it reserves and sends.
+    monkeypatch.setattr(fake_redis, "set", real_set)
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-shaped"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.S"))
+    await WhatsAppChannel().deliver(_shaped_delivery(interaction_id="int-B"))
+    assert "channel:whatsapp:endpoint-form:int-B" in fake_redis.store
+
+
+async def test_a_failed_send_after_the_sidecar_write_drops_the_sidecar_and_frees_the_pair(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-shaped"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(response(400, json={"error": {"code": 131009, "message": "Invalid recipient"}}))
+
+    with pytest.raises(ChannelDeliveryError, match=r"HTTP 400.*131009"):
+        await WhatsAppChannel().deliver(_shaped_delivery())
+    assert ("redis_set", "channel:whatsapp:endpoint-form:int-1") in fake_redis.events
+    assert "channel:whatsapp:endpoint-form:int-1" not in fake_redis.store
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+
+
+async def test_a_shape_checked_ask_without_key_material_refuses_before_any_reservation(
+    waba_env, monkeypatch: pytest.MonkeyPatch, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.delenv("CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY", raising=False)
+    monkeypatch.setenv("CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI", "https://app.example/api/channels/whatsapp/flow-data")
+    reset_all_settings()
+
+    with pytest.raises(ChannelDeliveryError, match="CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY"):
+        await WhatsAppChannel().deliver(_shaped_delivery())
+    assert fake_httpx.calls == []
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+
+
+async def test_a_native_shapes_only_ask_stays_static_without_key_material(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    schema = {"type": "object", "properties": {"code": {"type": "string", "pattern": "^[0-9]{4}$"}}}
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-static"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.N"))
+
+    await WhatsAppChannel().deliver(make_delivery(answer_format="form", schema=schema, question="Code?"))
+
+    create = fake_httpx.calls[0]["json"]
+    assert create.get("endpoint_uri") is None
+    flow = json.loads(create["flow_json"])
+    assert "data_api_version" not in flow
+    assert flow["screens"][0]["layout"]["children"][0]["pattern"] == "^[0-9]{4}$"
+    assert "channel:whatsapp:endpoint-form:int-1" not in fake_redis.store
+
+
+@pytest.mark.parametrize(
+    ("prop", "cap"),
+    [({"type": "string", "format": "email"}, 30), ({"type": "string", "format": "date", "minDate": "2026-01-01"}, 80)],
+)
+async def test_a_callers_sentence_over_its_controls_error_cap_is_refused_before_any_reservation(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, prop: dict, cap: int
+):
+    from tai42_contract.interactions.models import FieldWording, FormWording, Wording
+
+    wording = Wording(form=FormWording(fields={"f": FieldWording(invalid="x" * (cap + 1))}))
+    delivery = make_delivery(
+        answer_format="form", schema={"type": "object", "properties": {"f": prop}}, question="?", wording=wording
+    )
+    with pytest.raises(ChannelInputError, match=f"caps the error message of a .* at {cap}"):
+        await WhatsAppChannel().deliver(delivery)
+    assert fake_httpx.calls == []
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
 
 
 # --- Flow resolve: lookup by name on a cache miss, adopt / clean up, one publisher ---------
@@ -1383,3 +1539,47 @@ async def test_resolve_lock_failure_raises_delivery_error(
         await WhatsAppChannel().deliver(_form_delivery())
 
     assert _pending_key() not in fake_redis.store
+
+
+async def test_a_shape_checked_notify_form_publishes_endpoint_driven_and_carries_its_sentences(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    from tai42_contract.interactions.models import FieldWording, FormWording, Wording
+
+    wording = Wording(form=FormWording(fields={"email": FieldWording(invalid="Use your work address")}))
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-nf"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.NF"))
+
+    ids = await WhatsAppChannel().notify(_form_notification(schema=_SHAPED_SCHEMA, wording=wording))
+
+    assert ids == ["wamid.NF"]
+    create = fake_httpx.calls[0]["json"]
+    assert create["endpoint_uri"] == "https://app.example/api/channels/whatsapp/flow-data"
+    flow = json.loads(create["flow_json"])
+    assert flow["screens"][0]["data"]["email__invalid"] == {"type": "string", "__example__": "Not an accepted value"}
+    send = next(call["json"] for call in fake_httpx.calls if (call.get("json") or {}).get("type") == "interactive")
+    data = send["interactive"]["action"]["parameters"]["flow_action_payload"]["data"]
+    assert data["email__invalid"] == "Use your work address"
+    _, schema_hash = build_form_flow(
+        _SHAPED_SCHEMA, field_invalid={"email": "Use your work address"}, carry_invalid=True
+    )
+    sidecar = json.loads(fake_redis.store[_schema_cache_key(schema_hash)])
+    assert sidecar["pages"] is None
+    assert sidecar["option_fields"] == []
+
+
+async def test_a_shape_checked_notify_form_without_key_material_sends_nothing(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    with pytest.raises(ChannelDeliveryError, match="CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY"):
+        await WhatsAppChannel().notify(
+            _form_notification(
+                schema=_SHAPED_SCHEMA,
+                media=[MediaItem(kind=MediaKind.LINK, url="https://docs.example/p/1", caption="Details page")],
+            )
+        )
+    assert fake_httpx.calls == []

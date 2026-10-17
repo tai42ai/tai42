@@ -19,7 +19,8 @@ from tai42_contract.interactions import AnswerFormat, check_addressing, check_as
 
 from tai42_skeleton.access_control.user import clamp_write_audience
 from tai42_skeleton.channels.registry import resolve_channel
-from tai42_skeleton.interactions.form_schema import validate_channel_form_schema
+from tai42_skeleton.interactions.form_schema import validate_channel_form_schema, validate_form_answer_schema
+from tai42_skeleton.interactions.schema_rules import check_answer_schema_rules
 
 from .format_args import check_format_arguments, parse_answer_format
 from .payload import normalize_schema
@@ -96,6 +97,7 @@ def validate_ask_arguments(
         # A FREE answer is checked against its schema; normalize it here so a bad schema fails
         # before any state is written.
         schema = normalize_schema(schema)
+        check_answer_schema_rules(schema)
     return AskValidation(
         fmt=fmt, is_external=is_external, channel_obj=channel_obj, audience=audience, schema=schema, verifier=binding
     )
@@ -158,6 +160,12 @@ def _validate_channel_args(
         # A reacting form with no channel is served by the in-app reaction door (the
         # authenticated sibling of the answer door), so it is allowed here — no transport
         # gate, the inbox IS the transport.
+        if fmt is AnswerFormat.FORM and schema is not None:
+            # A form answered in the inbox is held to no channel subset, but its schema must
+            # still be one an answer can be accepted against (a channel form is held to that
+            # inside the subset walk).
+            schema = normalize_schema(schema)
+            validate_form_answer_schema(schema)
         return None, schema
     channel_obj = validate_channel(channel)
     if link is not None:
@@ -229,7 +237,7 @@ def _validate_external_args(
         # For external, the schema is normalized here too so a bad schema fails BEFORE
         # the link builder does external work.
         if schema is not None:
-            normalize_schema(schema)
+            check_answer_schema_rules(normalize_schema(schema))
         return validate_verifier(verifier) if verifier is not None else None
     if link is not None:
         raise ValueError("link is only valid with answer_format 'external'")

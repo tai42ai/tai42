@@ -87,6 +87,19 @@ async def test_deliver_carries_the_form_field_placeholder(fake_redis: FakeRedis)
     }
 
 
+async def test_deliver_carries_the_form_fields_invalid_sentence(fake_redis: FakeRedis):
+    schema = {"type": "object", "properties": {"email": {"type": "string", "format": "email"}}}
+    await WebChannel().deliver(
+        make_delivery(
+            answer_format="form",
+            question="Your address?",
+            schema=schema,
+            wording=Wording(form=FormWording(fields={"email": FieldWording(invalid="Use your work address")})),
+        )
+    )
+    assert _only_entry(fake_redis)["wording"] == {"form": {"fields": {"email": {"invalid": "Use your work address"}}}}
+
+
 async def test_notify_options_carries_the_group_label_on_the_media_card(fake_redis: FakeRedis):
     await WebChannel().notify(
         ChannelNotification(

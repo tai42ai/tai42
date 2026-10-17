@@ -102,7 +102,7 @@ async def _resolve_answer(
         await _bridge_inbound(phone_number_id, wa_id, bridge_text, wamid, params=params)
         return
     if result.outcome is InboundAnswerOutcome.RETRY_KEPT and is_form:
-        await _recover_form_rejection(phone_number_id, wa_id, wamid, pending, result.retry_reason)
+        await _recover_form_rejection(phone_number_id, wa_id, wamid, pending, result.retry_reason, result.retry_field)
         return
     await mark_seen(wamid)
 

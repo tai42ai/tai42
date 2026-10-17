@@ -23,7 +23,8 @@ from tai42_channel_whatsapp.flows_components import (
     _valid_iso_date,
     component_names,
 )
-from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages
+from tai42_channel_whatsapp.flows_endpoint import error_fields, form_endpoint_driven, shaped_fields
+from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages, slot_datanames
 from tai42_channel_whatsapp.flows_second_line import data_source_rows
 
 
@@ -32,6 +33,8 @@ def build_flow_data(
     values: dict[str, Any] | None,
     options: dict[str, list[dict[str, Any]]] | None,
     pages: list[dict[str, Any]] | None = None,
+    field_invalid: dict[str, str] | None = None,
+    carry_invalid: bool = False,
 ) -> dict[str, Any]:
     """The ``flow_action_payload.data`` a per-send form carries.
 
@@ -50,7 +53,11 @@ def build_flow_data(
     one-element (or empty) list; a merged range START's the object ``{start-date, end-date}``
     of both ends' prefills (a merged END carries no ``init`` of its own); every other field's a
     string. ``pages`` (the same step layout the Flow was built with) decides which ``rangeStart``
-    pairs merge, so the data agrees with the published controls. Raises ``ChannelInputError``.
+    pairs merge, so the data agrees with the published controls. Every field whose control binds an
+    ``error-message`` gets an empty ``__err`` (no error shown); with ``carry_invalid`` (an ask-less
+    endpoint-driven form) every shaped field's ``__invalid`` carries the caller's ``field_invalid``
+    sentence, else the empty string. Each display slot of the entry page reads the empty string.
+    Raises ``ChannelInputError``.
     """
     values = values or {}
     options = options or {}
@@ -73,6 +80,8 @@ def build_flow_data(
     merged_starts = {start: end for end, start in range_merges.items()}
 
     option_fields = set(options)
+    required_raw = schema.get("required")
+    required = {str(name) for name in required_raw} if isinstance(required_raw, list) else set()
     data: dict[str, Any] = {}
     for name, prop in properties.items():
         if name in merged_ends:
@@ -85,7 +94,32 @@ def build_flow_data(
         data[f"{cname}__init"] = _field_init_value(name, prop, values)
         if isinstance(prop, dict) and _is_choice_field(name, prop, option_fields):
             data[f"{cname}__ds"] = _choice_data_source(name, prop, options)
+    data.update(_shape_carriers(properties, required, option_fields, names, range_merges, field_invalid, carry_invalid))
+    # The entry screen's display slots read empty until a reaction fills them.
+    data.update(dict.fromkeys(slot_datanames(resolved_pages[:1]).values(), ""))
     return data
+
+
+def _shape_carriers(
+    properties: dict[str, Any],
+    required: set[str],
+    option_fields: set[str],
+    names: dict[str, str],
+    range_merges: dict[str, str],
+    field_invalid: dict[str, str] | None,
+    carry_invalid: bool,
+) -> dict[str, str]:
+    # The per-send shape carriers: an empty ``__err`` for every control binding an error-message, and
+    # (an ask-less endpoint-driven form) each shaped field's ``__invalid`` sentence, empty when unset.
+    carriers = {
+        f"{names[name]}__err": ""
+        for name in error_fields(properties, required, option_fields, names, set(range_merges))
+    }
+    if carry_invalid and form_endpoint_driven(properties, required, option_fields, names, range_merges, reacting=False):
+        sentences = field_invalid or {}
+        for name in shaped_fields(properties):
+            carriers[f"{names[name]}__invalid"] = sentences.get(name, "")
+    return carriers
 
 
 def _field_init_value(name: str, prop: dict[str, Any], values: dict[str, Any]) -> Any:

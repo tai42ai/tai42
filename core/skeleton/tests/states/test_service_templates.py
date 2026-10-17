@@ -101,7 +101,10 @@ async def test_put_template_replace_refuses_a_composition_the_declare_rules_refu
     await svc.put_template(_template_doc("m"), replace=False)
     await svc.attach("alerts", "m", AttachBody(path=["box"]))
     before = await svc.effective_schema_for("alerts")
-    with pytest.raises(TemplateInUseError, match=r"on state 'alerts' no longer validates: .*\$id below the root"):
+    with pytest.raises(
+        TemplateInUseError,
+        match=r"on state 'alerts' no longer validates: .*'urn:example:box' below the root is not allowed",
+    ):
         await svc.put_template(_template_doc("m", schema=_ID_FRAGMENT), replace=True)
     assert await svc.effective_schema_for("alerts") == before
 

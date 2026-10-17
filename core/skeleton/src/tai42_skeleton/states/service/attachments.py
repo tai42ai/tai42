@@ -29,6 +29,7 @@ from tai42_contract.states.models import (
 )
 from tai42_contract.states.pending import HeldPendingSave
 from tai42_kit.utils.data.jq_util import run_jq_first
+from tai42_kit.utils.data.json_schema_util import SCHEMA_REFS
 
 from tai42_skeleton.states.db import states_settings
 from tai42_skeleton.states.outbox.drain import drain_state
@@ -388,7 +389,7 @@ def _validate_effective_parameters(template: StateTemplate, effective: dict[str,
         if param is None:
             raise TemplateValidationError(f"attach supplies unknown parameter {name!r} for template {template.name!r}")
         try:
-            Draft202012Validator(param.schema_).validate(value)
+            Draft202012Validator(param.schema_, registry=SCHEMA_REFS).validate(value)
         except jsonschema.ValidationError as exc:
             raise TemplateValidationError(f"attach parameter {name!r} is invalid: {exc.message}") from exc
     for name, param in template.parameters.items():
@@ -412,7 +413,7 @@ async def _validate_attach_declarations(
             )
         return
     try:
-        Draft202012Validator(template.declarations.schema_).validate(declarations)
+        Draft202012Validator(template.declarations.schema_, registry=SCHEMA_REFS).validate(declarations)
     except jsonschema.ValidationError as exc:
         raise TemplateValidationError(
             f"attach declarations are invalid under template {template.name!r}: {exc.message}"

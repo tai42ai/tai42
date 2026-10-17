@@ -44,9 +44,18 @@ dependencies = [
     "ruamel.yaml>=0.18",
     # Imported directly by plugins/__init__.py (the strict plugin-spec SafeLoader).
     "PyYAML>=6",
-    # Imported directly by utils/data/json_schema_util.py (the draft-2020-12
-    # validate_against_json_schema path).
-    "jsonschema>=4",
+    # Imported directly by utils/data/json_schema_util/ (the draft-2020-12
+    # validate_against_json_schema path; validators take ``registry=``) and by the
+    # schema_rules.py walk, which follows each validator's VALIDATORS table (draft 2020-12's
+    # lists no ``additionalItems``).
+    "jsonschema>=4.19.2",
+    # Imported directly by utils/data/json_schema_util/schema_rules.py (Registry, Specification
+    # and Specification.detect, the draft specifications, lookup_recursive_ref and the resolver
+    # exceptions).
+    "referencing>=0.32.0",
+    # Imported directly by utils/data/json_schema_util/schema_rules.py (the meta-schema registry
+    # the walk's root resolver combines).
+    "jsonschema-specifications>=2023.03.6",
     # Imported lazily by conversations/entry_params.py (the dropped-params counter).
     "prometheus-client>=0.24",
 ]

@@ -135,8 +135,13 @@ def _render_awaiting_page(wording: Wording | None) -> str:
 # fields), shows/hides each conditional field by its ``visibleWhen`` predicate (a hidden field
 # is dropped from the answer), fills a review step's readback from the entered values, and
 # best-effort-rejects an unavailable date before POSTing the union as ``{"answer": {...}}`` JSON
-# to THIS same callback URL. On 200 it swaps to a done state; on 400 it renders the door's own
-# error text and lets the visitor retry.
+# to THIS same callback URL. Before a step advances or the form submits it checks every visible
+# control's declared shape — the browser's own constraint states, the schema ``pattern`` and the
+# platform's format regex (each an unanchored ``RegExp`` search), a range END's order and span —
+# and pins the field's sentence (the caller's ``data-invalid``, else the platform's
+# ``data-msg-<kind>``) under its row, keeping the visitor on the step. On 200 it swaps to a done
+# state; on 400 it renders the door's own error text, pins it under the field the door names, and
+# lets the visitor retry.
 #
 # When the form declares reactions (``data-reactions`` on the form), it also runs the on-change
 # reaction round-trip: a change to a declared field, an advance from a declared page, or submit
@@ -375,18 +380,83 @@ _FORM_SUBMIT_SCRIPT = """<script>
       fieldset.appendChild(label);
     });
   }
-  function applyErrors(errors) {
+  function clearFieldErrors() {
     var prev = form.querySelectorAll('.field-error');
     for (var i = 0; i < prev.length; i++) { prev[i].parentNode.removeChild(prev[i]); }
-    Object.keys(errors).forEach(function (name) {
-      var row = rowFor(name);
-      if (!row) { return; }
-      var box = document.createElement('div');
-      box.className = 'field-error';
-      box.setAttribute('role', 'alert');
-      box.textContent = errors[name];
-      row.appendChild(box);
-    });
+  }
+  // A field's row, or (for an END drawn inside a grouped date range) the row its control sits in.
+  function rowOfField(name) {
+    var row = rowFor(name);
+    if (row) { return row; }
+    var cs = controlsFor(name);
+    return cs.length ? cs[0].closest('[data-field-row]') : null;
+  }
+  function pinFieldError(name, message) {
+    var row = rowOfField(name);
+    if (!row) { return null; }
+    var box = document.createElement('div');
+    box.className = 'field-error';
+    box.setAttribute('role', 'alert');
+    box.textContent = message;
+    row.appendChild(box);
+    return row;
+  }
+  function applyErrors(errors) {
+    clearFieldErrors();
+    Object.keys(errors).forEach(function (name) { pinFieldError(name, errors[name]); });
+  }
+  // The sentence for a control's broken shape: the caller's own (data-invalid), else the
+  // platform's sentence for that kind (data-msg-<kind>), else the page's refusal line.
+  function shapeSentence(el, kind) {
+    var own = el.getAttribute('data-invalid');
+    if (own !== null) { return own; }
+    var platform = el.getAttribute('data-msg-' + kind);
+    return platform !== null ? platform : text('rejected');
+  }
+  // A regex the browser cannot compile (another dialect's syntax) is left to the answer door,
+  // which checks every shape again and refuses with the field named.
+  function regexFails(source, value) {
+    var re;
+    try { re = new RegExp(source); } catch (e) { return false; }
+    return !re.test(value);
+  }
+  function dayNumber(iso) {
+    var p = iso.split('-');
+    return Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2])) / 86400000;
+  }
+  // The control's first broken shape as its sentence, or null. Native constraint states map to
+  // their kind; the schema pattern and the platform's format regex are tested with an unanchored
+  // RegExp search (JSON Schema's semantics); a range END checks its order and inclusive span
+  // against its START. An empty value is unfilled — a required one is the browser's own check.
+  function shapeError(el) {
+    var v = el.validity;
+    if (v && (v.badInput || v.stepMismatch)) { return shapeSentence(el, 'type'); }
+    if (v && v.typeMismatch) { return shapeSentence(el, 'format'); }
+    if (v && v.rangeUnderflow) { return shapeSentence(el, el.type === 'date' ? 'min_date' : 'minimum'); }
+    if (v && v.rangeOverflow) { return shapeSentence(el, el.type === 'date' ? 'max_date' : 'maximum'); }
+    var value = (typeof el.value === 'string') ? el.value : '';
+    if (value === '' || el.type === 'checkbox' || el.type === 'radio' || el.tagName === 'SELECT') { return null; }
+    var length = Array.from(value).length;
+    if (el.minLength > 0 && length < el.minLength) { return shapeSentence(el, 'min_length'); }
+    if (el.maxLength >= 0 && length > el.maxLength) { return shapeSentence(el, 'max_length'); }
+    var formatPattern = el.getAttribute('data-format-pattern');
+    if (formatPattern !== null && regexFails(formatPattern, value)) { return shapeSentence(el, 'format'); }
+    var pattern = el.getAttribute('data-pattern');
+    if (pattern !== null && regexFails(pattern, value)) { return shapeSentence(el, 'pattern'); }
+    var start = el.getAttribute('data-range-start');
+    if (start !== null) {
+      var startControl = controlsFor(start)[0];
+      if (startControl && startControl.value) {
+        var days = dayNumber(value) - dayNumber(startControl.value) + 1;
+        if (days < 1) { return shapeSentence(el, 'range_order'); }
+        var low = el.getAttribute('data-min-days');
+        var high = el.getAttribute('data-max-days');
+        if ((low !== null && days < Number(low)) || (high !== null && days > Number(high))) {
+          return shapeSentence(el, 'range_span');
+        }
+      }
+    }
+    return null;
   }
   function applyDisplay(display) {
     var slots = form.querySelectorAll('[data-slot]');
@@ -452,7 +522,26 @@ _FORM_SUBMIT_SCRIPT = """<script>
       }
       if (resp.status === 400) {
         resp.json().then(function (data) {
-          err.textContent = reasonText('rejected', data && data.error);
+          var reason = data && data.error;
+          var row = null;
+          // The door names the refused field: pin its sentence under that field once, then show
+          // the step that holds it (showing a step keeps every pinned box). With a box pinned, the
+          // refusal line reads the caller's data-text-rejected sentence with its {reason} filled by
+          // the door's sentence when the caller set one, else the page's own line; with none pinned,
+          // the caller's sentence filled the same way, else the door's sentence itself.
+          if (data && typeof data.field === 'string' && typeof reason === 'string') {
+            clearFieldErrors();
+            row = pinFieldError(data.field, reason);
+            var step = row ? row.closest('.step') : null;
+            for (var s = 0; step && s < steps.length; s++) {
+              if (steps[s] === step && s !== current) {
+                current = s;
+                show(current);
+              }
+            }
+          }
+          err.textContent = row === null ? reasonText('rejected', reason)
+            : (form.getAttribute('data-text-rejected') === null ? text('rejected') : reasonText('rejected', reason));
         }).catch(function () {
           err.textContent = reasonText('rejected');
         });
@@ -483,11 +572,20 @@ _FORM_SUBMIT_SCRIPT = """<script>
     if (focusTarget) { focusTarget.focus(); }
   }
   function stepValid(i) {
+    clearFieldErrors();
     var controls = steps[i].querySelectorAll('[data-field]');
     for (var c = 0; c < controls.length; c++) {
-      var crow = controls[c].closest('[data-field-row]');
+      var el = controls[c];
+      var crow = el.closest('[data-field-row]');
       if (crow && crow.hidden) { continue; }
-      if (controls[c].checkValidity && !controls[c].checkValidity()) { controls[c].reportValidity(); return false; }
+      if (el.validity && el.validity.valueMissing) { el.reportValidity(); return false; }
+      var problem = shapeError(el);
+      if (problem !== null) {
+        pinFieldError(el.getAttribute('data-field'), problem);
+        el.focus();
+        return false;
+      }
+      if (el.checkValidity && !el.checkValidity()) { el.reportValidity(); return false; }
     }
     var groups = steps[i].querySelectorAll('[data-array-required="1"]');
     for (var g = 0; g < groups.length; g++) {

@@ -231,8 +231,8 @@ async def _handle_notify_form_reply(
         schema = None
         form = {key: value for key, value in response.items() if key != "flow_token"}
     else:
-        schema, labels = cached
-        form = _coerce_form_answer(response, schema, labels)
+        schema = cached.schema
+        form = _coerce_form_answer(response, schema, cached.names)
     await _bridge_inbound(
         phone_number_id,
         wa_id,
@@ -258,18 +258,34 @@ def _parse_notify_form_token(flow_token: str) -> tuple[str, str | None]:
     return schema_hash, form_tag
 
 
-def _door_error_line(retry_reason: str | None) -> str:
+def _door_error_line(retry_reason: str | None, retry_field: str | None, pending: PendingQuestion) -> str:
     """The participant-facing error line for the re-sent Flow.
 
-    The door's OWN reason (already length-bounded by the ladder, re-capped here defensively at
-    ``_DOOR_REJECTION_MAX_CHARS`` which names the failing field), or the fixed opaque line when the
-    door gave none.
+    The door's OWN reason — the plain sentence for the refused field — led by that field's label
+    (``"Label: sentence"``, the label the person saw on the field, read through the pending record's
+    payload-label map) when the door names a declared field; the line is bounded at
+    ``_DOOR_REJECTION_MAX_CHARS`` (the ladder already bounds the reason; a line past the bound is
+    never sent cut: the label is then left off, else the reason alone is re-capped). The fixed opaque
+    line when the door gave no reason.
     """
-    return retry_reason[:_DOOR_REJECTION_MAX_CHARS] if retry_reason else _CALLBACK_REJECTION_OPAQUE
+    if not retry_reason:
+        return _CALLBACK_REJECTION_OPAQUE
+    labels = {key: label for label, key in (pending.form_names or {}).items()}
+    label = labels.get(retry_field) if retry_field is not None else None
+    if label is not None:
+        line = f"{label}: {retry_reason}"
+        if len(line) <= _DOOR_REJECTION_MAX_CHARS:
+            return line
+    return retry_reason[:_DOOR_REJECTION_MAX_CHARS]
 
 
 async def _recover_form_rejection(
-    phone_number_id: str, wa_id: str, wamid: str, pending: PendingQuestion, retry_reason: str | None
+    phone_number_id: str,
+    wa_id: str,
+    wamid: str,
+    pending: PendingQuestion,
+    retry_reason: str | None,
+    retry_field: str | None = None,
 ) -> None:
     """Recover a door-rejected form answer by re-sending a fresh Flow for the SAME interaction.
 
@@ -278,8 +294,9 @@ async def _recover_form_rejection(
     The shared ladder returned RETRY_KEPT: it KEPT the reservation and — because this
     channel owns the retry notice — sent NO participant message, so the fresh Flow is the
     participant's single correction message (no double-messaging). ``retry_reason`` is the
-    door's own (already-truncated) message, which names the failing field and rides the
-    re-sent Flow's body; a missing reason falls back to a fixed opaque line. Ordering is
+    door's own (already-truncated) sentence and ``retry_field`` the field it refused; the re-sent
+    Flow's body reads ``"Label: sentence"`` (:func:`_door_error_line`); a missing reason falls back
+    to a fixed opaque line. Ordering is
     load-bearing for Meta's redelivery:
 
     * Under the cap — re-send a fresh Flow (same ``flow_token`` = ``interaction_id``,
@@ -319,7 +336,7 @@ async def _recover_form_rejection(
     wording = Wording.model_validate(pending.wording) if pending.wording is not None else None
     form = wording.form if wording is not None else None
     answer = wording.answer if wording is not None else None
-    door_line = _door_error_line(retry_reason)
+    door_line = _door_error_line(retry_reason, retry_field, pending)
     rejected_template = answer.rejected if answer is not None else None
     tail = (
         rejected_template.replace("{reason}", door_line)
@@ -346,6 +363,11 @@ async def _recover_form_rejection(
         open_label=form.open if form is not None else None,
         form_title=form.title if form is not None else None,
         form_submit=form.submit if form is not None else None,
+        field_invalid=(
+            {name: words.invalid for name, words in form.fields.items() if words.invalid is not None}
+            if form is not None
+            else None
+        ),
     )
     await bump_rejections(phone_number_id, wa_id, pending)
     await mark_seen(wamid)

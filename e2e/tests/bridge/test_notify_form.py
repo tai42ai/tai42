@@ -13,7 +13,9 @@ pinned no-validation transport contract). The whatsapp legs drive the Flow rende
 the FakeWhatsApp stub: the flow token rides the ``tai42-nf:`` namespace with NO pending
 reservation, a signed ``nfm_reply`` carrying it bridges the schema-coerced dict, a reply
 on a pair with a LIVE ask never touches that ask (the masquerade fence), and a schema
-sidecar miss degrades the reply to raw string values — accepted, never dropped. The
+sidecar miss degrades the reply to raw string values — accepted, never dropped; a shape no
+Flow control checks is refused inside the form by the data endpoint, which finds the ask-less
+form through the token's schema sidecar and reads the caller's sentence from the request. The
 capability leg pins the 501 refusal (a channel without the flag) leaving no feed entry.
 """
 
@@ -46,6 +48,7 @@ from ._bridge_support import (
     wait_probe_record,
     wait_send_to,
     wait_whatsapp_send,
+    whatsapp_flow_action_request,
 )
 
 # The scripted-LLM + FakeWhatsApp legs step aside when either seam is selected real,
@@ -501,6 +504,100 @@ async def test_whatsapp_notify_form_schema_sidecar_miss_degrades_reply_to_raw_va
     turn = await _recorded_form_turn(bridge, marker)
     assert turn["form"] == {"topic": marker, "amount": "7"}
     assert turn["message"] == f"topic: {marker}\namount: 7"
+
+
+@_whatsapp_mock_leg
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "probe-tools",
+    "helper:whatsapp",
+    "setting:conversations",
+    "setting:router:notifications",
+    "setting:seeded-access-control",
+    "store:redis",
+)
+async def test_whatsapp_notify_form_refuses_a_bad_email_inside_the_form_then_bridges_the_good_one(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    identity = _fresh_phone_id()
+    await _form_record_route(bridge, uniq, channel="whatsapp", identity=identity)
+    wa_id = _fresh_wa_id()
+    prompt = uniq("l27-wa-shape-prompt")
+    marker = uniq("l27-wa-shape-a")
+    # ``email`` declares ``format: email``, a shape no Meta control checks, so the ask-less Flow
+    # publishes endpoint-driven; the description keeps this leg's cached Flow and sidecar its own.
+    schema = {
+        "type": "object",
+        "description": f"{uniq('l27-wa-shape')} answer form",
+        "properties": {
+            "topic": {"type": "string", "title": "Topic"},
+            "email": {"type": "string", "format": "email", "title": "Email address"},
+        },
+        "required": ["topic", "email"],
+    }
+
+    await bridge.api().post(
+        "/api/notifications",
+        json={
+            "message": prompt,
+            "channel": "whatsapp",
+            "recipient": wa_id,
+            "schema": schema,
+            "wording": {"form": {"fields": {"email": {"invalid": "Enter your full address"}}}},
+        },
+    )
+
+    send = await wait_whatsapp_send(bridge.fake_whatsapp, prompt)
+    parameters = send["payload"]["interactive"]["action"]["parameters"]
+    flow_token = parameters["flow_token"]
+    assert flow_token.startswith("tai42-nf:")
+    created = next(flow for flow in bridge.fake_whatsapp.flows if flow["id"] == parameters["flow_id"])
+    assert created["endpoint_uri"] == bridge.stack.config.env["CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI"]
+    flow_json = json.loads(created["flow_json"])
+    screen_data = parameters["flow_action_payload"]["data"]
+
+    # The person taps the published submit with "dhdhdh": the data endpoint finds the form through
+    # the token's schema sidecar, and the caller's sentence — which an ask-less form carries in the
+    # Flow's own data and its submit forwards — keeps them on the screen.
+    refused = await bridge.whatsapp_flow_exchange(
+        whatsapp_flow_action_request(
+            flow_json,
+            screen="SCREEN_A",
+            flow_token=flow_token,
+            form={"topic": marker, "email": "dhdhdh"},
+            data=screen_data,
+        )
+    )
+    assert refused == {
+        "screen": "SCREEN_A",
+        "data": {
+            **screen_data,
+            "topic__init": marker,
+            "email__init": "dhdhdh",
+            "topic__err": "",
+            "email__err": "Enter your full address",
+            "error_message": "Email address: Enter your full address",
+        },
+    }
+
+    # A good address completes the Flow, and its reply enters the conversation as the form turn.
+    completed = await bridge.whatsapp_flow_exchange(
+        whatsapp_flow_action_request(
+            flow_json,
+            screen="SCREEN_A",
+            flow_token=flow_token,
+            form={"topic": marker, "email": "alice@example.org"},
+            data=refused["data"],
+        )
+    )
+    assert completed["screen"] == "SUCCESS", completed
+    params = completed["data"]["extension_message_response"]["params"]
+    assert params == {"flow_token": flow_token, "Topic": marker, "Email address": "alice@example.org"}
+    reply = bridge.whatsapp_nfm_reply(phone_number_id=identity, wa_id=wa_id, response=params)
+    resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
+    assert resp.status_code == 200, resp.text
+    turn = await _recorded_form_turn(bridge, marker)
+    assert turn["form"] == {"topic": marker, "email": "alice@example.org"}
 
 
 @pytest.mark.needs("kind:channels:twilio", "helper:twilio", "setting:router:notifications")

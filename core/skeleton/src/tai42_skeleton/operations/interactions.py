@@ -168,6 +168,25 @@ async def _load_answerable_state(store: InteractionStore, r: Any, interaction_id
     return state
 
 
+def _mismatch_text(exc: AnswerMismatchError, request: InteractionRequest) -> str:
+    """The 400 text for a refused answer: a FORM field's plain sentence led by that field's label.
+
+    This door's error carries one message, so a FORM refusal that names its field reads
+    ``"Label: sentence"`` (the property's ``title``, else its name) — the person can tell which
+    field failed and how. Any other refusal reads as the answer check worded it.
+    """
+    message = str(exc)
+    payload = request.format_payload or {}
+    schema = payload.get("schema")
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if request.answer_format is not AnswerFormat.FORM or exc.field is None or not isinstance(properties, dict):
+        return message
+    prop = properties.get(exc.field)
+    title = prop.get("title") if isinstance(prop, dict) else None
+    label = title if isinstance(title, str) and title.strip() else exc.field
+    return f"{label}: {message}"
+
+
 def _authorize_answerer(state: InteractionState, restricted: str | None) -> None:
     """The audience gate.
 
@@ -223,7 +242,7 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
                 answer,
             )
         except AnswerMismatchError as exc:
-            raise BadRequestError(str(exc)) from exc
+            raise BadRequestError(_mismatch_text(exc, state.request)) from exc
         # The consumer's submit check is enforced HERE, by the server, before anything records:
         # a reacting form that declares ``submitted`` runs its handler through the one reaction
         # chokepoint with the effective answer. A clean run proceeds; per-field errors refuse the

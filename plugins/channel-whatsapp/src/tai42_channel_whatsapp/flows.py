@@ -7,11 +7,14 @@ properties map one-to-one onto Flow field components:
 
 * ``string``                    → ``TextInput`` (its ``inputMode`` selects the keyboard, below)
 * ``string`` with ``enum``      → ``Dropdown`` (dynamic ``data-source`` items)
-* ``string`` + ``format: date`` → ``DatePicker`` (sets/returns a ``YYYY-MM-DD`` string)
-* ``string`` + ``format: time`` / ``date-time`` → ``TextInput`` (free text; the vendor has no
-  time-of-day picker, and its ``CalendarPicker`` is a calendar, not a date-time control)
+* ``string`` + ``format: date`` → single-mode ``CalendarPicker`` (sets/returns a ``YYYY-MM-DD`` string)
+* ``string`` + ``format: time`` / ``date-time`` → ``TextInput`` carrying the platform's format regex as
+  its ``pattern`` (the vendor has no time-of-day picker, and its ``CalendarPicker`` is a calendar,
+  not a date-time control)
+* ``string`` + ``format: email`` → ``TextInput`` with ``input-type: "email"``
 * ``boolean``                   → ``OptIn``
-* ``integer`` / ``number``      → ``TextInput`` with ``input-type: "number"``
+* ``integer`` / ``number``      → ``TextInput`` with ``input-type: "number"`` (an integer also draws
+  the whole-number ``pattern``)
 
 A ``string`` field's ``inputMode`` hint selects the ``TextInput`` keyboard (the value still
 arrives as the typed string, never coerced):
@@ -24,11 +27,17 @@ arrives as the typed string, never coerced):
 * ``text`` / absent             → plain ``TextInput``
 
 ``format`` is part of the platform's form-schema subset (validated at the ask door); this
-module only chooses the WhatsApp control for it. A ``DatePicker`` carries no ``required`` field
-— the vendor's component reference defines one for every other input control but not for the
-``DatePicker`` — so a schema's required flag on a date field is not enforced by that control.
-An enum or option-bearing string stays a ``Dropdown`` even with ``format: date``: an explicit
-choice list outranks a format hint.
+module only chooses the WhatsApp control for it. Every date draws a ``CalendarPicker`` (not the
+``DatePicker``, whose reference defines no ``required``, ``helper-text`` or ``error-message``), so a
+date's required flag is checked by the control. An enum or option-bearing string stays a
+``Dropdown`` even with ``format: date``: an explicit choice list outranks a format hint.
+
+A field's declared shape is checked inside the form (:mod:`tai42_channel_whatsapp.flows_shapes`):
+Meta's controls check what they can natively (``required``, a ``pattern`` on the text/number
+keyboard, the length/selection/calendar bounds), and a form carrying any other shape — or a
+consumer reaction — is ENDPOINT-DRIVEN (:func:`form_needs_endpoint`): every footer fires a
+``data_exchange`` the data endpoint answers with the platform's one form-shape check, keeping the
+person on the screen with the failing field's ``error-message`` while a shape is broken.
 
 Each property's ``title`` (else the property name) is the field label; the
 ``required`` list flags the components. Anything outside the subset — a nested
@@ -102,14 +111,25 @@ from tai42_channel_whatsapp.flows_components import (
     _field_data_decls,
     _forward_field_data,
     _range_value_type_decl,
-    _sanitize_name,
     _value_type_decl,
     component_names,
     payload_labels,
 )
-from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages
+from tai42_channel_whatsapp.flows_endpoint import (
+    REACTION_PAGE_KEY,
+    _attach_field_reaction,
+    _reaction_sets,
+    error_fields,
+    event_payload,
+    form_endpoint_driven,
+    guard_endpoint_names,
+    screen_data_refs,
+    shaped_fields,
+)
+from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages, slot_datanames
 from tai42_channel_whatsapp.flows_second_line import data_source_rows, field_caption, range_captions
 from tai42_channel_whatsapp.flows_send_data import build_flow_data
+from tai42_channel_whatsapp.flows_shapes import ERROR_EXAMPLE
 from tai42_channel_whatsapp.flows_visibility import emit_field_variants, form_ref, screen_field_variants
 
 __all__ = [
@@ -120,14 +140,13 @@ __all__ = [
     "build_form_flow",
     "component_names",
     "data_source_rows",
+    "form_needs_endpoint",
     "payload_labels",
     "slot_datanames",
 ]
 
-# Flow JSON version pinned to a Cloud-API-valid release. This is a static
-# (endpoint-less) navigate flow whose terminal screen completes with the form
-# payload — no ``data_api_version`` because there is no data-exchange endpoint.
-# Bump this constant when a newer schema version is adopted.
+# Flow JSON version pinned to a Cloud-API-valid release (≥ 6.2, so a TextInput takes a
+# ``pattern``). Bump this constant when a newer schema version is adopted.
 _FLOW_JSON_VERSION = "7.0"
 
 # The per-page screen id prefix. A screen id must be letters-and-underscores only
@@ -148,20 +167,11 @@ _CONTINUE_LABEL = "Continue"
 # (never truncated), the same discipline the per-send caps take.
 _FOOTER_LABEL_MAX_CHARS = 35
 
-# The data-exchange API version an endpoint-driven (reacting) Flow declares in its Flow JSON.
+# The data-exchange API version an endpoint-driven Flow declares in its Flow JSON.
 # A static (navigate-only) Flow carries none. Meta's current data-endpoint version.
 _DATA_API_VERSION = "3.0"
 
-# The reaction-event markers an endpoint-driven Flow carries in a ``data_exchange`` action's
-# payload so the data endpoint maps the vendor request onto a ``react(...)`` event. They are
-# reserved property names on a REACTING form (refused like ``flow_token``) so a field value can
-# never collide with a marker in the same payload; a static form never carries them.
-_REACTION_EVENT_KEY = "tai42_event"
-_REACTION_FIELD_KEY = "tai42_field"
-_REACTION_PAGE_KEY = "tai42_page"
-_RESERVED_REACTION_KEYS = frozenset({_REACTION_EVENT_KEY, _REACTION_FIELD_KEY, _REACTION_PAGE_KEY})
-
-# The screen a data-endpoint response names to COMPLETE a reacting Flow (Meta's reserved
+# The screen a data-endpoint response names to COMPLETE an endpoint-driven Flow (Meta's reserved
 # terminal screen); the completed answer rides ``extension_message_response.params``.
 SUCCESS_SCREEN = "SUCCESS"
 
@@ -259,8 +269,12 @@ class _RenderSpec:
 
     ``field_changed`` are the schema keys whose change fires a reaction; ``page_advanced`` the
     page TITLES whose advance fires one; ``submitted`` whether the submission is reaction-checked.
-    ``endpoint`` is True for a reacting (endpoint-driven) Flow and drives the ``data_exchange``
-    actions + ``data_api_version``. ``slots`` maps each display slot to its screen-``data`` key.
+    ``endpoint`` is True for an endpoint-driven Flow (a reacting form, or one carrying a shape no
+    control checks natively) and drives the ``data_exchange`` footers + ``data_api_version``.
+    ``slots`` maps each display slot to its screen-``data`` key. ``field_invalid`` is the caller's
+    per-field ``invalid`` sentence; ``err_fields`` the fields binding an ``error-message``;
+    ``invalid_fields`` the shaped fields whose sentence rides the Flow as ``__invalid`` (an ask-less
+    endpoint-driven form only, else empty).
     """
 
     properties: dict[str, Any]
@@ -276,32 +290,9 @@ class _RenderSpec:
     # ``END name -> START name`` for every ``rangeStart`` pair drawn as ONE range control; a merged
     # END emits no control/data and a merged START carries the pair's object value.
     range_merges: dict[str, str]
-
-
-def slot_datanames(pages: list[dict[str, Any]] | None) -> dict[str, str]:
-    """Map each declared display ``slot`` to a unique identifier-safe screen-``data`` key.
-
-    A slotted display block reads ``${data.<key>}``; a reaction's ``display`` update fills it
-    through the data endpoint. Slot names are unique across a form (the contract enforces it);
-    each is sanitised to Meta's identifier grammar and disambiguated deterministically on a
-    sanitisation collision, so the renderer and the data endpoint recompute an identical map.
-    """
-    mapping: dict[str, str] = {}
-    used: set[str] = set()
-    for page in pages or []:
-        for block in page.get("display") or []:
-            slot = block.get("slot") if isinstance(block, dict) else None
-            if not isinstance(slot, str) or slot in mapping:
-                continue
-            base = f"slot_{_sanitize_name(slot)}"
-            candidate = base
-            suffix = 2
-            while candidate in used:
-                candidate = f"{base}_{suffix}"
-                suffix += 1
-            used.add(candidate)
-            mapping[slot] = candidate
-    return mapping
+    field_invalid: dict[str, str]
+    err_fields: frozenset[str]
+    invalid_fields: frozenset[str]
 
 
 def _review_readback(spec: _RenderSpec) -> list[dict[str, Any]]:
@@ -318,80 +309,9 @@ def _review_readback(spec: _RenderSpec) -> list[dict[str, Any]]:
     ]
 
 
-def _reaction_event_payload(
-    kind: FormReactionEventKind,
-    marker_key: str | None,
-    marker_value: str | None,
-    this_fields: list[str],
-    earlier_fields: list[str],
-    names: dict[str, str],
-    variants: dict[str, list[tuple[str, list[str]]]],
-    range_merges: dict[str, str],
-) -> dict[str, str]:
-    """A ``data_exchange`` action payload: the event markers plus the values filled so far.
-
-    The event kind rides ``tai42_event``; a field/page trigger its ``tai42_field``/``tai42_page``
-    marker. Each known value is keyed by its SCHEMA NAME (this screen's through its coalesced
-    ``form_ref`` — a single control, or a backtick concatenation of a split field's variants —
-    earlier ones through their ``__val`` carrier), so the data endpoint hands the react facet
-    partial values keyed exactly as the stored schema. A merged range END emits no value of its own
-    (its START carries the pair's object, which the endpoint splits); later (unfilled) fields are
-    omitted.
-    """
-    merged_ends = set(range_merges)
-    payload: dict[str, str] = {_REACTION_EVENT_KEY: kind.value}
-    if marker_key is not None and marker_value is not None:
-        payload[marker_key] = marker_value
-    for name in this_fields:
-        if name in merged_ends:
-            continue
-        payload[name] = form_ref(name, variants[name], names)
-    for name in earlier_fields:
-        if name in merged_ends:
-            continue
-        payload[name] = f"${{data.{names[name]}__val}}"
-    return payload
-
-
-def _attach_field_reaction(
-    component: dict[str, Any],
-    name: str,
-    this_fields: list[str],
-    earlier_fields: list[str],
-    names: dict[str, str],
-    variants: dict[str, list[tuple[str, list[str]]]],
-    range_merges: dict[str, str],
-) -> dict[str, Any]:
-    """Attach a ``field_changed`` ``data_exchange`` action to a selectable control, or raise.
-
-    A choice/date/chips control carries the action on ``on-select-action``, an OptIn on
-    ``on-click-action``; a plain text or numeric input has no on-change event on WhatsApp and is
-    refused loudly (never silently dropped).
-    """
-    action = {
-        "name": "data_exchange",
-        "payload": _reaction_event_payload(
-            FormReactionEventKind.FIELD_CHANGED,
-            _REACTION_FIELD_KEY,
-            name,
-            this_fields,
-            earlier_fields,
-            names,
-            variants,
-            range_merges,
-        ),
-    }
-    ctype = component["type"]
-    if ctype in ("Dropdown", "RadioButtonsGroup", "CheckboxGroup", "ChipsSelector", "CalendarPicker", "DatePicker"):
-        component["on-select-action"] = action
-    elif ctype == "OptIn":
-        component["on-click-action"] = action
-    else:
-        raise ChannelInputError(
-            f"form property {name!r}: a field_changed reaction needs a selectable control (a choice, "
-            f"date, or opt-in); a {ctype} has no on-change event on WhatsApp"
-        )
-    return component
+def _error_decl() -> dict[str, Any]:
+    # The screen-``data`` declaration of a field's ``__err`` (its error-message text) or ``__invalid``.
+    return {"type": "string", "__example__": ERROR_EXAMPLE}
 
 
 def _screen_data_model(
@@ -399,31 +319,46 @@ def _screen_data_model(
 ) -> dict[str, Any]:
     """The screen's ``data`` declarations.
 
-    The entry screen declares EVERY field's init/ds (the send injects them all there); a later screen
-    declares its own and its successors' init/ds plus a ``__val`` carrier for each field collected earlier.
+    The entry screen declares EVERY field's init/ds/err (the send injects them all there); a later screen
+    declares its own and its successors' init/ds/err plus a ``__val`` carrier for each field collected
+    earlier. A merged range END declares only its ``__err`` (its START's range control binds it).
+    Every screen of an ask-less endpoint-driven form declares each shaped field's ``__invalid``.
     """
     merged_ends = set(spec.range_merges)
     merged_starts = set(spec.range_merges.values())
     data_model: dict[str, Any] = {}
-    if index == 0:
-        for name, prop in spec.properties.items():
-            if name in merged_ends:
-                continue
-            data_model.update(_field_data_decls(name, prop, spec.option_fields, spec.names, name in merged_starts))
-    else:
-        for name in [*this_fields, *later_fields]:
-            if name in merged_ends:
-                continue
+    rendered = list(spec.properties) if index == 0 else [*this_fields, *later_fields]
+    for name in rendered:
+        if name not in merged_ends:
             data_model.update(
                 _field_data_decls(name, spec.properties[name], spec.option_fields, spec.names, name in merged_starts)
             )
+        if name in spec.err_fields:
+            data_model[f"{spec.names[name]}__err"] = _error_decl()
+    if index > 0:
         for name in earlier_fields:
             if name in merged_ends:
                 continue
             data_model[f"{spec.names[name]}__val"] = (
                 _range_value_type_decl() if name in merged_starts else _value_type_decl(spec.properties[name])
             )
+    for name in spec.properties:
+        if name in spec.invalid_fields:
+            data_model[f"{spec.names[name]}__invalid"] = _error_decl()
     return data_model
+
+
+def _later_carriers(later_fields: list[str], spec: _RenderSpec) -> dict[str, str]:
+    # The carriers each later (unrendered) field still needs on a later screen: its init/ds and its
+    # ``__err`` (a merged END only its ``__err``), forwarded from this screen's data.
+    merged_ends = set(spec.range_merges)
+    forward: dict[str, str] = {}
+    for name in later_fields:
+        if name not in merged_ends:
+            forward.update(_forward_field_data(name, spec.properties[name], spec.option_fields, spec.names))
+        if name in spec.err_fields:
+            forward[f"{spec.names[name]}__err"] = f"${{data.{spec.names[name]}__err}}"
+    return forward
 
 
 def _resolve_button_label(page: dict[str, Any]) -> str | None:
@@ -452,15 +387,18 @@ def _terminal_footer(
     spec: _RenderSpec,
     variants: dict[str, list[tuple[str, list[str]]]],
     button_label: str | None,
+    screen_data: dict[str, str],
 ) -> dict[str, Any]:
     # The terminal screen's Footer, labelled by the page's ``button_label`` (else ``_FOOTER_LABEL``).
-    # A reacting form whose submission is reaction-checked fires a ``submitted`` data_exchange (the
-    # data endpoint accepts or refuses, then completes); a static form completes directly with the
-    # flat union of every field, keyed by human-readable label. A merged range END emits no
-    # completion entry — its START carries the pair's object, which the inbound decode splits.
+    # An endpoint-driven form fires a ``submitted`` data_exchange carrying the values and the
+    # screen's whole data (the data endpoint checks the shapes and any declared submit reaction,
+    # then completes or keeps the person on the screen, answering from that data); a
+    # static form completes directly with the flat union of every field, keyed by human-readable
+    # label. A merged range END emits no completion entry — its START carries the pair's object,
+    # which the inbound decode splits.
     label = button_label or _FOOTER_LABEL
-    if spec.submitted:
-        payload = _reaction_event_payload(
+    if spec.endpoint:
+        payload = event_payload(
             FormReactionEventKind.SUBMITTED,
             None,
             None,
@@ -470,6 +408,7 @@ def _terminal_footer(
             variants,
             spec.range_merges,
         )
+        payload.update(screen_data)
         return {
             "type": "Footer",
             "label": label,
@@ -495,22 +434,25 @@ def _step_footer(
     routing_model: dict[str, list[str]],
     variants: dict[str, list[tuple[str, list[str]]]],
     button_label: str | None,
+    screen_data: dict[str, str],
 ) -> dict[str, Any]:
     # A non-terminal screen's Footer, labelled by the page's ``button_label`` (else
-    # ``_CONTINUE_LABEL``). A page whose advance is reaction-triggered fires a ``page_advanced``
-    # data_exchange (the data endpoint applies the reaction and names the next screen); any other
-    # page navigates directly, forwarding successors' init/ds and every collected value. A merged
-    # range END forwards nothing — its START carries the pair's object value. Either way the
-    # transition is recorded in ``routing_model``.
+    # ``_CONTINUE_LABEL``). An endpoint-driven form fires a ``page_advanced`` data_exchange carrying
+    # the values so far and the screen's whole data, which holds the later fields' carriers (the
+    # data endpoint checks this screen's shapes and any declared advance reaction, then names the
+    # next screen or keeps the person here); a static form navigates directly, forwarding
+    # successors' carriers and every collected value. A merged range END forwards no value — its
+    # START carries the pair's object value.
+    # Either way the transition is recorded in ``routing_model``.
     label = button_label or _CONTINUE_LABEL
     merged_ends = set(spec.range_merges)
     screen_id = _screen_id(index)
     next_screen = _screen_id(index + 1)
     routing_model[screen_id] = [next_screen]
-    if page_title in spec.page_advanced:
-        payload = _reaction_event_payload(
+    if spec.endpoint:
+        payload = event_payload(
             FormReactionEventKind.PAGE_ADVANCED,
-            _REACTION_PAGE_KEY,
+            REACTION_PAGE_KEY,
             page_title,
             this_fields,
             earlier_fields,
@@ -518,16 +460,13 @@ def _step_footer(
             variants,
             spec.range_merges,
         )
+        payload.update(screen_data)
         return {
             "type": "Footer",
             "label": label,
             "on-click-action": {"name": "data_exchange", "payload": payload},
         }
-    forward: dict[str, str] = {}
-    for name in later_fields:
-        if name in merged_ends:
-            continue
-        forward.update(_forward_field_data(name, spec.properties[name], spec.option_fields, spec.names))
+    forward = _later_carriers(later_fields, spec)
     for name in earlier_fields:
         if name in merged_ends:
             continue
@@ -554,8 +493,9 @@ def _build_form_screen(
 ) -> dict[str, Any]:
     """One Flow screen for a page: its display blocks, field components, review readback, and footer.
 
-    Display blocks render in declared order ahead of the inputs; a reacting field carries a
-    ``data_exchange`` action; a ``visibleWhen`` field renders under client-side ``If``s — one per
+    Display blocks render in declared order ahead of the inputs; each control draws its native shapes
+    and binds its ``error-message``; a reacting field carries a ``data_exchange`` action; a
+    ``visibleWhen`` field renders under client-side ``If``s — one per
     matching value when shown for several (Meta's ``||`` refuses a disjunction of equality
     comparisons), each case uniquely named and its answer coalesced back under the field's own name
     (:func:`screen_field_variants`, :func:`emit_field_variants`, :func:`form_ref`); a review page adds
@@ -572,6 +512,7 @@ def _build_form_screen(
         slot = block.get("slot") if isinstance(block, dict) else None
         if isinstance(slot, str):
             data_model[spec.slots[slot]] = {"type": "string", "__example__": ""}
+    screen_data = screen_data_refs(data_model) if spec.endpoint else {}
 
     variants = screen_field_variants(this_fields, earlier_fields, spec.properties, spec.names)
     display_blocks = _display_component_list(page, spec.slots)
@@ -592,32 +533,54 @@ def _build_form_screen(
                 name in spec.required,
                 end in spec.required,
                 spec.names[name],
+                spec.names[end],
             )
             # A field_changed on EITHER end attaches the one on-select-action, named by the end that
             # declared the trigger.
             if name in spec.field_changed or end in spec.field_changed:
                 trigger_field = name if name in spec.field_changed else end
                 component = _attach_field_reaction(
-                    component, trigger_field, this_fields, earlier_fields, spec.names, variants, spec.range_merges
+                    component,
+                    trigger_field,
+                    this_fields,
+                    earlier_fields,
+                    spec.names,
+                    variants,
+                    spec.range_merges,
+                    screen_data,
                 )
             captions = range_captions(name, spec.properties[name], end, spec.properties[end])
             components.extend(emit_field_variants(component, variants[name], captions))
             continue
         component = _dynamic_component(
-            name, spec.properties[name], name in spec.required, spec.option_fields, spec.names
+            name,
+            spec.properties[name],
+            name in spec.required,
+            spec.option_fields,
+            spec.names,
+            spec.field_invalid.get(name),
         )
         caption = field_caption(name, component, spec.properties[name])
         if name in spec.field_changed:
             component = _attach_field_reaction(
-                component, name, this_fields, earlier_fields, spec.names, variants, spec.range_merges
+                component, name, this_fields, earlier_fields, spec.names, variants, spec.range_merges, screen_data
             )
         components.extend(emit_field_variants(component, variants[name], caption))
     readback = _review_readback(spec) if page.get("kind") == "review" else []
     footer = (
-        _terminal_footer(this_fields, earlier_fields, spec, variants, button_label)
+        _terminal_footer(this_fields, earlier_fields, spec, variants, button_label, screen_data)
         if is_terminal
         else _step_footer(
-            index, page_title, this_fields, later_fields, earlier_fields, spec, routing_model, variants, button_label
+            index,
+            page_title,
+            this_fields,
+            later_fields,
+            earlier_fields,
+            spec,
+            routing_model,
+            variants,
+            button_label,
+            screen_data,
         )
     )
 
@@ -632,47 +595,28 @@ def _build_form_screen(
     return screen
 
 
-def _reaction_sets(
-    reactions: dict[str, Any] | None, properties: dict[str, Any], option_fields: set[str], names: dict[str, str]
-) -> tuple[frozenset[str], frozenset[str], bool, bool]:
-    """The ``(field_changed, page_advanced, submitted, endpoint)`` render triggers from a reactions block.
+def form_needs_endpoint(
+    schema: dict[str, Any],
+    pages: list[dict[str, Any]] | None = None,
+    option_fields: set[str] | None = None,
+    reactions: dict[str, Any] | None = None,
+) -> bool:
+    """Whether this form is published ENDPOINT-DRIVEN: it reacts, or a field's shape is not native.
 
-    ``endpoint`` is True when any trigger is declared (the Flow is then endpoint-driven). A
-    ``field_changed`` field must render as a selectable control (refused loudly otherwise), and a
-    reacting form may not name a property that collides with a reserved reaction marker key.
+    The same decision :func:`build_form_flow` draws the Flow by — a form declaring a consumer
+    reaction, or carrying a shape no drawn Meta control checks
+    (:func:`~tai42_channel_whatsapp.flows_shapes.field_needs_endpoint`), goes through the data
+    endpoint. Pure. Raises ``ChannelInputError`` as :func:`build_form_flow` does for a schema
+    outside the subset.
     """
-    if not reactions:
-        return frozenset(), frozenset(), False, False
-    field_changed = frozenset(str(field) for field in reactions.get("field_changed", []))
-    page_advanced = frozenset(str(page) for page in reactions.get("page_advanced", []))
-    submitted = bool(reactions.get("submitted", False))
-    endpoint = bool(field_changed or page_advanced or submitted)
-    if endpoint:
-        collision = _RESERVED_REACTION_KEYS & set(properties)
-        if collision:
-            raise ChannelInputError(
-                f"reacting form property names {sorted(collision)} collide with the reserved reaction "
-                f"markers {sorted(_RESERVED_REACTION_KEYS)}"
-            )
-        for name in field_changed:
-            prop = properties.get(name)
-            if not isinstance(prop, dict):
-                raise ChannelInputError(f"form reaction field_changed names unknown property {name!r}")
-            ctype = _field_control(name, prop, False, option_fields, names)["type"]
-            if ctype not in (
-                "Dropdown",
-                "RadioButtonsGroup",
-                "CheckboxGroup",
-                "ChipsSelector",
-                "CalendarPicker",
-                "DatePicker",
-                "OptIn",
-            ):
-                raise ChannelInputError(
-                    f"form property {name!r}: a field_changed reaction needs a selectable control (a choice, "
-                    f"date, or opt-in); a {ctype} has no on-change event on WhatsApp"
-                )
-    return field_changed, page_advanced, submitted, endpoint
+    option_fields = option_fields or set()
+    properties, required = _validate_object_schema(schema)
+    names = component_names(properties)
+    _validate_form_properties(properties, required, option_fields, names)
+    resolved_pages, fields_by_screen = _resolve_pages(properties, pages)
+    reacting = _reaction_sets(reactions, properties, option_fields, names)[3]
+    range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen)
+    return form_endpoint_driven(properties, required, option_fields, names, range_merges, reacting)
 
 
 def build_form_flow(
@@ -682,6 +626,8 @@ def build_form_flow(
     reactions: dict[str, Any] | None = None,
     form_title: str | None = None,
     form_submit: str | None = None,
+    field_invalid: dict[str, str] | None = None,
+    carry_invalid: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """The ``(flow_json, key)`` for a per-send/stepped form ask — publishable Flow JSON.
 
@@ -697,19 +643,23 @@ def build_form_flow(
     supplies the values/options through ``flow_action_payload.data``. An array of strings
     renders a ``CheckboxGroup``; a string with a short schema ``enum`` a ``RadioButtonsGroup``
     (else a ``Dropdown`` — also when ``option_fields`` names an option-bearing string); a
-    date field with platform constraints a bounded ``CalendarPicker``, a plain date a bare
-    ``DatePicker``; any other string a ``TextInput``. A page's ``display`` blocks render ahead
+    date field a single-mode ``CalendarPicker``; any other string a ``TextInput``. Each control draws
+    the shapes Meta checks natively and binds its ``error-message``. A page's ``display`` blocks render ahead
     of its inputs, a ``review`` page adds a generic value readback, and a ``visibleWhen``
     field renders under client-side ``If``s — one per matching value when shown for several, each
     uniquely named with its answer coalesced back under the field's own name.
 
-    ``reactions`` (optional, a :class:`FormReactions` dump) makes the Flow ENDPOINT-DRIVEN: it
-    carries ``data_api_version`` + a ``routing_model`` and the reacting fields/pages/submission
-    fire ``data_exchange`` actions the data endpoint routes to the reaction facet. Absent (or
-    with no trigger) the Flow is the static navigate Flow exactly as before.
+    ``reactions`` (optional, a :class:`FormReactions` dump) or a field shape no control checks
+    natively makes the Flow ENDPOINT-DRIVEN (:func:`form_needs_endpoint`): it carries
+    ``data_api_version`` + a ``routing_model``, every footer fires a ``data_exchange`` the data
+    endpoint answers (shape check, then any declared reaction), and the reacting fields fire their
+    own. Otherwise the Flow is the static navigate Flow. ``field_invalid`` is the caller's per-field
+    ``invalid`` sentence (the helper text a native pattern requires when the field has no second
+    line); ``carry_invalid`` (an ask-less endpoint-driven form, which has no per-send sidecar) makes
+    every shaped field's sentence ride the Flow as ``__invalid`` screen data.
 
     ``key`` is the hash of the ``(schema, pages, option_fields)`` and the emitted ``flow_json``
-    — which now folds in the reactions/display/date-constraint/``visibleWhen`` shape, so a
+    — which folds in the reactions/display/date-constraint/``visibleWhen``/shape layout, so a
     changed form re-publishes. Pure — no I/O. Raises ``ChannelInputError`` naming any property
     outside the subset or any page field that is not a declared property.
     """
@@ -719,19 +669,27 @@ def build_form_flow(
     labels = payload_labels(properties)
     _validate_form_properties(properties, required, option_fields, names)
     resolved_pages, fields_by_screen = _resolve_pages(properties, pages, form_title, form_submit)
-    field_changed, page_advanced, submitted, endpoint = _reaction_sets(reactions, properties, option_fields, names)
+    field_changed, page_advanced, submitted, reacting = _reaction_sets(reactions, properties, option_fields, names)
+    range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen)
+    endpoint = form_endpoint_driven(properties, required, option_fields, names, range_merges, reacting)
+    slots = slot_datanames(resolved_pages)
+    if endpoint:
+        guard_endpoint_names(properties, names, slots.values())
     spec = _RenderSpec(
         properties=properties,
         required=required,
         option_fields=option_fields,
         names=names,
         labels=labels,
-        slots=slot_datanames(resolved_pages),
+        slots=slots,
         field_changed=field_changed,
         page_advanced=page_advanced,
         submitted=submitted,
         endpoint=endpoint,
-        range_merges=_form_range_merges(properties, resolved_pages, fields_by_screen),
+        range_merges=range_merges,
+        field_invalid=dict(field_invalid or {}),
+        err_fields=error_fields(properties, required, option_fields, names, set(range_merges)),
+        invalid_fields=shaped_fields(properties) if endpoint and carry_invalid else frozenset(),
     )
 
     screen_count = len(resolved_pages)

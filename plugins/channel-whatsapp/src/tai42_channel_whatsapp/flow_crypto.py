@@ -1,6 +1,6 @@
 """WhatsApp Flow data-endpoint encryption.
 
-A reacting Flow's data endpoint exchanges AES-128-GCM encrypted payloads with Meta. Each
+An endpoint-driven Flow's data endpoint exchanges AES-128-GCM encrypted payloads with Meta. Each
 request carries three base64 fields: ``encrypted_aes_key`` (the per-exchange AES key encrypted
 to the business PUBLIC key with RSA-2048 OAEP-SHA256), ``initial_vector`` (the AES-GCM IV), and
 ``encrypted_flow_data`` (the request JSON, AES-128-GCM encrypted with the 16-byte auth tag

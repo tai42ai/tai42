@@ -10,7 +10,9 @@ import pytest
 from jsonschema import Draft202012Validator
 from tai42_contract.states.errors import AttachConflictError, SchemaValidationError, TemplateValidationError
 from tai42_contract.template import TemplatedText
+from tai42_kit.utils.data.json_schema_util import evaluated_subschemas
 
+from tai42_skeleton.states import schema as states_schema
 from tai42_skeleton.states.schema import _validate_schema
 from tai42_skeleton.states.templates import (
     StateTemplate,
@@ -254,7 +256,7 @@ def test_compose_refuses_a_fragment_id_placed_below_the_root() -> None:
     template = validate_template(
         _doc(name="m", schema={"$id": "urn:example:box", "type": "object", "properties": {"tag": {"type": "string"}}})
     )
-    with pytest.raises(SchemaValidationError, match="\\$id below the root"):
+    with pytest.raises(SchemaValidationError, match="below the root is not allowed: the schema is one resource"):
         compose_effective_schema(_BASE, [(template, ["box"], {})])
 
 
@@ -360,16 +362,21 @@ def test_compose_checks_a_large_fragment_a_bounded_number_of_times(monkeypatch: 
         "$defs": {"big": big},
     }
     template = validate_template(_doc(name="m", schema=fragment))
-    calls = [0]
+    calls: list[str] = []
     original = Draft202012Validator.check_schema.__func__  # type: ignore[attr-defined]
 
     def counting(cls, schema, format_checker=None):
-        calls[0] += 1
+        calls.append("fragment")
         return original(cls, schema)
 
+    def rules(schema, validator, *, subject):
+        calls.append("composed")
+        return evaluated_subschemas(schema, validator, subject=subject)
+
     monkeypatch.setattr(Draft202012Validator, "check_schema", classmethod(counting))
+    monkeypatch.setattr(states_schema, "evaluated_subschemas", rules)
     compose_effective_schema(_BASE, [(template, ["box"], {})])
-    assert calls[0] == 2  # the substituted fragment once, the composed schema once
+    assert calls == ["fragment", "composed"]
 
 
 def test_compose_root_attach_refuses_a_root_type_its_parameters_make_non_object() -> None:

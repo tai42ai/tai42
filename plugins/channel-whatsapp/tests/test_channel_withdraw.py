@@ -10,9 +10,10 @@ from tai42_contract.channels import ChannelDeliveryError, ChannelWithdrawal
 
 from tai42_channel_whatsapp.channel import WhatsAppChannel
 from tai42_channel_whatsapp.correlation import (
+    EndpointForm,
     PendingQuestionExistsError,
-    cache_reaction_form,
-    get_reaction_form,
+    cache_endpoint_form,
+    get_endpoint_form,
     reserve_pending,
 )
 from tai42_channel_whatsapp.flows import build_form_flow
@@ -115,15 +116,16 @@ async def test_withdraw_without_a_recipient_touches_nothing(fake_redis: FakeRedi
     assert fake_redis.events == events_before
 
 
-async def test_withdraw_drops_the_reacting_form_sidecar(fake_redis: FakeRedis):
+async def test_withdraw_drops_the_endpoint_form_sidecar(fake_redis: FakeRedis):
     delivery = make_delivery(interaction_id="int-A")
     await _reserve("int-A")
-    await cache_reaction_form("int-A", {"type": "object"}, None, {}, {}, delivery.timeout_at)
-    assert await get_reaction_form("int-A") is not None
+    form = EndpointForm(schema={"type": "object"}, pages=None, reactions=None, option_fields=[], invalid={})
+    await cache_endpoint_form("int-A", form, delivery.timeout_at)
+    assert await get_endpoint_form("int-A") is not None
 
     await WhatsAppChannel().withdraw(ChannelWithdrawal(interaction_id="int-A", recipient=ALLOWED_A))
 
-    assert await get_reaction_form("int-A") is None
+    assert await get_endpoint_form("int-A") is None
     assert _held_by(fake_redis) is None
 
 

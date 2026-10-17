@@ -6,8 +6,9 @@ form submitted). While the form is open a channel (or the in-app surface) routes
 events, with the values filled so far, to :func:`react` — the single seam that:
 
 * asserts the interaction is OPEN (a reacting FORM still pending) — raising otherwise;
-* type-validates the partial values against the stored schema, reusing the answer path's own
-  schema caps (``schema_mismatch``), never a reinvented check;
+* type-validates the partial values against the stored schema's property types, reusing the
+  answer path's own schema caps (``schema_mismatch``), never a reinvented check — a value's
+  declared shape is checked by the surface before a reaction and by the answer door after submit;
 * runs the asker's ``reaction_tool`` through ``run_tool`` under the stored rebound identity and
   state context (exactly as the continuation does), bounded by ONE deadline here, so a handler
   that raises or times out surfaces LOUDLY — never a stale or silent value;
@@ -93,10 +94,12 @@ class SubmittedCheckRejectedError(FormReactionError):
 
 
 def _types_only_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    # ``schema`` reduced to a TYPE-only object schema: every ``enum`` stripped (membership is
-    # not checked mid-form — a reaction may replace a choice list), nothing required (the
-    # values are partial), unknown properties refused. The one shape both the partial values
-    # and a handler's returned ``values`` are type-checked against.
+    # ``schema`` reduced to a TYPE-only object schema: each property keeps only its ``type`` (and an
+    # array its ``items.type``) — no ``enum`` (a reaction may replace a choice list), no shape
+    # keyword (a value is checked against its declared shape by the surface before a reaction and
+    # by the answer door after submit, never mid-form here), nothing required (the values are
+    # partial), unknown properties refused. The one shape both the partial values and a handler's
+    # returned ``values`` are type-checked against.
     properties = schema.get("properties")
     props: dict[str, Any] = {}
     if isinstance(properties, dict):
@@ -104,11 +107,11 @@ def _types_only_schema(schema: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(prop, dict):
                 props[str(name)] = prop
                 continue
-            stripped = {key: value for key, value in prop.items() if key != "enum"}
-            items = stripped.get("items")
-            if stripped.get("type") == "array" and isinstance(items, dict):
-                stripped = {**stripped, "items": {k: v for k, v in items.items() if k != "enum"}}
-            props[str(name)] = stripped
+            typed: dict[str, Any] = {"type": prop["type"]} if "type" in prop else {}
+            items = prop.get("items")
+            if prop.get("type") == "array" and isinstance(items, dict) and "type" in items:
+                typed["items"] = {"type": items["type"]}
+            props[str(name)] = typed
     return {"type": "object", "properties": props, "required": [], "additionalProperties": False}
 
 

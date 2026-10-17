@@ -1245,3 +1245,54 @@ def test_validate_form_schema_refuses_an_over_cap_field_description():
     schema = {"type": "object", "properties": {"amount": {"type": "string", "description": "d" * 2001}}}
     with pytest.raises(FormSchemaError, match="hint exceeds"):
         validate_form_schema(schema, "q")
+
+
+def test_number_bounds_render_as_the_number_inputs_min_and_max():
+    schema = {
+        "type": "object",
+        "properties": {
+            "qty": {"type": "integer", "minimum": 1, "maximum": 9},
+            "rate": {"type": "number", "minimum": 0.5},
+            "free": {"type": "number", "exclusiveMinimum": 0},
+        },
+    }
+    by_id = {block["block_id"]: block["element"] for block in build_modal_blocks(schema)}
+    assert by_id["qty"] == {
+        "type": "number_input",
+        "action_id": FIELD_ACTION_ID,
+        "is_decimal_allowed": False,
+        "min_value": "1",
+        "max_value": "9",
+    }
+    assert by_id["rate"]["min_value"] == "0.5"
+    assert "max_value" not in by_id["rate"]
+    # An exclusive bound has no Slack element: the answer door refuses it, pinned under the field.
+    assert "min_value" not in by_id["free"]
+
+
+def test_an_integer_fields_bounds_are_the_tightest_whole_numbers():
+    # An integer input admits no decimal, so its bounds are whole numbers: a fractional bound
+    # rounds inward (the same whole numbers pass) and an integral float reads without ``.0``.
+    schema = {
+        "type": "object",
+        "properties": {
+            "qty": {"type": "integer", "minimum": 1.5, "maximum": 9.5},
+            "whole": {"type": "integer", "minimum": 1.0, "maximum": 3.0},
+            "low": {"type": "integer", "minimum": -2.5},
+        },
+    }
+    by_id = {block["block_id"]: block["element"] for block in build_modal_blocks(schema)}
+    assert (by_id["qty"]["min_value"], by_id["qty"]["max_value"]) == ("2", "9")
+    assert (by_id["whole"]["min_value"], by_id["whole"]["max_value"]) == ("1", "3")
+    assert by_id["low"]["min_value"] == "-2"
+
+
+def test_a_number_fields_bounds_read_as_plain_decimals():
+    schema = {"type": "object", "properties": {"rate": {"type": "number", "minimum": 1.0, "maximum": 1e20}}}
+    element = build_modal_blocks(schema)[0]["element"]
+    assert (element["min_value"], element["max_value"]) == ("1", "100000000000000000000")
+
+
+def test_email_format_renders_an_email_text_input():
+    schema = {"type": "object", "properties": {"contact": {"type": "string", "format": "email"}}}
+    assert build_modal_blocks(schema)[0]["element"] == {"type": "email_text_input", "action_id": FIELD_ACTION_ID}

@@ -242,6 +242,7 @@
     "plugins/channel-whatsapp": {
       "package-name": "tai42-channel-whatsapp",
       "component": "tai42-channel-whatsapp",
+      "release-as": "10.0.0",
       "skip-changelog": true,
       "extra-files": [
         {

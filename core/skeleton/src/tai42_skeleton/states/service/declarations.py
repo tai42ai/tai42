@@ -20,6 +20,7 @@ from tai42_contract.states.errors import (
 from tai42_contract.states.models import StateDeclaration, StateSubject
 from tai42_contract.states.pending import HeldPendingSave, StateDeclarationSaved
 from tai42_contract.template import TemplatedText
+from tai42_kit.utils.data.json_schema_util import SCHEMA_REFS
 
 from tai42_skeleton.states.db import states_settings
 from tai42_skeleton.states.outbox.drain import drain_state, held_subjects
@@ -189,7 +190,7 @@ def _refuse_for_held(
             f"(subjects {[_subject_text(r.subject) for r in hit]}); keep the kind(s), or discard the save(s)",
             extra={"held": named(ids)},
         )
-    validator = Draft202012Validator(effective_schema)
+    validator = Draft202012Validator(effective_schema, registry=SCHEMA_REFS)
     for record in held:
         try:
             _validate_document(validator, record.document)

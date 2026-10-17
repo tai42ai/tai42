@@ -488,3 +488,19 @@ def test_answer_part_plain_text_is_unaffected_by_the_new_fields():
     from tai42_contract.conversations import AnswerPart
 
     assert AnswerPart(message="just text").is_plain_text() is True
+
+
+_PROTO_REFUSAL = (
+    "form schema property '__proto__' is not an allowed name: JavaScript reads it as an object's prototype, "
+    "so a form drawn in a browser cannot keep a field by that name"
+)
+
+
+def test_answer_part_refuses_a_form_property_named_proto():
+    import re
+
+    from tai42_contract.conversations import AnswerPart
+
+    schema = {"type": "object", "properties": {"__proto__": {"type": "string"}, "name": {"type": "string"}}}
+    with pytest.raises(ValidationError, match=re.escape(_PROTO_REFUSAL)):
+        AnswerPart(message="hi", schema=schema)

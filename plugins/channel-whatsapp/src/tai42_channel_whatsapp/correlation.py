@@ -28,11 +28,13 @@ created and published) and stores it. The miss runs under a per-``(waba_id,
 flow_identity)`` redis lock so concurrent first sends resolve one Flow.
 Beside it, a schema sidecar maps ``(waba_id, schema_hash)`` to the answer
 schema itself PLUS the reverse of its schema-key → completion-payload-key map (each
-completion-payload key back to its schema key), for ask-less form notifications whose
-reply carries only the hash (inside its flow token) and no reservation — the map decodes
-the reply's payload-keyed answers back to schema keys before coercion. Each
-completion-payload key is the field's human-readable label (its schema ``title``, else
-the property key, disambiguated ``_2``, ``_3`` … on a collision).
+completion-payload key back to its schema key), its pages and option fields, for ask-less
+form notifications whose reply carries only the hash (inside its flow token) and no
+reservation — the map decodes the reply's payload-keyed answers back to schema keys before
+coercion, and the data endpoint checks an endpoint-driven notify form's steps with the rest.
+Each completion-payload key is the field's human-readable label (its schema ``title``, else
+the property key, disambiguated ``_2``, ``_3`` … on a collision). An endpoint-driven form
+ask keeps an :class:`EndpointForm` sidecar under its interaction id for the data endpoint.
 
 A handled-``wamid`` set is the replay guard (a redelivered webhook repeats the id).
 
@@ -144,8 +146,8 @@ def _flow_schema_key(waba_id: str, schema_hash: str) -> str:
     return f"channel:whatsapp:flow-schema:{waba_id}:{schema_hash}"
 
 
-def _reaction_form_key(interaction_id: str) -> str:
-    return f"channel:whatsapp:reaction-form:{interaction_id}"
+def _endpoint_form_key(interaction_id: str) -> str:
+    return f"channel:whatsapp:endpoint-form:{interaction_id}"
 
 
 def _seen_key(wamid: str) -> str:
@@ -436,32 +438,56 @@ async def flow_resolve_lock(waba_id: str, flow_identity: str, *, ttl_seconds: fl
                 raise ChannelDeliveryError(f"releasing the WhatsApp Flow resolve lock {key} failed: {exc}") from exc
 
 
-async def cache_flow_form(waba_id: str, schema_hash: str, schema: dict[str, Any], names: dict[str, str]) -> None:
-    """Store an ask-less form's schema and its completion-payload reverse map under ``(waba_id, schema_hash)``, no TTL.
+@dataclass(frozen=True)
+class CachedFlowForm:
+    """An ask-less form's durable sidecar, keyed by ``(waba_id, schema_hash)``.
+
+    ``schema`` and ``names`` (each completion-payload label back to its schema key) decode a reply;
+    ``pages`` and ``option_fields`` (the per-send option-bearing fields, which fold into the
+    schema hash) let the data endpoint check an endpoint-driven form's steps.
+    """
+
+    schema: dict[str, Any]
+    names: dict[str, str]
+    pages: list[dict[str, Any]] | None
+    option_fields: list[str]
+
+
+async def cache_flow_form(
+    waba_id: str,
+    schema_hash: str,
+    schema: dict[str, Any],
+    names: dict[str, str],
+    pages: list[dict[str, Any]] | None,
+    option_fields: list[str],
+) -> None:
+    """Store an ask-less form's sidecar under ``(waba_id, schema_hash)``, with no TTL.
 
     Beside the published-flow id it renders as. ``names`` maps each completion-payload key
     (the field's human-readable label) back to its schema key, so the notify reply (keyed by
-    those payload keys, as Meta relays them) decodes to the schema keys and coerces by type.
+    those payload keys, as Meta relays them) decodes to the schema keys and coerces by type;
+    ``pages`` and ``option_fields`` are what the data endpoint reads to check an endpoint-driven
+    form's steps (each fixed per schema hash, which already keys the published Flow).
     Durability is load-bearing here, not an optimization: an inbound reply carries
     only the schema HASH (inside its flow token), never the schema, so this entry can
     NOT be repopulated from the reply — a miss is permanent for every form already
     sitting in a chat, and degrades each of their replies to raw (uncoerced) values.
-    The entry is content-addressed — one schema+map per hash — so the unconditional
-    overwrite on every send is idempotent. Schema and map are stored as one value, so a
-    hit yields both or the read is a clean miss (no half-populated entry to reason about).
+    The entry is content-addressed — one value per hash — so the unconditional
+    overwrite on every send is idempotent. Everything is stored as one value, so a
+    hit yields all of it or the read is a clean miss (no half-populated entry to reason about).
     """
+    value = json.dumps({"schema": schema, "names": names, "pages": pages, "option_fields": sorted(option_fields)})
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
-        await redis.set(_flow_schema_key(waba_id, schema_hash), json.dumps({"schema": schema, "names": names}))
+        await redis.set(_flow_schema_key(waba_id, schema_hash), value)
 
 
-async def get_cached_flow_form(waba_id: str, schema_hash: str) -> tuple[dict[str, Any], dict[str, str]] | None:
-    """Return the ``(schema, names)`` cached under ``(waba_id, schema_hash)``, or ``None``.
+async def get_cached_flow_form(waba_id: str, schema_hash: str) -> CachedFlowForm | None:
+    """Return the :class:`CachedFlowForm` cached under ``(waba_id, schema_hash)``, or ``None``.
 
-    ``names`` is the completion-payload-key → schema-key reverse map. A miss means a reply for
-    that schema cannot be decoded/coerced and lands with its raw values (see
-    :func:`cache_flow_form`). A stored value that is not a JSON object carrying both an
-    object ``schema`` and an object ``names`` is treated as a miss (never a crash on the
-    webhook path).
+    A miss means a reply for that schema cannot be decoded/coerced and lands with its raw
+    values (see :func:`cache_flow_form`). A stored value that is not a JSON object carrying an
+    object ``schema``, an object ``names``, a list (or null) ``pages`` and a list ``option_fields``
+    is treated as a miss (never a crash on the webhook path).
     """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         raw = await redis.get(_flow_schema_key(waba_id, schema_hash))
@@ -476,67 +502,102 @@ async def get_cached_flow_form(waba_id: str, schema_hash: str) -> tuple[dict[str
         return None
     schema = parsed.get("schema")
     names = parsed.get("names")
-    if not isinstance(schema, dict) or not isinstance(names, dict):
-        logger.warning("cached flow form under %s lacks its schema or name map; treating as a miss", schema_hash)
+    pages = parsed.get("pages")
+    option_fields = parsed.get("option_fields")
+    if (
+        not isinstance(schema, dict)
+        or not isinstance(names, dict)
+        or not (pages is None or isinstance(pages, list))
+        or not isinstance(option_fields, list)
+    ):
+        logger.warning("cached flow form under %s is not a complete form sidecar; treating as a miss", schema_hash)
         return None
-    return schema, names
+    return CachedFlowForm(schema=schema, names=names, pages=pages, option_fields=option_fields)
 
 
-async def cache_reaction_form(
-    interaction_id: str,
-    schema: dict[str, Any],
-    pages: list[dict[str, Any]] | None,
-    values: dict[str, Any],
-    options: dict[str, list[dict[str, Any]]],
-    timeout_at: datetime,
-) -> None:
-    """Store a REACTING form's schema + per-send inputs under its ``interaction_id``, with the answer budget as TTL.
+@dataclass(frozen=True)
+class EndpointForm:
+    """What the data endpoint reads of an endpoint-driven form ask, keyed by its ``interaction_id``.
 
-    A reacting Flow's data-endpoint request carries only the ``flow_token`` (the interaction id),
-    never the schema, so this sidecar is the only place the endpoint can recover the schema (to
-    coerce the partial values the react facet type-checks), the pages (to rebuild the next screen
-    on a page advance), and the per-send values/options (to repopulate a rebuilt screen). The
-    entry expires with the ask's own deadline, so a stale token resolves to a clean miss. A
-    record for a form past its deadline is not written (nothing left to react to).
+    ``schema`` and ``pages`` lay out its steps; ``reactions`` (the :class:`FormReactions` dump, or
+    ``None``) names the consumer reactions to run after a clean shape check; ``option_fields`` the
+    fields whose per-send option list replaced their schema enum; ``invalid`` the caller's per-field
+    ``wording.form.fields[<name>].invalid`` sentence.
+    """
+
+    schema: dict[str, Any]
+    pages: list[dict[str, Any]] | None
+    reactions: dict[str, Any] | None
+    option_fields: list[str]
+    invalid: dict[str, str]
+
+
+async def cache_endpoint_form(interaction_id: str, form: EndpointForm, timeout_at: datetime) -> None:
+    """Store an endpoint-driven form ask's :class:`EndpointForm` under its ``interaction_id``, for the answer budget.
+
+    An endpoint-driven Flow's data-endpoint request carries only the ``flow_token`` (the interaction
+    id), never the schema, so this sidecar is the only place the endpoint can recover the schema
+    and pages (to coerce and check a step), the declared reactions (to run after a clean check) and
+    the caller's sentences (to word a refused field). Everything a screen carries forward rides the
+    request itself. The entry expires with the ask's own deadline, so a stale token resolves to a
+    clean miss. A record for a form past its deadline is not written (nothing left to check).
     """
     remaining = math.ceil((timeout_at - datetime.now(UTC)).total_seconds())
     if remaining <= 0:
         return
-    value = json.dumps({"schema": schema, "pages": pages, "values": values, "options": options})
+    value = json.dumps(
+        {
+            "schema": form.schema,
+            "pages": form.pages,
+            "reactions": form.reactions,
+            "option_fields": sorted(form.option_fields),
+            "invalid": form.invalid,
+        }
+    )
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
-        await redis.set(_reaction_form_key(interaction_id), value, ex=remaining)
+        await redis.set(_endpoint_form_key(interaction_id), value, ex=remaining)
 
 
-async def get_reaction_form(
-    interaction_id: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]] | None, dict[str, Any], dict[str, list[dict[str, Any]]]] | None:
-    """Return the ``(schema, pages, values, options)`` cached for a reacting form, or ``None`` on a miss.
+async def get_endpoint_form(interaction_id: str) -> EndpointForm | None:
+    """Return the :class:`EndpointForm` cached for an endpoint-driven form ask, or ``None`` on a miss.
 
-    A miss means the reacting form's token is unknown or its budget has expired — the data
-    endpoint treats it as a no-longer-valid flow token (never a crash on the endpoint path).
+    A miss means the form's token is unknown or its budget has expired — the data endpoint
+    treats it as a no-longer-valid flow token (never a crash on the endpoint path). A stored value
+    that is not a complete sidecar is a miss too, logged.
     """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
-        raw = await redis.get(_reaction_form_key(interaction_id))
+        raw = await redis.get(_endpoint_form_key(interaction_id))
     if raw is None:
         return None
     try:
         parsed = json.loads(raw)
     except ValueError:
-        logger.warning("cached reaction form for %s is not valid JSON; treating as a miss", interaction_id)
+        logger.warning("cached endpoint form for %s is not valid JSON; treating as a miss", interaction_id)
         return None
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("schema"), dict):
-        logger.warning("cached reaction form for %s lacks its schema; treating as a miss", interaction_id)
+    if (
+        not isinstance(parsed, dict)
+        or not isinstance(parsed.get("schema"), dict)
+        or not isinstance(parsed.get("option_fields"), list)
+        or not isinstance(parsed.get("invalid"), dict)
+    ):
+        logger.warning("cached endpoint form for %s is not a complete form sidecar; treating as a miss", interaction_id)
         return None
-    return parsed["schema"], parsed.get("pages"), parsed.get("values") or {}, parsed.get("options") or {}
+    return EndpointForm(
+        schema=parsed["schema"],
+        pages=parsed.get("pages"),
+        reactions=parsed.get("reactions"),
+        option_fields=parsed["option_fields"],
+        invalid=parsed["invalid"],
+    )
 
 
-async def drop_reaction_form(interaction_id: str) -> None:
-    """Delete the reacting form's data-endpoint sidecar (keyed by the id, so it can belong to no other ask).
+async def drop_endpoint_form(interaction_id: str) -> None:
+    """Delete the endpoint-driven form's data-endpoint sidecar (keyed by the id, so it can belong to no other ask).
 
     Idempotent: a missing sidecar is a no-op.
     """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
-        await redis.delete(_reaction_form_key(interaction_id))
+        await redis.delete(_endpoint_form_key(interaction_id))
 
 
 async def already_seen(wamid: str) -> bool:

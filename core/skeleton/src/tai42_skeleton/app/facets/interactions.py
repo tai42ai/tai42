@@ -7,11 +7,13 @@ from typing import TYPE_CHECKING, Any
 from .base import _Facet
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping
     from contextlib import AbstractAsyncContextManager
 
     from tai42_contract.interactions import (
         Ask,
         FormReactionEvent,
+        FormShapeError,
         ParkedEntry,
         QuestionFormat,
         RunAnswer,
@@ -35,6 +37,25 @@ class InteractionsFacet(_Facet):
         from tai42_skeleton.interactions.answer_check import check_answer
 
         return check_answer(question, answer)
+
+    def form_shape_errors(
+        self,
+        question: QuestionFormat,
+        values: Mapping[str, Any],
+        *,
+        fields: Collection[str] | None = None,
+        partial: bool = False,
+    ) -> list[FormShapeError]:
+        """Every FORM field whose value breaks its declared shape — the ONE shape check every surface reaches.
+
+        Delegates to :func:`tai42_skeleton.interactions.form_shapes.form_shape_errors`: one error
+        per failing field (a typed kind, its bound and the platform's plain sentence), judged on the
+        answer door's own effective schema; ``fields`` restricts it to a step, ``partial`` demands
+        nothing. The answer door refuses a FORM answer with the first such error.
+        """
+        from tai42_skeleton.interactions.form_shapes import form_shape_errors
+
+        return form_shape_errors(question, values, fields=fields, partial=partial)
 
     def question_format(
         self,

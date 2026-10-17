@@ -12,6 +12,7 @@ message is admissible only when media carries the content — a media-only send)
 from __future__ import annotations
 
 import base64
+import re
 from contextlib import asynccontextmanager
 from typing import cast
 
@@ -570,6 +571,18 @@ async def test_location_sections_header_footer_stored_on_sink(sink_redis):
 _FORM_SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
 
 
+_PROTO_FORM_SCHEMA = {"type": "object", "properties": {"__proto__": {"type": "string"}, "name": {"type": "string"}}}
+_PROTO_REFUSAL = "form schema property '__proto__' is not an allowed name"
+
+
+async def test_notify_refuses_a_form_property_named_proto_on_a_channel(register_channel):
+    channel = register_channel("rich", RichChannel())
+
+    with pytest.raises(ValueError, match=re.escape(_PROTO_REFUSAL)):
+        await notify_user("fill this in", channel="rich", schema=_PROTO_FORM_SCHEMA)
+    assert channel.notifications == []
+
+
 async def test_notify_threads_schema_to_a_capable_channel(register_channel):
     channel = register_channel("rich", RichChannel())
 
@@ -670,6 +683,54 @@ async def test_schema_outside_the_channel_subset_is_rejected(register_channel, s
     assert channel.notifications == []
     assert await notifications_sink.read_notifications(audience="alice") == []
     assert await notifications_sink.read_notifications() == []
+
+
+async def test_schema_breaking_the_json_schema_rules_is_rejected(register_channel, sink_redis):
+    # A schema the answer check could never pass a submission through is refused at the door,
+    # naming the property, before any feed write and before the channel is touched.
+    channel = register_channel("rich", RichChannel())
+    broken = {"type": "object", "properties": {"qty": {"type": "integer", "minimum": "1"}}}
+
+    with pytest.raises(ValueError, match="form schema property 'qty' breaks the JSON Schema rules"):
+        await notify_user("fill this in", channel="rich", schema=broken, audience="alice")
+
+    assert channel.notifications == []
+    assert await notifications_sink.read_notifications(audience="alice") == []
+
+
+async def test_schema_carrying_a_number_that_is_not_finite_is_rejected(register_channel, sink_redis):
+    # Infinity or NaN anywhere in the schema is no value an answer can be compared with: refused
+    # at the door, naming where it sits, before any feed write and before the channel is touched.
+    channel = register_channel("rich", RichChannel())
+    broken = {"type": "object", "properties": {"qty": {"type": ["number", "null"], "minimum": float("inf")}}}
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape("form schema property 'qty' has a value at minimum that is not a finite number (inf)"),
+    ):
+        await notify_user("fill this in", channel="rich", schema=broken, audience="alice")
+
+    assert channel.notifications == []
+    assert await notifications_sink.read_notifications(audience="alice") == []
+
+
+async def test_schema_carrying_a_reference_to_nowhere_is_rejected(register_channel, sink_redis):
+    # A reference the answer check could never follow fails every answer: refused at the door,
+    # naming where it sits, before any feed write and before the channel is touched.
+    channel = register_channel("rich", RichChannel())
+    broken = {"type": "object", "properties": {"qty": {"type": "string", "$ref": "#/nope"}}}
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "form schema property 'qty' breaks the JSON Schema rules: "
+            "$ref '#/nope' does not resolve: nothing at '/nope'"
+        ),
+    ):
+        await notify_user("fill this in", channel="rich", schema=broken, audience="alice")
+
+    assert channel.notifications == []
+    assert await notifications_sink.read_notifications(audience="alice") == []
 
 
 async def test_schema_channel_hook_refusal_is_rejected(register_channel, sink_redis):

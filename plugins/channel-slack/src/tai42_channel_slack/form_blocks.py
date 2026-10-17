@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import datetime
 import re
+from decimal import Decimal
 from typing import Any, assert_never
 
 from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import FormControl, FormInputMode
-from tai42_kit.interactions import RADIO_OPTION_THRESHOLD
+from tai42_kit.interactions import RADIO_OPTION_THRESHOLD, drawn_number_bounds
 
 # One fixed action_id per input block: block_id is the field name, so the pair
 # ``state.values[<field name>][FIELD_ACTION_ID]`` reads a field's value directly, and
@@ -317,7 +318,7 @@ def _plain_text_input(name: str, spec: dict[str, Any]) -> dict[str, Any]:
 def _string_input_element(name: str, spec: dict[str, Any]) -> dict[str, Any]:
     """The text element a plain ``string`` property collects, chosen by its ``inputMode``.
 
-    ``email`` draws Slack's ``email_text_input`` and ``url`` its ``url_text_input`` — the two
+    ``email`` (or a ``format: email``) draws Slack's ``email_text_input`` and ``url`` its ``url_text_input`` — the two
     modal text elements that carry Slack's own built-in check. Those two elements accept no
     ``max_length``/``min_length`` (only ``plain_text_input`` does), so a declared
     ``maxLength``/``minLength`` is not drawn on them and stays enforced at the answer door —
@@ -329,6 +330,9 @@ def _string_input_element(name: str, spec: dict[str, Any]) -> dict[str, Any]:
     :class:`~tai42_contract.interactions.FormInputMode`; a value outside it is refused naming
     the property (the render-door backstop for a record that bypassed the ask-time validator).
     """
+    if spec.get("format") == "email":
+        # ``format: email`` draws Slack's email element (the subset refuses an ``inputMode`` beside it).
+        return {"type": "email_text_input", "action_id": FIELD_ACTION_ID}
     if "inputMode" not in spec:
         return _plain_text_input(name, spec)
     raw = spec["inputMode"]
@@ -449,5 +453,32 @@ def _element(
     if ptype == "boolean":
         return _radio_buttons()
     if ptype in ("integer", "number"):
-        return {"type": "number_input", "action_id": FIELD_ACTION_ID, "is_decimal_allowed": ptype == "number"}
+        return _number_input(spec, decimal=ptype == "number")
     raise FormSchemaError(f"form schema property {name!r} has unsupported type {ptype!r}")
+
+
+def _decimal_text(value: float) -> str:
+    # A bound in plain decimal notation (``1`` for 1.0, ``100000000000000000000`` for 1e20, never an
+    # exponent), the form a ``number_input`` bound string takes.
+    if isinstance(value, int):
+        return str(value)
+    text = format(Decimal(repr(value)), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _number_input(spec: dict[str, Any], *, decimal: bool) -> dict[str, Any]:
+    """A ``number_input`` drawing the inclusive ``minimum``/``maximum`` as Slack's ``min_value``/``max_value``.
+
+    Slack takes the bounds as strings. An ``integer`` input admits no decimal, so its bounds are
+    the tightest whole numbers within them (``minimum: 1.5`` reads ``2``) — the same whole numbers
+    pass. An exclusive bound (``exclusiveMinimum``/``exclusiveMaximum``) or ``multipleOf`` has no
+    Slack attribute; the answer door refuses a value breaking it and the modal pins the door's
+    sentence under the field.
+    """
+    element: dict[str, Any] = {"type": "number_input", "action_id": FIELD_ACTION_ID, "is_decimal_allowed": decimal}
+    low, high = drawn_number_bounds(spec)
+    if low is not None:
+        element["min_value"] = _decimal_text(low)
+    if high is not None:
+        element["max_value"] = _decimal_text(high)
+    return element

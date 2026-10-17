@@ -40,7 +40,7 @@ def test_form_must_conform_and_names_the_failing_field():
     schema = {"type": "object", "properties": {"count": {"type": "integer"}}}
     qf = _qf(AnswerFormat.FORM, {"schema": schema})
     check_answer(qf, {"count": 3})
-    with pytest.raises(AnswerMismatchError, match="at count:") as exc:
+    with pytest.raises(AnswerMismatchError, match=r"^Enter a whole number$") as exc:
         check_answer(qf, {"count": "abc"})
     assert exc.value.field == "count"
 
@@ -64,7 +64,7 @@ def test_form_asserts_the_string_formats_on_the_answer(fmt, good, bad):
     schema = {"type": "object", "properties": {"when": {"type": "string", "format": fmt}}}
     qf = _qf(AnswerFormat.FORM, {"schema": schema})
     check_answer(qf, {"when": good})
-    with pytest.raises(AnswerMismatchError, match="at when:") as exc:
+    with pytest.raises(AnswerMismatchError, match=r"^Enter a (date|time)") as exc:
         check_answer(qf, {"when": bad})
     assert exc.value.field == "when"
 
@@ -76,13 +76,13 @@ def test_form_date_time_rejects_a_missing_offset_and_a_bad_time():
         {"schema": {"type": "object", "properties": {"at": {"type": "string", "format": "date-time"}}}},
     )
     check_answer(dt, {"at": "2024-01-15T10:30:00+01:00"})
-    with pytest.raises(AnswerMismatchError, match="at at:"):
+    with pytest.raises(AnswerMismatchError, match=r"^Enter a date and time with its time zone$"):
         check_answer(dt, {"at": "2024-01-15T10:30:00"})  # no offset
     tm = _qf(
         AnswerFormat.FORM, {"schema": {"type": "object", "properties": {"t": {"type": "string", "format": "time"}}}}
     )
     check_answer(tm, {"t": "09:30:00"})
-    with pytest.raises(AnswerMismatchError, match="at t:"):
+    with pytest.raises(AnswerMismatchError, match=r"^Enter a time as HH:MM$"):
         check_answer(tm, {"t": "24:00"})
 
 
@@ -97,8 +97,9 @@ def test_form_date_time_rejects_a_missing_offset_and_a_bad_time():
 )
 def test_form_format_rejects_shape_ok_but_invalid_value(fmt, bad):
     qf = _qf(AnswerFormat.FORM, {"schema": {"type": "object", "properties": {"v": {"type": "string", "format": fmt}}}})
-    with pytest.raises(AnswerMismatchError, match="at v:"):
+    with pytest.raises(AnswerMismatchError, match=r"^Enter a") as exc:
         check_answer(qf, {"v": bad})
+    assert exc.value.field == "v"
 
 
 @pytest.mark.parametrize("fmt", ["date", "time", "date-time"])
@@ -106,8 +107,51 @@ def test_form_format_leaves_a_non_string_to_the_type_check(fmt):
     # A format checker only judges strings; a non-string value is a plain type mismatch,
     # never a format complaint, so the checker passes it through to the ``type`` keyword.
     qf = _qf(AnswerFormat.FORM, {"schema": {"type": "object", "properties": {"v": {"type": "string", "format": fmt}}}})
-    with pytest.raises(AnswerMismatchError, match="not of type 'string'"):
+    with pytest.raises(AnswerMismatchError, match=r"^Enter text$"):
         check_answer(qf, {"v": 5})
+
+
+def test_form_refuses_a_malformed_email_with_the_plain_sentence():
+    schema = {"type": "object", "properties": {"email": {"type": "string", "format": "email"}}}
+    qf = _qf(AnswerFormat.FORM, {"schema": schema})
+    check_answer(qf, {"email": "alice@example.org"})
+    with pytest.raises(AnswerMismatchError, match=r"^Enter a valid email address$") as exc:
+        check_answer(qf, {"email": "dhdhdh"})
+    assert exc.value.field == "email"
+
+
+def test_form_refuses_a_broken_pattern_and_a_date_bound_with_their_sentences():
+    schema = {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string", "pattern": "^[0-9]{4}$"},
+            "on": {"type": "string", "format": "date", "minDate": "2026-01-01"},
+        },
+    }
+    qf = _qf(AnswerFormat.FORM, {"schema": schema})
+    with pytest.raises(AnswerMismatchError, match=r"^This value is not in the expected form$") as exc:
+        check_answer(qf, {"code": "12a4"})
+    assert exc.value.field == "code"
+    with pytest.raises(AnswerMismatchError, match=r"^Choose a date on or after 2026-01-01$") as exc:
+        check_answer(qf, {"on": "2025-12-31"})
+    assert exc.value.field == "on"
+
+
+def test_form_evaluates_visibility_on_the_submitted_values_once():
+    # ``c`` shows when ``b`` is filled; ``b`` is hidden by ``a``. Evaluated once on the submitted
+    # values, ``c`` stays visible (and checked) even though ``b`` is dropped from the answer.
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"type": "string", "visibleWhen": {"field": "a", "equals": "yes"}},
+            "c": {"type": "integer", "minimum": 5, "visibleWhen": {"field": "b", "notEmpty": True}},
+        },
+    }
+    qf = _qf(AnswerFormat.FORM, {"schema": schema})
+    with pytest.raises(AnswerMismatchError, match=r"^Enter a number of at least 5$"):
+        check_answer(qf, {"a": "no", "b": "x", "c": 1})
+    assert check_answer(qf, {"a": "no", "b": "x", "c": 7}) == {"a": "no", "c": 7}
 
 
 def test_schema_only_asserts_a_declared_format():
@@ -117,6 +161,13 @@ def test_schema_only_asserts_a_declared_format():
     check_answer(_qf(AnswerFormat.FREE, {"schema": schema}), {"d": "2024-01-15"})
     with pytest.raises(AnswerMismatchError, match="does not match schema"):
         check_answer(_qf(AnswerFormat.FREE, {"schema": schema}), {"d": "nope"})
+
+
+def test_schema_only_asserts_a_declared_email_format():
+    schema = {"type": "object", "properties": {"e": {"type": "string", "format": "email"}}}
+    check_answer(_qf(AnswerFormat.FREE, {"schema": schema}), {"e": "alice@example.org"})
+    with pytest.raises(AnswerMismatchError, match="does not match schema at e:"):
+        check_answer(_qf(AnswerFormat.FREE, {"schema": schema}), {"e": "dhdhdh"})
 
 
 def test_free_accepts_any_json_without_a_schema():
@@ -166,6 +217,48 @@ def test_schema_mismatch_field_paths():
     assert field_path is None
     assert "at " not in message
     assert message.startswith("answer does not match schema: ")
+
+
+@pytest.mark.parametrize(
+    ("schema", "answer", "message", "field"),
+    [
+        (
+            {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "integer"}},
+            {"a": "x", "b": "str"},
+            "answer does not match schema at b: 'str' is not of type 'integer'",
+            "b",
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "patternProperties": {"^x": {"type": "integer"}},
+            },
+            {"a": "x", "xb": "str"},
+            "answer does not match schema at xb: 'str' is not of type 'integer'",
+            "xb",
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "additionalProperties": {"type": "object", "properties": {"c": {"type": "integer"}}},
+            },
+            {"a": "x", "b": {"c": "str"}},
+            "answer does not match schema at b.c: 'str' is not of type 'integer'",
+            "b.c",
+        ),
+    ],
+)
+def test_form_refuses_a_fault_under_a_key_no_property_declares(
+    schema: dict, answer: dict, message: str, field: str
+) -> None:
+    # A fault located under an answer key the schema governs only through ``additionalProperties`` /
+    # ``patternProperties`` belongs to no form field, and the door refuses it naming its location.
+    with pytest.raises(AnswerMismatchError) as caught:
+        check_answer(_qf(AnswerFormat.FORM, {"schema": schema}), answer)
+    assert str(caught.value) == message
+    assert caught.value.field == field
 
 
 # === date bounds / range enforced at the one facet ==========================

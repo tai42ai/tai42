@@ -11,74 +11,17 @@ format.
 
 from __future__ import annotations
 
-import datetime
-import re
 from collections.abc import Callable
 from typing import Any
 
 import jsonschema
+from jsonschema.exceptions import best_match
+from jsonschema.validators import validator_for
 from tai42_contract.interactions import AnswerFormat, AnswerMismatchError, QuestionFormat
 from tai42_kit.interactions.form_vocabulary import hidden_fields
 
-from tai42_skeleton.interactions.form_schema import date_constraint_mismatch, effective_answer_schema
-
-# The channel-form string formats, asserted by the answer door. python-jsonschema treats
-# ``format`` as a bare annotation unless a ``FormatChecker`` carrying a checker for that format
-# is passed to ``validate``; the default checker set needs ``rfc3339-validator`` for ``time`` and
-# ``date-time`` — a package the skeleton does not declare — so these explicit stdlib checkers
-# (shape by regex, calendar by the stdlib) are registered on a checker limited to exactly these
-# three formats. Every other format stays an annotation, matching the channel-form subset.
-_DATE_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
-_TIME_RE = re.compile(r"\A\d{2}:\d{2}(:\d{2})?\Z")
-_DATE_TIME_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})\Z")
-
-
-def _is_date(value: object) -> bool:
-    """A ``date`` value is ``YYYY-MM-DD`` (zero-padded) naming a real calendar date."""
-    if not isinstance(value, str):
-        return True
-    if not _DATE_RE.match(value):
-        return False
-    try:
-        datetime.date.fromisoformat(value)
-    except ValueError:
-        return False
-    return True
-
-
-def _is_time(value: object) -> bool:
-    """A ``time`` value is ``HH:MM`` or ``HH:MM:SS`` naming a real wall-clock time."""
-    if not isinstance(value, str):
-        return True
-    if not _TIME_RE.match(value):
-        return False
-    try:
-        datetime.time.fromisoformat(value)
-    except ValueError:
-        return False
-    return True
-
-
-def _is_date_time(value: object) -> bool:
-    """A ``date-time`` value is an RFC 3339 timestamp with a mandatory ``Z``/``±HH:MM`` offset."""
-    if not isinstance(value, str):
-        return True
-    if not _DATE_TIME_RE.match(value):
-        return False
-    try:
-        # RFC 3339 permits a lowercase ``t``/``z``; the only letters a matched value can carry
-        # are those two designators, so upper-casing lets ``fromisoformat`` (which wants the
-        # canonical forms) validate the calendar without loosening the shape the regex fixed.
-        datetime.datetime.fromisoformat(value.upper())
-    except ValueError:
-        return False
-    return True
-
-
-_FORM_FORMAT_CHECKER = jsonschema.FormatChecker(formats=())
-_FORM_FORMAT_CHECKER.checks("date")(_is_date)
-_FORM_FORMAT_CHECKER.checks("time")(_is_time)
-_FORM_FORMAT_CHECKER.checks("date-time")(_is_date_time)
+from tai42_skeleton.interactions.form_shapes import FORM_FORMAT_CHECKER, scan_form_shapes
+from tai42_skeleton.interactions.schema_rules import answer_validator
 
 
 def _schema_error_field(exc: Exception) -> str | None:
@@ -125,23 +68,17 @@ def schema_mismatch(answer: Any, schema: dict) -> tuple[str, str | None] | None:
     for a root-level or otherwise non-locatable fault). Returns ``None`` when the answer conforms.
     """
     try:
-        jsonschema.validate(answer, schema, format_checker=_FORM_FORMAT_CHECKER)
+        # ``jsonschema.validate``'s own steps (the class the schema's ``$schema`` names, its
+        # meta-check, the best-matching fault), with references resolved through
+        # ``SCHEMA_REFS``, which fetches no schema.
+        validator = validator_for(schema, default=jsonschema.Draft202012Validator)
+        validator.check_schema(schema)
+        error = best_match(answer_validator(schema, validator, format_checker=FORM_FORMAT_CHECKER).iter_errors(answer))
+        if error is not None:
+            raise error
     except _SCHEMA_VALIDATION_ERRORS as exc:
         return _schema_error_message(exc), _schema_error_field(exc)
     return None
-
-
-def _without_required(schema: dict[str, Any], drop: set[str]) -> dict[str, Any]:
-    # ``schema`` with any name in ``drop`` removed from its ``required`` list, so a field
-    # hidden by its conditional predicate is not demanded. Non-mutating; unchanged when
-    # nothing is dropped.
-    required = schema.get("required")
-    if not isinstance(required, list) or not drop:
-        return schema
-    kept = [name for name in required if name not in drop]
-    if len(kept) == len(required):
-        return schema
-    return {**schema, "required": kept}
 
 
 def _check_text(_question: QuestionFormat, answer: Any) -> Any:
@@ -167,14 +104,18 @@ def _check_select(question: QuestionFormat, answer: Any) -> Any:
 
 
 def _check_form(question: QuestionFormat, answer: Any) -> Any:
-    """Validate a FORM answer against the stored schema; RETURN the answer the consumer receives.
+    """Validate a FORM answer through the one form-shape check; RETURN the answer the consumer receives.
 
     The returned object is the submitted answer with every field HIDDEN by its
     ``visibleWhen`` predicate (evaluated on the submitted values) REMOVED — the documented
     meaning of a conditional field: a hidden field is not required, not validated, and a
-    value sent for it is dropped rather than faulted. A field named in ``reactions.choices``
-    is TYPE-checked only (its enum omitted), the consumer owning membership at submit. Date
-    bounds / unavailable days / a range pairing are enforced after the schema check.
+    value sent for it is dropped rather than faulted. The shapes (the effective schema with
+    per-send option lists and reaction-fed choices typed only, then the date constraints) are
+    judged by :func:`~tai42_skeleton.interactions.form_shapes.scan_form_shapes`: the first failing
+    field is refused with its plain sentence and its name, the same words every surface shows
+    inside the form; a fault no declared field owns (on the answer object itself, or under a key
+    only ``additionalProperties``/``patternProperties`` govern) is refused with the schema's message
+    and its location.
     """
     if not isinstance(answer, dict):
         raise AnswerMismatchError("answer must be an object")
@@ -182,26 +123,21 @@ def _check_form(question: QuestionFormat, answer: Any) -> Any:
     schema = payload.get("schema")
     if not isinstance(schema, dict):
         raise AnswerMismatchError("question schema is invalid: missing or non-object schema")
-    reactions = payload.get("reactions")
-    choices = reactions.get("choices", []) if isinstance(reactions, dict) else []
-    # A field hidden by its predicate (evaluated on the SUBMITTED values) is absent from the
-    # answer the consumer receives; a value submitted for it is dropped, not an error.
+    try:
+        # The scan evaluates every ``visibleWhen`` on the SUBMITTED values, exactly as the
+        # returned answer drops the hidden fields below.
+        scan = scan_form_shapes(question, answer)
+    except ValueError as exc:
+        raise AnswerMismatchError(str(exc)) from exc
+    if scan.errors:
+        first = scan.errors[0]
+        raise AnswerMismatchError(first.message, field=first.field)
+    if scan.unowned_faults:
+        fault = scan.unowned_faults[0]
+        raise AnswerMismatchError(_schema_error_message(fault), field=_schema_error_field(fault))
     properties = schema.get("properties")
     hidden = hidden_fields(properties, answer) if isinstance(properties, dict) else set()
-    answer = {name: value for name, value in answer.items() if name not in hidden}
-    # Per-send option lists replace a property's enum for THIS send (so the answer is judged
-    # against the choices the human was shown); a reaction-fed choice is typed-only. A hidden
-    # field is also dropped from ``required`` so it is not demanded.
-    effective = _without_required(effective_answer_schema(schema, payload.get("data"), choices), hidden)
-    mismatch = schema_mismatch(answer, effective)
-    if mismatch is not None:
-        message, field = mismatch
-        raise AnswerMismatchError(message, field=field)
-    date_mismatch = date_constraint_mismatch(schema, answer)
-    if date_mismatch is not None:
-        message, field = date_mismatch
-        raise AnswerMismatchError(message, field=field)
-    return answer
+    return {name: value for name, value in answer.items() if name not in hidden}
 
 
 def _check_schema_only(question: QuestionFormat, answer: Any) -> Any:

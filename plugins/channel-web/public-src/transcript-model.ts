@@ -206,10 +206,12 @@ export interface LocationPoint {
   readonly address: string | null;
 }
 
-/** The caller's word for one form field's picker placeholder (its empty-state prompt),
- * keyed by property name in {@link FormWording.fields}. `null` when the caller set none. */
+/** The caller's words for one form field, keyed by property name in {@link FormWording.fields}:
+ * its picker placeholder (its empty-state prompt) and its sentence for a value that breaks the
+ * field's declared shape. Each `null` when the caller set none. */
 export interface FieldWording {
   readonly choiceLabel: string | null;
+  readonly invalid: string | null;
 }
 
 /** The caller's words for a form's chrome: the terminal button of a one-page form

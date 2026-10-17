@@ -1,7 +1,8 @@
 """JSON-Schema utilities.
 
 Exposes a schema → pydantic model converter, a schema → ``TypedDict`` converter, a faithful
-draft-2020-12 validator, and the platform int64 / msgpack integer-range guard.
+draft-2020-12 validator with the JSON Schema rules check it runs first, and the platform
+int64 / msgpack integer-range guard.
 
 The converters map a JSON-Schema fragment to a Python annotation and cannot
 express every construct (``oneOf`` collapses to a plain ``Union``; ``not`` and
@@ -17,6 +18,8 @@ from tai42_kit.utils.data.json_schema_util.int_bounds import (
     find_oversized_int,
     inject_int64_bounds,
 )
+from tai42_kit.utils.data.json_schema_util.json_pointer import json_pointer_array_index
+from tai42_kit.utils.data.json_schema_util.plain_json import check_plain_json
 from tai42_kit.utils.data.json_schema_util.portable import (
     NonPortableSchemaError,
     adapt_native_schema,
@@ -36,6 +39,12 @@ from tai42_kit.utils.data.json_schema_util.portable import (
     to_portable_schema,
 )
 from tai42_kit.utils.data.json_schema_util.pydantic_model import json_schema_to_pydantic_model
+from tai42_kit.utils.data.json_schema_util.schema_rules import (
+    SCHEMA_REFS,
+    check_schema_rules,
+    evaluated_subschemas,
+    schema_validator_class,
+)
 from tai42_kit.utils.data.json_schema_util.typed_dict import json_schema_to_typed_dict
 from tai42_kit.utils.data.json_schema_util.validation import (
     InvalidJsonSchemaError,
@@ -49,14 +58,18 @@ __all__ = [
     "INT64_MIN",
     "MSGPACK_INT_MAX",
     "MSGPACK_INT_MIN",
+    "SCHEMA_REFS",
     "InvalidJsonSchemaError",
     "JsonSchemaValidationError",
     "NonPortableSchemaError",
     "adapt_native_schema",
     "check_json_schema",
     "check_native_representable",
+    "check_plain_json",
+    "check_schema_rules",
     "count_optional_properties",
     "count_union_or_type_array_nodes",
+    "evaluated_subschemas",
     "find_oversized_int",
     "find_ref_cycle",
     "has_array_constraint",
@@ -68,9 +81,11 @@ __all__ = [
     "has_string_length_or_pattern",
     "inject_int64_bounds",
     "iter_schema_nodes",
+    "json_pointer_array_index",
     "json_schema_to_pydantic_model",
     "json_schema_to_typed_dict",
     "native_representability_reason",
+    "schema_validator_class",
     "to_portable_schema",
     "validate_against_json_schema",
 ]

@@ -4,7 +4,8 @@ Parses a raw JSON document into a :class:`~tai42_skeleton.states.templates.model
 the document's shape (every section, the name law, no key outside the platform set) is the
 contract's :class:`~tai42_contract.states.models.StateTemplateDocument`; this module adds the
 rules that span sections or need jq — parameter markers against declared parameters, the
-fragment as an object schema, regime and program paths inside the fragment, program names and
+fragment as an object schema, each parameter and declarations schema as a schema whose
+references resolve inside it, regime and program paths inside the fragment, program names and
 params as jq identifiers, and every inline jq body compiling. A consumer keeps its own documents
 beside the template under its own kind (validated through its registered attach validator).
 """
@@ -26,7 +27,7 @@ from tai42_contract.states.models import (
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.jq_util import compile_check
 
-from tai42_skeleton.states.schema import _validate_schema
+from tai42_skeleton.states.schema import _validate_schema, check_document_rules
 from tai42_skeleton.states.templates.jq import _compile_template_jq_inline
 from tai42_skeleton.states.templates.model import TEMPLATE_KIND, StateTemplate
 from tai42_skeleton.states.templates.parameters import _iter_marker_names, substitute_parameters
@@ -72,11 +73,26 @@ def _compile_check_jq(expr: str, *, where: str) -> None:
         raise TemplateValidationError(f"{where} is not a valid jq expression: {exc}") from exc
 
 
-def _check_declarations(declarations: StateTemplateDeclarations) -> None:
-    """An inline ``check`` is a non-empty jq predicate that compiles.
+def _check_value_schema(schema: dict[str, Any], *, where: str) -> None:
+    """A schema an attach value is validated against holds the record schema's document rules.
 
-    A by-id check is rendered and compiled at the save door, which can fetch the stored resource.
+    :func:`~tai42_skeleton.states.schema.check_document_rules`, opened by ``where``: every
+    ``$ref`` resolves inside the schema itself, so validating a value never reaches a schema
+    outside it.
     """
+    try:
+        check_document_rules(schema, subject=where)
+    except SchemaValidationError as exc:
+        raise TemplateValidationError(str(exc)) from exc
+
+
+def _check_declarations(declarations: StateTemplateDeclarations) -> None:
+    """The declarations schema is a value schema (:func:`_check_value_schema`); an inline ``check`` compiles.
+
+    An inline ``check`` is a non-empty jq predicate that compiles. A by-id check is rendered and
+    compiled at the save door, which can fetch the stored resource.
+    """
+    _check_value_schema(declarations.schema_, where="declarations schema")
     check = declarations.check
     if check is None or check.content is None:
         return
@@ -163,9 +179,12 @@ def _defaults_fragment(
 ) -> dict[str, Any]:
     """The fragment with parameter defaults substituted, after the marker/parameter cross-check.
 
-    Every marker names a declared parameter, a no-default parameter appears as a marker, and the
-    substituted fragment is a valid object schema.
+    Each parameter schema is a value schema (:func:`_check_value_schema`), every marker names a
+    declared parameter, a no-default parameter appears as a marker, and the substituted fragment
+    is a valid object schema.
     """
+    for pname, param in parameters.items():
+        _check_value_schema(param.schema_, where=f"parameter {pname!r} schema")
     marker_names = set(_iter_marker_names(schema))
     unknown = sorted(marker_names - set(parameters))
     if unknown:
@@ -196,7 +215,8 @@ def validate_template(doc: Any) -> StateTemplate:
     The document must carry ``kind == "state-template"`` and a dict fragment ``schema`` (a by-id
     fragment is resolved by the caller first) and parse as a
     :class:`~tai42_contract.states.models.StateTemplateDocument`; then a no-default parameter
-    must appear as a marker and every marker names a declared parameter, the defaults-substituted
+    must appear as a marker and every marker names a declared parameter, each parameter and
+    declarations schema is a valid schema whose references resolve inside it, the defaults-substituted
     fragment passes ``_validate_schema``, regime and update-program paths lie inside the fragment
     (``"*"`` only over ``items``/``additionalProperties``), program names and params are jq
     identifiers, and every inline jq body compiles (a by-id body is rendered and compiled at the

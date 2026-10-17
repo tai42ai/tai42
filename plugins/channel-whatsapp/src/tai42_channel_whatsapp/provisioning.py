@@ -1,13 +1,13 @@
-"""Reacting-form data-endpoint key provisioning (an operator step).
+"""Flow data-endpoint key provisioning (an operator step).
 
-A reacting form's data endpoint decrypts each request's AES key with the business PRIVATE key
-(held as the secret ``CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY``). Meta encrypts that AES key to the
-matching PUBLIC key, which must be registered for each SENDING number once (or after a key
-rotation). :func:`flow_encryption_material` derives the public key from the configured private
-key and :func:`provision_flow_encryption` registers it, so the operator never copies key
-material by hand. The operator's door is the admin-only
-``POST /api/channels/whatsapp/flow-encryption`` route (:mod:`.provisioning_route`); see the
-README for the full operator steps.
+The data endpoint of an endpoint-driven form (a reacting or shape-checked one) decrypts each
+request's AES key with the business PRIVATE key (held as the secret
+``CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY``). Meta encrypts that AES key to the matching PUBLIC key,
+which must be registered for each SENDING number once (or after a key rotation).
+:func:`flow_encryption_material` derives the public key from the configured private key and
+:func:`provision_flow_encryption` registers it, so the operator never copies key material by hand.
+The operator's door is the admin-only ``POST /api/channels/whatsapp/flow-encryption`` route
+(:mod:`.provisioning_route`); see the README for the full operator steps.
 """
 
 from __future__ import annotations

@@ -36,7 +36,7 @@ def _assert_only_identifier_safe_wire_names(flow_json: dict) -> None:
 
     def walk(node: object) -> None:
         if isinstance(node, dict):
-            if node.get("type") in {"TextInput", "Dropdown", "OptIn", "DatePicker"} and isinstance(
+            if node.get("type") in {"TextInput", "Dropdown", "OptIn", "CalendarPicker"} and isinstance(
                 node.get("name"), str
             ):
                 assert _IDENTIFIER_RE.match(node["name"]), node["name"]
@@ -134,6 +134,7 @@ def test_string_maps_to_text_input_with_title_label():
         "label": "Your note",
         "required": False,
         "init-value": "${data.note__init}",
+        "error-message": "${data.note__err}",
     }
 
 
@@ -147,6 +148,7 @@ def test_label_falls_back_to_property_name():
         "label": "note",
         "required": True,
         "init-value": "${data.note__init}",
+        "error-message": "${data.note__err}",
     }
 
 
@@ -179,6 +181,7 @@ def test_short_string_enum_maps_to_radio_group():
         "required": True,
         "data-source": "${data.pick__ds}",
         "init-value": "${data.pick__init}",
+        "error-message": "${data.pick__err}",
     }
 
 
@@ -223,6 +226,8 @@ def test_integer_and_number_map_to_number_text_input(json_type: str):
     schema = {"type": "object", "properties": {"qty": {"type": json_type}}, "required": ["qty"]}
 
     field = _controls(build_form_flow(schema)[0])[0]
+    # An integer also draws the whole-number shape as a native pattern, whose helper text Meta requires.
+    whole = {"pattern": "^-?[0-9]+$", "helper-text": "A whole number, like 42"} if json_type == "integer" else {}
     assert field == {
         "type": "TextInput",
         "name": "qty",
@@ -230,6 +235,8 @@ def test_integer_and_number_map_to_number_text_input(json_type: str):
         "required": True,
         "input-type": "number",
         "init-value": "${data.qty__init}",
+        **whole,
+        "error-message": "${data.qty__err}",
     }
 
 
@@ -254,6 +261,7 @@ def test_string_input_mode_draws_the_matching_keyboard(mode: str, input_type: st
         "required": True,
         "input-type": input_type,
         "init-value": "${data.field__init}",
+        "error-message": "${data.field__err}",
     }
 
 
@@ -271,6 +279,7 @@ def test_string_input_mode_url_and_text_stay_a_plain_text_input(mode: str):
         "label": "field",
         "required": True,
         "init-value": "${data.field__init}",
+        "error-message": "${data.field__err}",
     }
 
 
@@ -405,6 +414,7 @@ def test_string_textarea_control_renders_a_text_area_with_max_length():
         "required": True,
         "max-length": 500,
         "init-value": "${data.notes__init}",
+        "error-message": "${data.notes__err}",
     }
 
 
@@ -431,13 +441,11 @@ def test_single_line_text_input_draws_max_chars_and_min_chars_from_length_bounds
     assert field["min-chars"] == 2
 
 
-# -- the format: date → DatePicker mapping ------------------------------------
+# -- the format: date → CalendarPicker mapping --------------------------------
 
 
-def test_string_with_format_date_maps_to_date_picker_without_required():
-    # A DatePicker carries no ``required`` field: the vendor's component reference defines
-    # one for every other input control but not for the DatePicker, and Meta rejects an
-    # unknown component property at publish.
+def test_string_with_format_date_maps_to_a_single_calendar_picker_carrying_required():
+    # Every date draws a single-mode CalendarPicker: unlike the DatePicker it carries ``required``.
     schema = {
         "type": "object",
         "properties": {"when": {"type": "string", "format": "date", "title": "Pick a date"}},
@@ -446,28 +454,28 @@ def test_string_with_format_date_maps_to_date_picker_without_required():
 
     field = _controls(build_form_flow(schema)[0])[0]
     assert field == {
-        "type": "DatePicker",
+        "type": "CalendarPicker",
         "name": "when",
         "label": "Pick a date",
+        "mode": "single",
+        "required": True,
         "init-value": "${data.when__init}",
+        "error-message": "${data.when__err}",
     }
-    assert "required" not in field
 
 
 @pytest.mark.parametrize("fmt", ["time", "date-time"])
 def test_string_with_format_time_or_date_time_stays_text_input(fmt: str):
-    # The vendor has no time-of-day picker, so these render as a plain text input; the ask
-    # door validates the submitted shape.
+    # The vendor has no time-of-day picker, so these render as a text input carrying the platform's
+    # format regex as its native pattern; the data endpoint and the answer door check the calendar.
     schema = {"type": "object", "properties": {"at": {"type": "string", "format": fmt}}, "required": ["at"]}
 
     field = _controls(build_form_flow(schema)[0])[0]
-    assert field == {
-        "type": "TextInput",
-        "name": "at",
-        "label": "at",
-        "required": True,
-        "init-value": "${data.at__init}",
-    }
+    assert field["type"] == "TextInput"
+    assert field["required"] is True
+    assert field["pattern"].startswith("^[0-9]")
+    assert field["helper-text"].startswith("A time as HH:MM" if fmt == "time" else "Date, time and zone")
+    assert field["error-message"] == "${data.at__err}"
 
 
 def test_enum_outranks_format_date_and_still_renders_a_choice():
@@ -819,7 +827,7 @@ def test_flow_data_per_send_options_on_a_non_string_field_raise_naming_it():
 
 def test_field_description_renders_as_helper_text_on_text_and_date_controls():
     # A field's schema ``description`` draws as the control's ``helper-text`` on the controls Meta
-    # allows it on (TextInput — string and number — DatePicker, CalendarPicker).
+    # allows it on (TextInput — string and number — and the date CalendarPicker).
     schema = {
         "type": "object",
         "properties": {
@@ -833,7 +841,7 @@ def test_field_description_renders_as_helper_text_on_text_and_date_controls():
     assert [by_name[n]["type"] for n in ("note", "count", "day", "slot")] == [
         "TextInput",
         "TextInput",
-        "DatePicker",
+        "CalendarPicker",
         "CalendarPicker",
     ]
     assert by_name["note"]["helper-text"] == "Keep it short"
@@ -1277,6 +1285,7 @@ def test_array_of_strings_maps_to_checkbox_group_with_selection_bounds():
         "init-value": "${data.tags__init}",
         "min-selected-items": 1,
         "max-selected-items": 2,
+        "error-message": "${data.tags__err}",
     }
 
 
@@ -1364,13 +1373,6 @@ def test_constrained_date_renders_a_bounded_calendar_picker():
     assert field["init-value"] == "${data.when__init}"
 
 
-def test_unconstrained_date_stays_a_bare_date_picker():
-    schema = {"type": "object", "properties": {"when": {"type": "string", "format": "date"}}, "required": ["when"]}
-    field = _controls(build_form_flow(schema)[0])[0]
-    assert field["type"] == "DatePicker"
-    assert "required" not in field
-
-
 def _range_schema(**end_extra: object) -> dict:
     return {
         "type": "object",
@@ -1453,7 +1455,8 @@ def test_range_pair_with_a_sibling_visible_when_on_an_end_draws_two_date_control
     flow_json, _ = build_form_flow(schema)
     start = _field_by_name(flow_json, "start")
     end = _field_by_name(flow_json, "end")
-    assert start["type"] == "DatePicker"  # two separate scalar date controls, not one range picker
+    # Two separate single-mode date controls, not one range picker.
+    assert (start["type"], start["mode"]) == ("CalendarPicker", "single")
     assert end["type"] == "CalendarPicker"
     assert end.get("mode") != "range"
     # The conditional note gates on the scalar START control's form value, not an object.
@@ -1494,10 +1497,8 @@ def test_range_pair_with_a_multi_value_visible_when_draws_two_date_controls():
                 _walk(item)
 
     _walk(flow_json["screens"][0]["layout"]["children"])
-    # Two separate scalar date controls (a DatePicker and a single-mode CalendarPicker), never a
-    # merged range picker.
-    assert "DatePicker" in types
-    assert "CalendarPicker" in types
+    # Two separate single-mode date controls, never a merged range picker.
+    assert types.count("CalendarPicker") >= 2
     assert "range" not in modes
 
 
@@ -1505,8 +1506,8 @@ def test_range_pair_on_different_pages_draws_two_date_controls():
     schema = _range_schema()
     pages = [{"title": "First", "fields": ["start"]}, {"title": "Second", "fields": ["end"]}]
     flow_json, _ = build_form_flow(schema, pages)
-    assert _field_by_name(flow_json, "start", 0)["type"] == "DatePicker"
-    assert _field_by_name(flow_json, "end", 1)["type"] == "CalendarPicker"
+    assert _field_by_name(flow_json, "start", 0)["mode"] == "single"
+    assert _field_by_name(flow_json, "end", 1)["mode"] == "single"
 
 
 def test_range_pair_with_a_review_page_draws_two_date_controls():
@@ -1522,7 +1523,8 @@ def test_range_pair_with_a_review_page_draws_two_date_controls():
     flow_json, _ = build_form_flow(schema, pages)
     start = _field_by_name(flow_json, "start", 0)
     end = _field_by_name(flow_json, "end", 0)
-    assert start["type"] == "DatePicker"  # two separate scalar date controls, not one range picker
+    # Two separate single-mode date controls, not one range picker.
+    assert (start["type"], start["mode"]) == ("CalendarPicker", "single")
     assert end["type"] == "CalendarPicker"
     assert end.get("mode") != "range"
     # The review readback references each field's own scalar carrier — never a range object.
@@ -1850,7 +1852,7 @@ def test_field_changed_on_a_text_field_is_refused():
 def test_reacting_form_property_colliding_with_a_reserved_marker_is_refused():
     schema = {"type": "object", "properties": {"tai42_event": {"type": "string"}}, "required": ["tai42_event"]}
     reactions = {"field_changed": [], "page_advanced": [], "submitted": True, "choices": []}
-    with pytest.raises(ChannelInputError, match="reserved reaction"):
+    with pytest.raises(ChannelInputError, match="reserved data-endpoint markers"):
         build_form_flow(schema, reactions=reactions)
 
 
@@ -2052,7 +2054,7 @@ def test_attach_field_reaction_on_a_non_selectable_control_is_refused():
     # is refused loudly.
     component = {"type": "TextInput", "name": "note", "label": "note"}
     with pytest.raises(ChannelInputError, match="selectable control"):
-        _attach_field_reaction(component, "note", ["note"], [], {"note": "note"}, {"note": [("", [])]}, {})
+        _attach_field_reaction(component, "note", ["note"], [], {"note": "note"}, {"note": [("", [])]}, {}, {})
 
 
 def test_merged_range_data_model_on_a_later_screen_omits_the_end_init():

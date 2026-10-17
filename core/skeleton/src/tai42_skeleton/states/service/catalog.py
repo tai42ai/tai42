@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from jsonschema import Draft202012Validator
 from tai42_contract.states.models import StateRegimeRule
+from tai42_kit.utils.data.json_schema_util import SCHEMA_REFS
 
 from tai42_skeleton.states.store.trace import _abs_regime_paths, _traced_paths
 
@@ -99,7 +100,7 @@ def build_state_entry(
     return StateEntry(
         version=version,
         effective_schema=effective_schema,
-        validator=Draft202012Validator(effective_schema),
+        validator=Draft202012Validator(effective_schema, registry=SCHEMA_REFS),
         regime_paths=_abs_regime_paths(attachment_rows),
         traced_paths=_traced_paths(attachment_rows),
         attachments=attachments,

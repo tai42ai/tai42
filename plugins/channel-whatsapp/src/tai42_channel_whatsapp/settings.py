@@ -39,16 +39,17 @@ class WhatsAppSettings(TaiBaseSettings):
     # path (a form ask is rendered as a WhatsApp Flow created under this WABA).
     waba_id: str | None = None
     # The business RSA-2048 PRIVATE key (PEM), held as a secret: the data endpoint decrypts
-    # each reacting-form request's AES key with it. Required only to publish/serve a REACTING
-    # form; a static form never touches it. The matching PUBLIC key must be registered for the
+    # each endpoint-driven form request's AES key with it. Required only to publish/serve an
+    # ENDPOINT-DRIVEN form (one that reacts, or carries a shape the Flow's controls cannot check);
+    # a static form never touches it. The matching PUBLIC key must be registered for the
     # sending number (operator step: the admin-only `/flow-encryption` route; see the README).
     flow_private_key: SecretStr | None = None
     # Optional passphrase protecting `flow_private_key` (PEM encrypted with a passphrase).
     flow_private_key_passphrase: SecretStr | None = None
     # The PUBLIC HTTPS URL of this plugin's flow data endpoint
-    # (`{public base}/api/channels/whatsapp/flow-data`), configured on a reacting Flow at
+    # (`{public base}/api/channels/whatsapp/flow-data`), configured on an endpoint-driven Flow at
     # create time so Meta routes its data-exchange requests back here. Required only to publish
-    # a reacting form.
+    # an endpoint-driven form.
     flow_endpoint_uri: str | None = None
     # Whitelist of wa_ids a caller-requested recipient must be on (ask only).
     # NoDecode hands the raw env string to the validator (comma-separated or JSON).

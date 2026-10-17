@@ -186,7 +186,10 @@ describe("QuestionControls draw the send's wording", () => {
       null,
       null,
       wording({
-        form: formWording({ submit: 'File it', fields: { kind: { choiceLabel: 'Pick a kind' } } }),
+        form: formWording({
+          submit: 'File it',
+          fields: { kind: { choiceLabel: 'Pick a kind', invalid: null } },
+        }),
       }),
     );
     renderCard(item);

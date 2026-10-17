@@ -9,7 +9,7 @@ allowed: root ``{"type": "object"}`` with a non-empty ``properties`` map; every
 property a scalar (``string``/``boolean``/``integer``/``number``) OR an array whose
 ``items`` are strings (a multiple-choice field); ``enum`` only on a ``string``
 property (or on an array's string ``items``), a non-empty list of strings;
-``format`` only on a ``string`` property, one of ``date``/``time``/``date-time``
+``format`` only on a ``string`` property, one of ``date``/``time``/``date-time``/``email``
 (any other ``format`` value, or a ``format`` on a non-string property, is refused
 naming the property); a ``required`` list, when present, naming only declared
 properties. ``format`` may ride alongside an ``enum`` — the enum's choice control
@@ -49,8 +49,10 @@ for it is dropped, never an error. The named ``field`` must be another declared
 property.
 
 An extra constraint keyword riding alongside a scalar ``type`` (``pattern``,
-``minimum``, an inline ``anyOf``, ...) is not rendered but is enforced when the
-answer is validated.
+``minimum``, an inline ``anyOf``, ...) is enforced when the answer is validated, and
+each surface catches the shapes it can inside the form before the submit leaves it
+(``tai42_skeleton.interactions.form_shapes`` is the one check every surface and the
+answer door share).
 
 A ``string`` property MAY carry an ``inputMode`` keyword naming the keyboard/input
 kind a channel draws for it (``text``/``numeric``/``decimal``/``tel``/``email``/
@@ -86,11 +88,22 @@ them at ask-time on top of this walk.
 from __future__ import annotations
 
 import datetime
+import math
 import re
-from typing import Any
+from collections.abc import Iterator
+from typing import Any, TypeGuard
 
-from tai42_contract.interactions.models import FormControl, FormInputMode
-from tai42_kit.interactions.form_vocabulary import DATE_CONSTRAINT_KEYS, FORM_WEEKDAYS, VISIBLE_WHEN_OPS
+import jsonschema
+from tai42_contract.interactions.models import FormControl, FormInputMode, FormShapeKind, check_form_property_names
+from tai42_kit.interactions.form_vocabulary import (
+    DATE_CONSTRAINT_KEYS,
+    FORM_WEEKDAYS,
+    VISIBLE_WHEN_OPS,
+    drawn_number_bounds,
+)
+from tai42_kit.utils.data.json_schema_util import check_plain_json, check_schema_rules
+
+from tai42_skeleton.interactions.form_shape_words import shape_sentence
 
 _SCALAR_TYPES = ("string", "boolean", "integer", "number")
 # The keyboard/input kinds a string field may declare via ``inputMode`` — the shared
@@ -100,8 +113,9 @@ _INPUT_MODES = tuple(mode.value for mode in FormInputMode)
 # its own control (or a documented degrade to the default control for the property's shape).
 _FORM_CONTROLS = tuple(control.value for control in FormControl)
 # The string formats a channel form may declare, each with a value shape the answer
-# door validates (``date`` -> YYYY-MM-DD, ``time`` -> HH:MM[:SS], ``date-time`` -> RFC 3339).
-_STRING_FORMATS = ("date", "time", "date-time")
+# door validates (``date`` -> YYYY-MM-DD, ``time`` -> HH:MM[:SS], ``date-time`` -> RFC 3339,
+# ``email`` -> the platform's one address shape).
+_STRING_FORMATS = ("date", "time", "date-time", "email")
 # The two formats that carry a real calendar date, so date constraints (bounds,
 # unavailable days, a range pairing) apply to them.
 _DATE_FORMATS = ("date", "date-time")
@@ -281,6 +295,50 @@ def _validate_length_bounds(name: str, prop: dict[str, Any]) -> None:
         raise ValueError(f"form schema property {name!r} has minLength {minimum} above maxLength {maximum}")
 
 
+def _is_number(value: Any) -> TypeGuard[int | float]:
+    # A JSON-Schema numeric bound; a bool is not one.
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _validate_count_bounds(name: str, prop: dict[str, Any]) -> None:
+    # ``minItems``/``maxItems`` bound how many choices an array answer carries. A ``minItems``
+    # above ``maxItems`` is a selection count no answer could meet — refused when the form is built.
+    minimum = prop.get("minItems")
+    maximum = prop.get("maxItems")
+    if _is_number(minimum) and _is_number(maximum) and minimum > maximum:
+        raise ValueError(f"form schema property {name!r} has minItems {minimum} above maxItems {maximum}")
+
+
+_NUMBER_BOUNDS = ("minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum")
+
+
+def _validate_number_bounds(name: str, prop: dict[str, Any]) -> None:
+    # A number property's ``minimum``/``maximum`` and ``exclusiveMinimum``/``exclusiveMaximum``
+    # bounds that no value lies within (for an ``integer``, no whole number) are a field no answer
+    # could fill — refused when the form is built, so no channel sends a form no one can submit.
+    if prop.get("type") not in ("integer", "number"):
+        return
+    integer = prop.get("type") == "integer"
+    low, high = drawn_number_bounds(prop)
+    strict_low = strict_high = False
+    above = prop.get("exclusiveMinimum")
+    below = prop.get("exclusiveMaximum")
+    if _is_number(above):
+        lowest = math.floor(above) + 1 if integer else above
+        if low is None or lowest > low or (not integer and lowest == low):
+            low, strict_low = lowest, not integer
+    if _is_number(below):
+        highest = math.ceil(below) - 1 if integer else below
+        if high is None or highest < high or (not integer and highest == high):
+            high, strict_high = highest, not integer
+    if low is None or high is None:
+        return
+    if low > high or (low == high and (strict_low or strict_high)):
+        declared = ", ".join(f"{key} {prop[key]}" for key in _NUMBER_BOUNDS if _is_number(prop.get(key)))
+        what = "whole number" if integer else "number"
+        raise ValueError(f"form schema property {name!r} has bounds no {what} can meet ({declared})")
+
+
 def _check_bound_date(name: str, key: str, value: Any) -> None:
     if not _is_iso_date(value):
         raise ValueError(f"form schema property {name!r} {key} must be a YYYY-MM-DD date, got {value!r}")
@@ -374,17 +432,28 @@ def _validate_description(name: str, prop: dict[str, Any]) -> None:
         raise ValueError(f"form schema property {name!r} description must be a string when present")
 
 
+def _validate_answerable_bounds(name: str, prop: dict[str, Any]) -> None:
+    # Some answer meets every bound a property's answer must meet: the choice count of an array,
+    # the length of a scalar, the value of a number.
+    ptype = prop.get("type")
+    if ptype == "array":
+        _validate_count_bounds(name, prop)
+    elif ptype in _SCALAR_TYPES:
+        _validate_length_bounds(name, prop)
+        _validate_number_bounds(name, prop)
+
+
 def _validate_property(name: str, prop: Any) -> None:
     if not isinstance(prop, dict):
         raise ValueError(f"form schema property {name!r} must be an object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
     ptype = prop.get("type")
     _validate_input_mode(name, prop, ptype)
     _validate_control(name, prop, ptype)
+    _validate_answerable_bounds(name, prop)
     if ptype == "array":
         _validate_array_items(name, prop)
     elif ptype in _SCALAR_TYPES:
         _validate_scalar_string(name, prop, ptype)
-        _validate_length_bounds(name, prop)
         _validate_date_constraints(name, prop)
     else:
         raise ValueError(
@@ -445,10 +514,14 @@ def channel_form_fields(schema: Any) -> list[tuple[str, dict, bool]]:
     Fields come back as ``(name, prop, is_required)`` in declared order.
 
     Raises ``ValueError`` naming the offending property (or the violated root rule) on
-    any deviation from the subset.
+    any deviation from the subset, on bounds no answer could meet, on a number anywhere in the
+    schema that is not finite or a schema holding itself (checked first, before any bound is
+    compared or any property walked), and on a schema
+    breaking the JSON Schema rules, its references included (:func:`check_form_schema_rules`).
     """
     if not isinstance(schema, dict):
         raise ValueError("form schema must be an object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
+    check_plain_json(schema, subject="form schema")
     if schema.get("type") != "object":
         raise ValueError(f"form schema top-level type must be 'object', got {schema.get('type')!r}")
     properties = schema.get("properties")
@@ -467,7 +540,45 @@ def channel_form_fields(schema: Any) -> list[tuple[str, dict, bool]]:
         _validate_property(key, prop)
         fields.append((key, prop, name in required_set))
     _check_cross_references(fields)
+    check_form_schema_rules(schema)
     return fields
+
+
+def check_form_schema_rules(schema: dict[str, Any]) -> None:
+    """Raise ``ValueError`` naming the property when ``schema`` breaks the JSON Schema rules.
+
+    The meta-check (Draft 2020-12, with its format checks: a ``pattern`` must compile) is the
+    one the form answer check runs before it judges an answer; no number in the schema may be
+    an infinity or a NaN and the schema may not hold itself; and every subschema the answer check
+    evaluates holds the rules of the dialect it names, with every ``$ref``/``$dynamicRef``
+    resolving inside the schema (no schema is fetched) and no cycle of references that never
+    descends into the answer (:func:`~tai42_kit.utils.data.json_schema_util.check_schema_rules`).
+    No top-level property may be named ``__proto__``, the one name a form drawn in a browser
+    cannot keep (:func:`~tai42_contract.interactions.models.forms.check_form_property_names`).
+    A form schema passing here is one every answer can be judged against.
+    """
+    check_form_property_names(schema)
+    check_schema_rules(schema, jsonschema.Draft202012Validator, subject="form schema")
+
+
+def validate_form_answer_schema(schema: dict[str, Any]) -> None:
+    """Refuse a form schema no answer could ever be accepted against; return ``None`` when one could.
+
+    The schema must hold the JSON Schema rules, its references included, carry no number that is
+    not finite and not hold itself (:func:`check_form_schema_rules`), and some answer must meet each property's bounds:
+    no ``minimum``/``maximum`` (or their exclusive forms) that no value lies within, no
+    ``minLength`` above ``maxLength``, no ``minItems`` above ``maxItems``. Raises ``ValueError``
+    naming the property. A form delivered over a channel is held to these through
+    :func:`channel_form_fields`; this is the check for a form answered in the in-app inbox, whose
+    schema is not held to the channel subset.
+    """
+    check_form_schema_rules(schema)
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return
+    for name, prop in properties.items():
+        if isinstance(prop, dict):
+            _validate_answerable_bounds(str(name), prop)
 
 
 def validate_channel_form_schema(schema: dict) -> None:
@@ -496,26 +607,32 @@ def _answer_date(value: Any) -> datetime.date | None:
         return None
 
 
-def _date_bounds_mismatch(name: str, prop: dict[str, Any], the_date: datetime.date) -> str | None:
-    # The message for a date outside this property's min/max or on an unavailable day, else None.
+#: One broken date constraint: the date field, the constraint's kind and the bound it names.
+DateConstraintError = tuple[str, FormShapeKind, dict[str, Any]]
+
+
+def _date_bounds_error(prop: dict[str, Any], the_date: datetime.date) -> tuple[FormShapeKind, dict[str, Any]] | None:
+    # The kind and bound of a date outside this property's min/max or on an unavailable day, else None.
     minimum = prop.get("minDate")
     if isinstance(minimum, str) and the_date < datetime.date.fromisoformat(minimum):
-        return f"date for {name!r} must be on or after {minimum}"
+        return FormShapeKind.MIN_DATE, {"minDate": minimum}
     maximum = prop.get("maxDate")
     if isinstance(maximum, str) and the_date > datetime.date.fromisoformat(maximum):
-        return f"date for {name!r} must be on or before {maximum}"
+        return FormShapeKind.MAX_DATE, {"maxDate": maximum}
     unavailable = prop.get("unavailableDates")
     if isinstance(unavailable, list):
         weekday = FORM_WEEKDAYS[the_date.weekday()]
         iso = the_date.isoformat()
         for entry in unavailable:
             if isinstance(entry, str) and (entry == iso or entry.lower() == weekday):
-                return f"date for {name!r} ({iso}) is unavailable"
+                return FormShapeKind.DATE_UNAVAILABLE, {"date": iso}
     return None
 
 
-def _range_mismatch(key: str, prop: dict[str, Any], the_date: datetime.date, answer: dict[str, Any]) -> str | None:
-    # The message for a range END field whose end precedes its start or whose inclusive
+def _range_error(
+    prop: dict[str, Any], the_date: datetime.date, answer: dict[str, Any]
+) -> tuple[FormShapeKind, dict[str, Any]] | None:
+    # The kind and bound of a range END field whose end precedes its start or whose inclusive
     # day-count falls outside ``minDays``/``maxDays``, else None (no range, or within bounds).
     start_name = prop.get("rangeStart")
     if not (isinstance(start_name, str) and start_name):
@@ -524,30 +641,31 @@ def _range_mismatch(key: str, prop: dict[str, Any], the_date: datetime.date, ans
     if start_date is None:
         return None
     if the_date < start_date:
-        return f"date range end {key!r} must be on or after its start {start_name!r}"
+        return FormShapeKind.RANGE_ORDER, {"rangeStart": start_name}
     span = (the_date - start_date).days + 1
     minimum_days = prop.get("minDays")
-    if isinstance(minimum_days, int) and span < minimum_days:
-        return f"date range {key!r} spans {span} day(s), at least {minimum_days} required"
     maximum_days = prop.get("maxDays")
-    if isinstance(maximum_days, int) and span > maximum_days:
-        return f"date range {key!r} spans {span} day(s), at most {maximum_days} allowed"
-    return None
+    too_short = isinstance(minimum_days, int) and span < minimum_days
+    too_long = isinstance(maximum_days, int) and span > maximum_days
+    if not (too_short or too_long):
+        return None
+    bounds = {key: prop[key] for key in ("minDays", "maxDays") if isinstance(prop.get(key), int)}
+    return FormShapeKind.RANGE_SPAN, {**bounds, "days": span}
 
 
-def date_constraint_mismatch(schema: dict[str, Any], answer: dict[str, Any]) -> tuple[str, str] | None:
-    """Enforce the platform date constraints on a submitted ``answer``; return ``(message, field)`` or ``None``.
+def date_constraint_errors(schema: dict[str, Any], answer: dict[str, Any]) -> Iterator[DateConstraintError]:
+    """Yield every date field of ``answer`` that breaks a platform date constraint, in schema order.
 
     For each date property present in the answer: the value must fall within its
     ``minDate``/``maxDate`` (inclusive) and off its ``unavailableDates``. For a range END
     field (one declaring ``rangeStart``) the end must be on or after its start and the
-    inclusive day-count between them within ``minDays``/``maxDays``. The answer is read as
-    already type-valid (``jsonschema.validate`` ran first), so a value that is not a date is
-    ignored here. ``field`` is the offending date field so a surface can pin the error.
+    inclusive day-count between them within ``minDays``/``maxDays``. A value that is not a date
+    is left to the schema's own ``format`` check. Each item is ``(field, kind, params)`` — the
+    first broken constraint of that field, its :class:`FormShapeKind` and the bound it names.
     """
     properties = schema.get("properties")
     if not isinstance(properties, dict):
-        return None
+        return
     for name, prop in properties.items():
         if not isinstance(prop, dict) or not _prop_is_date(prop):
             continue
@@ -555,9 +673,20 @@ def date_constraint_mismatch(schema: dict[str, Any], answer: dict[str, Any]) -> 
         the_date = _answer_date(answer.get(key))
         if the_date is None:
             continue
-        message = _date_bounds_mismatch(key, prop, the_date) or _range_mismatch(key, prop, the_date, answer)
-        if message is not None:
-            return message, key
+        error = _date_bounds_error(prop, the_date) or _range_error(prop, the_date, answer)
+        if error is not None:
+            yield key, error[0], error[1]
+
+
+def date_constraint_mismatch(schema: dict[str, Any], answer: dict[str, Any]) -> tuple[str, str] | None:
+    """The first date field of ``answer`` that breaks a platform date constraint, as ``(message, field)``.
+
+    The first item of :func:`date_constraint_errors`, with the platform's plain sentence for its
+    kind (:func:`~tai42_skeleton.interactions.form_shape_words.shape_sentence`); ``None`` when every
+    date field holds.
+    """
+    for field, kind, params in date_constraint_errors(schema, answer):
+        return shape_sentence(kind, params), field
     return None
 
 

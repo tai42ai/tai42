@@ -366,7 +366,10 @@ async def test_get_form_ticket_renders_a_textarea_with_its_maximum(wired):
     resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
     body = bytes(resp.body).decode()
     # A multi-line control with its native length bounds and the maximum shown as a hint.
-    assert '<textarea data-field="notes" data-kind="string" rows="4" maxlength="500" minlength="10">' in body
+    assert (
+        '<textarea data-field="notes" data-kind="string" rows="4" maxlength="500" minlength="10" '
+        'data-msg-min_length="Enter at least 10 characters" data-msg-max_length="Enter at most 500 characters">'
+    ) in body
     assert '<small class="hint">up to 500 characters</small>' in body
 
 
@@ -617,3 +620,129 @@ def test_reactions_attr_carries_only_the_triggers_not_choices():
     assert "page_advanced" in attr
     assert "submitted" in attr
     assert "choices" not in attr
+
+
+# === the shapes caught on the page ===========================================
+
+
+def _page(properties: dict, *, required: list[str] | None = None, wording: dict | None = None) -> str:
+    from tai42_skeleton.routers.interactions.form_render import _render_form_page
+
+    schema: dict = {"type": "object", "properties": properties}
+    if required is not None:
+        schema["required"] = required
+    payload: dict = {"schema": schema}
+    if wording is not None:
+        payload["wording"] = wording
+    return _render_form_page(payload)
+
+
+def test_a_pattern_field_carries_its_regex_and_the_platform_sentence():
+    body = _page({"code": {"type": "string", "pattern": "^[0-9]{4}$"}})
+    assert 'data-pattern="^[0-9]{4}$"' in body
+    assert 'data-msg-pattern="This value is not in the expected form"' in body
+    # The native ``pattern`` attribute (anchored, a different regex dialect) is never drawn.
+    assert " pattern=" not in body
+
+
+def test_an_email_field_draws_the_email_control_and_the_platform_regex():
+    body = _page({"email": {"type": "string", "format": "email"}})
+    assert 'data-field="email" data-kind="string" type="email"' in body
+    assert 'data-format-pattern="^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"' in body
+    assert 'data-msg-format="Enter a valid email address"' in body
+
+
+def test_time_and_date_time_fields_carry_the_platform_regex():
+    body = _page({"at": {"type": "string", "format": "time"}, "stamp": {"type": "string", "format": "date-time"}})
+    assert 'data-format-pattern="^[0-9]{2}:[0-9]{2}(:[0-9]{2})?$"' in body
+    assert 'data-msg-format="Enter a time as HH:MM"' in body
+    assert 'data-msg-format="Enter a date and time with its time zone"' in body
+
+
+def test_a_number_field_draws_its_bounds_and_their_sentences():
+    body = _page({"qty": {"type": "integer", "minimum": 1, "maximum": 9}, "rate": {"type": "number"}})
+    assert 'data-field="qty" data-kind="number" type="number" step="1" min="1" max="9"' in body
+    assert 'data-msg-minimum="Enter a number of at least 1"' in body
+    assert 'data-msg-maximum="Enter a number of at most 9"' in body
+    assert 'data-msg-type="Enter a whole number"' in body
+    assert 'data-msg-type="Enter a number"' in body
+
+
+def test_an_integer_fields_drawn_bounds_are_whole_numbers():
+    # The browser steps an integer input from its ``min``, so a fractional minimum would refuse
+    # every whole number: the drawn bounds are the tightest whole numbers within the schema's.
+    body = _page({"qty": {"type": "integer", "minimum": 1.5, "maximum": 3.5}})
+    assert 'data-field="qty" data-kind="number" type="number" step="1" min="2" max="3"' in body
+
+
+def test_text_length_bounds_carry_their_sentences():
+    body = _page({"nick": {"type": "string", "minLength": 3, "maxLength": 9}})
+    assert 'data-msg-min_length="Enter at least 3 characters"' in body
+    assert 'data-msg-max_length="Enter at most 9 characters"' in body
+
+
+def test_a_date_field_carries_its_bound_sentences():
+    body = _page({"on": {"type": "string", "format": "date", "minDate": "2026-01-01", "maxDate": "2026-12-31"}})
+    assert 'data-msg-min_date="Choose a date on or after 2026-01-01"' in body
+    assert 'data-msg-max_date="Choose a date on or before 2026-12-31"' in body
+
+
+def test_a_range_end_carries_its_start_and_span():
+    body = _page(
+        {
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start", "minDays": 2, "maxDays": 5},
+        }
+    )
+    assert 'data-range-start="start" data-min-days="2" data-max-days="5"' in body
+    assert 'data-msg-range_order="The end date must be on or after the start date"' in body
+    assert 'data-msg-range_span="Choose between 2 and 5 days"' in body
+
+
+def test_the_callers_invalid_sentence_rides_the_field():
+    body = _page(
+        {"email": {"type": "string", "format": "email"}},
+        wording={"form": {"fields": {"email": {"invalid": "Enter your <work> address"}}}},
+    )
+    assert 'data-invalid="Enter your &lt;work&gt; address"' in body
+
+
+def test_a_pattern_and_a_format_each_keep_their_own_regex():
+    body = _page({"email": {"type": "string", "format": "email", "pattern": "@example\\.org$"}})
+    assert 'data-pattern="@example\\.org$"' in body
+    assert 'data-format-pattern="^[^@' in body
+
+
+def test_a_field_with_no_shape_carries_no_shape_attribute():
+    markup = _page({"name": {"type": "string"}, "agree": {"type": "boolean"}}).split("<script>")[0]
+    assert "data-pattern" not in markup
+    assert "data-format-pattern" not in markup
+    assert "data-msg-" not in markup
+    assert "data-invalid" not in markup
+
+
+def test_the_page_checks_every_shape_itself_rather_than_the_browsers_submit_validation():
+    # The browser's own submit-time validation would refuse a native shape (an email, a number
+    # bound) with its own bubble before the page's script runs; ``novalidate`` hands every check to
+    # the script, which shows the field's sentence (and the browser's bubble for a missing value).
+    assert '<form id="askform" novalidate ' in _page({"email": {"type": "string", "format": "email"}})
+
+
+def test_the_page_script_catches_shapes_and_pins_the_door_refusal():
+    from tai42_skeleton.routers.interactions.pages import _FORM_SUBMIT_SCRIPT
+
+    assert "function shapeError(" in _FORM_SUBMIT_SCRIPT
+    assert "new RegExp(" in _FORM_SUBMIT_SCRIPT
+    assert "data-range-start" in _FORM_SUBMIT_SCRIPT
+    assert "function pinFieldError(" in _FORM_SUBMIT_SCRIPT
+    assert "data.field" in _FORM_SUBMIT_SCRIPT
+
+
+def test_the_door_refusal_is_pinned_once_even_when_its_field_is_on_another_step():
+    # The refusal's sentence is pinned under the named field once; showing the step that holds
+    # the field keeps the pinned box (``show`` clears no field error), so the field reads it once.
+    from tai42_skeleton.routers.interactions.pages import _FORM_SUBMIT_SCRIPT
+
+    assert _FORM_SUBMIT_SCRIPT.count("pinFieldError(data.field, reason)") == 1
+    show_body = _FORM_SUBMIT_SCRIPT.split("function show(i) {", 1)[1].split("\n  function ", 1)[0]
+    assert "clearFieldErrors" not in show_body

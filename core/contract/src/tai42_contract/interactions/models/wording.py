@@ -58,24 +58,26 @@ class PageCopy(BaseModel):
 class FieldWording(BaseModel):
     """The caller's words for one form field's platform-drawn controls. Frozen, strict keys.
 
-    ``choice_label`` is the placeholder of the field's picker (its empty-state prompt). It is the
-    sender's own words, in the end-user's language; absent, the surface shows its own generic word.
-    A set value is non-blank; an empty object names nothing and is refused; an unknown key is
-    refused.
+    ``choice_label`` is the placeholder of the field's picker (its empty-state prompt); ``invalid``
+    is the sentence shown when the field's value does not have its declared shape. Each is the
+    sender's own words, in the end-user's language; absent, the surface shows its own generic word
+    (for ``invalid``, its own word for the failing shape). A set value is non-blank; an empty object
+    names nothing and is refused; an unknown key is refused.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     choice_label: str | None = None
+    invalid: str | None = None
 
-    @field_validator("choice_label")
+    @field_validator("choice_label", "invalid")
     @classmethod
     def _non_blank(cls, value: str | None, info: ValidationInfo) -> str | None:
         return _member_non_blank(value, info, "wording.form.fields entry")
 
     @model_validator(mode="after")
     def _at_least_one_set(self) -> FieldWording:
-        if self.choice_label is None:
+        if self.choice_label is None and self.invalid is None:
             raise ValueError("a form field wording must set at least one member")
         return self
 

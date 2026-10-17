@@ -14,6 +14,11 @@ disturbing a live ask; ``notify_user`` carries media (image parts) and a templat
 and the split recipient policy admits a freeform send to any recipient while fencing a
 template to the allowlist or a known contact.
 
+A shape no Flow control checks (``format: email``) stops the person inside the form: each leg
+fires the published Flow's own Footer or control action against the data endpoint, which
+refuses a bad value on the submit and on its own step only, runs a declared field reaction
+without judging shapes, and completes the form on good values.
+
 The Flow encryption provisioning door registers the public half of the stack's business key
 for the default or a named sending number, and refuses a caller with no key (401) or a
 non-admin key (403) before any Graph call.
@@ -54,6 +59,7 @@ from ._bridge_support import (
     wait_channel_send_count,
     wait_probe_record,
     wait_whatsapp_send,
+    whatsapp_flow_action_request,
     whatsapp_get_verify,
 )
 
@@ -113,8 +119,8 @@ _CONTROLS_PAGES = [
 # A ``rangeStart`` date pair the WhatsApp renderer must NOT merge into one range control, because
 # a SIBLING field's ``visibleWhen`` names the pair's END — merging would leave that sibling's
 # ``${form.end}`` reference reading the one range control's object value. The pair draws as two
-# separate date controls instead (the documented degrade): ``start`` (no constraints) a bare
-# DatePicker, ``end`` (its ``rangeStart`` is a constraint) a single-mode CalendarPicker.
+# separate single-mode CalendarPickers instead (the documented degrade), so its span is checked
+# by the data endpoint and the form publishes endpoint-driven.
 _RANGE_WITH_DEPENDENT_SIBLING_SCHEMA = {
     "type": "object",
     "properties": {
@@ -136,7 +142,7 @@ def _flow_control_names(flow_json: dict) -> list[str]:
         child["name"]
         for screen in flow_json["screens"]
         for child in screen["layout"]["children"]
-        if child.get("type") in {"TextInput", "Dropdown", "OptIn", "DatePicker"}
+        if child.get("type") in {"TextInput", "Dropdown", "OptIn", "CalendarPicker"}
     ]
 
 
@@ -689,6 +695,12 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
         # as the typed string, coerced only by the schema type (the integer below).
         flow_json = json.loads(bridge.fake_whatsapp.flows[0]["flow_json"])
         assert _text_input_by_name(flow_json, "contact")["input-type"] == "email"
+        # Every shape here is one Meta's controls check themselves (required, the integer's
+        # whole-number pattern, a calendar date), so the Flow stays the static navigate Flow.
+        assert "data_api_version" not in flow_json
+        assert bridge.fake_whatsapp.flows[0]["endpoint_uri"] is None
+        assert _text_input_by_name(flow_json, "amount")["pattern"] == "^-?[0-9]+$"
+        assert _components_of_type(flow_json, "Footer")[-1]["on-click-action"]["name"] == "complete"
         params = interactive["action"]["parameters"]
         assert params["flow_id"] == created
         flow_token = params["flow_token"]
@@ -906,13 +918,358 @@ async def test_form_range_pair_degrades_to_two_controls_when_a_sibling_depends_o
         await wait_whatsapp_send(bridge.fake_whatsapp, question)
         flow_json = json.loads(bridge.fake_whatsapp.flows[0]["flow_json"])
         # A sibling's visibleWhen names the end, so the pair is NOT merged: no range-mode control,
-        # and the two date fields draw as their own controls (the start a bare DatePicker, the end
-        # — its rangeStart a constraint — a single-mode CalendarPicker), so ${form.end} resolves.
+        # and the two date fields draw as their own single-mode calendars, so ${form.end} resolves;
+        # the split pair's span is the data endpoint's to check, so the Flow is endpoint-driven.
         assert [c for c in _components_of_type(flow_json, "CalendarPicker") if c.get("mode") == "range"] == []
-        assert _component_by_name(flow_json, "DatePicker", "start")
+        assert _component_by_name(flow_json, "CalendarPicker", "start")["mode"] == "single"
         assert _component_by_name(flow_json, "CalendarPicker", "end")["mode"] == "single"
+        assert flow_json["data_api_version"] == "3.0"
     finally:
         await cancel_and_join(ask_task)
+
+
+# A form carrying a shape no Meta control checks natively: ``email`` declares ``format: email``,
+# whose address shape only the platform's check at the data endpoint can catch inside the form.
+_SHAPED_FORM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string", "title": "Label"},
+        "email": {"type": "string", "format": "email", "title": "Email address"},
+    },
+    "required": ["label", "email"],
+}
+
+# The same shape on the first of two steps; the second step's ``note`` is required too, so a
+# step advance that checked more than its own step's fields would refuse the advance.
+_SHAPED_PAGED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string", "title": "Label"},
+        "email": {"type": "string", "format": "email", "title": "Email address"},
+        "note": {"type": "string", "title": "Note"},
+    },
+    "required": ["label", "email", "note"],
+}
+_SHAPED_PAGES = [{"title": "Contact", "fields": ["label", "email"]}, {"title": "Detail", "fields": ["note"]}]
+
+# A reacting form: changing ``tier`` runs the asker's reaction while ``email`` keeps its shape.
+_SHAPED_REACTING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string", "title": "Label"},
+        "tier": {"type": "string", "enum": ["gold", "silver"], "title": "Tier"},
+        "email": {"type": "string", "format": "email", "title": "Email address"},
+    },
+    "required": ["label", "tier", "email"],
+}
+
+# The prefix the ``e2e_form_reaction`` probe writes in front of the picked tier when it re-fills
+# ``label`` — kept in step with the probe's own constant.
+_REACTION_LABEL_PREFIX = "picked "
+
+# This channel's word for a broken ``format: email`` in the field, and the platform's sentence
+# the screen's error line names it with.
+_EMAIL_FIELD_WORD = "Use name@example.com"
+_EMAIL_SENTENCE = "Enter a valid email address"
+
+
+def _sent_flow(bridge: BridgeHarness, send: dict) -> tuple[dict, str, dict]:
+    """The published Flow JSON a form send opens, its flow token and the entry screen's data.
+
+    Asserts the Flow published endpoint-driven against the configured data endpoint (a shape
+    the endpoint checks makes it so) and that the send navigates to the entry screen.
+    """
+    parameters = send["payload"]["interactive"]["action"]["parameters"]
+    created = next(flow for flow in bridge.fake_whatsapp.flows if flow["id"] == parameters["flow_id"])
+    assert created["endpoint_uri"] == bridge.stack.config.env["CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI"]
+    flow_json = json.loads(created["flow_json"])
+    assert flow_json["data_api_version"] == "3.0"
+    assert parameters["flow_action"] == "navigate"
+    assert parameters["flow_action_payload"]["screen"] == "SCREEN_A"
+    return flow_json, parameters["flow_token"], parameters["flow_action_payload"]["data"]
+
+
+async def _complete_flow(
+    bridge: BridgeHarness, request: dict, wa_id: str, *, expected: dict[str, str], port: int | None = None
+) -> None:
+    """Fire the completing ``request``, check the completion params, and relay them as the nfm_reply."""
+    completed = await bridge.whatsapp_flow_exchange(request)
+    assert completed["screen"] == "SUCCESS", completed
+    params = completed["data"]["extension_message_response"]["params"]
+    assert params == {"flow_token": request["flow_token"], **expected}
+    reply = bridge.whatsapp_nfm_reply(phone_number_id=BRIDGE_WHATSAPP_PHONE_ID, wa_id=wa_id, response=params)
+    resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=port or bridge.stack.port_b)
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_shape_checked_form_refuses_a_bad_email_inside_the_form_then_completes(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-shape-q")
+    label = uniq("l7-shape-label")
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": _SHAPED_FORM_SCHEMA,
+                    "wording": {"form": {"fields": {"email": {"invalid": "Enter your full address"}}}},
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_json, flow_token, screen_data = _sent_flow(bridge, send)
+        assert _text_input_by_name(flow_json, "email")["error-message"] == "${data.email__err}"
+
+        # The person types "dhdhdh" and taps the published submit: the platform's check at the data
+        # endpoint keeps them on the screen, the field shows the caller's sentence and the screen
+        # the label line. The answer is the screen's whole data, each control as the person left it.
+        refused = await bridge.whatsapp_flow_exchange(
+            whatsapp_flow_action_request(
+                flow_json,
+                screen="SCREEN_A",
+                flow_token=flow_token,
+                form={"label": label, "email": "dhdhdh"},
+                data=screen_data,
+            )
+        )
+        assert refused == {
+            "screen": "SCREEN_A",
+            "data": {
+                **screen_data,
+                "label__init": label,
+                "email__init": "dhdhdh",
+                "label__err": "",
+                "email__err": "Enter your full address",
+                "error_message": "Email address: Enter your full address",
+            },
+        }
+        assert not ask_task.done()
+
+        # A valid address completes the Flow; Meta relays the completion params as the nfm_reply,
+        # which answers the ask with the typed dict.
+        await _complete_flow(
+            bridge,
+            whatsapp_flow_action_request(
+                flow_json,
+                screen="SCREEN_A",
+                flow_token=flow_token,
+                form={"label": label, "email": "alice@example.org"},
+                data=refused["data"],
+            ),
+            wa_id,
+            expected={"Label": label, "Email address": "alice@example.org"},
+        )
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        await cancel_and_join(ask_task)
+
+    assert resolved == {"label": label, "email": "alice@example.org"}
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_shape_checked_step_refuses_its_own_bad_email_and_advances_on_a_good_one(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-shape-step-q")
+    label = uniq("l7-shape-step-label")
+    note = uniq("l7-shape-step-note")
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": _SHAPED_PAGED_SCHEMA,
+                    "pages": _SHAPED_PAGES,
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_json, flow_token, screen_data = _sent_flow(bridge, send)
+
+        # The first step's published Footer advances the step: a bad email there is refused on the
+        # step itself with this channel's word, while the second step's empty required ``note`` is
+        # not this step's to check.
+        refused = await bridge.whatsapp_flow_exchange(
+            whatsapp_flow_action_request(
+                flow_json,
+                screen="SCREEN_A",
+                flow_token=flow_token,
+                form={"label": label, "email": "dhdhdh"},
+                data=screen_data,
+            )
+        )
+        assert refused == {
+            "screen": "SCREEN_A",
+            "data": {
+                **screen_data,
+                "label__init": label,
+                "email__init": "dhdhdh",
+                "label__err": "",
+                "email__err": _EMAIL_FIELD_WORD,
+                "error_message": f"Email address: {_EMAIL_SENTENCE}",
+            },
+        }
+
+        # A good address advances to the second step, carrying the first step's values on: the
+        # answer is exactly the data the second screen declares.
+        advanced = await bridge.whatsapp_flow_exchange(
+            whatsapp_flow_action_request(
+                flow_json,
+                screen="SCREEN_A",
+                flow_token=flow_token,
+                form={"label": label, "email": "alice@example.org"},
+                data=refused["data"],
+            )
+        )
+        assert advanced["screen"] == "SCREEN_B", advanced
+        second = next(entry for entry in flow_json["screens"] if entry["id"] == "SCREEN_B")
+        assert set(advanced["data"]) == set(second["data"])
+        assert advanced["data"]["label__val"] == label
+        assert advanced["data"]["email__val"] == "alice@example.org"
+        assert not ask_task.done()
+
+        # The second step's published submit completes the form with every step's values.
+        await _complete_flow(
+            bridge,
+            whatsapp_flow_action_request(
+                flow_json, screen="SCREEN_B", flow_token=flow_token, form={"note": note}, data=advanced["data"]
+            ),
+            wa_id,
+            expected={"Label": label, "Email address": "alice@example.org", "Note": note},
+        )
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        await cancel_and_join(ask_task)
+
+    assert resolved == {"label": label, "email": "alice@example.org", "note": note}
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "probe-tools",
+    "setting:seeded-access-control",
+    "store:redis",
+    "topology:replicas",
+)
+async def test_reacting_form_runs_its_field_reaction_over_a_bad_email_and_its_submit_refuses_it(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-shape-react-q")
+    wa_id = _fresh_wa_id()
+    caller_key = await bridge.mint_key(user_id=uniq("l7-shape-react-key"), scopes=["e2e-all"])
+
+    async with bridge.stack.mcp(port=bridge.stack.port_a, auth=caller_key) as mcp:
+        parked = await mcp.call_tool(
+            "e2e_reacting_form_ask",
+            {
+                "question": question,
+                "channel": "whatsapp",
+                "recipient": wa_id,
+                "schema": _SHAPED_REACTING_SCHEMA,
+                "reactions": {"field_changed": ["tier"]},
+                "expiry_seconds": 120.0,
+            },
+        )
+    interaction_id = parked.data["interaction_id"]
+    send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+    flow_json, flow_token, screen_data = _sent_flow(bridge, send)
+    assert flow_token == interaction_id
+
+    # Picking a tier fires the published ``tier`` control's own action: the reaction runs with the
+    # values filled so far — the bad email among them, since a field change is not a submit — and
+    # its update re-fills the label on the same screen. The answer is the screen's whole data, each
+    # control as the person left it and the update on top.
+    typed = {"label": "", "tier": "gold", "email": "dhdhdh"}
+    changed = await bridge.whatsapp_flow_exchange(
+        whatsapp_flow_action_request(
+            flow_json, screen="SCREEN_A", flow_token=flow_token, form=typed, data=screen_data, control="tier"
+        )
+    )
+    assert changed == {
+        "screen": "SCREEN_A",
+        "data": {
+            **screen_data,
+            "tier__init": "gold",
+            "email__init": "dhdhdh",
+            "label__init": f"{_REACTION_LABEL_PREFIX}gold",
+        },
+    }
+    reactions = await wait_probe_record(bridge, f"form_reaction:{interaction_id}")
+    assert [(entry["event"], entry["values"]) for entry in reactions] == [
+        ({"kind": "field_changed", "field": "tier"}, typed)
+    ]
+
+    # The submit still meets the email's shape: refused inside the form with this channel's word.
+    filled = {**typed, "label": f"{_REACTION_LABEL_PREFIX}gold"}
+    refused = await bridge.whatsapp_flow_exchange(
+        whatsapp_flow_action_request(
+            flow_json, screen="SCREEN_A", flow_token=flow_token, form=filled, data=changed["data"]
+        )
+    )
+    assert refused == {
+        "screen": "SCREEN_A",
+        "data": {
+            **changed["data"],
+            "label__err": "",
+            "tier__err": "",
+            "email__err": _EMAIL_FIELD_WORD,
+            "error_message": f"Email address: {_EMAIL_SENTENCE}",
+        },
+    }
+
+    # A good address completes the form, and the answer resumes the parked ask.
+    await _complete_flow(
+        bridge,
+        whatsapp_flow_action_request(
+            flow_json,
+            screen="SCREEN_A",
+            flow_token=flow_token,
+            form={**filled, "email": "alice@example.org"},
+            data=refused["data"],
+        ),
+        wa_id,
+        expected={"Label": f"{_REACTION_LABEL_PREFIX}gold", "Tier": "gold", "Email address": "alice@example.org"},
+    )
+    resumed = await wait_probe_record(bridge, f"async_resume:{interaction_id}", deadline=20.0)
+    assert [entry["branch"] for entry in resumed] == ["answer"]
+    assert json.loads(resumed[0]["value"]) == {
+        "label": f"{_REACTION_LABEL_PREFIX}gold",
+        "tier": "gold",
+        "email": "alice@example.org",
+    }
 
 
 @pytest.mark.needs(
@@ -1004,6 +1361,9 @@ async def test_form_open_label_is_reused_on_the_door_rejection_resend(
         resend = sends[-1]
         assert resend["payload"]["interactive"]["type"] == "flow"
         assert resend["payload"]["interactive"]["action"]["parameters"]["flow_cta"] == "Start now"
+        assert resend["payload"]["interactive"]["body"]["text"].endswith(
+            "Your last answer could not be accepted: amount: Enter a whole number"
+        )
     finally:
         await cancel_and_join(ask_task)
 
@@ -1221,8 +1581,8 @@ async def test_door_rejection_resend_carries_the_caller_rejected_sentence(
         assert resp.status_code == 200, resp.text
         sends = await wait_channel_send_count(bridge.fake_whatsapp, question, 2)
         body = sends[-1]["payload"]["interactive"]["body"]["text"]
-        assert "Not accepted — " in body
-        assert " — try again." in body
+        # The door's plain sentence rides led by the refused field's label.
+        assert "Not accepted — amount: Enter a whole number — try again." in body
         assert "{reason}" not in body
         assert "Your last answer could not be accepted:" not in body
     finally:

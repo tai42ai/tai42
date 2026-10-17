@@ -6,6 +6,10 @@ page shows beside its input fields; ``FormReactions`` declares WHEN an open form
 ``check_form_data``/``check_form_pages``/``check_form_reactions`` cross-check that data
 against the schema (prefilled values, per-send option lists, one-page-per-property
 coverage with unique display slots, and reaction triggers that name real fields/pages).
+``SHAPE_KEYWORDS``/``FormShapeKind``/``FormShapeError`` are the vocabulary of a field whose value
+breaks its declared shape. ``__proto__`` is the one name a form refuses for a top-level property
+or a display slot: JavaScript reads it as an object's prototype, so a form drawn in a browser
+cannot keep it.
 """
 
 from __future__ import annotations
@@ -56,7 +60,7 @@ class FormInputMode(StrEnum):
     It is a rendering hint, never a validator: the value is always the string typed
     (``numeric`` keeps ``"007"`` as ``"007"``, never a number; a value that may hold letters
     is ``text``), and the answer door still enforces only the schema's ``type``, ``pattern``
-    and date ``format``s. A channel draws the kind's control where it has one and degrades to
+    and string ``format``s. A channel draws the kind's control where it has one and degrades to
     a plain text field by its documented rule where it does not. The vocabulary is the open
     HTML ``inputmode`` set, so no one channel's naming enters the platform.
     """
@@ -74,6 +78,75 @@ class FormControl(StrEnum):
 
     CHIPS = "chips"
     TEXTAREA = "textarea"
+
+
+#: The form-schema keywords that declare a SHAPE a field's value can break — the JSON-Schema string,
+#: number and array bounds, ``pattern`` and ``format``, and the platform date constraints. A field
+#: carrying none of them (on itself or on an array's ``items``) has no shape to word an error for.
+SHAPE_KEYWORDS: tuple[str, ...] = (
+    "pattern",
+    "format",
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minItems",
+    "maxItems",
+    "minDate",
+    "maxDate",
+    "unavailableDates",
+    "rangeStart",
+    "minDays",
+    "maxDays",
+)
+
+
+class FormShapeKind(StrEnum):
+    """Which declared shape a form field's value breaks — the kind a surface words its error by.
+
+    ``required`` a demanded field is missing; ``type`` the value is not the declared type; the
+    keyword kinds name the JSON-Schema keyword broken; ``min_date``/``max_date``/
+    ``date_unavailable``/``range_order``/``range_span`` name the platform date constraint broken;
+    ``other`` is any other keyword (its name rides the error's ``params["keyword"]``).
+    """
+
+    REQUIRED = "required"
+    TYPE = "type"
+    PATTERN = "pattern"
+    FORMAT = "format"
+    MIN_LENGTH = "min_length"
+    MAX_LENGTH = "max_length"
+    MINIMUM = "minimum"
+    MAXIMUM = "maximum"
+    MIN_ITEMS = "min_items"
+    MAX_ITEMS = "max_items"
+    ENUM = "enum"
+    MIN_DATE = "min_date"
+    MAX_DATE = "max_date"
+    DATE_UNAVAILABLE = "date_unavailable"
+    RANGE_ORDER = "range_order"
+    RANGE_SPAN = "range_span"
+    OTHER = "other"
+
+
+class FormShapeError(BaseModel):
+    """One form field whose value breaks its declared shape. Frozen.
+
+    ``field`` is the top-level property name; ``kind`` the shape broken; ``params`` the bound the
+    shape names (``{"minimum": 1}``, ``{"format": "email"}``, ``{"keyword": "multipleOf"}`` for
+    ``other``); ``message`` the platform's plain sentence for it. A surface shows the caller's
+    ``wording.form.fields[field].invalid`` when set, else its own word for ``kind`` or ``message``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    field: str
+    kind: FormShapeKind
+    params: dict[str, Any]
+    message: str
 
 
 class FormOption(BaseModel):
@@ -323,6 +396,25 @@ def _schema_properties(schema: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
+# The one form property and display slot name refused: assigning it on a JavaScript object sets the
+# object's prototype instead of a key, so a form drawn in a browser cannot keep it.
+_REFUSED_FORM_NAME = "__proto__"
+_REFUSED_FORM_NAME_REASON = (
+    "JavaScript reads it as an object's prototype, so a form drawn in a browser cannot keep a {what} by that name"
+)
+
+
+def check_form_property_names(schema: dict[str, Any]) -> None:
+    """Refuse a form whose top-level ``properties`` declares the name ``__proto__``.
+
+    Raises ``ValueError`` naming the property and why no browser-drawn form can keep it.
+    """
+    properties = schema.get("properties")
+    if isinstance(properties, dict) and _REFUSED_FORM_NAME in properties:
+        reason = _REFUSED_FORM_NAME_REASON.format(what="field")
+        raise ValueError(f"form schema property {_REFUSED_FORM_NAME!r} is not an allowed name: {reason}")
+
+
 def _form_option_values(prop: dict[str, Any], options: list[FormOption] | None) -> list[str] | None:
     # The allowed string set for a prefilled value: the per-send option values when a
     # per-send list is given (it replaces the enum for this send), else the property's
@@ -461,23 +553,34 @@ def _form_property_draws_choice(prop: dict[str, Any], named_in_options: bool) ->
     )
 
 
+def _form_property_has_shape(prop: dict[str, Any]) -> bool:
+    # Whether a form property declares a shape its value can break: any of :data:`SHAPE_KEYWORDS`
+    # on the property itself or on an array's ``items``.
+    items = prop.get("items")
+    item_keys: set[str] = set(cast("dict[str, Any]", items)) if isinstance(items, dict) else set()
+    return any(key in prop or key in item_keys for key in SHAPE_KEYWORDS)
+
+
 def check_form_wording_fields(schema: dict[str, Any], data: FormData | None, fields: dict[str, FieldWording]) -> None:
     """Validate a form's per-field ``wording`` keys against its schema and per-send data.
 
-    Every key of ``wording.form.fields`` must name a declared top-level property that DRAWS a
-    choice list — a string with an ``enum`` or named in the per-send ``data.options``, or an array
-    of strings with an ``items.enum`` or named in ``data.options`` — since a per-field word labels
-    the field's picker and a field with no picker has nothing to label. Raises ``ValueError``
-    naming the offending property.
+    Every key of ``wording.form.fields`` must name a declared top-level property, and each set
+    member must have something to word on it: ``choice_label`` labels the field's picker, so the
+    property must DRAW a choice list — a string with an ``enum`` or named in the per-send
+    ``data.options``, or an array of strings with an ``items.enum`` or named in ``data.options``;
+    ``invalid`` words a value that breaks the field's declared shape, so the property must carry at
+    least one of :data:`SHAPE_KEYWORDS`. Raises ``ValueError`` naming the offending property.
     """
     props = _schema_properties(schema)
     option_names: set[str] = set(data.options) if data is not None else set()
-    for name in fields:
+    for name, wording in fields.items():
         prop = props.get(name)
         if prop is None:
             raise ValueError(f"wording.form.fields names {name!r}, which is not a declared property")
-        if not _form_property_draws_choice(prop, name in option_names):
+        if wording.choice_label is not None and not _form_property_draws_choice(prop, name in option_names):
             raise ValueError(f"wording.form.fields names {name!r}, which draws no choice list")
+        if wording.invalid is not None and not _form_property_has_shape(prop):
+            raise ValueError(f"wording.form.fields names {name!r}, which declares no shape to break")
 
 
 def check_form_pages(schema: dict[str, Any], pages: list[FormPage]) -> None:
@@ -486,8 +589,8 @@ def check_form_pages(schema: dict[str, Any], pages: list[FormPage]) -> None:
     Every top-level property must appear exactly once across the INPUT pages (a review
     page carries no input fields and so contributes none), and every named field must be
     a declared property. A display ``slot`` name is unique across all pages (two blocks
-    cannot fill the same slot). Raises ``ValueError`` naming the missing / duplicate /
-    unknown field or the repeated slot.
+    cannot fill the same slot) and is not ``__proto__``. Raises ``ValueError`` naming the
+    missing / duplicate / unknown field or the repeated or refused slot.
     """
     declared = list(_schema_properties(schema))
     seen: list[str] = []
@@ -501,11 +604,19 @@ def check_form_pages(schema: dict[str, Any], pages: list[FormPage]) -> None:
     missing = [name for name in declared if name not in seen]
     if missing:
         raise ValueError(f"form pages omit properties: {missing}")
+    _check_display_slots(pages)
+
+
+def _check_display_slots(pages: list[FormPage]) -> None:
+    # Each display slot name is unique across the pages and is not the refused name.
     slots: list[str] = []
     for page in pages:
         for block in page.display:
             if block.slot is None:
                 continue
+            if block.slot == _REFUSED_FORM_NAME:
+                reason = _REFUSED_FORM_NAME_REASON.format(what="slot")
+                raise ValueError(f"form display slot {block.slot!r} is not an allowed name: {reason}")
             if block.slot in slots:
                 raise ValueError(f"form display slot {block.slot!r} appears on more than one block")
             slots.append(block.slot)
