@@ -146,8 +146,9 @@ an endpoint-driven Flow whose controls call this plugin's encrypted Flow **data
 endpoint** (`/api/channels/whatsapp/flow-data`, which answers the encrypted reply as a
 `text/plain` body); it needs the business key material
 (`CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY` + `CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI`, and the
-public key registered for the sending number) and refuses loudly without it. See the
-plugin README for the provisioning steps.
+public key registered for the sending number through the admin-only
+`POST /api/channels/whatsapp/flow-encryption` route, which derives it from the private
+key) and refuses loudly without it. See the plugin README for the provisioning steps.
 
 Each schema property name may use any character, while a Flow component name must be
 an identifier (`[A-Za-z_][A-Za-z0-9_]*`). The channel maps each property to a unique

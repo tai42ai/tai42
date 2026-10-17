@@ -13,6 +13,10 @@ pending question (or a stale id) is a non-answer that bridges the reply title wi
 disturbing a live ask; ``notify_user`` carries media (image parts) and a template send;
 and the split recipient policy admits a freeform send to any recipient while fencing a
 template to the allowlist or a known contact.
+
+The Flow encryption provisioning door registers the public half of the stack's business key
+for the default or a named sending number, and refuses a caller with no key (401) or a
+non-admin key (403) before any Graph call.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from collections.abc import Callable
 
 import pytest
 
+from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.manifests import (
     BRIDGE_TWILIO_CLIENT,
     BRIDGE_WHATSAPP_CLIENT,
@@ -1473,3 +1478,56 @@ async def test_template_to_known_contact_recipient_succeeds(bridge: BridgeHarnes
     assert len(sends) == 1
     assert sends[0]["type"] == "template"
     assert sends[0]["to"] == wa_id
+
+
+_FLOW_ENCRYPTION_PATH = "/api/channels/whatsapp/flow-encryption"
+
+
+@pytest.mark.needs("kind:channels:whatsapp", "setting:seeded-access-control")
+async def test_flow_encryption_registers_the_public_key_for_the_default_number(bridge: BridgeHarness) -> None:
+    data = await bridge.api().post(_FLOW_ENCRYPTION_PATH, json={})
+
+    assert data["phone_number_id"] == BRIDGE_WHATSAPP_PHONE_ID
+    assert "BEGIN PUBLIC KEY" in data["public_key"]
+    assert bridge.fake_whatsapp.public_keys == [
+        {
+            "token": "e2e-whatsapp-access-token",
+            "phone_number_id": BRIDGE_WHATSAPP_PHONE_ID,
+            "business_public_key": data["public_key"],
+        }
+    ]
+
+
+@pytest.mark.needs("kind:channels:whatsapp", "setting:seeded-access-control")
+async def test_flow_encryption_registers_for_a_named_number(bridge: BridgeHarness) -> None:
+    other = _fresh_phone_id()
+
+    data = await bridge.api().post(_FLOW_ENCRYPTION_PATH, json={"phone_number_id": other})
+
+    assert data["phone_number_id"] == other
+    assert [record["phone_number_id"] for record in bridge.fake_whatsapp.public_keys] == [other]
+    assert bridge.fake_whatsapp.public_keys[0]["business_public_key"] == data["public_key"]
+
+
+@pytest.mark.needs("kind:channels:whatsapp", "setting:seeded-access-control")
+async def test_flow_encryption_refuses_a_caller_without_a_key(bridge: BridgeHarness) -> None:
+    anon = ApiClient(bridge.stack.origin(bridge.stack.port_b))
+
+    refused = await anon.request_raw("POST", _FLOW_ENCRYPTION_PATH, json={})
+
+    assert refused.status_code == 401, refused.text
+    assert refused.json() == {"error": "Authentication required"}
+    assert bridge.fake_whatsapp.public_keys == []
+
+
+@pytest.mark.needs("kind:channels:whatsapp", "setting:seeded-access-control")
+async def test_flow_encryption_refuses_a_non_admin_key(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
+    # The scoped key reaches every route through the path-scope table but is not an
+    # administrator, so the admin-only fence refuses it.
+    scoped = await bridge.mint_key(user_id=uniq("flow-enc-scoped"), scopes=["e2e-all"])
+
+    refused = await bridge.api(token=scoped).request_raw("POST", _FLOW_ENCRYPTION_PATH, json={})
+
+    assert refused.status_code == 403, refused.text
+    assert refused.json() == {"error": "Forbidden"}
+    assert bridge.fake_whatsapp.public_keys == []

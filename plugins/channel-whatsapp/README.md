@@ -230,10 +230,25 @@ sending number (the plugin never mutates Meta configuration at startup):
    never leaves the environment; a fork configures its own.
 3. Set `CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI` to the public URL of the
    `/api/channels/whatsapp/flow-data` route.
-4. Register the **public** key for the sending number — run
-   `tai42_channel_whatsapp.provisioning.provision_flow_encryption()`, which
-   derives the public key from the configured private key and registers it via
-   the Graph API (re-run after a key rotation).
+4. Register the **public** key for the sending number:
+   `POST {public base URL}/api/channels/whatsapp/flow-encryption` with the
+   platform **admin** API key, body `{}` for
+   `CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID` or `{"phone_number_id": "<id>"}`
+   for another number the deployment sends from — once per sending number:
+
+   ```bash
+   curl -X POST "{public base URL}/api/channels/whatsapp/flow-encryption" \
+     -H 'Authorization: Bearer <admin key>' \
+     -H 'Content-Type: application/json' \
+     -d '{}'
+   ```
+
+   The route derives the public key from the configured private key and
+   registers it through the Graph API; it answers
+   `{"data": {"phone_number_id": …, "public_key": …}}`. A missing private key or
+   sending number is a `501` naming the setting, an unreadable private key a `501`
+   saying so; a Graph refusal is a `502` carrying Meta's error. Re-run after a key
+   rotation.
 5. Ensure the endpoint is publicly reachable and healthy (Meta `ping`s it).
 
 The data endpoint authenticates each request with `X-Hub-Signature-256` over the
@@ -399,6 +414,10 @@ status is acknowledged, never retried.
   HMAC seams.
 - The unauthenticated route bounds its body read (1 MiB → 413) before any
   signature work.
+- The Flow encryption provisioning route
+  (`POST /api/channels/whatsapp/flow-encryption`) is authenticated and
+  admin-only (the platform's `fenced` route class). It reads the private key only
+  to derive the public key, and never returns or logs it.
 
 ## Limits
 

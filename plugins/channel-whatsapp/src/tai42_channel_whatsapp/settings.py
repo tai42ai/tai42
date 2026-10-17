@@ -41,7 +41,7 @@ class WhatsAppSettings(TaiBaseSettings):
     # The business RSA-2048 PRIVATE key (PEM), held as a secret: the data endpoint decrypts
     # each reacting-form request's AES key with it. Required only to publish/serve a REACTING
     # form; a static form never touches it. The matching PUBLIC key must be registered for the
-    # sending number (operator step; see the README and `provision_flow_encryption`).
+    # sending number (operator step: the admin-only `/flow-encryption` route; see the README).
     flow_private_key: SecretStr | None = None
     # Optional passphrase protecting `flow_private_key` (PEM encrypted with a passphrase).
     flow_private_key_passphrase: SecretStr | None = None

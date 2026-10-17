@@ -169,11 +169,21 @@ def child_env(stack: TaiStack, tmpdir: str, cwd_override: str | None) -> dict[st
     return env
 
 
+def _env_file_literal(value: str) -> str:
+    """``value`` as a double-quoted ``.env`` literal that ``dotenv_values`` reads back exactly.
+
+    Backslash is escaped first, then the double quote and the line breaks, so a multi-line
+    value (a PEM key) stays one assignment.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+    return f'"{escaped}"'
+
+
 def render_env_file(stack: TaiStack) -> None:
     """Render the feature env map to ``<config>/.env`` so the admin reload
     path (which re-reads ``.env``) sees the same values the process env
     does. TMPDIR is deliberately NOT written here — it is per-process, which
     is how REPLICAS get per-replica metrics dirs from one shared .env."""
     merged = {**stack.config.env, **dynamic_env(stack)}
-    lines = [f"{key}={value}" for key, value in sorted(merged.items())]
+    lines = [f"{key}={_env_file_literal(value)}" for key, value in sorted(merged.items())]
     (stack._config_dir / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")

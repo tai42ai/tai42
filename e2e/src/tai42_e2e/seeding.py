@@ -239,7 +239,9 @@ def seed_bridge_authz(infra: Infra, resources: StackResources) -> str:
 
     The channel inbound/status doors carry their OWN signature auth (Twilio HMAC, Meta
     X-Hub-Signature-256), so they must resolve to ``public`` or the access-control guard
-    would 403 them before the plugin's signature check runs. Every other path maps to the
+    would 403 them before the plugin's signature check runs. The authed channel doors under
+    that public family (the web entry-gate management doors, the WhatsApp Flow encryption
+    door) are re-pinned to ``e2e-all``. Every other path maps to the
     ``e2e-all`` scope the root satisfies and the tests mint keys against; ``/metrics`` (an
     authed route the operator opens) is pinned public, and the readiness probes are public by
     their own declaration so boot's readiness wait is not itself denied. Returns the raw root
@@ -258,6 +260,9 @@ def seed_bridge_authz(infra: Infra, resources: StackResources) -> str:
             # across tiers, so the path resolving to BOTH ids stays protected — an unauthed
             # caller is refused, the operator (root) is admitted.
             ("/bridge-web-gates", "e2e-all", r"^/api/channels/web/gates(?:/.*)?$"),
+            # The WhatsApp Flow encryption provisioning door is authed and admin-only: pinned to
+            # e2e-all for the same reason, so an unauthed caller is refused before the fence.
+            ("/bridge-whatsapp-flow-encryption", "e2e-all", r"^/api/channels/whatsapp/flow-encryption$"),
             # The readiness probes, the interactions callback and the served-media doors need
             # no row: all register ``authed=False``, so the verifier's declared-public tier
             # publics them straight from the route registration, above the route table.
