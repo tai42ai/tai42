@@ -28,6 +28,7 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import (
     FieldChangedEvent,
     FormReactionEvent,
@@ -57,6 +58,7 @@ from tai42_channel_whatsapp.flows import (
     _screen_id,
     build_flow_data,
     component_names,
+    data_source_rows,
     payload_labels,
     slot_datanames,
 )
@@ -95,8 +97,9 @@ async def whatsapp_flow_data(request: Request) -> Response:
     The order is load-bearing: bounded body read (413) → ``X-Hub-Signature-256`` (432 on
     mismatch; nothing trusted before it) → decrypt (421) → dispatch → encrypt. An unset app
     secret or private key is a loud misconfiguration (500), never a skipped check. A
-    no-longer-valid flow token is 427; anything the react facet raises becomes the vendor's
-    encrypted error surface, never a 5xx that would have Meta retry a poison reaction forever.
+    no-longer-valid flow token is 427; anything the react facet raises — or a reaction update this
+    channel cannot render — becomes the vendor's encrypted error surface, never a 5xx that would have
+    Meta retry a poison reaction forever.
     """
     try:
         raw = await read_bounded_body(request, _MAX_BODY_BYTES)
@@ -192,7 +195,13 @@ async def _handle_data_exchange(payload: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         logger.exception("whatsapp flow reaction for %s failed; surfacing the vendor error", flow_token)
         return _error_response(screen)
-    return _translate_update(event, update or {}, screen, flow_token, schema, pages, values, options, partial)
+    try:
+        return _translate_update(event, update or {}, screen, flow_token, schema, pages, values, options, partial)
+    except ChannelInputError:
+        # A reaction result this channel cannot render (e.g. an option second line past Meta's cap)
+        # is the same class as a failed reaction: logged loudly, answered with the vendor error.
+        logger.exception("whatsapp flow reaction for %s returned an update WhatsApp cannot render", flow_token)
+        return _error_response(screen)
 
 
 def _build_event(data: dict[str, Any]) -> FormReactionEvent | None:
@@ -291,9 +300,9 @@ def _update_data(
         # ``__init`` is the one-element list the ChipsSelector expects — matching the initial send.
         out[f"{names[name]}__init"] = [shaped] if _chips_single_pick(prop) else shaped
     for name, option_list in (update.get("options") or {}).items():
-        out[f"{names[name]}__ds"] = [
-            {"id": option["value"], "title": option.get("label") or option["value"]} for option in option_list
-        ]
+        prop = properties.get(name)
+        prop = prop if isinstance(prop, dict) else {}
+        out[f"{names[name]}__ds"] = data_source_rows(name, prop, option_list)
     for slot, value in (update.get("display") or {}).items():
         if slot in slots:
             out[slots[slot]] = value

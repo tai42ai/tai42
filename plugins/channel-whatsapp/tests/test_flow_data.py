@@ -175,6 +175,106 @@ async def test_field_changed_routes_to_react_and_applies_the_update(
     assert out["data"]["tier__ds"] == [{"id": "g", "title": "Gold"}]
 
 
+async def test_reaction_option_second_line_rides_the_data_source(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # A reaction that replaces a field's choices mid-form carries each option's second line into
+    # the data-source ``description`` exactly as the publish path does.
+    await _seed(fake_redis)
+    stub = stub_app.interactions
+    stub.react_result = {
+        "options": {"tier": [{"value": "g", "label": "Gold", "description": "2 hours, 50"}, {"value": "s"}]}
+    }
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "field_changed", "tai42_field": "tier", "tier": "g", "qty": "5"},
+    }
+    request, aes_key, iv = _request(payload)
+    response = await flow_handler(request)
+
+    out = _decrypt_response(response, aes_key, iv)
+    assert out["data"]["tier__ds"] == [
+        {"id": "g", "title": "Gold", "description": "2 hours, 50"},
+        {"id": "s", "title": "s"},
+    ]
+
+
+async def test_reaction_option_second_line_folds_onto_a_chip_title(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # A reaction that replaces a chips field's choices folds each option's second line onto the chip
+    # title (a ChipsSelector item has no description slot) — the row carries no ``description``.
+    schema = {
+        "type": "object",
+        "properties": {
+            "tier": {"type": "string", "enum": ["g", "s", "b"], "control": "chips"},
+            "qty": {"type": "integer"},
+        },
+    }
+    await cache_reaction_form(_TOKEN, schema, None, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    stub_app.interactions.react_result = {
+        "options": {"tier": [{"value": "g", "label": "Gold", "description": "2 hours, 50"}, {"value": "s"}]}
+    }
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "field_changed", "tai42_field": "qty", "qty": "5"},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["tier__ds"] == [{"id": "g", "title": "Gold \u2014 2 hours, 50"}, {"id": "s", "title": "s"}]
+
+
+async def test_reaction_option_description_over_cap_surfaces_the_vendor_error(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, caplog
+):
+    # A reaction whose replaced option carries a second line past Meta's 300-character cap cannot be
+    # rendered: the open screen gets the vendor error surface and the failure is logged — never a 5xx.
+    await _seed(fake_redis)
+    stub_app.interactions.react_result = {
+        "options": {"tier": [{"value": "g", "label": "Gold", "description": "d" * 301}]}
+    }
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "field_changed", "tai42_field": "tier", "tier": "g", "qty": "5"},
+    }
+    request, aes_key, iv = _request(payload)
+    response = await flow_handler(request)
+    assert response.status_code == 200
+    out = _decrypt_response(response, aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert "could not be updated" in out["data"]["error_message"]
+    assert any(record.exc_info and _TOKEN in record.getMessage() for record in caplog.records)
+
+
+async def test_reaction_chips_option_list_past_meta_max_surfaces_the_vendor_error(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, caplog
+):
+    # A reaction that replaces a chips field's choices with 21 options cannot be drawn by a
+    # ChipsSelector: the open screen gets the vendor error surface and the failure is logged.
+    await cache_reaction_form(_TOKEN, _CHIPS_SCHEMA, None, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    stub_app.interactions.react_result = {"options": {"pick": [{"value": f"v{n}"} for n in range(21)]}}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "field_changed", "tai42_field": "note", "note": "hi"},
+    }
+    request, aes_key, iv = _request(payload)
+    response = await flow_handler(request)
+    assert response.status_code == 200
+    out = _decrypt_response(response, aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert "could not be updated" in out["data"]["error_message"]
+    assert "pick__ds" not in out["data"]
+    assert any(record.exc_info and _TOKEN in record.getMessage() for record in caplog.records)
+
+
 async def test_submit_with_no_errors_completes_the_flow(
     flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
 ):

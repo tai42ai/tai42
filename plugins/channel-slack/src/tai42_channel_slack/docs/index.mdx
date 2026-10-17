@@ -103,6 +103,12 @@ reactions. A string field may name an `inputMode` for the kind of text it collec
 `email` draws an email text input and `url` a url text input. A property may also name
 a `control`: `chips` on a choice, `textarea` on a `string`.
 
+A field may carry a **second line** of text (its schema `description`), drawn as the
+input block's hint under the control; a per-send option may carry one too (its
+`description`), drawn as the option's description under its label. Each is capped at
+Slack's own limit (an option description at 75 characters) and an over-cap value is
+refused loudly at delivery, never truncated.
+
 Slack-specific behaviour (the documented degrades):
 
 - **Dates** carry no drawable bounds — Slack's date picker has no min/max/disabled

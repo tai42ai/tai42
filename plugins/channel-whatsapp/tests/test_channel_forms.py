@@ -194,6 +194,72 @@ async def test_form_with_pages_and_data_publishes_once_and_carries_data_per_send
     assert action_payload["data"]["tier__ds"] == [{"id": "g", "title": "Gold"}]
 
 
+async def test_form_send_carries_a_per_send_option_second_line_in_the_data_source(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.interactions.models import FormData, FormOption
+
+    # A per-send option's second line (``description``) reaches the send's data-source item, so
+    # the choice control draws it under the option title.
+    schema = {"type": "object", "properties": {"tier": {"type": "string", "enum": ["g", "s"]}}}
+    data = FormData(
+        values={},
+        options={"tier": [FormOption(value="g", label="Gold", description="2-3 days"), FormOption(value="s")]},
+    )
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-desc"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.ONE"))
+
+    await WhatsAppChannel().deliver(_form_delivery(schema=schema, data=data))
+
+    action_payload = fake_httpx.calls[2]["json"]["interactive"]["action"]["parameters"]["flow_action_payload"]
+    assert action_payload["data"]["tier__ds"] == [
+        {"id": "g", "title": "Gold", "description": "2-3 days"},
+        {"id": "s", "title": "s"},
+    ]
+
+
+async def test_form_send_folds_a_chip_option_second_line_onto_the_title(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.interactions.models import FormData, FormOption
+
+    # On a chip grid the option's second line is folded onto the chip title (a ChipsSelector item has
+    # no description slot), so the send's data-source row carries no ``description``.
+    schema = {"type": "object", "properties": {"tier": {"type": "string", "enum": ["g", "s", "b"], "control": "chips"}}}
+    data = FormData(
+        values={},
+        options={"tier": [FormOption(value="g", label="Gold", description="2-3 days"), FormOption(value="s")]},
+    )
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-chips"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.ONE"))
+
+    await WhatsAppChannel().deliver(_form_delivery(schema=schema, data=data))
+
+    action_payload = fake_httpx.calls[2]["json"]["interactive"]["action"]["parameters"]["flow_action_payload"]
+    assert action_payload["data"]["tier__ds"] == [
+        {"id": "g", "title": "Gold \u2014 2-3 days"},
+        {"id": "s", "title": "s"},
+    ]
+
+
+async def test_form_send_with_a_chips_option_list_past_meta_max_is_refused_before_any_flow_work(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.interactions.models import FormData, FormOption
+
+    # A chips field (3-entry enum, drawn as a ChipsSelector) sent with 21 per-send options is refused
+    # loudly before any Flow is created, published or sent.
+    schema = {"type": "object", "properties": {"tier": {"type": "string", "enum": ["g", "s", "b"], "control": "chips"}}}
+    data = FormData(values={}, options={"tier": [FormOption(value=f"v{n}") for n in range(21)]})
+    with pytest.raises(ChannelInputError, match=r"'tier'.*21 per-send options.*2\.\.20"):
+        await WhatsAppChannel().deliver(_form_delivery(schema=schema, data=data))
+    assert fake_httpx.calls == []
+
+
 async def test_form_per_send_option_on_non_string_field_raises_before_any_send(
     waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):

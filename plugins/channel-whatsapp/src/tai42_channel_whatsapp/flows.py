@@ -91,13 +91,14 @@ from typing import Any
 
 from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import FormReactionEventKind
+from tai42_kit.interactions import RADIO_OPTION_THRESHOLD
 
 from tai42_channel_whatsapp.flows_components import (
     _RESERVED_PROPERTY,
-    RADIO_OPTION_THRESHOLD,
     _calendar_range_component,
     _display_component_list,
     _dynamic_component,
+    _field_control,
     _field_data_decls,
     _forward_field_data,
     _range_value_type_decl,
@@ -107,6 +108,7 @@ from tai42_channel_whatsapp.flows_components import (
     payload_labels,
 )
 from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages
+from tai42_channel_whatsapp.flows_second_line import data_source_rows, field_caption, range_captions
 from tai42_channel_whatsapp.flows_send_data import build_flow_data
 from tai42_channel_whatsapp.flows_visibility import emit_field_variants, form_ref, screen_field_variants
 
@@ -117,6 +119,7 @@ __all__ = [
     "build_flow_data",
     "build_form_flow",
     "component_names",
+    "data_source_rows",
     "payload_labels",
     "slot_datanames",
 ]
@@ -244,8 +247,10 @@ def _validate_form_properties(
             and (not isinstance(enum, list) or not enum or not all(isinstance(item, str) for item in enum))
         ):
             raise ChannelInputError(f"form property {name!r}: a string enum must be a non-empty list of strings")
-        # Validate the subset up front (raises naming the property on an unsupported type).
-        _dynamic_component(name, prop, name in required, option_fields, names)
+        # Validate the subset up front (raises naming the property on an unsupported type). The bare
+        # control is built: a field's second line and its Meta cap are checked where the field is
+        # drawn, since a merged range end draws it as a caption rather than as helper text.
+        _field_control(name, prop, name in required, option_fields, names)
 
 
 @dataclass(frozen=True)
@@ -595,16 +600,18 @@ def _build_form_screen(
                 component = _attach_field_reaction(
                     component, trigger_field, this_fields, earlier_fields, spec.names, variants, spec.range_merges
                 )
-            components.extend(emit_field_variants(component, variants[name]))
+            captions = range_captions(name, spec.properties[name], end, spec.properties[end])
+            components.extend(emit_field_variants(component, variants[name], captions))
             continue
         component = _dynamic_component(
             name, spec.properties[name], name in spec.required, spec.option_fields, spec.names
         )
+        caption = field_caption(name, component, spec.properties[name])
         if name in spec.field_changed:
             component = _attach_field_reaction(
                 component, name, this_fields, earlier_fields, spec.names, variants, spec.range_merges
             )
-        components.extend(emit_field_variants(component, variants[name]))
+        components.extend(emit_field_variants(component, variants[name], caption))
     readback = _review_readback(spec) if page.get("kind") == "review" else []
     footer = (
         _terminal_footer(this_fields, earlier_fields, spec, variants, button_label)
@@ -651,7 +658,7 @@ def _reaction_sets(
             prop = properties.get(name)
             if not isinstance(prop, dict):
                 raise ChannelInputError(f"form reaction field_changed names unknown property {name!r}")
-            ctype = _dynamic_component(name, prop, False, option_fields, names)["type"]
+            ctype = _field_control(name, prop, False, option_fields, names)["type"]
             if ctype not in (
                 "Dropdown",
                 "RadioButtonsGroup",

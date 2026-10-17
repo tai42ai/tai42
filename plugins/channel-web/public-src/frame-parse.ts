@@ -270,15 +270,24 @@ export function clientMessageIdOf(raw: unknown): string | null | undefined {
   return raw === undefined ? null : undefined;
 }
 
-/** One per-send form option: a non-blank string `value` and an optional non-blank
- * `label` (absent → `null`). `undefined` on anything off-shape. */
+/** An optional option member that a JSON dump may carry as `null`: `null` and absent
+ * both mean absent (`null`); otherwise the {@link secondaryLabelOf} rule. */
+function optionalMemberOf(raw: unknown): string | null | undefined {
+  return raw === null ? null : secondaryLabelOf(raw);
+}
+
+/** One per-send form option: a non-blank string `value`, an optional non-blank
+ * `label` (absent or `null` → `null`) and an optional non-blank second-line
+ * `description` (absent or `null` → not carried). `undefined` on anything off-shape. */
 function formOptionOf(raw: unknown): FormOptionData | undefined {
   if (!isRecord(raw)) return undefined;
   const { value } = raw;
   if (typeof value !== 'string' || value.trim() === '') return undefined;
-  const label = secondaryLabelOf(raw.label);
+  const label = optionalMemberOf(raw.label);
   if (label === undefined) return undefined;
-  return { value, label };
+  const description = optionalMemberOf(raw.description);
+  if (description === undefined) return undefined;
+  return description === null ? { value, label } : { value, label, description };
 }
 
 /** A map of property name → its NON-EMPTY per-send choice list (the shape carried by

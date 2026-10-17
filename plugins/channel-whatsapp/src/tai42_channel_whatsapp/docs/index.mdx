@@ -102,7 +102,10 @@ only chooses the keyboard — the value is always submitted as the typed string.
 
 A `control: chips` choice draws a chip grid (single-pick for a string `enum`,
 multi-pick for an array of strings) for Meta's 2–20 choices, else it degrades to the
-default radio/dropdown or checkbox control. A `control: textarea` string draws a
+default radio/dropdown or checkbox control. Whether a field draws chips is decided by
+its schema `enum`, so a send (or a reaction update) whose per-send option list for a
+chip grid has fewer than 2 or more than 20 entries is refused, naming the property and
+the count. A `control: textarea` string draws a
 multi-line text area, and a declared `maxLength`/`minLength` is drawn as the field's
 character limit (`max-chars`/`min-chars` on a single-line field, `max-length` on the
 text area). A declared date range (a `rangeStart` pairing) draws as one range
@@ -110,6 +113,18 @@ CalendarPicker when both ends sit on the same page with the same visibility, no
 other field depends on either end, and the form has no review page, else as two date
 fields (a review page reads each field's value back as text, which a range object
 cannot render); either way the answer is the two date strings.
+
+A field may carry a **second line** of text (its schema `description`): it draws as
+the control's helper text on a text, text-area or date field, and as a caption right
+after the control on a choice control (chips included) or an opt-in, which take no
+helper text — inside the same `If` when the field is conditional. A date range drawn
+as one range control carries each end's second line as its own caption. Helper text
+is refused past 80 characters and a caption past 409 (Meta's caps), naming the property.
+A per-send option may carry a second line too (its `description`): on a dropdown, radio
+group or checkbox group it is drawn under the option title (at most 300 characters,
+Meta's cap — a longer one is refused naming the property); a chip has no second-line
+slot, so on a chip grid it is folded onto the chip's title after an em dash
+(`Gold — 2-3 days`), which Meta leaves uncapped.
 
 The platform-drawn texts of a send ride the sender's `wording` catalogue. The chat
 button that opens the Flow reads `wording.form.open` (else *Fill form*, ≤20

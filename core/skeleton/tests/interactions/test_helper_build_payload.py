@@ -65,7 +65,10 @@ def test_form_payload_carries_data_and_pages():
     payload = build_payload(AnswerFormat.FORM, None, schema, data=data, pages=pages)
     assert payload is not None
     assert payload["schema"] == schema
-    assert payload["data"] == {"values": {"c": "x"}, "options": {"c": [{"value": "x", "label": "X"}]}}
+    assert payload["data"] == {
+        "values": {"c": "x"},
+        "options": {"c": [{"value": "x", "label": "X", "description": None}]},
+    }
     assert payload["pages"] == [{"title": "A", "fields": ["c"], "display": [], "kind": "input", "button_label": None}]
 
 

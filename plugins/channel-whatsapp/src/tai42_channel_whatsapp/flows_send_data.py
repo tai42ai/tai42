@@ -24,6 +24,7 @@ from tai42_channel_whatsapp.flows_components import (
     component_names,
 )
 from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages
+from tai42_channel_whatsapp.flows_second_line import data_source_rows
 
 
 def build_flow_data(
@@ -153,7 +154,7 @@ def _choice_data_source(
     Raises ``ChannelInputError`` when neither is available (a choice control with no options to show).
     """
     if name in options:
-        return [{"id": choice["value"], "title": choice.get("label") or choice["value"]} for choice in options[name]]
+        return data_source_rows(name, prop, options[name])
     enum = _choice_options_enum(prop)
     if enum is None:
         raise ChannelInputError(

@@ -129,7 +129,10 @@ an **array of strings** a **checkbox group** (multiple choice), a `boolean` an
 opt-in toggle, and an `integer`/`number` a numeric text field. A `control: chips`
 choice draws a **chip grid** (`ChipsSelector`) — single-pick for a string `enum`,
 multi-pick for an array — for Meta's 2–20 choices, else it **degrades** to the
-default control (the radio/dropdown or checkbox group) for that shape. A
+default control (the radio/dropdown or checkbox group) for that shape. Whether a field
+draws chips is decided by its schema `enum`, so a send (or a reaction update) whose
+per-send option list for a chip grid has fewer than 2 or more than 20 entries is
+refused, naming the property and the count. A
 `control: textarea` string draws a **multi-line text area**, and a declared
 `maxLength`/`minLength` is drawn as the field's character limit (`max-chars`/
 `min-chars` on a single-line field, `max-length` on the text area) as well as
@@ -160,6 +163,18 @@ option*; ≤20 characters) with its numbered-text fallback hint reading
 `wording.choice.reply_hint`. A non-form `confirm`/`external` ask is a text link whose
 line reads `wording.lines.answer_link` (its `{url}` token filled with the callback
 link).
+A field may carry a **second line** of text
+(its schema `description`): it draws as the control's **helper-text** on a text,
+text-area or date field and, since a choice control (chips included) and an opt-in take
+no helper-text, as a **caption** rendered immediately after such a control (inside the
+same `If` when the field is conditional), so the content is never dropped; a date range
+drawn as one range control carries each end's second line as its own caption after the
+control. Helper text is refused past 80 characters and a caption past 409 (Meta's caps),
+naming the property. A per-send option may carry a **second line** too (its `description`):
+on a dropdown, radio group or checkbox group it is drawn under the option title (at most
+300 characters, Meta's cap — a longer one is refused naming the property); a **chip** has
+no second-line slot, so on a chip grid it is folded onto the chip's title after an em dash
+(`Gold — 2-3 days`), which Meta leaves uncapped.
 A page's **display blocks** (heading/body/
 image, each static or a reaction-filled slot) render ahead of its inputs, a
 **review** page shows a generic readback of the entered values, and a field with

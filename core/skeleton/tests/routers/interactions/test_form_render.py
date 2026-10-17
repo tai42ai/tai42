@@ -78,6 +78,82 @@ async def test_get_form_ticket_renders_prefill_and_per_send_options(wired):
     assert ">blue<" not in body
 
 
+async def test_get_form_ticket_renders_field_and_option_second_lines(wired):
+    # A field's schema ``description`` draws as a <small class="hint"> second line; a per-send
+    # option's ``description`` draws as a <small class="choice-desc"> under a radio/checkbox
+    # label and folds onto the label of a <select> row (which has no second-line slot). A blank
+    # description is absent.
+    schema = {
+        "type": "object",
+        "properties": {
+            "note": {"type": "string", "title": "Your note", "description": "Keep it short"},
+            "blank": {"type": "string", "title": "Blank", "description": "   "},
+            "tier": {"type": "string", "enum": ["a", "b"]},
+            "many": {"type": "string", "enum": ["a", "b", "c", "d", "e", "f"]},
+            "extras": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    data = {
+        "options": {
+            "tier": [
+                {"value": "a", "label": "Standard", "description": "2 hours, 50"},
+                {"value": "b", "label": "Express", "description": "1 hour, 90"},
+            ],
+            "many": [
+                {"value": "a", "label": "A", "description": "first"},
+                {"value": "b", "label": "B"},
+                {"value": "c", "label": "C"},
+                {"value": "d", "label": "D"},
+                {"value": "e", "label": "E"},
+                {"value": "f", "label": "F"},
+            ],
+            "extras": [{"value": "x", "label": "Extra", "description": "adds 10"}],
+        }
+    }
+    await _seed_form_payload(wired, format_payload={"schema": schema, "data": data})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    body = bytes(resp.body).decode()
+    # A field's description is a hint between the label and the control.
+    assert '<small class="hint">Keep it short</small>' in body
+    # A blank description draws no hint.
+    assert "Blank<br><small" not in body
+    # A radio option (<= threshold) carries its description as a <small> second line.
+    assert '> Standard<small class="choice-desc">2 hours, 50</small></label>' in body
+    assert '> Express<small class="choice-desc">1 hour, 90</small></label>' in body
+    # A long enum renders a <select>; the description folds onto the option text (no second-line slot).
+    assert ">A — first</option>" in body
+    assert ">B</option>" in body
+    # A checkbox (array) option carries its description as a <small> second line.
+    assert '> Extra<small class="choice-desc">adds 10</small></label>' in body
+
+
+async def test_get_form_ticket_renders_second_lines_on_chips_textarea_and_date_range(wired):
+    # A chip carries its option's description as a <small> second line inside the pill; a chips
+    # group and a text area draw the field's description as a hint under the label; a date-range
+    # pair draws each end's description under that end's own label.
+    schema = {
+        "type": "object",
+        "properties": {
+            "colour": {"type": "string", "enum": ["r", "b"], "control": "chips", "description": "Tap one"},
+            "notes": {"type": "string", "control": "textarea", "description": "A few lines"},
+            "start": {"type": "string", "format": "date", "title": "From", "description": "First day"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start", "title": "To"},
+        },
+    }
+    data = {"options": {"colour": [{"value": "r", "label": "Red", "description": "warm"}, {"value": "b"}]}}
+    await _seed_form_payload(wired, format_payload={"schema": schema, "data": data})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    body = bytes(resp.body).decode()
+    assert '<fieldset class="chips"><legend>colour</legend><small class="hint">Tap one</small>' in body
+    assert '> Red<small class="choice-desc">warm</small></label>' in body
+    assert 'value="b"> b</label>' in body
+    assert '<label>notes<br><small class="hint">A few lines</small><textarea' in body
+    assert '<label>From<br><small class="hint">First day</small><input data-field="start"' in body
+    assert '<label>To<br><input data-field="end"' in body
+
+
 async def test_get_form_ticket_renders_format_controls(wired):
     schema = {
         "type": "object",
@@ -488,6 +564,29 @@ async def test_get_form_ticket_renders_a_reacting_form_with_the_reaction_round_t
     # The field_changed and submitted events are wired.
     assert "kind: 'field_changed', field: name" in body
     assert "reactions.submitted" in body
+
+
+async def test_reaction_choice_rebuild_draws_option_second_lines_and_keeps_the_select_placeholder(wired):
+    # A reaction that replaces a field's choices rebuilds the control client-side, drawn as the
+    # server draws it: a <select> keeps its existing empty-state text (the caller's choice_label,
+    # else the dash) and folds an option's second line onto the option text after " — "; a
+    # radio/checkbox/chip label gets the ``choice-desc`` second line.
+    schema = {"type": "object", "properties": {"colour": {"type": "string", "enum": ["r", "g"]}}}
+    reactions = {"field_changed": ["colour"], "page_advanced": [], "submitted": False, "choices": []}
+    await _seed_reacting_form(wired, schema=schema, reactions=reactions)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    # The second line counts only when a non-blank string — the server's rule.
+    assert "o.description.trim() !== '') ? o.description : null;" in body
+    # The select keeps the placeholder it was drawn with instead of writing a fresh dash.
+    assert "first.options[0].textContent : '\\u2014';" in body
+    assert "blank.value = ''; blank.textContent = blankText;" in body
+    assert "blank.textContent = '\\u2014';" not in body
+    # A select option folds its second line onto the option text.
+    assert "optionLabel(o) : optionLabel(o) + ' \\u2014 ' + second;" in body
+    # A radio/checkbox/chip label carries its second line as a ``choice-desc`` small.
+    assert "small.className = 'choice-desc';" in body
+    assert "small.textContent = second;" in body
 
 
 async def test_get_form_ticket_static_form_carries_no_reaction_wiring(wired):

@@ -440,6 +440,23 @@ async def test_deliver_form_stores_wording_and_on_mismatch_on_the_record(http_sc
     assert record["on_mismatch"] == "bridge"
 
 
+async def test_deliver_form_threads_the_option_second_line_onto_the_record(http_script, fake_redis):
+    # A per-send option's second line (``description``) rides the record so the modal, built
+    # at click time, draws it on the option object.
+    http_script.results.append(_ok_response(ts="1.1"))
+    schema = {"type": "object", "properties": {"plan": {"type": "string"}}}
+    delivery = make_delivery(
+        answer_format="form",
+        schema=schema,
+        data=FormData(options={"plan": [FormOption(value="s", label="Standard", description="2-3 days")]}),
+    )
+
+    await SlackChannel().deliver(delivery)
+
+    record = json.loads(fake_redis.store[_FORM_KEY])
+    assert record["data"]["options"] == {"plan": [{"value": "s", "label": "Standard", "description": "2-3 days"}]}
+
+
 async def test_deliver_form_draws_the_open_button_from_wording_form_open(http_script, fake_redis):
     http_script.results.append(_ok_response(ts="1.1"))
     delivery = make_delivery(

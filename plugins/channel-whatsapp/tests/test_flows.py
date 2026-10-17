@@ -814,6 +814,260 @@ def test_flow_data_per_send_options_on_a_non_string_field_raise_naming_it():
         build_flow_data(schema, {}, {"agree": [{"value": "x"}]})
 
 
+# -- the second line: a field's helper-text / caption and an option's description ----------
+
+
+def test_field_description_renders_as_helper_text_on_text_and_date_controls():
+    # A field's schema ``description`` draws as the control's ``helper-text`` on the controls Meta
+    # allows it on (TextInput — string and number — DatePicker, CalendarPicker).
+    schema = {
+        "type": "object",
+        "properties": {
+            "note": {"type": "string", "description": "Keep it short"},
+            "count": {"type": "integer", "description": "A whole number"},
+            "day": {"type": "string", "format": "date", "description": "When to start"},
+            "slot": {"type": "string", "format": "date", "minDate": "2026-01-01", "description": "Within the window"},
+        },
+    }
+    by_name = {c["name"]: c for c in _controls(build_form_flow(schema)[0])}
+    assert [by_name[n]["type"] for n in ("note", "count", "day", "slot")] == [
+        "TextInput",
+        "TextInput",
+        "DatePicker",
+        "CalendarPicker",
+    ]
+    assert by_name["note"]["helper-text"] == "Keep it short"
+    assert by_name["count"]["helper-text"] == "A whole number"
+    assert by_name["day"]["helper-text"] == "When to start"
+    assert by_name["slot"]["helper-text"] == "Within the window"
+
+
+def test_choice_and_boolean_field_description_renders_as_a_text_caption_after_the_control():
+    # A Dropdown/RadioButtonsGroup/CheckboxGroup/OptIn cannot hold ``helper-text`` (Meta), so a
+    # field's second line on one draws as a sibling ``TextCaption`` immediately after the control —
+    # the content is never dropped.
+    schema = {
+        "type": "object",
+        "properties": {
+            "tier": {"type": "string", "enum": ["g", "s"], "description": "Pick one tier"},
+            "agree": {"type": "boolean", "description": "Read the terms first"},
+        },
+    }
+    children = _screen_children(build_form_flow(schema)[0])
+    types = [c["type"] for c in children if c["type"] != "Footer"]
+    # Each control is immediately followed by its caption.
+    assert types == ["RadioButtonsGroup", "TextCaption", "OptIn", "TextCaption"]
+    captions = [c["text"] for c in children if c["type"] == "TextCaption"]
+    assert captions == ["Pick one tier", "Read the terms first"]
+    # The control carries no helper-text (Meta would reject it on these controls).
+    assert "helper-text" not in next(c for c in children if c["type"] == "RadioButtonsGroup")
+
+
+def test_textarea_field_description_renders_as_helper_text():
+    # A ``control: textarea`` draws a TextArea, which takes ``helper-text`` like a TextInput.
+    schema = {
+        "type": "object",
+        "properties": {"bio": {"type": "string", "control": "textarea", "description": "A few lines"}},
+    }
+    children = _screen_children(build_form_flow(schema)[0])
+    area = next(c for c in children if c["type"] == "TextArea")
+    assert area["helper-text"] == "A few lines"
+    assert all(c["type"] != "TextCaption" for c in children)
+
+
+def test_chips_field_description_renders_as_a_text_caption_after_the_control():
+    # A ChipsSelector takes no ``helper-text``, so its field's second line is a sibling caption.
+    schema = {
+        "type": "object",
+        "properties": {
+            "pick": {"type": "string", "enum": ["a", "b", "c"], "control": "chips", "description": "Tap one"}
+        },
+    }
+    children = _screen_children(build_form_flow(schema)[0])
+    types = [c["type"] for c in children if c["type"] != "Footer"]
+    assert types == ["ChipsSelector", "TextCaption"]
+    assert children[1]["text"] == "Tap one"
+    assert "helper-text" not in children[0]
+
+
+def test_merged_range_pair_descriptions_render_as_captions_after_the_range_control():
+    # A merged ``rangeStart`` pair draws ONE range CalendarPicker, so each end's second line is its
+    # own caption after the control, START first; an end without one draws none.
+    schema = _range_schema(description="The last day")
+    schema["properties"]["start"]["description"] = "The first day"
+    children = _screen_children(build_form_flow(schema)[0])
+    types = [c["type"] for c in children if c["type"] != "Footer"]
+    assert types == ["CalendarPicker", "TextCaption", "TextCaption"]
+    assert [c["text"] for c in children if c["type"] == "TextCaption"] == ["The first day", "The last day"]
+    assert "helper-text" not in children[0]
+
+    only_end = _range_schema(description="The last day")
+    children = _screen_children(build_form_flow(only_end)[0])
+    assert [c["text"] for c in children if c["type"] == "TextCaption"] == ["The last day"]
+
+
+def test_conditional_choice_field_caption_rides_inside_the_if():
+    # A choice field shown by a ``visibleWhen`` carries its caption INSIDE the same If, so the
+    # caption shows and hides with the control.
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "tier": {
+                "type": "string",
+                "enum": ["g", "s"],
+                "visibleWhen": {"field": "role", "equals": "admin"},
+                "description": "Pick one tier",
+            },
+        },
+    }
+    children = _screen_children(build_form_flow(schema)[0])
+    conditional = next(c for c in children if c.get("type") == "If")
+    inner = [node["type"] for node in conditional["then"]]
+    assert inner == ["RadioButtonsGroup", "TextCaption"]
+    assert conditional["then"][1]["text"] == "Pick one tier"
+
+
+def test_blank_field_description_draws_neither_helper_text_nor_caption():
+    schema = {
+        "type": "object",
+        "properties": {
+            "note": {"type": "string", "description": "   "},
+            "tier": {"type": "string", "enum": ["g"], "description": ""},
+        },
+    }
+    children = _screen_children(build_form_flow(schema)[0])
+    assert all(c["type"] != "TextCaption" for c in children)
+    assert "helper-text" not in next(c for c in children if c["type"] == "TextInput")
+
+
+def test_option_description_rides_the_data_source_and_the_published_item_shape_is_stable():
+    schema = {"type": "object", "properties": {"tier": {"type": "string", "enum": ["g"]}}}
+    options = {
+        "tier": [
+            {"value": "g", "label": "Gold", "description": "2 hours, 50"},
+            {"value": "s", "label": "Silver"},
+        ]
+    }
+    data = build_flow_data(schema, {}, options)
+    # The option carrying a second line gets a ``description`` item key; the one without omits it.
+    assert data["tier__ds"] == [
+        {"id": "g", "title": "Gold", "description": "2 hours, 50"},
+        {"id": "s", "title": "Silver"},
+    ]
+    # The published Flow ALWAYS declares ``description`` on the data-source item type, so its shape
+    # — and so its cache key — does not depend on a given send carrying option descriptions.
+    screen = build_form_flow(schema, option_fields={"tier"})[0]["screens"][0]
+    item_props = screen["data"]["tier__ds"]["items"]["properties"]
+    assert set(item_props) == {"id", "title", "description"}
+
+
+_CHIP_OPTIONS = {"pick": [{"value": "a", "label": "Gold", "description": "2-3 days"}, {"value": "b"}]}
+
+
+def _chips_schema(enum: list[str]) -> dict:
+    return {"type": "object", "properties": {"pick": {"type": "string", "enum": enum, "control": "chips"}}}
+
+
+def test_chips_option_second_line_folds_onto_the_chip_title_and_declares_no_description():
+    # A ChipsSelector item has no second-line slot, so the option's second line is folded onto the
+    # chip title after an em dash, and the chips data-source declares only Meta's ``id``/``title``.
+    schema = _chips_schema(["a", "b", "c"])
+    assert build_flow_data(schema, {}, _CHIP_OPTIONS)["pick__ds"] == [
+        {"id": "a", "title": "Gold \u2014 2-3 days"},
+        {"id": "b", "title": "b"},
+    ]
+    screen = build_form_flow(schema, option_fields={"pick"})[0]["screens"][0]
+    decl = screen["data"]["pick__ds"]
+    assert set(decl["items"]["properties"]) == {"id", "title"}
+    assert decl["__example__"] == [{"id": "a", "title": "a"}]
+
+
+@pytest.mark.parametrize("count", [1, 21])
+def test_degraded_chips_option_second_line_keeps_the_native_description(count: int):
+    # A ``control: chips`` field outside Meta's 2..20 degrades to a radio/dropdown, which draws the
+    # option's second line natively — the row keeps ``description`` and the item type declares it.
+    schema = _chips_schema(["a", "b"] + [f"opt{n}" for n in range(count - 2)] if count > 2 else ["a"])
+    assert build_flow_data(schema, {}, _CHIP_OPTIONS)["pick__ds"][0] == {
+        "id": "a",
+        "title": "Gold",
+        "description": "2-3 days",
+    }
+    screen = build_form_flow(schema, option_fields={"pick"})[0]["screens"][0]
+    assert set(screen["data"]["pick__ds"]["items"]["properties"]) == {"id", "title", "description"}
+
+
+def test_option_description_over_meta_cap_is_refused_naming_the_property():
+    # Meta caps a dropdown/radio/checkbox option description at 300 characters: a longer one is
+    # refused at build naming the property and the option; a chip folds it with no documented cap.
+    long_line = "d" * 301
+    dropdown = {"type": "object", "properties": {"tier": {"type": "string", "enum": ["g"]}}}
+    with pytest.raises(ChannelInputError, match="option 'g' description is 301 characters"):
+        build_flow_data(dropdown, {}, {"tier": [{"value": "g", "label": "Gold", "description": long_line}]})
+    folded = build_flow_data(
+        _chips_schema(["a", "b", "c"]),
+        {},
+        {"pick": [{"value": "a", "label": "Gold", "description": long_line}, {"value": "b"}]},
+    )
+    assert folded["pick__ds"] == [{"id": "a", "title": f"Gold \u2014 {long_line}"}, {"id": "b", "title": "b"}]
+
+
+@pytest.mark.parametrize("count", [1, 21])
+def test_chips_per_send_option_list_outside_meta_bounds_is_refused_naming_the_property(count: int):
+    # Meta's ChipsSelector draws 2..20 choices. A field drawn as one (its schema enum is within the
+    # bound) whose send carries a per-send list of another length is refused, naming the property,
+    # the count and the bound — never a ChipsSelector fed rows past Meta's limit.
+    schema = _chips_schema(["a", "b", "c"])
+    options = {"pick": [{"value": f"v{n}"} for n in range(count)]}
+    with pytest.raises(ChannelInputError, match=rf"'pick'.*{count} per-send options.*2\.\.20"):
+        build_flow_data(schema, {}, options)
+    # The bounds themselves pass.
+    for ok in (2, 20):
+        rows = build_flow_data(schema, {}, {"pick": [{"value": f"v{n}"} for n in range(ok)]})["pick__ds"]
+        assert len(rows) == ok
+
+
+def _second_line_schema(prop: dict, description: str) -> dict:
+    return {"type": "object", "properties": {"f": {**prop, "description": description}}}
+
+
+_HELPER_TEXT_PROPS = [
+    {"type": "string"},
+    {"type": "string", "control": "textarea"},
+    {"type": "string", "format": "date"},
+    {"type": "string", "format": "date", "minDate": "2026-01-01"},
+]
+_CAPTION_PROPS = [
+    {"type": "string", "enum": ["g", "s"]},
+    {"type": "boolean"},
+    {"type": "string", "enum": ["a", "b", "c"], "control": "chips"},
+]
+
+
+def test_field_second_line_over_meta_caps_is_refused_naming_the_property():
+    # Meta caps a field's helper text at 80 characters and a caption at 409: a longer second line
+    # is refused at build naming the property; exactly the cap passes.
+    for prop in _HELPER_TEXT_PROPS:
+        with pytest.raises(ChannelInputError, match=r"'f' description is 81 characters.*helper text at 80"):
+            build_form_flow(_second_line_schema(prop, "h" * 81))
+        build_form_flow(_second_line_schema(prop, "h" * 80))
+    for prop in _CAPTION_PROPS:
+        with pytest.raises(ChannelInputError, match=r"'f' description is 410 characters.*caption at 409"):
+            build_form_flow(_second_line_schema(prop, "c" * 410))
+        build_form_flow(_second_line_schema(prop, "c" * 409))
+    for end in ("start", "end"):
+        schema = _range_schema()
+        schema["properties"][end]["description"] = "c" * 410
+        with pytest.raises(ChannelInputError, match=rf"'{end}' description is 410 characters.*caption at 409"):
+            build_form_flow(schema)
+        schema["properties"][end]["description"] = "c" * 409
+        build_form_flow(schema)
+    # A merged range end draws its second line as a caption, so the 80-character helper-text cap of a
+    # lone date field does not apply to it.
+    schema = _range_schema(description="c" * 100)
+    assert [c["type"] for c in _screen_children(build_form_flow(schema)[0])][:2] == ["CalendarPicker", "TextCaption"]
+
+
 # -- component_names: the identifier-safe naming rule --------------------------
 
 

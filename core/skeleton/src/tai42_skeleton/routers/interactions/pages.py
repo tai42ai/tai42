@@ -143,7 +143,9 @@ def _render_awaiting_page(wording: Wording | None) -> str:
 # (when the form declares a submitted check) POSTs ``{"event": {kind, field?|page?}, "values":
 # {...}}`` to the ``/react`` sibling of this callback URL (the ticket react door — the ticket
 # stays in the address) and applies the returned form update — setting values, replacing an
-# option-bearing field's choice list, showing per-field errors, and filling display slots. A
+# option-bearing field's choice list (drawn exactly as the server draws it: each option's second
+# line as a ``choice-desc`` line under a radio/checkbox/chip label or folded onto a ``<select>``
+# row, and a select's empty-state prompt kept), showing per-field errors, and filling display slots. A
 # submitted reaction that returns errors (or fails) keeps the form open; only a clean one sends
 # the answer. A reaction error surfaces loudly, never a stale/silent value. A static form carries
 # no ``data-reactions`` and every reaction path is dormant. The script body is a constant — only
@@ -313,7 +315,10 @@ _FORM_SUBMIT_SCRIPT = """<script>
     Object.keys(values).forEach(function (name) { setFieldValue(name, values[name]); });
   }
   function optionLabel(o) {
-    return (o.label !== undefined && o.label !== null) ? o.label : o.value;
+    return (o.label !== undefined && o.label !== null && o.label !== '') ? String(o.label) : String(o.value);
+  }
+  function optionSecondLine(o) {
+    return (typeof o.description === 'string' && o.description.trim() !== '') ? o.description : null;
   }
   function rebuildChoices(name, options) {
     if (!Array.isArray(options)) { return; }
@@ -322,13 +327,17 @@ _FORM_SUBMIT_SCRIPT = """<script>
     var first = cs[0];
     if (first.tagName === 'SELECT') {
       var prev = first.value;
+      var blankText = (first.options.length && first.options[0].value === '')
+        ? first.options[0].textContent : '\\u2014';
       first.innerHTML = '';
       var blank = document.createElement('option');
-      blank.value = ''; blank.textContent = '\\u2014';
+      blank.value = ''; blank.textContent = blankText;
       first.appendChild(blank);
       options.forEach(function (o) {
         var opt = document.createElement('option');
-        opt.value = o.value; opt.textContent = optionLabel(o);
+        var second = optionSecondLine(o);
+        opt.value = o.value;
+        opt.textContent = second === null ? optionLabel(o) : optionLabel(o) + ' \\u2014 ' + second;
         first.appendChild(opt);
       });
       first.value = prev;
@@ -347,14 +356,22 @@ _FORM_SUBMIT_SCRIPT = """<script>
       var label = document.createElement('label');
       label.className = isChip ? 'choice chip' : 'choice';
       var input = document.createElement('input');
-      input.type = isArray ? 'checkbox' : 'radio';
+      input.setAttribute('type', isArray ? 'checkbox' : 'radio');
+      if (!isArray) { input.setAttribute('name', name); }
       input.setAttribute('data-field', name);
       input.setAttribute('data-kind', isArray ? 'array' : 'string');
-      if (!isArray) { input.name = name; if (wasRequired) { input.required = true; } }
-      input.value = o.value;
+      input.setAttribute('value', o.value);
+      if (!isArray && wasRequired) { input.setAttribute('required', ''); }
       if (selected[o.value]) { input.checked = true; }
       label.appendChild(input);
       label.appendChild(document.createTextNode(' ' + optionLabel(o)));
+      var second = optionSecondLine(o);
+      if (second !== null) {
+        var small = document.createElement('small');
+        small.className = 'choice-desc';
+        small.textContent = second;
+        label.appendChild(small);
+      }
       fieldset.appendChild(label);
     });
   }

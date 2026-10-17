@@ -5695,8 +5695,20 @@
       },
       "FormOption": {
         "additionalProperties": false,
-        "description": "One per-send choice for a form field. Frozen.\n\n``value`` is the string submitted as the answer, ``label`` (when set) is shown\nto the human in its place. A per-send option list REPLACES a property's schema\n``enum`` for ONE send — the published form is unchanged, so a variant needs no\nre-publish.",
+        "description": "One per-send choice for a form field. Frozen.\n\n``value`` is the string submitted as the answer, ``label`` (when set) is shown\nto the human in its place, and ``description`` (when set) is an OPTIONAL secondary\nline shown under ``label`` — a surface keeps a short label and moves the rest (a\ntime, a price) onto the second line. A per-send option list REPLACES a property's\nschema ``enum`` for ONE send — the published form is unchanged, so a variant needs\nno re-publish. The ``description`` carries content, so a surface whose control has\nno native second-line affordance draws it by that surface's own documented rule —\nnever silently drops it; a per-medium length cap is each channel's own.",
         "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
           "label": {
             "anyOf": [
               {

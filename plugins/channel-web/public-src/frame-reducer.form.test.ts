@@ -57,6 +57,32 @@ describe('applyFrame: chat.form', () => {
     });
   });
 
+  it("folds a per-send option's second line (its description) onto the option", () => {
+    const model = fold(
+      EMPTY_MODEL,
+      formFrame({
+        schema: { type: 'object', properties: { plan: { type: 'string' } } },
+        data: {
+          values: {},
+          options: {
+            plan: [
+              { value: 's', label: 'Standard', description: '2-3 days' },
+              { value: 'x', label: 'Express' },
+            ],
+          },
+        },
+      }),
+    );
+
+    const item = model.items[0];
+    expect(item?.kind === 'form' ? item.formData?.options : undefined).toEqual({
+      plan: [
+        { value: 's', label: 'Standard', description: '2-3 days' },
+        { value: 'x', label: 'Express' },
+      ],
+    });
+  });
+
   it('folds a form entry carrying media through the same vetted parse a card uses', () => {
     const model = fold(
       EMPTY_MODEL,
@@ -98,6 +124,10 @@ describe('applyFrame: chat.form', () => {
     [
       'a form whose per-send option list is empty',
       formFrame({ data: { values: {}, options: { colour: [] } } }),
+    ],
+    [
+      'a form whose per-send option carries a blank description',
+      formFrame({ data: { values: {}, options: { colour: [{ value: 'r', description: '  ' }] } } }),
     ],
     ['a form whose pages is not a list', formFrame({ pages: 'first' })],
     ['a form with an empty pages list', formFrame({ pages: [] })],

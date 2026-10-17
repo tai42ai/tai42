@@ -6,6 +6,7 @@ so the flow always crosses real verification first."""
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode
@@ -819,6 +820,85 @@ async def test_field_change_runs_reaction_and_applies_the_update(fake_redis, htt
     _id, opts, disp = decode_private_metadata(view["private_metadata"])
     assert opts["plan"] == [{"value": "basic", "label": "Basic"}, {"value": "pro", "label": "Pro"}]
     assert disp == {"total": "Total: 20"}
+
+
+async def _react_with_plan_options(fake_redis, http_script, interactions, plan_options: list[dict[str, Any]]):
+    # A ``qty`` change whose reaction replaces the ``plan`` choice list with ``plan_options``.
+    schema = {
+        "type": "object",
+        "properties": {"qty": {"type": "integer"}, "plan": {"type": "string", "enum": ["basic"]}},
+    }
+    reactions = {"field_changed": ["qty"], "page_advanced": [], "submitted": False, "choices": ["plan"]}
+    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _FUTURE, reactions=reactions)
+    interactions.react_result = {"options": {"plan": plan_options}}
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+    state = {"qty": {FIELD_ACTION_ID: {"type": "number_input", "value": "1"}}}
+    return await slack_interactive(_signed(_field_action("qty", state)))
+
+
+async def test_field_change_reaction_option_second_line_draws_on_the_re_rendered_option(
+    fake_redis, http_script, interactions
+):
+    # A reaction's replaced option carries its second line (``description``) onto the re-rendered
+    # option object, exactly as the first render draws it; a blank description is absent.
+    await _react_with_plan_options(
+        fake_redis,
+        http_script,
+        interactions,
+        [
+            {"value": "s", "label": "Standard", "description": "2-3 days"},
+            {"value": "x", "label": "Express", "description": "  "},
+        ],
+    )
+
+    view = json.loads(http_script.requests[0].content)["view"]
+    by_id = {b["block_id"]: b for b in view["blocks"] if b["type"] == "input"}
+    assert by_id["plan"]["element"]["options"] == [
+        {
+            "text": {"type": "plain_text", "text": "Standard"},
+            "value": "s",
+            "description": {"type": "plain_text", "text": "2-3 days"},
+        },
+        {"text": {"type": "plain_text", "text": "Express"}, "value": "x"},
+    ]
+    # The second line survives the next re-render in the accumulated reaction state.
+    _id, opts, _disp = decode_private_metadata(view["private_metadata"])
+    assert opts["plan"] == [
+        {"value": "s", "label": "Standard", "description": "2-3 days"},
+        {"value": "x", "label": "Express"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("option", "message"),
+    [
+        ({"value": "s", "label": "Standard", "description": "d" * 76}, r"plan.*description exceeds 75"),
+        ({"value": "s", "label": "L" * 76}, r"plan.*exceeds 75"),
+    ],
+    ids=["description", "label"],
+)
+async def test_field_change_reaction_option_over_the_cap_shows_the_failure_banner(
+    fake_redis, http_script, interactions, caplog, option, message
+):
+    # A reaction whose replaced option (its second line or its label) is past Slack's 75-character
+    # option-text cap cannot be drawn: like a failing handler it surfaces LOUDLY — a logged exception
+    # and the failure banner on the re-rendered modal, which keeps the pre-reaction choices — never a
+    # 500, a truncated option or a stale modal with no notice.
+    response = await _react_with_plan_options(fake_redis, http_script, interactions, [option])
+
+    assert body_json(response) == {"status": "updated"}
+    view = json.loads(http_script.requests[0].content)["view"]
+    assert view["blocks"][1]["type"] == "section"
+    assert view["blocks"][1]["text"]["text"] == _REACTION_FAILURE_TEXT
+    by_id = {b["block_id"]: b for b in view["blocks"] if b["type"] == "input"}
+    assert [o["value"] for o in by_id["plan"]["element"]["options"]] == ["basic"]
+    _id, opts, _disp = decode_private_metadata(view["private_metadata"])
+    assert "plan" not in opts
+    logged = [r for r in caplog.records if r.exc_info]
+    assert logged
+    exc = logged[-1].exc_info
+    assert exc is not None
+    assert re.search(message, str(exc[1]))
 
 
 async def test_field_change_reaction_failure_shows_a_banner(fake_redis, http_script, interactions):

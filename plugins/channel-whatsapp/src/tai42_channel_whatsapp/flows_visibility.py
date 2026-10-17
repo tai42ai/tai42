@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from tai42_contract.channels import ChannelInputError
@@ -165,20 +166,26 @@ def _guard_coalescible(name: str, prop: dict[str, Any], variants: list[_Variant]
         )
 
 
-def emit_field_variants(component: dict[str, Any], variants: list[_Variant]) -> list[dict[str, Any]]:
+def emit_field_variants(
+    component: dict[str, Any], variants: list[_Variant], captions: Sequence[dict[str, Any]] = ()
+) -> list[dict[str, Any]]:
     """A control's render nodes: one per variant, the control (uniquely renamed) under its nested ``If``s.
 
     An unconditional single variant returns the control itself. A conditional variant wraps the
     control — renamed with the variant suffix when it is one of several — in an ``If`` per condition,
-    outermost first, so the controller's own condition encloses the dependent's.
+    outermost first, so the controller's own condition encloses the dependent's. The ``captions`` (a
+    field's second line on a control that cannot hold ``helper-text``) ride immediately after the
+    control inside the SAME wrapper, so they show and hide with the control; their text is identical
+    across variants (the control's name is suffixed, a caption is not).
     """
     base_name = component["name"]
     nodes: list[dict[str, Any]] = []
     for suffix, conditions in variants:
-        node = component if suffix == "" else {**copy.deepcopy(component), "name": base_name + suffix}
+        control = component if suffix == "" else {**copy.deepcopy(component), "name": base_name + suffix}
+        group = [control, *(copy.deepcopy(caption) for caption in captions)]
         for condition in reversed(conditions):
-            node = {"type": "If", "condition": condition, "then": [node]}
-        nodes.append(node)
+            group = [{"type": "If", "condition": condition, "then": group}]
+        nodes.extend(group)
     return nodes
 
 
