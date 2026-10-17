@@ -310,7 +310,7 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
             # Kill any async park still addressed to the person even on the already-gone branch:
             # the checkpoint is forgotten regardless, so a lingering park would otherwise be
             # orphaned exactly as on the linked branch. Reaches both the aggregated thread and the
-            # person subject, whole-chain.
+            # person subject, each run whole.
             from tai42_skeleton.interactions.helper import cancel_parks_for_thread
 
             await cancel_parks_for_thread(thread_id, also_subjects=[(PERSON_KIND, person_id)], reason="person_erased")
@@ -331,7 +331,7 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
         if await store.thread_has_live_intake(thread_id):
             raise ConflictError(in_flight_409)
         # Kill every async park addressed to the person BEFORE its indexes go, so the
-        # forget-me does not orphan a parked ``ask`` — whole-chain, across the aggregated thread
+        # forget-me does not orphan a parked ``ask`` — each run whole, across the aggregated thread
         # and the person subject, under the same per-thread FIFO.
         from tai42_skeleton.interactions.helper import cancel_parks_for_thread
 

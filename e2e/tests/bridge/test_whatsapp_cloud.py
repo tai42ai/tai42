@@ -26,9 +26,12 @@ import json
 import re
 import uuid
 from collections.abc import Callable
+from urllib.parse import urlencode
 
 import pytest
+import redis as redis_lib
 
+from tai42_e2e import wait_absent_async
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.manifests import (
     BRIDGE_TWILIO_CLIENT,
@@ -40,6 +43,7 @@ from tai42_e2e.manifests import (
 from tai42_e2e.settings import HarnessSettings
 
 from ._bridge_support import (
+    ERROR_ANSWER_TEXT,
     WHATSAPP_INBOUND_PATH,
     BridgeHarness,
     cancel_and_join,
@@ -1531,3 +1535,161 @@ async def test_flow_encryption_refuses_a_non_admin_key(bridge: BridgeHarness, un
     assert refused.status_code == 403, refused.text
     assert refused.json() == {"error": "Forbidden"}
     assert bridge.fake_whatsapp.public_keys == []
+
+
+# --- withdrawing an open form: the pair is released, nothing is said, the next form goes out ---
+
+# How long a withdrawal leg watches the person's outbound after the act, proving no notice is sent.
+_QUIET_WINDOW_SECONDS = 5.0
+
+
+def _withdraw_schema(uniq: Callable[[str], str]) -> dict:
+    """A one-field form schema unique to the leg, so its Flow is never a cached one another leg published."""
+    return {"type": "object", "properties": {uniq("note").replace("-", "_"): {"type": "string"}}}
+
+
+def _pending_holder(bridge: BridgeHarness, wa_id: str) -> str | None:
+    """The interaction id the whatsapp plugin's pending reservation for the pair names, or None."""
+    client = redis_lib.Redis.from_url(bridge.stack.resources.redis_url, decode_responses=True)
+    try:
+        raw = client.get(f"channel:whatsapp:pending:{BRIDGE_WHATSAPP_PHONE_ID}:{wa_id}")
+    finally:
+        client.close()
+    return None if raw is None else json.loads(str(raw))["interaction_id"]
+
+
+async def _assert_no_notice_to(bridge: BridgeHarness, wa_id: str) -> None:
+    """Watch the person's outbound for a bounded window and assert no send carries the error notice."""
+
+    async def _notices() -> list[dict]:
+        return [r for r in bridge.fake_whatsapp.sent if r["to"] == wa_id and ERROR_ANSWER_TEXT in (r["body"] or "")]
+
+    await wait_absent_async(_notices, window=_QUIET_WINDOW_SECONDS, message="a withdrawn form sent a notice")
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "kind:interactions",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_cancel_frees_the_pair_and_the_next_form_is_sent(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    schema = _withdraw_schema(uniq)
+    wa_id = _fresh_wa_id()
+    question_a = uniq("wd-form-a")
+    question_b = uniq("wd-form-b")
+
+    async def ask(question: str) -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": schema,
+                },
+            )
+        return result
+
+    task_a = asyncio.create_task(ask(question_a))
+    task_b: asyncio.Task | None = None
+    try:
+        send_a = await wait_whatsapp_send(bridge.fake_whatsapp, question_a)
+        interaction_a = send_a["payload"]["interactive"]["action"]["parameters"]["flow_token"]
+        assert _pending_holder(bridge, wa_id) == interaction_a
+
+        # The operator withdraws form A through the REST cancel door.
+        cancelled = await bridge.api().post(f"/api/interactions/{interaction_a}/cancel")
+        assert cancelled == {"interaction_id": interaction_a, "status": "cancelled"}
+        # The channel released the pair when the door returned.
+        assert _pending_holder(bridge, wa_id) is None
+
+        # The next form to the same person goes out at once: a second Flow send, not a refusal.
+        task_b = asyncio.create_task(ask(question_b))
+        send_b = await wait_whatsapp_send(bridge.fake_whatsapp, question_b, deadline=20.0)
+        assert send_b["to"] == wa_id
+        assert send_b["payload"]["interactive"]["type"] == "flow"
+        interaction_b = send_b["payload"]["interactive"]["action"]["parameters"]["flow_token"]
+        assert interaction_b != interaction_a
+        assert _pending_holder(bridge, wa_id) == interaction_b
+        await _assert_no_notice_to(bridge, wa_id)
+    finally:
+        await cancel_and_join(task_a)
+        if task_b is not None:
+            await cancel_and_join(task_b)
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "kind:interactions",
+    "helper:whatsapp",
+    "probe-tools",
+    "setting:conversations",
+    "setting:seeded-access-control",
+    "store:redis",
+)
+async def test_route_cancel_expr_closes_the_form_quietly_and_starts_the_next(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    # A tool route whose target parks a FORM ask to the person who wrote; the form goes out from
+    # the deployment's sending number and holds that pair. The route answers on its own number, so
+    # the person's next message reaches it as a turn: its ``cancel_expr`` closes the open form and
+    # its ``start_expr`` sends the next one to the same person.
+    schema = _withdraw_schema(uniq)
+    wa_id = _fresh_wa_id()
+    route_identity = _fresh_phone_id()
+    exec_key = uniq("wd-route-exec")
+    route_name = uniq("wd-route").replace("_", "-")
+    await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])
+    start = (
+        '{marker: .message, channel: "whatsapp", recipient: .sender, answer_format: "form", '
+        f"schema: {json.dumps(schema)}}}"
+    )
+    await bridge.create_tool_channel_route(
+        route_name=route_name,
+        tool="e2e_tool_target_park",
+        execution_key=exec_key,
+        channel="whatsapp",
+        our_identity=route_identity,
+        start_expr=start,
+        cancel_expr="if ($parked | length) > 0 then $parked[0].id else null end",
+        reply_expr=".result.answer",
+    )
+
+    async def write(text: str) -> None:
+        inbound = bridge.whatsapp_inbound(phone_number_id=route_identity, wa_id=wa_id, text=text)
+        resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, inbound, port=bridge.stack.port_b)
+        assert resp.status_code == 200, resp.text
+
+    # Turn 1 parks form A to the person.
+    first = uniq("wd-route-a")
+    await write(first)
+    parked_a = await wait_probe_record(bridge, f"tool_target_park:{first}", deadline=20.0)
+    interaction_a = parked_a[0]["interaction_id"]
+    send_a = await wait_whatsapp_send(bridge.fake_whatsapp, first)
+    assert send_a["payload"]["interactive"]["action"]["parameters"]["flow_token"] == interaction_a
+
+    # Turn 2: the person writes again instead of submitting. The route closes form A and starts form B.
+    second = uniq("wd-route-b")
+    await write(second)
+    parked_b = await wait_probe_record(bridge, f"tool_target_park:{second}", deadline=20.0)
+    interaction_b = parked_b[0]["interaction_id"]
+    send_b = await wait_whatsapp_send(bridge.fake_whatsapp, second, deadline=20.0)
+    assert send_b["to"] == wa_id
+    assert send_b["payload"]["interactive"]["action"]["parameters"]["flow_token"] == interaction_b
+    # Form A's reservation is gone; the pair now holds form B.
+    assert _pending_holder(bridge, wa_id) == interaction_b
+    # Nothing was said to the person about the closed form: the closing kill ran before form B
+    # started, so a notice record would already stand in the thread, and none is ever sent.
+    (thread,) = (await bridge.api().get(f"/api/conversations/{route_name}/threads"))["items"]
+    transcript = await bridge.api().get(
+        f"/api/conversations/{route_name}/transcript?{urlencode({'thread_id': thread['thread_id']})}"
+    )
+    assert [item for item in transcript["items"] if ERROR_ANSWER_TEXT in (item.get("answer") or "")] == []
+    await _assert_no_notice_to(bridge, wa_id)

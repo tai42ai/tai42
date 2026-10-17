@@ -23,6 +23,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from pydantic_core import PydanticSerializationError
 from tai42_contract.interactions import (
+    PARK_COMPLETION_WITHDRAWN,
     AnswerFormat,
     AnswerMismatchError,
     InteractionRequest,
@@ -329,10 +330,12 @@ async def cancel_interaction(interaction_id: str) -> dict:
     """Cancel a pending interaction — WITHDRAW one specific ask without answering or deleting its thread.
 
     The mirror of ``answer_interaction`` for the terminal-without-an-answer case: it
-    tears the pending question down through the status-gated kill seam (``kill_park``), so
-    NO continuation fires — a parked async flow is never resumed — and the removed event
+    takes the pending question's whole run down through the status-gated kill seam
+    (``kill_park``) — every open ask of the run, nested runs and the callers waiting on it —
+    so NO continuation fires — nothing of the run is resumed — and the removed event
     rides tagged ``reason="cancelled"`` so a live operator surface tells a deliberate
-    withdrawal apart from a timeout/expiry removal.
+    withdrawal apart from a timeout/expiry removal. A door that started the run is delivered
+    the ``withdrawn`` terminal: nothing is said to the person.
 
     Status-gated exactly like the answer door: only a PENDING (or parked) question cancels.
     A question already ``answered`` (its state retained) is a loud ``409`` conflict; a
@@ -345,10 +348,12 @@ async def cancel_interaction(interaction_id: str) -> dict:
     answer door it is answer-format-AGNOSTIC: an EXTERNAL ask is a pending ask an operator
     may withdraw, so it is cancellable too.
 
-    Channel-blind by construction: a channel-side pending correlation is NOT proactively
-    torn down. A later participant reply forwarded to the callback door finds the state gone and
-    the door answers ``404``, which the inbound ladder maps to a fresh bridged turn — the
-    identical path a timeout/expiry removal already takes.
+    The teardown withdraws the channel delivery through the delivering channel's ``withdraw``
+    member, so the channel's hold on the person's address is released and that address is free
+    for the next ask when this door returns; the rest of the run's takedown is durable and
+    finishes behind the door. The question already sent stays on the medium: a
+    participant who still answers it reaches the callback door, finds the state gone and gets a
+    ``404``, which the inbound ladder maps to a fresh bridged turn.
 
     Audience gate identical to ``answer_interaction`` (after the existence/status guards):
     a question's ``audience`` identity OR any unrestricted caller (the operator can always
@@ -375,14 +380,20 @@ async def cancel_interaction(interaction_id: str) -> dict:
             if state.request.audience != restricted:
                 raise ForbiddenError("interaction is addressed to another identity")
         # Status-gated teardown routed through the kill seam on the single-park precondition
-        # (``KILL_ACT_ON_PENDING``): it fires NO continuation and tags the removed event
-        # ``cancelled``. An answer that committed between the read and the atomic claim leaves the
-        # park to its own continuation — the kill writes nothing and surfaces as ``"answered"`` here
-        # (a loud 409 conflict, no teardown, no FAILED); a state that vanished between the read and
-        # the teardown surfaces as ``"gone"`` (a 404, the same terminal answer the answer door gives
-        # for a missing interaction).
+        # (``KILL_ACT_ON_PENDING``): it fires NO continuation, tags the removed event ``cancelled``
+        # and delivers the run's ``withdrawn`` terminal. An answer that committed between the read
+        # and the atomic claim leaves the park to its own continuation — the kill writes nothing and
+        # surfaces as ``"answered"`` here (a loud 409 conflict, no teardown, no terminal); a state
+        # that vanished between the read and the teardown surfaces as ``"gone"`` (a 404, the same
+        # terminal answer the answer door gives for a missing interaction).
         result = await kill_park(
-            r, store, interaction_id, state.group_id, reason="cancelled", act_on=KILL_ACT_ON_PENDING
+            r,
+            store,
+            interaction_id,
+            state.group_id,
+            reason="cancelled",
+            act_on=KILL_ACT_ON_PENDING,
+            terminal=PARK_COMPLETION_WITHDRAWN,
         )
         if result == "answered":
             raise ConflictError("Interaction already answered")

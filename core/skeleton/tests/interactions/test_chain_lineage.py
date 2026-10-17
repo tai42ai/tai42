@@ -2,12 +2,12 @@
 
 A run that parks inside chained nested dispatches records the chain keys of every chained call it is
 nested under (outermost first). Whenever the platform drives that interaction — the answer door's
-detached drive, the reaper's redelivery, the inline visit under a fresh run frame, the give-up, the
-kill from the door and from the reaper — it deposits that lineage beside the resume origin, and
+detached drive, the reaper's redelivery, the inline visit under a fresh run frame, the give-up — it
+deposits that lineage beside the resume origin, and
 ``assert_resume_authorized(chain_token)`` admits a token of that lineage at any depth and refuses a
 token of another lineage, as well as any token named outside a platform drive.
 
-A neutral test-only driver takes part: its continuation tool and its kill / give-up handlers fire a
+A neutral test-only driver takes part: its continuation tool and its give-up handler fire a
 test-only chain face, which asks the platform predicate and records the verdict. No real driver's
 code runs.
 """
@@ -41,14 +41,14 @@ from tai42_contract.tools import RunDelivery, run_delivery, tool_call_frame
 from tai42_kit.interactions import park_giveup
 from tai42_kit.interactions import park_kill as kit_park_kill
 from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome, register_park_giveup_handler
-from tai42_kit.interactions.park_kill import register_park_kill_handler
+from tai42_kit.interactions.park_kill import ParkKillNotReadyError, register_park_kill_handler
 
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.interactions import ask, authorization, giveup_delivery
 from tai42_skeleton.interactions import continuation as continuation_module
 from tai42_skeleton.interactions import visit as visit_module
-from tai42_skeleton.interactions.kill import kill_park, redeliver_kill
+from tai42_skeleton.interactions.kill import kill_park
 from tai42_skeleton.interactions.store import ContinuationDue, KillDue
 from tai42_skeleton.runs.chokepoint import get_resume_lineage, resume_lineage, resume_origin
 
@@ -101,7 +101,7 @@ def _isolated_handlers(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 class _ProbeDriver:
-    """A neutral driver: its resume, kill and give-up fire its chain face; the face records the verdict.
+    """A neutral driver: its resume and give-up fire its chain face; the face records the verdict.
 
     ``fire`` is the list of chain tokens the next platform drive fires at the face. ``repark`` (when
     set) makes the next resume ask again, under the routing it names, instead of firing.
@@ -140,20 +140,18 @@ class _ProbeDriver:
     async def _resume(self, arguments: Mapping[str, Any]) -> Any:
         if self.repark is not None:
             routing, self.repark = self.repark, None
-            tool_token = set_resume_continuation_tool(RESUME)
+            # The driver re-binds the routing it captured, then binds its continuation under it.
             token = set_chained_resume(routing)
+            tool_token = set_resume_continuation_tool(RESUME)
             try:
                 parked = await _ask()
             finally:
-                reset_chained_resume(token)
                 reset_resume_continuation_tool(tool_token)
+                reset_chained_resume(token)
             self.reparked.append(parked)
             return parked
         await self.fire_all()
         return {"done": arguments["interaction_id"]}
-
-    async def kill(self, interaction_id: str, reason: str) -> None:
-        await self.fire_all()
 
     async def give_up(self, interaction_id: str, failed_outcome: Mapping[str, Any]) -> ParkGiveUpOutcome:
         await self.fire_all()
@@ -173,11 +171,13 @@ def _routing(key: str) -> ChainedResume:
 
 @contextmanager
 def _chained(keys: Sequence[str]) -> Iterator[None]:
-    """Bind one chained dispatch per key, outermost first — the nesting a run parks inside."""
+    """Bind one chained dispatch per key, outermost first, each driving a nested run: the nesting a run parks in."""
     with ExitStack() as stack:
         for key in keys:
             token = set_chained_resume(_routing(key))
             stack.callback(reset_chained_resume, token)
+            run_face = set_resume_continuation_tool(RESUME)
+            stack.callback(reset_resume_continuation_tool, run_face)
         yield
 
 
@@ -262,31 +262,6 @@ async def _give_up(wired: SimpleNamespace, state: InteractionState, probe: _Prob
     await giveup_delivery.deliver_park_giveup(wired.store, state.request, fingerprint="fp-1")
 
 
-async def _kill_door(wired: SimpleNamespace, state: InteractionState, probe: _ProbeDriver) -> None:
-    register_park_kill_handler(probe.kill)
-    await kill_park(wired.fake, wired.store, state.request.interaction_id, None, reason="cancelled")
-
-
-async def _kill_reaper(wired: SimpleNamespace, state: InteractionState, probe: _ProbeDriver) -> None:
-    """The kill's teardown raises once after firing (the kill-due record stays), and the reaper redelivers it."""
-    attempts = {"n": 0}
-
-    async def _flaky(interaction_id: str, reason: str) -> None:
-        attempts["n"] += 1
-        if attempts["n"] == 1:
-            raise RuntimeError("teardown not ready")
-        await probe.kill(interaction_id, reason)
-
-    register_park_kill_handler(_flaky)
-    with pytest.raises(RuntimeError, match="teardown not ready"):
-        await kill_park(wired.fake, wired.store, state.request.interaction_id, None, reason="cancelled")
-    due = await wired.store.claim_kill_retry(
-        wired.fake, state.request.interaction_id, datetime.now(UTC) + timedelta(hours=2), 1000, 60000
-    )
-    assert isinstance(due, KillDue)
-    await redeliver_kill(wired.store, due)
-
-
 async def _drive(door: str, wired: SimpleNamespace, state: InteractionState, probe: _ProbeDriver) -> None:
     if door == "answer":
         await _answer_door(wired, state)
@@ -294,15 +269,11 @@ async def _drive(door: str, wired: SimpleNamespace, state: InteractionState, pro
         await _reaper_redelivery(wired, state)
     elif door == "visit":
         await _inline_visit(wired, state)
-    elif door == "giveup":
-        await _give_up(wired, state, probe)
-    elif door == "kill":
-        await _kill_door(wired, state, probe)
     else:
-        await _kill_reaper(wired, state, probe)
+        await _give_up(wired, state, probe)
 
 
-DOORS = ["answer", "reaper", "visit", "giveup", "kill", "kill-reaper"]
+DOORS = ["answer", "reaper", "visit", "giveup"]
 
 
 # --- a token of the driven park's lineage is admitted, at depth 1 and depth 2, at every door ---------
@@ -384,6 +355,29 @@ async def test_a_first_park_records_every_enclosing_chain_key_outermost_first(wi
     assert state.request.chain_keys == recorded
 
 
+@pytest.mark.parametrize(("keys", "recorded"), [([], []), ([OUTER], [OUTER])])
+async def test_a_park_raised_by_the_dispatcher_itself_under_its_own_routing_records_no_chain_key(
+    wired, keys, recorded
+) -> None:
+    # The run's tool body asks directly under the routing it bound for its own call: no nested run
+    # bound its continuation under that routing, so the call's key is not part of the park's lineage.
+    tool_token = set_resume_continuation_tool(RESUME)
+    id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
+    try:
+        with tool_call_frame(), _chained(keys):
+            own_call = set_chained_resume(_routing(INNER))
+            try:
+                parked = await _ask()
+            finally:
+                reset_chained_resume(own_call)
+    finally:
+        reset_execution_identity(id_token)
+        reset_resume_continuation_tool(tool_token)
+    state = await wired.store.get_state(wired.fake, parked.interaction_id)
+    assert state is not None
+    assert state.request.chain_keys == recorded
+
+
 async def test_the_lineage_rides_the_due_record_the_kill_target_and_the_kill_due_record(wired, probe) -> None:
     state = await _park(wired, [OUTER, INNER])
     iid = state.request.interaction_id
@@ -401,12 +395,11 @@ async def test_the_lineage_rides_the_due_record_the_kill_target_and_the_kill_due
     assert from_due is not None
     assert from_due.chain_keys == [OUTER, INNER]
 
-    async def _not_ready(interaction_id: str, reason: str) -> None:
-        raise RuntimeError("teardown not ready")
+    async def _not_ready(node: str, reason: str) -> bool:
+        raise ParkKillNotReadyError(node, "teardown not ready")
 
-    register_park_kill_handler(_not_ready)
-    with pytest.raises(RuntimeError, match="teardown not ready"):
-        await kill_park(wired.fake, wired.store, iid, None, reason="cancelled")
+    register_park_kill_handler(_not_ready, continuation_tool=RESUME)
+    await kill_park(wired.fake, wired.store, iid, None, reason="cancelled")
     kill_due = await wired.store.claim_kill_retry(wired.fake, iid, datetime.now(UTC) + timedelta(hours=2), 1, 1)
     assert isinstance(kill_due, KillDue)
     assert kill_due.chain_keys == [OUTER, INNER]

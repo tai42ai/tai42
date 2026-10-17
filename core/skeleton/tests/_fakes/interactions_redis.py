@@ -15,7 +15,6 @@ pipeline honoring the watch/multi transaction shape ``record_answer`` /
 from __future__ import annotations
 
 import asyncio
-import math
 
 from redis.exceptions import WatchError
 
@@ -84,6 +83,9 @@ class _FakePipeline:
     def hgetall(self, *a, **k):
         return self._dispatch("hgetall", a, k)
 
+    def hmget(self, *a, **k):
+        return self._dispatch("hmget", a, k)
+
     def incr(self, *a, **k):
         return self._dispatch("incr", a, k)
 
@@ -108,6 +110,9 @@ class _FakePipeline:
     def zrem(self, *a, **k):
         return self._dispatch("zrem", a, k)
 
+    def zscore(self, *a, **k):
+        return self._dispatch("zscore", a, k)
+
     def zremrangebyscore(self, *a, **k):
         return self._dispatch("zremrangebyscore", a, k)
 
@@ -123,6 +128,18 @@ class _FakePipeline:
     def expire(self, *a, **k):
         return self._dispatch("expire", a, k)
 
+    def pexpire(self, *a, **k):
+        return self._dispatch("pexpire", a, k)
+
+    def ttl(self, *a, **k):
+        return self._dispatch("ttl", a, k)
+
+    def pttl(self, *a, **k):
+        return self._dispatch("pttl", a, k)
+
+    def smembers(self, *a, **k):
+        return self._dispatch("smembers", a, k)
+
     def delete(self, *a, **k):
         return self._dispatch("delete", a, k)
 
@@ -130,7 +147,10 @@ class _FakePipeline:
         return self._dispatch("eval", a, k)
 
     async def execute(self) -> list:
-        # A watched key changed since ``watch`` → abort, running no queued command.
+        # A watched key changed since ``watch`` → abort, running no queued command. A watched
+        # key that expired since ``watch`` counts as changed, as in Redis 7.
+        for key in self._watched:
+            self._r._expired(key)
         for key, version in self._watched.items():
             if self._r._versions.get(key, 0) != version:
                 await self.reset()
@@ -151,7 +171,9 @@ class FakeRedis:
         self._lists: dict[str, list[str]] = {}
         self._sets: dict[str, set[str]] = {}
         # Absolute expiry (in ``self.time`` units) per key; expiry is lazily
-        # enforced on read. Tests advance ``self.time`` to drive TTL.
+        # enforced by every command, reads and writes alike, so a write to a
+        # lapsed key starts a fresh key with no TTL, as in Redis. Tests advance
+        # ``self.time`` to drive TTL.
         self._ttls: dict[str, float] = {}
         self.time = 0.0
         # Monotonic per-stream entry counter — survives MAXLEN trimming so ids
@@ -183,6 +205,7 @@ class FakeRedis:
     # -- internal command impls (shared by direct calls + pipeline) ----------
 
     def _xadd(self, key, fields, maxlen=None, approximate=False) -> str:
+        self._expired(key)
         stream = self._streams.setdefault(key, [])
         # 1-based monotonic ids (independent of the current length, which shrinks
         # on trim) so the "0-0" tail sentinel (which assumes stream ids are
@@ -202,6 +225,7 @@ class FakeRedis:
         # Mirror redis-py ``hset``: either a single field/value pair or a ``mapping``
         # (or both). The interactions store uses the ``mapping=`` form; the sub-MCP
         # store uses the field/value form.
+        self._expired(key)
         h = self._hashes.setdefault(key, {})
         items = dict(mapping) if mapping else {}
         if field is not None:
@@ -223,6 +247,7 @@ class FakeRedis:
         return value
 
     def _hdel(self, key, *fields) -> int:
+        self._expired(key)
         h = self._hashes.get(key, {})
         removed = sum(1 for f in fields if h.pop(f, None) is not None)
         self._bump(key)
@@ -231,6 +256,11 @@ class FakeRedis:
     def _hgetall(self, key) -> dict:
         self._expired(key)
         return dict(self._hashes.get(key, {}))
+
+    def _hmget(self, key, keys) -> list:
+        self._expired(key)
+        h = self._hashes.get(key, {})
+        return [h.get(field) for field in keys]
 
     def _incr(self, key) -> int:
         self._expired(key)
@@ -250,7 +280,11 @@ class FakeRedis:
         self._expired(key)
         return self._strings.get(key)
 
-    def _set(self, key, value, ex=None) -> bool:
+    def _set(self, key, value, ex=None, nx=False) -> bool | None:
+        self._expired(key)
+        if nx and key in self._strings:
+            # Mirror ``SET ... NX``: an existing key is left as it stands and the reply is nil.
+            return None
         self._strings[key] = str(value)
         # Mirror ``SET`` without KEEPTTL: a new value discards any prior TTL.
         if ex is not None:
@@ -261,6 +295,7 @@ class FakeRedis:
         return True
 
     def _zadd(self, key, mapping, gt=False) -> int:
+        self._expired(key)
         z = self._zsets.setdefault(key, {})
         added = 0
         for member, score in mapping.items():
@@ -276,13 +311,19 @@ class FakeRedis:
         self._bump(key)
         return added
 
+    def _zscore(self, key, member) -> float | None:
+        self._expired(key)
+        return self._zsets.get(key, {}).get(str(member))
+
     def _zrem(self, key, *members) -> int:
+        self._expired(key)
         z = self._zsets.get(key, {})
         removed = sum(1 for m in members if z.pop(str(m), None) is not None)
         self._bump(key)
         return removed
 
     def _zremrangebyscore(self, key, min_score, max_score) -> int:
+        self._expired(key)
         z = self._zsets.get(key, {})
         doomed = [m for m, s in z.items() if min_score <= s <= max_score]
         for m in doomed:
@@ -291,17 +332,20 @@ class FakeRedis:
         return len(doomed)
 
     def _zrangebyscore(self, key, min_score, max_score) -> list[str]:
+        self._expired(key)
         z = self._zsets.get(key, {})
         matched = sorted(((m, s) for m, s in z.items() if min_score <= s <= max_score), key=lambda kv: kv[1])
         return [m for m, _ in matched]
 
     def _rpush(self, key, *values) -> int:
+        self._expired(key)
         lst = self._lists.setdefault(key, [])
         lst.extend(str(v) for v in values)
         self._bump(key)
         return len(lst)
 
     def _lpush(self, key, *values) -> int:
+        self._expired(key)
         lst = self._lists.setdefault(key, [])
         # redis LPUSH prepends each value in turn, so the last argument ends up at
         # the head — mirror that ordering exactly.
@@ -311,12 +355,14 @@ class FakeRedis:
         return len(lst)
 
     def _lrange(self, key, start, stop) -> list[str]:
+        self._expired(key)
         lst = self._lists.get(key, [])
         if stop == -1:
             return lst[start:]
         return lst[start : stop + 1]
 
     def _ltrim(self, key, start, stop) -> bool:
+        self._expired(key)
         # Keep only the inclusive ``[start, stop]`` slice, mirroring redis LTRIM
         # (``stop == -1`` means through the tail); a key trimmed empty is dropped.
         lst = self._lists.get(key)
@@ -332,6 +378,7 @@ class FakeRedis:
 
     def _expire(self, key, ttl, nx=False, gt=False) -> bool:
         # Mirror redis: EXPIRE on a missing key is a no-op returning False.
+        self._expired(key)
         if not any(
             key in store for store in (self._hashes, self._strings, self._streams, self._zsets, self._lists, self._sets)
         ):
@@ -352,6 +399,7 @@ class FakeRedis:
     def _delete(self, *keys) -> int:
         removed = 0
         for key in keys:
+            self._expired(key)
             present = any(
                 key in store
                 for store in (self._hashes, self._strings, self._streams, self._zsets, self._lists, self._sets)
@@ -412,6 +460,9 @@ class FakeRedis:
     async def hget(self, key, field):
         return self._hget(key, field)
 
+    async def hmget(self, key, keys) -> list:
+        return self._hmget(key, keys)
+
     async def hset(self, key, field=None, value=None, mapping=None) -> int:
         return self._hset(key, field, value, mapping)
 
@@ -421,11 +472,17 @@ class FakeRedis:
     async def get(self, key):
         return self._get(key)
 
+    async def set(self, key, value, ex=None, nx=False) -> bool | None:
+        return self._set(key, value, ex=ex, nx=nx)
+
     async def zadd(self, key, mapping, gt=False) -> int:
         return self._zadd(key, mapping, gt=gt)
 
     async def zrem(self, key, *members) -> int:
         return self._zrem(key, *members)
+
+    async def zscore(self, key, member) -> float | None:
+        return self._zscore(key, member)
 
     async def zremrangebyscore(self, key, min_score, max_score) -> int:
         return self._zremrangebyscore(key, min_score, max_score)
@@ -535,10 +592,44 @@ class FakeRedis:
     async def delete(self, *keys) -> int:
         return self._delete(*keys)
 
+    async def expire(self, key, ttl, nx=False, gt=False) -> bool:
+        return self._expire(key, ttl, nx=nx, gt=gt)
+
+    async def pexpire(self, key, ttl_ms, nx=False, gt=False) -> bool:
+        return self._pexpire(key, ttl_ms, nx=nx, gt=gt)
+
+    def _pexpire(self, key, ttl_ms, nx=False, gt=False) -> bool:
+        return self._expire(key, ttl_ms / 1000, nx=nx, gt=gt)
+
+    async def exists(self, *keys) -> int:
+        count = 0
+        for key in keys:
+            self._expired(key)
+            if any(
+                key in store
+                for store in (self._hashes, self._strings, self._streams, self._zsets, self._lists, self._sets)
+            ):
+                count += 1
+        return count
+
     async def ttl(self, key) -> int:
-        # Mirror redis TTL: -2 for a missing key, -1 for a key with no expiry, else
-        # the whole seconds remaining (ceil, floor 0) so a live media key reports a
-        # positive cache lifetime.
+        return self._ttl(key)
+
+    def _ttl(self, key) -> int:
+        # Mirror redis TTL: -2 for a missing key, -1 for a key with no expiry, else the
+        # milliseconds remaining rounded to the nearest second, so a key with under half a
+        # second left reads 0 while it still exists.
+        remaining = self._pttl(key)
+        if remaining < 0:
+            return remaining
+        return (remaining + 500) // 1000
+
+    async def pttl(self, key) -> int:
+        return self._pttl(key)
+
+    def _pttl(self, key) -> int:
+        # Mirror redis PTTL: -2 for a missing key, -1 for a key with no expiry, else the
+        # whole milliseconds remaining.
         self._expired(key)
         present = any(
             key in store for store in (self._hashes, self._strings, self._streams, self._zsets, self._lists, self._sets)
@@ -548,7 +639,7 @@ class FakeRedis:
         exp = self._ttls.get(key)
         if exp is None:
             return -1
-        return max(0, math.ceil(exp - self.time))
+        return max(0, round((exp - self.time) * 1000))
 
     async def zcard(self, key) -> int:
         return len(self._zsets.get(key, {}))

@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from tai42_contract.interactions import ChainedResume, get_chained_resume
-from tai42_kit.llm.checkpoint import checkpoint_park_horizon, durable_checkpoint_providers, register_live_thread_filter
+from tai42_kit.llm.checkpoint import durable_checkpoint_providers, latest_park_deadline, register_live_thread_filter
 from tai42_kit.llm.settings import llm_provider_settings
 
 from tai42_agents._internal.park.park_binding import park_index_configured, threads_with_live_barriers
@@ -33,11 +33,11 @@ class ParkIdentity:
     (a JSON-serializable blob the engine's own ``aresume_park`` reads back), so BOTH the
     LangGraph engines and ``claude_code`` record and resume a park through this one shape.
 
-    ``retention_bound`` is CALLER-COMPUTED: the latest wall-time every store backing this
-    parked run is guaranteed to still hold it (a LangGraph engine passes its checkpoint
-    horizon, the durable-workspace engines the min of checkpoint and workspace). ``None``
-    means keep-forever (unbounded). The generic persist path gates each ask deadline
-    against it without touching any provider.
+    ``retention_bound`` is CALLER-COMPUTED: the latest ask deadline the stores backing this
+    parked run can serve (a LangGraph engine passes its checkpoint's, which keeps the
+    platform's redelivery horizon free after the deadline; the durable-workspace engines the
+    min of that and the workspace's idle-reap time). ``None`` means keep-forever (unbounded).
+    The generic persist path gates each ask deadline against it without touching any provider.
 
     ``bind`` gates whether an async ask under this run may park at all: it binds the resume
     continuation so a parked ask re-enters through ``agent_resume``. Both the ``run`` and
@@ -84,8 +84,8 @@ class ParkIdentity:
         # on the re-entry. ``None`` when unchained. Carried forward onto every re-park so the
         # terminal always reaches the same ancestor.
         self.completion_context = completion_context
-        # The latest wall-time every store backing this park is guaranteed to still hold it;
-        # ``None`` = keep-forever. Gated against each ask deadline at persist time.
+        # The latest ask deadline the stores backing this park can serve; ``None`` = keep-forever.
+        # Gated against each ask deadline at persist time.
         self.retention_bound = retention_bound
 
 
@@ -134,10 +134,11 @@ def build_park_identity(
 
     ``checkpoint_provider`` is the caller's value or ``None``; the effective provider is
     resolved here so durability is judged (and the resume recompiles) against the concrete
-    provider, never a defaulted-away one. ``retention_bound`` is the checkpoint retention
-    horizon narrowed by ``extra_retention_horizon`` (a durable-workspace engine passes its
-    volume horizon so the bound is ``min(checkpoint, workspace)``; ``None`` = no extra
-    bound, so the bound is the checkpoint horizon alone).
+    provider, never a defaulted-away one. ``retention_bound`` is the latest deadline the
+    checkpoint can serve (:func:`_checkpoint_retention_horizon`) narrowed by
+    ``extra_retention_horizon`` (a durable-workspace engine passes its volume horizon so the
+    bound is ``min(checkpoint, workspace)``; ``None`` = no extra bound, so the bound is the
+    checkpoint's alone).
     """
     resolved_provider = checkpoint_provider or llm_provider_settings().checkpoint
     # A parked run's paused graph must be readable by whatever worker later fires its
@@ -177,17 +178,18 @@ def build_park_identity(
 
 
 def _checkpoint_retention_horizon(provider: str) -> datetime:
-    """The latest wall-time a parked graph's checkpoint is guaranteed to still exist (LangGraph-only).
+    """The latest ask deadline a parked graph's checkpoint can still serve (LangGraph-only).
 
-    A durable provider keeps a thread the kit's waiting retention after its last write; the park
-    write is itself a write, so ``now + horizon`` bounds the park. A provider with no such horizon
-    is not park-capable (never reaches here); one that does raises rather than assuming a retention
-    it cannot know.
+    The kit's :func:`~tai42_kit.llm.checkpoint.latest_park_deadline`: the identity is built
+    before the drive whose checkpoint the park resumes from is written, so the bound it measures
+    from now is at or before that checkpoint's, and it keeps the redelivery horizon free after the
+    deadline. A provider with no such horizon is not park-capable (never reaches here); one that
+    does raises rather than assuming a retention it cannot know.
     """
-    horizon = checkpoint_park_horizon(provider)
-    if horizon is None:
+    deadline = latest_park_deadline(provider)
+    if deadline is None:
         raise RuntimeError(f"unexpected checkpoint provider {provider!r} at park-persist time")
-    return datetime.now(UTC) + horizon
+    return deadline
 
 
 def assert_park_capable(identity: ParkIdentity, *, durable: bool, retention_bound: datetime | None) -> None:

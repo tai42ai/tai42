@@ -105,7 +105,12 @@ async def _drive(
     run_delivery_id: str | None = "rd-1",
     candidates: SubjectCandidates | None = None,
     receives_outcome: bool = False,
+    ticket: bool = True,
 ) -> Any:
+    # A receiver-less drive runs under the continuation-due ticket the answer claim wrote with it;
+    # ``ticket=False`` models a ticket the kill seam revoked while the resume drove.
+    if ticket and not receives_outcome:
+        await _seed_due(wired, interaction_id)
     return await continuation_module.drive_and_deliver(
         wired.store,
         identity="svc-key",
@@ -281,6 +286,31 @@ async def test_no_address_no_subject_drops_the_outcome(wired, monkeypatch, caplo
     assert any("no delivery address and no subject" in rec.message for rec in caplog.records)
 
 
+async def test_withdrawn_terminal_with_a_subject_writes_no_outcome_and_leaves_the_index(wired, monkeypatch):
+    # A run the platform took down on purpose has no outcome for anyone to take: the subject rung
+    # writes nothing and the entry leaves its subject index.
+    from tai42_contract.interactions import PARK_COMPLETION_WITHDRAWN
+
+    tools = _wire_tools(monkeypatch, {})
+    candidates = SubjectCandidates(target_kind="tool", target_name="tool-a", by_kind={"person": "p1"})
+    parks_key = wired.store.subject_parks_key("tool", "tool-a", "person", "p1")
+    await wired.fake.sadd(parks_key, "iid-w")
+
+    await continuation_module._deliver_terminal(
+        wired.store,
+        interaction_id="iid-w",
+        outcome={"tai42:run_killed": "cancelled"},
+        status=PARK_COMPLETION_WITHDRAWN,
+        delivery=None,
+        run_delivery_id="rd-w",
+        candidates=candidates,
+    )
+
+    assert await wired.store.claim_outcome(wired.fake, _cid("rd-w")) is None
+    assert await wired.fake.smembers(parks_key) == set()
+    assert tools.calls == []
+
+
 async def test_subject_waiting_outcome_is_written_once_on_redelivery(wired, monkeypatch):
     _wire_tools(monkeypatch, {"resume_tool": lambda _a: {"status": "success", "value": 9}})
     candidates = SubjectCandidates(target_kind="tool", target_name="tool-a", by_kind={"person": "p1"})
@@ -347,6 +377,69 @@ async def test_resume_buffered_delivers_nothing(wired, monkeypatch):
     )
     assert isinstance(result, ResumeBuffered)
     assert not any(c["key"] == "deliver_tool" for c in tools.calls)
+
+
+# --- a receiver-less terminal is delivered only while the resume's ticket stands ----------
+
+
+async def test_receiver_less_terminal_is_not_delivered_once_its_ticket_is_gone(wired, monkeypatch, caplog):
+    tools = _wire_tools(monkeypatch, {"resume_tool": lambda _a: {"status": "success"}, "deliver_tool": lambda a: None})
+    address = DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1")
+    # With the ticket standing the terminal is delivered and the ticket cleared.
+    await _seed_due(wired, "iid-t")
+    await _drive(wired, tool="resume_tool", interaction_id="iid-t", delivery=address, run_delivery_id="rd-t")
+    assert [c["key"] for c in tools.calls].count("deliver_tool") == 1
+    assert not await _due_present(wired, "iid-t")
+
+    # The kill walk revoked the ticket while the resume drove: nothing is delivered, nothing is parked.
+    caplog.set_level(logging.INFO)
+    candidates = SubjectCandidates(target_kind="tool", target_name="tool-a", by_kind={"person": "p9"})
+    await _drive(
+        wired, tool="resume_tool", interaction_id="iid-g", delivery=address, run_delivery_id="rd-g", ticket=False
+    )
+    await _drive(
+        wired,
+        tool="resume_tool",
+        interaction_id="iid-h",
+        delivery=None,
+        run_delivery_id="rd-h",
+        candidates=candidates,
+        ticket=False,
+    )
+    assert [c["key"] for c in tools.calls].count("deliver_tool") == 1
+    assert await wired.store.claim_outcome(wired.fake, _cid("rd-h")) is None
+    assert any("iid-g" in rec.getMessage() and "nothing is delivered" in rec.getMessage() for rec in caplog.records)
+
+
+async def test_receiver_less_failed_terminal_is_not_delivered_once_its_ticket_is_gone(wired, monkeypatch, caplog):
+    def _raise(_a):
+        raise RunTerminalFailed({"status": "aborted"})
+
+    tools = _wire_tools(monkeypatch, {"resume_tool": _raise, "deliver_tool": lambda a: None})
+    caplog.set_level(logging.INFO)
+    await _drive(
+        wired,
+        tool="resume_tool",
+        interaction_id="iid-f",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-f",
+        ticket=False,
+    )
+    assert not any(c["key"] == "deliver_tool" for c in tools.calls)
+    assert any("iid-f" in rec.getMessage() and "nothing is delivered" in rec.getMessage() for rec in caplog.records)
+
+
+async def test_inline_resume_returns_its_outcome_regardless_of_the_ticket(wired, monkeypatch):
+    _wire_tools(monkeypatch, {"resume_tool": lambda _a: {"status": "success", "value": 7}})
+    result = await _drive(
+        wired,
+        tool="resume_tool",
+        interaction_id="iid-i",
+        delivery=None,
+        run_delivery_id="rd-i",
+        receives_outcome=True,
+    )
+    assert result == {"status": "success", "value": 7}
 
 
 # --- the inline-receiver rung ------------------------------------------------------------
@@ -463,6 +556,77 @@ async def test_assert_resume_authorized_by_origin_and_by_run_identity(wired, mon
         pytest.raises(ParkResumeUnauthorizedError),
     ):
         await authorization.assert_resume_authorized("iid-9")
+
+
+async def test_a_face_entry_for_a_taken_down_run_is_refused(wired, monkeypatch):
+    from tai42_contract.interactions import ParkRunTakenDownError
+
+    from tai42_skeleton.runs.chokepoint import resume_lineage
+
+    monkeypatch.setattr(authorization, "client_ctx", monkeypatch_client_ctx(wired))
+    monkeypatch.setattr(authorization, "interactions_settings", lambda: wired.settings)
+    monkeypatch.setattr(authorization, "interactions_store_configured", lambda: True)
+    monkeypatch.setattr(authorization, "InteractionStore", lambda _prefix: wired.store)
+    chain_key = "tai42:chained-park:kd"
+    # The run was taken down: its kill mark stands.
+    await wired.fake.set(wired.store.run_killed_key("rd-dead"), "cancelled")
+
+    # The drive of the interaction itself, a sibling of its run and a chained call of its lineage are
+    # all refused while the ambient run is dead.
+    with resume_origin("iid-d"), run_delivery(RunDelivery("rd-dead", None)), pytest.raises(ParkRunTakenDownError):
+        await authorization.assert_resume_authorized("iid-d")
+    with (
+        resume_origin("iid-d"),
+        resume_lineage([chain_key]),
+        run_delivery(RunDelivery("rd-dead", None)),
+        pytest.raises(ParkRunTakenDownError),
+    ):
+        await authorization.assert_resume_authorized(chain_key)
+
+    # A live run is authorised as before.
+    with resume_origin("iid-l"), run_delivery(RunDelivery("rd-live", None)):
+        await authorization.assert_resume_authorized("iid-l")
+    with resume_origin("iid-l"), resume_lineage([chain_key]), run_delivery(RunDelivery("rd-live", None)):
+        await authorization.assert_resume_authorized(chain_key)
+
+
+async def test_a_receiver_less_drive_of_a_taken_down_run_delivers_nothing_at_info(wired, monkeypatch, caplog):
+    from tai42_contract.interactions import ParkRunTakenDownError
+
+    def _taken_down(_a):
+        raise ParkRunTakenDownError("resume of 'iid-x' refused: its run was taken down")
+
+    tools = _wire_tools(monkeypatch, {"resume_tool": _taken_down, "deliver_tool": lambda a: None})
+    caplog.set_level(logging.INFO)
+    address = DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1")
+
+    assert (
+        await _drive(wired, tool="resume_tool", interaction_id="iid-x", delivery=address, run_delivery_id="rd-x")
+        is None
+    )
+
+    assert not any(c["key"] == "deliver_tool" for c in tools.calls)
+    assert not [rec for rec in caplog.records if rec.levelno >= logging.ERROR]
+    infos = [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.INFO and "iid-x" in rec.getMessage() and "taken down" in rec.getMessage()
+    ]
+    assert len(infos) == 1
+
+    # The inline receiver is told: the due record is cleared and the refusal re-raised.
+    await _seed_due(wired, "iid-y")
+    with pytest.raises(ParkRunTakenDownError):
+        await _drive(
+            wired,
+            tool="resume_tool",
+            interaction_id="iid-y",
+            delivery=address,
+            run_delivery_id="rd-y",
+            receives_outcome=True,
+        )
+    assert not await _due_present(wired, "iid-y")
+    assert not any(c["key"] == "deliver_tool" for c in tools.calls)
 
 
 def monkeypatch_client_ctx(wired):

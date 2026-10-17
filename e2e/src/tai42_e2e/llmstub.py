@@ -27,9 +27,10 @@ from tai42_e2e.ports import allocate_port
 
 class LlmStub:
     """A threaded scripted LLM. Script a list of turns, each either
-    ``{"content": str}`` (a final assistant message) or
-    ``{"tool_call": {"name", "arguments"}}`` (a single tool call). Reset the
-    queue between agent tests.
+    ``{"content": str}`` (a final assistant message),
+    ``{"tool_call": {"name", "arguments"}}`` (a single tool call) or
+    ``{"tool_calls": [{"name", "arguments"}, ...]}`` (several tool calls in one
+    model step, run in parallel by the agent). Reset the queue between agent tests.
 
     It also serves ``/v1/embeddings`` with DETERMINISTIC vectors (a fixed-length
     hash of each input item), so the vector-store agents (retrieval) embed and
@@ -371,8 +372,8 @@ def _deterministic_vector(item: Any) -> list[float]:
 
 def _message(turn: dict[str, Any]) -> tuple[dict[str, Any], str]:
     """Build the assistant message + finish_reason for a scripted turn."""
-    if "tool_call" in turn:
-        call = turn["tool_call"]
+    if "tool_call" in turn or "tool_calls" in turn:
+        calls = [turn["tool_call"]] if "tool_call" in turn else list(turn["tool_calls"])
         message = {
             "role": "assistant",
             "content": None,
@@ -382,11 +383,12 @@ def _message(turn: dict[str, Any]) -> tuple[dict[str, Any], str]:
                     "type": "function",
                     "function": {"name": call["name"], "arguments": json.dumps(call.get("arguments", {}))},
                 }
+                for call in calls
             ],
         }
         return message, "tool_calls"
     if "content" not in turn:
-        raise ValueError(f"llmstub turn has neither 'content' nor 'tool_call': {turn!r}")
+        raise ValueError(f"llmstub turn has neither 'content' nor 'tool_call' nor 'tool_calls': {turn!r}")
     return {"role": "assistant", "content": turn["content"]}, "stop"
 
 
@@ -420,20 +422,20 @@ def _stream(turn: dict[str, Any], body: dict[str, Any]):
 
     yield chunk({"role": "assistant"}, None)
     if finish_reason == "tool_calls":
-        call = message["tool_calls"][0]
-        yield chunk(
-            {
-                "tool_calls": [
-                    {
-                        "index": 0,
-                        "id": call["id"],
-                        "type": "function",
-                        "function": {"name": call["function"]["name"], "arguments": call["function"]["arguments"]},
-                    }
-                ]
-            },
-            None,
-        )
+        for index, call in enumerate(message["tool_calls"]):
+            yield chunk(
+                {
+                    "tool_calls": [
+                        {
+                            "index": index,
+                            "id": call["id"],
+                            "type": "function",
+                            "function": {"name": call["function"]["name"], "arguments": call["function"]["arguments"]},
+                        }
+                    ]
+                },
+                None,
+            )
     else:
         yield chunk({"content": message["content"]}, None)
     yield chunk({}, finish_reason)

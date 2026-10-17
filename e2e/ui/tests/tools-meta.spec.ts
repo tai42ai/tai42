@@ -8,9 +8,9 @@
  * is a CLI/API operation (overlay `hidden:false`), never a screen toggle.
  *
  * The list paginates client-side (24 entries per page by default) over a catalog larger
- * than one page, and the shell-owned `?tags=` deep link filters the whole current
- * directory BEFORE the page slice — so every navigation here scopes the list with it,
- * keeping each asserted tool inside a single page.
+ * than one page, and the shell-owned `?tags=` and `?q=` deep links filter the whole
+ * current directory BEFORE the page slice — so every navigation here scopes the list
+ * with them, keeping each asserted tool inside a single page whatever else bears its tag.
  *
  * Every fixture is SEEDED through the API and, where the UI mutates state (the edit
  * dialog), the effect is read back through the API — so a green assertion proves the
@@ -102,8 +102,8 @@ test('display name + merged native/overlay tags render; edit dialog round-trips 
   await upsert(request, 'e2e_echo', { display_name: displayName, tags: [overlayTag] });
 
   await seedCredential(page);
-  // Few tools bear `e2e`, so the scoped list fits one page.
-  await page.goto('/tools?tags=e2e');
+  // Many tools bear `e2e`; the name filter narrows the scoped list to the tool under test.
+  await page.goto('/tools?tags=e2e&q=e2e_echo');
 
   // The tool renders its display name; its real name stays visible for identity. The
   // flat explorer lists each tool once and the aria-label is exact, so no group scoping
@@ -162,10 +162,10 @@ test('folder explorer: a filed tool lives inside its folder, reached via the bre
   await upsert(request, 'e2e_echo', { folder_id: folderId });
 
   await seedCredential(page);
-  // Folders are never tag-filtered, so the `e2e` filter narrows only the tool list: the
-  // folder stays offered and the absence assertions run against a short, fully-merged
-  // list.
-  await gotoToolsSettled(page, '/tools?tags=e2e');
+  // Folders are never tag- or name-filtered, so the `e2e` and name filters narrow only the
+  // tool list: the folder stays offered and the absence assertions run against a short,
+  // fully-merged list.
+  await gotoToolsSettled(page, '/tools?tags=e2e&q=e2e_echo');
 
   // At the root the folder is offered as a subfolder to open; the filed tool is NOT
   // listed. `exact` so a longer-named tool at the root never substring-matches e2e_echo.

@@ -175,7 +175,7 @@ class InteractionsFacet(_Facet):
         return await resume_parked(interaction_id, _TAKE if payload is ... else payload)
 
     async def cancel_parked(self, ids: list[str]) -> VisitOutcome:
-        """Whole-chain kill every parked interaction named in ``ids`` on the current run's subject."""
+        """Kill the whole run of every parked interaction named in ``ids`` on the current run's subject."""
         from tai42_skeleton.interactions.visit import cancel_parked
 
         return await cancel_parked(ids)

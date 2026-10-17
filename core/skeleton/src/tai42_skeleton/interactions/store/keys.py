@@ -203,14 +203,31 @@ class _StoreKeys:
         """
         return f"{self._p}outcome:retention"
 
+    def run_parks_key(self, run_delivery_id: str) -> str:
+        """SET of the park ids of one run — the index a kill reads to revoke every park of the run.
+
+        A park of a run joins it in the park's own ``add`` pipeline and leaves it on prune and on
+        kill; the set's TTL is set-or-extended to the park's own key TTL (the thread index's NX+GT
+        discipline), so it outlives the longest-lived park it indexes and expires drained.
+        """
+        return f"{self._p}run-parks:{run_delivery_id}"
+
+    def run_killed_key(self, run_delivery_id: str) -> str:
+        """The mark a kill writes once per run.
+
+        While it stands no face may resume the run and no park may be written for it.
+        """
+        return f"{self._p}run-killed:{run_delivery_id}"
+
     def kill_due_key(self, interaction_id: str) -> str:
-        """The durable KILL-DUE record for one whole-chain kill, mirroring the continuation-due outbox.
+        """The durable KILL-DUE record for one whole-run kill, mirroring the continuation-due outbox.
 
         Written in the kill's MULTI carrying the killed run's own copied ``delivery`` and
-        ``run_delivery_id`` (self-contained, so the run's FAILED delivery and its dedup id survive
-        the prune and a redelivery). It is cleared only when the driver teardown returned normally
-        AND the platform's FAILED delivery for the killed run committed; while it stands the reaper
-        redelivers the kill, and past its retention horizon it is dropped with a loud give-up.
+        ``run_delivery_id`` (self-contained, so the run's terminal delivery and its dedup id survive
+        the prune and a redelivery). It is cleared only when the driver teardown returned normally,
+        the channel delivery was withdrawn AND the platform's terminal delivery for the killed run
+        committed; while it stands the reaper redelivers the kill, and past its retention horizon
+        it is dropped with a loud give-up.
         """
         return f"{self._p}kill:due:{interaction_id}"
 

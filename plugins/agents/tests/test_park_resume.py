@@ -41,6 +41,7 @@ from tai42_agents._internal.park import agent_resume, finalize_drive
 from tai42_agents._internal.park import capability as cap
 from tai42_agents._internal.park.errors import (
     AgentParkNotHostableError,
+    AgentResumeCheckpointMissingError,
     AgentResumeParkEntryNotFoundError,
 )
 from tai42_agents._internal.park.park_binding import agents_park_index
@@ -391,6 +392,73 @@ def test_full_park_resume_cycle_runs_ask_once_and_clears_index(
     asyncio.run(go())
 
 
+def test_deep_agent_resume_over_a_gone_checkpoint_fails_loudly(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # The park index still routes the answer, but the thread's checkpoint is gone: the resume ends
+    # the run FAILED naming the missing checkpoint, never as a blank clean terminal.
+    saver = InMemorySaver()
+    store = InMemoryStore()
+    ask = _CountingAsk("i1")
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
+    _wire_real_build(monkeypatch, model, saver, store)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = tai42_app.agents.get_agent("langchain_deep_agent")
+
+    async def go() -> None:
+        await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-gone",
+        )
+        await saver.adelete_thread("t-gone")
+        with pytest.raises(RunTerminalFailed) as raised:
+            await agent_resume("i1", "the answer")
+        assert raised.value.outcome["error_type"] == "AgentResumeCheckpointMissingError"
+        assert ask.calls == 1
+
+    asyncio.run(go())
+
+
+def test_deep_agent_redrive_after_a_clean_terminal_reproduces_the_answer(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A crash between the terminal drive and the index finalize redelivers the answer onto a thread
+    # whose checkpoint holds the finished run and no pending interrupt: the redrive re-produces the
+    # same answer from that checkpoint, never re-invoking the graph.
+    saver = InMemorySaver()
+    store = InMemoryStore()
+    ask = _CountingAsk("i1")
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
+    _wire_real_build(monkeypatch, model, saver, store)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = tai42_app.agents.get_agent("langchain_deep_agent")
+    assert isinstance(agent, agent_mod.DeepAgent)
+
+    async def go() -> None:
+        await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-redrive",
+        )
+        entry = await agents_park_index().read_entry("i1")
+        assert entry is not None
+        assert await agent_resume("i1", "the answer") == "all done"
+        again = await agent.aresume_park(
+            rebuild_kwargs=entry["rebuild_kwargs"],
+            thread_id="t-redrive",
+            resume_map={entry["interrupt_id"]: {"i1": "the answer"}},
+        )
+        assert again == "all done"
+        assert ask.calls == 1
+
+    asyncio.run(go())
+
+
 def test_agent_resume_rejects_a_no_longer_pending_interrupt(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
@@ -623,3 +691,69 @@ def test_two_parallel_subagent_parks_resume_iB_first(
 
 def _is_resolved(entry: Any) -> bool:
     return agents_park_index().tombstone_kind(entry) == "resolved"
+
+
+def test_deep_agent_run_forked_from_a_pinned_checkpoint_parks_and_resumes(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A turn forked from an earlier checkpoint that async-asks parks at the checkpoint the drive
+    # ended at, and the answer resumes it from there.
+    saver = InMemorySaver()
+    store = InMemoryStore()
+    ask = _CountingAsk("i1")
+    model = ScriptedChatModel([AIMessage(content="turn one"), _ask_call(), AIMessage(content="park answered")])
+    _wire_real_build(monkeypatch, model, saver, store)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = tai42_app.agents.get_agent("langchain_deep_agent")
+
+    async def go() -> None:
+        await agent.run(
+            tool_names=["ask"], checkpoint_provider="redis", user_message=TemplatedText(content="hi"), thread_id="t-pin"
+        )
+        latest = await saver.aget_tuple({"configurable": {"thread_id": "t-pin", "checkpoint_ns": ""}})
+        assert latest is not None
+        pin = latest.checkpoint["id"]
+        parked = await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-pin",
+            langgraph_config={"configurable": {"checkpoint_id": pin}},
+        )
+        assert isinstance(parked, SuspendedInteraction)
+        assert await agents_park_index().read_entry("i1") is not None
+        assert await agent_resume("i1", "the answer") == "park answered"
+        assert ask.calls == 1
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("face", ["run", "astream"])
+def test_deep_agent_resume_input_over_a_thread_with_no_checkpoint_raises(
+    face: str, fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A ``resume`` answer aimed at a thread that holds no checkpoint is refused before the graph
+    # runs, never driven as a fresh run over empty state.
+    saver = InMemorySaver()
+    store = InMemoryStore()
+    model = ScriptedChatModel([AIMessage(content="fresh run answer")])
+    _wire_real_build(monkeypatch, model, saver, store)
+
+    agent = tai42_app.agents.get_agent("langchain_deep_agent")
+
+    async def go() -> None:
+        async def drive() -> Any:
+            if face == "run":
+                return await agent.run(checkpoint_provider="redis", resume={"answer": 1}, thread_id="t-none")
+            return [
+                event
+                async for event in agent.astream(checkpoint_provider="redis", resume={"answer": 1}, thread_id="t-none")
+            ]
+
+        with pytest.raises(AgentResumeCheckpointMissingError) as raised:
+            await drive()
+        assert raised.value.thread_id == "t-none"
+        assert await saver.aget_tuple({"configurable": {"thread_id": "t-none", "checkpoint_ns": ""}}) is None
+
+    asyncio.run(go())

@@ -6,7 +6,7 @@ thread delete had no way to reach it and left it orphaned: the expiry reaper lat
 fired a continuation into a deleted thread (a delivery retry storm) and the channel
 correlation stayed muted until the ~24h deadline. This suite proves the reverse index
 that closes that gap: a park bound to a thread joins ``thread-parks:{thread_id}``, the
-member is dropped wherever the interaction leaves pending (answer / prune), and the whole-chain
+member is dropped wherever the interaction leaves pending (answer / prune), and the whole-run
 kill's thread reach reads the reverse-index snapshot (``thread_park_members``) and reconciles it
 (``reconcile_thread_park_members``) as it routes each member through the kill seam.
 """

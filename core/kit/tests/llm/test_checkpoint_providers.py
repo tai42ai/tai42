@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
@@ -20,6 +20,7 @@ from tai42_kit.llm.checkpoint import (
     checkpoint_provider_facts,
     checkpoint_providers,
     durable_checkpoint_providers,
+    latest_park_deadline,
     register_checkpoint_provider,
     shared_value_threshold,
 )
@@ -286,6 +287,38 @@ def test_park_horizon_of_a_non_durable_provider_is_none_whatever_the_retention(p
     from tai42_kit.llm.checkpoint import ThreadRetention
 
     assert checkpoint_park_horizon(provider, ThreadRetention(2, 1)) is None
+
+
+@pytest.mark.parametrize("provider", ["redis", "postgres"])
+@pytest.mark.parametrize("retention", [None, "declared"])
+def test_latest_park_deadline_leaves_the_redelivery_horizon_inside_the_waiting_retention(
+    monkeypatch, provider, retention
+):
+    # An answer may still be delivered a redelivery horizon after the ask's deadline; the latest
+    # deadline a park taken now may carry is the checkpoint's expiry less that horizon.
+    from tai42_contract.app import tai42_app
+
+    from tai42_kit.llm.checkpoint import ThreadRetention
+
+    monkeypatch.setattr(
+        providers_mod,
+        "llm_provider_settings",
+        lambda: SimpleNamespace(checkpoint_retention_waiting_minutes=2880),
+    )
+    declared = ThreadRetention(waiting_minutes=600, finished_minutes=1) if retention else None
+    keep = timedelta(minutes=600 if retention else 2880) - timedelta(hours=1)
+    app = SimpleNamespace(interactions=SimpleNamespace(redelivery_horizon_seconds=lambda: 3600))
+    with tai42_app.bound(app):
+        before = datetime.now(UTC)
+        deadline = latest_park_deadline(provider, declared)
+        after = datetime.now(UTC)
+    assert deadline is not None
+    assert before + keep <= deadline <= after + keep
+
+
+@pytest.mark.parametrize("provider", ["sqlite", "memory"])
+def test_latest_park_deadline_of_a_non_durable_provider_is_none(provider):
+    assert latest_park_deadline(provider) is None
 
 
 def test_a_registered_durable_store_has_a_park_horizon(registry, monkeypatch):

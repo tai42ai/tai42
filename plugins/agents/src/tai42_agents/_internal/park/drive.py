@@ -19,13 +19,18 @@ from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Any
 
-from langgraph.types import StateSnapshot
+from langgraph.types import Command, StateSnapshot
 from tai42_contract.agent.events import InterruptFinal, StreamEvent, SuspendedFinal
 from tai42_contract.interactions import reset_resume_continuation_tool, set_resume_continuation_tool
 from tai42_kit.interactions.park_adoption import chained_park_claims
 
+from tai42_agents._internal.config_util import thread_head_config
 from tai42_agents._internal.park.capability import ParkIdentity
-from tai42_agents._internal.park.errors import AgentParkMarkerError, AgentParkNotHostableError
+from tai42_agents._internal.park.errors import (
+    AgentParkMarkerError,
+    AgentParkNotHostableError,
+    AgentResumeCheckpointMissingError,
+)
 from tai42_agents._internal.park.middleware import AGENT_PARK_PAYLOAD_KEY
 from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents._internal.park.persist import persist_park
@@ -45,8 +50,9 @@ def park_continuation(park: ParkIdentity | None) -> Iterator[None]:
     bound — NOT a no-op. Binding ``None`` SHADOWS any ambient resume continuation the caller
     left bound, so a non-park-capable (or streaming) run nested under a park-capable one cannot
     inherit that binding and mint a park it has no way to resume: its async ask sees no bound
-    continuation and refuses loudly pre-persist. The continuation is set and reset around each
-    drive.
+    continuation and refuses loudly pre-persist. The binding is also the run's face: it carries
+    the ambient chained key (the routing the dispatching run bound for this call) into the
+    lineage of every park this drive raises. The continuation is set and reset around each drive.
 
     This is a SYNC context manager binding ONE contextvar and never awaiting, so it can be
     re-entered per drive-step by :func:`bind_resume_per_step` (the binding cannot span a
@@ -175,15 +181,28 @@ def collect_pending_interrupts(snapshot: Any) -> list[tuple[str, Any]]:
     return pending
 
 
-async def pending_interrupts(agent: Any, config: dict[str, Any]) -> list[InterruptFinal]:
-    """Read the top-level interrupts a paused graph is waiting on, as contract events.
+def require_stored_checkpoint(snapshot: StateSnapshot, thread_id: str) -> None:
+    """Raise :class:`AgentResumeCheckpointMissingError` when ``snapshot`` was read from no stored checkpoint.
 
-    An empty list means the run completed normally. A failure to read the snapshot
-    propagates — a paused run whose interrupt we cannot read would otherwise hang invisibly.
+    A snapshot read from a stored checkpoint carries that checkpoint's ``created_at``; a read the
+    store holds nothing for comes back empty with none (its config echoes whatever checkpoint id
+    was asked for, so the id proves nothing). A resume tells a finished run apart from a missing
+    one by this, before it reads an absent interrupt as a clean terminal.
+    """
+    if snapshot.created_at is None:
+        raise AgentResumeCheckpointMissingError(thread_id)
+
+
+async def resume_command(agent: Any, config: dict[str, Any], resume: Any) -> Command:
+    """The ``Command(resume=...)`` a ``resume`` input drives, once ``config`` is shown to address a stored checkpoint.
+
+    Every face that takes a ``resume`` input builds its graph input here. Over a thread with no
+    stored checkpoint LangGraph would start the graph afresh on empty state, so that raises
+    :class:`AgentResumeCheckpointMissingError` before anything runs.
     """
     snapshot = await agent.aget_state(config)
-    interrupts = list(getattr(snapshot, "interrupts", None) or [])
-    return [InterruptFinal(interrupt_id=intr.id, payload=intr.value) for intr in interrupts]
+    require_stored_checkpoint(snapshot, config["configurable"]["thread_id"])
+    return Command(resume=resume)
 
 
 def _park_interactions(value: Any) -> dict[str, Any] | None:
@@ -220,9 +239,10 @@ async def finalize_drive(
 
     A pending interrupt whose value carries the reserved park payload is a PARK: persist
     the durable park index and surface one :class:`SuspendedFinal`. Any other pending
-    interrupt is a HITL pause, surfaced as :class:`InterruptFinal` (today's behavior). The
+    interrupt is a HITL pause, surfaced as :class:`InterruptFinal`. The
     state read is skipped entirely unless the run can pause — ``interrupt_on`` is set, or
-    the run is park-capable and binds — so a plain run pays no extra read.
+    the run is park-capable and binds — so a plain run pays no extra read. The read is of the
+    thread's latest checkpoint, where the drive ended, even when the drive started from a pinned one.
 
     Every distinct park interrupt pending at once (e.g. two parallel task-tool subagents that
     each async-ask) is collected into ONE super-step: a single durable index over the union of
@@ -238,7 +258,7 @@ async def finalize_drive(
         # interrupt, so there is no pending park interrupt to classify.
         return []
 
-    snapshot = await agent.aget_state(config, subgraphs=True)
+    snapshot = await agent.aget_state(thread_head_config(config), subgraphs=True)
     pending = collect_pending_interrupts(snapshot)
     if not pending:
         return []

@@ -158,15 +158,28 @@ def test_build_agent_mints_a_thread_when_keyless(monkeypatch: pytest.MonkeyPatch
     assert minted == config["configurable"]["thread_id"]
 
 
-def test_pending_interrupts_reads_paused_snapshot() -> None:
-    from tai42_agents._internal.park import pending_interrupts
+def test_collect_pending_interrupts_reads_the_paused_snapshot_and_its_subgraphs() -> None:
+    from langgraph.types import Interrupt, PregelTask, StateSnapshot
 
-    class FakeAgent:
-        async def aget_state(self, config: object) -> SimpleNamespace:
-            return SimpleNamespace(interrupts=[SimpleNamespace(id="i-9", value={"q": "?"})])
+    from tai42_agents._internal.park import collect_pending_interrupts
 
-    (interrupt,) = asyncio.run(pending_interrupts(FakeAgent(), {}))
-    assert (interrupt.interrupt_id, interrupt.payload) == ("i-9", {"q": "?"})
+    def paused_on(interrupt: Interrupt, state: StateSnapshot | None) -> StateSnapshot:
+        task = PregelTask(id="t", name="node", path=(), interrupts=(interrupt,), state=state)
+        return StateSnapshot(
+            values={},
+            next=("node",),
+            config={},
+            metadata=None,
+            created_at=None,
+            parent_config=None,
+            tasks=(task,),
+            interrupts=(interrupt,),
+        )
+
+    subagent = paused_on(Interrupt(value={"q": "deep?"}, id="i-sub"), None)
+    paused = paused_on(Interrupt(value={"q": "?"}, id="i-9"), subagent)
+
+    assert collect_pending_interrupts(paused) == [("i-9", {"q": "?"}), ("i-sub", {"q": "deep?"})]
 
 
 def test_astream_requires_exactly_one_of_message_or_resume() -> None:

@@ -11,7 +11,11 @@ chain lineage the parked interaction recorded, which the platform deposits aroun
 
 from __future__ import annotations
 
-from tai42_contract.interactions import ParkDeliveryUnauthorizedError, ParkResumeUnauthorizedError
+from tai42_contract.interactions import (
+    ParkDeliveryUnauthorizedError,
+    ParkResumeUnauthorizedError,
+    ParkRunTakenDownError,
+)
 from tai42_contract.tools import get_run_delivery_id
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
@@ -25,8 +29,11 @@ from tai42_skeleton.runs.chokepoint import get_delivery_fire, get_resume_lineage
 async def assert_resume_authorized(interaction_id: str) -> None:
     """Raise unless the current run is the platform's own drive of ``interaction_id``'s run.
 
-    A platform drive (a resume, a kill teardown, a give-up) must be on the stack: the ambient resume
-    origin is set. Then exactly one of three facts authorises the call:
+    A platform drive (a resume, a give-up) must be on the stack: the ambient resume origin is set.
+    The ambient run must not have been taken down: a run a kill marked
+    (:meth:`~tai42_skeleton.interactions.store.InteractionStore.run_killed`) is refused with
+    :class:`~tai42_contract.interactions.ParkRunTakenDownError` on every face, so nothing of it
+    runs on. Then exactly one of three facts authorises the call:
 
     * the origin EQUALS ``interaction_id`` — the drive of that very interaction;
     * ``interaction_id`` is an interaction whose stored ``run_delivery_id`` equals the ambient one —
@@ -47,6 +54,9 @@ async def assert_resume_authorized(interaction_id: str) -> None:
             f"resume of interaction {interaction_id!r} refused: no platform resume drive is on the stack "
             "(this face may only produce an outcome inside the platform's own resume of its run)"
         )
+    run_delivery_id = get_run_delivery_id()
+    if run_delivery_id is not None and await _run_killed(run_delivery_id):
+        raise ParkRunTakenDownError(f"resume of {interaction_id!r} refused: its run was taken down")
     if origin == interaction_id:
         return
     if is_chained_park_key(interaction_id):
@@ -56,8 +66,7 @@ async def assert_resume_authorized(interaction_id: str) -> None:
             f"resume of chained call {interaction_id!r} refused: it is not a chained call the resumed "
             "interaction is nested under"
         )
-    ambient_run_delivery_id = get_run_delivery_id()
-    if ambient_run_delivery_id is not None and ambient_run_delivery_id == await _stored_run_delivery_id(interaction_id):
+    if run_delivery_id is not None and run_delivery_id == await _stored_run_delivery_id(interaction_id):
         # The origin names a different interaction of the SAME run: the shared run delivery
         # identity authorises it.
         return
@@ -74,6 +83,15 @@ async def _stored_run_delivery_id(interaction_id: str) -> str | None:
     async with client_ctx(RedisClient, interactions_settings().redis) as r:
         state = await store.get_state(r, interaction_id)
     return state.request.run_delivery_id if state is not None else None
+
+
+async def _run_killed(run_delivery_id: str) -> bool:
+    """Whether the run ``run_delivery_id`` was taken down; ``False`` when the store is off."""
+    if not interactions_store_configured():
+        return False
+    store = InteractionStore(interactions_settings().key_prefix)
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
+        return await store.run_killed(r, run_delivery_id)
 
 
 def assert_delivery_authorized(completion_id: str | None) -> None:

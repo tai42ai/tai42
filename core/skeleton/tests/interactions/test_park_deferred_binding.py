@@ -391,6 +391,11 @@ async def test_answer_copies_deferred_binding_into_the_continuation_due(monkeypa
     await _drain()
 
 
+async def _seed_ticket(wired, interaction_id: str) -> None:
+    """The continuation-due ticket the answer claim writes; a receiver-less terminal delivers under it."""
+    await wired.fake.hset(wired.store.continuation_due_key(interaction_id), mapping={"attempts": "0"})
+
+
 async def test_reaper_redelivery_applies_the_deferred_binding(monkeypatch, fake_redis):
     # The async-park path: the reaper's detached redelivery drives the stored continuation to its
     # terminal and applies the deferred updates — read off the self-contained continuation-due record.
@@ -413,6 +418,7 @@ async def test_reaper_redelivery_applies_the_deferred_binding(monkeypatch, fake_
                 run_input={"x": 5, "n": 4},
                 door_id="pp",
             )
+            await _seed_ticket(wired, "rd1")
             continuation_module.redeliver_continuation(wired.store, due)
             await _drain()
             assert ("__custom__", [{"op": "set", "path": ["last"], "value": 9}]) in fake_states.applies
@@ -453,7 +459,7 @@ async def test_failed_terminal_applies_no_deferred_updates(monkeypatch, fake_red
 
 
 async def test_person_erase_scrubs_the_stored_run_input(monkeypatch, fake_redis):
-    # The run input the park stores may hold person data; a person erase whole-chain-kills the park,
+    # The run input the park stores may hold person data; a person erase kills the park's whole run,
     # deleting the state hash (the full request, run input included) — so the erase scrubs it.
     wired = _wire(monkeypatch, fake_redis)
     now = datetime.now(UTC)
@@ -574,6 +580,7 @@ async def test_re_park_carries_the_deferred_binding_to_the_final_terminal(monkey
 
                 # Drive the second park to its clean terminal, off its OWN stored fields — the door
                 # update lands once at the final terminal.
+                await _seed_ticket(wired, park_b.interaction_id)
                 await continuation_module.drive_and_deliver(
                     wired.store,
                     identity="svc-key",

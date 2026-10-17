@@ -12,6 +12,7 @@ out from under a live question).
 
 from __future__ import annotations
 
+from tai42_contract.app import tai42_app
 from tai42_contract.channels import Channel
 
 
@@ -42,3 +43,16 @@ class ChannelRegistry:
     def reset(self) -> None:
         """Clear every registration, so a reload can re-register cleanly."""
         self._channels.clear()
+
+
+def resolve_channel(channel: str) -> Channel:
+    """Resolve a named channel on the app handle loudly — a malformed or unknown name raises ``ValueError``.
+
+    A hard guard, never a soft ignore: every caller that hands work to a named channel resolves it here.
+    """
+    if not isinstance(channel, str) or not channel:
+        raise ValueError("channel must be a non-empty string")
+    try:
+        return tai42_app.channels.get(channel)
+    except KeyError as exc:
+        raise ValueError(f"unknown channel: {channel!r}") from exc

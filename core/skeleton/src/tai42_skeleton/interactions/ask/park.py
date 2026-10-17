@@ -20,6 +20,7 @@ from tai42_contract.interactions import (
     caller_ask_no_landing_outcome,
     chained_lineage,
     current_caller_ask_landing,
+    get_chained_resume,
     get_park_completion,
     get_resume_continuation_tool,
 )
@@ -135,13 +136,14 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
 
 
 def park_chain_keys() -> tuple[str, ...]:
-    """The chain keys a park records: the lineage it inherits, then the ambient chained calls, outermost first.
+    """The chain keys a park records: the lineage it inherits, then the chained calls this run crossed, outermost first.
 
     Inside a platform drive the lineage of the interaction being driven comes first (a re-park is
-    nested under every chained call its resumed run was), followed by each key of the ambient
-    chained dispatches (:func:`~tai42_contract.interactions.chained_lineage`) not already in it, in
-    order — so a driver re-binding its captured routing adds nothing and a new nested chained call
-    is appended. Outside a drive it is the ambient chained lineage alone.
+    nested under every chained call its resumed run was), followed by each key of the chained
+    calls whose run face this context crossed (:func:`~tai42_contract.interactions.chained_lineage`)
+    not already in it, in order — so a driver re-binding its captured routing adds nothing and a
+    new nested chained call is appended. Outside a drive it is the crossed chained lineage alone;
+    a park the dispatcher raises itself under its own routing records nothing of that routing.
     """
     inherited = get_resume_lineage()
     return inherited + tuple(key for key in chained_lineage() if key not in inherited)
@@ -163,18 +165,22 @@ def bound_park_thread_id() -> str | None:
 
 
 async def notify_repark(expiry_at: datetime | None, *, interaction_id: str) -> None:
-    """Tell a bound chain routing that the run it addresses just parked on a new ask.
+    """Tell a chained caller that the run it waits on just re-parked on a new ask.
 
     A caller whose own suspension horizon was inherited from that run can then refresh it.
 
-    Fired only when :func:`repark_notice` reports a bound chain routing — with no chain routing
-    bound it is silent, so no delivery tool ever sees a fire it has no horizon to answer.
+    Fired only for a RE-park of a run a chained caller waits on: a chain routing is bound and its
+    chain key is in the lineage of the park being driven (:func:`get_resume_lineage`) — the
+    caller parked on that key or released it at the run's first park. A first park, and a park
+    the dispatcher raises itself under its own routing, notify nothing, so no delivery tool ever
+    sees a fire it has no horizon to answer.
     BEST-EFFORT by construction: the notice refreshes a horizon, it never
     carries an answer, so a failing notifier is logged and swallowed rather than turning a
     successfully persisted park into a failed ``ask``. The cost of a lost notice is a
     caller whose horizon stays at the previous ask's deadline.
     """
-    notice = repark_notice(expiry_at)
+    routing = get_chained_resume()
+    notice = repark_notice(expiry_at) if routing is not None and routing.chain_key in get_resume_lineage() else None
     if notice is None:
         return
     tool, payload = notice

@@ -8,6 +8,8 @@ chain routing a nested dispatch binds keeps its lineage per task.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Generator
 
 import pytest
 from pydantic import ValidationError
@@ -153,79 +155,109 @@ def _routing(key: str) -> ChainedResume:
     return ChainedResume(delivery_tool="deliver_chained_park", chain_key=key, asked_by=("main",))
 
 
+@contextlib.contextmanager
+def _nested_run(key: str, continuation: str = "nested_resume") -> Generator[None]:
+    """A dispatch binds the routing ``key``; the nested run it starts binds its continuation under it."""
+    routing = set_chained_resume(_routing(key))
+    try:
+        binding = set_resume_continuation_tool(continuation)
+        try:
+            yield
+        finally:
+            reset_resume_continuation_tool(binding)
+    finally:
+        reset_chained_resume(routing)
+
+
 def test_the_chained_lineage_nests_the_enclosing_chain_keys_outermost_first():
     assert chained_lineage() == ()
     outer = set_chained_resume(_routing("tai42:chained-park:outer"))
     try:
-        assert chained_lineage() == ("tai42:chained-park:outer",)
-        inner = set_chained_resume(_routing("tai42:chained-park:inner"))
+        # A routing alone crosses nothing: no nested run has bound under it yet.
+        assert chained_lineage() == ()
+        outer_run = set_resume_continuation_tool("nested_resume")
         try:
-            assert chained_lineage() == ("tai42:chained-park:outer", "tai42:chained-park:inner")
-            assert get_chained_resume() == _routing("tai42:chained-park:inner")
+            assert chained_lineage() == ("tai42:chained-park:outer",)
+            with _nested_run("tai42:chained-park:inner"):
+                assert chained_lineage() == ("tai42:chained-park:outer", "tai42:chained-park:inner")
+                assert get_chained_resume() == _routing("tai42:chained-park:inner")
+            # The resets restore the outer frame, routing and lineage alike.
+            assert chained_lineage() == ("tai42:chained-park:outer",)
+            assert get_chained_resume() == _routing("tai42:chained-park:outer")
         finally:
-            reset_chained_resume(inner)
-        # The reset restores the outer frame, routing and lineage alike.
-        assert chained_lineage() == ("tai42:chained-park:outer",)
-        assert get_chained_resume() == _routing("tai42:chained-park:outer")
+            reset_resume_continuation_tool(outer_run)
+        assert chained_lineage() == ()
     finally:
         reset_chained_resume(outer)
     assert chained_lineage() == ()
     assert get_chained_resume() is None
 
 
-def test_an_unchained_binding_starts_an_empty_lineage():
-    outer = set_chained_resume(_routing("tai42:chained-park:outer"))
+def test_a_routing_nobody_binds_under_stays_out_of_the_lineage():
+    # The dispatcher's own binding is outside the routing; an ask its tool body raises is its own.
+    dispatcher = set_resume_continuation_tool("agent_resume")
     try:
+        routing = set_chained_resume(_routing("tai42:chained-park:k"))
+        try:
+            assert get_chained_resume() == _routing("tai42:chained-park:k")
+            assert chained_lineage() == ()
+        finally:
+            reset_chained_resume(routing)
+    finally:
+        reset_resume_continuation_tool(dispatcher)
+
+
+def test_resetting_a_binding_restores_the_lineage_it_crossed():
+    dispatcher = set_resume_continuation_tool("agent_resume")
+    try:
+        routing = set_chained_resume(_routing("tai42:chained-park:k"))
+        try:
+            nested = set_resume_continuation_tool("nested_resume")
+            assert chained_lineage() == ("tai42:chained-park:k",)
+            reset_resume_continuation_tool(nested)
+            # The nested run ended: a later ask of the tool body records nothing of the routing.
+            assert chained_lineage() == ()
+            assert get_chained_resume() == _routing("tai42:chained-park:k")
+            assert get_resume_continuation_tool() == "agent_resume"
+        finally:
+            reset_chained_resume(routing)
+    finally:
+        reset_resume_continuation_tool(dispatcher)
+
+
+def test_an_unchained_binding_starts_an_empty_lineage():
+    with _nested_run("tai42:chained-park:outer"):
         cleared = set_chained_resume(None)
         try:
             assert chained_lineage() == ()
             assert get_chained_resume() is None
             # A chained dispatch under the cleared one starts its own lineage.
-            nested = set_chained_resume(_routing("tai42:chained-park:fresh"))
-            try:
+            with _nested_run("tai42:chained-park:fresh"):
                 assert chained_lineage() == ("tai42:chained-park:fresh",)
-            finally:
-                reset_chained_resume(nested)
         finally:
             reset_chained_resume(cleared)
         assert chained_lineage() == ("tai42:chained-park:outer",)
-    finally:
-        reset_chained_resume(outer)
 
 
 def test_re_binding_the_innermost_routing_does_not_repeat_its_key():
-    # A driver re-binds, for its resume, the routing it captured at park time.
-    outer = set_chained_resume(_routing("tai42:chained-park:outer"))
-    try:
-        inner = set_chained_resume(_routing("tai42:chained-park:inner"))
-        try:
-            again = set_chained_resume(_routing("tai42:chained-park:inner"))
-            try:
-                assert chained_lineage() == ("tai42:chained-park:outer", "tai42:chained-park:inner")
-            finally:
-                reset_chained_resume(again)
-        finally:
-            reset_chained_resume(inner)
-    finally:
-        reset_chained_resume(outer)
+    # A driver re-binds, for its resume, the routing it captured at park time, and binds again under it.
+    with (
+        _nested_run("tai42:chained-park:outer"),
+        _nested_run("tai42:chained-park:inner"),
+        _nested_run("tai42:chained-park:inner"),
+    ):
+        assert chained_lineage() == ("tai42:chained-park:outer", "tai42:chained-park:inner")
 
 
 def test_the_chained_lineage_is_isolated_per_task():
     async def _nested(key: str) -> tuple[str, ...]:
-        token = set_chained_resume(_routing(key))
-        try:
+        with _nested_run(key):
             await asyncio.sleep(0)
             return chained_lineage()
-        finally:
-            reset_chained_resume(token)
 
     async def scenario() -> tuple[tuple[str, ...], tuple[str, ...]]:
-        outer = set_chained_resume(_routing("tai42:chained-park:outer"))
-        try:
-            a, b = await asyncio.gather(_nested("tai42:chained-park:a"), _nested("tai42:chained-park:b"))
-        finally:
-            reset_chained_resume(outer)
-        return a, b
+        with _nested_run("tai42:chained-park:outer"):
+            return await asyncio.gather(_nested("tai42:chained-park:a"), _nested("tai42:chained-park:b"))
 
     a, b = asyncio.run(scenario())
     assert a == ("tai42:chained-park:outer", "tai42:chained-park:a")
@@ -250,3 +282,23 @@ def test_run_failed_is_exported_beside_resume_buffered():
     from tai42_contract.interactions.models import RunFailed as ModelsRunFailed
 
     assert InteractionsRunFailed is ModelsRunFailed
+
+
+def test_the_withdrawn_terminal_is_its_own_exported_value():
+    import tai42_contract.interactions as interactions
+    from tai42_contract.interactions import (
+        PARK_COMPLETION_FAILED,
+        PARK_COMPLETION_REPARKED,
+        PARK_COMPLETION_SUCCEEDED,
+        PARK_COMPLETION_WITHDRAWN,
+    )
+
+    assert PARK_COMPLETION_WITHDRAWN == "withdrawn"
+    assert "PARK_COMPLETION_WITHDRAWN" in interactions.__all__
+    vocabulary = {
+        PARK_COMPLETION_SUCCEEDED,
+        PARK_COMPLETION_FAILED,
+        PARK_COMPLETION_REPARKED,
+        PARK_COMPLETION_WITHDRAWN,
+    }
+    assert len(vocabulary) == 4

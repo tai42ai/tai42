@@ -89,7 +89,8 @@ class AppInteractions(Protocol):
         chain lineage (a cross-driver chain re-entry of a caller the driven run is nested under).
         Raises :class:`~tai42_contract.interactions.ParkResumeUnauthorizedError` for an external
         caller (no origin), an id belonging to another run, or a chain key outside the lineage —
-        never a mere presence test.
+        never a mere presence test. Raises :class:`~tai42_contract.interactions.ParkRunTakenDownError`
+        when the ambient drive belongs to a run the platform has taken down.
         """
         ...
 
@@ -217,10 +218,12 @@ class AppInteractions(Protocol):
         ...
 
     async def cancel_parked(self, ids: list[str]) -> VisitOutcome:
-        """Whole-chain kill every parked interaction named in ``ids`` on the current run's subject.
+        """Kill the whole run of every parked interaction named in ``ids`` on the current run's subject.
 
-        Each id is torn down through the one teardown seam (its run and every run it linked above it
-        close for good, delivering FAILED once to a door that started it); returns a
+        Each id is torn down through the one teardown seam, which takes the whole run down: every open
+        ask of the run, nested runs included and the callers waiting on it; nothing of the run is
+        resumed and nothing is said to the person (the channel that delivered an ask releases what it
+        held for it, and a door that started the run is delivered ``withdrawn`` once); returns a
         :class:`~tai42_contract.interactions.VisitOutcome` naming the ids cancelled. An id outside
         the run's own parked list raises :class:`~tai42_contract.interactions.ParkedEntryGoneError`
         with nothing cancelled.

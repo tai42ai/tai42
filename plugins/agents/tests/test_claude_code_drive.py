@@ -44,6 +44,7 @@ from tests._claude_stubs import (
 )
 
 import tai42_agents.claude_code.agent as agent_module
+import tai42_agents.claude_code.live_sessions as live_sessions_module
 import tai42_agents.claude_code.workspace as workspace_module
 from tai42_agents.claude_code.agent import ClaudeCodeAgent
 from tai42_agents.claude_code.errors import ClaudeCodeError
@@ -56,9 +57,9 @@ _DIGEST = "registry.example/claude@sha256:" + "c" * 64
 
 @pytest.fixture(autouse=True)
 def _clear_live_sessions() -> Iterator[None]:
-    agent_module._LIVE_SESSIONS.clear()
+    live_sessions_module.LIVE_SESSIONS.clear()
     yield
-    agent_module._LIVE_SESSIONS.clear()
+    live_sessions_module.LIVE_SESSIONS.clear()
 
 
 def _settings(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> ClaudeCodeSettings:
@@ -274,7 +275,7 @@ def test_ephemeral_run_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     _run(build_local_app(), user_message=TemplatedText(content="hi"))
-    assert agent_module._LIVE_SESSIONS == {}
+    assert live_sessions_module.LIVE_SESSIONS == {}
 
 
 def test_sdk_version_mismatch_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:

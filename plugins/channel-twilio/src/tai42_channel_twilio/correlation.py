@@ -15,7 +15,9 @@ cannot capture a later reply.
 The shared inbound-answer ladder reads the record with a NON-destructive peek
 (:meth:`get_correlation` -> ``GET``, no ``DEL``) and drops it only on a terminal
 outcome (:meth:`release_correlation` -> ``DEL``, idempotent): a kept (retry-in-place)
-rejection leaves the record untouched. Upstream ``MessageSid`` dedupe
+rejection leaves the record untouched. When the platform takes a delivered question down,
+:func:`release_pending_for` drops the pair's record atomically ONLY while it is still held for
+that question's interaction id, so a newer ask's hold on the same pair is never released. Upstream ``MessageSid`` dedupe
 (``already_seen``/``mark_seen``) is the replay guard that keeps a redelivered webhook
 from re-forwarding a peeked-but-not-released reply.
 """
@@ -23,8 +25,9 @@ from re-forwarding a peeked-but-not-released reply.
 from __future__ import annotations
 
 import math
+from collections.abc import Awaitable
 from datetime import UTC, datetime
-from typing import cast
+from typing import Final, cast
 
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError, Correlation
@@ -147,6 +150,29 @@ async def reserve_pending(
 async def release_pending(twilio_number: str, human_number: str) -> None:
     """Drop the reservation (the send failed — the human never received the question)."""
     await twilio_correlation_store.release_correlation(correlation_key(twilio_number, human_number))
+
+
+# Compare-and-delete in one atomic step: the pair's record is dropped only while it is held for
+# ARGV[1], so a withdrawal never releases a hold a newer ask has taken on the same pair.
+_RELEASE_PENDING_FOR_LUA: Final[str] = (
+    "local raw = redis.call('GET', KEYS[1]) "
+    "if not raw then return 0 end "
+    "local rec = cjson.decode(raw) "
+    "if rec.interaction_id == ARGV[1] then return redis.call('DEL', KEYS[1]) end "
+    "return 0"
+)
+
+
+async def release_pending_for(twilio_number: str, human_number: str, interaction_id: str) -> bool:
+    """Drop the pair's reservation ONLY if it is held for ``interaction_id``; True when released.
+
+    A different ask's record, or no record at all, is left untouched and returns False. redis-py's
+    async ``eval`` stub types a non-awaitable return; it is awaitable at runtime.
+    """
+    key = _pending_key(correlation_key(twilio_number, human_number))
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        released = await cast("Awaitable[int]", redis.eval(_RELEASE_PENDING_FOR_LUA, 1, key, interaction_id))
+    return bool(released)
 
 
 async def already_seen(message_sid: str) -> bool:

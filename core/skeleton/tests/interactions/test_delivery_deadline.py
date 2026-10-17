@@ -55,7 +55,6 @@ def _window(seconds: float = 30.0) -> DeadlineWindow:
         created_at=now,
         timeout_at=now + timedelta(seconds=seconds),
         deadline=loop.time() + seconds,
-        park_ttl_margin_seconds=0,
     )
 
 

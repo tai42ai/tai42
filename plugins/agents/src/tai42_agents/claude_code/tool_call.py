@@ -43,11 +43,11 @@ async def run_proxied_tool_call(
     deferred answer, so a parking driver reached through the tool must not capture the
     completion binding addressing that answer (see
     :mod:`~tai42_agents._internal.nested_dispatch`). It is not chained because this session
-    resumes by feeding the runner the answer to the interaction its pending tool call is
-    waiting on — a park on the CALL is not a shape its protocol can resume — so a nested
-    run's park is refused here rather than waited on. The park surfaced up here is therefore
-    the agent's own — raised outside the scoped call, and the ownership check above is what
-    keeps that true.
+    resumes by starting a fresh runner over the resumed SDK session and sending it the answer
+    as a new user message — the pending tool call itself never returns — so a nested run's
+    park, whose answer belongs to that nested run, is refused here rather than waited on. The
+    park surfaced up here is therefore the agent's own — raised outside the scoped call, and
+    the ownership check above is what keeps that true.
     """
     if frame.tool_name not in allowlist:
         # A compromised session cannot widen its declared tool set — a loud protocol error.

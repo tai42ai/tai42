@@ -447,3 +447,28 @@ async def test_reaction_form_sidecar_without_schema_is_a_miss(fake_redis: FakeRe
 
     fake_redis.store["channel:whatsapp:reaction-form:int-noschema"] = json.dumps({"pages": None})
     assert await get_reaction_form("int-noschema") is None
+
+
+async def test_release_pending_for_drops_the_pair_only_for_its_own_ask(fake_redis: FakeRedis):
+    from tai42_channel_whatsapp.correlation import release_pending_for
+
+    deadline = datetime.now(UTC) + timedelta(minutes=5)
+    await reserve_pending(_PNID, _WA, _CALLBACK, deadline, interaction_id="int-A")
+
+    # A different ask's id leaves the hold in place.
+    assert await release_pending_for(_PNID, _WA, "int-X") is False
+    assert _KEY in fake_redis.store
+    # The holding ask's id releases it.
+    assert await release_pending_for(_PNID, _WA, "int-A") is True
+    assert _KEY not in fake_redis.store
+    # Nothing held: a no-op.
+    assert await release_pending_for(_PNID, _WA, "int-A") is False
+
+
+async def test_drop_reaction_form_deletes_the_sidecar_and_is_idempotent(fake_redis: FakeRedis):
+    from tai42_channel_whatsapp.correlation import cache_reaction_form, drop_reaction_form, get_reaction_form
+
+    await cache_reaction_form("int-9", {"type": "object"}, None, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    await drop_reaction_form("int-9")
+    assert await get_reaction_form("int-9") is None
+    await drop_reaction_form("int-9")

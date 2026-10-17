@@ -17,9 +17,11 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, cast, get_args
+
+from tai42_contract.app import tai42_app
 
 from tai42_kit.llm.settings import llm_provider_settings
 from tai42_kit.registry.staged import NamedFactoryRegistry
@@ -291,6 +293,21 @@ def checkpoint_park_horizon(provider: str, retention: ThreadRetention | None = N
     if retention is not None:
         return timedelta(minutes=retention.waiting_minutes)
     return timedelta(minutes=llm_provider_settings().checkpoint_retention_waiting_minutes)
+
+
+def latest_park_deadline(provider: str, retention: ThreadRetention | None = None) -> datetime | None:
+    """The latest ask deadline a park taken now on ``provider`` can serve; ``None`` on a store dying with the process.
+
+    The park's checkpoint is written at or after now and kept :func:`checkpoint_park_horizon` after
+    it. The platform may deliver an ask's answer or expiry up to its redelivery horizon after the
+    deadline, so the latest deadline is the checkpoint's earliest expiry less that horizon: a
+    delivery at any moment the platform still holds the ask finds the checkpoint.
+    """
+    horizon = checkpoint_park_horizon(provider, retention)
+    if horizon is None:
+        return None
+    redelivery = timedelta(seconds=tai42_app.interactions.redelivery_horizon_seconds())
+    return datetime.now(UTC) + horizon - redelivery
 
 
 def shared_value_threshold(provider: str) -> int | None:

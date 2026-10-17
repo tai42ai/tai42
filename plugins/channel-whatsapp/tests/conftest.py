@@ -464,6 +464,19 @@ class FakeRedis:
     async def exists(self, key: str) -> int:
         return 1 if key in self.store else 0
 
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
+        """Run the one Lua script the correlation store sends, in Python; refuse any other script."""
+        from tai42_channel_whatsapp.correlation import _RELEASE_PENDING_FOR_LUA
+
+        if script != _RELEASE_PENDING_FOR_LUA:
+            raise AssertionError(f"FakeRedis.eval was handed an unknown script: {script!r}")
+        self.events.append(("redis_eval", keys_and_args[0]))
+        (key,), (interaction_id,) = keys_and_args[:numkeys], keys_and_args[numkeys:]
+        raw = self.store.get(key)
+        if raw is None or json.loads(raw).get("interaction_id") != interaction_id:
+            return 0
+        return await self.delete(key)
+
 
 @pytest.fixture
 def stub_app() -> Iterator[_StubApp]:

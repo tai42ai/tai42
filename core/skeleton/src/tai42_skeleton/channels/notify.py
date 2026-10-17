@@ -29,7 +29,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from tai42_contract.app import tai42_app
 from tai42_contract.channels import (
     NOTIFICATION_ADDRESS_MAX_CHARS,
     Channel,
@@ -57,6 +56,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_skeleton.access_control.user import clamp_write_audience
 from tai42_skeleton.channels.capabilities import unsupported_capability
 from tai42_skeleton.channels.notifications_sink import record_notification
+from tai42_skeleton.channels.registry import resolve_channel
 from tai42_skeleton.channels.send_receipts import index_send
 from tai42_skeleton.channels.send_span import active_trace_id, send_span
 from tai42_skeleton.interactions.form_schema import validate_channel_form_schema
@@ -75,19 +75,6 @@ class SenderIdentityNotAllowedError(Exception):
     identities a message leaves from. A domain exception, not the operations-layer
     ``BadRequestError``, so this module needs no upward dependency; the door maps it.
     """
-
-
-def _resolve_channel(channel: str) -> Channel:
-    """Resolve a named channel loudly — an unknown name raises ``ValueError``.
-
-    Mirrors the ``ask`` helper's channel guard, never a soft ignore.
-    """
-    if not isinstance(channel, str) or not channel:
-        raise ValueError("channel must be a non-empty string")
-    try:
-        return tai42_app.channels.get(channel)
-    except KeyError as exc:
-        raise ValueError(f"unknown channel: {channel!r}") from exc
 
 
 def _guard_channel_capabilities(
@@ -492,7 +479,7 @@ async def notify_user(
         )
         await _record_feed(sink_notification, audience)
         return []
-    channel_obj = _resolve_channel(channel)
+    channel_obj = resolve_channel(channel)
     # Capability gate, form validation and media rewrite all run BEFORE the feed record:
     # a refused rich send must leave no phantom feed entry.
     _guard_channel_capabilities(

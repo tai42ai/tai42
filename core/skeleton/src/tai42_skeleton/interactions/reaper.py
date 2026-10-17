@@ -6,8 +6,9 @@ for each async park whose ``expiry_at`` has passed and that is still unanswered,
 claims it ONCE — through the same atomic ``record_answer`` a human answer takes,
 so an answer racing an expiry (or two reaper workers racing) resolves to exactly
 one — and fires the stored continuation with the generic EXPIRY answer. The claim
-drops the park from the expiry index; a member whose state already vanished or was
-answered is reconciled off the index without firing.
+drops the park from the expiry index. A due member with no pending park behind it
+lapsed unresolved: it is logged at error, stated once as
+``interactions_ask_expiry_abandoned``, and reconciled off the index.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from redis.asyncio import Redis
-from tai42_contract.interactions import InteractionRequest, InteractionResponse
+from tai42_contract.interactions import PARK_COMPLETION_FAILED, InteractionRequest, InteractionResponse
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -50,9 +51,9 @@ ASK_EXPIRED_UNANSWERED_EVENT_TOPIC = "interactions_ask_expired_unanswered"
 # The reason tag on the removed event + kill-due record for an expiry kill (``on_expiry="kill"``).
 _EXPIRED_REASON = "expired"
 
-# The platform-event topic emitted ONCE when a whole-chain kill is PERMANENTLY abandoned — the
+# The platform-event topic emitted ONCE when a whole-run kill is PERMANENTLY abandoned — the
 # kill-due reaper leg dropped its record past the give-up deadline with the driver teardown still
-# failing, so no door FAILED is ever committed. Best-effort, like the expiry event.
+# failing, so no door terminal is ever committed. Best-effort, like the expiry event.
 KILL_ABANDONED_EVENT_TOPIC = "interactions_kill_abandoned"
 
 # The platform-event topic emitted ONCE when a waiting outcome is dropped UNTAKEN — the retention
@@ -60,6 +61,12 @@ KILL_ABANDONED_EVENT_TOPIC = "interactions_kill_abandoned"
 # run's result. Best-effort, like the other reaper events; core states the fact, a deployment wires a
 # hook to decide what an operator sees.
 OUTCOME_DROPPED_UNTAKEN_EVENT_TOPIC = "interactions_outcome_dropped_untaken"
+
+# The platform-event topic emitted ONCE when an async park's expiry is PERMANENTLY abandoned — its
+# keys aged out before the expiry reaper reached it, so no ``on_expiry`` action ran and no door
+# terminal was committed. Best-effort, like the other reaper events; core states the fact, a
+# deployment wires a hook to decide what an operator sees.
+ASK_EXPIRY_ABANDONED_EVENT_TOPIC = "interactions_ask_expiry_abandoned"
 
 
 async def _emit_ask_expired_unanswered(request: InteractionRequest, group_id: str, expired_at: datetime) -> None:
@@ -92,6 +99,47 @@ async def _emit_ask_expired_unanswered(request: InteractionRequest, group_id: st
         )
 
 
+async def _emit_ask_expiry_abandoned(interaction_id: str, expiry_at: datetime) -> None:
+    """Emit ``interactions_ask_expiry_abandoned`` ONCE for an async park whose expiry was abandoned.
+
+    Best-effort: a hooks-manager failure is logged and swallowed so it never perturbs the reaper
+    pass. ``expiry_at`` is the park's deadline, read off its expiry-index member.
+    """
+    from tai42_skeleton.hooks.cache import get_hooks_manager
+
+    payload = {"interaction_id": interaction_id, "expiry_at": expiry_at.isoformat()}
+    try:
+        await get_hooks_manager().on_event(topic=ASK_EXPIRY_ABANDONED_EVENT_TOPIC, payload=payload)
+    except Exception:
+        logger.warning(
+            "interactions expiry reaper: failed to emit %r for abandoned park %s",
+            ASK_EXPIRY_ABANDONED_EVENT_TOPIC,
+            interaction_id,
+            exc_info=True,
+        )
+
+
+async def _settle_unresolved_expiry(r: Redis, store: InteractionStore, interaction_id: str) -> None:
+    """Close a due park this pass did not resolve: surface it once when it lapsed unresolved.
+
+    The one exit of every expiry the reaper did not resolve. Removing the expiry-index member is
+    the witness: every resolution (an answer claim, a kill prune, a cancel prune) removes the member
+    in the same MULTI that ends the state, so a member this call still removes lapsed unresolved —
+    it is logged at error and ``interactions_ask_expiry_abandoned`` is emitted, once, since the
+    member is gone after it. A member a resolution already removed (one that raced the scan) leaves
+    nothing to remove, and this returns quietly.
+    """
+    expiry_ms = await store.drop_expiry_member(r, interaction_id)
+    if expiry_ms is None:
+        return
+    logger.error(
+        "expiry of async park %s permanently abandoned: its keys aged out before the reaper reached it; "
+        "no on_expiry action ran and no door terminal was committed",
+        interaction_id,
+    )
+    await _emit_ask_expiry_abandoned(interaction_id, datetime.fromtimestamp(expiry_ms / 1000, UTC))
+
+
 async def reap_expired_parks_once() -> int:
     """Run one reaper pass, resolving every due async park by expiry; return how many continuations fired.
 
@@ -122,31 +170,43 @@ async def reap_expired_parks_once() -> int:
 async def _reap_one_expired_park(r: Redis, store: InteractionStore, interaction_id: str, now: datetime) -> bool:
     """Resolve a single due park by expiry; return True when this call resolved it.
 
-    Branches on the park's stored ``on_expiry``: ``"kill"`` (the default) tears the whole chain
-    down through ``kill_park`` and delivers the run's single FAILED; ``"resume"`` claims the park
+    Branches on the park's stored ``on_expiry``: ``"kill"`` (the default) takes the whole run
+    down through ``kill_park`` (the channel delivery withdrawn) and delivers the run's single
+    FAILED — a lapsed deadline is the run failing to finish; ``"resume"`` claims the park
     and fires its stored continuation with the generic expiry answer. The
-    ``interactions_ask_expired_unanswered`` event is emitted once in BOTH. Vanished/answered/boundary
-    members are reconciled or skipped.
+    ``interactions_ask_expired_unanswered`` event is emitted once in BOTH. A boundary member (not
+    yet due) is left for a later pass. Every other exit that resolves nothing — no pending async
+    park behind the member, a kill that finds the park gone, a claim that commits nothing — goes
+    through :func:`_settle_unresolved_expiry`, which surfaces a park that lapsed unresolved and
+    stays quiet for one a racing resolution already closed.
     """
     state = await store.get_state(r, interaction_id)
     if state is None or state.status != "pending" or state.request.mode != "async" or state.request.expiry_at is None:
-        # Vanished, already answered, or no longer an async park with a
-        # deadline: drop the stale index member and move on.
-        await store.drop_expiry_member(r, interaction_id)
+        await _settle_unresolved_expiry(r, store, interaction_id)
         return False
     if now < state.request.expiry_at:
         # Indexed but not yet due (a boundary member); leave it for a later pass.
         return False
     if state.request.on_expiry == "kill":
-        # Expiry kills the whole chain, but claims ONLY a park still pending at claim time: the kill
+        # Expiry kills the whole run, but claims ONLY a park still pending at claim time: the kill
         # seam's atomic pending-gate (``KILL_ACT_ON_PENDING``) is the claim, so an answer that
         # committed between this read and the claim leaves the park to its own continuation — the
         # kill writes nothing, delivers no FAILED, and returns ``"answered"`` here (not ``"pruned"``),
         # so no expiry event fires either. On a genuine expiry ``kill_park`` prunes the park, fires
-        # the driver teardown and delivers the run's single FAILED, and the expiry event is emitted.
+        # the driver teardown, withdraws the channel delivery and delivers the run's single FAILED,
+        # and the expiry event is emitted.
         result = await kill_park(
-            r, store, interaction_id, state.group_id, reason=_EXPIRED_REASON, act_on=KILL_ACT_ON_PENDING
+            r,
+            store,
+            interaction_id,
+            state.group_id,
+            reason=_EXPIRED_REASON,
+            act_on=KILL_ACT_ON_PENDING,
+            terminal=PARK_COMPLETION_FAILED,
         )
+        if result == "gone":
+            await _settle_unresolved_expiry(r, store, interaction_id)
+            return False
         if result != "pruned":
             return False
         await _emit_ask_expired_unanswered(state.request, state.group_id, now)
@@ -181,6 +241,7 @@ async def _reap_one_expired_park(r: Redis, store: InteractionStore, interaction_
         # claim and the continuation fire. Rides alongside; never perturbs the flow.
         await _emit_ask_expired_unanswered(state.request, state.group_id, now)
         return True
+    await _settle_unresolved_expiry(r, store, interaction_id)
     return False
 
 
@@ -246,7 +307,7 @@ async def redeliver_due_continuations_once() -> int:
 
 
 async def _emit_kill_abandoned(interaction_id: str, run_delivery_id: str | None) -> None:
-    """Emit ``interactions_kill_abandoned`` ONCE for a permanently-abandoned whole-chain kill.
+    """Emit ``interactions_kill_abandoned`` ONCE for a permanently-abandoned whole-run kill.
 
     Best-effort: a hooks-manager failure is logged and swallowed so it never perturbs the reaper
     pass. ``run_delivery_id`` is the killed run's identity read off the kill-due record at give-up;
@@ -269,13 +330,15 @@ async def _emit_kill_abandoned(interaction_id: str, run_delivery_id: str | None)
 async def redeliver_due_kills_once() -> int:
     """Run one kill-due redelivery pass, re-firing every due kill-due record; return how many redelivered.
 
-    A kill-due record stands until its driver teardown returned AND the run's FAILED delivery
-    committed — a worker crash between the two, or a driver teardown that keeps raising (its ancestor
-    not yet torn down), leaves it. Each due member is claimed with an advancing backoff, then either
-    redelivered (fire the teardown + the run's FAILED, deduped by the run's ``completion_id``) or,
+    A kill-due record stands until its driver teardown returned, its channel delivery was withdrawn
+    AND the run's terminal delivery committed — a worker crash between them, or a driver teardown or
+    channel withdrawal that keeps raising (its ancestor not yet torn down, the channel's store
+    unreachable), leaves it. Each due member is claimed with an advancing backoff, then either
+    redelivered (fire the teardown + the withdrawal + the run's recorded terminal, deduped by the
+    run's ``completion_id``) or,
     once past its give-up deadline with the teardown still failing, PERMANENTLY abandoned: logged at
     error, ``interactions_kill_abandoned`` emitted once carrying the killed run's
-    ``{interaction_id, run_delivery_id}``, the record cleared, and NO door FAILED committed (its
+    ``{interaction_id, run_delivery_id}``, the record cleared, and NO door terminal committed (its
     clear condition never held). A no-op (returns 0) when the interactions store is unconfigured.
     """
     if not interactions_store_configured():
@@ -297,18 +360,18 @@ async def redeliver_due_kills_once() -> int:
                     # The kill-due record TTL-expired past its backstop; only the orphan index
                     # member remained. Reconciled off by the claim — surface it, run identity gone.
                     logger.error(
-                        "whole-chain kill for interaction %s permanently abandoned (its kill-due record aged out); "
-                        "no door FAILED was committed",
+                        "whole-run kill for interaction %s permanently abandoned (its kill-due record aged out); "
+                        "no door terminal was committed",
                         interaction_id,
                     )
                     await _emit_kill_abandoned(interaction_id, None)
                     continue
                 if now_ms >= due.deadline_ms:
                     # Past the give-up deadline with the driver teardown still failing: drop it
-                    # loudly, once, committing no door FAILED (the ancestor was never torn down).
+                    # loudly, once, committing no door terminal (the ancestor was never torn down).
                     logger.error(
-                        "whole-chain kill for interaction %s permanently abandoned after exhausting its "
-                        "retention horizon; its driver teardown never completed and no door FAILED was committed",
+                        "whole-run kill for interaction %s permanently abandoned after exhausting its "
+                        "retention horizon; its teardown never completed and no door terminal was committed",
                         interaction_id,
                     )
                     await _emit_kill_abandoned(interaction_id, due.run_delivery_id)
@@ -427,7 +490,7 @@ async def run_expiry_reaper_loop() -> None:
 
     Each pass sleeps the configured interval, then (1) resolves every due async park by
     expiry, (2) redelivers every stale continuation-due record whose ``run_tool``
-    never returned, (3) redelivers every stale kill-due record whose teardown or FAILED
+    never returned, (3) redelivers every stale kill-due record whose teardown, withdrawal or terminal
     delivery never committed, and (4) drops every waiting outcome no subject owner took past the
     retention horizon. A per-pass error is logged loudly and the loop survives to the next
     interval — a silently dead reaper would strand every async park past its expiry, every

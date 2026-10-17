@@ -41,7 +41,7 @@ from langgraph.errors import GraphRecursionError
 
 # A node may overwrite a reduced channel by returning ``Overwrite(value=...)``;
 # the ``updates`` stream then yields the wrapper, so it must be unwrapped.
-from langgraph.types import Command, Overwrite
+from langgraph.types import Overwrite
 from tai42_contract.agent.events import (
     InterruptFinal,
     MessageDelta,
@@ -64,7 +64,13 @@ from tai42_agents._internal.outcomes import (
     drive_reprompt_scope,
     outcome_for_drive_error,
 )
-from tai42_agents._internal.park import bind_resume_per_step, detach_dead_chains, finalize_drive, park_step_binding
+from tai42_agents._internal.park import (
+    bind_resume_per_step,
+    detach_dead_chains,
+    finalize_drive,
+    park_step_binding,
+    resume_command,
+)
 from tai42_agents._internal.usage import usage_event
 
 
@@ -164,7 +170,7 @@ async def astream_tools_agent_events(
     agent, strategy, response_format = graph.agent, graph.strategy, graph.response_format
     messages, config, minted_thread = await _build_agent_and_input(graph, user_message, config, user_content_kwargs)
     park = park_builder(config) if park_builder is not None else None
-    agent_input: Any = Command(resume=resume) if resume is not None else messages
+    agent_input: Any = await resume_command(agent, config, resume) if resume is not None else messages
 
     async def _drive() -> AsyncIterator[StreamEvent]:
         async for event in aproject_agent_events(

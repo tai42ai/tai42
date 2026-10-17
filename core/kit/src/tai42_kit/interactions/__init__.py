@@ -23,6 +23,7 @@ from tai42_kit.interactions.media_caps import (
     MediaIngestCapSettings,
     media_ingest_cap_settings,
 )
+from tai42_kit.interactions.park_kill import ParkKillNotReadyError, ParkKillOwnerMissingError
 
 __all__ = [
     "DATE_CONSTRAINT_KEYS",
@@ -34,6 +35,8 @@ __all__ = [
     "CallbackUrlRefusedError",
     "DoorContractOutcome",
     "MediaIngestCapSettings",
+    "ParkKillNotReadyError",
+    "ParkKillOwnerMissingError",
     "evaluate_door_contract",
     "evaluate_visible_when",
     "hidden_fields",

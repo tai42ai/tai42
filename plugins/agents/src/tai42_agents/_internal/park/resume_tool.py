@@ -11,8 +11,8 @@ The face is AUTHORISED: it is dispatchable by name at the run-tool door and the 
 asserts ``assert_resume_authorized(interaction_id)`` at entry, before reading any park state — a
 caller with no matching resume context is refused loudly.
 
-:func:`agent_park_kill_handler` is the driver teardown the platform fires from ``kill_park`` when a
-parked run is killed whole-chain, and :func:`agent_park_giveup_handler` the driver epilogue the
+:func:`agent_park_kill_handler` is the driver teardown the platform fires from ``kill_park`` for
+every node of a killed run, and :func:`agent_park_giveup_handler` the driver epilogue the
 platform's give-up fires when it abandons an answered park; both are registered ONCE at import (the
 handler lists are not reset on reload), while the resume tool is (re)bound per parking-agent
 registration.
@@ -27,13 +27,12 @@ from typing import Any
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import RunFailed
 from tai42_contract.tools import TOOL_META_HIDDEN, TOOL_META_PAUSES, ToolAlreadyRegisteredError
-from tai42_kit.interactions.park_adoption import terminal_chain_notice
 from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome, register_park_giveup_handler
 from tai42_kit.interactions.park_index import DriveInProgressError, ResolutionMissingError
-from tai42_kit.interactions.park_kill import register_park_kill_handler
+from tai42_kit.interactions.park_kill import ParkKillNotReadyError, register_park_kill_handler
 
 from tai42_agents._internal.park.capability import chained_resume_from_entry
-from tai42_agents._internal.park.errors import AgentResumeBarrierNotFoundError, ParkKillNotReadyError
+from tai42_agents._internal.park.errors import AgentResumeBarrierNotFoundError
 from tai42_agents._internal.park.park_binding import agents_park_index, park_index_configured
 from tai42_agents._internal.park.resume import (
     AGENT_RESUME_TOOL_NAME,
@@ -57,7 +56,7 @@ async def agent_resume_tool(interaction_id: str, answer: Any) -> Any:
     ``ParkResumeUnauthorizedError`` and never handed a run's outcome.
 
     It reverses the id to its parked run through the durable park index, buffers the answer into the
-    run's super-step barrier, and — when the last sibling answer lands — drives the paused graph to
+    run's super-step barrier, and — when the last sibling answer lands — drives the paused run to
     its next outcome. It fires NO door completion; the platform delivers the outcome to the run's own
     address. The return is the OUTERMOST run's outcome expressed ONLY in contract types
     (:func:`~tai42_agents._internal.park.resume.to_contract_outcome`): a ``ResumeBuffered`` while
@@ -67,7 +66,8 @@ async def agent_resume_tool(interaction_id: str, answer: Any) -> Any:
 
     Args:
         interaction_id: The parked interaction to resume.
-        answer: The answer value (or the expiry marker) fed to the awaiting tool result.
+        answer: The answer value (or the expiry marker) the parked run resumes with; each agent hands
+            it to its paused turn its own way.
     """
     await tai42_app.interactions.assert_resume_authorized(interaction_id)
     return to_contract_outcome(await agent_resume(interaction_id, answer), raise_failed=True)
@@ -93,15 +93,13 @@ def register_agent_resume_tool() -> None:
         logger.debug("agent_resume tool already bound this epoch; registration is a no-op")
 
 
-async def _live_entry(interaction_id: str, purpose: str) -> dict[str, Any] | None:
-    """The agents' entry for ``interaction_id`` when this driver owns it, or ``None`` when it does not.
+async def _owned_entry(interaction_id: str, purpose: str) -> dict[str, Any] | None:
+    """The agents' entry for ``interaction_id`` — live, resolved or detached — or ``None`` when it has none.
 
     ``None`` when the park index is UNCONFIGURED (this deployment loaded the agents plugin but wired
     no durable park index, so it owns no parks; the kill and give-up handlers fire for EVERY
-    driver's park, so they answer "not ours" WITHOUT reading the index), when there is NO entry
-    (never parked here, or another driver owns it), and for a DETACHED tombstone (a chained key
-    claimed but never parked on). A configured index that fails a read raises. A returned entry is
-    a live entry or a resolved tombstone.
+    driver's park, so they answer "not ours" WITHOUT reading the index) and when there is NO entry
+    (never parked here, or another driver owns it). A configured index that fails a read raises.
     """
     if not park_index_configured():
         logger.debug(
@@ -111,42 +109,59 @@ async def _live_entry(interaction_id: str, purpose: str) -> dict[str, Any] | Non
             interaction_id,
         )
         return None
-    index = agents_park_index()
-    entry = await index.read_entry(interaction_id)
-    if entry is None or index.tombstone_kind(entry) == "detached":
+    return await agents_park_index().read_entry(interaction_id)
+
+
+async def _live_entry(interaction_id: str, purpose: str) -> dict[str, Any] | None:
+    """The agents' entry for ``interaction_id`` when it is live or resolved, or ``None`` otherwise.
+
+    ``None`` for an entry :func:`_owned_entry` does not return and for a DETACHED tombstone (a
+    chained key claimed but never parked on). A returned entry is a live entry or a resolved
+    tombstone.
+    """
+    entry = await _owned_entry(interaction_id, purpose)
+    if entry is None or agents_park_index().tombstone_kind(entry) == "detached":
         return None
     return entry
 
 
-async def agent_park_kill_handler(interaction_id: str, reason: str) -> None:
-    """Tear the agents plugin's own durable state for a killed interaction down, or no-op when it is not ours.
+async def agent_park_kill_handler(node: str, reason: str) -> bool:
+    """End the agents super-step ``node`` belongs to for a killed run; return whether this driver owns ``node``.
 
-    Fired by the platform's ``kill_park`` for every killed interaction, with the run-authorization
-    context bound around the fire (so the cross-driver teardown notify below authorizes on the
-    chain lineage the killed interaction recorded, without any auth code of its own). Not ours (an
-    unconfigured index, no entry, a detached tombstone) is a no-op. A RESOLVED tombstone drops its
-    whole super-step's record and tombstones, so a person erase reaching it per-interaction leaves
-    no stored outcome (which can hold person data) behind.
+    A kill is a deliberate takedown of the whole run: this handler ends the super-step the node
+    belongs to — a park of this run's own, or the chained call it waits on — resumes nobody and
+    notifies nobody; the platform reaches every caller and every nested run of the killed run
+    through this same seam. It returns whether this driver owns the node: ``False`` for an
+    unconfigured index or no entry, ``True`` otherwise.
 
-    A LIVE parked super-step is torn down under its drive lease: the kill CLAIMS it first, so it
-    never stomps an in-flight resume drive — a held lease raises :class:`ParkKillNotReadyError`, so
-    the platform keeps the kill-due record and redelivers once the drive completes or its lease
-    expires. Holding the lease, it fires the captured cross-driver chain FAILED so an ancestor that
-    waited on this run tears down too (that fire PROPAGATES on failure, so the kill is redelivered
-    and the ancestor is never left standing), drops every OTHER resolved super-step of the run (the
-    prior delivered outcomes, which can hold person data), and finalizes the super-step
-    ``aborted`` — so a redrive of any still-open sibling due record replays the aborted
-    :class:`RunFailed`, deduped against the kill's own FAILED. The platform delivers the killed
-    run's single DOOR FAILED itself, once, AFTER the handlers return.
+    A DETACHED tombstone (a chained key claimed but never parked on) is owned and has nothing to
+    end. A RESOLVED tombstone of an ``aborted`` super-step keeps its record: a sibling's resume
+    already in flight lands on it and the platform delivers nothing, and the record ages out on its
+    own TTL. A delivered outcome's tombstone (terminal or suspended, or one whose record already
+    aged out) is dropped with its whole super-step's tombstones, so an erase leaves no stored
+    outcome (which can hold person data) behind.
+
+    A LIVE super-step is ended under its drive lease: the kill CLAIMS it first, so it never stomps
+    an in-flight resume drive — a held lease raises the kit
+    :class:`~tai42_kit.interactions.park_kill.ParkKillNotReadyError`, so the platform keeps the
+    kill-due record and redelivers once the drive completes or its lease expires. Holding the
+    lease, it drops every OTHER resolved super-step of the run (the prior delivered outcomes, which
+    can hold person data) and finalizes the super-step ``aborted``. The platform delivers the
+    killed run's single DOOR terminal itself, once, after every handler returns.
     """
-    entry = await _live_entry(interaction_id, "kill")
+    entry = await _owned_entry(node, "kill")
     if entry is None:
-        return
+        return False
     index = agents_park_index()
-    if index.tombstone_kind(entry) == "resolved":
+    kind = index.tombstone_kind(entry)
+    if kind == "detached":
+        return True
+    if kind == "resolved":
         thread_id, superstep_id = index.tombstone_coordinates(entry)
-        await index.drop_resolution(thread_id, superstep_id, member_ids=[interaction_id])
-        return
+        record = await index.read_resolution(thread_id, superstep_id)
+        if record is None or record.resolution != "aborted":
+            await index.drop_resolution(thread_id, superstep_id, member_ids=[node])
+        return True
 
     thread_id = entry["thread_id"]
     superstep_id = entry["superstep_id"]
@@ -154,21 +169,21 @@ async def agent_park_kill_handler(interaction_id: str, reason: str) -> None:
     try:
         await lease.acquire()
     except DriveInProgressError as exc:
-        raise ParkKillNotReadyError(thread_id, superstep_id) from exc
+        raise ParkKillNotReadyError(
+            node, f"a drive holds agent thread {thread_id!r} super-step {superstep_id!r}"
+        ) from exc
     try:
         barrier = await index.read_barrier(thread_id, superstep_id)
         if barrier is None:
             raise AgentResumeBarrierNotFoundError(thread_id, superstep_id)
-        logger.info("Whole-chain kill of agent thread %r super-step %r (reason: %s)", thread_id, superstep_id, reason)
-        aborted = _aborted_outcome(reason)
-        routing = chained_resume_from_entry(entry)
-        if routing is not None:
-            tool, payload = terminal_chain_notice(routing, aborted)
-            await tai42_app.tools.run_tool(tool, payload, continues_chain=routing.asked_by)
+        logger.info("Kill of agent thread %r super-step %r (reason: %s)", thread_id, superstep_id, reason)
         await index.drop_run_resolutions(thread_id, keep=superstep_id)
-        await index.finalize(lease, member_ids=list(barrier.expected), resolution="aborted", value=aborted)
+        await index.finalize(
+            lease, member_ids=list(barrier.expected), resolution="aborted", value=_aborted_outcome(reason)
+        )
     finally:
         await lease.close()
+    return True
 
 
 async def agent_park_giveup_handler(interaction_id: str, failed_outcome: Mapping[str, Any]) -> ParkGiveUpOutcome | None:
@@ -215,5 +230,5 @@ async def agent_park_giveup_handler(interaction_id: str, failed_outcome: Mapping
 # registration binds exactly one handler per process. The reaper worker that fires a kill or a
 # give-up must load the agents plugin (import this module) for the handlers to be present — every
 # worker kind that runs the reaper also loads the plugin, so they are present wherever they fire.
-register_park_kill_handler(agent_park_kill_handler)
+register_park_kill_handler(agent_park_kill_handler, continuation_tool=AGENT_RESUME_TOOL_NAME)
 register_park_giveup_handler(agent_park_giveup_handler)

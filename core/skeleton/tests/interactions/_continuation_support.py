@@ -36,7 +36,7 @@ def make_wired(monkeypatch, fake_redis, fake_client_ctx) -> SimpleNamespace:
     # through the continuation module's seam — point it at the same fake.
     monkeypatch.setattr(continuation_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(continuation_module, "interactions_settings", lambda: settings)
-    # The whole-chain kill opens its own clients (the subject-erase walk, the reaper's kill
+    # The whole-run kill opens its own clients (the subject-erase walk, the reaper's kill
     # redelivery clear) and reads the retention horizon; point both at the same fake/settings.
     monkeypatch.setattr(kill_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(kill_module, "interactions_settings", lambda: settings)

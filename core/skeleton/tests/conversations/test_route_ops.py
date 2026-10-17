@@ -918,7 +918,7 @@ async def test_delete_route_cascade_cancels_every_thread_park(wired, record_redi
 async def test_delete_route_cancels_parks_before_removing_the_routing_row(
     wired, record_redis, interactions_parks, monkeypatch
 ):
-    # A park's whole-chain kill delivers the run's FAILED, which resolves the park's thread back to
+    # A park's whole-run kill delivers the run's FAILED, which resolves the park's thread back to
     # its route+address — reachable only while the routing row stands. So the delete cancels every
     # thread park BEFORE it removes the row; removing the row first would leave that delivery unable
     # to resolve the now-gone route and fail the delete.

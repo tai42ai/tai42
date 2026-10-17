@@ -10,7 +10,7 @@ cancel / resume / take / start order ONCE for every caller, in this fixed order:
    each resume payload passes the ask's declared answer check; a resume carrying non-empty extras is
    refused; the start's extras keys are declared by the target. A structural refusal or an answer
    mismatch raises with NOTHING cancelled and NOTHING resumed.
-2. Cancel — each id through the one whole-chain kill seam.
+2. Cancel — each id through the one whole-run kill seam.
 3. Resume or take (at most one action besides cancel) — a resume claims the answer atomically and
    drives the continuation INLINE through the one delivery chokepoint
    (:func:`~tai42_skeleton.interactions.continuation.drive_and_deliver`); a take atomically claims a
@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
+    PARK_COMPLETION_WITHDRAWN,
     AnswerFormat,
     InteractionResponse,
     ParkableRunFailedError,
@@ -115,7 +116,10 @@ async def visit(
     :class:`~tai42_contract.interactions.ParkedEntryGoneError` /
     :class:`~tai42_contract.interactions.UndeclaredExtrasKeyError` from the pre-check with nothing
     cancelled and nothing resumed, or a :class:`~tai42_contract.interactions.ParkableRunFailedError`
-    from a take of a ``failed`` outcome.
+    from a take of a ``failed`` outcome. A cancel takes the whole run down — every open ask of the
+    run, nested runs and the callers waiting on it; nothing of the run is resumed — so a resume of
+    another park of that run in the same visit is refused with
+    :class:`~tai42_contract.interactions.ParkedEntryGoneError`.
     """
     resumes = [item for item in resume if isinstance(item, ResumeItem)]
     takes = [item for item in resume if isinstance(item, TakeItem)]
@@ -155,7 +159,7 @@ async def visit(
     # --- Run entry: the subject's outstanding pending saves (records and deferred calls) finish
     #     before anything is cancelled, resumed, taken or started; a held subject refuses here. ---
     async with run_entry_drain():
-        # --- 2. Cancel (each id → the one whole-chain kill seam). ---
+        # --- 2. Cancel (each id → the one whole-run kill seam). ---
         cancelled = await _cancel_all(store, cancel, parked)
 
         # --- 3/4/5. At most one action besides cancel, then normalise what came back. ---
@@ -290,12 +294,20 @@ async def _parked_index(
 async def _cancel_all(
     store: InteractionStore | None, cancel: list[str], parked: dict[str, dict[str, Any]]
 ) -> list[str]:
-    """Whole-chain kill each cancel id through the one teardown seam; return the ids acted on."""
+    """Kill each cancel id's run through the one teardown seam, delivering ``withdrawn``; return the ids acted on.
+
+    A cancel takes the whole run down — every open ask of the run, nested runs and the callers
+    waiting on it; nothing of the run is resumed; the cancelled ask's address is free when the
+    cancel returns and the rest of the takedown is durable — so a ``start`` after a cancel finds
+    the cancelled ask's address free.
+    """
     if not cancel or store is None:
         return list(cancel)
     async with client_ctx(RedisClient, interactions_settings().redis) as r:
         for iid in cancel:
-            await kill_park(r, store, iid, parked[iid].get("group_id") or "", reason="cancelled")
+            await kill_park(
+                r, store, iid, parked[iid].get("group_id") or "", reason="cancelled", terminal=PARK_COMPLETION_WITHDRAWN
+            )
     return list(cancel)
 
 
@@ -667,7 +679,7 @@ async def resume_parked(interaction_id: str, payload: Any = _TAKE) -> VisitOutco
 
 
 async def cancel_parked(ids: list[str]) -> VisitOutcome:
-    """Whole-chain kill every parked interaction named in ``ids`` on the current run's subject."""
+    """Kill the whole run of every parked interaction named in ``ids`` on the current run's subject."""
     return await visit(
         target_name="cancel_parked", cancel=list(ids), resume=[], start=None, extras={}, receives_outcome=True
     )

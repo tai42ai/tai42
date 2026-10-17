@@ -16,6 +16,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from tai42_contract.interactions import (
     EXPIRY_ANSWER,
     ChainedResume,
+    RunTerminalFailed,
     SuspendedInteraction,
     reset_chained_resume,
     reset_park_completion,
@@ -23,6 +24,7 @@ from tai42_contract.interactions import (
     set_park_completion,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.llm.settings import llm_provider_settings
 from tests._tools_agent_park_support import (
     ScriptedChatModel,
     _agent,
@@ -30,10 +32,11 @@ from tests._tools_agent_park_support import (
     _AskStandIn,
     _wire_tools_build,
 )
-from tests.conftest import bind_park_index
+from tests.conftest import APP, bind_park_index
 
 from tai42_agents._internal import base_tool_agent as base_mod
 from tai42_agents._internal.park import agent_resume
+from tai42_agents._internal.park.errors import AgentResumeCheckpointMissingError
 from tai42_agents._internal.park.park_binding import agents_park_index
 
 
@@ -113,6 +116,103 @@ def test_tools_agent_park_then_answer_exactly_once(
         entry = await agents_park_index().read_entry("i1")
         assert entry is not None
         assert _is_resolved(entry)
+
+    asyncio.run(go())
+
+
+def test_tools_agent_resume_over_a_gone_checkpoint_fails_loudly(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # The park index still routes the answer, but the thread's checkpoint is gone: the resume ends
+    # the run FAILED naming the missing checkpoint, never as a blank clean terminal.
+    saver = InMemorySaver()
+    ask = _AskStandIn("i1")
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
+    _wire_tools_build(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = _agent()
+
+    async def go() -> None:
+        await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-gone",
+        )
+        await saver.adelete_thread("t-gone")
+        with pytest.raises(RunTerminalFailed) as raised:
+            await agent_resume("i1", "the answer")
+        assert raised.value.outcome["error_type"] == "AgentResumeCheckpointMissingError"
+        assert ask.calls == 1
+
+    asyncio.run(go())
+
+
+def test_tools_agent_park_bound_keeps_the_redelivery_horizon_inside_the_checkpoint_retention(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # The park's bound is measured against the checkpoint the resume reads: an ask whose deadline
+    # sits at the bound and whose answer arrives a full redelivery horizon late still lands before
+    # that checkpoint's retention runs out.
+    saver = InMemorySaver()
+    ask = _AskStandIn("i1")
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
+    _wire_tools_build(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = _agent()
+
+    async def go() -> None:
+        await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-bound",
+        )
+        entry = await agents_park_index().read_entry("i1")
+        assert entry is not None
+        checkpoint = await saver.aget_tuple({"configurable": {"thread_id": "t-bound", "checkpoint_ns": ""}})
+        assert checkpoint is not None
+        written = datetime.fromisoformat(checkpoint.checkpoint["ts"])
+        expires = written + timedelta(minutes=llm_provider_settings().checkpoint_retention_waiting_minutes)
+        late = datetime.fromisoformat(entry["retention_bound"]) + timedelta(seconds=APP.interactions.redelivery_horizon)
+        assert late <= expires
+
+    asyncio.run(go())
+
+
+def test_tools_agent_redrive_after_a_clean_terminal_reproduces_the_answer(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A crash between the terminal drive and the index finalize redelivers the answer onto a thread
+    # whose checkpoint holds the finished run and no pending interrupt: the redrive re-produces the
+    # same answer from that checkpoint, never re-invoking the graph.
+    saver = InMemorySaver()
+    ask = _AskStandIn("i1")
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
+    _wire_tools_build(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = _agent()
+
+    async def go() -> None:
+        await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-redrive",
+        )
+        entry = await agents_park_index().read_entry("i1")
+        assert entry is not None
+        assert await agent_resume("i1", "the answer") == "all done"
+        again = await agent.aresume_park(
+            rebuild_kwargs=entry["rebuild_kwargs"],
+            thread_id="t-redrive",
+            resume_map={entry["interrupt_id"]: {"i1": "the answer"}},
+        )
+        assert again == "all done"
+        assert ask.calls == 1
 
     asyncio.run(go())
 
@@ -334,3 +434,111 @@ def test_tools_agent_park_has_no_interrupt_on_collision(
 
 def _is_resolved(entry: Any) -> bool:
     return agents_park_index().tombstone_kind(entry) == "resolved"
+
+
+async def _latest_checkpoint_id(saver: InMemorySaver, thread_id: str) -> str:
+    latest = await saver.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+    assert latest is not None
+    return latest.checkpoint["id"]
+
+
+def _pin_kwargs(pin_by: str, checkpoint_id: str) -> dict[str, Any]:
+    if pin_by == "resume_checkpoint_id":
+        return {"resume_checkpoint_id": checkpoint_id}
+    return {"langgraph_config": {"configurable": {"checkpoint_id": checkpoint_id}}}
+
+
+@pytest.mark.parametrize("pin_by", ["resume_checkpoint_id", "langgraph_config"])
+def test_tools_agent_run_forked_from_a_pinned_checkpoint_parks_and_resumes(
+    pin_by: str, fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A turn forked from an earlier checkpoint that async-asks parks at the checkpoint the drive
+    # ended at: the receipt is returned, the park entry is persisted, and the answer resumes it.
+    saver = InMemorySaver()
+    ask = _AskStandIn("i1")
+    model = ScriptedChatModel([AIMessage(content="turn one"), _ask_call(), AIMessage(content="park answered")])
+    _wire_tools_build(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = _agent()
+
+    async def go() -> None:
+        await agent.run(
+            tool_names=["ask"], checkpoint_provider="redis", user_message=TemplatedText(content="hi"), thread_id="t-pin"
+        )
+        pin = await _latest_checkpoint_id(saver, "t-pin")
+        parked = await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-pin",
+            **_pin_kwargs(pin_by, pin),
+        )
+        assert isinstance(parked, SuspendedInteraction)
+        assert await agents_park_index().read_entry("i1") is not None
+        assert await agent_resume("i1", "the answer") == "park answered"
+        assert ask.calls == 1
+
+    asyncio.run(go())
+
+
+def test_tools_agent_resume_of_a_pinned_park_over_a_gone_checkpoint_fails_loudly(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # The pinned checkpoint id the park was started from names nothing once the thread is gone:
+    # the resume still ends FAILED naming the missing checkpoint.
+    saver = InMemorySaver()
+    ask = _AskStandIn("i1")
+    model = ScriptedChatModel([AIMessage(content="turn one"), _ask_call(), AIMessage(content="park answered")])
+    _wire_tools_build(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = _agent()
+
+    async def go() -> None:
+        await agent.run(
+            tool_names=["ask"], checkpoint_provider="redis", user_message=TemplatedText(content="hi"), thread_id="t-pg"
+        )
+        pin = await _latest_checkpoint_id(saver, "t-pg")
+        await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-pg",
+            langgraph_config={"configurable": {"checkpoint_id": pin}},
+        )
+        await saver.adelete_thread("t-pg")
+        with pytest.raises(RunTerminalFailed) as raised:
+            await agent_resume("i1", "the answer")
+        assert raised.value.outcome["error_type"] == "AgentResumeCheckpointMissingError"
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("face", ["run", "astream"])
+def test_tools_agent_resume_input_over_a_thread_with_no_checkpoint_raises(
+    face: str, fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A ``resume`` answer aimed at a thread that holds no checkpoint is refused before the graph
+    # runs, never driven as a fresh run over empty state.
+    saver = InMemorySaver()
+    model = ScriptedChatModel([AIMessage(content="fresh run answer")])
+    _wire_tools_build(monkeypatch, model, saver)
+
+    agent = _agent()
+
+    async def go() -> None:
+        async def drive() -> Any:
+            if face == "run":
+                return await agent.run(checkpoint_provider="redis", resume={"answer": 1}, thread_id="t-none")
+            return [
+                event
+                async for event in agent.astream(checkpoint_provider="redis", resume={"answer": 1}, thread_id="t-none")
+            ]
+
+        with pytest.raises(AgentResumeCheckpointMissingError) as raised:
+            await drive()
+        assert raised.value.thread_id == "t-none"
+        assert await saver.aget_tuple({"configurable": {"thread_id": "t-none", "checkpoint_ns": ""}}) is None
+
+    asyncio.run(go())

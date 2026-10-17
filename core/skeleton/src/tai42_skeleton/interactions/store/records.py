@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
 from tai42_contract.conversation_target import ConversationTargetKind
-from tai42_contract.interactions import CallerAskLanding, DeliveryAddress
+from tai42_contract.interactions import PARK_COMPLETION_FAILED, CallerAskLanding, DeliveryAddress
 from tai42_contract.states import StateBinding, StateContext, SubjectCandidates
 
 
@@ -172,17 +172,24 @@ def _continuation_due_mapping(
 
 @dataclass(frozen=True)
 class KillTarget:
-    """What a whole-chain kill reads off the surviving record to tear a run down.
+    """What a whole-run kill reads off the surviving record to tear a run down.
 
     ``kind`` is ``"park"`` (a pending ask), ``"running"`` (an answered/resuming entry — its state
     hash retained or only its continuation-due record left), or ``"outcome"`` (a completed run's
     waiting result). ``group_id`` is the pending park's group (for the prune's count cleanup),
     ``None`` for the other kinds. ``delivery`` (the run's out-of-band address),
     ``run_delivery_id`` and ``subjects`` (the descriptor) are the run's delivery identity the kill
-    copies onto its durable record and delivers its single FAILED under — ``None`` when the run
+    copies onto its durable record and delivers its terminal under — ``None`` when the run
     carried none (a receiver-less door, no subject). ``chain_keys`` are the chained calls the
-    interaction is nested under, copied onto the kill-due record and deposited as the resume
-    lineage around the driver teardown — empty when nested under none (and for an outcome).
+    interaction is nested under, copied onto the kill-due record so the kill fires every one of
+    them — empty when nested under none (and for an outcome). ``continuation_tool`` is the
+    tool the park's continuation resumes through (the state hash's request, or the
+    continuation-due record's ``tool``), copied onto the kill-due record so the kill knows which
+    driver must own the park — ``None`` for an outcome or a park with no continuation.
+    ``channel`` and ``recipient`` are the ask's delivery channel and address, read off the state
+    hash's request so the kill withdraws that channel delivery — ``None`` when the ask surfaced
+    in the inbox only, or when the surviving record is not the state hash (neither a waiting
+    outcome nor a bare continuation-due record can hold a channel reservation).
     """
 
     kind: Literal["park", "running", "outcome"]
@@ -191,19 +198,25 @@ class KillTarget:
     run_delivery_id: str | None
     subjects: dict[str, Any] | None
     chain_keys: list[str] = field(default_factory=list)
+    channel: str | None = None
+    recipient: str | None = None
+    continuation_tool: str | None = None
 
 
 @dataclass(frozen=True)
 class KillDue:
-    """A durable kill-due record read back for redelivery — the whole-chain kill's outbox.
+    """A durable kill-due record read back for redelivery — the whole-run kill's outbox.
 
-    Written in the kill's teardown MULTI and cleared only when every driver teardown returned
-    normally AND the platform's FAILED delivery for the killed run committed. Carries the killed
-    run's OWN copied ``delivery`` address and ``run_delivery_id`` (so the FAILED delivery and its
-    dedup id survive the prune and a redelivery), the ``chain_keys`` the killed interaction is
-    nested under (deposited as the resume lineage around a redelivered teardown), the subject
-    descriptor it subject-tracks a receiver-less FAILED under, the removal ``reason``, and the hard
-    ``deadline_ms`` past which the reaper gives the kill up. It carries no consumer-specific data.
+    Written in the kill's teardown MULTI and cleared only when every node of it was fired and
+    owned, the channel delivery was withdrawn AND the platform's terminal delivery for the
+    killed run committed. Carries the killed run's OWN copied ``delivery`` address and
+    ``run_delivery_id`` (so the terminal delivery and its dedup id survive the prune and a
+    redelivery), the ``chain_keys`` the killed interaction is nested under (each fired as a node
+    of the kill), the ``continuation_tool`` its park resumes through, the subject descriptor it subject-tracks a
+    receiver-less terminal under, the removal ``reason``, the ``terminal`` the door named, the
+    ask's delivery ``channel`` and ``recipient`` (so a redelivery withdraws the same delivery),
+    and the hard ``deadline_ms`` past which the reaper gives the kill up. It carries no
+    consumer-specific data.
     """
 
     interaction_id: str
@@ -214,6 +227,10 @@ class KillDue:
     run_delivery_id: str | None = None
     subjects: dict[str, Any] | None = None
     chain_keys: list[str] = field(default_factory=list)
+    terminal: str = PARK_COMPLETION_FAILED
+    channel: str | None = None
+    recipient: str | None = None
+    continuation_tool: str | None = None
 
 
 def _kill_due_mapping(
@@ -223,18 +240,25 @@ def _kill_due_mapping(
     run_delivery_id: str | None = None,
     subjects: str | None = None,
     chain_keys: str | None = None,
+    *,
+    terminal: str = PARK_COMPLETION_FAILED,
+    channel: str | None = None,
+    recipient: str | None = None,
+    continuation_tool: str | None = None,
 ) -> dict[str, str]:
     """The kill-due record fields.
 
-    The removal ``reason``, a zeroed attempt count, the hard ``deadline_ms`` (created + retention
-    horizon) past which the reaper gives the kill up, and — when the killed run carried them — the
-    run's ``delivery`` address (JSON), its ``run_delivery_id``, its subject descriptor (JSON) and
-    the ``chain_keys`` the interaction is nested under (JSON), so a detached redelivery re-fires the
-    driver teardown under the same resume lineage and delivers the run's single FAILED
-    without re-reading a state hash the kill already pruned. Written into the kill's teardown MULTI,
-    so the outbox enqueue commits atomically with the prune.
+    The removal ``reason``, the ``terminal`` the door named (always written), a zeroed attempt
+    count, the hard ``deadline_ms`` (created + retention horizon) past which the reaper gives the
+    kill up, and — when the killed run carried them — the run's ``delivery`` address (JSON), its
+    ``run_delivery_id``, its subject descriptor (JSON), the ``chain_keys`` the interaction is
+    nested under (JSON), the ask's delivery ``channel`` and ``recipient`` and its
+    ``continuation_tool``, so a detached redelivery fires the same nodes, withdraws the same
+    channel delivery and delivers the same terminal without re-reading a state hash the kill
+    already pruned. Written into the kill's teardown MULTI, so the outbox enqueue commits
+    atomically with the prune.
     """
-    mapping = {"reason": reason, "attempts": "0", "deadline_ms": str(deadline_ms)}
+    mapping = {"reason": reason, "terminal": terminal, "attempts": "0", "deadline_ms": str(deadline_ms)}
     if delivery is not None:
         mapping["delivery"] = delivery
     if run_delivery_id is not None:
@@ -243,6 +267,12 @@ def _kill_due_mapping(
         mapping["subjects"] = subjects
     if chain_keys is not None:
         mapping["chain_keys"] = chain_keys
+    if channel is not None:
+        mapping["channel"] = channel
+    if recipient is not None:
+        mapping["recipient"] = recipient
+    if continuation_tool is not None:
+        mapping["continuation_tool"] = continuation_tool
     return mapping
 
 

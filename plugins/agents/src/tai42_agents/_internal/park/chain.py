@@ -25,11 +25,15 @@ Three statuses arrive, and each has one job:
 * :data:`~tai42_contract.interactions.PARK_COMPLETION_REPARKED` — not a terminal at all: the
   nested run asked again, so the chained park's INHERITED horizon is extended to the new
   deadline and nothing is resumed;
-* :data:`~tai42_contract.interactions.PARK_COMPLETION_FAILED` — the nested run failed: it is
-  resumed as a model-visible tool ERROR, so the model reads that the call came back empty and
-  answers around it instead of the turn stalling on silence.
+* :data:`~tai42_contract.interactions.PARK_COMPLETION_FAILED` — the nested run failed on its own:
+  it is resumed as a model-visible tool ERROR, so the model reads that the call came back empty and
+  answers around it instead of the turn stalling on silence. A kill never fires this tool — the
+  platform ends the waiting run through the kill seam.
 
 Any other status is a sender's defect and RAISES before anything is resumed.
+:data:`~tai42_contract.interactions.PARK_COMPLETION_WITHDRAWN` is a door-address terminal the
+platform's kill ladder fires at a door's completion; this chain face never receives it, so it is
+refused like any other status this face does not read.
 """
 
 from __future__ import annotations
@@ -75,11 +79,9 @@ async def _extend_horizon(chain_token: str, expiry_at: str | None) -> dict[str, 
     bound the entry recorded — so an extension can never carry a park past the window its own
     state survives, and never past the configured cap.
 
-    A key with no entry is a no-op, not an error, and that is the COMMON case rather than a
-    fault: the first park of a chained call always notifies before the waiting run has finished
-    recording its own park (the nested run parks first, by construction); a park the caller
-    ADOPTED as its own — an ``ask`` raised directly by a chained dispatch — notifies a chain
-    nothing ever parks on; and a resolved chain has nothing left to extend. A DETACHED tombstone
+    A resolved chain, or a key with no entry left, is a no-op, not an error: nothing is left to
+    extend. The platform notifies only a re-park of a run the caller waits on, so the caller
+    parked on the key or released it before the notice. A DETACHED tombstone
     (a chain released or left dead by its drive, whose held run still fires the key until its own
     deadline) IS grown: it carries no run state and no retention bound, so it moves straight out to
     the run's new deadline, and the eventual terminal still lands on it. The extension only ever
@@ -128,10 +130,9 @@ async def deliver_chained_park(
     AUTHORISATION: the tool is hidden but dispatchable by name at the run-tool door and the MCP
     edge, so it asserts ``assert_resume_authorized(chain_token)`` FIRST (after the presence check),
     before it re-enters or returns anything — a legitimate fire runs inside the platform's own drive
-    of an interaction nested under this chained call (its resume, its whole-chain kill's teardown
-    notify, its give-up), whose recorded chain lineage holds ``chain_token``, so it passes; an
-    external run-tool / MCP caller, or a fire for a chained call outside that lineage, is refused
-    loudly.
+    of an interaction nested under this chained call (its resume, its give-up), whose recorded chain
+    lineage holds ``chain_token``, so it passes; an external run-tool / MCP caller, or a fire for a
+    chained call outside that lineage, is refused loudly.
 
     Delivery is at-least-once, and the resume is idempotent for it: the super-step barrier
     buffers an answer once (a redelivery is a no-op) and a resolved super-step replays its stored
@@ -151,7 +152,9 @@ async def deliver_chained_park(
     raises instead: an entry can be missing because the waiting run has not finished recording
     its park yet, which the platform's redelivery fixes, so the retry ticket is kept. A run that
     ends without ever parking on a chain it claimed detaches that key itself, which is what
-    turns the truly-dead case into the benign tombstone rather than an endless retry.
+    turns the truly-dead case into the benign tombstone rather than an endless retry. A resolved
+    chain key — the waiting run finalized by its own drive or torn down by a kill — replays its
+    record; a kill keeps an aborted record standing for exactly this fire.
     """
     if not chain_token:
         logger.error(

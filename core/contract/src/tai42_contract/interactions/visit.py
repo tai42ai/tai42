@@ -204,8 +204,8 @@ class Visit(Protocol):
     ) -> VisitOutcome:
         """Run the visit for one door and return its :class:`VisitOutcome`.
 
-        ``target_name`` names the tool/agent the door drives. ``cancel`` is the ids to whole-chain
-        kill; ``resume`` is the resume/take items acted on (at most one non-cancel action per
+        ``target_name`` names the tool/agent the door drives. ``cancel`` is the ids whose whole run
+        is killed; ``resume`` is the resume/take items acted on (at most one non-cancel action per
         visit). ``start`` starts the target with ``extras`` when nothing was resumed or taken
         (``None`` starts nothing); ``extras`` keys must be declared by the target. ``state_binding``
         is the door's binding, deposited ONLY around ``start`` — never around a resume/take/cancel

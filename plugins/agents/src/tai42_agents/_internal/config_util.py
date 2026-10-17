@@ -68,6 +68,17 @@ def build_run_config(
     return config
 
 
+def thread_head_config(config: dict[str, Any]) -> dict[str, Any]:
+    """``config`` addressing its thread's latest checkpoint: any pinned ``checkpoint_id`` is dropped.
+
+    A drive started from a pinned checkpoint forks the thread and writes its own checkpoints after
+    it, so what the drive ended at, and what a later resume continues from, is the thread's latest
+    checkpoint, never the pin. The given config is not mutated.
+    """
+    configurable = {key: value for key, value in config.get("configurable", {}).items() if key != "checkpoint_id"}
+    return {**config, "configurable": configurable}
+
+
 def config_addressed(value: Any) -> tuple[set[str], set[str]]:
     """The ``(thread_ids, checkpoint_ids)`` a ``langgraph_config``-shaped value carries in ``configurable``.
 

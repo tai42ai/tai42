@@ -62,6 +62,7 @@ from tai42_agents._internal.config_util import (
     build_run_config,
     config_addressed,
     init_langgraph_config,
+    thread_head_config,
     unmark_caller_thread,
 )
 from tai42_agents._internal.graph_cache import ToolsAgentGraphSpec, tools_agent_graph
@@ -75,6 +76,7 @@ from tai42_agents._internal.park import (
     park_drive,
     register_agent_resume_tool,
     register_chained_park_tool,
+    require_stored_checkpoint,
 )
 from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
@@ -657,11 +659,12 @@ class ToolsAgent(Agent):
         ``resume_map`` is ``{interrupt_id: {interaction_id: answer}}`` over every park interrupt
         the super-step suspended on — one key for a single park, several for parallel subagent
         parks. Recompiles the same graph on the same ``thread_id`` + durable checkpoint provider
-        from ``rebuild_kwargs``, asserts each stored park interrupt is still pending (else raises,
-        so the caller releases the drive lease and the reaper redelivers), then drives one
+        from ``rebuild_kwargs``, asserts the thread holds a stored checkpoint and each stored park
+        interrupt is still pending (else raises, and the resumed run ends failed), then drives one
         ``Command(resume=resume_map)`` under the drive wrapper — a re-park re-persists a fresh
         index (carrying the completion tool the driver rebound) and returns the suspended
-        receipt, completion returns the final value.
+        receipt, completion returns the final value. A stored checkpoint with no interrupt pending
+        is a run that already finished: its answer is re-produced from that checkpoint.
 
         The LangGraph ``recursion_limit`` is an engine extra carried INSIDE ``rebuild_kwargs``
         (the provider-free park identity holds no engine facts), popped out here before the
@@ -684,12 +687,15 @@ class ToolsAgent(Agent):
             )
         )
         agent = graph.agent
-        config = init_langgraph_config(
-            build_run_config(validated.langgraph_config, thread_id, None, recursion_limit)
-        ).config
+        # The parked drive wrote its checkpoints after any checkpoint its run was pinned to, so the
+        # resume continues from the thread's latest checkpoint.
+        config = thread_head_config(
+            init_langgraph_config(build_run_config(validated.langgraph_config, thread_id, None, recursion_limit)).config
+        )
         await unmark_caller_thread(thread_id, provider=validated.checkpoint_provider)
         await _repair_dangling_tool_calls(agent, config)
         snapshot = await agent.aget_state(config, subgraphs=True)
+        require_stored_checkpoint(snapshot, thread_id)
         pending_ids = {iid for iid, _ in collect_pending_interrupts(snapshot)}
         missing = [interrupt_id for interrupt_id in resume_map if interrupt_id not in pending_ids]
         if missing:
@@ -697,7 +703,7 @@ class ToolsAgent(Agent):
                 # The graph is still parked, but not on every interrupt this super-step resumes
                 # — a corrupted routing, or a graph that advanced past one. Raise.
                 raise AgentResumeInterruptNotPendingError(next(iter(resume_map[missing[0]])), missing[0])
-            # No interrupt pending at all: the super-step already drove to a CLEAN TERMINAL, so
+            # A stored checkpoint with no interrupt pending: the super-step already drove to a CLEAN TERMINAL, so
             # this is an idempotent re-drive after a crash between the terminal drive and the
             # index finalize. Re-produce the SAME terminal output from the persisted state —
             # never re-invoke a resolved graph — so the completion handoff re-fires under its

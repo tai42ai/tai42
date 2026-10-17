@@ -30,10 +30,10 @@ dependencies = [
     # a published agents wheel paired with the contract release carrying its
     # imports (the ambient trace-context carrier lands with contract 5.10.0).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=19.4,<20",
+    "tai42-contract>=20.0,<21",
     # Leaf helpers: settings machinery and the llm factories agents configure
     # model access through (never a direct model-provider SDK).
-    "tai42-kit>=10.0,<11",
+    "tai42-kit>=11.0,<12",
     # The agent runtime. Agents are this repo's purpose, so the runtime is a
     # BASE dependency, not an extra. Floors track the versions the agents are
     # developed against.
@@ -86,7 +86,7 @@ dev = [
     # fresh context), and the monitoring tests record through the kit's OpenTelemetry
     # writer over an in-memory exporter. The shipped package imports no OpenTelemetry.
     "opentelemetry-api>=1.30",
-    "tai42-kit[monitoring]>=10.0,<11",
+    "tai42-kit[monitoring]>=11.0,<12",
     # Test-only: the skeleton-boot e2e integration test (tests/test_skeleton_e2e.py)
     # boots the real tai42-skeleton app in-process to prove tools_agent registers,
     # reports spec_runnable, authors, and streams end-to-end through it. Resolved
@@ -95,7 +95,7 @@ dev = [
     # dependency, NEVER a runtime one — the shipped wheel stays contract-facing and
     # never imports tai42-skeleton (the ruff banned-api guard enforces that for src;
     # the e2e test is the sole, per-file-exempted importer).
-    "tai42-skeleton>=26.5,<27",
+    "tai42-skeleton>=27.0,<28",
 ]
 
 [tool.setuptools]

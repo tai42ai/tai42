@@ -182,3 +182,35 @@ def test_signal_working_is_optional_and_does_not_tighten_the_check():
     # Neither is a Protocol member.
     assert not hasattr(Channel, "working_signal_expiry_seconds")
     assert not hasattr(Channel, "signal_working")
+
+
+def test_withdraw_is_optional_and_does_not_tighten_the_check():
+    from tai42_contract.channels import Channel, ChannelDelivery, ChannelNotification, ChannelWithdrawal
+
+    # ``withdraw`` follows the optional-member convention: not a Protocol member, so a
+    # channel that keeps nothing withdrawable omits it and is still a Channel; a channel
+    # that declares it is read the same way, with ``getattr(channel, "withdraw", None)``.
+    class _NoWithdraw:
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            return None
+
+        async def notify(self, notification: ChannelNotification) -> list[str]:
+            return []
+
+    class _WithWithdraw(_NoWithdraw):
+        def __init__(self) -> None:
+            self.withdrawn: list[ChannelWithdrawal] = []
+
+        async def withdraw(self, withdrawal: ChannelWithdrawal) -> None:
+            self.withdrawn.append(withdrawal)
+
+    no_withdraw = _NoWithdraw()
+    with_withdraw = _WithWithdraw()
+    assert isinstance(no_withdraw, Channel)
+    assert isinstance(with_withdraw, Channel)
+    assert getattr(no_withdraw, "withdraw", None) is None
+    member = getattr(with_withdraw, "withdraw", None)
+    assert member is not None
+    asyncio.run(member(ChannelWithdrawal(interaction_id="int-1", recipient="alice")))
+    assert with_withdraw.withdrawn == [ChannelWithdrawal(interaction_id="int-1", recipient="alice")]
+    assert not hasattr(Channel, "withdraw")

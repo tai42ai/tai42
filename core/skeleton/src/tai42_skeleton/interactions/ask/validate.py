@@ -18,6 +18,7 @@ from tai42_contract.hooks import TopicVerifierBinding
 from tai42_contract.interactions import AnswerFormat, check_addressing, check_ask_timing
 
 from tai42_skeleton.access_control.user import clamp_write_audience
+from tai42_skeleton.channels.registry import resolve_channel
 from tai42_skeleton.interactions.form_schema import validate_channel_form_schema
 
 from .format_args import check_format_arguments, parse_answer_format
@@ -268,9 +269,4 @@ def validate_channel(channel: Any) -> Channel:
     delivery reuses this exact validated instance, so a registry change between validation and
     delivery can never surface as a post-persist lookup failure.
     """
-    if not isinstance(channel, str) or not channel:
-        raise ValueError("channel must be a non-empty string")
-    try:
-        return tai42_app.channels.get(channel)
-    except KeyError as exc:
-        raise ValueError(f"unknown channel: {channel!r}") from exc
+    return resolve_channel(channel)

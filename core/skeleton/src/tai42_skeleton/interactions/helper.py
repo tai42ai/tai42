@@ -29,6 +29,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 from tai42_contract.hooks import TopicVerifierBinding
 from tai42_contract.interactions import (
+    PARK_COMPLETION_WITHDRAWN,
     AnswerMismatchPolicy,
     FormData,
     FormPage,
@@ -69,14 +70,15 @@ DELIVERY_FAILED_EVENT_TOPIC = "interactions_delivery_failed"
 async def cancel_parks_for_thread(
     thread_id: str, *, also_subjects: Sequence[tuple[str, str]] = (), reason: str
 ) -> list[str]:
-    """Whole-chain-kill every async ``ask`` park addressed to ``thread_id``, and to each of ``also_subjects``.
+    """Kill the whole run of every async ``ask`` park addressed to ``thread_id``, and to each of ``also_subjects``.
 
     The entry point a conversation thread/route/person delete calls so a parked question the deletion
     would orphan is torn down instead of lingering muted until its expiry deadline. Reaches every park
     through the thread reverse index (a thread-bound background park) UNION the subject index for
     ``(kind="thread", key=thread_id)`` (a conversation park on any scope) UNION the subject index of
-    every ``(kind, key)`` in ``also_subjects``, and routes each through the ONE whole-chain kill seam
-    (:func:`kill_park`): the driver teardown fires and the run's single FAILED is delivered, never a
+    every ``(kind, key)`` in ``also_subjects``, and routes each through the ONE whole-run kill seam
+    (:func:`kill_park`): the driver teardown fires, the channel delivery is withdrawn and the run's
+    single ``withdrawn`` terminal is delivered (nothing is said into a thread being erased), never a
     bare prune. Runs on one connection. A no-op when the interactions store is unconfigured.
     Idempotent — safe to re-run under a delete's retry. Returns the interaction ids reached.
     """
@@ -92,7 +94,7 @@ async def cancel_parks_for_thread(
         members = [*thread_members, *await store.subject_members(conn, "thread", thread_id)]
         for kind, key in also_subjects:
             members.extend(await store.subject_members(conn, kind, key))
-        reached = await kill_members(conn, store, members, reason=reason)
+        reached = await kill_members(conn, store, members, reason=reason, terminal=PARK_COMPLETION_WITHDRAWN)
         # Reconcile the reverse index: the kill prune already dropped a pruned member, this drops an
         # orphan whose state had vanished, and a concurrently-added park keeps its member.
         await store.reconcile_thread_park_members(conn, thread_id, thread_members)
@@ -467,8 +469,9 @@ async def ask(
     # generic continuation as the stored identity.
     if mode == "async":
         # A CHAINED caller waiting on this run inherited ITS horizon from the run's
-        # previous ask, so tell it this park's deadline. Fired only under a chained
-        # binding and only once the park is persisted — never for a caller-addressed ask,
+        # previous ask, so tell it this park's deadline. Fired only for a re-park of a run
+        # a chained caller waits on (a first park and the dispatcher's own park notify
+        # nothing) and only once the park is persisted — never for a caller-addressed ask,
         # which performs no send of any kind.
         if not caller_addressed:
             await park.notify_repark(expiry_at, interaction_id=interaction_id)

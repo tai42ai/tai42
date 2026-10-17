@@ -72,7 +72,10 @@ def nested_tool_dispatch(*, chain: bool = False) -> Iterator[None]:
     ``chain`` asks for the CHAINED resume routing: a fresh chained key addressing this one call,
     carried on ``chained_resume`` with the ancestor's own call chain, so a nested run that parks
     captures it and re-enters THIS loop with its terminal (through ``deliver_chained_park``) instead
-    of stranding it. It is honored only when a resume continuation is bound for this run
+    of stranding it. The key joins a park's lineage only when a nested driver binds its resume
+    continuation under this routing (the nested run's face); an ``ask`` this tool body raises
+    directly is the run's own park and records nothing of the key, so a kill of such a park never
+    looks for an owner of it. It is honored only when a resume continuation is bound for this run
     (``agent_resume``) — exactly the condition under which this run can park at all, and a chain
     nothing can park on would leave the nested run firing at a key that never existed. Otherwise,
     and by default, ``chained_resume`` is CLEARED to ``None`` so a nested run that cannot be waited

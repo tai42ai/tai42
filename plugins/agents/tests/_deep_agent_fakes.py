@@ -54,9 +54,12 @@ class _FakeCompiledGraph:
         # A faithful StateSnapshot exposes ``values`` (read by the turn-start repair),
         # ``interrupts`` (read by the interrupt projection), and ``tasks`` (each task's
         # ``interrupts`` are what the drive finalizer walks, descending into subgraphs). An
-        # empty message log means a non-poisoned thread, so the repair is a no-op.
+        # empty message log means a non-poisoned thread, so the repair is a no-op. ``created_at``
+        # marks the snapshot as read from a stored checkpoint, which a ``resume`` input requires.
         task = SimpleNamespace(interrupts=self._interrupts, state=None)
-        return SimpleNamespace(values={}, interrupts=self._interrupts, tasks=[task])
+        return SimpleNamespace(
+            values={}, interrupts=self._interrupts, tasks=[task], created_at="2026-01-01T00:00:00+00:00"
+        )
 
 
 def _scripted_chunks() -> list[tuple[str, Any]]:

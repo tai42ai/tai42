@@ -46,22 +46,16 @@ class AgentResumeInterruptNotPendingError(RuntimeError):
         super().__init__(f"agent park interrupt {interrupt_id!r} for interaction {interaction_id!r} is not pending")
 
 
-class ParkKillNotReadyError(RuntimeError):
-    """A whole-chain kill reached a live super-step whose drive lease another worker holds.
+class AgentResumeCheckpointMissingError(RuntimeError):
+    """The thread being resumed holds no stored checkpoint.
 
-    The kill claims the super-step's drive lease before finalizing it ``aborted``, so it never
-    stomps an in-flight resume drive. When a live drive holds the lease the claim loses and this
-    raises, so the driver teardown propagates: the platform keeps the kill-due record and the
-    reaper redelivers the kill, which lands once the drive completes or its lease TTL expires.
+    Its checkpoint was removed or expired while the park index still routed an answer to it, so
+    there is no parked run to resume and no finished run to re-produce an answer from.
     """
 
-    def __init__(self, thread_id: str, superstep_id: str) -> None:
+    def __init__(self, thread_id: str) -> None:
         self.thread_id = thread_id
-        self.superstep_id = superstep_id
-        super().__init__(
-            f"whole-chain kill deferred for thread {thread_id!r} super-step {superstep_id!r}; "
-            "a live resume drive holds its lease"
-        )
+        super().__init__(f"agent thread {thread_id!r} holds no stored checkpoint to resume")
 
 
 class AgentParkMarkerError(RuntimeError):

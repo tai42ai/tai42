@@ -1125,18 +1125,17 @@ def async_driver():
     reset_resume_continuation_tool(tool_token)
 
 
-async def test_async_park_callback_door_answerable_through_reaper_margin(
+async def test_async_park_callback_door_answerable_through_the_retention_horizon(
     monkeypatch, wired, fake_channel, async_driver
 ):
     # Door parity for an async park: the channel-delivery callback ticket carries the
-    # SAME reaper margin the state hash does, so the public callback door and the
-    # authenticated /answer door stay answerable through the identical
-    # (expiry_at, expiry_at + park_ttl_margin) window — never one door rejecting a
-    # late answer the other still accepts. ``idle_ttl`` is shrunk below the expiry
-    # horizon so the state's own ``_key_ttl`` is exactly ``expiry_at + margin`` (not
-    # floored to idle_ttl), and the reaper interval fixes margin = 2*ceil(45) = 90s.
-    # The continuation is stubbed — this exercises the door, not the resume.
-    _tune(monkeypatch, wired, idle_ttl_seconds=10, expiry_reaper_interval_seconds=45)
+    # SAME retention horizon (``idle_ttl_seconds``) past the deadline the state hash
+    # does, so the public callback door and the authenticated /answer door stay
+    # answerable through the identical (expiry_at, expiry_at + idle_ttl) window — never
+    # one door rejecting a late answer the other still accepts. With idle_ttl = 90s the
+    # window closes at expiry_at + 90. The continuation is stubbed — this exercises the
+    # door, not the resume.
+    _tune(monkeypatch, wired, idle_ttl_seconds=90)
     resumed: list[Any] = []
 
     async def _stub(
@@ -1162,10 +1161,10 @@ async def test_async_park_callback_door_answerable_through_reaper_margin(
     assert isinstance(result, SuspendedInteraction)
     ticket = _ticket(fake_channel.deliveries[0])
 
-    # Into the window: PAST expiry_at (200s) but WITHIN the reaper margin
-    # (expiry_at + 90 = 290s). Without the margin on the ticket, ``resolve_ticket``
-    # would now return None and the callback door would 404 — while the state hash,
-    # and therefore the authenticated door, is still live.
+    # Into the window: PAST expiry_at (200s) but WITHIN the horizon (expiry_at + 90 =
+    # 290s). Without the horizon on the ticket, ``resolve_ticket`` would now return None
+    # and the callback door would 404 — while the state hash, and therefore the
+    # authenticated door, is still live.
     wired.fake.advance(245)
     assert await wired.store.get_state(wired.fake, result.interaction_id) is not None
 

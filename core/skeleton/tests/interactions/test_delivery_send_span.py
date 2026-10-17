@@ -148,7 +148,6 @@ def _window(seconds: float) -> DeadlineWindow:
         created_at=now,
         timeout_at=now + timedelta(seconds=seconds),
         deadline=asyncio.get_running_loop().time() + seconds,
-        park_ttl_margin_seconds=0,
     )
 
 

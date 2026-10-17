@@ -21,6 +21,7 @@ validation fires at run start (the first ``astream``/``run``), before any sandbo
 from __future__ import annotations
 
 import contextlib
+import json
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Final, cast
@@ -67,6 +68,7 @@ from tai42_agents.claude_code.credentials import (
 from tai42_agents.claude_code.errors import ClaudeCodeError
 from tai42_agents.claude_code.frames import drain_handle, iter_up_frames, map_event, terminal_event
 from tai42_agents.claude_code.inputs import ClaudeCodeInput, InlineSkillShape, SubagentSpecShape
+from tai42_agents.claude_code.live_sessions import live_session
 from tai42_agents.claude_code.protocol import (
     CLAUDE_AGENT_SDK_VERSION,
     AnswerFrame,
@@ -128,11 +130,16 @@ def _resume_continuation(threaded: bool) -> Iterator[None]:
 # idempotent, so a combined box binds it exactly once.
 register_agent_resume_tool()
 
-# Per-worker live-session cache for DETERMINISTIC (threaded) workspaces, so a reused session
-# keeps its create-time ``spec.env`` (the refresh channel is the per-turn bearer file, not a
-# re-baked env). Ephemeral ``uuid4`` workspaces are never cached. The cross-worker mutex is the
-# Redis workspace lease; this cache only avoids re-creating within one worker.
-_LIVE_SESSIONS: dict[str, SandboxSession] = {}
+
+def _resume_prompt_text(answers: list[Any]) -> str:
+    """The user turn a resumed SDK session is queried with: the answers the parked turn waited on, as JSON.
+
+    The parked turn stopped inside its ``ask`` or proxied tool call, which never returned; the resumed session
+    (the same SDK session id) receives what that call waited on as its next user message.
+    """
+    if len(answers) == 1:
+        return f"The ask or tool call this session was waiting on was answered: {json.dumps(answers[0])}"
+    return f"The asks or tool calls this session was waiting on were answered, as a JSON list: {json.dumps(answers)}"
 
 
 @tai42_app.agents.agent(
@@ -290,7 +297,7 @@ class ClaudeCodeAgent(Agent):
             async for event in self._drive_workspace(
                 settings=settings,
                 thread_id=thread_id,
-                prompt={"text": "", "resume_answers": flat},
+                prompt={"text": _resume_prompt_text(list(flat.values()))},
                 options_snapshot=options_snapshot,
                 terminal_key=superstep_id,
             )
@@ -357,14 +364,7 @@ class ClaudeCodeAgent(Agent):
             labels={"tai42.agent": AGENT_NAME, "tai42.thread": thread_id or ""},
             network_setting=settings.network,
         )
-        cached = _LIVE_SESSIONS.get(workspace_key) if threaded else None
-        if cached is not None:
-            session = cached
-            await session.touch()
-        else:
-            session = await sandbox.create_session(spec)
-            if threaded:
-                _LIVE_SESSIONS[workspace_key] = session
+        session = await live_session(sandbox, spec, workspace_key) if threaded else await sandbox.create_session(spec)
 
         ws = session.workspace_path
         park_suspended = False
@@ -386,6 +386,13 @@ class ClaudeCodeAgent(Agent):
             )
 
             resume_id = await read_session_id(session) if threaded else None
+            if terminal_key is not None and resume_id is None:
+                # A park is taken after the runner's hello stored the SDK session id, so a resume over a
+                # workspace without one would start a new SDK session that never saw the parked conversation.
+                raise ClaudeCodeError(
+                    f"thread {thread_id!r} resumes a parked turn, but its workspace holds no stored SDK session id, "
+                    "so the parked conversation cannot continue"
+                )
             payload = build_payload(
                 settings=settings,
                 ws=ws,

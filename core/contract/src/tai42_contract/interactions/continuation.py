@@ -61,8 +61,6 @@ __all__ = [
     "set_resume_continuation_tool",
 ]
 
-_resume_continuation_tool: ContextVar[str | None] = ContextVar("tai42_resume_continuation_tool", default=None)
-
 # The keys the completion fire itself writes into its payload beside the bound context; a
 # context carrying one of them would be silently overwritten by the fire, so it is refused.
 _FIRE_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset({"thread_id", "result", "completion_id", "status"})
@@ -113,57 +111,57 @@ class ChainedResume(NamedTuple):
     asked_by: tuple[str, ...]
 
 
-class _ChainedFrame(NamedTuple):
-    """The chain routing bound around the current nested dispatch and the chain keys it is nested in.
+class _ResumeFrame(NamedTuple):
+    """The resume binding of the current context: the driver continuation, the chain routing and the crossed lineage.
 
-    ``lineage`` holds the chain key of every chained dispatch the current context is nested in,
-    outermost first, the current routing's own key last; it is empty when ``routing`` is ``None``.
+    ``continuation_tool`` is the bound driver continuation. ``routing`` is the chain routing bound
+    around the current nested dispatch. ``lineage`` holds the chain key of every chained call whose
+    run face the context crossed, outermost first: a key joins it when a driver binds its resume
+    continuation under the routing that carries it.
     """
 
+    continuation_tool: str | None
     routing: ChainedResume | None
     lineage: tuple[str, ...]
 
 
-# The frame outside any chained dispatch: no routing, an empty lineage.
-_UNCHAINED: Final[_ChainedFrame] = _ChainedFrame(None, ())
+# The frame outside any driver and any chained dispatch.
+_UNBOUND: Final[_ResumeFrame] = _ResumeFrame(None, None, ())
 
-_chained_resume: ContextVar[_ChainedFrame] = ContextVar("tai42_chained_resume", default=_UNCHAINED)
+_resume_frame: ContextVar[_ResumeFrame] = ContextVar("tai42_resume_frame", default=_UNBOUND)
 
 
 def get_chained_resume() -> ChainedResume | None:
     """The chain routing bound around the current nested dispatch, or ``None`` when unchained."""
-    return _chained_resume.get().routing
+    return _resume_frame.get().routing
 
 
 def chained_lineage() -> tuple[str, ...]:
-    """The chain keys of every chained dispatch the current context is nested in, outermost first.
+    """The chain keys of every chained call whose run face the current context crossed, outermost first.
 
-    The innermost entry is the key of :func:`get_chained_resume`; empty when unchained. A run that
-    parks here is nested under each of these chained calls, so each is a call whose waiting caller
-    the run's terminal may re-enter.
+    A key joins when a driver binds its resume continuation under the routing that carries it (a
+    nested run starts); a park raised by the dispatcher itself, under its own binding, is nested
+    under none of its own calls and records nothing of them. Empty outside any crossed chained call.
     """
-    return _chained_resume.get().lineage
+    return _resume_frame.get().lineage
 
 
-def set_chained_resume(routing: ChainedResume | None) -> Token[_ChainedFrame]:
+def set_chained_resume(routing: ChainedResume | None) -> Token[_ResumeFrame]:
     """Bind ``routing`` as the current nested dispatch's chain routing and return the reset token.
 
-    A routing extends the enclosing lineage with its chain key, unless that key is already the
-    innermost one (a driver re-binding, for its resume, the routing it captured at park time). A
-    ``None`` routing starts a new, empty lineage: a dispatch nothing can wait on keeps no chain of
-    an outer dispatch.
+    The lineage is not extended here: the routing's key joins it only when a nested run binds its
+    continuation under it (:func:`set_resume_continuation_tool`). A ``None`` routing starts a new,
+    empty lineage: a dispatch nothing can wait on keeps no chain of an outer dispatch.
     """
+    frame = _resume_frame.get()
     if routing is None:
-        return _chained_resume.set(_UNCHAINED)
-    lineage = _chained_resume.get().lineage
-    if not lineage or lineage[-1] != routing.chain_key:
-        lineage = (*lineage, routing.chain_key)
-    return _chained_resume.set(_ChainedFrame(routing, lineage))
+        return _resume_frame.set(_ResumeFrame(frame.continuation_tool, None, ()))
+    return _resume_frame.set(_ResumeFrame(frame.continuation_tool, routing, frame.lineage))
 
 
-def reset_chained_resume(token: Token[_ChainedFrame]) -> None:
+def reset_chained_resume(token: Token[_ResumeFrame]) -> None:
     """Restore the chain routing and its lineage to the values captured in ``token``."""
-    _chained_resume.reset(token)
+    _resume_frame.reset(token)
 
 
 # --- the platform delivery signals ------------------------------------------------------
@@ -213,6 +211,16 @@ class ParkResumeUnauthorizedError(Exception):
     __tai_error_kind__ = ErrorKind.UNAUTHORIZED
 
 
+class ParkRunTakenDownError(Exception):
+    """The run was taken down (cancelled, erased or expired) and nothing of it may run on.
+
+    A resume face, a chain re-entry or a new park of the run is refused with it.
+    """
+
+    # A conflict with the run's state: the run is gone, the caller's input is not at fault.
+    __tai_error_kind__ = ErrorKind.CONFLICT
+
+
 class ParkDeliveryUnauthorizedError(Exception):
     """A door's delivery-address tool was invoked outside the platform's own delivery fire.
 
@@ -232,9 +240,10 @@ EXPIRY_ANSWER: Final[dict[str, bool]] = {"tai42:interaction_expired": True}
 
 
 # The shared terminal-status vocabulary a completion fire names its outcome with. The
-# resuming driver (which owns the parked run's terminal) and the delivery tool (which maps
-# the outcome back to the caller) both key on these SAME two strings, so neither side has to
-# name the other to agree on the wire vocabulary — the contract is the single shared point.
+# resuming driver (which owns the parked run's terminal), the platform's kill ladder (which
+# takes a run down) and the delivery tool (which maps the outcome back to the caller) all key
+# on these SAME strings, so neither side has to name the other to agree on the wire
+# vocabulary — the contract is the single shared point.
 #
 # The generic completion-fire payload the platform dispatches the address's delivery tool with
 # is the opaque bound context merged with the thread and the terminal outcome:
@@ -244,14 +253,19 @@ EXPIRY_ANSWER: Final[dict[str, bool]] = {"tai42:interaction_expired": True}
 #
 # where ``address`` is the bound :class:`DeliveryAddress`, ``result`` is the run's terminal
 # outcome value, ``completion_id`` is the stable idempotency id of the resolved terminal, and
-# ``status`` is one of the two constants below.
+# ``status`` is one of the three terminal constants below.
 # ``PARK_COMPLETION_SUCCEEDED`` names a clean-success terminal whose ``result`` the delivery
-# tool maps back to the caller; ``PARK_COMPLETION_FAILED`` names ANY non-success terminal
-# (failed/stopped/aborted/errored) the delivery tool surfaces as its uniform notice. A
+# tool maps back to the caller. ``PARK_COMPLETION_FAILED`` names ANY non-success terminal
+# (failed/stopped/aborted/errored/lapsed) the delivery tool surfaces as its uniform notice; a
 # delivery tool treats ``FAILED`` as the fail-safe default, so an unstamped fire never pushes
-# a non-success payload through the success mapping.
+# a non-success payload through the success mapping. ``PARK_COMPLETION_WITHDRAWN`` names a run
+# the platform took down ON PURPOSE (a cancel, or its thread, route or person erased): there is
+# no outcome and NOTHING to say to the person, so a delivery tool delivers nothing and
+# announces nothing. Only the platform's kill ladder fires ``WITHDRAWN``; a driver's own
+# terminal is always ``SUCCEEDED`` or ``FAILED``.
 PARK_COMPLETION_SUCCEEDED: Final[str] = "succeeded"
 PARK_COMPLETION_FAILED: Final[str] = "failed"
+PARK_COMPLETION_WITHDRAWN: Final[str] = "withdrawn"
 
 # The one NON-terminal status in the vocabulary: the parked run did not finish, it raised a
 # NEW ask under this same completion binding. The fire carries the new ``expiry_at`` in place
@@ -300,24 +314,32 @@ def get_resume_continuation_tool() -> str | None:
 
     ``None`` is the default, and applies to any code outside a driver dispatch.
     """
-    return _resume_continuation_tool.get()
+    return _resume_frame.get().continuation_tool
 
 
-def set_resume_continuation_tool(tool_name: str | None) -> Token[str | None]:
+def set_resume_continuation_tool(tool_name: str | None) -> Token[_ResumeFrame]:
     """Bind ``tool_name`` as the current driver's resume continuation and return the reset token.
 
-    The driver calls this around a tool dispatch; pass the returned
-    token to :func:`reset_resume_continuation_tool` to restore the previous value.
+    The driver calls this around a tool dispatch; pass the returned token to
+    :func:`reset_resume_continuation_tool` to restore the previous binding. The binding is the
+    run's face: under a bound chain routing it crosses that routing's key into
+    :func:`chained_lineage` (once — a driver re-binding per step under one routing does not repeat
+    it), so every park the run raises records the chained call it is nested under. The reset
+    restores the lineage with the binding.
     """
-    return _resume_continuation_tool.set(tool_name)
+    frame = _resume_frame.get()
+    lineage = frame.lineage
+    if frame.routing is not None and (not lineage or lineage[-1] != frame.routing.chain_key):
+        lineage = (*lineage, frame.routing.chain_key)
+    return _resume_frame.set(_ResumeFrame(tool_name, frame.routing, lineage))
 
 
-def reset_resume_continuation_tool(token: Token[str | None]) -> None:
-    """Restore the resume continuation to the value captured in ``token``.
+def reset_resume_continuation_tool(token: Token[_ResumeFrame]) -> None:
+    """Restore the resume continuation, the chain routing and the lineage to the values captured in ``token``.
 
     ``token`` comes from the matching :func:`set_resume_continuation_tool` call.
     """
-    _resume_continuation_tool.reset(token)
+    _resume_frame.reset(token)
 
 
 def get_park_completion() -> DeliveryAddress:

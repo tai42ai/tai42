@@ -12,7 +12,7 @@ Over ``replicas_stack`` (the webhook home, backend on, access control off):
   parked on a subject is resumed by a hook fire (``resume_expr`` reads ``$parked``); the resumed
   result waits on the subject as a finished outcome, and a later run on that subject takes it.
 - ``test_hook_cancel_expr_cancels_a_parked_interaction`` — a hook fire's ``cancel_expr`` names a
-  parked interaction and whole-chain kills it, so the subject no longer lists it.
+  parked interaction and kills its whole run, so the subject no longer lists it.
 """
 
 from __future__ import annotations

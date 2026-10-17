@@ -12,8 +12,9 @@ The agent leg runs over ``agent_route_bridge`` (durable agent state, the only st
 can park on): a route onto the caller-ask probe agent surfaces the run's caller ask through
 ``reply_expr`` (``$asks``) and resumes it through ``resume_expr`` on the next inbound (``$parked``
 bound) — the door-contract round trip. The tool legs run over ``bridge`` and cover a null start
-(nothing runs), ``start_expr`` + ``extras_expr`` reaching the run, and ``cancel_expr`` whole-chain
-killing a parked run (its FAILED delivered as the route's client-safe notice).
+(nothing runs), ``start_expr`` + ``extras_expr`` reaching the run, and ``cancel_expr`` whole-run
+killing a parked run (its ``withdrawn`` terminal delivered: the park leaves the inbox and nothing is
+said to the person).
 """
 
 from __future__ import annotations
@@ -212,10 +213,14 @@ async def test_tool_route_start_and_extras_expr_reach_the_run(
     assert any(_EXTRAS_TAG in t for t in out_texts), f"the extras tag did not reach the run, saw {out_texts!r}"
 
 
-async def test_tool_route_cancel_expr_kills_a_parked_run(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
+async def test_tool_route_cancel_expr_withdraws_a_parked_run_quietly(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
     # A tool route whose target parks (capturing the door's completion binding). The first inbound
-    # parks it silently; the cancel inbound's cancel_expr names $parked[0].id, whole-chain killing
-    # the run — the door delivers the run's single FAILED as the route's client-safe error notice.
+    # parks it silently; the cancel inbound's cancel_expr names $parked[0].id, killing the whole run of
+    # the run — the door is delivered the run's ``withdrawn`` terminal, so nothing is said.
+    from tai42_e2e import wait_absent_async, wait_for_async
+
     from ._bridge_support import ERROR_ANSWER_TEXT, wait_probe_record
 
     identity = uniq("dccancel-site").replace("_", "-")
@@ -252,11 +257,28 @@ async def test_tool_route_cancel_expr_kills_a_parked_run(bridge: BridgeHarness, 
     parked = await wait_probe_record(bridge, f"tool_target_park:{marker}", deadline=20.0)
     assert len(parked) == 1, parked
 
-    # Turn 2: cancel_expr names the parked id; the whole-chain kill delivers the run's FAILED as the
-    # route's uniform client-safe notice.
+    interaction_id = parked[0]["interaction_id"]
+
+    async def _pending_ids() -> set[str]:
+        listing = await bridge.api().get("/api/interactions?page=1&pageSize=200")
+        return {item["interaction_id"] for item in listing["items"]}
+
+    assert interaction_id in await _pending_ids()
+
+    # Turn 2: cancel_expr names the parked id; the whole-run kill withdraws the park and delivers
+    # the run's ``withdrawn`` terminal — the park leaves the inbox and nothing is said.
     assert (await web.send(_CANCEL_WORD)).status_code == 200
-    delivered = await web.frames(until=_out_carrying(ERROR_ANSWER_TEXT), deadline=40.0)
-    out_texts = [d["text"] for e, d in delivered if e == "chat.message" and d["direction"] == "out"]
-    assert any(ERROR_ANSWER_TEXT in t for t in out_texts), (
-        f"the cancel did not deliver the FAILED notice, saw {out_texts!r}"
-    )
+
+    async def _withdrawn() -> bool | None:
+        return True if interaction_id not in await _pending_ids() else None
+
+    await wait_for_async(_withdrawn, deadline=20.0, message="the cancelled park never left the inbox")
+
+    async def _notices() -> list[str]:
+        return [
+            d["text"]
+            for e, d in await web.frames()
+            if e == "chat.message" and d["direction"] == "out" and ERROR_ANSWER_TEXT in d["text"]
+        ]
+
+    await wait_absent_async(_notices, window=5.0, interval=0.5, message="a withdrawn run delivered a notice")

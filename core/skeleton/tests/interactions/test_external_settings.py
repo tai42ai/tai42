@@ -93,9 +93,7 @@ def test_the_callback_prefix_is_the_start_of_every_minted_callback_url(base: str
 
     settings = InteractionsSettings(public_base_url=base)
     now = datetime.now(UTC)
-    window = DeadlineWindow(
-        budget=60.0, created_at=now, timeout_at=now + timedelta(minutes=1), deadline=0.0, park_ttl_margin_seconds=0
-    )
+    window = DeadlineWindow(budget=60.0, created_at=now, timeout_at=now + timedelta(minutes=1), deadline=0.0)
     ticket = mint_callback_ticket(settings, window, "sync", force=True)
     assert ticket is not None
     prefix = callback_url_prefix(settings)

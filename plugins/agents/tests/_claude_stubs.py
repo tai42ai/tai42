@@ -186,6 +186,27 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 """
 )
 
+# Terminates with the start frame's prompt text — the text the shipped runner hands to ``client.query`` — so a
+# test reads what the SDK session is asked.
+QUERY_ECHO = (
+    _PREAMBLE
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
+emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
+      "usage": None, "result": start["prompt"]["text"], "is_structured": False})
+"""
+)
+
+# Reports the SDK session the start frame asks to resume, or a fresh id when it asks for none, and terminates
+# with that resume id as text — so a test reads whether a turn resumed the stored SDK session.
+RESUME_ID_ECHO = (
+    _PREAMBLE
+    + """sid = options.get("resume") or "sess-fresh"
+emit({"type": "hello", "sdk_version": "0.2.144", "session_id": sid})
+emit({"type": "result", "terminal_reason": "completed", "session_id": sid,
+      "usage": None, "result": "resumed=" + str(options.get("resume")), "is_structured": False})
+"""
+)
+
 # A resume stub that WOULD return a DIFFERENT terminal if it ever ran — swapped in for the
 # redelivery so a re-drive (instead of the durable-record short-circuit) would be observable.
 RESUME_REDRIVE = (

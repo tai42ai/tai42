@@ -25,13 +25,15 @@ from tai42_contract.versioning.errors import (
 )
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 
-from tai42_skeleton.app import graceful_exit
+from tai42_skeleton.app import graceful_exit, instance
 from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, RecycleReport, RecycleRow, RecycleStop
 from tai42_skeleton.config.recycle_policy import CapabilityReport, Shape
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, OperationResponse
 from tai42_skeleton.operations import config as config_ops
 from tai42_skeleton.settings_profiles.store import SettingsProfileStoreView
+
+from .._fakes.bus import FakeBus
 
 
 class _MemStore(VersionedStore):
@@ -397,12 +399,16 @@ async def test_apply_arms_self_exit_when_serve_affecting(
 ) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
     seen = _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=True, recycle=_converged()))
+    # The armed self-exit names this process's bus member, so the test runs with its own bus.
+    bus = FakeBus(origin="serve-test")
+    monkeypatch.setattr(instance.app, "_bus", bus)
     response = await config_ops.apply_profile("p")
     assert isinstance(response, OperationResponse)
     # A serve-affecting recycle arms the applier's OWN deferred self-exit as a post-flush
     # BackgroundTask wrapping ``request_graceful_exit`` — never an inline create_task.
     assert response.background is not None
     assert response.background.func is graceful_exit.request_graceful_exit
+    assert response.background.args == (bus.member_identity.pid,)
     assert response.payload["refused"] == []
     assert response.payload["hot"] == ["A"]
     # The profile's active env is what the pipeline was handed.

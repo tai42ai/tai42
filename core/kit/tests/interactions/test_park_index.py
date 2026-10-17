@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import subprocess
 import sys
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from pydantic import BaseModel
+from tai42_contract.app import tai42_app
 from tai42_contract.interactions import ResumeBuffered, RunFailed, SuspendedInteraction
 
 from tai42_kit.interactions import park_index
@@ -68,12 +71,24 @@ def test_superstep_id_ignores_member_order() -> None:
     assert superstep_id(["a"]) != superstep_id(["a", "b"])
 
 
-def test_ttls_floor_and_extend_past_the_deadline() -> None:
+def test_ttls_floor_and_extend_past_the_deadline(horizon_app: None) -> None:
     assert entry_ttl_seconds(None) == ENTRY_TTL_FLOOR_SECONDS
     far = datetime.now(UTC) + timedelta(days=60)
     assert entry_ttl_seconds(far) > ENTRY_TTL_FLOOR_SECONDS
     assert barrier_ttl_seconds([None, far, datetime.now(UTC)]) == entry_ttl_seconds(far)
     assert barrier_ttl_seconds([]) == ENTRY_TTL_FLOOR_SECONDS
+
+
+def test_a_far_deadline_entry_and_barrier_outlive_the_platform_park_by_the_redelivery_horizon() -> None:
+    # The platform keeps a park resolvable for the redelivery horizon past its deadline, so a late
+    # expiry reaper still resolves it; the entry and the barrier it reaches must still be there.
+    horizon = 24 * 3600
+    app = SimpleNamespace(interactions=SimpleNamespace(redelivery_horizon_seconds=lambda: horizon))
+    with tai42_app.bound(app):
+        far = datetime.now(UTC) + timedelta(days=40)
+        remaining = math.ceil((far - datetime.now(UTC)).total_seconds())
+        assert entry_ttl_seconds(far) >= remaining + horizon
+        assert barrier_ttl_seconds([far, None]) >= remaining + horizon
 
 
 async def test_persist_writes_entries_barrier_and_live_set_atomically(make_index: Any, fake_redis: Any) -> None:
@@ -445,7 +460,7 @@ async def test_run_resolutions_and_their_drops(make_index: Any, fake_redis: Any)
         await index.finalize(lease, member_ids=["b", "c"], resolution="terminal", value=2)
     assert await index.run_resolutions(THREAD) == {first: ["a"], second: ["b", "c"]}
 
-    await index.drop_resolution(THREAD, first, member_ids=["extra"])
+    assert await index.drop_resolution(THREAD, first, member_ids=["extra"]) == ["a", "extra"]
     assert await index.read_entry("a") is None
     assert await index.read_resolution(THREAD, first) is None
     assert await index.run_resolutions(THREAD) == {second: ["b", "c"]}

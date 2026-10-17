@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
+from tai42_e2e_fixtures.tools.park import _on_expiry_policy
 
 # The tool-target async-park leg (the unified park-completion binding). Unlike the flow-driver
 # and agent probes above, THIS pair rides the CONVERSATION door's OWN park-completion binding:
@@ -23,8 +25,8 @@ from tai42_e2e_fixtures.tools.driving import driving_as
 # band on whichever worker resolves the park. Generic: no flow/engine state, only the opaque
 # park-completion binding the door produced and the parked interaction id.
 
-# Far enough out that a driven answer always resolves the park first — the reaper never races
-# these legs (they resolve by answer or by an aborted-resume terminal, never by expiry).
+# Far enough out that a driven answer always resolves the park first — an expiry leg forces the
+# deadline past explicitly rather than waiting on this window.
 _TOOL_TARGET_PARK_EXPIRY_SECONDS = 3600.0
 
 # A sentinel answer the resume continuation reads as a NON-SUCCESS terminal (an aborted/failed
@@ -35,9 +37,21 @@ _TOOL_TARGET_ABORT_ANSWER = "__abort__"
 
 
 @tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
-async def e2e_tool_target_park(marker: str) -> object:
+async def e2e_tool_target_park(
+    marker: str,
+    channel: str | None = None,
+    recipient: str | None = None,
+    answer_format: str = "text",
+    schema: dict[str, Any] | None = None,
+    on_expiry: str = "kill",
+) -> object:
     """A conversation tool-target that async-parks on ``ask`` and later delivers its
     resumed reply back through the door's generic park-completion binding.
+
+    ``marker`` is the question. ``channel``/``recipient``/``answer_format``/``schema``/``on_expiry``
+    pass straight to ``ask``, so a route's ``start_expr`` can park the ask on a channel (a form
+    to the inbound sender, say) or pick its unanswered-park policy (``"kill"``, the default, or
+    ``"resume"``); left unset the ask is an inbox-only text question killed on expiry.
 
     Runs as the target of a ``target_kind=tool`` conversation route. The conversation door binds a
     delivery address naming ``deliver_tool_completion``, the turn's thread and its opaque
@@ -70,7 +84,16 @@ async def e2e_tool_target_park(marker: str) -> object:
 
     with driving_as(continuation="e2e_tool_target_deliver"):
         expiry_at = datetime.now(UTC) + timedelta(seconds=_TOOL_TARGET_PARK_EXPIRY_SECONDS)
-        suspended = await ask(marker, mode="async", expiry_at=expiry_at)
+        suspended = await ask(
+            marker,
+            mode="async",
+            expiry_at=expiry_at,
+            channel=channel,
+            recipient=recipient,
+            answer_format=answer_format,
+            schema=schema,
+            on_expiry=_on_expiry_policy(on_expiry),
+        )
 
     park_record = json.dumps({"interaction_id": suspended.interaction_id, "pid": os.getpid()})
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
