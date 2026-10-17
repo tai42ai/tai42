@@ -13,10 +13,11 @@ from typing import Any
 import pytest
 from fakeredis import aioredis
 from tai42_kit.interactions.park_index import superstep_id
-from tests.conftest import bind_park_index
+from tests.conftest import APP, bind_park_index
 
-from tai42_agents._internal.park import build_park_identity
+from tai42_agents._internal.park import build_park_identity, persist_park
 from tai42_agents._internal.park import capability as cap
+from tai42_agents._internal.park.errors import ParkExpiryExceedsRetentionError
 from tai42_agents._internal.park.park_binding import agents_park_index, threads_with_live_barriers
 
 
@@ -161,16 +162,18 @@ def test_build_park_identity_refuses_unconfigured_park_redis(monkeypatch: pytest
 
 
 # --------------------------------------------------------------------------- #
-# The retention bound is the kit's park horizon on every durable provider
+# The retention bound is the kit's park horizon on every durable provider, less the
+# window the platform may still deliver an answer after the ask's deadline
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("provider", ["redis", "postgres"])
-def test_retention_bound_is_the_waiting_horizon_of_a_durable_provider(
+def test_retention_bound_is_the_waiting_horizon_less_the_redelivery_horizon(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, provider: str
 ) -> None:
     from datetime import UTC, datetime, timedelta
 
     from tai42_kit.settings import reset_all_settings
 
+    APP.interactions.redelivery_horizon = 3600
     monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES", "2880")
     reset_all_settings()
     try:
@@ -189,7 +192,81 @@ def test_retention_bound_is_the_waiting_horizon_of_a_durable_provider(
         reset_all_settings()
     assert park is not None
     assert park.retention_bound is not None
-    assert before + timedelta(minutes=2880) <= park.retention_bound <= after + timedelta(minutes=2880)
+    keep = timedelta(minutes=2880) - timedelta(seconds=3600)
+    assert before + keep <= park.retention_bound <= after + keep
+
+
+def _redis_park(thread_id: str) -> Any:
+    park = build_park_identity(
+        agent_name="tools_agent",
+        config={"configurable": {"thread_id": thread_id}},
+        checkpoint_provider="redis",
+        has_live_tools=False,
+        rebuild_kwargs={},
+        recursion_limit=10,
+        bind=True,
+    )
+    assert park is not None
+    return park
+
+
+def test_an_ask_answered_late_inside_the_redelivery_horizon_still_finds_its_checkpoint(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The platform may deliver an ask's answer up to the redelivery horizon after its deadline, and
+    # the checkpoint is kept the waiting retention after its write. An ask whose deadline fits the
+    # retention but whose late delivery does not is refused before any index key is written.
+    from datetime import UTC, datetime, timedelta
+
+    from tai42_kit.settings import reset_all_settings
+
+    APP.interactions.redelivery_horizon = 3600
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES", "2880")
+    reset_all_settings()
+
+    async def go() -> None:
+        retention = timedelta(minutes=2880)
+        late = (datetime.now(UTC) + retention - timedelta(minutes=30)).isoformat()
+        with pytest.raises(ParkExpiryExceedsRetentionError) as excinfo:
+            await persist_park(_redis_park("t-late"), [("int1", {"i-late": late})])
+        assert excinfo.value.interaction_id == "i-late"
+        assert await agents_park_index().read_entry("i-late") is None
+
+        fits = (datetime.now(UTC) + retention - timedelta(minutes=90)).isoformat()
+        await persist_park(_redis_park("t-fits"), [("int1", {"i-fits": fits})])
+        assert await agents_park_index().read_entry("i-fits") is not None
+
+    try:
+        asyncio.run(go())
+    finally:
+        reset_all_settings()
+
+
+def test_a_chained_park_clamped_to_the_bound_is_answerable_through_the_redelivery_horizon(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A chained key's inherited deadline clamps to the retention bound; a nested answer delivered up
+    # to the redelivery horizon after that deadline still lands inside the checkpoint's retention.
+    from datetime import UTC, datetime, timedelta
+
+    from tai42_kit.settings import reset_all_settings
+
+    APP.interactions.redelivery_horizon = 3600
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES", "2880")
+    reset_all_settings()
+    chain = "tai42:chained-park:k-clamp"
+
+    async def go() -> None:
+        before = datetime.now(UTC)
+        far = (before + timedelta(days=90)).isoformat()
+        written = await persist_park(_redis_park("t-chain"), [("int1", {chain: far})])
+        deadline = datetime.fromisoformat(written[chain])
+        assert deadline + timedelta(seconds=3600) <= datetime.now(UTC) + timedelta(minutes=2880)
+
+    try:
+        asyncio.run(go())
+    finally:
+        reset_all_settings()
 
 
 def test_retention_horizon_refuses_a_provider_without_one() -> None:

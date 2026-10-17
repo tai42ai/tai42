@@ -1,5 +1,5 @@
 """The driver contract of the agents resume face: the outcome conversion, the two faces'
-resume authorisation, the whole-chain kill teardown, and the horizon-derived resolution TTL.
+resume authorisation, the whole-run kill teardown, and the horizon-derived resolution TTL.
 
 The agents' park index is bound to an in-memory fakeredis; the bound recording app supplies the
 platform facets the driver calls (``assert_resume_authorized`` / ``redelivery_horizon_seconds``
@@ -34,12 +34,12 @@ from tests.conftest import APP, bind_park_index
 
 from tai42_agents._internal.park import park_binding
 from tai42_agents._internal.park.chain import deliver_chained_park
-from tai42_agents._internal.park.errors import ParkKillNotReadyError
 from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents._internal.park.resume import agent_resume, to_contract_outcome
 from tai42_agents._internal.park.resume_tool import agent_park_kill_handler, agent_resume_tool
 
 ANCESTOR = {"chain_key": "tai42:chained-park:anc", "asked_by": ["caller"]}
+_CHILD_KEY = "tai42:chained-park:child"
 
 
 @pytest.fixture
@@ -162,17 +162,17 @@ def test_agent_resume_tool_authorised_returns_a_contract_typed_outcome(fake_park
     asyncio.run(go())
 
 
-# ---- the whole-chain kill teardown -------------------------------------------------------
+# ---- the whole-run kill: the driver ends the super-step the node belongs to ----------------
 
 
-def test_kill_handler_is_a_noop_for_an_interaction_it_never_parked(fake_park_redis: Any) -> None:
-    asyncio.run(agent_park_kill_handler("not-ours", "cancelled"))
+def test_an_unknown_id_is_not_owned(fake_park_redis: Any) -> None:
+    assert asyncio.run(agent_park_kill_handler("not-ours", "cancelled")) is False
 
 
-def test_kill_handler_is_a_noop_when_the_park_index_is_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The handler is registered globally and fires for EVERY driver's kill. A deployment that loaded
-    # the agents plugin but configured no durable park index owns no parks: the handler answers "not
-    # ours" WITHOUT reading the index.
+def test_an_unconfigured_index_owns_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The handler fires for EVERY driver's kill. A deployment that loaded the agents plugin but
+    # configured no durable park index owns no parks: the handler answers "not ours" WITHOUT reading
+    # the index.
     bind_park_index(monkeypatch, None, configured=False)
 
     @contextlib.asynccontextmanager
@@ -184,10 +184,22 @@ def test_kill_handler_is_a_noop_when_the_park_index_is_unconfigured(monkeypatch:
     monkeypatch.setattr(
         park_binding, "_bound", (settings, ParkIndex(park_binding.AGENTS_PARK_NAMESPACE, settings, client=_forbidden))
     )
-    asyncio.run(agent_park_kill_handler("not-ours", "cancelled"))
+    assert asyncio.run(agent_park_kill_handler("not-ours", "cancelled")) is False
 
 
-def test_kill_handler_drops_a_resolved_super_steps_stored_outcome(fake_park_redis: Any) -> None:
+def test_a_detached_key_is_owned(fake_park_redis: Any) -> None:
+    async def go() -> None:
+        index = agents_park_index()
+        await index.detach([_CHILD_KEY])
+        entry = await index.read_entry(_CHILD_KEY)
+        assert entry is not None
+        assert index.tombstone_kind(entry) == "detached"
+        assert await agent_park_kill_handler(_CHILD_KEY, "cancelled") is True
+
+    asyncio.run(go())
+
+
+def test_kill_handler_drops_a_delivered_outcomes_tombstone(fake_park_redis: Any) -> None:
     async def go() -> None:
         index = agents_park_index()
         step = await _write_park(["i1", "i2"])
@@ -195,7 +207,7 @@ def test_kill_handler_drops_a_resolved_super_steps_stored_outcome(fake_park_redi
         assert await index.read_resolution("t", step) is not None
         # A person erase reaches the killed interaction: its whole super-step's stored outcome
         # (which can hold person data) and its tombstones are dropped.
-        await agent_park_kill_handler("i1", "erased")
+        assert await agent_park_kill_handler("i1", "erased") is True
         assert await index.read_resolution("t", step) is None
         assert await index.read_entry("i1") is None
         assert await index.read_entry("i2") is None
@@ -204,27 +216,15 @@ def test_kill_handler_drops_a_resolved_super_steps_stored_outcome(fake_park_redi
     asyncio.run(go())
 
 
-def test_kill_handler_aborts_a_live_park_and_fires_the_chain_upward(fake_park_redis: Any, app_tools: Any) -> None:
+def test_a_kill_never_resumes_the_ancestor(fake_park_redis: Any, app_tools: Any) -> None:
     async def go() -> None:
         step = await _write_park(["i1"], completion_tool="deliver_ancestor_chain", completion_context=ANCESTOR)
-        fired: list[dict[str, Any]] = []
-        app_tools.tool_runners["deliver_ancestor_chain"] = lambda **kwargs: fired.append(kwargs)
+        app_tools.tool_runners["deliver_ancestor_chain"] = lambda **_kwargs: {"answer": "answered around it"}
 
-        await agent_park_kill_handler("i1", "thread deleted")
+        assert await agent_park_kill_handler("i1", "thread deleted") is True
 
-        # The captured cross-driver chain was fired FAILED, carrying the ancestor's chain and the
-        # aborted outcome, so an ancestor that waited on this run tears down too.
-        assert fired == [
-            {
-                "chain_token": "tai42:chained-park:anc",
-                "status": "failed",
-                "result": {"status": "aborted", "reason": "thread deleted"},
-            }
-        ]
-        (call,) = app_tools.run_tool_calls
-        assert call["key"] == "deliver_ancestor_chain"
-        assert call["continues_chain"] == ("caller",)
-        # The super-step is finalized ``aborted`` with the aborted RunFailed.
+        # No tool ran: the waiting ancestor is reached by the platform through this same seam.
+        assert app_tools.run_tool_calls == []
         assert _is_resolved(await agents_park_index().read_entry("i1"))
         assert await agents_park_index().read_resolution("t", step) == ResolutionRecord(
             "aborted", RunFailed(outcome={"status": "aborted", "reason": "thread deleted"})
@@ -233,21 +233,20 @@ def test_kill_handler_aborts_a_live_park_and_fires_the_chain_upward(fake_park_re
     asyncio.run(go())
 
 
-def test_kill_handler_chain_fire_propagates_so_the_kill_redelivers(fake_park_redis: Any, app_tools: Any) -> None:
+def test_a_kill_fired_on_the_chained_call_key_ends_the_waiting_super_step(fake_park_redis: Any, app_tools: Any) -> None:
     async def go() -> None:
-        step = await _write_park(["i1"], completion_tool="deliver_ancestor_chain", completion_context=ANCESTOR)
+        index = agents_park_index()
+        # One super-step: the run's own ask and the chained call a nested run parked under.
+        step = await _write_park(["p1", _CHILD_KEY])
 
-        def deliver_ancestor_chain(**_kwargs: Any) -> None:
-            raise RuntimeError("ancestor unreachable")
+        assert await agent_park_kill_handler(_CHILD_KEY, "cancelled") is True
 
-        app_tools.tool_runners["deliver_ancestor_chain"] = deliver_ancestor_chain
-
-        # The cross-driver teardown fire is NOT best-effort: its failure PROPAGATES so kill_park
-        # keeps the kill-due record and the reaper redelivers; the lease is released for it.
-        with pytest.raises(RuntimeError, match="ancestor unreachable"):
-            await agent_park_kill_handler("i1", "cancelled")
-        assert not _is_resolved(await agents_park_index().read_entry("i1"))
-        assert await fake_park_redis.get(agents_park_index().lease_key("t", step)) is None
+        assert _is_resolved(await index.read_entry("p1"))
+        assert _is_resolved(await index.read_entry(_CHILD_KEY))
+        assert await index.read_resolution("t", step) == ResolutionRecord(
+            "aborted", RunFailed(outcome={"status": "aborted", "reason": "cancelled"})
+        )
+        assert app_tools.run_tool_calls == []
 
     asyncio.run(go())
 
@@ -261,7 +260,7 @@ def test_kill_handler_drops_the_whole_runs_resolution_records(fake_park_redis: A
         await _seed_finalized("t", ss2, ["p2"], resolution="terminal", value="out-2")
         ss_live = await _write_park(["live"])
 
-        await agent_park_kill_handler("live", "person erased")
+        assert await agent_park_kill_handler("live", "person erased") is True
 
         for ss, pid in ((ss1, "p1"), (ss2, "p2")):
             assert await index.read_resolution("t", ss) is None
@@ -273,9 +272,53 @@ def test_kill_handler_drops_the_whole_runs_resolution_records(fake_park_redis: A
         assert live_record.resolution == "aborted"
         assert set(await index.run_resolutions("t")) == {ss_live}
 
-        # A second kill of the same id drops the aborted super-step and no-ops.
-        await agent_park_kill_handler("live", "person erased")
-        assert await index.run_resolutions("t") == {}
+        # A second kill of the same id reaches the aborted tombstone: owned, and the record stands for
+        # the late fires that land on it.
+        assert await agent_park_kill_handler("live", "person erased") is True
+        assert set(await index.run_resolutions("t")) == {ss_live}
+
+    asyncio.run(go())
+
+
+def test_a_nested_runs_late_terminal_fire_lands_on_the_parents_aborted_record(
+    fake_park_redis: Any, app_tools: Any, app_interactions: Any
+) -> None:
+    async def go() -> None:
+        index = agents_park_index()
+        step = await _write_park(["p1", _CHILD_KEY])
+        assert await agent_park_kill_handler("p1", "cancelled") is True
+        assert set(await index.run_resolutions("t")) == {step}
+        # A drive of the nested run already past its face when the kill landed fires its terminal into
+        # the parent's call: it lands on the aborted record by value.
+        out = await deliver_chained_park(chain_token=_CHILD_KEY, result={"answer": "x"}, status="succeeded")
+        assert out == RunFailed(outcome={"status": "aborted", "reason": "cancelled"})
+
+    asyncio.run(go())
+
+
+def test_a_resume_in_flight_at_the_kill_lands_on_the_aborted_record(fake_park_redis: Any, app_tools: Any) -> None:
+    async def go() -> None:
+        await _write_park(["a1", "b1"])
+        assert await agent_park_kill_handler("a1", "cancelled") is True
+        # The platform fires the handler on the sibling too.
+        assert await agent_park_kill_handler("b1", "cancelled") is True
+        # A resume of the sibling already in flight replays the aborted outcome: the platform then
+        # finds no ticket and delivers nothing.
+        with pytest.raises(RunTerminalFailed) as exc:
+            await agent_resume_tool("b1", "late")
+        assert exc.value.outcome == {"status": "aborted", "reason": "cancelled"}
+
+    asyncio.run(go())
+
+
+def test_kill_handler_on_an_aborted_tombstone_keeps_the_record(fake_park_redis: Any, app_tools: Any) -> None:
+    async def go() -> None:
+        index = agents_park_index()
+        step = await _write_park(["a1", "b1"])
+        assert await agent_park_kill_handler("a1", "cancelled") is True
+        # The fire on the sibling reaches the aborted tombstone: owned, and the record stands.
+        assert await agent_park_kill_handler("b1", "cancelled") is True
+        assert set(await index.run_resolutions("t")) == {step}
 
     asyncio.run(go())
 
@@ -283,9 +326,9 @@ def test_kill_handler_drops_the_whole_runs_resolution_records(fake_park_redis: A
 def test_kill_handler_aborted_tombstone_replays_as_run_terminal_failed(fake_park_redis: Any, app_tools: Any) -> None:
     async def go() -> None:
         await _write_park(["i1"])
-        await agent_park_kill_handler("i1", "cancelled")
-        # A redrive of the killed super-step's due record replays the aborted RunFailed, which the
-        # platform face raises so the platform delivers FAILED (once, deduped against the kill).
+        assert await agent_park_kill_handler("i1", "cancelled") is True
+        # The replay is the driver's answer to a resume already in flight when the kill landed; the
+        # platform delivers nothing for it (the kill revoked the resume's ticket).
         with pytest.raises(RunTerminalFailed) as exc:
             await agent_resume_tool("i1", "late")
         assert exc.value.outcome == {"status": "aborted", "reason": "cancelled"}
@@ -294,18 +337,19 @@ def test_kill_handler_aborted_tombstone_replays_as_run_terminal_failed(fake_park
 
 
 def test_kill_handler_defers_while_a_live_drive_holds_the_lease(fake_park_redis: Any, app_tools: Any) -> None:
+    from tai42_kit.interactions.park_kill import ParkKillNotReadyError
+
     async def go() -> None:
         index = agents_park_index()
-        step = await _write_park(["i1"], completion_tool="deliver_ancestor_chain", completion_context=ANCESTOR)
-        app_tools.tool_runners["deliver_ancestor_chain"] = lambda **_kwargs: None
+        step = await _write_park(["i1"])
         await fake_park_redis.set(index.lease_key("t", step), "live-drive")
 
-        with pytest.raises(ParkKillNotReadyError):
+        with pytest.raises(ParkKillNotReadyError) as raised:
             await agent_park_kill_handler("i1", "thread deleted")
+        assert raised.value.node == "i1"
 
-        # It wrote NOTHING: no chain fire, the live drive's lease is untouched, the park entry stays
-        # live, the barrier stands, and no resolution record exists.
-        assert app_tools.run_tool_calls == []
+        # It wrote NOTHING: the live drive's lease is untouched, the park entry stays live, the
+        # barrier stands, and no resolution record exists.
         assert await fake_park_redis.get(index.lease_key("t", step)) == "live-drive"
         assert not _is_resolved(await index.read_entry("i1"))
         assert await index.read_barrier("t", step) is not None
@@ -313,9 +357,27 @@ def test_kill_handler_defers_while_a_live_drive_holds_the_lease(fake_park_redis:
 
         # Once the drive released its lease, the redelivered kill lands.
         await fake_park_redis.delete(index.lease_key("t", step))
-        await agent_park_kill_handler("i1", "thread deleted")
+        assert await agent_park_kill_handler("i1", "thread deleted") is True
         assert _is_resolved(await index.read_entry("i1"))
         assert await fake_park_redis.get(index.lease_key("t", step)) is None
+
+    asyncio.run(go())
+
+
+def test_the_handler_is_registered_for_the_agent_resume_tool(fake_park_redis: Any) -> None:
+    from tai42_kit.interactions.park_kill import ParkKillOwnerMissingError, fire_park_killed
+
+    from tai42_agents._internal.park.resume import AGENT_RESUME_TOOL_NAME
+
+    async def go() -> None:
+        # A park bound to the agent resume continuation that this driver has not recorded is owned by
+        # nobody yet: the platform keeps the kill and redelivers it.
+        with pytest.raises(ParkKillOwnerMissingError):
+            await fire_park_killed("not-recorded", "cancelled", continuation_tool=AGENT_RESUME_TOOL_NAME)
+        # Once recorded, this driver owns it.
+        await _write_park(["recorded"])
+        await fire_park_killed("recorded", "cancelled", continuation_tool=AGENT_RESUME_TOOL_NAME)
+        assert _is_resolved(await agents_park_index().read_entry("recorded"))
 
     asyncio.run(go())
 
@@ -377,7 +439,7 @@ def test_drive_whose_lease_a_kill_reclaimed_leaves_the_kills_resolution_for_the_
     class _Agent:
         async def aresume_park(self, *, rebuild_kwargs: Any, thread_id: str, resume_map: Any) -> Any:
             # The drive produced a clean terminal, but while it ran its lease lapsed and a
-            # whole-chain kill reclaimed the super-step and finalized it aborted.
+            # whole-run kill reclaimed the super-step and finalized it aborted.
             index = agents_park_index()
             step = superstep_id(["i1"])
             await fake_park_redis.delete(index.lease_key(thread_id, step))
@@ -481,6 +543,28 @@ async def _lease_is_free(thread_id: str, step: str) -> bool:
         return False
     await lease.close()
     return True
+
+
+def test_a_taken_down_run_error_is_re_raised_unchanged_by_the_drive(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    from tai42_contract.interactions import ParkRunTakenDownError
+
+    refusal = ParkRunTakenDownError("interaction 'i9': its run was taken down; nothing of it parks again")
+    _bind_agent(monkeypatch, _ScriptedResumeAgent(raises=refusal))
+
+    async def go() -> None:
+        step = await _write_park(["i1"], completion_tool="deliver_ancestor_chain", completion_context=ANCESTOR)
+        with pytest.raises(ParkRunTakenDownError) as raised:
+            await agent_resume("i1", "the answer")
+        assert raised.value is refusal
+        # The drive ended no run: nothing finalized, no chain fired, the lease free for the kill.
+        assert await agents_park_index().read_resolution("t", step) is None
+        assert not _is_resolved(await agents_park_index().read_entry("i1"))
+        assert app_tools.run_tool_calls == []
+        assert await _lease_is_free("t", step)
+
+    asyncio.run(go())
 
 
 def test_agent_resume_on_a_tombstone_whose_record_is_gone_raises(fake_park_redis: Any) -> None:

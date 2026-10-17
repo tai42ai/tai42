@@ -14,8 +14,8 @@ from typing import Any
 
 import pytest
 from fakeredis import aioredis
-from tai42_kit.interactions.park_index import BARRIER_TTL_MARGIN_SECONDS, ENTRY_TTL_FLOOR_SECONDS, superstep_id
-from tests.conftest import bind_park_index
+from tai42_kit.interactions.park_index import ENTRY_TTL_FLOOR_SECONDS, superstep_id
+from tests.conftest import APP, bind_park_index
 
 from tai42_agents._internal.park import ParkIdentity, persist_park
 from tai42_agents._internal.park import persist as persist_mod
@@ -300,9 +300,10 @@ def test_park_entry_ttl_scales_to_the_ask_deadline(fake_park_redis: Any) -> None
         index = agents_park_index()
         far_ttl = await fake_park_redis.ttl(index.entry_key("i_far"))
         near_ttl = await fake_park_redis.ttl(index.entry_key("i_near"))
-        # The far entry outlasts its 40-day deadline plus the margin — above the 30-day floor.
+        # The far entry outlasts its 40-day deadline by the platform's redelivery horizon, as long
+        # as the platform keeps the park resolvable for a late expiry reaper.
         assert far_ttl > ENTRY_TTL_FLOOR_SECONDS
-        assert far_ttl >= 40 * 24 * 60 * 60 + BARRIER_TTL_MARGIN_SECONDS - 5
+        assert far_ttl >= 40 * 24 * 60 * 60 + APP.interactions.redelivery_horizon - 5
         # A short-horizon entry keeps the 30-day backstop floor.
         assert near_ttl == ENTRY_TTL_FLOOR_SECONDS
         # The barrier floors at or above every entry it coordinates.

@@ -51,20 +51,25 @@ conversation, bypassing the allowlist.
 
 from __future__ import annotations
 
+import logging
 from typing import ClassVar
 
+from redis.exceptions import RedisError
 from tai42_contract.channels import (
     ChannelDelivery,
     ChannelDeliveryError,
     ChannelInputError,
     ChannelNotification,
+    ChannelWithdrawal,
 )
 from tai42_contract.interactions import CALLBACK_LINK_FORMATS
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_twilio.client import send_message
-from tai42_channel_twilio.correlation import release_pending, reserve_pending
+from tai42_channel_twilio.correlation import release_pending, release_pending_for, reserve_pending
 from tai42_channel_twilio.settings import TwilioSettings, require_delivery_setting, twilio_settings
+
+logger = logging.getLogger(__name__)
 
 # The media kinds that ride as an MMS ``MediaUrl`` attachment — a renderable media bubble
 # Twilio fetches and delivers. A ``document`` is deliberately NOT here (its suggested
@@ -156,6 +161,17 @@ def _render_link(delivery: ChannelDelivery) -> str:
     return "\n".join(lines)
 
 
+def _target_number(settings: TwilioSettings, requested: str | None) -> str:
+    """The "To" number an address names: ``requested`` when set, else ``CHANNEL_TWILIO_DEFAULT_RECIPIENT``.
+
+    The address resolution alone, with no send fence — shared by every outbound send and by a
+    withdrawal, so a withdrawal releases the very pair its delivery reserved.
+    """
+    if requested is None:
+        return require_delivery_setting(settings.default_recipient, "CHANNEL_TWILIO_DEFAULT_RECIPIENT")
+    return requested
+
+
 def _resolve_target(settings: TwilioSettings, requested: str | None) -> str:
     """The destination "To" number for an outbound send.
 
@@ -163,13 +179,11 @@ def _resolve_target(settings: TwilioSettings, requested: str | None) -> str:
     or is refused loudly (fail closed); no requested recipient uses the
     operator-set ``CHANNEL_TWILIO_DEFAULT_RECIPIENT`` (no allowlist check).
     """
-    if requested is None:
-        return require_delivery_setting(settings.default_recipient, "CHANNEL_TWILIO_DEFAULT_RECIPIENT")
-    if requested not in set(settings.allowed_recipients):
+    if requested is not None and requested not in set(settings.allowed_recipients):
         raise ChannelDeliveryError(
             f"recipient {requested!r} is not on CHANNEL_TWILIO_ALLOWED_RECIPIENTS; refusing to send"
         )
-    return requested
+    return _target_number(settings, requested)
 
 
 class TwilioChannel:
@@ -237,6 +251,33 @@ class TwilioChannel:
             # Send failed — free the pair instead of holding it until its TTL.
             await release_pending(twilio_number=from_number, human_number=target)
             raise
+
+    async def withdraw(self, withdrawal: ChannelWithdrawal) -> None:
+        """Release what this channel kept for a delivered question the platform has taken down.
+
+        The pair's pending reservation is dropped only while it is still held for
+        ``withdrawal.interaction_id`` (a newer ask's hold on the same pair stays). The pair is
+        resolved exactly as ``deliver`` resolved it — ``CHANNEL_TWILIO_FROM`` and the recipient, or
+        ``CHANNEL_TWILIO_DEFAULT_RECIPIENT`` when none was named — without the allowlist fence,
+        which guards a send: a withdrawal sends nothing, and an address removed from the allowlist
+        after its delivery is still released. Idempotent, and a no-op when nothing is held (a
+        link-answered format never reserved). The question already sent is left as it is. A store
+        fault raises a retryable :class:`ChannelDeliveryError`.
+        """
+        settings = twilio_settings()
+        from_number = require_delivery_setting(settings.from_number, "CHANNEL_TWILIO_FROM")
+        target = _target_number(settings, withdrawal.recipient)
+        try:
+            released = await release_pending_for(from_number, target, withdrawal.interaction_id)
+        except RedisError as exc:
+            raise ChannelDeliveryError(
+                f"could not release the withdrawn question {withdrawal.interaction_id}: {exc}", retryable=True
+            ) from exc
+        logger.info(
+            "withdrawn question %s: %s",
+            withdrawal.interaction_id,
+            "released the pair's reservation" if released else "no reservation held for it",
+        )
 
     async def notify(self, notification: ChannelNotification) -> list[str]:
         """Send one fire-and-forget message; raise ``ChannelDeliveryError`` on any failure.

@@ -294,9 +294,9 @@ async def delete_conversation_route(route_name: str) -> dict[str, Any]:
     manager = _require_backend()
     store = manager.records
     # Cancel every async ``ask`` parked on each of the route's threads FIRST, while the routing row
-    # still stands. Each cancel whole-chain-kills the park and delivers the run's single door FAILED,
+    # still stands. Each cancel kills the park's whole run and delivers the run's single door terminal,
     # and that delivery resolves the park's thread back to its route+address — which only exists while
-    # the row is present. Removing the row first would leave the kill's FAILED delivery unable to
+    # the row is present. Removing the row first would leave the kill's terminal delivery unable to
     # resolve the now-gone route (a ``CompletionDeliveryError``), failing the delete and stranding the
     # route's thread indexes. Cancelling first also stops the expiry reaper later firing a continuation
     # into a thread whose route is gone. Enumerated up front from the route thread index; idempotent,

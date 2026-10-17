@@ -24,6 +24,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.conversations import TurnSupersededError
 from tai42_contract.interactions import (
     ChainedResume,
+    ParkRunTakenDownError,
     ResumeBuffered,
     RunFailed,
     RunTerminalFailed,
@@ -102,7 +103,8 @@ async def _replay_resolution(entry: Mapping[str, Any]) -> Any:
     first drive left and replays its record's value: a terminal, a re-park, or a :class:`RunFailed`
     the platform face raises as :class:`RunTerminalFailed`. A detached tombstone (a chained key a
     drive claimed but never parked on) has no record and is the benign no-op landing; a resolved
-    tombstone whose record is gone raises.
+    tombstone whose record is gone raises. An aborted record is what a resume ALREADY in flight when
+    the run was killed lands on; the platform delivers nothing for it (the kill revoked its ticket).
     """
     record = await agents_park_index().read_tombstone_resolution(entry)
     return None if record is None else record.value
@@ -137,7 +139,7 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
     platform delivers FAILED once and clears the due record. Raises loudly on an interaction with
     no park entry, an interrupt the super-step does not expect, a missing barrier, a drive lease
     another worker holds (the kit ``DriveInProgressError``, so the platform keeps the due record
-    and redelivers), and the kit ``LeaseLostError`` when a whole-chain kill reclaimed the lease
+    and redelivers), and the kit ``LeaseLostError`` when a kill reclaimed the lease
     during the drive (no chain routing is fired; the redrive lands on the kill's resolution). A
     raise of the PREPARE step (an entry or the agent missing, no ``aresume_park`` face, an index
     read failing) is a plain raise: the run was never resumed, the lease is released and the index
@@ -218,7 +220,7 @@ async def _drive_superstep(entry: Mapping[str, Any], thread_id: str, superstep_i
                 raise RunTerminalFailed(resumed.failed.outcome)
             return outcome
 
-        # A whole-chain kill can reclaim a lease that lapsed during the drive (a heartbeat that
+        # A kill can reclaim a lease that lapsed during the drive (a heartbeat that
         # could not renew): re-check before the terminal chain fire, so a super-step this drive no
         # longer owns fires no chain routing.
         if not await lease.holds():
@@ -272,18 +274,20 @@ async def _run_resumed(
     """Resume the parked graph once; a raise of the resumed run is its failed terminal.
 
     The captured cross-driver chain routing is re-bound for the drive, so a re-park re-persists a
-    fresh index carrying it forward — the terminal always reaches the same ancestor. Two raises
+    fresh index carrying it forward — the terminal always reaches the same ancestor. Three raises
     are re-raised unchanged, as they end no run: the kit ``LeaseLostError`` (a kill owns the
-    super-step) and :class:`WorkspaceLeaseHeldError` (another drive holds the run's workspace, so
-    this resume never started and a redelivery retries it). Every other raise becomes the run's
-    :class:`RunFailed`.
+    super-step), :class:`WorkspaceLeaseHeldError` (another drive holds the run's workspace, so
+    this resume never started and a redelivery retries it) and
+    :class:`~tai42_contract.interactions.ParkRunTakenDownError` (the run was taken down: end no run
+    here, finalize nothing — the platform's kill ends the super-step). Every other raise becomes the
+    run's :class:`RunFailed`.
     """
     chain_token = set_chained_resume(routing)
     try:
         result = await resume_park(
             rebuild_kwargs=entry["rebuild_kwargs"], thread_id=entry["thread_id"], resume_map=resume_map
         )
-    except (LeaseLostError, WorkspaceLeaseHeldError):
+    except (LeaseLostError, WorkspaceLeaseHeldError, ParkRunTakenDownError):
         raise
     except asyncio.CancelledError as exc:
         return _ResumedRun(failed=_aborted_outcome(type(exc).__name__), aborted=True, cancelled=exc)
@@ -314,8 +318,8 @@ async def _fire_failed_terminal(
 ) -> Any:
     """End a run's parked super-step as a failed terminal under ``lease`` (held); return the outermost outcome.
 
-    Fires only while ``lease`` still holds the super-step — a whole-chain kill that reclaimed it
-    has already fired ``aborted`` and finalized, so firing again would race it (raises the kit
+    Fires only while ``lease`` still holds the super-step — a kill that reclaimed it
+    has already finalized it ``aborted``, so firing would race it (raises the kit
     ``LeaseLostError``). A CHAINED terminal (``routing`` set) fires that routing ``failed`` with
     ``failed``'s outcome; the waiting ancestor's chain-delivery face resumes it with the failure
     and returns the outermost outcome (a :class:`RunFailed` when it failed too, its own answer when

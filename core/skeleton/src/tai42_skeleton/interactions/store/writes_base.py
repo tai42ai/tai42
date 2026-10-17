@@ -1,7 +1,7 @@
 """Addressing and subject-index write primitives shared by the question-lifecycle mutations.
 
-The open-slot index selector, the denormalized ``to`` reader, and the subject-parks leave enqueuer
-that the add, answer, prune and kill mutations all write through.
+The open-slot index selector, the denormalized ``to`` reader, and the subject-parks and run-parks
+leave enqueuers that the add, answer, prune and kill mutations all write through.
 """
 
 from __future__ import annotations
@@ -31,6 +31,11 @@ class _StoreWritesBase(_StoreKeys):
     def _addressed_to(value: str | None) -> AskTo:
         """Read the denormalized ``to`` field: ``"caller"`` only when explicitly stamped, else ``"user"``."""
         return "caller" if value == "caller" else "user"
+
+    def _queue_run_leave(self, pipe: Any, run_delivery_id: str | None, member: str) -> None:
+        """Enqueue the ``SREM`` of ``member`` from its run's park index (nothing for a run-less park)."""
+        if run_delivery_id is not None:
+            pipe.srem(self.run_parks_key(run_delivery_id), member)
 
     def _queue_subject_leave(self, pipe: Any, subjects: str | None, member: str) -> None:
         """Enqueue the ``SREM`` of ``member`` from every subject-parks set the descriptor addresses."""

@@ -6,11 +6,14 @@ import logging
 from typing import Any, ClassVar
 
 from pydantic import ValidationError
+from redis.exceptions import RedisError
 from tai42_contract.channels import (
     ChannelDelivery,
+    ChannelDeliveryError,
     ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
+    ChannelWithdrawal,
 )
 from tai42_contract.interactions import CALLBACK_LINK_FORMATS
 
@@ -22,7 +25,12 @@ from tai42_channel_whatsapp.channel.notifications import _send_notification
 from tai42_channel_whatsapp.channel.recipients import _NO_DEFAULT_RECIPIENT, _require_recipient, _send_template
 from tai42_channel_whatsapp.channel.template_params import parse_template_parameters
 from tai42_channel_whatsapp.client import mark_read_typing, send_message
-from tai42_channel_whatsapp.correlation import release_pending, reserve_pending
+from tai42_channel_whatsapp.correlation import (
+    drop_reaction_form,
+    release_pending,
+    release_pending_for,
+    reserve_pending,
+)
 from tai42_channel_whatsapp.flows import build_form_flow
 from tai42_channel_whatsapp.settings import require_delivery_setting, whatsapp_settings
 
@@ -152,6 +160,36 @@ class WhatsAppChannel:
             # Send failed — free the pair instead of holding it until its TTL.
             await release_pending(phone_number_id=phone_number_id, wa_id=target)
             raise
+
+    async def withdraw(self, withdrawal: ChannelWithdrawal) -> None:
+        """Release what this channel kept for a delivered question the platform has taken down.
+
+        The pair's pending reservation is dropped only while it is still held for
+        ``withdrawal.interaction_id`` (a newer ask's hold on the same pair stays), and a reacting
+        form's data-endpoint sidecar is deleted. The pair is resolved exactly as ``deliver``
+        resolved it: the configured default ``phone_number_id`` and the recipient ``wa_id``; a
+        withdrawal with no recipient holds nothing, since ``deliver`` refuses a missing recipient
+        before any reservation. Idempotent, and a no-op when nothing is held (a link-answered
+        format never reserved). The question already in the chat is left as it is. A store fault
+        raises a retryable :class:`ChannelDeliveryError`.
+        """
+        if withdrawal.recipient is None:
+            return
+        phone_number_id = require_delivery_setting(
+            whatsapp_settings().default_phone_number_id, "CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID"
+        )
+        try:
+            released = await release_pending_for(phone_number_id, withdrawal.recipient, withdrawal.interaction_id)
+            await drop_reaction_form(withdrawal.interaction_id)
+        except RedisError as exc:
+            raise ChannelDeliveryError(
+                f"could not release the withdrawn question {withdrawal.interaction_id}: {exc}", retryable=True
+            ) from exc
+        logger.info(
+            "withdrawn question %s: %s",
+            withdrawal.interaction_id,
+            "released the pair's reservation" if released else "no reservation held for it",
+        )
 
     async def notify(self, notification: ChannelNotification) -> list[str]:
         """Send one fire-and-forget message; raise ``ChannelDeliveryError`` on any failure.

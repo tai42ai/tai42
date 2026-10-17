@@ -12,7 +12,10 @@ without claiming it, and the shared ladder (through the ``CorrelationStore``
 port's ``get_correlation``/``release_correlation``) decides when the reservation
 is released — a kept rejection leaves the record untouched, and only a terminal
 outcome deletes it. ``bump_rejections`` increments the re-ask counter in place on
-the still-held record. Exclusivity lives entirely on the ``SET NX`` reserve.
+the still-held record. Exclusivity lives entirely on the ``SET NX`` reserve. When the
+platform takes a delivered question down, ``release_pending_for`` drops the pair's
+record atomically ONLY while it is still held for that question's interaction id, so a
+newer ask's hold on the same pair is never released.
 
 A select ask also carries its ``options`` and ``interaction_id`` so an inbound
 interactive tap (whose id is ``{interaction_id}:{index}``) maps back to the exact
@@ -44,11 +47,11 @@ from __future__ import annotations
 import json
 import logging
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final, cast
 
 from redis.exceptions import LockError, LockNotOwnedError
 from tai42_contract.app import tai42_app
@@ -239,6 +242,31 @@ async def release_pending(phone_number_id: str, wa_id: str) -> None:
     """Drop the reservation (the send failed — the human never received the question)."""
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         await redis.delete(_pending_key(phone_number_id, wa_id))
+
+
+# Compare-and-delete in one atomic step: the pair's record is dropped only while it is held for
+# ARGV[1], so a withdrawal never releases a hold a newer ask has taken on the same pair.
+_RELEASE_PENDING_FOR_LUA: Final[str] = (
+    "local raw = redis.call('GET', KEYS[1]) "
+    "if not raw then return 0 end "
+    "local rec = cjson.decode(raw) "
+    "if rec.interaction_id == ARGV[1] then return redis.call('DEL', KEYS[1]) end "
+    "return 0"
+)
+
+
+async def release_pending_for(phone_number_id: str, wa_id: str, interaction_id: str) -> bool:
+    """Drop the pair's reservation ONLY if it is held for ``interaction_id``; True when released.
+
+    A different ask's record, or no record at all, is left untouched and returns False. redis-py's
+    async ``eval`` stub types a non-awaitable return; it is awaitable at runtime.
+    """
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        released = await cast(
+            "Awaitable[int]",
+            redis.eval(_RELEASE_PENDING_FOR_LUA, 1, _pending_key(phone_number_id, wa_id), interaction_id),
+        )
+    return bool(released)
 
 
 def _decode_pending(raw: str | bytes) -> PendingQuestion:
@@ -500,6 +528,15 @@ async def get_reaction_form(
         logger.warning("cached reaction form for %s lacks its schema; treating as a miss", interaction_id)
         return None
     return parsed["schema"], parsed.get("pages"), parsed.get("values") or {}, parsed.get("options") or {}
+
+
+async def drop_reaction_form(interaction_id: str) -> None:
+    """Delete the reacting form's data-endpoint sidecar (keyed by the id, so it can belong to no other ask).
+
+    Idempotent: a missing sidecar is a no-op.
+    """
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        await redis.delete(_reaction_form_key(interaction_id))
 
 
 async def already_seen(wamid: str) -> bool:

@@ -1,7 +1,7 @@
-"""The whole-chain kill teardown, the kill-due outbox, and the thread reverse-index reach.
+"""The whole-run kill teardown, the kill-due outbox, and the thread reverse-index reach.
 
-Prune-or-clear a killed park atomically and enqueue the durable kill-due record, plus read and
-reconcile the thread→interaction reverse index the kill cascade walks.
+Prune-or-clear a killed park atomically, mark its run taken down and enqueue the durable kill-due
+record, plus read and reconcile the thread→interaction reverse index the kill cascade walks.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any, Final, Literal, cast
 
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
-from tai42_contract.interactions import DeliveryAddress
+from tai42_contract.interactions import PARK_COMPLETION_FAILED, DeliveryAddress
 
 from . import events, records, serde
 from .writes_base import AskTo, _StoreWritesBase
@@ -23,9 +23,10 @@ from .writes_base import AskTo, _StoreWritesBase
 # MULTI wrote NOTHING — the resolving answer's own continuation owns the run.
 KillEnqueueResult = Literal["pruned", "answered", "gone", "skipped"]
 
-# The kill's status precondition: the resolved target states a door may tear down. The whole-chain
-# teardown walk (subject erase, thread/person/route delete) acts on an answered/running sibling too,
-# so it never redelivers into a torn-down run; a SINGLE-park door (the expiry reaper's
+# The kill's status precondition: the resolved target states a door may tear down. The whole-run
+# teardown walk (subject erase, thread/person/route delete, and a kill's walk of every park of the
+# run) acts on an answered/running sibling too, so it never redelivers into a torn-down run; a
+# SINGLE-park door (the expiry reaper's
 # ``on_expiry="kill"`` branch, the per-interaction cancel) acts ONLY on a still-pending target, so a
 # raced answer that resolved the park in the claim window is left to its own continuation.
 KILL_ACT_ON_ANY: Final[frozenset[str]] = frozenset({"pending", "answered"})
@@ -49,7 +50,7 @@ class _KillPrune:
 
 
 class _StoreKillWrites(_StoreWritesBase):
-    """The whole-chain kill teardown, kill-due enqueue, and thread reverse-index reach."""
+    """The whole-run kill teardown, kill-due enqueue, and thread reverse-index reach."""
 
     async def enqueue_kill(
         self,
@@ -66,8 +67,12 @@ class _StoreKillWrites(_StoreWritesBase):
         first_attempt_at_ms: int,
         deadline_ms: int,
         act_on: frozenset[str] = KILL_ACT_ON_ANY,
+        terminal: str = PARK_COMPLETION_FAILED,
+        channel: str | None = None,
+        recipient: str | None = None,
+        continuation_tool: str | None = None,
     ) -> KillEnqueueResult:
-        """The whole-chain kill's teardown MULTI: prune the park, clear its continuation-due, enqueue the kill-due.
+        """The whole-run kill's teardown MULTI: prune the park, clear its continuation-due, enqueue the kill-due.
 
         Status-gated exactly like :meth:`prune_pending`, atomically under WATCH — and, when the
         target's resolved state is one the caller's ``act_on`` precondition permits, in the SAME MULTI:
@@ -80,24 +85,36 @@ class _StoreKillWrites(_StoreWritesBase):
           continuation-due record is ``"gone"`` (nothing written);
         * the interaction's continuation-due record + its due-index member are deleted
           UNCONDITIONALLY of the ``pending`` status, so a buffered/answered sibling reached by the
-          whole-chain walk has its live due record cleared and nothing redelivers into a run whose
+          whole-run walk has its live due record cleared and nothing redelivers into a run whose
           driver dropped its tombstones;
+        * UNCONDITIONALLY of the ``pending`` status too, the park leaves its run's index
+          (``run_parks_key``) and the run is marked taken down (``run_killed_key``, written once
+          with the kill-due TTL), so no face resumes the run and no park is written for it;
         * a durable kill-due record + its next-attempt index member are written, carrying the
-          killed run's copied ``delivery`` address, ``run_delivery_id``, subject descriptor and the
-          ``chain_keys`` the interaction is nested under, so the platform's FAILED delivery and the
-          teardown's resume lineage survive the prune and a crash-redelivery.
+          killed run's copied ``delivery`` address, ``run_delivery_id``, subject descriptor, the
+          ``chain_keys`` the interaction is nested under, the ``terminal`` the door named, the
+          ask's delivery ``channel`` and ``recipient`` and its ``continuation_tool``, so a
+          crash-redelivery fires the same nodes, withdraws the same channel delivery and delivers
+          the same terminal.
 
         ``act_on`` is the door's precondition — the resolved target states the kill may act on. The
         default (:data:`KILL_ACT_ON_ANY`) tears down a pending OR an already-resolved
-        (answered/running) target, the whole-chain-walk behavior. A single-park door passes
+        (answered/running) target, the whole-run-walk behavior. A single-park door passes
         :data:`KILL_ACT_ON_PENDING`: when the WATCHed status shows the park was resolved in the claim
         window (an answer committed after the door read it pending), the resolved state is excluded,
         the MULTI writes NOTHING, and ``"skipped"`` is returned — so the answer's own continuation
-        owns the run and the door delivers no FAILED, tears nothing down and clears no due record.
+        owns the run and the door delivers no terminal, tears nothing down and clears no due record.
 
-        The caller passes the run's ``delivery``/``run_delivery_id``/``subjects``/``chain_keys`` it read off the
-        surviving record (state hash or continuation-due), and the kill-due TTL, first-attempt score
-        and hard ``deadline_ms`` (the reaper's give-up horizon).
+        The kill seam revokes every park of the run through this MULTI before any driver is told,
+        and completes each one's kill-due record: each MULTI prunes its park, leaves its thread,
+        subject and run indexes, clears its continuation-due ticket and writes its own kill-due
+        record — no park of a taken-down run stays open, keeps a channel slot, or keeps a
+        continuation ticket.
+
+        The caller passes the run's ``delivery``/``run_delivery_id``/``subjects``/``chain_keys``/
+        ``continuation_tool`` it read off the surviving record (state hash or continuation-due), and
+        the kill-due TTL, first-attempt score and hard ``deadline_ms`` (the reaper's give-up
+        horizon).
         """
         state_key = self.state_key(interaction_id)
         due_key = self.continuation_due_key(interaction_id)
@@ -110,12 +127,20 @@ class _StoreKillWrites(_StoreWritesBase):
             run_delivery_id,
             json.dumps(subjects) if subjects is not None else None,
             json.dumps(chain_keys) if chain_keys else None,
+            terminal=terminal,
+            channel=channel,
+            recipient=recipient,
+            continuation_tool=continuation_tool,
         )
 
         async with r.pipeline() as pipe:
             while True:
                 try:
                     await pipe.watch(*watch_keys)
+                    # The count is read BEFORE the status, so a pending state that lapses with
+                    # its group's shared horizon mid-claim reads as gone (or aborts the WATCHed
+                    # EXEC) instead of passing for a live state beside a lapsed count.
+                    count = await pipe.get(self.count_key(group_id)) if group_id is not None else None
                     status = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "status")))
                     due_exists = bool(await cast("Awaitable[dict[str | bytes, str | bytes]]", pipe.hgetall(due_key)))
                     if status is None and not due_exists:
@@ -131,7 +156,9 @@ class _StoreKillWrites(_StoreWritesBase):
                         await pipe.reset()
                         return "skipped"
                     prune = (
-                        await self._read_kill_prune_fields(pipe, state_key, group_id) if status == "pending" else None
+                        await self._read_kill_prune_fields(pipe, state_key, group_id, count)
+                        if status == "pending"
+                        else None
                     )
                     pipe.multi()
                     if prune is not None:
@@ -140,6 +167,11 @@ class _StoreKillWrites(_StoreWritesBase):
                     # record is cleared so nothing redelivers into a torn-down run.
                     pipe.delete(due_key)
                     pipe.zrem(self.continuation_due_index_key, interaction_id)
+                    if run_delivery_id is not None:
+                        # UNCONDITIONAL too: the park leaves its run's index and the run is marked
+                        # taken down once, so nothing of it is resumed or parks again.
+                        self._queue_run_leave(pipe, run_delivery_id, interaction_id)
+                        pipe.set(self.run_killed_key(run_delivery_id), reason, ex=kill_due_ttl, nx=True)
                     pipe.hset(kill_key, mapping=kill_mapping)
                     pipe.expire(kill_key, kill_due_ttl)
                     pipe.zadd(self.kill_due_index_key, {interaction_id: first_attempt_at_ms})
@@ -153,11 +185,16 @@ class _StoreKillWrites(_StoreWritesBase):
                     # (``status`` is None — reached only WITH a continuation-due record present, the
                     # ``status is None and not due_exists`` case returns ``"gone"`` before the MULTI)
                     # had that due record cleared and its kill-due written: either way the entry is
-                    # now torn down, so the caller delivers the FAILED and clears the kill-due at once.
+                    # now torn down, so the caller delivers the terminal and clears the kill-due at once.
                     return "pruned"
 
-    async def _read_kill_prune_fields(self, pipe: Any, state_key: str, group_id: str | None) -> _KillPrune:
-        """Read the denormalized fields a pending park's kill-prune MULTI writes from (pre-MULTI phase)."""
+    async def _read_kill_prune_fields(
+        self, pipe: Any, state_key: str, group_id: str | None, count: str | bytes | None
+    ) -> _KillPrune:
+        """Read the denormalized fields a pending park's kill-prune MULTI writes from (pre-MULTI phase).
+
+        ``count`` is the group's pending count, read before the park's status.
+        """
         audience = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "audience")))
         media_ids_field = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "media_ids")))
         media_ids = media_ids_field.split(",") if media_ids_field else []
@@ -166,10 +203,11 @@ class _StoreKillWrites(_StoreWritesBase):
         subjects = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "subjects")))
         remaining: int | None = None
         if group_id is not None:
-            current = await pipe.get(self.count_key(group_id))
-            if current is None:
+            if count is None:
+                # count_key is set-or-extended to cover the group's longest-lived state, so a
+                # live (pending) state ALWAYS has a live count: a missing count is a torn index.
                 raise RuntimeError(f"pending count missing for group {group_id!r} with a live state at {state_key!r}")
-            remaining = int(current) - 1
+            remaining = int(count) - 1
         return _KillPrune(
             to=to,
             audience=audience,
@@ -210,7 +248,7 @@ class _StoreKillWrites(_StoreWritesBase):
         )
 
     async def clear_kill_due(self, r: Redis, interaction_id: str) -> None:
-        """Delete the kill-due record + drop its index member once the teardown and FAILED delivery committed.
+        """Delete the kill-due record and its index member once the kill completed.
 
         Atomic, and a no-op on an already-cleared record (a redelivery the original kill raced to
         completion), so double-clear is harmless.
@@ -223,7 +261,7 @@ class _StoreKillWrites(_StoreWritesBase):
     async def thread_park_members(self, r: Redis, thread_id: str) -> list[str]:
         """The interaction ids of the async parks bound to ``thread_id`` — the thread reverse-index snapshot.
 
-        The whole-chain kill's thread reach reads this so it can route each member through the kill
+        The whole-run kill's thread reach reads this so it can route each member through the kill
         seam. A missing/drained set is an empty list.
         """
         key = self.thread_parks_key(thread_id)

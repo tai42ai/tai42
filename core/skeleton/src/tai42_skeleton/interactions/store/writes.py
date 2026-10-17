@@ -12,7 +12,12 @@ from typing import Any, Literal, cast
 
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
-from tai42_contract.interactions import DeliveryAddress, InteractionRequest, InteractionState
+from tai42_contract.interactions import (
+    DeliveryAddress,
+    InteractionRequest,
+    InteractionState,
+    ParkRunTakenDownError,
+)
 
 from . import events, records, scripts, serde, ttl
 from .writes_base import AskTo, _StoreWritesBase
@@ -52,7 +57,6 @@ class _StoreWrites(_StoreWritesBase):
         ticket_ttl: int | None = None,
         open_member_reserved: bool = False,
         continuation_fingerprint: str | None = None,
-        expiry_ttl_margin_seconds: int = ttl._DEFAULT_EXPIRY_TTL_MARGIN_SECONDS,
         thread_id: str | None = None,
         to: AskTo = "user",
         delivery: DeliveryAddress | None = None,
@@ -66,11 +70,10 @@ class _StoreWrites(_StoreWritesBase):
         and extends the shared group stream and ``count_key`` to the greatest horizon across the
         group's parks, so a still-open question always has a live group stream and count.
 
-        A key's TTL is its ``_key_ttl``: an async park whose ``expiry_at`` runs past
-        the ``idle_ttl`` horizon gets a TTL covering that expiry plus
-        ``expiry_ttl_margin_seconds`` (a reaper-pass margin the helper derives from
-        the reaper interval), so its state survives to be answered and reaped rather
-        than expiring mid-park. This question's own state hash takes its own
+        A key's TTL is its ``_key_ttl``: an async park's keys live the seconds remaining to
+        its ``expiry_at`` plus one retention horizon (``idle_ttl``), so the park stays
+        answerable to its deadline and the expiry reaper resolves it however late it runs
+        within that horizon. This question's own state hash takes its own
         ``_key_ttl``; the shared group stream and ``count_key`` take a
         SET-OR-EXTEND-TO-GREATER TTL (``EXPIRE ... NX`` to set the first horizon,
         ``EXPIRE ... GT`` to raise it only when longer), so concurrent adds to the
@@ -105,8 +108,16 @@ class _StoreWrites(_StoreWritesBase):
         listing, an erasure and a merge reach it without a SCAN. ``delivery`` (the run's
         durable out-of-band address) and ``run_delivery_id`` (the run's delivery
         identity) are denormalized when given, so the answer path copies them onto the
-        continuation-due record for a detached redelivery.
+        continuation-due record for a detached redelivery. A park of a run joins the run's
+        index (``run_parks_key``), so a kill reaches every park of the run.
+
+        A park for a run that was taken down (its ``run_killed_key`` mark stands) is refused
+        with :class:`~tai42_contract.interactions.ParkRunTakenDownError` and nothing is written.
         """
+        if run_delivery_id is not None and await r.exists(self.run_killed_key(run_delivery_id)):
+            raise ParkRunTakenDownError(
+                f"interaction {request.interaction_id!r}: its run was taken down; nothing of it parks again"
+            )
         # Atomic phantom self-heal over the parallel deadline index, BEFORE the new
         # question is written (its deadline is in the future, so it is never a
         # purge target). redis-py's async ``eval`` stub types a non-awaitable
@@ -127,10 +138,10 @@ class _StoreWrites(_StoreWritesBase):
         )
         new_media_ids = ttl._media_ids_of(request)
         pipe = r.pipeline()
-        thread_parks_key = self._queue_record_writes(
+        index_keys = self._queue_record_writes(
             pipe, request, state_mapping, ticket, ticket_ttl, open_member_reserved, to
         )
-        self._queue_ttls(pipe, request, idle_ttl, expiry_ttl_margin_seconds, thread_parks_key, new_media_ids)
+        self._queue_ttls(pipe, request, idle_ttl, index_keys, new_media_ids)
         await pipe.execute()
 
     def _build_state_mapping(
@@ -214,6 +225,8 @@ class _StoreWrites(_StoreWritesBase):
         ``run_delivery_id`` are copied onto the continuation-due record by the answer path so the
         reaper's detached redelivery restores the chain, deposits the lineage and binds the address
         without re-reading the request; a kill copies ``chain_keys`` onto its kill-due record.
+        ``run_delivery_id`` also indexes the park under its run (``run_parks_key``), so a kill
+        of any park of the run reaches every other.
         ``deferred_binding`` (the door's merged binding, JSON), ``run_input`` (the input it saw,
         JSON) and ``door_id`` are copied the same way, so the reaper's redelivery applies the
         deferred UPDATES at the run's real terminal.
@@ -248,11 +261,12 @@ class _StoreWrites(_StoreWritesBase):
         ticket_ttl: int | None,
         open_member_reserved: bool,
         to: AskTo,
-    ) -> str | None:
-        """Enqueue the record + index writes; return the ``thread_parks_key`` (or ``None``) for the TTL step.
+    ) -> list[str]:
+        """Enqueue the record + index writes; return the reverse-index keys the TTL step set-or-extends.
 
         Writes the stream, state, count, pending + deadline indexes, expiry member, thread-park
-        member, subject index members, open member, ticket, and add-event.
+        member, run-park member, subject index members, open member, ticket, and add-event. The
+        returned keys are the thread-parks and run-parks sets this park joined.
         """
         group_key = self.group_key(request.group_id)
         state_key = self.state_key(request.interaction_id)
@@ -283,10 +297,18 @@ class _StoreWrites(_StoreWritesBase):
         # joins it (the ``thread_id`` denormalized above is the exact condition). Rides
         # THIS same atomic pipeline; its TTL is set-or-extended below.
         park_thread_id = state_mapping.get("thread_id")
-        thread_parks_key: str | None = None
+        index_keys: list[str] = []
         if park_thread_id is not None:
             thread_parks_key = self.thread_parks_key(park_thread_id)
             pipe.sadd(thread_parks_key, request.interaction_id)
+            index_keys.append(thread_parks_key)
+        run_delivery_id = state_mapping.get("run_delivery_id")
+        if run_delivery_id is not None:
+            # The run -> park index a kill reads to revoke every park of the run. Rides THIS
+            # atomic pipeline; its TTL is set-or-extended below.
+            run_parks_key = self.run_parks_key(run_delivery_id)
+            pipe.sadd(run_parks_key, request.interaction_id)
+            index_keys.append(run_parks_key)
         subjects_field = state_mapping.get("subjects")
         if subjects_field is not None:
             # Join the subject index for each of the run's subject keys (user asks
@@ -316,28 +338,27 @@ class _StoreWrites(_StoreWritesBase):
             maxlen=events._EVENTS_MAXLEN,
             approximate=True,
         )
-        return thread_parks_key
+        return index_keys
 
     def _queue_ttls(
         self,
         pipe: Any,
         request: InteractionRequest,
         idle_ttl: int,
-        expiry_margin: int,
-        thread_parks_key: str | None,
+        index_keys: list[str],
         media_ids: list[str],
     ) -> None:
         """Enqueue the per-key TTL refreshes.
 
         This park's own state hash to its own horizon, the shared group stream + count (and
-        thread-parks set) set-or-extended to the greater horizon (``EXPIRE NX`` + ``EXPIRE GT``),
+        the thread-parks and run-parks sets) set-or-extended to the greater horizon (``EXPIRE NX`` + ``EXPIRE GT``),
         and the media set-or-extend Lua over the group's media index and keys.
         """
         group_key = self.group_key(request.group_id)
         state_key = self.state_key(request.interaction_id)
         count_key = self.count_key(request.group_id)
         now_ms = ttl._now_ms()
-        new_ttl = ttl._key_ttl(request, idle_ttl, now_ms, expiry_margin)
+        new_ttl = ttl._key_ttl(request, idle_ttl, now_ms)
         pipe.expire(state_key, new_ttl)
         # ``NX`` sets this horizon when the key has none yet (a group's first park — a
         # bare ``GT`` treats a no-expiry key as infinity and would leave it unbounded);
@@ -349,11 +370,11 @@ class _StoreWrites(_StoreWritesBase):
         pipe.expire(group_key, new_ttl, gt=True)
         pipe.expire(count_key, new_ttl, nx=True)
         pipe.expire(count_key, new_ttl, gt=True)
-        if thread_parks_key is not None:
-            # The reverse index takes the SAME set-or-extend-to-greater TTL as the
-            # group stream, so it outlives the longest-lived park it indexes.
-            pipe.expire(thread_parks_key, new_ttl, nx=True)
-            pipe.expire(thread_parks_key, new_ttl, gt=True)
+        for index_key in index_keys:
+            # The thread and run reverse indexes take the SAME set-or-extend-to-greater TTL as
+            # the group stream, so each outlives the longest-lived park it indexes.
+            pipe.expire(index_key, new_ttl, nx=True)
+            pipe.expire(index_key, new_ttl, gt=True)
         if request.continuation_state_context is not None:
             # The subject index sets take the SAME set-or-extend-to-greater TTL, so they
             # outlive the longest-lived entry they index; drained empty they simply
@@ -451,6 +472,10 @@ class _StoreWrites(_StoreWritesBase):
             while True:
                 try:
                     await pipe.watch(state_key, count_key)
+                    # The count is read BEFORE the status, so a state that lapses with its
+                    # group's shared horizon mid-claim reads as gone (or aborts the WATCHed
+                    # EXEC) instead of passing for a live state beside a lapsed count.
+                    current = await pipe.get(count_key)
                     status = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "status")))
                     if status is None:
                         await pipe.reset()
@@ -458,6 +483,13 @@ class _StoreWrites(_StoreWritesBase):
                     if status == "answered":
                         await pipe.reset()
                         return "answered"
+                    if current is None:
+                        # count_key is set-or-extended to cover the group's
+                        # longest-lived state, so a live (pending) state ALWAYS has a
+                        # live count. A missing count here is a torn index, not a zero.
+                        raise RuntimeError(
+                            f"pending count missing for group {group_id!r} with a live state {interaction_id!r}"
+                        )
                     # The question's audience rides the removed event so the tail-only
                     # SSE filters the frame directly (absent = an unaddressed question).
                     audience = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "audience")))
@@ -479,14 +511,10 @@ class _StoreWrites(_StoreWritesBase):
                         serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "to")))
                     )
                     subjects = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "subjects")))
-                    current = await pipe.get(count_key)
-                    if current is None:
-                        # count_key is set-or-extended to cover the group's
-                        # longest-lived state, so a live (pending) state ALWAYS has a
-                        # live count. A missing count here is a torn index, not a zero.
-                        raise RuntimeError(
-                            f"pending count missing for group {group_id!r} with a live state {interaction_id!r}"
-                        )
+                    # The park's run, so the prune leaves the run index.
+                    run_delivery_id = serde.as_str(
+                        await cast("Awaitable[str | None]", pipe.hget(state_key, "run_delivery_id"))
+                    )
                     remaining = int(current) - 1
                     pipe.multi()
                     pipe.delete(state_key)
@@ -503,6 +531,7 @@ class _StoreWrites(_StoreWritesBase):
                     # SAME MULTI as the state delete — so the subject index leaves
                     # exactly where the state key is deleted.
                     self._queue_subject_leave(pipe, subjects, interaction_id)
+                    self._queue_run_leave(pipe, run_delivery_id, interaction_id)
                     if media_ids:
                         pipe.srem(self.media_index_key(group_id), *media_ids)
                     pipe.decr(count_key)

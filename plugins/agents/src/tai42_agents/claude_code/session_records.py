@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 from tai42_contract.agent.events import MessageFinal, StreamEvent, StructuredFinal
-from tai42_contract.sandbox import SandboxSession
+from tai42_contract.sandbox import SandboxFileNotFoundError, SandboxSession
 
 from tai42_agents.claude_code.protocol import ProtocolError, ResultFrame
 
@@ -47,11 +47,12 @@ class _TerminalRecord(BaseModel):
 async def read_session_id(session: SandboxSession) -> str | None:
     """The persisted SDK session id for a threaded turn, or ``None`` when none is stored.
 
-    Raises :class:`ProtocolError` when the stored record is present but malformed.
+    Raises :class:`ProtocolError` when the stored record is present but malformed; any read failure other than
+    an absent file propagates.
     """
     try:
         raw = await session.get_file(_SESSION_ID_PATH)
-    except Exception:
+    except SandboxFileNotFoundError:
         return None
     try:
         record = json.loads(raw.decode("utf-8"))
@@ -72,7 +73,7 @@ async def read_terminal_record(session: SandboxSession, superstep_id: str) -> _T
     """Read + schema-validate the durable terminal record for a resumed super-step.
 
     Returns ``None`` when there is none (the common first-drive case) or it does not
-    validate.
+    validate; any read failure other than an absent file propagates.
 
     UNTRUSTED UNTIL VERIFIED: the in-session Bash can write under ``.runner``, so the
     record is schema-validated and its ``superstep_id`` must match the one being resumed
@@ -82,7 +83,7 @@ async def read_terminal_record(session: SandboxSession, superstep_id: str) -> _T
     """
     try:
         raw = await session.get_file(f"{_TERMINAL_DIR}/{superstep_id}.json")
-    except Exception:
+    except SandboxFileNotFoundError:
         return None
     try:
         record = _TerminalRecord.model_validate_json(raw)

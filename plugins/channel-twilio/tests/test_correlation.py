@@ -215,3 +215,20 @@ async def test_missing_redis_url_raises_on_every_store_function(fake_redis: Fake
     ):
         with pytest.raises(ValueError, match="CHANNEL_TWILIO_REDIS_URL"):
             await call
+
+
+async def test_release_pending_for_drops_the_pair_only_for_its_own_ask(fake_redis: FakeRedis):
+    from tai42_channel_twilio.correlation import release_pending_for
+
+    await reserve_pending(
+        _TWILIO, _HUMAN, _CALLBACK, "int-A", _deadline(), on_mismatch=AnswerMismatchPolicy.RETRY, wording=None
+    )
+
+    # A different ask's id leaves the hold in place.
+    assert await release_pending_for(_TWILIO, _HUMAN, "int-X") is False
+    assert _REDIS_KEY in fake_redis.store
+    # The holding ask's id releases it.
+    assert await release_pending_for(_TWILIO, _HUMAN, "int-A") is True
+    assert _REDIS_KEY not in fake_redis.store
+    # Nothing held: a no-op.
+    assert await release_pending_for(_TWILIO, _HUMAN, "int-A") is False

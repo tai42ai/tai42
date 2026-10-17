@@ -1,7 +1,7 @@
 """The interactions reaper passes and ``kill_park`` hold no settings instance across an await.
 
 The reaper is a perpetual loop that outlives a settings reload. Each pass (and the
-whole-chain kill a pass runs per due park) reads its configuration through the
+whole-run kill a pass runs per due park) reads its configuration through the
 cached accessor at the point of use, so a pass suspended on the store while the
 reload retires the settings generation keeps no retired ``InteractionsSettings``
 alive for the stale-settings sweep to report. Each case parks one door at its

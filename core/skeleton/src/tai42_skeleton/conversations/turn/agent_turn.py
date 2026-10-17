@@ -257,8 +257,11 @@ async def _run_agent_turn(
         )
         return _tool_error(f"start_expr error: {exc}", route)
     # A start runs only when the visit does not resume/take first (the pending-caller-ask guard
-    # below refuses the actual start).
-    if start_requested and not contract.resume and _has_pending_caller_ask(parked):
+    # below refuses the actual start). The visit cancels before it starts, so a caller ask this
+    # turn's ``cancel_expr`` names leaves nobody owed an answer and does not hold the start back.
+    cancelled = set(contract.cancel)
+    still_parked = [entry for entry in parked if entry.get("id") not in cancelled]
+    if start_requested and not contract.resume and _has_pending_caller_ask(still_parked):
         logger.warning(
             "conversations: agent route %r cannot start a turn while a caller ask is pending", route.route_name
         )

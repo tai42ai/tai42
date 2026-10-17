@@ -71,7 +71,7 @@ from tai42_agents.tools_agent import ToolsAgent
 #: The holder's delivery tool: a held run's terminal re-enters the holder through it.
 _DELIVERY_TOOL = "held_chain_deliver"
 #: The resume continuation the holding driver binds around its own drive.
-_HOLDER_CONTINUATION = "held_flow_resume"
+_HOLDER_CONTINUATION = "held_resume"
 #: The interaction id the synthetic caller ask parks.
 _ASK_ID = "i-held-ask"
 _DIGEST = "registry.example/claude@sha256:" + "c" * 64

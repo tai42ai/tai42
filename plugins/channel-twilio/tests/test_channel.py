@@ -756,3 +756,95 @@ async def test_notify_twilio_rejection_raises_delivery_error(fake_redis: FakeRed
         await TwilioChannel().notify(ChannelNotification(message="Heads up.", recipient="whatsapp:+15550000004"))
 
     assert not fake_redis.store  # still nothing reserved on failure
+
+
+# --- withdraw: the platform took a delivered question down -------------------
+
+
+def _pair_holder(fake_redis: FakeRedis, human: str) -> str | None:
+    raw = fake_redis.store.get(f"channel:twilio:pending:{correlation_key('+15550000001', human)}")
+    return None if raw is None else Correlation.model_validate_json(raw).interaction_id
+
+
+async def test_withdraw_frees_the_pair_so_a_second_ask_is_accepted(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    from tai42_contract.channels import ChannelWithdrawal
+
+    channel = TwilioChannel()
+    fake_httpx.responses.append(_accepted())
+    await channel.deliver(make_delivery(interaction_id="int-A", recipient="+15550000003"))
+    with pytest.raises(PendingQuestionExistsError):
+        await channel.deliver(make_delivery(interaction_id="int-B", recipient="+15550000003"))
+
+    await channel.withdraw(ChannelWithdrawal(interaction_id="int-A", recipient="+15550000003"))
+
+    fake_httpx.responses.append(_accepted())
+    await channel.deliver(make_delivery(interaction_id="int-B", recipient="+15550000003"))
+    assert _pair_holder(fake_redis, "+15550000003") == "int-B"
+
+
+async def test_withdraw_never_drops_another_asks_reservation(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    from tai42_contract.channels import ChannelWithdrawal
+
+    fake_httpx.responses.append(_accepted())
+    await TwilioChannel().deliver(make_delivery(interaction_id="int-A", recipient="+15550000003"))
+
+    await TwilioChannel().withdraw(ChannelWithdrawal(interaction_id="int-X", recipient="+15550000003"))
+
+    assert _pair_holder(fake_redis, "+15550000003") == "int-A"
+
+
+async def test_withdraw_is_a_no_op_when_nothing_is_pending(fake_redis: FakeRedis):
+    from tai42_contract.channels import ChannelWithdrawal
+
+    await TwilioChannel().withdraw(ChannelWithdrawal(interaction_id="int-A", recipient="+15550000003"))
+    await TwilioChannel().withdraw(ChannelWithdrawal(interaction_id="int-A", recipient="+15550000003"))
+
+    assert fake_redis.store == {}
+
+
+async def test_withdraw_with_no_recipient_releases_the_default_recipients_hold(
+    fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.channels import ChannelWithdrawal
+
+    # An ask with no recipient is delivered to (and held for) the operator's default recipient.
+    fake_httpx.responses.append(_accepted())
+    await TwilioChannel().deliver(make_delivery(interaction_id="int-A"))
+    assert _pair_holder(fake_redis, "+15550000002") == "int-A"
+
+    await TwilioChannel().withdraw(ChannelWithdrawal(interaction_id="int-A"))
+
+    assert _pair_holder(fake_redis, "+15550000002") is None
+
+
+async def test_withdraw_of_a_recipient_no_longer_allowlisted_still_releases(
+    fake_redis: FakeRedis, fake_httpx: FakeHttpx, monkeypatch: pytest.MonkeyPatch
+):
+    from tai42_contract.channels import ChannelWithdrawal
+    from tai42_kit.settings import reset_all_settings
+
+    fake_httpx.responses.append(_accepted())
+    await TwilioChannel().deliver(make_delivery(interaction_id="int-A", recipient="+15550000003"))
+    # The operator removes the address from the allowlist after the ask went out.
+    monkeypatch.setenv("CHANNEL_TWILIO_ALLOWED_RECIPIENTS", "whatsapp:+15550000004")
+    reset_all_settings()
+
+    await TwilioChannel().withdraw(ChannelWithdrawal(interaction_id="int-A", recipient="+15550000003"))
+
+    assert _pair_holder(fake_redis, "+15550000003") is None
+
+
+async def test_withdraw_store_fault_raises_a_retryable_delivery_error(
+    fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
+):
+    from redis.exceptions import ConnectionError as RedisConnectionError
+    from tai42_contract.channels import ChannelWithdrawal
+
+    async def _down(*_args: object, **_kwargs: object) -> int:
+        raise RedisConnectionError("connection refused")
+
+    monkeypatch.setattr(fake_redis, "eval", _down)
+
+    with pytest.raises(ChannelDeliveryError) as excinfo:
+        await TwilioChannel().withdraw(ChannelWithdrawal(interaction_id="int-A", recipient="+15550000003"))
+    assert excinfo.value.retryable is True

@@ -89,23 +89,31 @@ class _StoreReads(_StoreKeys):
         """The interaction ids of async parks whose ``expiry_at`` is at or before ``now``.
 
         The expiry reaper's work list. Reads the per-interaction expiry index by
-        score; a member is removed from it only when the question leaves pending
-        (answer/expiry/prune), so a lingering member for a vanished/answered state
-        is re-reconciled by the reaper (claim returns no-op, the member is
-        dropped).
+        score; a member is removed from it in the same MULTI that ends its pending
+        state (an answer claim, a kill prune, a cancel prune), so a listed member
+        is either a pending park or one whose keys lapsed unresolved, which the
+        reaper surfaces and reconciles through :meth:`drop_expiry_member`.
         """
         cutoff = int(now.timestamp() * 1000)
         raw = await r.zrangebyscore(self.pending_expiry_key, 0, cutoff)
         return [serde.as_str(member) for member in raw]
 
-    async def drop_expiry_member(self, r: Redis, interaction_id: str) -> None:
-        """Remove ``interaction_id`` from the expiry index.
+    async def drop_expiry_member(self, r: Redis, interaction_id: str) -> int | None:
+        """Remove ``interaction_id`` from the expiry index; return its ``expiry_at`` in ms, or ``None``.
 
-        The reaper's cleanup for a member whose state already vanished/answered
-        (so the claim was a no-op), keeping the index from re-listing a dead
-        member every pass.
+        The witness of a park that lapsed unresolved: every resolution removes the member with the
+        state in one MULTI, so a member still indexed when its pending state is absent lapsed
+        unresolved, and this call removes it and returns its score (the park's ``expiry_at``). It
+        returns ``None`` when nothing was indexed, because a resolution already removed the member.
+        The read and the removal run in one MULTI, so two reapers never both see the member.
         """
-        await r.zrem(self.pending_expiry_key, interaction_id)
+        pipe = r.pipeline()
+        pipe.zscore(self.pending_expiry_key, interaction_id)
+        pipe.zrem(self.pending_expiry_key, interaction_id)
+        score, removed = await pipe.execute()
+        if not removed:
+            return None
+        return int(score)
 
     async def list_pending(
         self, r: Redis, *, now: datetime, limit: int = _PENDING_LIST_DEFAULT_LIMIT
@@ -246,6 +254,14 @@ class _StoreReads(_StoreKeys):
         )
         return serde.as_str(raw)
 
+    async def continuation_due_present(self, r: Redis, interaction_id: str) -> bool:
+        """Whether ``interaction_id``'s continuation-due record stands.
+
+        The durable ticket a receiver-less resume delivers its terminal under; the kill seam clears
+        it when the run is taken down.
+        """
+        return bool(await r.exists(self.continuation_due_key(interaction_id)))
+
     async def clear_continuation_due(self, r: Redis, interaction_id: str) -> None:
         """Delete the durable continuation-due record + drop its index member once ``run_tool`` has returned.
 
@@ -329,21 +345,25 @@ class _StoreReads(_StoreKeys):
         )
 
     async def read_kill_target(self, r: Redis, interaction_id: str) -> KillTarget | None:
-        """Read the run's delivery identity + subjects off whichever record survives, for a whole-chain kill.
+        """Read the run's delivery identity + subjects off whichever record survives, for a whole-run kill.
 
         Priority: the state hash (a pending park → ``"park"``, an answered/resuming entry →
         ``"running"``), then the waiting-outcome hash (``"outcome"``, a completed run's result),
         then the continuation-due record (``"running"``, an entry whose state hash aged out). Returns
         ``None`` when nothing live names this id. The ``delivery``/``run_delivery_id``/``subjects``
         are the run's, and ``chain_keys`` the chained calls the interaction is nested under,
-        self-contained so the kill's durable record, its teardown's resume lineage and its FAILED
-        delivery survive the prune.
+        self-contained so the kill's durable record, the nodes it fires and its terminal delivery
+        survive the prune. ``continuation_tool`` is the state hash request's continuation tool or
+        the continuation-due record's ``tool``. The state hash also yields the ask's delivery
+        ``channel`` and ``recipient`` off its stored request (a hash without one is a torn record
+        and raises); the other two records hold no channel reservation and carry ``None``.
         """
         raw_state = await cast("Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.state_key(interaction_id)))
         if raw_state:
             fields = {serde.as_str(k): serde.as_str(v) for k, v in raw_state.items()}
             raw_delivery = fields.get("delivery")
             raw_subjects = fields.get("subjects")
+            request = InteractionRequest.model_validate_json(fields["request"])
             return KillTarget(
                 kind="park" if fields.get("status") == "pending" else "running",
                 group_id=fields.get("group_id"),
@@ -351,6 +371,9 @@ class _StoreReads(_StoreKeys):
                 run_delivery_id=fields.get("run_delivery_id"),
                 subjects=json.loads(raw_subjects) if raw_subjects is not None else None,
                 chain_keys=_chain_keys(fields),
+                channel=request.channel,
+                recipient=request.recipient,
+                continuation_tool=request.continuation_tool,
             )
         raw_outcome = await cast(
             "Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.outcome_key(interaction_id))
@@ -384,6 +407,7 @@ class _StoreReads(_StoreKeys):
                 run_delivery_id=fields.get("run_delivery_id"),
                 subjects=subjects,
                 chain_keys=_chain_keys(fields),
+                continuation_tool=fields.get("tool"),
             )
         return None
 
@@ -391,8 +415,8 @@ class _StoreReads(_StoreKeys):
         """The interaction ids of kill-due records whose next-attempt time is at or before ``now``.
 
         The kill-due reaper leg's work list, mirroring :meth:`due_continuations`. A member survives
-        until the kill's teardown + FAILED delivery commits (``clear_kill_due``), or the reaper
-        gives it up past its deadline.
+        until the kill's teardown, channel withdrawal and terminal delivery commit
+        (``clear_kill_due``), or the reaper gives it up past its deadline.
         """
         cutoff = int(now.timestamp() * 1000)
         raw = await r.zrangebyscore(self.kill_due_index_key, 0, cutoff)
@@ -408,7 +432,9 @@ class _StoreReads(_StoreKeys):
         when not (or no longer) due, and :data:`KILL_DROPPED` when the record hash TTL-expired and
         the orphan index member is reconciled off. The reaper's ordinary give-up is governed by the
         record's own ``deadline_ms`` (read here while the record still stands), not by this drop.
-        redis-py's async ``eval`` stub types a non-awaitable return; it is awaitable at runtime.
+        The record's ``terminal`` is REQUIRED: a record without it raises ``KeyError`` rather than
+        being read as any terminal. redis-py's async ``eval`` stub types a non-awaitable return; it
+        is awaitable at runtime.
         """
         raw = await cast(
             "Awaitable[list[Any] | str | bytes | None]",
@@ -436,10 +462,14 @@ class _StoreReads(_StoreKeys):
             reason=fields.get("reason", ""),
             attempts=int(fields["attempts"]),
             deadline_ms=int(fields["deadline_ms"]),
+            terminal=fields["terminal"],
             delivery=DeliveryAddress.model_validate_json(raw_delivery) if raw_delivery is not None else None,
             run_delivery_id=fields.get("run_delivery_id"),
             subjects=json.loads(raw_subjects) if raw_subjects is not None else None,
             chain_keys=_chain_keys(fields),
+            channel=fields.get("channel"),
+            recipient=fields.get("recipient"),
+            continuation_tool=fields.get("continuation_tool"),
         )
 
     async def due_untaken_outcomes(self, r: Redis, now: datetime, horizon_seconds: int) -> list[str]:
@@ -453,6 +483,18 @@ class _StoreReads(_StoreKeys):
         cutoff = int(now.timestamp() * 1000) - horizon_seconds * 1000
         raw = await r.zrangebyscore(self.outcome_retention_index_key, 0, cutoff)
         return [serde.as_str(member) for member in raw]
+
+    async def run_members(self, r: Redis, run_delivery_id: str) -> list[str]:
+        """The park ids of the run ``run_delivery_id`` (``run_parks_key``), sorted.
+
+        The kill reads it to revoke every park of the run; sorted so the walk order is deterministic.
+        """
+        raw = await cast("Awaitable[set[str | bytes]]", r.smembers(self.run_parks_key(run_delivery_id)))
+        return sorted(serde.as_str(member) for member in raw)
+
+    async def run_killed(self, r: Redis, run_delivery_id: str) -> bool:
+        """Whether the run ``run_delivery_id`` was taken down (its ``run_killed_key`` mark stands)."""
+        return bool(await r.exists(self.run_killed_key(run_delivery_id)))
 
     async def subject_members(self, r: Redis, kind: str, key: str) -> list[str]:
         """Every entry id addressed to ``(kind, key)`` across EVERY scope, de-duplicated.

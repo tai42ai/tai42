@@ -48,9 +48,7 @@ def captured(monkeypatch):
 
 def _window() -> DeadlineWindow:
     now = datetime.now(UTC)
-    return DeadlineWindow(
-        budget=60.0, created_at=now, timeout_at=now + timedelta(seconds=60), deadline=0.0, park_ttl_margin_seconds=10
-    )
+    return DeadlineWindow(budget=60.0, created_at=now, timeout_at=now + timedelta(seconds=60), deadline=0.0)
 
 
 def test_build_request_records_the_chain_without_the_ask_frame() -> None:

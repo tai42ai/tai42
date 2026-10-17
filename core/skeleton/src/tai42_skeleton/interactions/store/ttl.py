@@ -32,12 +32,6 @@ def _expiry_ms(request: InteractionRequest) -> int:
     return int(request.expiry_at.timestamp() * 1000)
 
 
-# Fallback ``expiry_ttl_margin_seconds`` for a direct ``add`` caller (the helper
-# always passes a reaper-derived value); a park with an ``expiry_at`` within
-# ``idle_ttl`` never reaches this since its TTL floors to ``idle_ttl``.
-_DEFAULT_EXPIRY_TTL_MARGIN_SECONDS = 60
-
-
 def _media_ids_of(request: InteractionRequest) -> list[str]:
     # The stored-media ids a request's media references — items whose url is a served
     # reference; https/link/data: items carry none. A data:image is substituted to a
@@ -52,16 +46,15 @@ def _media_ids_of(request: InteractionRequest) -> list[str]:
     return [mid for item in request.media if (mid := served_media_id(item.url)) is not None]
 
 
-def _key_ttl(request: InteractionRequest, idle_ttl: int, now_ms: int, expiry_margin_s: int) -> int:
+def _key_ttl(request: InteractionRequest, idle_ttl: int, now_ms: int) -> int:
     """Return the TTL a question's own keys need.
 
-    An async park with an ``expiry_at`` beyond the idle horizon must survive to its expiry
-    PLUS a reaper-pass margin, or its state hash would expire before the reaper reads it —
-    leaving the question unanswerable in the ``idle_ttl``..``expiry_at`` gap and stranding
-    the continuation. Every other question (sync, or a park expiring within the idle horizon)
-    uses the flat ``idle_ttl``.
+    An async park with an ``expiry_at`` keeps its keys one retention horizon (``idle_ttl``) past
+    its deadline: the seconds remaining to ``expiry_at`` (none when already past it) plus
+    ``idle_ttl``. The expiry reaper resolves the park however late it runs within that horizon,
+    the same horizon every durable record of the reaper keeps. Every other question uses the flat
+    ``idle_ttl``.
     """
     if request.mode == "async" and request.expiry_at is not None:
-        horizon = math.ceil((_expiry_ms(request) - now_ms) / 1000) + expiry_margin_s
-        return max(idle_ttl, horizon)
+        return max(0, math.ceil((_expiry_ms(request) - now_ms) / 1000)) + idle_ttl
     return idle_ttl

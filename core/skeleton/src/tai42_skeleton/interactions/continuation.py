@@ -45,9 +45,11 @@ from tai42_contract.interactions import (
     EXPIRY_ANSWER,
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
+    PARK_COMPLETION_WITHDRAWN,
     CallerAskLanding,
     DeliveryAddress,
     InteractionRequest,
+    ParkRunTakenDownError,
     ResumeBuffered,
     RunFailed,
     RunTerminalFailed,
@@ -129,6 +131,21 @@ def _is_nonterminal(result: Any) -> bool:
     new interaction carries the run's delivery forward.
     """
     return isinstance(result, (SuspendedInteraction, ResumeBuffered))
+
+
+async def _ticket_stands(store: InteractionStore, interaction_id: str) -> bool:
+    """Whether the resume's continuation-due ticket still stands; logs at INFO when it is gone.
+
+    The kill seam revokes the ticket of every park of a run it takes down, so a receiver-less resume
+    that was already driving when the kill landed reads it gone and delivers nothing.
+    """
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
+        stands = await store.continuation_due_present(r, interaction_id)
+    if not stands:
+        logger.info(
+            "interaction %s resumed to a terminal after its run was taken down; nothing is delivered", interaction_id
+        )
+    return stands
 
 
 async def _clear_due(store: InteractionStore, interaction_id: str) -> None:
@@ -223,14 +240,19 @@ async def _deliver_terminal(
     run_delivery_id: str | None,
     candidates: SubjectCandidates | None,
 ) -> None:
-    """Deliver a resumed run's TERMINAL through the ladder — fire the address, else subject-track, else drop.
+    """Deliver a run's TERMINAL through the ladder — fire the address, else subject-track, else drop.
 
-    Every rung is IDEMPOTENT, keyed by the run's ``completion_id`` (from ``run_delivery_id``): the
-    address fire dedupes on it (``completion_delivery``), the waiting outcome writes once, so a
-    redelivery of the same terminal lands once. An interaction reaching delivery with NO stored
-    ``run_delivery_id`` RAISES loudly — a park that stored none is a platform bug, never a
-    per-interaction fallback id. A transient failure of the fire propagates, so the caller keeps
-    the due record for the reaper.
+    The address rung fires the door's address with ``status`` for every terminal. The subject rung
+    parks a waiting outcome for a ``succeeded`` or ``failed`` terminal; a ``withdrawn`` terminal (the
+    platform took the run down on purpose) has no outcome for anyone to take, so it only leaves the
+    subject index. Every rung is IDEMPOTENT, keyed by the run's ``completion_id`` (from
+    ``run_delivery_id``): the address fire dedupes on it (``completion_delivery``), the waiting
+    outcome writes once, so a redelivery of the same terminal lands once. A ``withdrawn`` fire
+    anchors no record: a run that continues after a kill inside its own chain re-parks under the
+    same id and its real terminal is still delivered. An interaction reaching delivery with NO
+    stored ``run_delivery_id`` RAISES loudly — a park that stored none is a platform bug, never a
+    per-interaction fallback id. A transient failure of the fire propagates, so the caller keeps the
+    due record for the reaper.
     """
     if run_delivery_id is None:
         raise RuntimeError(
@@ -256,6 +278,12 @@ async def _deliver_terminal(
         if candidates is not None and candidates.by_kind:
             async with client_ctx(RedisClient, interactions_settings().redis) as r:
                 await store.leave_subject_index(r, interaction_id=interaction_id, candidates=candidates)
+        return
+    if candidates is not None and candidates.by_kind and status == PARK_COMPLETION_WITHDRAWN:
+        # A deliberate takedown with no address: nothing to take, so no waiting outcome — only the
+        # run's ``running`` subject-index membership leaves (a pending park's prune already left it).
+        async with client_ctx(RedisClient, interactions_settings().redis) as r:
+            await store.leave_subject_index(r, interaction_id=interaction_id, candidates=candidates)
         return
     if candidates is not None and candidates.by_kind:
         # No address, but a subject: park the terminal for whoever next runs on the subject. Its
@@ -322,6 +350,59 @@ async def _apply_deferred_binding(
     )
 
 
+async def _deliver_receiverless_failure(
+    store: InteractionStore,
+    *,
+    interaction_id: str,
+    failure: RunTerminalFailed,
+    delivery: DeliveryAddress | None,
+    run_delivery_id: str | None,
+    candidates: SubjectCandidates | None,
+) -> None:
+    """Deliver a receiver-less drive's FAILED terminal through the ladder while its ticket stands, then clear it."""
+    if not await _ticket_stands(store, interaction_id):
+        return
+    await _deliver_terminal(
+        store,
+        interaction_id=interaction_id,
+        outcome=failure.outcome,
+        status=PARK_COMPLETION_FAILED,
+        delivery=delivery,
+        run_delivery_id=run_delivery_id,
+        candidates=candidates,
+    )
+    await _clear_due(store, interaction_id)
+
+
+async def _deliver_receiverless_outcome(
+    store: InteractionStore,
+    *,
+    interaction_id: str,
+    result: Any,
+    delivery: DeliveryAddress | None,
+    run_delivery_id: str | None,
+    candidates: SubjectCandidates | None,
+    deferred_binding: StateBinding | None,
+    run_input: Mapping[str, Any] | None,
+    door_id: str | None,
+) -> None:
+    """Deliver a receiver-less drive's terminal (:func:`_deliver_run_outcome`) while its ticket stands; clear it."""
+    if not await _ticket_stands(store, interaction_id):
+        return
+    await _deliver_run_outcome(
+        store,
+        interaction_id=interaction_id,
+        result=result,
+        delivery=delivery,
+        run_delivery_id=run_delivery_id,
+        candidates=candidates,
+        deferred_binding=deferred_binding,
+        run_input=run_input,
+        door_id=door_id,
+    )
+    await _clear_due(store, interaction_id)
+
+
 async def drive_and_deliver(
     store: InteractionStore,
     *,
@@ -373,6 +454,12 @@ async def drive_and_deliver(
     so a run that parked to ask writes the door updates the pause dropped; never on a
     ``RunTerminalFailed`` or a re-park, matching the live apply which runs only on a clean output.
 
+    A receiver-less terminal is delivered only while the resume's continuation-due ticket stands;
+    the kill seam clears the ticket of every park it reaches — siblings and nested runs alike — so
+    a resume that was already driving when the kill landed delivers nothing. A drive the facet
+    refuses because its run was taken down (``ParkRunTakenDownError``) propagates to a live
+    receiver and, receiver-less, delivers nothing and is logged at INFO.
+
     The due record is cleared only AFTER a terminal is delivered, so a transient delivery failure
     leaves it for the reaper. Returns the inline receiver's outcome (or the non-terminal value); a
     receiver-less drive returns ``None``.
@@ -416,6 +503,17 @@ async def drive_and_deliver(
             raise
         park_failed = exc
         result = None
+    except ParkRunTakenDownError:
+        if receives_outcome:
+            # A live receiver learns the run was taken down: clear the record and propagate.
+            await _clear_due(store, interaction_id)
+            raise
+        # The kill's revoke already cleared this park's ticket: nothing is delivered or kept.
+        logger.info(
+            "interaction %s: its run was taken down while its answer was in flight; nothing is delivered",
+            interaction_id,
+        )
+        return None
     except Exception:
         # A PLAIN raise: a live receiver clears the record and the error propagates; a
         # receiver-less drive KEEPS the record (never cleared here) and surfaces loudly, so the
@@ -425,16 +523,14 @@ async def drive_and_deliver(
         raise
 
     if park_failed is not None:
-        await _deliver_terminal(
+        await _deliver_receiverless_failure(
             store,
             interaction_id=interaction_id,
-            outcome=park_failed.outcome,
-            status=PARK_COMPLETION_FAILED,
+            failure=park_failed,
             delivery=delivery,
             run_delivery_id=run_delivery_id,
             candidates=candidates,
         )
-        await _clear_due(store, interaction_id)
         return None
 
     if _is_nonterminal(result):
@@ -454,7 +550,7 @@ async def drive_and_deliver(
         await _clear_due(store, interaction_id)
         return result
 
-    await _deliver_run_outcome(
+    await _deliver_receiverless_outcome(
         store,
         interaction_id=interaction_id,
         result=result,
@@ -465,7 +561,6 @@ async def drive_and_deliver(
         run_input=run_input,
         door_id=door_id,
     )
-    await _clear_due(store, interaction_id)
     return None
 
 

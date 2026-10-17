@@ -79,6 +79,7 @@ def _agent_route(
     reply_expr: str | None = None,
     resume_expr: str | None = None,
     extras_expr: str | None = None,
+    cancel_expr: str | None = None,
 ) -> ConversationRoute:
     return ChannelConversationRoute(
         route_name="chat",
@@ -93,6 +94,7 @@ def _agent_route(
         reply_expr=TemplatedText(content=reply_expr) if reply_expr is not None else None,
         resume_expr=TemplatedText(content=resume_expr) if resume_expr is not None else None,
         extras_expr=TemplatedText(content=extras_expr) if extras_expr is not None else None,
+        cancel_expr=TemplatedText(content=cancel_expr) if cancel_expr is not None else None,
     )
 
 
@@ -343,6 +345,33 @@ async def test_agent_start_is_refused_while_a_caller_ask_is_pending(monkeypatch)
     assert outcome.answer_status == "error"
     assert "pending" in (outcome.error or "")
     assert agent.seen == []  # the start never ran
+
+
+async def test_agent_start_runs_after_the_visit_cancels_the_pending_caller_ask(monkeypatch):
+    # The visit cancels first: a turn whose ``cancel_expr`` names the pending caller ask leaves no
+    # caller owed an answer, so the start is not refused — the visit cancels, then starts.
+    agent = _RecordingAgent(MessageFinal(text="unused"))
+    route = _agent_route(cancel_expr="$parked[0].id")
+    _wire_agent(monkeypatch, route, agent)
+
+    async def _pending():
+        return [ParkedEntry(id="i-1", status="asking", to="caller")]
+
+    monkeypatch.setattr(agent_turn_module, "list_parked", _pending)
+    visits: list[dict[str, Any]] = []
+
+    async def _visit(**kwargs):
+        visits.append(kwargs)
+        return VisitOutcome(action="started", cancelled=["i-1"], kind="result", result="a fresh start")
+
+    monkeypatch.setattr(agent_turn_module, "visit", _visit)
+
+    outcome = await _run_agent(route)
+    assert isinstance(outcome, outcome_module._ResolvedOutcome)
+    assert outcome.answer_status == "answered"
+    assert len(visits) == 1
+    assert visits[0]["cancel"] == ["i-1"]
+    assert visits[0]["start"] is not None
 
 
 class _ExtrasRecordingAgent(_RecordingAgent):

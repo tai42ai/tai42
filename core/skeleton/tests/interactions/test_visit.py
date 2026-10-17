@@ -295,14 +295,14 @@ async def test_asks_outcome_sentinel_keeps_the_resume_owner_the_run_reported(sto
             interaction_id="c1",
             interaction_ids=["c1"],
             caller_interaction_ids=["c1"],
-            resume_owner="middle_flow_resume",
+            resume_owner="middle_resume",
         )
 
     with state_context(_context(_candidates())):
         outcome = await visit_module.visit(target_name="t", cancel=[], resume=[], start=_start, extras={})
     assert outcome.kind == "asks"
     assert outcome.suspended is not None
-    assert outcome.suspended.resume_owner == "middle_flow_resume"
+    assert outcome.suspended.resume_owner == "middle_resume"
 
 
 async def test_asks_outcome_sentinel_derives_the_owner_when_the_run_reported_none(store, fake_redis):

@@ -114,7 +114,7 @@ async def test_prune_leaves_the_index(fake_redis):
 
 
 async def test_kill_teardown_leaves_the_index(fake_redis):
-    # The whole-chain kill's teardown MULTI drops the killed park from every subject-parks set it
+    # The whole-run kill's teardown MULTI drops the killed park from every subject-parks set it
     # joined, exactly where the state key is deleted.
     store = InteractionStore("t:")
     req = _park(store, "i1", candidates=_candidates(person="pA"))
@@ -518,7 +518,7 @@ async def test_rekey_subject_rewrites_the_kill_due_subjects(fake_redis):
     store = InteractionStore("t:")
     descriptor = {"target_kind": "agent", "target_name": "a", "by_kind": {"person": "pA"}}
     # An answered-and-killed sibling still listed under the subject: its kill-due record's ``subjects``
-    # copy — the one the crash-redelivery leg reads to subject-track the killed run's FAILED — still
+    # copy — the one the crash-redelivery leg reads to subject-track the killed run's terminal — still
     # names the absorbed person.
     await fake_redis.sadd(store.subject_parks_key("agent", "a", "person", "pA"), "kd1")
     await fake_redis.sadd(store.subject_scopes_key("person", "pA"), "agent:a")
@@ -526,6 +526,7 @@ async def test_rekey_subject_rewrites_the_kill_due_subjects(fake_redis):
         store.kill_due_key("kd1"),
         mapping={
             "reason": "erased",
+            "terminal": "withdrawn",
             "attempts": "0",
             "deadline_ms": "9999999999999",
             "run_delivery_id": "rd-k",
@@ -560,7 +561,7 @@ async def test_rekey_subject_updates_a_waiting_outcome_membership(fake_redis):
     assert await fake_redis.smembers(store.subject_parks_key("agent", "a", "person", "pA")) == set()
 
 
-# -- kill-due key shapes (used by the whole-chain kill) -----------------------
+# -- kill-due key shapes (used by the whole-run kill) -----------------------
 
 
 def test_kill_due_key_shapes():

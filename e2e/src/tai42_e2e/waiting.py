@@ -63,6 +63,29 @@ async def wait_for_async[T](
         await asyncio.sleep(interval)  # noqa: TID251 — the sanctioned poll interval; every other sleep is banned
 
 
+async def wait_absent_async[T](
+    probe: Callable[[], Awaitable[T | None]],
+    *,
+    window: float,
+    interval: float = 0.25,
+    message: str = "an absent condition became true",
+) -> None:
+    """The negative twin of :func:`wait_for_async`: poll ``probe`` every ``interval`` seconds for
+    ``window`` seconds and raise :class:`AssertionError` the moment it returns a truthy value.
+
+    The one way a spec proves something did NOT happen after the act under test (a message never
+    sent, a record never written): there is no condition to wait FOR, so the window bounds the
+    observation and the probe is judged on every poll, never only once at the end."""
+    start = time.monotonic()
+    while True:
+        seen = await probe()
+        if seen:
+            raise AssertionError(f"{message}: {seen!r}")
+        if time.monotonic() - start >= window:
+            return
+        await asyncio.sleep(interval)  # noqa: TID251 — the sanctioned poll interval; every other sleep is banned
+
+
 def align_to_window(window_seconds: float) -> None:
     """Block until just after the next ``window_seconds`` boundary of the wall
     clock, so a fixed-window rate-limit test cannot straddle two windows. The

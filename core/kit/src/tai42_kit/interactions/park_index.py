@@ -28,6 +28,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
@@ -63,7 +64,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "BARRIER_TTL_MARGIN_SECONDS",
     "DRIVE_LEASE_HEARTBEAT_SECONDS",
     "DRIVE_LEASE_SECONDS",
     "ENTRY_TTL_FLOOR_SECONDS",
@@ -94,10 +94,6 @@ __all__ = [
 # The floor TTL of every entry: a never-resolved entry whose deadline is short or absent still
 # lives this long, and a truly abandoned one still drops out instead of leaking forever.
 ENTRY_TTL_FLOOR_SECONDS: Final[int] = 30 * 24 * 3600
-
-# Headroom over an ask deadline when sizing an entry or a barrier, so the expiry continuation
-# that fires AT the deadline still finds them.
-BARRIER_TTL_MARGIN_SECONDS: Final[int] = 3600
 
 # The drive lease's TTL and its heartbeat cadence (three beats per TTL): a crashed holder's lease
 # expires within a minute, so a redelivery reclaims and re-drives.
@@ -210,15 +206,20 @@ def superstep_id(member_ids: Iterable[str]) -> str:
 
 
 def entry_ttl_seconds(expiry_at: datetime | None) -> int:
-    """An entry's TTL: the floor, extended to outlast its ask's deadline plus the margin."""
+    """An entry's TTL: the floor, extended to outlast its ask's deadline by the redelivery horizon.
+
+    The platform keeps a park with a deadline resolvable for the redelivery horizon past that
+    deadline, so a late expiry reaper still resolves it; the entry it reaches lives at least as
+    long, by the same rule: the whole seconds remaining to the deadline plus the horizon.
+    """
     if expiry_at is None:
         return ENTRY_TTL_FLOOR_SECONDS
-    horizon = int((expiry_at - datetime.now(UTC)).total_seconds()) + BARRIER_TTL_MARGIN_SECONDS
-    return max(ENTRY_TTL_FLOOR_SECONDS, horizon)
+    remaining = max(0, math.ceil((expiry_at - datetime.now(UTC)).total_seconds()))
+    return max(ENTRY_TTL_FLOOR_SECONDS, remaining + tai42_app.interactions.redelivery_horizon_seconds())
 
 
 def barrier_ttl_seconds(expiries: Iterable[datetime | None]) -> int:
-    """A barrier's TTL: the entry floor, extended to outlast the LATEST deadline it coordinates plus the margin."""
+    """A barrier's TTL: the entry TTL (:func:`entry_ttl_seconds`) of the LATEST deadline it coordinates."""
     deadlines = [expiry for expiry in expiries if expiry is not None]
     if not deadlines:
         return ENTRY_TTL_FLOOR_SECONDS
@@ -559,21 +560,25 @@ class ParkIndex:
             pipe.delete(self.run_resolutions_key(thread_id))
             await pipe.execute()
 
-    async def drop_resolution(self, thread_id: str, superstep: str, *, member_ids: Iterable[str] = ()) -> None:
-        """Drop one resolved super-step: its record, its members' tombstones (and ``member_ids``), its index member."""
-        members = set((await self.run_resolutions(thread_id)).get(superstep, [])) | set(member_ids)
+    async def drop_resolution(self, thread_id: str, superstep: str, *, member_ids: Iterable[str] = ()) -> list[str]:
+        """Drop one resolved super-step: its record, its members' tombstones (and ``member_ids``), its index member.
+
+        Returns the sorted member ids whose tombstones it dropped.
+        """
+        members = sorted(set((await self.run_resolutions(thread_id)).get(superstep, [])) | set(member_ids))
         async with self._client() as client, client.pipeline(transaction=True) as pipe:
-            for member in sorted(members):
+            for member in members:
                 pipe.delete(self.entry_key(member))
             pipe.delete(self.resolution_key(thread_id, superstep))
             pipe.hdel(self.run_resolutions_key(thread_id), superstep)
             await pipe.execute()
+        return members
 
     async def detach(self, entry_ids: Sequence[str], *, expiry_ats: Iterable[datetime | None] = ()) -> None:
         """Tombstone keys that were claimed but never parked on, never overwriting an existing key.
 
         Each detached tombstone lives the held step's park-entry life — the entry floor, extended to
-        outlast the LATEST of ``expiry_ats`` plus the margin (:func:`barrier_ttl_seconds`) — so a run
+        outlast the LATEST of ``expiry_ats`` by the redelivery horizon (:func:`barrier_ttl_seconds`) — so a run
         whose chain was detached but which still fires the key until its own deadline finds the
         tombstone and its fire lands transparently, not a key the tombstone already dropped. A
         re-park grows it through :meth:`extend_horizon`. With no deadline the floor alone applies.

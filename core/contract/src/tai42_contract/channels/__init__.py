@@ -12,6 +12,10 @@ A channel also sends fire-and-forget notifications: ``notify`` pushes one
 :class:`ChannelNotification` to a human with no interaction, no ticket, and no
 reply path, under the same loud-failure rule; it returns the per-message ids the
 medium assigned the send (empty when the medium exposes none), never a bool.
+
+When the platform takes a delivered question down by a path that is not the channel's own
+forwarded reply, it hands the channel a :class:`ChannelWithdrawal` through the channel's
+optional ``withdraw`` member, so the channel releases what it kept for that question.
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ from tai42_contract.channels.options import NOTIFICATION_OPTION_MAX_CHARS as NOT
 from tai42_contract.channels.options import NOTIFICATION_OPTIONS_MAX as NOTIFICATION_OPTIONS_MAX
 from tai42_contract.channels.protocol import Channel
 from tai42_contract.channels.templates import ChannelTemplate
+from tai42_contract.channels.withdrawal import ChannelWithdrawal
 
 __all__ = [
     "NOTIFICATION_FOOTER_MAX_CHARS",
@@ -57,6 +62,7 @@ __all__ = [
     "ChannelInputError",
     "ChannelNotification",
     "ChannelTemplate",
+    "ChannelWithdrawal",
     "Correlation",
     "CorrelationStore",
     "InboundAnswerOutcome",

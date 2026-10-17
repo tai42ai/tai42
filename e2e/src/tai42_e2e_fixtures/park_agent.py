@@ -25,8 +25,10 @@ AGENT_NAME = "e2e_park_agent"
 
 # The baked tool list every run carries. ``e2e_agent_async_ask`` is the async ``ask`` the
 # scripted model calls to park the run; ``e2e_record_identity`` lets a resumed turn record the
-# identity it drove under, exactly as the agents park suite reads it.
-BAKED_TOOL_NAMES = ["e2e_agent_async_ask", "e2e_record_identity"]
+# identity it drove under, exactly as the agents park suite reads it; ``e2e_chained_park`` parks
+# under its own resume continuation and returns the park, so called from the agent it is a chained
+# nested park the agent waits on.
+BAKED_TOOL_NAMES = ["e2e_agent_async_ask", "e2e_record_identity", "e2e_chained_park"]
 
 
 class _ParkAgentInput(BaseModel):

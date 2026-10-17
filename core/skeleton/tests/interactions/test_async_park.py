@@ -39,6 +39,7 @@ from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.ask import park as park_module
 from tai42_skeleton.interactions.helper import InteractionTimeoutError
 from tai42_skeleton.interactions.settings import InteractionsSettings
+from tai42_skeleton.runs.chokepoint import resume_lineage
 
 
 @pytest.fixture(autouse=True)
@@ -206,7 +207,7 @@ def repark_fires(monkeypatch):
     return fired
 
 
-async def test_a_park_under_a_chained_binding_notifies_the_new_horizon(
+async def test_a_re_park_under_a_chained_binding_notifies_the_new_horizon(
     monkeypatch, fake_redis, fake_client_ctx, driver, repark_fires
 ):
     _wire(monkeypatch, fake_client_ctx)
@@ -215,7 +216,9 @@ async def test_a_park_under_a_chained_binding_notifies_the_new_horizon(
         ChainedResume(delivery_tool="deliver_chained_park", chain_key="tai42:chained-park:k1", asked_by=("main",))
     )
     try:
-        result = await ask("proceed?", mode="async", expiry_at=expiry)
+        # A resume drive of a park nested under the chained call: the call's key is in the lineage driven.
+        with resume_lineage(("tai42:chained-park:k1",)):
+            result = await ask("proceed?", mode="async", expiry_at=expiry)
     finally:
         reset_chained_resume(completion)
     assert isinstance(result, SuspendedInteraction)
@@ -231,6 +234,23 @@ async def test_a_park_under_a_chained_binding_notifies_the_new_horizon(
     # instead of it.
     store = InteractionStore("interactions:")
     assert await store.get_state(fake_redis, result.interaction_id) is not None
+
+
+async def test_a_first_park_under_a_chained_routing_notifies_nothing(
+    monkeypatch, fake_redis, fake_client_ctx, driver, repark_fires, caplog
+):
+    _wire(monkeypatch, fake_client_ctx)
+    # No drive of a park on the chained call: nothing the caller waits on has a horizon to move yet.
+    completion = set_chained_resume(
+        ChainedResume(delivery_tool="deliver_chained_park", chain_key="tai42:chained-park:k1", asked_by=("main",))
+    )
+    try:
+        result = await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+    finally:
+        reset_chained_resume(completion)
+    assert isinstance(result, SuspendedInteraction)
+    assert repark_fires == []
+    assert "re-park horizon notice" not in caplog.text
 
 
 async def test_a_park_under_a_plain_delivery_binding_notifies_nothing(
@@ -276,7 +296,8 @@ async def test_a_failing_notice_never_fails_the_park(monkeypatch, fake_redis, fa
         # The notice refreshes a horizon, it never carries an answer: a persisted park must not
         # be turned into a failed ask by a notifier that is down. The caller simply keeps the
         # horizon it already had, and the failure is announced.
-        result = await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+        with resume_lineage(("tai42:chained-park:k1",)):
+            result = await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
     finally:
         reset_chained_resume(completion)
     assert isinstance(result, SuspendedInteraction)

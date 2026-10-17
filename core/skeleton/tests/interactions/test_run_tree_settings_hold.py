@@ -305,7 +305,6 @@ async def test_a_channel_delivery_suspended_in_its_send_holds_no_retired_setting
             created_at=now,
             timeout_at=now + timedelta(seconds=30),
             deadline=asyncio.get_running_loop().time() + 30,
-            park_ttl_margin_seconds=0,
         )
         await delivery_module.deliver_with_retry(
             cast(Channel, _ParkedChannel()),

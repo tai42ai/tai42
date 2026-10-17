@@ -18,6 +18,29 @@ from tai42_contract.interactions import InteractionResponse
 from . import events, records, serde
 from .writes_base import AskTo, _StoreWritesBase
 
+# The state-hash fields an answer claim reads, in one HMGET.
+_ANSWER_CLAIM_FIELDS = (
+    "status",
+    "sensitive",
+    "audience",
+    "media_ids",
+    "thread_id",
+    "to",
+    "subjects",
+    "asked_by",
+    "chain_keys",
+    "delivery",
+    "run_delivery_id",
+    "deferred_binding",
+    "run_input",
+    "door_id",
+    "continuation_tool",
+    "continuation_identity",
+    "continuation_fingerprint",
+    "continuation_state_context",
+    "caller_ask_landing",
+)
+
 
 @dataclass(frozen=True)
 class _AnswerClaim:
@@ -152,69 +175,75 @@ class _StoreAnswerWrites(_StoreWritesBase):
     ) -> _AnswerClaim | None:
         """Read + validate the denormalized fields the claim needs.
 
-        Reads the status gate plus the denormalized ``sensitive``/``audience``/``media_ids``/
-        ``thread_id``/``continuation_*`` fields and the post-decrement ``remaining`` count,
+        Reads the group's count, then the status gate plus the denormalized ``sensitive``/
+        ``audience``/``media_ids``/``thread_id``/``continuation_*`` fields in one HMGET, and
+        derives the post-decrement ``remaining`` count,
         returning a frozen ``_AnswerClaim`` or ``None`` when the status is missing/``answered``.
         MULTI queues, it cannot read — so this is the immediate (pre-MULTI) phase.
         """
+        # The count is read BEFORE the state: ``count_key`` is set-or-extended to cover the
+        # group's longest-lived state, so a count that has lapsed by now means any state still
+        # read live after it is a torn index — while a state that lapses after this read (the
+        # shared horizon passing mid-claim) reads as missing below, or aborts the WATCHed EXEC.
+        current = await pipe.get(count_key)
+        # Every field the claim needs comes from ONE read, so the claim sees one snapshot of
+        # the state: never a live status beside fields of a state that lapsed in between.
         # redis-py's async stubs type pre-MULTI pipeline reads with the sync
         # (non-awaitable) return; the value is awaitable at runtime.
-        status = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "status")))
+        values = await cast("Awaitable[list[str | bytes | None]]", pipe.hmget(state_key, _ANSWER_CLAIM_FIELDS))
+        state = {name: serde.as_str(value) for name, value in zip(_ANSWER_CLAIM_FIELDS, values, strict=True)}
+        status = state["status"]
         if status is None or status == "answered":
             return None
-        sensitive = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "sensitive"))) == "1"
+        if current is None:
+            # A live (pending) state ALWAYS has a live count: a missing count is a torn
+            # index, not a zero — raise, never guess.
+            raise RuntimeError(f"pending count missing for group {group_id!r} with a live state {interaction_id!r}")
+        sensitive = state["sensitive"] == "1"
         # The question's audience rides the answered event so the tail-only SSE
         # filters the frame directly (absent = an unaddressed question).
-        audience = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "audience")))
+        audience = state["audience"]
         # The question's own media ids, from the denormalized ``media_ids`` field, so
         # the group's media index drops them as the question leaves pending.
-        media_ids_field = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "media_ids")))
+        media_ids_field = state["media_ids"]
         media_ids = media_ids_field.split(",") if media_ids_field else []
         # The conversation thread this park is bound to, so the thread→interaction
         # reverse index drops this member. Absent for a sync question / unbound park.
-        park_thread_id = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "thread_id")))
+        park_thread_id = state["thread_id"]
         # The ask's addressing, so the answer frees the RIGHT open-slot index (caller
         # vs user). Absent means the default ``"user"``.
-        to = self._addressed_to(serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "to"))))
+        to = self._addressed_to(state["to"])
         # The subject descriptor + the run's delivery address/identity, denormalized at
         # add time: the continuation-due record copies delivery + run_delivery_id so a
         # detached redelivery binds the run's address without re-reading the request;
         # ``subjects`` rides the claim only so the record stays self-describing.
-        subjects = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "subjects")))
-        asked_by_field = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "asked_by")))
+        subjects = state["subjects"]
+        asked_by_field = state["asked_by"]
         asked_by = json.loads(asked_by_field) if asked_by_field is not None else None
         # The chained calls the park is nested under (JSON), copied onto the due record so the
         # reaper's redelivery deposits the same lineage the immediate drive does.
-        chain_keys = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "chain_keys")))
-        delivery = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "delivery")))
-        run_delivery_id = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "run_delivery_id")))
+        chain_keys = state["chain_keys"]
+        delivery = state["delivery"]
+        run_delivery_id = state["run_delivery_id"]
         # The door's merged binding + the run input it saw + the door id, denormalized at add time:
         # the continuation-due record copies all three so the reaper's detached redelivery applies
         # the deferred UPDATES at the run's real terminal without re-reading the request.
-        deferred_binding = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "deferred_binding")))
-        run_input = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "run_input")))
-        door_id = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "door_id")))
+        deferred_binding = state["deferred_binding"]
+        run_input = state["run_input"]
+        door_id = state["door_id"]
         # An async park carries a denormalized continuation tool + identity (+
         # fingerprint); their presence is the signal to enqueue the durable
         # continuation-due record in THIS claim's MULTI.
-        continuation_tool = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "continuation_tool")))
+        continuation_tool = state["continuation_tool"]
         continuation_identity: str | None = None
         continuation_fingerprint: str | None = None
         continuation_state_context: str | None = None
         caller_ask_landing: str | None = None
         if continuation_tool is not None:
-            continuation_identity = serde.as_str(
-                await cast("Awaitable[str | None]", pipe.hget(state_key, "continuation_identity"))
-            )
-            continuation_fingerprint = serde.as_str(
-                await cast("Awaitable[str | None]", pipe.hget(state_key, "continuation_fingerprint"))
-            )
-            continuation_state_context = serde.as_str(
-                await cast("Awaitable[str | None]", pipe.hget(state_key, "continuation_state_context"))
-            )
-            caller_ask_landing = serde.as_str(
-                await cast("Awaitable[str | None]", pipe.hget(state_key, "caller_ask_landing"))
-            )
+            continuation_identity = state["continuation_identity"]
+            continuation_fingerprint = state["continuation_fingerprint"]
+            continuation_state_context = state["continuation_state_context"]
+            caller_ask_landing = state["caller_ask_landing"]
             if continuation_due_ttl is None or continuation_first_attempt_at_ms is None:
                 raise RuntimeError(
                     f"async park {interaction_id!r} resolved without continuation-due timing "
@@ -222,12 +251,6 @@ class _StoreAnswerWrites(_StoreWritesBase):
                 )
             if continuation_identity is None:
                 raise RuntimeError(f"async park {interaction_id!r} missing denormalized continuation identity")
-        current = await pipe.get(count_key)
-        if current is None:
-            # count_key is set-or-extended to cover the group's longest-lived state, so
-            # a live (pending) state ALWAYS has a live count. A missing count here is a
-            # torn index, not a zero — raise, never guess.
-            raise RuntimeError(f"pending count missing for group {group_id!r} with a live state {interaction_id!r}")
         return _AnswerClaim(
             sensitive=sensitive,
             audience=audience,

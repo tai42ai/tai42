@@ -32,6 +32,7 @@ from tai42_contract.interactions import (
     ChainedResume,
     DeliveryAddress,
     SuspendedInteraction,
+    chained_lineage,
     get_chained_resume,
     get_park_completion,
     get_resume_continuation_tool,
@@ -234,6 +235,65 @@ def test_nested_tool_captures_a_chain_while_the_agent_park_is_outermost(
         assert entry["completion_context"] is None
 
     asyncio.run(go())
+
+
+class _LineageProbe:
+    """A tool whose body reads the crossed chain lineage as a plain asking body, then as a nested driver.
+
+    A nested driver binds its own resume continuation around the run it starts; an ask the body
+    raises without one is the dispatching agent's own.
+    """
+
+    def __init__(self) -> None:
+        self.routing_keys: list[str] = []
+        self.body_lineage: list[tuple[str, ...]] = []
+        self.nested_lineage: list[tuple[str, ...]] = []
+
+    def tool(self) -> FakeClientTool:
+        def probe() -> str:
+            self.routing_keys.append(_assert_chain_routing(get_chained_resume()))
+            self.body_lineage.append(chained_lineage())
+            token = set_resume_continuation_tool("nested_resume")
+            try:
+                self.nested_lineage.append(chained_lineage())
+            finally:
+                reset_resume_continuation_tool(token)
+            return "probed"
+
+        return client_tool("probe", probe, description="A tool reading the chain lineage.")
+
+
+def test_a_chained_call_key_joins_the_lineage_only_under_a_nested_drivers_binding(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    saver = InMemorySaver()
+    lineage = _LineageProbe()
+    model = ScriptedChatModel([_call("c1", "probe"), AIMessage(content="all done")])
+    _wire(monkeypatch, model, saver)
+    app_tools.client_tools["probe"] = lineage.tool()
+
+    agent = _agent()
+
+    async def go() -> None:
+        token = set_park_completion(_COMPLETION_TOOL, thread_id=_THREAD)
+        try:
+            with tool_call_frame(name="agent"):
+                async for _event in agent.astream(
+                    tool_names=["probe"],
+                    checkpoint_provider="redis",
+                    user_message=TemplatedText(content="go"),
+                    thread_id=_THREAD,
+                ):
+                    pass
+        finally:
+            reset_park_completion(token)
+
+    asyncio.run(go())
+    (key,) = lineage.routing_keys
+    # An ask of the tool body itself records nothing of the call; a run a nested driver starts
+    # under the call's routing is nested under it.
+    assert lineage.body_lineage == [()]
+    assert lineage.nested_lineage == [(key,)]
 
 
 def test_nested_tool_captures_a_chain_on_the_deep_agent_resume_drive(

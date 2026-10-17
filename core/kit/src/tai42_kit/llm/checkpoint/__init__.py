@@ -53,6 +53,7 @@ from tai42_kit.llm.checkpoint.providers import (
     checkpoint_provider_facts,
     checkpoint_providers,
     durable_checkpoint_providers,
+    latest_park_deadline,
     register_checkpoint_provider,
     shared_value_threshold,
 )
@@ -105,6 +106,7 @@ __all__ = [
     "durable_checkpoint_providers",
     "envelope_reference",
     "get_saver_from_resource",
+    "latest_park_deadline",
     "live_thread_filters",
     "live_threads",
     "mark_threads_active",

@@ -1,7 +1,7 @@
 """The ask's budget/deadline and callback-ticket computation.
 
-Derives the stored deadline, the monotonic answer-wait deadline, and the async-park TTL margin,
-and mints the callback ticket + URL when an external/channel ask forces one.
+Derives the stored deadline and the monotonic answer-wait deadline, and mints the callback
+ticket + URL when an external/channel ask forces one.
 """
 
 from __future__ import annotations
@@ -20,15 +20,13 @@ class DeadlineWindow:
     """The ask's time window.
 
     Carries the answer ``budget``, the ``created_at`` anchor, the STORED ``timeout_at`` (sync budget
-    or async ``expiry_at``), the monotonic ``deadline`` bounding the synchronous phase, and the
-    async-park TTL margin.
+    or async ``expiry_at``), and the monotonic ``deadline`` bounding the synchronous phase.
     """
 
     budget: float
     created_at: datetime
     timeout_at: datetime
     deadline: float
-    park_ttl_margin_seconds: int
 
 
 @dataclass(frozen=True)
@@ -46,18 +44,16 @@ class CallbackTicket:
 def resolve_deadline(
     mode: str, timeout: float | None, expiry_at: datetime | None, settings: InteractionsSettings
 ) -> DeadlineWindow:
-    """Compute the ask's budget, anchor, stored deadline, monotonic deadline, and park TTL margin.
+    """Compute the ask's budget, anchor, stored deadline and monotonic deadline.
 
-    Produces ``budget``, ``created_at``, stored ``timeout_at``, the monotonic ``deadline`` for the
-    synchronous phase, and the async-park TTL margin.
+    Produces ``budget``, ``created_at``, stored ``timeout_at`` and the monotonic ``deadline`` for
+    the synchronous phase.
 
     A sync question's stored deadline is its answer budget; an async park's is its
     ``expiry_at`` (no caller blocks on it — the expiry reaper resumes work). ONE
     monotonic ``deadline`` bounds the synchronous phase (delivery attempts + backoff +
     the sync answer wait), so delivery time shrinks a sync caller's wait and a sync
-    caller can never block past the budget. The park TTL margin ties the state
-    ``_key_ttl`` and the callback ticket TTL to the reaper interval so a park's keys
-    outlive its ``expiry_at`` by enough reaper passes to fire.
+    caller can never block past the budget.
     """
     budget = settings.answer_timeout_seconds if timeout is None else timeout
     if budget <= 0:
@@ -73,20 +69,7 @@ def resolve_deadline(
         timeout_at = created_at + timedelta(seconds=budget)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + budget
-    # An async park's keys must outlive its ``expiry_at`` by enough for the reaper to
-    # fire — at least a couple of its passes. Tie the margin to the reaper interval so
-    # it holds under any configured cadence. This is the ONE source for the async-park
-    # margin: the state ``_key_ttl`` and the callback ticket TTL both add this value,
-    # so ``expiry_at + margin`` is the shared answerable window for the authenticated
-    # ``/answer`` door and the channel-delivery callback door alike.
-    park_ttl_margin_seconds = 2 * math.ceil(settings.expiry_reaper_interval_seconds)
-    return DeadlineWindow(
-        budget=budget,
-        created_at=created_at,
-        timeout_at=timeout_at,
-        deadline=deadline,
-        park_ttl_margin_seconds=park_ttl_margin_seconds,
-    )
+    return DeadlineWindow(budget=budget, created_at=created_at, timeout_at=timeout_at, deadline=deadline)
 
 
 def mint_callback_ticket(
@@ -96,9 +79,9 @@ def mint_callback_ticket(
 
     ``force`` is set for an external format or a channel-delivered question, which bridges the reply
     back through the public callback door. The ticket TTL is the seconds to the stored deadline
-    (ceiled, floor 1s) plus — for an async park — the same reaper margin the state ``_key_ttl``
-    uses, so the callback door and the authenticated ``/answer`` door stay answerable through the
-    identical park window.
+    (ceiled, floor 1s) plus — for an async park — the same retention horizon
+    (``idle_ttl_seconds``) the park's state ``_key_ttl`` adds, so the callback door and the
+    authenticated ``/answer`` door stay answerable through the identical park window.
     """
     if not force:
         return None
@@ -112,6 +95,6 @@ def mint_callback_ticket(
     ticket = secrets.token_urlsafe(32)
     ticket_ttl = max(1, math.ceil((window.timeout_at - window.created_at).total_seconds()))
     if mode == "async":
-        ticket_ttl += window.park_ttl_margin_seconds
+        ticket_ttl += settings.idle_ttl_seconds
     callback_url = f"{prefix}{ticket}"
     return CallbackTicket(ticket=ticket, ticket_ttl=ticket_ttl, callback_url=callback_url)

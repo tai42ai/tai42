@@ -283,7 +283,7 @@ async def caller_resume_id(interaction_id: str, payload: object) -> dict:
 
 @tai42_app.tools.tool(tags={"e2e"})
 async def caller_cancel() -> dict:
-    """Whole-chain kill every caller ask parked on the CURRENT run's subject.
+    """Kill the whole run of every caller ask parked on the CURRENT run's subject.
 
     Lists the subject's caller asks and cancels them through the generic cancel tool, so a
     run a door started with a receiver is delivered its single FAILED. Returns the visit

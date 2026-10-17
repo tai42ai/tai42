@@ -69,6 +69,25 @@ async def e2e_async_park_flow(question: str, expiry_seconds: float, on_expiry: s
     }
 
 
+@tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
+async def e2e_chained_park(question: str, expiry_seconds: float) -> object:
+    """Park an async ``ask`` under this probe's own resume continuation and RETURN the park.
+
+    The same park ``e2e_async_park_flow`` raises (resumed by ``e2e_async_resume`` as the synthetic
+    stand-in identity), but the ``SuspendedInteraction`` itself is returned, so a run that calls this
+    from a chained dispatch — an agent's tool call — waits on the CALL: it parks on the chained
+    resume key and the ask is a park of a run nested under it."""
+    from datetime import UTC, datetime, timedelta
+
+    from tai42_skeleton.authz.identity import CallerIdentity
+    from tai42_skeleton.interactions import ask
+
+    identity = CallerIdentity(user_id=_ASYNC_PARK_IDENTITY, execution_key_fingerprint="e2e-async-fp")
+    with driving_as(continuation="e2e_async_resume", identity=identity):
+        expiry_at = datetime.now(UTC) + timedelta(seconds=expiry_seconds)
+        return await ask(question, mode="async", expiry_at=expiry_at)
+
+
 @tai42_app.tools.tool(tags={"e2e"})
 async def e2e_async_resume(interaction_id: str, answer: object) -> dict:
     """The generic resume continuation an async park fires ONCE — the stand-in flow
@@ -413,3 +432,93 @@ async def e2e_expire_park(interaction_id: str) -> dict:
         )
         await cast(Awaitable[int], r.zadd(store.pending_expiry_key, {interaction_id: int(past.timestamp() * 1000)}))
     return {"interaction_id": interaction_id, "expiry_at": past.isoformat()}
+
+
+# Every key a park writes takes a TTL in whole seconds, rounded up from the moment of its own
+# write, so keys sized to the same horizon end within one second of each other.
+_SAME_HORIZON_MS = 1000
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_lapse_park(interaction_id: str) -> dict:
+    """Age a live async park out past its retention horizon, as Redis would, so the reaper reaches a lapse.
+
+    Deletes exactly the keys Redis expires when the park's state hash does: of every key the park
+    wrote (its state hash and callback tickets, the group stream and pending count, the group's
+    media index and media, the thread-parks, run-parks and subject sets), each whose TTL ends no
+    later than the state hash's. A shared key a sibling park keeps alive past that stays whole,
+    the lapsed park's member included, just as a real lapse leaves it; a key with no TTL never
+    lapses. The expiry-index member stays behind, re-scored into the immediate past in the same
+    transaction: a park lapses only after its deadline, so a lapsed park's member is always
+    already due, and the running reaper reaches it next pass with no pending park behind it.
+    Raises loudly when ``interaction_id`` names no live async park (already resolved, vanished,
+    or never a park), or when its state hash carries no TTL to lapse by, so a mis-sequenced spec
+    fails visibly.
+    """
+    from collections.abc import Awaitable
+    from datetime import UTC, datetime, timedelta
+    from typing import cast
+
+    from tai42_kit.clients import client_ctx
+    from tai42_kit.clients.impl.redis import RedisClient
+    from tai42_skeleton.interactions import InteractionStore, interactions_settings
+    from tai42_skeleton.interactions.store.records import iter_subject_keys
+
+    settings = interactions_settings()
+    store = InteractionStore(settings.key_prefix)
+    async with client_ctx(RedisClient, settings.redis) as r:
+        state = await store.get_state(r, interaction_id)
+        if (
+            state is None
+            or state.status != "pending"
+            or state.request.mode != "async"
+            or state.request.expiry_at is None
+        ):
+            raise RuntimeError(f"e2e_lapse_park: {interaction_id!r} is not a live async park to lapse")
+        fields = await cast(Awaitable[dict], r.hgetall(store.state_key(interaction_id)))
+
+        def _text(value: str | bytes) -> str:
+            return value.decode() if isinstance(value, bytes) else value
+
+        def _field(name: str) -> str | None:
+            value = fields.get(name, fields.get(name.encode()))
+            return None if value is None else _text(value)
+
+        group_id = state.request.group_id
+        keys = [store.state_key(interaction_id), store.group_key(group_id), store.count_key(group_id)]
+        keys += [
+            key
+            async for key in r.scan_iter(match=store.ticket_key("*"))
+            if (await cast(Awaitable[str | bytes | None], r.get(key))) in (interaction_id, interaction_id.encode())
+        ]
+        media_index = store.media_index_key(group_id)
+        keys.append(media_index)
+        keys += [store.media_key(_text(media_id)) for media_id in await cast(Awaitable[set], r.smembers(media_index))]
+        thread_id = _field("thread_id")
+        if thread_id is not None:
+            keys.append(store.thread_parks_key(thread_id))
+        run_delivery_id = _field("run_delivery_id")
+        if run_delivery_id is not None:
+            keys.append(store.run_parks_key(run_delivery_id))
+        subjects = _field("subjects")
+        if subjects is not None:
+            for target_kind, target_name, kind, key in iter_subject_keys(json.loads(subjects)):
+                keys.append(store.subject_parks_key(target_kind, target_name, kind, key))
+                keys.append(store.subject_scopes_key(kind, key))
+        keys = list(dict.fromkeys(keys))
+
+        read = r.pipeline(transaction=False)
+        for key in keys:
+            read.pttl(key)
+        ttls = await read.execute()
+        state_ttl = ttls[0]
+        if state_ttl <= 0:
+            raise RuntimeError(f"e2e_lapse_park: {interaction_id!r} state has no TTL to lapse by (PTTL {state_ttl})")
+        lapsed = [key for key, key_ttl in zip(keys, ttls, strict=True) if 0 < key_ttl <= state_ttl + _SAME_HORIZON_MS]
+
+        past = datetime.now(UTC) - timedelta(seconds=1)
+        pipe = r.pipeline(transaction=True)
+        pipe.delete(*lapsed)
+        pipe.zadd(store.pending_expiry_key, {interaction_id: int(past.timestamp() * 1000)})
+        await pipe.execute()
+    return {"interaction_id": interaction_id, "expiry_at": past.isoformat(), "keys_lapsed": len(lapsed)}

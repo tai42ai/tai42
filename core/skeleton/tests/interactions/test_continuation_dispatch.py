@@ -215,31 +215,12 @@ async def test_reaper_hooks_failure_does_not_break_continuation_fire(wired, capt
     assert len(captured) == 1  # the continuation still fired despite the hooks failure
 
 
-async def test_reaper_drops_stale_index_member_for_vanished_state(wired, captured, monkeypatch):
-    # An expiry member whose state has vanished (idle-expired) is reconciled off the
-    # index without firing — never a phantom continuation, and never a phantom
-    # ``ask_expired_unanswered`` event either: the event states a successful expiry
-    # CLAIM, and a vanished member exits before ever claiming. (The lost-race exit —
-    # ``claimed is False`` — shares the same ``if claimed:`` guard by structure.)
-    from tai42_skeleton.hooks import cache as hooks_cache
-
-    hooks = RecordingHooks()
-    monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
-    now_ms = int(datetime.now(UTC).timestamp() * 1000)
-    await wired.fake.zadd(wired.store.pending_expiry_key, {"ghost": now_ms - 1000})
-    assert await reaper_module.reap_expired_parks_once() == 0
-    await drain()
-    assert captured == []
-    assert hooks.events == []
-    assert await wired.store.due_expiries(wired.fake, datetime.now(UTC)) == []
-
-
 async def test_park_state_survives_past_idle_ttl_so_reaper_can_fire(wired, captured, monkeypatch):
     # A park whose ``expiry_at`` runs past ``idle_ttl``: its state hash must survive to
-    # the expiry (plus a reaper-pass margin), or the reaper would read ``state=None``
-    # and drop the expiry member WITHOUT firing — a silent strand — and the question
-    # would be unanswerable in the ``idle_ttl``..``expiry_at`` gap. With a flat
-    # ``idle_ttl`` the state expires at fake-time 100 and the reaper fires nothing.
+    # the expiry plus one retention horizon (``idle_ttl``), or the reaper would find no
+    # park to resolve and the question would be unanswerable in the
+    # ``idle_ttl``..``expiry_at`` gap. With a flat ``idle_ttl`` the state expires at
+    # fake-time 100 and the reaper fires nothing.
     idle_ttl = 100
     base = datetime.now(UTC)
     expiry = base + timedelta(seconds=300)  # well beyond idle_ttl
@@ -248,9 +229,8 @@ async def test_park_state_survives_past_idle_ttl_so_reaper_can_fire(wired, captu
         async_req(wired.store, iid="p1", expiry_at=expiry),
         idle_ttl=idle_ttl,
         continuation_fingerprint="fp-1",
-        expiry_ttl_margin_seconds=10,
     )
-    # Advance the store clock past idle_ttl but before the park horizon+margin (310):
+    # Advance the store clock past idle_ttl but before the park's horizon (300 + 100):
     # the state (and its count) are still live — answerable in the old gap.
     wired.fake.advance(150)
     state = await wired.store.get_state(wired.fake, "p1")
@@ -259,9 +239,9 @@ async def test_park_state_survives_past_idle_ttl_so_reaper_can_fire(wired, captu
 
     # The reaper runs once wall-time passes the expiry; the state is still present, so
     # it claims and fires exactly once.
-    class _Clock:
-        @staticmethod
-        def now(tz=None):
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
             return expiry + timedelta(seconds=1)
 
     monkeypatch.setattr(reaper_module, "datetime", _Clock)
@@ -273,7 +253,7 @@ async def test_park_state_survives_past_idle_ttl_so_reaper_can_fire(wired, captu
     assert captured[0]["answer"] == EXPIRY_ANSWER
 
     # And the state does eventually expire — the TTL is finite, not leaked forever.
-    wired.fake.advance(200)  # store clock now 350 > horizon 310
+    wired.fake.advance(300)  # store clock now 450 > horizon 400
     assert await wired.store.get_state(wired.fake, "p1") is None
 
 
@@ -445,24 +425,19 @@ async def test_concurrent_same_group_parks_never_shrink_shared_ttls(monkeypatch,
     store = InteractionStore(settings.key_prefix)
 
     idle_ttl = 100
-    margin = 10
     base = datetime.now(UTC)
-    long_expiry = base + timedelta(seconds=300)  # horizon 300 + margin 10 = 310
-    short_expiry = base + timedelta(seconds=150)  # horizon 150 + margin 10 = 160
+    long_expiry = base + timedelta(seconds=300)  # horizon 300 + idle 100 = 400
+    short_expiry = base + timedelta(seconds=150)  # horizon 150 + idle 100 = 250
     long_req = async_req(store, iid="long", gid="raceg", expiry_at=long_expiry)
     short_req = async_req(store, iid="short", gid="raceg", expiry_at=short_expiry)
 
     # SHORT reaches the eval barrier first (and so commits LAST); LONG arrives second,
     # releases the barrier, and commits FIRST — the order that would shrink the shared
     # TTLs under last-writer-wins.
-    short_task = asyncio.create_task(
-        store.add(r, short_req, idle_ttl=idle_ttl, continuation_fingerprint="fp-s", expiry_ttl_margin_seconds=margin)
-    )
+    short_task = asyncio.create_task(store.add(r, short_req, idle_ttl=idle_ttl, continuation_fingerprint="fp-s"))
     await asyncio.sleep(0)
     assert barrier.arrived == 1  # short is parked at the barrier, pre-write
-    long_task = asyncio.create_task(
-        store.add(r, long_req, idle_ttl=idle_ttl, continuation_fingerprint="fp-l", expiry_ttl_margin_seconds=margin)
-    )
+    long_task = asyncio.create_task(store.add(r, long_req, idle_ttl=idle_ttl, continuation_fingerprint="fp-l"))
     await asyncio.gather(short_task, long_task)
 
     group_key = store.group_key("raceg")
@@ -473,28 +448,28 @@ async def test_concurrent_same_group_parks_never_shrink_shared_ttls(monkeypatch,
     # The shared group stream + count_key survive to the LONG horizon: the short add
     # could not shrink them. The long park's own state matches; the short park's own
     # state keeps its own (shorter) horizon.
-    assert barrier._ttls[long_state] == 310
-    assert barrier._ttls[short_state] == 160
+    assert barrier._ttls[long_state] == 400
+    assert barrier._ttls[short_state] == 250
     assert barrier._ttls[count_key] == barrier._ttls[long_state]
     assert barrier._ttls[group_key] == barrier._ttls[long_state]
 
     # Advance the store clock past the SHORT horizon but before the LONG one: the
     # short park's state has idle-expired, but the long park's state AND the shared
     # count survive — the long park is still answerable.
-    barrier.advance(200)
+    barrier.advance(300)
     long_alive = await store.get_state(r, "long")
     assert long_alive is not None
     assert long_alive.status == "pending"
     assert await store.get_state(r, "short") is None
 
-    # The reaper runs once wall-time passes both expiries. It reconciles the short
-    # park's stale expiry member (state gone, no fire) and claims the LONG park through
+    # The reaper runs once wall-time passes both expiries. It surfaces the short park's
+    # lapsed expiry member (state gone, no fire) and claims the LONG park through
     # ``record_answer`` — which finds a LIVE count and fires the continuation EXACTLY
     # once. Under last-writer-wins the count would be gone here and the claim would
     # raise "pending count missing".
-    class _Clock:
-        @staticmethod
-        def now(tz=None):
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
             return long_expiry + timedelta(seconds=1)
 
     monkeypatch.setattr(reaper_module, "datetime", _Clock)
@@ -571,7 +546,7 @@ async def test_expiry_pass_survives_a_poison_member(wired, monkeypatch, caplog):
     async def _get_state(r, interaction_id):
         if interaction_id == "poison":
             raise RuntimeError("poison park")
-        # A member whose state has vanished is reconciled off the expiry index.
+        # A member whose state has vanished is surfaced and reconciled off the expiry index.
         return await real_get_state(r, interaction_id)
 
     monkeypatch.setattr(wired.store, "get_state", _get_state)

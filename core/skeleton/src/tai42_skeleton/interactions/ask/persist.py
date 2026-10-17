@@ -136,7 +136,9 @@ async def persist_question(
     """Open the persist connection, substitute media, build the request, reserve the slot, and write it.
 
     Reserves the concurrency slot under ``max_concurrent`` (raising
-    ``InteractionLimitError`` at the cap). Returns the stored media list (the same items the
+    ``InteractionLimitError`` at the cap). A park for a run that was taken down is refused by the
+    store with :class:`~tai42_contract.interactions.ParkRunTakenDownError`, which propagates out of
+    the ask. Returns the stored media list (the same items the
     durable record and any channel delivery carry). Reads the interactions settings at each use,
     never keeping an instance across an await.
     """
@@ -219,7 +221,6 @@ async def persist_question(
                 ticket_ttl=ticket_ttl,
                 open_member_reserved=True,
                 continuation_fingerprint=park_binding.continuation_fingerprint,
-                expiry_ttl_margin_seconds=window.park_ttl_margin_seconds,
                 thread_id=park_binding.park_thread_id,
                 to=to,
                 delivery=delivery,
@@ -233,7 +234,6 @@ async def persist_question(
                 ticket=ticket,
                 ticket_ttl=ticket_ttl,
                 continuation_fingerprint=park_binding.continuation_fingerprint,
-                expiry_ttl_margin_seconds=window.park_ttl_margin_seconds,
                 thread_id=park_binding.park_thread_id,
                 to=to,
                 delivery=delivery,

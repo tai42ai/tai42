@@ -49,7 +49,8 @@ async def deliver_park_giveup(store: InteractionStore, request: InteractionReque
 
     When no driver owns a record of the park, the platform delivers the run's single FAILED itself —
     fire the run's address, else a ``failed`` waiting outcome on its subject, else drop — keyed by the
-    run's ``completion_id`` so it dedupes against any FAILED already delivered. A handler that raises
+    run's ``completion_id``. A park of a torn-down run never reaches the give-up: the kill walk clears
+    its ticket. A handler that raises
     is logged, the FAILED is still delivered so the door learns the run failed, and the error is
     re-raised.
     """

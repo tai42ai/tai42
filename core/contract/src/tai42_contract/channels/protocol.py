@@ -115,6 +115,24 @@ class Channel(Protocol):
     start frame on ``True`` and a stop frame on ``False``. It is fire-and-forget,
     carries no reply, and raises :class:`ChannelDeliveryError` ONLY on a genuine send
     failure the caller logs, never for a transient it can ignore.
+
+    A channel that keeps something per delivered question MAY also declare one OPTIONAL
+    method, ``async def withdraw(self, withdrawal: ChannelWithdrawal) -> None`` — the same
+    documented-member convention, NOT a Protocol method, read defensively with
+    ``getattr(channel, "withdraw", None)``. The platform calls it when it takes a delivered
+    question down by a path that is not the channel's own forwarded reply (a cancel, an erase
+    of the question's thread, route or person, an expiry). The channel releases EVERYTHING it
+    reserved or cached for ``withdrawal.interaction_id`` at delivery — the per-address pending
+    correlation and any per-interaction sidecar — resolving the address from
+    ``withdrawal.recipient`` exactly as its ``deliver`` resolved ``delivery.recipient``. It
+    MUST compare the stored interaction id and never drop a hold another ask now has on the
+    same address. It MUST be idempotent and a no-op when nothing is held (expired, already
+    forwarded, never reserved — a link-answered format reserves nothing). It touches no
+    message on the medium: the question already sent stays where it is, and a late reply to
+    it takes the inbound answer ladder's no-longer-pending path. It raises
+    :class:`ChannelDeliveryError` (``retryable=True`` for a transient store fault) only on a
+    fault, never for "nothing to release". A channel that keeps nothing withdrawable omits the
+    member (absent = nothing to release).
     """
 
     async def deliver(self, delivery: ChannelDelivery) -> None:

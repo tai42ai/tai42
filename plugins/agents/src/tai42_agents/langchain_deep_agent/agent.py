@@ -39,7 +39,12 @@ from tai42_kit.llm.store.store_registry import store_registry
 
 from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
 from tai42_agents._internal.cache_mark import default_system_cache_mark
-from tai42_agents._internal.config_util import build_run_config, config_addressed, mark_minted_thread_finished
+from tai42_agents._internal.config_util import (
+    build_run_config,
+    config_addressed,
+    mark_minted_thread_finished,
+    thread_head_config,
+)
 from tai42_agents._internal.lc_tools import structured_tools
 from tai42_agents._internal.park import (
     ParkIdentity,
@@ -54,6 +59,8 @@ from tai42_agents._internal.park import (
     park_step_binding,
     register_agent_resume_tool,
     register_chained_park_tool,
+    require_stored_checkpoint,
+    resume_command,
 )
 from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
@@ -220,7 +227,7 @@ class DeepAgent(Agent):
                     langgraph_config, thread_id, None, recursion_limit, checkpoint_provider
                 )
                 if resume is not None:
-                    agent_input: Any = Command(resume=resume)
+                    agent_input: Any = await resume_command(agent, config, resume)
                 else:
                     # The resume/user guard above makes rendered_user a str on this branch.
                     assert rendered_user is not None  # noqa: S101 (type-narrowing invariant guaranteed above; assert keeps the complexity floor)
@@ -434,7 +441,7 @@ class DeepAgent(Agent):
                     session=drive.session,
                 )
                 if resume is not None:
-                    agent_input: Any = Command(resume=resume)
+                    agent_input: Any = await resume_command(agent, config, resume)
                 else:
                     # The exactly-one-of guard above makes user_message (and its render) non-None here.
                     assert rendered_user is not None  # noqa: S101 (type-narrowing invariant guaranteed above; assert keeps the complexity floor)
@@ -666,11 +673,12 @@ class DeepAgent(Agent):
         ``resume_map`` is ``{interrupt_id: {interaction_id: answer}}`` over every park interrupt
         the super-step suspended on — one key for a single park, several for parallel subagent
         parks. Recompiles the same graph on the same ``thread_id`` + durable checkpoint provider
-        from ``rebuild_kwargs``, asserts each stored park interrupt is still pending (else raises,
-        so the caller releases the drive lease and the reaper redelivers), then drives one
+        from ``rebuild_kwargs``, asserts the thread holds a stored checkpoint and each stored park
+        interrupt is still pending (else raises, and the resumed run ends failed), then drives one
         ``Command(resume=resume_map)`` under the drive wrapper — a re-park re-persists a fresh
         index (carrying the completion tool the driver rebound) and returns the suspended
-        receipt, completion returns the final value.
+        receipt, completion returns the final value. A stored checkpoint with no interrupt pending
+        is a run that already finished: its answer is re-produced from that checkpoint.
 
         The LangGraph ``recursion_limit`` and the ``workspace_key`` are engine extras carried
         INSIDE ``rebuild_kwargs`` (the provider-free park identity holds no engine facts), popped
@@ -719,8 +727,12 @@ class DeepAgent(Agent):
                 config, _minted = await start_run_config(
                     validated.langgraph_config, thread_id, None, recursion_limit, validated.checkpoint_provider
                 )
+                # The parked drive wrote its checkpoints after any checkpoint its run was pinned to,
+                # so the resume continues from the thread's latest checkpoint.
+                config = thread_head_config(config)
 
                 snapshot = await agent.aget_state(config, subgraphs=True)
+                require_stored_checkpoint(snapshot, thread_id)
                 pending_ids = {iid for iid, _ in collect_pending_interrupts(snapshot)}
                 missing = [interrupt_id for interrupt_id in resume_map if interrupt_id not in pending_ids]
                 if missing:
@@ -728,7 +740,7 @@ class DeepAgent(Agent):
                         # The graph is still parked, but not on every interrupt this super-step
                         # resumes — a corrupted routing, or a graph that advanced past one. Raise.
                         raise AgentResumeInterruptNotPendingError(next(iter(resume_map[missing[0]])), missing[0])
-                    # No interrupt pending at all: the super-step already drove to a CLEAN TERMINAL,
+                    # A stored checkpoint with no interrupt pending: the super-step already drove to a CLEAN TERMINAL,
                     # so this is an idempotent re-drive after a crash between the terminal drive and
                     # the index finalize. Re-produce the SAME terminal output from the persisted
                     # state — never re-invoke a resolved graph — so the completion handoff re-fires

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import pytest
 from tai42_contract.interactions import PARK_COMPLETION_FAILED, PARK_COMPLETION_SUCCEEDED
@@ -553,3 +554,81 @@ async def test_deliver_tool_completion_reply_reads_turn_rebuilt_from_the_intake_
     gone = await _store().get_record("c-gone")
     assert gone is not None
     assert gone.answer == "no-turn"
+
+
+async def _never_resolved(thread_id: str) -> Any:
+    raise AssertionError(f"a withdrawn terminal must not resolve thread {thread_id!r}")
+
+
+@pytest.mark.parametrize("fire", ["tool", "agent"])
+async def test_deliver_completion_withdrawn_delivers_nothing_and_warns_nothing(env, monkeypatch, caplog, fire):
+    # A run the platform took down on purpose has no outcome and nothing to say to the person:
+    # neither tool reads a record, resolves the thread, mints, sends or announces anything.
+    from tai42_contract.interactions import PARK_COMPLETION_WITHDRAWN
+
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route(reply_expr=".result.reply // null")), channel)
+    monkeypatch.setattr(completion_module, "_resolve_completion_target", _never_resolved)
+    firing = _fire_tool if fire == "tool" else _fire_agent
+
+    with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
+        out = await firing(
+            thread_id="bridge:tool-line:+15550002222",
+            completion_id="wd1",
+            result={"tai42:run_killed": "cancelled"},
+            status=PARK_COMPLETION_WITHDRAWN,
+        )
+        # A redelivered fire of the same terminal returns the same nothing.
+        again = await firing(
+            thread_id="bridge:tool-line:+15550002222",
+            completion_id="wd1",
+            result={"tai42:run_killed": "cancelled"},
+            status=PARK_COMPLETION_WITHDRAWN,
+        )
+    await _settle()
+    assert out == again == {"message_id": None}
+    assert await _store().get_record("wd1") is None
+    assert channel.sends == []
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+async def test_deliver_completion_withdrawn_is_refused_outside_the_delivery_fire(env, monkeypatch):
+    from tai42_contract.interactions import PARK_COMPLETION_WITHDRAWN, ParkDeliveryUnauthorizedError
+
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route(reply_expr=".result.reply // null")), channel)
+
+    with pytest.raises(ParkDeliveryUnauthorizedError):
+        await turn_module.deliver_tool_completion(
+            thread_id="bridge:tool-line:+15550002222", completion_id="wd-unauth", status=PARK_COMPLETION_WITHDRAWN
+        )
+    with pytest.raises(ParkDeliveryUnauthorizedError):
+        await turn_module.deliver_agent_completion(
+            thread_id="bridge:tool-line:+15550002222", completion_id="wd-unauth-2", status=PARK_COMPLETION_WITHDRAWN
+        )
+    assert channel.sends == []
+
+
+async def test_withdrawn_anchors_no_record_so_the_runs_later_real_terminal_is_delivered(env, monkeypatch):
+    # A run that continues after a kill inside its own chain re-parks under the same completion id:
+    # the kill's ``withdrawn`` fire anchors nothing, so the run's later real terminal still lands.
+    from tai42_contract.interactions import PARK_COMPLETION_WITHDRAWN
+
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route(reply_expr=".result.reply // null")), channel)
+
+    first = await _fire_tool(
+        thread_id="bridge:tool-line:+15550002222", completion_id="wr1", status=PARK_COMPLETION_WITHDRAWN
+    )
+    later = await _fire_tool(
+        thread_id="bridge:tool-line:+15550002222",
+        completion_id="wr1",
+        result={"result": {"reply": "the real answer"}},
+        status=PARK_COMPLETION_SUCCEEDED,
+    )
+    await _settle()
+    assert first == {"message_id": None}
+    assert later == {"message_id": "wr1"}
+    rec = await _store().get_record("wr1")
+    assert rec is not None
+    assert [n.message for n in channel.sends] == ["the real answer"]

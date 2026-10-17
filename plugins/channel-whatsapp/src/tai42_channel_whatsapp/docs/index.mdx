@@ -167,6 +167,13 @@ reason shown above it — so the participant can correct and resubmit. This repe
 up to a fixed retry cap; past the cap the participant is told once that the form
 could not be processed and the ask times out.
 
+One question is open per participant at a time: a second ask to the same participant
+is refused while the first is pending. When the platform withdraws the open question
+(a cancel, a route's `cancel_expr`, or an erase of its thread, route or person), the
+channel releases the participant at once and sends them nothing, so the next ask goes
+out straight away. The withdrawn form stays in the chat; a late reply to it arrives as
+a new inbound turn.
+
 ## Inbound entry parameters
 
 When an inbound message enters the conversation **bridge** as a fresh turn (no

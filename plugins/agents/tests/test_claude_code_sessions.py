@@ -21,6 +21,7 @@ from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.interactions import (
     ChainedResume,
     DeliveryAddress,
+    RunTerminalFailed,
     SuspendedInteraction,
     get_chained_resume,
     get_park_completion,
@@ -38,18 +39,21 @@ from tests._claude_stubs import (
     FORM_ASYNC_REACTING_ASK,
     MESSAGE,
     MESSAGE_SESSION_OTHER,
+    QUERY_ECHO,
     REDACT_TRANSCRIPT,
+    RESUME_ID_ECHO,
     RESUME_ONCE,
     RESUME_REDRIVE,
     TOOL_CALL,
     TOOL_CALL_PARK,
     payload_for,
 )
-from tests._sandbox_fake import FakeSandboxSession
+from tests._sandbox_fake import FakeSandboxSession, make_fake_sandbox
 from tests.conftest import bind_park_index
 
 import tai42_agents._internal.park.lease as lease_mod
 import tai42_agents.claude_code.agent as agent_module
+import tai42_agents.claude_code.live_sessions as live_sessions_module
 import tai42_agents.claude_code.workspace as workspace_module
 from tai42_agents._internal.park import agent_resume, workspace_lease
 from tai42_agents._internal.park.errors import WorkspaceLeaseHeldError
@@ -59,6 +63,7 @@ from tai42_agents._internal.session_cred import SessionCredError
 from tai42_agents.claude_code.agent import ClaudeCodeAgent
 from tai42_agents.claude_code.errors import ClaudeCodeError
 from tai42_agents.claude_code.protocol import ProtocolError
+from tai42_agents.claude_code.session_records import read_session_id
 from tai42_agents.claude_code.settings import ClaudeCodeSettings, ConnectionCred
 
 # A minimal resume options snapshot (the shape ``astream`` stores on the park identity's
@@ -86,9 +91,9 @@ _CREDS_PATH = ".claude-home/.creds/GH_TOKEN"
 
 @pytest.fixture(autouse=True)
 def _clear_live_sessions() -> Iterator[None]:
-    agent_module._LIVE_SESSIONS.clear()
+    live_sessions_module.LIVE_SESSIONS.clear()
     yield
-    agent_module._LIVE_SESSIONS.clear()
+    live_sessions_module.LIVE_SESSIONS.clear()
 
 
 @pytest.fixture
@@ -122,6 +127,21 @@ def _run(app: LocalApp, **kwargs: Any) -> list[Any]:
     return asyncio.run(_astream(app, **kwargs))
 
 
+async def _parking_ask(_question: str, *, expiry_at: datetime | None = None, **_: Any) -> Any:
+    """An async ask that parks as ``int-1``, stamped with the resume owner the threaded drive bound."""
+    return SuspendedInteraction(
+        interaction_id="int-1",
+        expiry_at=expiry_at or datetime.now(UTC) + timedelta(hours=1),
+        resume_owner=get_resume_continuation_tool(),
+    )
+
+
+async def _park_turn(monkeypatch: pytest.MonkeyPatch, thread_id: str) -> None:
+    """A threaded turn that parks on ``int-1``, leaving the SDK session id a resume continues from."""
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(ASYNC_ASK))
+    _ = [e async for e in ClaudeCodeAgent().astream(user_message=TemplatedText(content="go"), thread_id=thread_id)]
+
+
 def _bearer_cred() -> ConnectionCred:
     return ConnectionCred(env_name="GH_TOKEN", connection_id="conn-1", provider_id="github", sub_service="api")
 
@@ -132,7 +152,7 @@ def test_threaded_turn_captures_and_persists_the_session_id(monkeypatch: pytest.
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     events = _run(build_local_app(), user_message=TemplatedText(content="hi"), thread_id="t1")
     assert any(isinstance(e, MessageFinal) for e in events)
-    session = agent_module._LIVE_SESSIONS[workspace_key_for("claude_code", "t1")]
+    session = live_sessions_module.LIVE_SESSIONS[workspace_key_for("claude_code", "t1")]
     raw = asyncio.run(session.get_file(".runner/session_id"))
     assert b"sess-1" in raw
 
@@ -146,15 +166,43 @@ def test_second_threaded_turn_reuses_and_resumes(monkeypatch: pytest.MonkeyPatch
 
     async def _two_turns() -> list[Any]:
         await _astream(app, user_message=TemplatedText(content="turn1"), thread_id="t1")
-        first = agent_module._LIVE_SESSIONS[key]
+        first = live_sessions_module.LIVE_SESSIONS[key]
         events = await _astream(app, user_message=TemplatedText(content="turn2"), thread_id="t1")
         # Turn 2 reuses the same live session (its create-time spec.env intact) and resumes the
         # persisted SDK id — the MESSAGE stub reports the same id, so no mismatch is raised.
-        assert agent_module._LIVE_SESSIONS[key] is first
+        assert live_sessions_module.LIVE_SESSIONS[key] is first
         return events
 
     events = asyncio.run(_two_turns())
     assert any(isinstance(e, MessageFinal) for e in events)
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_a_turn_after_the_sandbox_reaped_the_cached_session_starts_a_new_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A threaded session idle past its ttl (a park waiting on its answer) is reaped by the sandbox while this
+    # worker still caches it; the next turn opens a new session over the kept workspace and resumes the SDK session.
+    _settings(monkeypatch, session_ttl_seconds=60)
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
+    sandbox = make_fake_sandbox()
+    app = build_local_app(sandbox=sandbox)
+    key = workspace_key_for("claude_code", "t1")
+
+    async def _turn_reap_turn() -> tuple[Any, Any, list[Any]]:
+        await _astream(app, user_message=TemplatedText(content="turn1"), thread_id="t1")
+        first = live_sessions_module.LIVE_SESSIONS[key]
+        later = datetime.now(UTC) + timedelta(seconds=120)
+        monkeypatch.setattr(sandbox, "_now", lambda: later)
+        assert await sandbox.reap() == [first.id]
+        # Turn 2's runner reports a fresh SDK id unless it is asked to resume one, so only a kept workspace
+        # (holding turn 1's stored id) makes it resume sess-1.
+        monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(RESUME_ID_ECHO))
+        events = await _astream(app, user_message=TemplatedText(content="turn2"), thread_id="t1")
+        return first, live_sessions_module.LIVE_SESSIONS[key], events
+
+    first, second, events = asyncio.run(_turn_reap_turn())
+    assert second is not first
+    assert any(isinstance(e, MessageFinal) and e.text == "resumed=sess-1" for e in events)
+    assert asyncio.run(read_session_id(second)) == "sess-1"
 
 
 @pytest.mark.usefixtures("fake_redis")
@@ -194,7 +242,7 @@ def test_terminal_exit_scrubs_the_bearer_file(monkeypatch: pytest.MonkeyPatch) -
         _run(app, user_message=TemplatedText(content="hi"), thread_id="t1")
     finally:
         reset_request_user_id(token)
-    session = agent_module._LIVE_SESSIONS[workspace_key_for("claude_code", "t1")]
+    session = live_sessions_module.LIVE_SESSIONS[workspace_key_for("claude_code", "t1")]
     with pytest.raises(SandboxError):
         asyncio.run(session.get_file(_CREDS_PATH))
 
@@ -371,7 +419,7 @@ def test_async_ask_on_threaded_run_parks(monkeypatch: pytest.MonkeyPatch) -> Non
     assert suspended[0].interaction_ids == ["int-1"]
     assert suspended[0].thread_id == "t1"
     # A park-suspend exit does NOT scrub the bearer file — it survives for the expiry resume.
-    session = agent_module._LIVE_SESSIONS[workspace_key_for("claude_code", "t1")]
+    session = live_sessions_module.LIVE_SESSIONS[workspace_key_for("claude_code", "t1")]
     assert asyncio.run(session.get_file(_CREDS_PATH))  # present, no SandboxError
 
 
@@ -470,6 +518,74 @@ def test_real_async_ask_parks_then_agent_resume_drives_to_completion(monkeypatch
 
 
 @pytest.mark.usefixtures("fake_redis")
+def test_the_answer_reaches_the_resumed_sdk_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    _settings(monkeypatch)
+    agent = ClaudeCodeAgent()
+    app = build_local_app(ask=_parking_ask, agents={"claude_code": agent})
+
+    async def _park_then_resume() -> Any:
+        with tai42_app.bound(app):
+            await _park_turn(monkeypatch, "tq")
+            monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(QUERY_ECHO))
+            return await agent_resume("int-1", {"choice": "ship it"})
+
+    queried = asyncio.run(_park_then_resume())
+
+    assert '{"choice": "ship it"}' in queried
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_several_answers_reach_the_resumed_sdk_query_as_one_json_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A super-step that parked on two calls resumes with both answers in one user message.
+    _settings(monkeypatch)
+    app = build_local_app(ask=_parking_ask)
+    rebuild = {"thread_id": "tm", "options_snapshot": _RESUME_SNAPSHOT}
+    resume_map = {"int-1": {"int-1": "yes"}, "int-2": {"int-2": {"n": 2}}}
+
+    async def _park_then_resume() -> Any:
+        with tai42_app.bound(app):
+            await _park_turn(monkeypatch, "tm")
+            monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(QUERY_ECHO))
+            return await ClaudeCodeAgent().aresume_park(rebuild_kwargs=rebuild, thread_id="tm", resume_map=resume_map)
+
+    queried = asyncio.run(_park_then_resume())
+
+    assert queried.endswith('as a JSON list: ["yes", {"n": 2}]')
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_resume_after_the_workspace_was_destroyed_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The parked thread's session is torn down WITH its workspace: the SDK session id the resume must continue is
+    # gone, so the resume refuses loudly instead of starting a new SDK session that never saw the conversation.
+    _settings(monkeypatch)
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(ASYNC_ASK))
+    sandbox = make_fake_sandbox()
+
+    async def ask(_question: str, *, expiry_at: datetime | None = None, **_: Any) -> Any:
+        return SuspendedInteraction(
+            interaction_id="int-gone",
+            expiry_at=expiry_at or datetime.now(UTC) + timedelta(hours=1),
+            resume_owner=get_resume_continuation_tool(),
+        )
+
+    agent = ClaudeCodeAgent()
+    app = build_local_app(sandbox=sandbox, ask=ask, agents={"claude_code": agent})
+
+    async def _park_destroy_resume() -> None:
+        with tai42_app.bound(app):
+            _ = [e async for e in agent.astream(user_message=TemplatedText(content="deploy"), thread_id="tgone")]
+            await sandbox.destroy_session(
+                live_sessions_module.LIVE_SESSIONS[workspace_key_for("claude_code", "tgone")].id
+            )
+            monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(RESUME_ONCE))
+            await agent_resume("int-gone", "yes")
+
+    with pytest.raises(RunTerminalFailed) as failed:
+        asyncio.run(_park_destroy_resume())
+    assert "its workspace holds no stored SDK session id" in str(failed.value.outcome)
+
+
+@pytest.mark.usefixtures("fake_redis")
 def test_park_persists_a_resumable_index_entry(monkeypatch: pytest.MonkeyPatch, fake_redis: Any) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(ASYNC_ASK))
@@ -502,13 +618,14 @@ def test_resume_terminal_record_dedups_a_redelivery(monkeypatch: pytest.MonkeyPa
     output WITHOUT re-driving the SDK session — proven by swapping in a stub that would return a
     DIFFERENT terminal if it ran, and asserting the recorded output is returned instead."""
     _settings(monkeypatch)
-    app = build_local_app()
+    app = build_local_app(ask=_parking_ask)
     rebuild = {"thread_id": "tr", "options_snapshot": _RESUME_SNAPSHOT}
     resume_map = {"int-1": {"int-1": "yes"}}
 
     async def _drive_twice() -> tuple[Any, Any]:
         agent = ClaudeCodeAgent()
         with tai42_app.bound(app):
+            await _park_turn(monkeypatch, "tr")
             monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(RESUME_ONCE))
             first = await agent.aresume_park(rebuild_kwargs=rebuild, thread_id="tr", resume_map=resume_map)
             # Redelivery: a stub that WOULD terminate with a different value if the SDK re-drove.
@@ -521,7 +638,7 @@ def test_resume_terminal_record_dedups_a_redelivery(monkeypatch: pytest.MonkeyPa
     # The redelivery returned the RECORDED output, not the "re-driven" value the swapped stub emits.
     assert second == "done-once"
     # The durable record sits at the super-step path derived from the resumed interaction ids.
-    session = agent_module._LIVE_SESSIONS[workspace_key_for("claude_code", "tr")]
+    session = live_sessions_module.LIVE_SESSIONS[workspace_key_for("claude_code", "tr")]
     superstep_id = compute_superstep_id(["int-1"])
     raw = asyncio.run(session.get_file(f".runner/terminal/{superstep_id}.json"))
     assert b"done-once" in raw
@@ -540,7 +657,7 @@ def test_transcript_content_is_redacted_when_scrub_on(monkeypatch: pytest.Monkey
     app = build_local_app(policy=_scrub_on_policy())
     _run(app, user_message=TemplatedText(content="hi"), thread_id="tscrub")
 
-    session = agent_module._LIVE_SESSIONS[workspace_key_for("claude_code", "tscrub")]
+    session = live_sessions_module.LIVE_SESSIONS[workspace_key_for("claude_code", "tscrub")]
     body = asyncio.run(session.get_file(".claude-home/transcript.jsonl")).decode("utf-8")
     assert "modelkey" not in body
     assert "[REDACTED]" in body
@@ -602,7 +719,7 @@ def test_malformed_persisted_session_id_raises(monkeypatch: pytest.MonkeyPatch, 
 
     async def _turn_then_corrupt() -> None:
         await _astream(app, user_message=TemplatedText(content="turn1"), thread_id="t1")  # creates the session id file
-        session = agent_module._LIVE_SESSIONS[key]
+        session = live_sessions_module.LIVE_SESSIONS[key]
         await session.put_file(".runner/session_id", corrupt)
         await _astream(app, user_message=TemplatedText(content="turn2"), thread_id="t1")  # reads the corrupted file
 
@@ -628,7 +745,7 @@ def test_forged_terminal_record_is_ignored_and_redrives(monkeypatch: pytest.Monk
     ``superstep_id`` matches; a forged or mismatched record is treated as ABSENT, so the resume
     RE-DRIVES rather than returning garbage (agent.py ~741-744)."""
     _settings(monkeypatch)
-    app = build_local_app()
+    app = build_local_app(ask=_parking_ask)
     rebuild = {"thread_id": "tf", "options_snapshot": _RESUME_SNAPSHOT}
     resume_map = {"int-1": {"int-1": "yes"}}
     superstep_id = compute_superstep_id(["int-1"])
@@ -637,10 +754,11 @@ def test_forged_terminal_record_is_ignored_and_redrives(monkeypatch: pytest.Monk
     async def _drive() -> tuple[Any, Any]:
         agent = ClaudeCodeAgent()
         with tai42_app.bound(app):
+            await _park_turn(monkeypatch, "tf")
             monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(RESUME_ONCE))
             first = await agent.aresume_park(rebuild_kwargs=rebuild, thread_id="tf", resume_map=resume_map)
             # Overwrite the legit record with a forged one; the redelivery must reject it.
-            session = agent_module._LIVE_SESSIONS[key]
+            session = live_sessions_module.LIVE_SESSIONS[key]
             body = forge % superstep_id.encode("utf-8") if b"%s" in forge else forge
             await session.put_file(f".runner/terminal/{superstep_id}.json", body)
             monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(RESUME_REDRIVE))

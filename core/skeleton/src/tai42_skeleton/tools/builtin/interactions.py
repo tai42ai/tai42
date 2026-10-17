@@ -273,10 +273,12 @@ async def resume_parked(interaction_id: str, payload: Any = None) -> dict[str, A
 
 @tai42_app.tools.tool(tags={"interactions"})
 async def cancel_parked(ids: list[str]) -> dict[str, Any]:
-    """Cancel (whole-chain kill) the parked interactions named in ``ids`` on the current run's subject.
+    """Cancel the parked interactions named in ``ids`` on the current run's subject, taking each one's run down.
 
-    Each named interaction and every run it linked above it is torn down for good; a run a door
-    started with a receiver is delivered a single FAILED. Use it to withdraw asks a run no longer
+    Each named interaction's whole run is taken down for good — every open ask of the run, nested
+    runs and the callers waiting on it; nothing of the run is resumed; the channel that delivered
+    an ask releases what it held for it, so the person's address is free for the
+    next ask at once, and nothing is said to the person. Use it to withdraw asks a run no longer
     needs answered.
 
     Args:

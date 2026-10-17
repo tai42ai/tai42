@@ -16,7 +16,6 @@ from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import StructuredTool
 from langgraph.errors import GraphRecursionError
-from langgraph.types import Command
 from tai42_contract.agent.events import SuspendedFinal
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware import history_middlewares
@@ -36,7 +35,7 @@ from tai42_agents._internal.outcomes import (
     drive_reprompt_scope,
     outcome_for_drive_error,
 )
-from tai42_agents._internal.park import ParkIdentity, bind_resume_per_step, finalize_drive, park_drive
+from tai42_agents._internal.park import ParkIdentity, bind_resume_per_step, finalize_drive, park_drive, resume_command
 from tai42_agents._internal.park.middleware import AsyncParkMiddleware
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
 from tai42_agents._internal.structured import structured_output_stack
@@ -201,7 +200,7 @@ async def ainvoke_tools_agent(
     agent = graph.agent
     messages, config, minted_thread = await _build_agent_and_input(graph, user_message, config, user_content_kwargs)
     park = park_builder(config) if park_builder is not None else None
-    agent_input: Any = Command(resume=resume) if resume is not None else messages
+    agent_input: Any = await resume_command(agent, config, resume) if resume is not None else messages
     # The resume continuation and the chained-park claims ledger are bound for the drive's
     # duration so an async ``ask`` a tool raises stamps its resume path onto the parked
     # interaction (``None`` bound when the run does not bind), and a chained call this run does

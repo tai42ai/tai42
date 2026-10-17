@@ -60,7 +60,9 @@ class InteractionsSettings(TaiBaseSettings):
     answer_timeout_seconds: int = Field(default=3600, gt=0)
 
     # Idle TTL on a group's stream + state + index entry, refreshed on each new
-    # question; a group with no open questions expires after this (24h). Must be
+    # question; a group with no open questions expires after this (24h). It is also
+    # the retention horizon: an async park's keys live this long past its deadline,
+    # and every durable record of the reaper keeps the same horizon. Must be
     # positive — a non-positive TTL would delete keys on write.
     idle_ttl_seconds: int = Field(default=86400, gt=0)
 
@@ -109,10 +111,12 @@ class InteractionsSettings(TaiBaseSettings):
     # an outer ``asyncio.wait_for`` (budget/keepalive + grace). Must be positive.
     blocking_grace_seconds: float = Field(default=5, gt=0)
 
-    # Interval (seconds) between async-park expiry reaper passes. An async ask has
-    # no blocking waiter, so this loop is what fires a parked question's continuation
-    # once its ``expiry_at`` passes; it bounds how late past expiry a continuation
-    # fires. Must be positive.
+    # Interval (seconds) between async-park expiry reaper passes: the healthy cadence
+    # of the loop that resolves a parked question once its ``expiry_at`` passes (an
+    # async ask has no blocking waiter). A park stays resolvable for
+    # ``idle_ttl_seconds`` past its deadline; a lapse beyond that is surfaced once
+    # (an error log and ``interactions_ask_expiry_abandoned``), never resolved.
+    # Must be positive.
     expiry_reaper_interval_seconds: float = Field(default=30, gt=0)
 
     # Deadline (seconds) for a mid-form reaction handler. A reacting form runs the
