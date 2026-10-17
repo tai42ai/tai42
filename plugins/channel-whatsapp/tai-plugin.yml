@@ -42,3 +42,7 @@ provides:
           methods:
             - POST
           public: true
+        - path: /flow-encryption
+          methods:
+            - POST
+          public: false

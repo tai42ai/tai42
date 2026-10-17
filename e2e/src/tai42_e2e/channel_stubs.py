@@ -667,10 +667,11 @@ class FakeWhatsApp:
     delivery hits when its Flow is uncached — ``GET /{waba_id}/flows`` (one page listing
     every recorded flow of that WABA, ``PUBLISHED`` once published, else ``DRAFT``),
     ``POST /{waba_id}/flows`` (minting a flow id, recorded in ``flows``) and
-    ``POST /{flow_id}/publish`` (recorded in ``published_flows``). Any other path answers a
-    loud 500. The Cloud API has no boot-time
-    call (the webhook is configured in the Meta dashboard), so nothing is served for
-    startup. The builders synthesize the requests aimed at the SUT's own
+    ``POST /{flow_id}/publish`` (recorded in ``published_flows``) — and the Flow encryption
+    key registration ``POST /{phone_number_id}/whatsapp_business_encryption`` (recorded in
+    ``public_keys``, answered ``{"success": true}``). Any other path answers a loud 500.
+    The Cloud API has no boot-time call (the webhook is configured in the Meta dashboard),
+    so nothing is served for startup. The builders synthesize the requests aimed at the SUT's own
     ``/api/channels/whatsapp/inbound`` door: the GET verify handshake, a genuinely
     X-Hub-Signature-256-signed inbound text message, an interactive button/list reply, a
     completed-Flow ``nfm_reply``, and a signed status webhook."""
@@ -684,6 +685,9 @@ class FakeWhatsApp:
         # ``published_flows`` the ids the publish step confirmed. The flow list serves both.
         self.flows: list[dict[str, Any]] = []
         self.published_flows: list[str] = []
+        # The business public keys registered for a sending number:
+        # ``{token, phone_number_id, business_public_key}`` per call.
+        self.public_keys: list[dict[str, Any]] = []
         # Per-``media_id`` inbound-media config for the ingest suites. ``media_meta`` holds the
         # metadata GET response (``mime_type``/``sha256``/``file_size`` and an optional non-200
         # ``status`` for a permanent miss); ``media`` holds the Bearer-guarded lookaside byte blob.
@@ -711,6 +715,7 @@ class FakeWhatsApp:
         self.sent.clear()
         self.flows.clear()
         self.published_flows.clear()
+        self.public_keys.clear()
         self.media_meta.clear()
         self.media.clear()
         self._media_served.clear()
@@ -968,6 +973,18 @@ class FakeWhatsApp:
         @app.post("/{flow_id}/publish")
         async def publish_flow(flow_id: str, request: Request) -> JSONResponse:
             self.published_flows.append(flow_id)
+            return JSONResponse({"success": True})
+
+        @app.post("/{phone_number_id}/whatsapp_business_encryption")
+        async def set_business_public_key(phone_number_id: str, request: Request) -> JSONResponse:
+            payload = await request.json()
+            self.public_keys.append(
+                {
+                    "token": (request.headers.get("authorization", "")).removeprefix("Bearer "),
+                    "phone_number_id": phone_number_id,
+                    "business_public_key": payload.get("business_public_key"),
+                }
+            )
             return JSONResponse({"success": True})
 
         @app.get("/lookaside/{media_id}")

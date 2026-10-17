@@ -292,7 +292,7 @@ def _require_reaction_settings(settings: WhatsAppSettings) -> str:
     endpoint's requests) and the public endpoint URI (configured on the Flow so Meta routes
     data-exchange back here). Either unset is refused loudly — never a silent fall back to a
     non-reacting flow. The public key must also be registered for the sending number (operator
-    step; see :func:`tai42_channel_whatsapp.provisioning.provision_flow_encryption`).
+    step; see :mod:`tai42_channel_whatsapp.provisioning_route`).
     """
     require_delivery_secret(settings.flow_private_key, "CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY")
     return require_delivery_setting(settings.flow_endpoint_uri, "CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI")

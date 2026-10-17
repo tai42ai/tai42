@@ -83,6 +83,9 @@ dependencies = [
     "pydantic>=2.12",
     "pydantic-settings>=2.15.0",
     "PyYAML>=6.0",
+    # The per-stack business key pair the WhatsApp bridge env generates for the Flow
+    # encryption provisioning door.
+    "cryptography>=44",
     # The Celery client library the celery-backend census pings the control plane
     # with (never tai42_backend_celery — the harness does not import the SUT), plus
     # the celery-pydantic serializer so the census can deserialize the backend's

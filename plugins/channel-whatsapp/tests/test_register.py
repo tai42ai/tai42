@@ -16,6 +16,7 @@ from tai42_channel_whatsapp import WhatsAppChannel
 
 def test_importing_register_registers_channel_and_route(stub_app):
     sys.modules.pop("tai42_channel_whatsapp.register", None)
+    sys.modules.pop("tai42_channel_whatsapp.provisioning_route", None)
     # ``inbound`` is a package: evict it AND every submodule so re-importing it re-runs
     # the route-registration side-effect (importing the package alone would find the
     # cached ``webhook`` submodule and skip the @custom_route decorator).
@@ -33,14 +34,20 @@ def test_importing_register_registers_channel_and_route(stub_app):
     assert list(stub_app.channels.registered) == ["whatsapp"]
     assert isinstance(stub_app.channels.registered["whatsapp"], WhatsAppChannel)
     routes = {route.path: route for route in stub_app.http.routes}
-    # The webhook (GET verification + POST events) and the reacting-form Flow data endpoint.
-    assert set(routes) == {"/inbound", "/flow-data"}
+    # The webhook (GET verification + POST events), the reacting-form Flow data endpoint, and the
+    # admin door that registers the Flow encryption public key.
+    assert set(routes) == {"/inbound", "/flow-data", "/flow-encryption"}
     assert routes["/inbound"].methods == ["GET", "POST"]
     assert routes["/flow-data"].methods == ["POST"]
-    # Both routes are declared relative and pass no explicit ``authed``: the mount base and the
-    # public flag come from ``tai-plugin.yml``, resolved by the runtime.
-    assert routes["/inbound"].authed is None
-    assert routes["/flow-data"].authed is None
+    assert routes["/flow-encryption"].methods == ["POST"]
+    # Every route is declared relative with no explicit ``authed``: the mount base and the public
+    # flag come from ``tai-plugin.yml``, resolved by the runtime. The provisioning door is the
+    # admin-only ``fenced`` class; the two vendor doors leave the class to the runtime.
+    for path in ("/inbound", "/flow-data", "/flow-encryption"):
+        assert routes[path].authed is None
+    assert routes["/flow-encryption"].action == "fenced"
+    assert routes["/inbound"].action is None
+    assert routes["/flow-data"].action is None
 
 
 def test_bare_package_import_does_not_register():

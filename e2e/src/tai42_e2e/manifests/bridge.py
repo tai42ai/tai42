@@ -8,6 +8,9 @@ import os
 import secrets
 from typing import TYPE_CHECKING
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+
 from tai42_e2e.manifests.channels import (
     _require_stub,
     _slack_channel_env,
@@ -183,7 +186,20 @@ def _bridge_whatsapp_env(res: StackResources, *, real: bool) -> dict[str, str]:
         # The WABA a form ask's WhatsApp Flow is created under (form-delivery path only).
         "CHANNEL_WHATSAPP_WABA_ID": BRIDGE_WHATSAPP_WABA_ID,
         "CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS": BRIDGE_WHATSAPP_CLIENT,
+        # The reacting-form business key pair, fresh per stack: the provisioning door derives
+        # and registers its public half.
+        "CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY": _fresh_flow_private_key(),
     }
+
+
+def _fresh_flow_private_key() -> str:
+    """A new RSA-2048 private key as unencrypted PKCS#8 PEM."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("ascii")
 
 
 def _bridge_channel_env(res: StackResources) -> dict[str, str]:

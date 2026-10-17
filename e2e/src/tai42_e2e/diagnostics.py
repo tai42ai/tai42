@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 # find them without threading the fixture through every assertion.
 _active: list[TaiStack] = []
 
-_SECRET_HINTS = ("secret", "password", "kek", "hmac", "api_key", "token")
+_SECRET_HINTS = ("secret", "password", "kek", "hmac", "api_key", "token", "private_key")
 
 
 def register(stack: TaiStack) -> None:

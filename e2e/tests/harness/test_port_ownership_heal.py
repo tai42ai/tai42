@@ -144,7 +144,7 @@ def test_heal_refreshes_the_origin_allowlist_to_the_new_port(
         assert stack._specs["serve"].env[_ALLOWLIST_KEY] == new_origin, stack._specs["serve"].env[_ALLOWLIST_KEY]
         # The reload path reads .env, which must carry the same refreshed origin.
         env_text = (stack._config_dir / ".env").read_text()
-        assert f"{_ALLOWLIST_KEY}={new_origin}" in env_text, env_text
+        assert f'{_ALLOWLIST_KEY}="{new_origin}"' in env_text, env_text
         assert seized_origin not in env_text, env_text
     finally:
         seize.close()
