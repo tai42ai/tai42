@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider
 
+from tai42_kit.access_control import registry as identity_registry
 from tai42_kit.access_control.registry import (
     abort_staging,
     begin_staging,
@@ -22,14 +23,17 @@ from tai42_kit.access_control.registry import (
     register_identity_provider,
     reset_registry,
 )
+from tai42_kit.registry.staged import StagedGeneration
 
 
 @pytest.fixture(autouse=True)
-def _clean_registry():  # pyright: ignore[reportUnusedFunction]
-    # The registry is module-global state; isolate every test from the others.
-    reset_registry()
-    yield
-    reset_registry()
+def _clean_registry(monkeypatch: pytest.MonkeyPatch):  # pyright: ignore[reportUnusedFunction]
+    """Run each test against an empty identity registry.
+
+    The registry is module-global state. Each test gets a fresh generation; the process's own
+    generation, holding what plugin modules registered at import, is put back when it ends.
+    """
+    monkeypatch.setattr(identity_registry._PROVIDERS, "_generation", StagedGeneration(dict))
 
 
 class _FakeProvider(IdentityProvider):

@@ -26,6 +26,7 @@ from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import McpError
+from tests.app import _reload_drive_state
 
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app import epoch_retire as epoch_retire_mod
@@ -33,7 +34,6 @@ from tai42_skeleton.app.epoch import current_epoch
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.reload_gate import reload_gate
 
-from . import _reload_drive_state
 from ._served_app import (
     ADMIN_KEY,
     MCP_CALL_TIMEOUT_S,

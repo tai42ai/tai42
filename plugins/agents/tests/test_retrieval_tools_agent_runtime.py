@@ -26,14 +26,6 @@ from tai42_contract.agent import (
 )
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.string_util import text_to_md5
-from tests._retrieval_tools_agent_support import (
-    ScriptedChatModel,
-    StubStore,
-    _collect,
-    _mark_count,
-    _marked_user,
-    _tool,
-)
 
 from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents.retrieval_tools_agent import agent as ragent
@@ -43,6 +35,15 @@ from tai42_agents.retrieval_tools_agent.agent import (
     _embedding_dims_cache,
 )
 from tai42_agents.retrieval_tools_agent.graph import RetrievalToolsGraph
+
+from ._retrieval_tools_agent_support import (
+    ScriptedChatModel,
+    StubStore,
+    _collect,
+    _mark_count,
+    _marked_user,
+    _tool,
+)
 
 
 class TestSystemPromptPerRun:

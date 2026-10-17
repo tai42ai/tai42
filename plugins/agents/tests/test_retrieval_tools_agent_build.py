@@ -16,18 +16,19 @@ from tai42_contract.agent import (
     StructuredFinal,
 )
 from tai42_contract.template import TemplatedText
-from tests._retrieval_tools_agent_support import (
-    _RETRIEVAL_SCHEMA,
-    _collect,
-    _NativeFake,
-    _patch_build_seams,
-    _ToolFake,
-)
 
 from tai42_agents.retrieval_tools_agent import agent as ragent
 from tai42_agents.retrieval_tools_agent.agent import (
     RetrievalToolsAgent,
     RetrievalToolsAgentInput,
+)
+
+from ._retrieval_tools_agent_support import (
+    _RETRIEVAL_SCHEMA,
+    _collect,
+    _NativeFake,
+    _patch_build_seams,
+    _ToolFake,
 )
 
 

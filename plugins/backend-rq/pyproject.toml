@@ -99,6 +99,9 @@ xfail_strict = true
 # (e.g. a missing await -> "coroutine was never awaited") fails the suite loudly
 # instead of passing green.
 filterwarnings = ["error"]
+markers = [
+    "scoped_install: needs this member's own package-scoped install (uv sync --package <member>); a whole-repo session, whose venv holds every member, skips it",
+]
 
 [tool.coverage.run]
 source = ["tai42_backend_rq"]

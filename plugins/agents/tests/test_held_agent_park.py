@@ -43,18 +43,6 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.template import TemplatedText
 from tai42_kit.interactions.park_adoption import chained_park_claims, new_chained_park_key, resolve_park_adoption
-from tests._claude_app import build_local_app
-from tests._claude_stubs import RESUME_ONCE, TOOL_CALL_PARK, payload_for
-from tests._client_tool import client_tool
-from tests._tools_agent_park_support import (
-    ScriptedChatModel,
-    _ask_call,
-    _LlmSettings,
-    _ProviderSettings,
-    _Registry,
-    _wire_tools_build,
-)
-from tests.conftest import APP, bind_park_index, fake_run_trace
 
 import tai42_agents._internal.park.lease as lease_mod
 import tai42_agents.claude_code.agent as claude_agent_module
@@ -67,6 +55,19 @@ from tai42_agents.langchain_deep_agent import agent as deep_agent_module
 from tai42_agents.langchain_deep_agent import run_thread as deep_run_thread
 from tai42_agents.langchain_deep_agent.agent import DeepAgent
 from tai42_agents.tools_agent import ToolsAgent
+
+from ._claude_app import build_local_app
+from ._claude_stubs import RESUME_ONCE, TOOL_CALL_PARK, payload_for
+from ._client_tool import client_tool
+from ._tools_agent_park_support import (
+    ScriptedChatModel,
+    _ask_call,
+    _LlmSettings,
+    _ProviderSettings,
+    _Registry,
+    _wire_tools_build,
+)
+from .conftest import APP, bind_park_index, fake_run_trace
 
 #: The holder's delivery tool: a held run's terminal re-enters the holder through it.
 _DELIVERY_TOOL = "held_chain_deliver"

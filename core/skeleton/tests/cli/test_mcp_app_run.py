@@ -47,6 +47,25 @@ def _restore_log_record_factory():
 
 
 @pytest.fixture(autouse=True)
+def _own_multiproc_dir(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Point the multiproc dir at this test's own tmp dir.
+
+    The serve paths run the launcher's real wipe, which deletes the configured
+    multiproc dir. Aimed at the test process's own dir, it would delete the per-pid
+    files the counters this process already opened keep writing to, so their
+    later increments would reach no file a scrape or the health watch reads.
+    """
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path / "prometheus"))
+    reset_all_settings()
+    try:
+        yield
+    finally:
+        reset_all_settings()
+
+
+@pytest.fixture(autouse=True)
 def _bus_configured(monkeypatch: pytest.MonkeyPatch):
     """These serve-path tests exercise multi-worker runs, which the boot rules require
     the worker bus for. Report it configured so the launch wiring under test runs

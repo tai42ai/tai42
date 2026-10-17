@@ -36,7 +36,6 @@ from tai42_kit.interactions.park_index import (
     entry_ttl_seconds,
     superstep_id,
 )
-from tests.conftest import APP
 
 from tai42_agents._internal.park.chain import deliver_chained_park
 from tai42_agents._internal.park.drive import park_drive
@@ -44,6 +43,8 @@ from tai42_agents._internal.park.errors import WorkspaceLeaseHeldError
 from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents._internal.park.resume import AGENT_RESUME_TOOL_NAME, agent_resume
 from tai42_agents._internal.park.resume_tool import agent_resume_tool
+
+from .conftest import APP
 
 THREAD = "t-failed"
 AGENT = "probe_resumable_agent"

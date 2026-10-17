@@ -23,19 +23,20 @@ from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
-from tests._refine_agent_support import (
+
+from tai42_agents.refine_agent.prompt import (
+    CRITIC_APPROVAL_MESSAGE,
+    CRITIC_SYSTEM_MESSAGE,
+    EVALUATOR_SYSTEM_MESSAGE,
+)
+
+from ._refine_agent_support import (
     AGENT_NAME,
     FakeAgent,
     _collect,
     _final_pass_script,
     _patch_loop,
     _structured_stream_items,
-)
-
-from tai42_agents.refine_agent.prompt import (
-    CRITIC_APPROVAL_MESSAGE,
-    CRITIC_SYSTEM_MESSAGE,
-    EVALUATOR_SYSTEM_MESSAGE,
 )
 
 

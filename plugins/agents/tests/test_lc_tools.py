@@ -38,7 +38,6 @@ from tai42_contract.tools import AppTools, ClientToolError, UndeclaredPauseError
 from tai42_kit.interactions.park_adoption import chained_park_claims, is_chained_park_key
 from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 from tai42_kit.llm import ToolNameTooLongError
-from tests._client_tool import FakeClientTool, client_tool
 
 from tai42_agents._internal.lc_tools import (
     adapt_tool_result,
@@ -47,6 +46,8 @@ from tai42_agents._internal.lc_tools import (
     to_structured_tool,
 )
 from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME
+
+from ._client_tool import FakeClientTool, client_tool
 
 _PROPS = {"example_config": {"type": "object"}, "example_config_kwargs": {"type": "object"}}
 

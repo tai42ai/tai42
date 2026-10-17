@@ -21,12 +21,13 @@ from tai42_contract.interactions import (
     get_chained_resume,
     get_resume_continuation_tool,
 )
-from tests._client_tool import FakeClientTool, client_tool
-from tests.conftest import fake_run_trace
 
 from tai42_agents import tools_agent as tools_mod
 from tai42_agents._internal import base_tool_agent as base_mod
 from tai42_agents._internal.park import capability as park_capability
+
+from ._client_tool import FakeClientTool, client_tool
+from .conftest import fake_run_trace
 
 
 class ScriptedChatModel(BaseChatModel):

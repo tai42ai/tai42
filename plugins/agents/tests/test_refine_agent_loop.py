@@ -16,8 +16,14 @@ from tai42_contract.agent import (
 )
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
-from tests._delivery_scope import assert_delivery_scoped, probe_tool
-from tests._refine_agent_support import (
+
+from tai42_agents.refine_agent.agent import RefineAgent
+from tai42_agents.refine_agent.prompt import (
+    CRITIC_APPROVAL_MESSAGE,
+)
+
+from ._delivery_scope import assert_delivery_scoped, probe_tool
+from ._refine_agent_support import (
     AGENT_NAME,
     FakeAgent,
     _a_tool,
@@ -27,11 +33,6 @@ from tests._refine_agent_support import (
     _patch_loop,
     _patch_loop_real,
     _RecordingChatModel,
-)
-
-from tai42_agents.refine_agent.agent import RefineAgent
-from tai42_agents.refine_agent.prompt import (
-    CRITIC_APPROVAL_MESSAGE,
 )
 
 

@@ -22,6 +22,7 @@ from tai42_kit.settings import (
     unbind_respawn_class_env,
 )
 from tai42_kit.settings.registry import (
+    _REGISTRY,
     _clear_registry,
     _factory_needs_validated_data,
     _register,
@@ -32,11 +33,16 @@ from tai42_kit.settings.registry import (
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    """Clear the registry around every test so locally-defined classes don't leak
-    into (or out of) other tests."""
+    """Run every test on an empty registry, then restore the registrations it replaced.
+
+    Locally-defined classes never leak into or out of a test, and the groups the
+    imported modules registered are back in place for whatever runs next.
+    """
+    saved = dict(_REGISTRY)
     _clear_registry()
     yield
     _clear_registry()
+    _REGISTRY.update(saved)
 
 
 def _group(name: str):

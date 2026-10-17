@@ -17,10 +17,6 @@ from tai42_contract.agent import (
     Agent,
 )
 from tai42_contract.app import tai42_app
-from tests._retrieval_tools_agent_support import (
-    AGENT_NAME,
-    _graph,
-)
 
 from tai42_agents.retrieval_tools_agent import graph as rgraph
 from tai42_agents.retrieval_tools_agent.agent import (
@@ -28,6 +24,11 @@ from tai42_agents.retrieval_tools_agent.agent import (
     RetrievalToolsAgentInput,
 )
 from tai42_agents.retrieval_tools_agent.graph import RetrievalToolsGraph
+
+from ._retrieval_tools_agent_support import (
+    AGENT_NAME,
+    _graph,
+)
 
 
 class TestRegistration:

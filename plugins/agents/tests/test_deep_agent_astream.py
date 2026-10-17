@@ -35,7 +35,12 @@ from tai42_contract.interactions import (
 from tai42_contract.template import TemplatedText
 from tai42_kit.interactions.park_adoption import new_chained_park_key, resolve_park_adoption
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
-from tests._deep_agent_fakes import (
+
+from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, CHAINED_PARK_DELIVERY_TOOL_NAME
+from tai42_agents._internal.park.park_binding import agents_park_index
+from tai42_agents.langchain_deep_agent.agent import DeepAgent
+
+from ._deep_agent_fakes import (
     _client_tool,
     _drain_astream,
     _FakeCompiledGraph,
@@ -43,11 +48,7 @@ from tests._deep_agent_fakes import (
     _install_fake_resolve,
     _scripted_chunks,
 )
-from tests.conftest import bind_park_index
-
-from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, CHAINED_PARK_DELIVERY_TOOL_NAME
-from tai42_agents._internal.park.park_binding import agents_park_index
-from tai42_agents.langchain_deep_agent.agent import DeepAgent
+from .conftest import bind_park_index
 
 
 def test_astream_emits_every_event_kind_and_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:

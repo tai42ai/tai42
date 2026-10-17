@@ -46,7 +46,7 @@ def checkpoint_saver(monkeypatch) -> _RecordingSaver:
 def states_pg(monkeypatch):
     """Wire the states store to an in-memory fake Postgres and mark the feature configured, so the
     delete doors' state-erase step runs the real service SQL rather than no-opping."""
-    from tests.states.conftest import FakeStatesPg, _FakePool
+    from ..states.conftest import FakeStatesPg, _FakePool
 
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     fake = FakeStatesPg()

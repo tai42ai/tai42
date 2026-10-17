@@ -90,6 +90,7 @@ filterwarnings = ["error"]
 # The live-engine conformance leg is gated behind this marker: it needs a real
 # Docker engine and is never collected in a bare venv.
 markers = [
+    "scoped_install: needs this member's own package-scoped install (uv sync --package <member>); a whole-repo session, whose venv holds every member, skips it",
     "docker: requires a live Docker engine (SANDBOX_DOCKER_TEST_HOST); not run in the unit gate",
 ]
 

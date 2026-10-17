@@ -9,6 +9,8 @@ settings resolve. No client, database, or Redis is touched.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 
 import pytest
 import typer
@@ -34,6 +36,23 @@ _OAUTH_CONNECTOR = {
         }
     },
 }
+
+
+def _config_lint_in_a_clean_process(*args: str) -> tuple[int, str]:
+    """``tai config lint`` in its own interpreter, with this process's environment and directory.
+
+    The lint reads the process-wide settings registry, so it runs where only the groups
+    its own command imports are registered, never a group another test imported here.
+    Returns the exit code and the combined output.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", "from tai42_cli.app import app; app()", "config", "lint", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, result.stdout + result.stderr
+
 
 _VALID_MANIFEST = """
 tools:
@@ -95,10 +114,10 @@ def test_config_lint_accepts_valid(tmp_path) -> None:
     path = tmp_path / "manifest.yml"
     path.write_text(_VALID_MANIFEST, encoding="utf-8")
 
-    result = CliRunner().invoke(app_module.app, ["config", "lint", str(path)])
-    assert result.exit_code == 0, result.output
-    assert "is valid" in result.output
-    assert "required settings resolve" in result.output
+    exit_code, output = _config_lint_in_a_clean_process(str(path))
+    assert exit_code == 0, output
+    assert "is valid" in output
+    assert "required settings resolve" in output
 
 
 def test_config_lint_rejects_broken_manifest(tmp_path) -> None:
@@ -119,9 +138,9 @@ def test_config_lint_missing_file_is_usage_error(tmp_path) -> None:
 
 def test_config_lint_without_manifest_still_checks_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TAI_MANIFEST_PATH", raising=False)
-    result = CliRunner().invoke(app_module.app, ["config", "lint"])
-    assert result.exit_code == 0, result.output
-    assert "required settings resolve" in result.output
+    exit_code, output = _config_lint_in_a_clean_process()
+    assert exit_code == 0, output
+    assert "required settings resolve" in output
 
 
 def test_config_lint_flags_unresolved_required_setting(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,9 +240,9 @@ def test_config_lint_treats_an_empty_manifest_path_as_unset(monkeypatch: pytest.
     # The settings layer's empty-is-absent rule: an exported empty TAI_MANIFEST_PATH names no file.
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TAI_MANIFEST_PATH", "")
-    result = CliRunner().invoke(app_module.app, ["config", "lint"])
-    assert result.exit_code == 0, result.output
-    assert "skipping manifest shape check" in result.output
+    exit_code, output = _config_lint_in_a_clean_process()
+    assert exit_code == 0, output
+    assert "skipping manifest shape check" in output
 
 
 _DISCOVERED_CONNECTOR = {

@@ -724,7 +724,9 @@ async def test_view_submission_without_private_metadata_raises(fake_redis):
 # -- B/A: a field change re-renders the modal (conditional) or runs a reaction ----------------
 
 
-_FUTURE = datetime.now(UTC) + timedelta(minutes=10)
+def _future() -> datetime:
+    """A form deadline ten minutes after the moment the test stores the record."""
+    return datetime.now(UTC) + timedelta(minutes=10)
 
 
 def _field_action(block_id: str, state: dict[str, Any], private_metadata: str | None = None) -> dict[str, Any]:
@@ -755,7 +757,7 @@ _COND_SCHEMA: dict[str, Any] = {
 async def test_field_change_re_renders_conditional_without_a_consumer_call(fake_redis, http_script, interactions):
     # Conditional visibility on Slack: the platform re-evaluates visibleWhen HERE and views.update the
     # modal to hide the field — never a call to the consumer's reaction handler.
-    await store_form_record(_INTERACTION_ID, _CALLBACK, _COND_SCHEMA, _QUESTION, _FUTURE)
+    await store_form_record(_INTERACTION_ID, _CALLBACK, _COND_SCHEMA, _QUESTION, _future())
     http_script.results.append(httpx.Response(200, json={"ok": True}))
     state = {"kind": {FIELD_ACTION_ID: {"type": "radio_buttons", "selected_option": {"value": "b"}}}}
 
@@ -782,7 +784,7 @@ async def test_field_change_re_render_reads_cancel_and_title_off_the_record(fake
         _CALLBACK,
         _COND_SCHEMA,
         _QUESTION,
-        _FUTURE,
+        _future(),
         wording={"form": {"cancel": "Not now", "title": "Tell us"}},
     )
     http_script.results.append(httpx.Response(200, json={"ok": True}))
@@ -798,7 +800,7 @@ async def test_field_change_re_render_reads_cancel_and_title_off_the_record(fake
 async def test_field_change_failed_views_update_surfaces_loudly(fake_redis, http_script, interactions):
     from tai42_contract.channels import ChannelDeliveryError
 
-    await store_form_record(_INTERACTION_ID, _CALLBACK, _COND_SCHEMA, _QUESTION, _FUTURE)
+    await store_form_record(_INTERACTION_ID, _CALLBACK, _COND_SCHEMA, _QUESTION, _future())
     http_script.results.append(httpx.Response(200, json={"ok": False, "error": "not_found"}))
     state = {"kind": {FIELD_ACTION_ID: {"type": "radio_buttons", "selected_option": {"value": "b"}}}}
 
@@ -817,7 +819,7 @@ async def test_field_change_runs_reaction_and_applies_the_update(fake_redis, htt
         {"title": "Details", "fields": ["qty", "plan"], "kind": "input", "display": [{"kind": "body", "slot": "total"}]}
     ]
     reactions = {"field_changed": ["qty"], "page_advanced": [], "submitted": False, "choices": ["plan"]}
-    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _FUTURE, pages=pages, reactions=reactions)
+    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _future(), pages=pages, reactions=reactions)
     interactions.react_result = {
         "values": {"qty": 2},
         "options": {"plan": [{"value": "basic", "label": "Basic"}, {"value": "pro", "label": "Pro"}]},
@@ -853,7 +855,7 @@ async def _react_with_plan_options(fake_redis, http_script, interactions, plan_o
         "properties": {"qty": {"type": "integer"}, "plan": {"type": "string", "enum": ["basic"]}},
     }
     reactions = {"field_changed": ["qty"], "page_advanced": [], "submitted": False, "choices": ["plan"]}
-    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _FUTURE, reactions=reactions)
+    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _future(), reactions=reactions)
     interactions.react_result = {"options": {"plan": plan_options}}
     http_script.results.append(httpx.Response(200, json={"ok": True}))
     state = {"qty": {FIELD_ACTION_ID: {"type": "number_input", "value": "1"}}}
@@ -930,7 +932,7 @@ async def test_field_change_reaction_failure_shows_a_banner(fake_redis, http_scr
     # stale or silent value.
     schema = {"type": "object", "properties": {"qty": {"type": "integer"}}}
     reactions = {"field_changed": ["qty"], "page_advanced": [], "submitted": False, "choices": []}
-    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _FUTURE, reactions=reactions)
+    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _future(), reactions=reactions)
     interactions.react_error = RuntimeError("boom")
     http_script.results.append(httpx.Response(200, json={"ok": True}))
     state = {"qty": {FIELD_ACTION_ID: {"type": "number_input", "value": "1"}}}
@@ -968,7 +970,7 @@ async def test_field_change_on_unstamped_view_is_ignored(fake_redis, http_script
 
 async def _seed_reacting_submit(fake_redis) -> None:
     reactions = {"field_changed": [], "page_advanced": [], "submitted": True, "choices": []}
-    await store_form_record(_INTERACTION_ID, _CALLBACK, _SCHEMA, _QUESTION, _FUTURE, reactions=reactions)
+    await store_form_record(_INTERACTION_ID, _CALLBACK, _SCHEMA, _QUESTION, _future(), reactions=reactions)
 
 
 async def test_view_submission_date_bound_violation_degrades_to_an_inline_error(fake_redis, channels):
@@ -980,7 +982,7 @@ async def test_view_submission_date_bound_violation_degrades_to_an_inline_error(
         "type": "object",
         "properties": {"on": {"type": "string", "format": "date", "minDate": "2026-01-01", "maxDate": "2026-12-31"}},
     }
-    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _FUTURE)
+    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _future())
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
     channels.inbound_retry_reason = "Choose a date on or after 2026-01-01"
     channels.inbound_retry_field = "on"

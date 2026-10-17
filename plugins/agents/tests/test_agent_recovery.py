@@ -36,10 +36,11 @@ from pydantic import PrivateAttr
 from tai42_contract.agent import ToolResultStep
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
-from tests._client_tool import FakeClientTool, client_tool
 
 from tai42_agents._internal import recovery as rec
 from tai42_agents._internal.stream_events import aproject_agent_events
+
+from ._client_tool import FakeClientTool, client_tool
 
 _RECOVERY_LOGGER = "tai42_agents._internal.recovery"
 

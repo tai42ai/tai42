@@ -23,7 +23,12 @@ from tai42_contract.interactions import (
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import tool_call_frame
 from tai42_kit.interactions.park_marker import suspended_interaction_marker
-from tests._tools_agent_park_support import (
+
+from tai42_agents._internal.park import drive as park_drive_mod
+from tai42_agents._internal.park.park_binding import agents_park_index
+from tai42_agents._internal.park.resume import AGENT_RESUME_TOOL_NAME
+
+from ._tools_agent_park_support import (
     ScriptedChatModel,
     _agent,
     _ask_call,
@@ -34,11 +39,7 @@ from tests._tools_agent_park_support import (
     _tool_messages,
     _wire_tools_build,
 )
-from tests.conftest import bind_park_index
-
-from tai42_agents._internal.park import drive as park_drive_mod
-from tai42_agents._internal.park.park_binding import agents_park_index
-from tai42_agents._internal.park.resume import AGENT_RESUME_TOOL_NAME
+from .conftest import bind_park_index
 
 
 @pytest.fixture

@@ -11,12 +11,6 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from tai42_contract.template import TemplatedText
-from tests._langchain_deep_agent_factory_support import (
-    _FAKE_LLM,
-    _FakeRunnable,
-    _nested_pair,
-    _tool,
-)
 
 from tai42_agents._internal.recovery import _tool_error_middleware
 from tai42_agents.langchain_deep_agent import factory
@@ -27,6 +21,13 @@ from tai42_agents.langchain_deep_agent.factory import (
     build_langchain_deep_agent,
 )
 from tai42_agents.langchain_deep_agent.spec import ResolvedSubAgentSpec
+
+from ._langchain_deep_agent_factory_support import (
+    _FAKE_LLM,
+    _FakeRunnable,
+    _nested_pair,
+    _tool,
+)
 
 
 def test_validate_rejects_two_level_nesting() -> None:

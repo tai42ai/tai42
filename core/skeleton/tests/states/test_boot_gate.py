@@ -15,11 +15,12 @@ import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.states.errors import StatesNotConfiguredError
 from tai42_contract.states.models import StateSubject
-from tests._module_identity import restore_states_module_identity
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.states.service.service import StatesService
+
+from .._module_identity import restore_states_module_identity
 
 
 def test_boot_with_no_postgres_and_states_refuses_501() -> None:

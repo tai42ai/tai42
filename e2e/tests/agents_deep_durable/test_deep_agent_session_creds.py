@@ -42,6 +42,7 @@ from ._support import AGENT, DETERMINISTIC_MARKS
 
 pytestmark = [
     *DETERMINISTIC_MARKS,
+    pytest.mark.usefixtures("checkpoint_redis_configured"),
     pytest.mark.needs(
         "helper:llm",
         "process",

@@ -6,10 +6,11 @@ import asyncio
 
 import pytest
 from tai42_contract.app import tai42_app
-from tests._claude_app import build_local_app
 
 from tai42_agents.claude_code.skills_sync import SkillNameError, sync_skills, validate_name
 from tai42_agents.claude_code.skills_sync import _dest_path as dest_path
+
+from ._claude_app import build_local_app
 
 _TEMPLATES = {
     "skills/jq/SKILL.md": "# jq skill",

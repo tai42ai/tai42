@@ -14,12 +14,6 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from tai42_contract.template import TemplatedText
 from tai42_kit.llm.runtime import build_agent_input
-from tests._langchain_deep_agent_factory_support import (
-    _FAKE_LLM,
-    _inline,
-    _mark_count,
-    _RecordingChatModel,
-)
 
 from tai42_agents.langchain_deep_agent import factory
 from tai42_agents.langchain_deep_agent.backend import SKILLS_ROOT
@@ -30,6 +24,13 @@ from tai42_agents.langchain_deep_agent.factory import (
     build_langchain_deep_agent,
 )
 from tai42_agents.langchain_deep_agent.spec import ResolvedSubAgentSpec
+
+from ._langchain_deep_agent_factory_support import (
+    _FAKE_LLM,
+    _inline,
+    _mark_count,
+    _RecordingChatModel,
+)
 
 
 def test_collect_inline_skills_spans_all_agents() -> None:

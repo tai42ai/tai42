@@ -93,6 +93,9 @@ addopts = ["--import-mode=importlib"]
 testpaths = ["tests"]
 xfail_strict = true
 filterwarnings = ["error"]
+markers = [
+    "scoped_install: needs this member's own package-scoped install (uv sync --package <member>); a whole-repo session, whose venv holds every member, skips it",
+]
 
 [tool.coverage.run]
 source = ["tai42_webhook_verifier_github"]

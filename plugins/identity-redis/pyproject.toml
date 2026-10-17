@@ -99,6 +99,9 @@ testpaths = ["tests"]
 xfail_strict = true
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "scoped_install: needs this member's own package-scoped install (uv sync --package <member>); a whole-repo session, whose venv holds every member, skips it",
+]
 
 [tool.coverage.run]
 source = ["tai42_identity_redis"]

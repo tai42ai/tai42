@@ -180,7 +180,11 @@ tai42_skeleton = ["py.typed", "**/*.sql", "schemas/*.json"]
 # module loads under a unique path-derived name, so a whole-repo run collecting
 # every member's ``tests`` tree never collides on shared basenames. Intra-suite
 # helper imports are relative (``from .conftest``), resolving the same under the
-# scoped rootdir here and the repo-root rootdir of a whole-repo run.
+# scoped rootdir here and the repo-root rootdir of a whole-repo run. A module the
+# app also imports by its dotted ``tests.*`` name (a manifest's fixture module, or
+# state such a module shares) is imported by that same absolute name instead: a
+# whole-repo run names this tree ``core.skeleton.tests``, and one name keeps one
+# module object.
 addopts = ["--import-mode=importlib"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

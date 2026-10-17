@@ -20,15 +20,16 @@ from tai42_contract.interactions import SuspendedInteraction, get_resume_continu
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import tool_call_frame
 from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
-from tests._client_tool import client_tool
-from tests._tools_agent_park_support import (
+
+from ._client_tool import client_tool
+from ._tools_agent_park_support import (
     ScriptedChatModel,
     _agent,
     _tool_messages,
     _wire_tools_build,
     _within_retention,
 )
-from tests.conftest import bind_park_index
+from .conftest import bind_park_index
 
 
 @pytest.fixture

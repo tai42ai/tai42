@@ -43,13 +43,14 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.template import TemplatedText
 from tai42_kit.interactions.park_marker import suspended_interaction_marker
-from tests.conftest import bind_park_index
 
 from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, collect_pending_interrupts
 from tai42_agents._internal.park.capability import ParkIdentity
 from tai42_agents._internal.park.drive import _park_interactions, finalize_drive
 from tai42_agents._internal.park.middleware import AsyncParkMiddleware
 from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
+
+from .conftest import bind_park_index
 
 
 class ScriptedChatModel(BaseChatModel):

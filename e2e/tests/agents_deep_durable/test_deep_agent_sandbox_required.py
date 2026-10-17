@@ -24,6 +24,7 @@ from ._support import AGENT, DETERMINISTIC_MARKS, build_deep_durable_no_sandbox_
 
 pytestmark = [
     *DETERMINISTIC_MARKS,
+    pytest.mark.usefixtures("checkpoint_redis_configured"),
     pytest.mark.needs("helper:llm", "process", "setting:agent:langchain_deep_agent", "setting:no-sandbox-provider"),
 ]
 

@@ -27,19 +27,26 @@ dev = [
     "uvloop>=0.22; sys_platform != 'win32'",
 ]
 
-# Lint config for the root-level scripts/ and tests/ — the only Python here not
-# owned by a workspace member. Mirrors every member's ruff regime; src marks the
-# conftest-injected scripts/ modules as first-party.
 # Whole-repo pytest config. Present so a bare ``pytest`` at the repo root anchors
 # its rootdir here and collects every member's ``tests`` tree in one session.
 # importlib import mode + the package-less test dirs (no tests/__init__.py) give
 # each test module a unique path-derived name, so shared basenames across members
-# (test_channel.py, conftest.py, ...) never collide. Scoped runs still resolve
+# (test_channel.py, conftest.py, ...) never collide. The root conftest.py keeps
+# each member's process-global state (its bound ``tai42_app``, its named loggers'
+# configuration) to that member and registers every member's markers. The e2e suite needs its Redis and Postgres up
+# (``docker compose up -d`` in e2e/) and stops the session loudly when they are
+# not. A test marked ``scoped_install`` is skipped here, and named with its reason
+# in the session summary: it judges its member's own package-scoped install. Only
+# the options in this block apply here; a member's own ini options (warning
+# filters, timeouts, reports) apply in its scoped run. Scoped runs still resolve
 # their own member pyproject as rootdir and are unaffected by this block.
 [tool.pytest.ini_options]
 addopts = ["--import-mode=importlib"]
 asyncio_mode = "auto"
 
+# Lint config for the root-level scripts/ and tests/ — the only Python here not
+# owned by a workspace member. Mirrors every member's ruff regime; src marks the
+# conftest-injected scripts/ modules as first-party.
 [tool.ruff]
 src = ["scripts"]
 target-version = "py313"

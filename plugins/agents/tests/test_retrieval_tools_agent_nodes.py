@@ -12,18 +12,19 @@ from unittest.mock import MagicMock
 import pytest
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool, ToolException
-from tests._retrieval_tools_agent_support import (
-    RecordingStore,
-    StubStore,
-    _graph,
-    _tool,
-)
 
 from tai42_agents.retrieval_tools_agent import graph as rgraph
 from tai42_agents.retrieval_tools_agent.agent import (
     _terminal_result,
 )
 from tai42_agents.retrieval_tools_agent.graph import RetrievalToolsGraph
+
+from ._retrieval_tools_agent_support import (
+    RecordingStore,
+    StubStore,
+    _graph,
+    _tool,
+)
 
 
 class TestAbuild:
