@@ -347,6 +347,30 @@ async def test_block_actions_modal_carries_the_reserved_per_send_data_and_pages(
     assert [b["text"]["text"] for b in view["blocks"] if b["type"] == "header"] == ["You", "Plan"]
 
 
+async def test_block_actions_modal_carries_the_number_bounds_slack_checks_inside_the_modal(fake_redis, http_script):
+    # A number's inclusive bounds ride the opened modal's number input, so Slack refuses an
+    # out-of-range value inside the modal before the submission reaches the answer door.
+    schema = {
+        "type": "object",
+        "properties": {"qty": {"type": "integer", "title": "Quantity", "minimum": 1, "maximum": 9}},
+    }
+    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, datetime.now(UTC) + timedelta(minutes=10))
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+
+    await slack_interactive(_signed(_block_actions()))
+
+    (req,) = http_script.requests
+    view = json.loads(req.content)["view"]
+    (block,) = [b for b in view["blocks"] if b["type"] == "input"]
+    assert block["element"] == {
+        "type": "number_input",
+        "action_id": FIELD_ACTION_ID,
+        "is_decimal_allowed": False,
+        "min_value": "1",
+        "max_value": "9",
+    }
+
+
 async def test_block_actions_open_reads_cancel_and_title_off_the_record(fake_redis, http_script):
     # The modal is built AT CLICK TIME from the record, so the caller's cancel label and form
     # title must reach the opened view — a fall back to the platform defaults would be the bug.
@@ -518,18 +542,18 @@ async def test_view_submission_retry_kept_shows_door_reason_keeps_record(fake_re
 
 
 async def test_view_submission_retry_kept_pins_door_named_field_block(fake_redis, channels):
-    # The door names the SECOND field: the error pins under its block_id, not the first
-    # field's, so the human sees it on the control that failed.
+    # The door names the SECOND field with its plain sentence: the sentence pins under its
+    # block_id, not the first field's, so the human reads it inside the modal on the failing control.
     await _seed_form(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
-    channels.inbound_retry_reason = "answer does not match schema at count: ..."
+    channels.inbound_retry_reason = "Enter a whole number"
     channels.inbound_retry_field = "count"
 
     response = await slack_interactive(_signed(_view_submission()))
 
     assert body_json(response) == {
         "response_action": "errors",
-        "errors": {"count": "answer does not match schema at count: ..."},
+        "errors": {"count": "Enter a whole number"},
     }
     assert fake_redis.store[_FORM_KEY]
 
@@ -958,7 +982,7 @@ async def test_view_submission_date_bound_violation_degrades_to_an_inline_error(
     }
     await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _FUTURE)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
-    channels.inbound_retry_reason = "answer does not match schema at on: date before minDate"
+    channels.inbound_retry_reason = "Choose a date on or after 2026-01-01"
     channels.inbound_retry_field = "on"
     state = {"on": {FIELD_ACTION_ID: {"type": "datepicker", "selected_date": "2025-06-01"}}}
 
@@ -966,7 +990,7 @@ async def test_view_submission_date_bound_violation_degrades_to_an_inline_error(
 
     assert body_json(response) == {
         "response_action": "errors",
-        "errors": {"on": "answer does not match schema at on: date before minDate"},
+        "errors": {"on": "Choose a date on or after 2026-01-01"},
     }
     assert fake_redis.store[_FORM_KEY]  # kept: the human corrects the out-of-range date and resubmits
 

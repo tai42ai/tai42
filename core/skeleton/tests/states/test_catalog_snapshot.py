@@ -327,11 +327,11 @@ async def test_a_failed_validator_build_leaves_no_entry(
     real = catalog_mod.Draft202012Validator
     calls = {"n": 0}
 
-    def flaky(schema: dict[str, Any]) -> Any:
+    def flaky(schema: dict[str, Any], **kwargs: Any) -> Any:
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("validator build failed")
-        return real(schema)
+        return real(schema, **kwargs)
 
     monkeypatch.setattr(catalog_mod, "Draft202012Validator", flaky)
     with pytest.raises(RuntimeError, match="validator build failed"):

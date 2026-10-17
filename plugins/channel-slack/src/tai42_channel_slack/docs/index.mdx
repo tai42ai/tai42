@@ -100,8 +100,19 @@ longer one to a select, an array of strings to a checkbox group or multi-select,
 date to a date picker, a boolean to Yes/No, a number to a number input — and the
 per-send layout drives display blocks, a review step, conditional fields and mid-form
 reactions. A string field may name an `inputMode` for the kind of text it collects:
-`email` draws an email text input and `url` a url text input. A property may also name
-a `control`: `chips` on a choice, `textarea` on a `string`.
+`email` draws an email text input and `url` a url text input; a `format: email` field
+draws the email text input too. A property may also name a `control`: `chips` on a
+choice, `textarea` on a `string`.
+
+**A field's declared shape** is checked inside the modal: a number's inclusive
+`minimum`/`maximum` is drawn as the number input's `min_value`/`max_value` (an
+integer's rounded inward to whole numbers; bounds no value can meet are refused when
+the form is asked, on every channel), a text length bound as the text input's own (below), and every
+other shape (`pattern`, the email shape, an exclusive bound, a date bound or range,
+a selection count) by the answer door on submit — the modal never closes on a refusal: the door's plain
+sentence for the failing field (*Enter a valid email address*) is pinned under that
+field (wrapped by the caller's `wording.answer.rejected` when set), and the person
+corrects it in place.
 
 A field may carry a **second line** of text (its schema `description`), drawn as the
 input block's hint under the control; a per-send option may carry one too (its

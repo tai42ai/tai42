@@ -1,4 +1,4 @@
-"""The operator's door for registering the reacting-form encryption public key.
+"""The operator's door for registering the Flow data-endpoint encryption public key.
 
 ``POST /api/channels/whatsapp/flow-encryption`` is authenticated and admin-only (the ``fenced``
 route class). It derives the business PUBLIC key from ``CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY`` and
@@ -63,7 +63,7 @@ def _body_refusal(exc: ValidationError) -> str:
 @tai42_app.http.custom_route(
     "/flow-encryption",
     methods=["POST"],
-    summary="Register the business public key for a sending number (reacting-form data endpoint)",
+    summary="Register the business public key for a sending number (Flow data endpoint)",
     tags=["channels"],
     request_model=ProvisionFlowEncryptionBody,
     response_model=FlowEncryptionProvisionedResponse,

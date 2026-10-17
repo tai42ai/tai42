@@ -353,3 +353,21 @@ def test_notification_wording_choice_label_must_be_non_blank():
             options=[ReplyOption(text="Item A")],
             wording=Wording.model_validate({"choice": {"label": "  "}}),
         )
+
+
+_PROTO_REFUSAL = (
+    "form schema property '__proto__' is not an allowed name: JavaScript reads it as an object's prototype, "
+    "so a form drawn in a browser cannot keep a field by that name"
+)
+
+
+def test_notification_refuses_a_form_property_named_proto():
+    import re
+
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+
+    schema = {"type": "object", "properties": {"__proto__": {"type": "string"}, "name": {"type": "string"}}}
+    with pytest.raises(ValidationError, match=re.escape(_PROTO_REFUSAL)):
+        ChannelNotification(message="hi", schema=schema)

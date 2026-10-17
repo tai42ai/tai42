@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 import hmac
 import json
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -23,7 +23,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome, InboundAnswerResult
-from tai42_contract.interactions import FormReactionEvent
+from tai42_contract.interactions import FormReactionEvent, FormShapeError, QuestionFormat
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -274,14 +274,36 @@ class _StubMedia:
 
 class _StubInteractions:
     """Stands in for ``app.interactions`` — the plugin's test venv cannot import the skeleton,
-    so the one reaction chokepoint (``react``) is faked at this contract seam. A test queues an
-    update to return (``react_result``) or an exception to raise (``react_error``) and reads back
-    the recorded ``react_calls`` (``interaction_id``/``event``/``partial_values``)."""
+    so the one reaction chokepoint (``react``) and the one form-shape check (``form_shape_errors``)
+    are faked at this contract seam. A test queues an update to return (``react_result``) or an
+    exception to raise (``react_error``) and reads back the recorded ``react_calls``
+    (``interaction_id``/``event``/``partial_values``); it queues the shape errors to report
+    (``shape_errors``, narrowed to the asked ``fields``) and reads back ``shape_calls``."""
 
     def __init__(self) -> None:
         self.react_calls: list[dict[str, Any]] = []
         self.react_result: dict[str, Any] = {}
         self.react_error: BaseException | None = None
+        self.shape_calls: list[dict[str, Any]] = []
+        self.shape_errors: list[FormShapeError] = []
+
+    def form_shape_errors(
+        self,
+        question: QuestionFormat,
+        values: Mapping[str, Any],
+        *,
+        fields: Collection[str] | None = None,
+        partial: bool = False,
+    ) -> list[FormShapeError]:
+        self.shape_calls.append(
+            {
+                "question": question,
+                "values": dict(values),
+                "fields": None if fields is None else list(fields),
+                "partial": partial,
+            }
+        )
+        return [error for error in self.shape_errors if fields is None or error.field in fields]
 
     async def react(
         self, interaction_id: str, event: FormReactionEvent, partial_values: dict[str, Any]

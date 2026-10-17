@@ -11,7 +11,13 @@ from typing import Any
 
 from tai42_contract.channels.options import Option, OptionSection
 from tai42_contract.channels.templates import ChannelTemplate
-from tai42_contract.interactions.models import LocationElement, MediaItem, Wording, check_wording_for_notification
+from tai42_contract.interactions.models import (
+    LocationElement,
+    MediaItem,
+    Wording,
+    check_form_property_names,
+    check_wording_for_notification,
+)
 
 
 def _require_prompt_for_surfaces(
@@ -128,11 +134,16 @@ def check_interactive_composition(
     * ``template`` is the standalone out-of-window send: exclusive with every other content and
       interactive field (``media``, ``location``, ``options``, ``sections``, ``schema``; and
       transitively ``header``/``footer``, which require ``options``/``sections``).
+    * a form ``schema`` declares no top-level property named ``__proto__``
+      (:func:`~tai42_contract.interactions.models.forms.check_form_property_names`), the one
+      name a form drawn in a browser cannot keep — the same refusal an asked form meets.
     """
     _require_prompt_for_surfaces(message, media, location, options, sections, schema, noun)
     _check_surface_exclusivity(options, sections, schema, noun)
     _check_header_footer_require_surface(header, footer, options, sections, noun)
     _check_template_standalone(template, media, location, options, sections, schema, header, footer, noun)
+    if isinstance(schema, dict):
+        check_form_property_names(schema)
     if wording is not None:
         check_wording_for_notification(
             wording,

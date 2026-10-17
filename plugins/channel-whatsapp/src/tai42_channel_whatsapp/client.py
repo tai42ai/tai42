@@ -564,7 +564,7 @@ async def create_flow(
 
     POSTs ``{name, categories: ["OTHER"], flow_json: <json string>}`` to
     ``{api}/{waba_id}/flows``. An ``endpoint_uri`` is included for an ENDPOINT-DRIVEN
-    (reacting) Flow, linking the published Flow to the plugin's data endpoint; a static Flow
+    Flow, linking the published Flow to the plugin's data endpoint; a static Flow
     passes none. A 2xx that carries no ``id`` raises loudly (mirrors the no-message-id guard on
     the send path). A pure Graph wrapper: it returns both handles Meta returned (the draft id
     and any ``validation_errors``); the lifecycle owner acts on them.

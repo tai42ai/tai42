@@ -2,8 +2,10 @@
 
 Run with ``pytest -m integration``. Reads the operator's
 ``CHANNEL_WHATSAPP_*`` credentials from the environment and skips cleanly
-when any is unset. Only the outbound Graph calls are live; the correlation store stays
-the in-memory fake. The flow legs (``CHANNEL_WHATSAPP_WABA_ID`` set) create and publish
+when any is unset. Only the outbound Graph calls are live; the correlation store is the
+in-memory fake, except in the endpoint leg, which writes to the host's store
+(``CHANNEL_WHATSAPP_REDIS_URL``) so the host's data endpoint can serve the Flow it sends.
+The flow legs (``CHANNEL_WHATSAPP_WABA_ID`` set) create and publish
 Flows on that WABA. The lifecycle probes clean up every Flow they create, however the probe
 ends: a draft is deleted, and a published one is deprecated (Meta never deletes a published
 Flow, so a deprecated probe Flow stays listed on the WABA).
@@ -20,6 +22,8 @@ from uuid import uuid4
 import httpx
 import pytest
 from tai42_contract.channels import ChannelDeliveryError
+from tai42_kit.clients import client_ctx as kit_client_ctx
+from tai42_kit.clients import shutdown_all_clients
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -178,8 +182,8 @@ class _ProbeFlows:
         self._api_base_url = api_base_url
         self._states: dict[str, str] = {}
 
-    async def create(self, name: str) -> FlowCreateResult:
-        created = await create_flow(waba_id=self._waba_id, name=name, flow_json=_probe_flow_json())
+    async def create(self, name: str, flow_json: dict[str, Any] | None = None) -> FlowCreateResult:
+        created = await create_flow(waba_id=self._waba_id, name=name, flow_json=flow_json or _probe_flow_json())
         self._states[created.flow_id] = "DRAFT"
         return created
 
@@ -297,3 +301,111 @@ async def test_create_under_a_deleted_draft_name_outcome(record_property):
         created = await flows.create(name)
         await flows.delete(created.flow_id)
         record_property("deleted_draft_name_outcome", await _recreate_outcome(flows, name))
+
+
+# --- the declared shapes on a live Flow -------------------------------------------------
+
+# Every shape family the Flow draws natively (required on a CalendarPicker date, a pattern with its
+# helper text, the whole-number pattern on an integer, the platform regex on a time) and one each
+# that only the data endpoint checks (an email format, a number bound), with every control binding
+# its ``error-message`` and a merged range binding the paired one.
+_SHAPED_LIVE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "code": {"type": "string", "title": "Code", "pattern": "^[0-9]{4}$"},
+        "count": {"type": "integer", "title": "Count"},
+        "at": {"type": "string", "title": "Time", "format": "time"},
+        "on": {"type": "string", "title": "Day", "format": "date"},
+        "start": {"type": "string", "title": "From", "format": "date"},
+        "end": {"type": "string", "title": "To", "format": "date", "rangeStart": "start", "maxDays": 5},
+        "email": {"type": "string", "title": "Email address", "format": "email"},
+        "qty": {"type": "integer", "title": "Quantity", "minimum": 1},
+    },
+    "required": ["code", "on", "email"],
+}
+
+_needs_flow_endpoint = pytest.mark.skipif(
+    not (
+        os.environ.get("CHANNEL_WHATSAPP_WABA_ID")
+        and os.environ.get("CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY")
+        and os.environ.get("CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI")
+    ),
+    reason="CHANNEL_WHATSAPP_WABA_ID / _FLOW_PRIVATE_KEY / _FLOW_ENDPOINT_URI not set (the endpoint leg needs each)",
+)
+
+
+@_needs_waba
+async def test_native_shapes_publish_without_validation_errors():
+    # The vendor authority for the native shape attributes: a static Flow carrying a TextInput
+    # ``pattern`` with its helper text, an integer's whole-number pattern, a time's regex pattern, a
+    # single-mode CalendarPicker with ``required``, and an ``error-message`` bound to an empty
+    # ``__err`` key on every control, created as a draft — Meta returns its validation errors for any
+    # attribute it refuses.
+    native = {
+        "type": "object",
+        "properties": {key: _SHAPED_LIVE_SCHEMA["properties"][key] for key in ("code", "count", "at", "on")},
+        "required": ["code", "on"],
+    }
+    flow_json, _ = build_form_flow(native)
+    assert "data_api_version" not in flow_json
+    async with _probe_flows() as flows:
+        created = await flows.create(_probe_name(), flow_json)
+        assert created.validation_errors == []
+
+
+_needs_host_store = pytest.mark.skipif(
+    not os.environ.get("CHANNEL_WHATSAPP_REDIS_URL"),
+    reason=(
+        "CHANNEL_WHATSAPP_REDIS_URL not set: the endpoint leg must write the form's sidecar to the store the "
+        "host's data endpoint reads, through the same setting the host uses"
+    ),
+)
+
+
+@pytest.fixture
+async def host_store(stub_app, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
+    # The correlation store this process writes is the host's real one: the kit's pooled Redis client
+    # opened from ``CHANNEL_WHATSAPP_REDIS_URL`` (and its sibling connection settings), exactly as the
+    # host opens it. Every other client stays the test's stub.
+    stubbed = stub_app.clients.client_ctx
+
+    def client_ctx(client_cls: type, settings: Any = None, **kwargs: Any) -> Any:
+        if client_cls is RedisClient:
+            return kit_client_ctx(RedisClient, settings, **kwargs)
+        return stubbed(client_cls, settings, **kwargs)
+
+    monkeypatch.setattr(stub_app.clients, "client_ctx", client_ctx)
+    yield
+    await shutdown_all_clients()
+
+
+@_needs_flow_endpoint
+@_needs_host_store
+async def test_shape_checked_form_publishes_endpoint_driven_and_sends(host_store, record_property):
+    # The whole shape-checked form delivered through the real Graph API, published endpoint-driven
+    # against the configured data endpoint (served by this plugin on the host), with the form's
+    # sidecar written to the host's own store so its data endpoint serves every screen. deliver()
+    # SUCCEEDS only if Meta created the Flow with no validation errors (the paired range
+    # ``error-message`` object included), published it, and accepted the send. What the person reads
+    # on each failure is then observed on the phone and recorded beside the run: the native refusals
+    # (an empty required field; a pattern mismatch; whether the email/phone keyboards refuse on their
+    # own), that native checks run before a ``data_exchange`` footer, that a same-screen refusal keeps
+    # the person on the screen with the bound ``error-message`` showing its sentence and an empty one
+    # showing nothing, the longest dynamic error text shown whole, and that every control keeps what
+    # the person typed after a refusal (the refusal carries the screen's whole data, each control's
+    # ``__init`` set to the value the person left in it). The final submit reaches a host that holds no parked ask
+    # for this probe's interaction, so what follows the submit is not part of this leg.
+    settings = whatsapp_settings()
+    delivery = make_delivery(
+        recipient=settings.allowed_recipients[0],
+        answer_format="form",
+        schema=_SHAPED_LIVE_SCHEMA,
+        question="tai42-channel-whatsapp live probe: shape-checked form — fill it with bad values first.",
+    )
+    await WhatsAppChannel().deliver(delivery)
+    record_property("shape_probe_interaction", delivery.interaction_id)
+    record_property(
+        "shape_probe_observe",
+        "empty required text; pattern mismatch on Code; dhdhdh in the email keyboard; 0 in Quantity; "
+        "a same-screen refusal; an empty error-message on every clean field; every typed value kept after it",
+    )

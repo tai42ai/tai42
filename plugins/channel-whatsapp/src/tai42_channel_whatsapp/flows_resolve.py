@@ -1,10 +1,11 @@
-"""Resolving a form's page layout and its range-pair merges.
+"""Resolving a form's page layout, its range-pair merges and its display slots' data keys.
 
 A form's screens come from its ``pages`` (absent → one screen carrying every
 property in schema order); the range-pair merge map says which ``rangeStart`` date
-pairs draw as a single range control. Both the Flow-JSON builder and the per-send
-data builder read this shared geometry, so a pair's merge decision and a screen's
-field list are identical on every surface.
+pairs draw as a single range control; the slot map names each display slot's
+screen-``data`` key. The Flow-JSON builder, the per-send data builder and the data
+endpoint read this shared geometry, so a pair's merge decision, a screen's field
+list and a slot's data key are identical on every surface.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import Any
 
 from tai42_contract.channels import ChannelInputError
 
-from tai42_channel_whatsapp.flows_components import range_pairs
+from tai42_channel_whatsapp.flows_components import _sanitize_name, range_pairs
 
 # The default top-bar title of the page-less form's single screen, shown when the
 # caller passes no ``form_title``. A form ask carries no domain-specific chrome.
@@ -67,3 +68,29 @@ def _form_range_merges(
     for this_fields in fields_by_screen:
         merges.update(range_pairs(this_fields, properties, has_review_page))
     return merges
+
+
+def slot_datanames(pages: list[dict[str, Any]] | None) -> dict[str, str]:
+    """Map each declared display ``slot`` to a unique identifier-safe screen-``data`` key.
+
+    A slotted display block reads ``${data.<key>}``; a reaction's ``display`` update fills it
+    through the data endpoint. Slot names are unique across a form (the contract enforces it);
+    each is sanitised to Meta's identifier grammar and disambiguated deterministically on a
+    sanitisation collision, so the renderer and the data endpoint recompute an identical map.
+    """
+    mapping: dict[str, str] = {}
+    used: set[str] = set()
+    for page in pages or []:
+        for block in page.get("display") or []:
+            slot = block.get("slot") if isinstance(block, dict) else None
+            if not isinstance(slot, str) or slot in mapping:
+                continue
+            base = f"slot_{_sanitize_name(slot)}"
+            candidate = base
+            suffix = 2
+            while candidate in used:
+                candidate = f"{base}_{suffix}"
+                suffix += 1
+            used.add(candidate)
+            mapping[slot] = candidate
+    return mapping

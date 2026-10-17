@@ -163,6 +163,12 @@ def _bridge_twilio_env(res: StackResources, *, real: bool) -> dict[str, str]:
     }
 
 
+# The Flow data-endpoint URL a mock stack configures on its endpoint-driven Flows. The WhatsApp stub
+# records it on the Flow create and never calls it (the legs drive the SUT's endpoint themselves),
+# so it names a reserved ``.test`` host.
+BRIDGE_WHATSAPP_FLOW_ENDPOINT_URI = "https://flow-endpoint.e2e.test/api/channels/whatsapp/flow-data"
+
+
 def _bridge_whatsapp_env(res: StackResources, *, real: bool) -> dict[str, str]:
     if real:
         # HARNESS-MAP: DEFAULT_PHONE_NUMBER_ID is our_identity, TEST_TO the allowlisted
@@ -186,9 +192,11 @@ def _bridge_whatsapp_env(res: StackResources, *, real: bool) -> dict[str, str]:
         # The WABA a form ask's WhatsApp Flow is created under (form-delivery path only).
         "CHANNEL_WHATSAPP_WABA_ID": BRIDGE_WHATSAPP_WABA_ID,
         "CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS": BRIDGE_WHATSAPP_CLIENT,
-        # The reacting-form business key pair, fresh per stack: the provisioning door derives
-        # and registers its public half.
+        # The business key pair, fresh per stack, an endpoint-driven form (a reacting or
+        # shape-checked one) publishes and is served with: the provisioning door derives and
+        # registers its public half, and the legs encrypt their data-endpoint requests to it.
         "CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY": _fresh_flow_private_key(),
+        "CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI": BRIDGE_WHATSAPP_FLOW_ENDPOINT_URI,
     }
 
 

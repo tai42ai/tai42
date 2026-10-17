@@ -702,7 +702,9 @@ def _schema_cache_key() -> str:
 def _seed_schema_cache(fake_redis: FakeRedis) -> None:
     """The durable schema+map entry the notify-form send left beside the flow id."""
     labels = {label: key for key, label in payload_labels(_FORM_SCHEMA["properties"]).items()}
-    fake_redis.store[_schema_cache_key()] = json.dumps({"schema": _FORM_SCHEMA, "names": labels})
+    fake_redis.store[_schema_cache_key()] = json.dumps(
+        {"schema": _FORM_SCHEMA, "names": labels, "pages": None, "option_fields": []}
+    )
 
 
 async def test_notify_form_reply_accepts_coerced_form_and_rendered_text(
@@ -975,7 +977,7 @@ async def test_notify_form_reply_maps_payload_labels_back_to_schema_keys(
     _, schema_hash = build_form_flow(_ODD_SCHEMA)
     labels = {label: key for key, label in payload_labels(_ODD_SCHEMA["properties"]).items()}
     fake_redis.store[f"channel:whatsapp:flow-schema:{_WABA_ID}:{schema_hash}"] = json.dumps(
-        {"schema": _ODD_SCHEMA, "names": labels}
+        {"schema": _ODD_SCHEMA, "names": labels, "pages": None, "option_fields": []}
     )
     token = f"{_NF_PREFIX}{schema_hash}:cafef00d"
     plabels = payload_labels(_ODD_SCHEMA["properties"])
@@ -986,3 +988,37 @@ async def test_notify_form_reply_maps_payload_labels_back_to_schema_keys(
     assert result.status_code == 200
     assert channels.inbound_calls == []  # a notify reply is a participant turn, not an answer
     assert stub_app.conversations.accept_calls[0]["form"] == {"a.b=/c/4:d": 7, "note": "hi"}
+
+
+async def test_form_rejection_resend_names_the_refused_field_by_its_label(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The door refuses with the platform's plain sentence and names the field; the re-sent Flow's
+    # body reads "Label: sentence", the label the person saw on the field.
+    schema = {
+        "type": "object",
+        "properties": {"email": {"type": "string", "pattern": "^[^@]+@[^@]+$", "title": "Email address"}},
+        "required": ["email"],
+    }
+    delivery = make_delivery(question=_FORM_QUESTION)
+    await reserve_pending(
+        PHONE_NUMBER_ID,
+        WA_ID,
+        delivery.callback_url,
+        delivery.timeout_at,
+        interaction_id="int-1",
+        schema=schema,
+        question=delivery.question,
+        form_names={label: key for key, label in payload_labels(schema["properties"]).items()},
+    )
+    _, schema_hash = build_form_flow(schema)
+    fake_redis.store[f"channel:whatsapp:flow:{_WABA_ID}:{expected_flow_identity(schema_hash)}"] = "flow-cached"
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "This value is not in the expected form"
+    channels.inbound_retry_field = "email"
+    fake_httpx.responses.append(_flow_accepted())
+
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "Email address": "dhdhdh"})))
+
+    body = fake_httpx.calls[0]["json"]["interactive"]["body"]["text"]
+    assert body == f"{_FORM_QUESTION}\n\n{_FORM_REJECTION_LEAD} Email address: This value is not in the expected form"

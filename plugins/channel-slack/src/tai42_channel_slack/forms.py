@@ -12,7 +12,7 @@ layout the ask carried (``data``/``pages``/``reactions``):
 
 Supported property subset (identical to the callback door's own form renderer, so
 a modal answer validates there): ``string`` → ``plain_text_input``, except a
-``string`` whose ``inputMode`` is ``email`` → ``email_text_input`` or ``url`` →
+``string`` whose ``inputMode`` is ``email`` (or whose ``format`` is ``email``) → ``email_text_input`` or ``url`` →
 ``url_text_input`` (Slack's own text elements, which carry their built-in check),
 while ``numeric``/``decimal``/``tel`` have no Slack keyboard hint and degrade to a
 ``plain_text_input`` (the value always arrives exactly as typed); ``string``
@@ -27,7 +27,8 @@ RFC 3339 string, so ``date-time`` stays text); an ``array`` of strings → a
 ``checkboxes`` group at or below the threshold, else a ``multi_static_select``,
 over the items' ``enum`` or per-send ``options`` (a free array with no choices is a
 multiline ``plain_text_input``, one entry per line); ``boolean`` → ``radio_buttons``
-(Yes/No → ``true``/``false``); ``integer``/``number`` → ``number_input``. Anything
+(Yes/No → ``true``/``false``); ``integer``/``number`` → ``number_input`` (its inclusive
+``minimum``/``maximum`` drawn as ``min_value``/``max_value``). Anything
 else, or a value past a Slack cap, raises :class:`FormSchemaError` naming the
 property — never a silently dropped or truncated field. A property schema's
 ``description`` renders as the input block's ``hint`` (the field's second line); a

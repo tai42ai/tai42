@@ -5498,7 +5498,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "9.2.0"
+version = "10.0.0"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "cryptography" },
@@ -5784,12 +5784,14 @@ dependencies = [
     { name = "httpcore" },
     { name = "httpx" },
     { name = "jsonschema" },
+    { name = "jsonschema-specifications" },
     { name = "mcp" },
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "referencing" },
     { name = "ruamel-yaml" },
     { name = "tai42-contract" },
 ]
@@ -5968,7 +5970,8 @@ requires-dist = [
     { name = "joserfc", marker = "extra == 'dev'", specifier = ">=1.7.5" },
     { name = "joserfc", marker = "extra == 'jwt'", specifier = ">=1.7.5" },
     { name = "jq", marker = "extra == 'jq'", specifier = ">=1.10" },
-    { name = "jsonschema", specifier = ">=4" },
+    { name = "jsonschema", specifier = ">=4.19.2" },
+    { name = "jsonschema-specifications", specifier = ">=2023.3.6" },
     { name = "langchain", marker = "extra == 'llm'", specifier = ">=1.2,<2" },
     { name = "langchain-anthropic", marker = "extra == 'anthropic'", specifier = ">=1.7.5" },
     { name = "langchain-core", marker = "extra == 'llm'", specifier = ">=1.2,<2" },
@@ -6009,6 +6012,7 @@ requires-dist = [
     { name = "redis", marker = "extra == 'llm'", specifier = ">=5" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5" },
     { name = "redisvl", marker = "extra == 'llm'", specifier = ">=0.15.0,<1" },
+    { name = "referencing", specifier = ">=0.32.0" },
     { name = "ruamel-yaml", specifier = ">=0.18" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "sentence-transformers", marker = "extra == 'huggingface'", specifier = ">=5.3" },

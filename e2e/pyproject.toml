@@ -64,7 +64,7 @@ dependencies = [
     "tai42-channel-telegram>=6.0,<7",
     "tai42-channel-slack>=6.1,<7",
     "tai42-channel-twilio>=7.0,<8",
-    "tai42-channel-whatsapp>=9.2,<10",
+    "tai42-channel-whatsapp>=10.0,<11",
     "tai42-channel-web>=8.1,<9",
     # Loaded only by the monitoring stack's manifest.
     "tai42-monitoring-langfuse>=5.1,<6",
@@ -84,7 +84,8 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "PyYAML>=6.0",
     # The per-stack business key pair the WhatsApp bridge env generates for the Flow
-    # encryption provisioning door.
+    # encryption provisioning door and the Flow data endpoint, and the WhatsApp stub's
+    # Meta-side encryption of a data-endpoint request and decryption of its reply.
     "cryptography>=44",
     # The Celery client library the celery-backend census pings the control plane
     # with (never tai42_backend_celery — the harness does not import the SUT), plus

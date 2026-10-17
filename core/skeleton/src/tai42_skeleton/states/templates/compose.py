@@ -20,7 +20,7 @@ import jsonschema
 from jsonschema import Draft202012Validator
 from tai42_contract.states.errors import AttachConflictError, SchemaValidationError
 
-from tai42_skeleton.states.schema import _DRAFT_2020_12, _iter_refs, _schema_nodes, _validate_schema
+from tai42_skeleton.states.schema import _DRAFT_2020_12, _validate_schema, iter_refs, schema_nodes
 from tai42_skeleton.states.templates.model import StateTemplate
 from tai42_skeleton.states.templates.parameters import _iter_marker_names, substitute_parameters
 from tai42_skeleton.states.templates.trace import _inject_trace
@@ -46,12 +46,13 @@ def compose_effective_schema(
     overlapping another attachment's path, is refused with
     :class:`~tai42_contract.states.errors.AttachConflictError`. A fragment its parameters leave
     malformed is refused with :class:`~tai42_contract.states.errors.SchemaValidationError`
-    naming the template. The composed
-    schema satisfies the declaration rules (object-rooted, at least one property, a valid
-    draft 2020-12 schema, no ``$schema`` naming another dialect, every ``$ref`` local and
-    resolvable, no ``$dynamicRef``, no ``$id``
-    below the root, unique ``$anchor`` / ``$dynamicAnchor`` names, no cycle of references that
-    never descends into the document), raising
+    naming the template. The composed schema satisfies the declaration rules (object-rooted, at
+    least one property, a valid draft 2020-12 schema, no ``$schema`` naming another dialect, every
+    ``$ref`` local and resolvable, no ``$dynamicRef``, no root ``$id`` naming a meta-schema, no
+    ``$id`` below the root, unique ``$anchor`` / ``$dynamicAnchor`` names, under a root ``$id`` no
+    ``$dynamicAnchor`` below the root whose name the meta-schema subschema a reference reaches binds
+    dynamically or the reference names, every pointer's array index an RFC 6901 index, no cycle of
+    references that never descends into the document), raising
     :class:`~tai42_contract.states.errors.SchemaValidationError` otherwise.
     """
     for i, (template_a, path_a, _pa) in enumerate(attachments):
@@ -204,15 +205,16 @@ def _placement_pointer(path: list[str]) -> str:
 def _rebase_refs(fragment: dict[str, Any], pointer: str, template_name: str, path: list[str]) -> dict[str, Any]:
     """A copy of ``fragment`` with every schema node's ``#`` / ``#/…`` ``$ref`` prefixed by ``pointer``.
 
-    The nodes are the fragment's :func:`_schema_nodes`, resolved against the fragment's own root:
-    its subschemas plus every node a pointer ref reaches. A ``$ref``-shaped value elsewhere inside
-    ``const``, ``enum``, ``default`` or ``examples`` is data and stays as it is; ``#anchor`` and
-    non-local refs are left untouched. A node to rebase that a pointer ref reaches INSIDE a
-    ``const`` or ``enum`` value is both data a record must equal and a schema whose ref must
-    move, so it is refused with :class:`SchemaValidationError` naming the template and the ref.
+    The nodes are the fragment's :func:`~tai42_skeleton.states.schema.schema_nodes`, resolved
+    against the fragment's own root: its subschemas plus every node a pointer ref reaches. A
+    ``$ref``-shaped value elsewhere inside ``const``, ``enum``, ``default`` or ``examples`` is data
+    and stays as it is; ``#anchor`` and non-local refs are left untouched. A node to rebase that a
+    pointer ref reaches INSIDE a ``const`` or ``enum`` value is both data a record must equal and a
+    schema whose ref must move, so it is refused with :class:`SchemaValidationError` naming the
+    template and the ref.
     """
     out = copy.deepcopy(fragment)
-    nodes = _schema_nodes(out)
+    nodes = schema_nodes(out)
     in_data = {id(item) for node in nodes for key in ("const", "enum") if key in node for item in _dicts_in(node[key])}
     for node in nodes:
         ref = node.get("$ref")
@@ -244,7 +246,7 @@ def _refuse_root_relative_refs(fragment: dict[str, Any], template_name: str) -> 
     A ``#/properties/<key>…`` or ``#/$defs/<key>…`` pointer keeps its target (a colliding key is
     refused by the merge); ``#`` and any other root pointer would name the merged state root.
     """
-    for ref in _iter_refs(fragment):
+    for ref in iter_refs(fragment):
         if not (ref == "#" or ref.startswith("#/")):
             continue
         tokens = unquote(ref[2:]).split("/") if ref != "#" else []

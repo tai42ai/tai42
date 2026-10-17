@@ -3,6 +3,7 @@ and their against-schema cross-check on ``InteractionRequest``."""
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -16,6 +17,7 @@ from tai42_contract.interactions.models import (
     FormOption,
     FormPage,
     InteractionRequest,
+    check_format_payload,
 )
 
 
@@ -494,3 +496,40 @@ def test_form_page_button_label_non_blank():
     assert FormPage(title="Who", fields=["name"]).button_label is None
     with pytest.raises(ValueError, match="form page button_label must be non-blank when set"):
         FormPage(title="Who", fields=["name"], button_label="   ")
+
+
+_PROTO_PROPERTY = {"type": "object", "properties": {"__proto__": {"type": "string"}, "name": {"type": "string"}}}
+_PROTO_PROPERTY_REFUSAL = (
+    "form schema property '__proto__' is not an allowed name: JavaScript reads it as an object's "
+    "prototype, so a form drawn in a browser cannot keep a field by that name"
+)
+_PROTO_SLOT_PAGES = [
+    {"title": "A", "fields": ["name", "color", "count", "agree"], "display": [{"kind": "body", "slot": "__proto__"}]}
+]
+_PROTO_SLOT_REFUSAL = (
+    "form display slot '__proto__' is not an allowed name: JavaScript reads it as an object's "
+    "prototype, so a form drawn in a browser cannot keep a slot by that name"
+)
+
+
+def test_a_form_property_named_proto_is_refused():
+    with pytest.raises(ValueError, match=re.escape(_PROTO_PROPERTY_REFUSAL)):
+        _interaction(answer_format=AnswerFormat.FORM, format_payload={"schema": _PROTO_PROPERTY})
+
+
+def test_a_form_display_slot_named_proto_is_refused():
+    with pytest.raises(ValueError, match=re.escape(_PROTO_SLOT_REFUSAL)):
+        _form(pages=_PROTO_SLOT_PAGES)
+
+
+def test_the_answer_check_view_refuses_a_proto_property_and_slot():
+    with pytest.raises(ValueError, match=re.escape(_PROTO_PROPERTY_REFUSAL)):
+        check_format_payload(AnswerFormat.FORM, {"schema": _PROTO_PROPERTY}, durable=False)
+    with pytest.raises(ValueError, match=re.escape(_PROTO_SLOT_REFUSAL)):
+        check_format_payload(AnswerFormat.FORM, {"schema": _FORM_SCHEMA, "pages": _PROTO_SLOT_PAGES}, durable=False)
+
+
+def test_a_form_property_named_like_another_object_member_is_accepted():
+    schema = {"type": "object", "properties": {"constructor": {"type": "string"}, "toString": {"type": "string"}}}
+    request = _interaction(answer_format=AnswerFormat.FORM, format_payload={"schema": schema})
+    assert request.format_payload == {"schema": schema}

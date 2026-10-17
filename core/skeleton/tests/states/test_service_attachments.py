@@ -269,7 +269,7 @@ async def test_attach_refuses_a_composition_the_declare_rules_refuse(svc: States
     await svc.put_declaration(_STATE)
     before = await svc.effective_schema_for("alerts")
     await svc.put_template(_template_doc("m", schema=_ID_FRAGMENT), replace=False)
-    with pytest.raises(SchemaValidationError, match="\\$id below the root"):
+    with pytest.raises(SchemaValidationError, match="below the root is not allowed: the schema is one resource"):
         await svc.attach("alerts", "m", AttachBody(path=["box"]))
     assert await svc.list_attachments("alerts") == []
     assert await svc.effective_schema_for("alerts") == before
@@ -281,7 +281,7 @@ async def test_update_attachment_declarations_refuses_a_composition_the_declare_
     await _attach_by_id_fragment(svc, monkeypatch)
     _store_an_id_rooted_fragment(monkeypatch)
     before = await svc.effective_schema_for("alerts")
-    with pytest.raises(SchemaValidationError, match="\\$id below the root"):
+    with pytest.raises(SchemaValidationError, match="below the root is not allowed: the schema is one resource"):
         await svc.update_attachment_declarations("alerts", "byid", {})
     assert await svc.effective_schema_for("alerts") == before
 
@@ -294,7 +294,7 @@ async def test_detach_refuses_a_composition_the_declare_rules_refuse(
     await svc.attach("alerts", "other", AttachBody(path=["sub"]))
     _store_an_id_rooted_fragment(monkeypatch)
     before = await svc.effective_schema_for("alerts")
-    with pytest.raises(SchemaValidationError, match="\\$id below the root"):
+    with pytest.raises(SchemaValidationError, match="below the root is not allowed: the schema is one resource"):
         await svc.detach("alerts", "other")
     assert sorted(a["template"] for a in await svc.list_attachments("alerts")) == ["byid", "other"]
     assert await svc.effective_schema_for("alerts") == before
@@ -312,7 +312,7 @@ async def test_redeclare_refuses_a_composition_the_declare_rules_refuse(
         subject_kinds=["thread"],
         default_subject_kind="thread",
     )
-    with pytest.raises(SchemaValidationError, match="\\$id below the root"):
+    with pytest.raises(SchemaValidationError, match="below the root is not allowed: the schema is one resource"):
         await svc.put_declaration(widened)
     assert await svc.effective_schema_for("alerts") == before
 

@@ -326,3 +326,42 @@ def test_form_wording_fields_refuses_an_unknown_property():
     schema = _schema({"size": {"type": "string", "enum": ["s", "m"]}})
     with pytest.raises(ValueError, match=r"wording.form.fields names 'ghost', which is not a declared property"):
         check_form_wording_fields(schema, None, {"ghost": FieldWording(choice_label="Pick")})
+
+
+# === the per-field ``invalid`` sentence =====================================
+
+
+def test_field_wording_invalid_round_trips_alone_and_refuses_blank():
+    wording = FieldWording(invalid="Enter a valid email address")
+    assert wording.invalid == "Enter a valid email address"
+    assert wording.choice_label is None
+    assert FieldWording.model_validate(wording.model_dump()) == wording
+    with pytest.raises(ValueError, match=r"wording.form.fields entry.invalid must be non-blank when set"):
+        FieldWording(invalid="   ")
+
+
+@pytest.mark.parametrize(
+    "prop",
+    [
+        {"type": "string", "pattern": "^[a-z]+$"},
+        {"type": "string", "format": "email"},
+        {"type": "integer", "minimum": 1},
+        {"type": "array", "items": {"type": "string", "enum": ["a", "b"]}, "minItems": 1},
+        {"type": "string", "format": "date", "minDate": "2026-01-01"},
+    ],
+)
+def test_form_wording_fields_admits_invalid_on_a_field_with_a_shape(prop: dict[str, Any]):
+    check_form_wording_fields(_schema({"field": prop}), None, {"field": FieldWording(invalid="Not right")})
+
+
+def test_form_wording_fields_refuses_invalid_on_a_field_with_no_shape():
+    schema = _schema({"note": {"type": "string"}})
+    with pytest.raises(ValueError, match=r"wording.form.fields names 'note', which declares no shape to break"):
+        check_form_wording_fields(schema, None, {"note": FieldWording(invalid="Not right")})
+
+
+def test_form_wording_fields_checks_each_member_by_its_own_rule():
+    # ``choice_label`` keeps its "draws a choice list" rule even beside an admitted ``invalid``.
+    schema = _schema({"code": {"type": "string", "pattern": "^[0-9]+$"}})
+    with pytest.raises(ValueError, match=r"wording.form.fields names 'code', which draws no choice list"):
+        check_form_wording_fields(schema, None, {"code": FieldWording(choice_label="Pick", invalid="Digits only")})

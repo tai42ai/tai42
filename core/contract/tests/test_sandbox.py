@@ -301,6 +301,7 @@ def test_app_interactions_exposes_ask_typed_by_the_contract_protocol():
     assert protocol_members(AppInteractions) == {
         "ask",
         "check_answer",
+        "form_shape_errors",
         "question_format",
         "react",
         "visit",
@@ -369,6 +370,11 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
 
         def check_answer(self, question: object, answer: object) -> object:
             return answer
+
+        def form_shape_errors(
+            self, question: object, values: object, *, fields: object = None, partial: bool = False
+        ) -> list[object]:
+            return []
 
         def question_format(self, answer_format: str, **arguments: object) -> object:
             return None

@@ -162,9 +162,12 @@ async def test_form_over_telegram_web_app_button_and_the_callback_form_page(
         assert '<input data-field="contact" data-kind="string" type="email" required>' in page.text
         assert '<input data-field="code" data-kind="string" type="text" inputmode="numeric" required>' in page.text
 
-        # A mismatched object is refused with the door's 400 and the ask stays answerable.
+        # A mismatched object is refused with the door's 400 — the plain sentence for the first
+        # failing field and its name, which the page pins under that field — and the ask stays answerable.
         bad = await post_callback(callback_url, json.dumps({"answer": {"label": "x", "amount": "nope"}}).encode())
         assert bad.status_code == 400, bad.text
+        assert bad.json()["error"] == "Enter a whole number"
+        assert bad.json()["field"] == "amount"
         assert await is_pending(stack, stack.port_a, question)
         assert not ask_task.done()
 
@@ -832,10 +835,8 @@ async def test_form_over_slack_rejected_submission_shows_the_caller_inline_error
         assert rejected.status_code == 200, rejected.text
         body = rejected.json()
         assert body["response_action"] == "errors", body
-        error_text = next(iter(body["errors"].values()))
-        assert error_text.startswith("Rejected: "), body
-        assert "{reason}" not in error_text, body
-        assert error_text != "Rejected: ", body
+        # The door's plain sentence for the refused field, pinned under that field's block.
+        assert body["errors"] == {"amount": "Rejected: Enter a whole number"}, body
     finally:
         await cancel_and_join(ask_task)
 

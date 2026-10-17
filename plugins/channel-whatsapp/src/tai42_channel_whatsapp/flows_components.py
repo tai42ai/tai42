@@ -20,7 +20,7 @@ from typing import Any, assert_never
 
 from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import FormControl, FormInputMode
-from tai42_kit.interactions import DATE_CONSTRAINT_KEYS, FORM_WEEKDAYS
+from tai42_kit.interactions import FORM_WEEKDAYS
 
 from tai42_channel_whatsapp.flows_choices import (
     _CHIPS_MAX_CHOICES,
@@ -36,8 +36,10 @@ from tai42_channel_whatsapp.flows_second_line import (
     _CHIPS_DS_ITEM_PROPERTIES,
     _DS_ITEM_EXAMPLE,
     _DS_ITEM_PROPERTIES,
+    _HELPER_TEXT_MAX_CHARS,
     _with_helper_text,
 )
+from tai42_channel_whatsapp.flows_shapes import ERROR_MESSAGE_TYPES, error_binding, helper_word, native_pattern
 
 # Meta injects ``flow_token`` into every Flow response to correlate the reply, so a
 # form property of that name is unanswerable on this channel: the reply handler
@@ -48,14 +50,13 @@ _RESERVED_PROPERTY = "flow_token"
 # reference: a letter or underscore, then letters, digits, underscores.
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# Meta's ``DatePicker`` (Flow JSON ≥ 5.0) sets and returns a ``YYYY-MM-DD`` string. A date
+# Meta's ``CalendarPicker`` (Flow JSON ≥ 6.1) sets and returns a ``YYYY-MM-DD`` string. A date
 # field's prefill must be exactly that shape, so the emitted ``init-value`` is a value the
 # control accepts. The regex fixes the hyphenated calendar-date form; the ``date.fromisoformat``
 # check then rejects an impossible date (e.g. ``2026-13-40``).
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-# The platform's form vocabulary, from ``tai42_kit.interactions``: the date-constraint keys whose
-# presence makes a date field a bounded CalendarPicker, and the weekday names an
+# The platform's form vocabulary, from ``tai42_kit.interactions``: the weekday names an
 # ``unavailableDates`` entry may carry. Each weekday maps onto Meta's CalendarPicker
 # ``include-days`` enum code below; an excluded weekday is dropped from ``include-days`` (the
 # days that STAY selectable).
@@ -73,7 +74,7 @@ _WEEKDAY_CODES = {
 
 
 def _is_date_field(prop: Any) -> bool:
-    """Whether a property renders as a ``DatePicker`` — a ``string`` carrying ``"format": "date"``.
+    """Whether a property renders as a date ``CalendarPicker`` — a ``string`` carrying ``"format": "date"``.
 
     ``format: time`` and ``format: date-time`` are not this: the vendor has no time-of-day
     picker, so they stay a ``TextInput``.
@@ -82,7 +83,7 @@ def _is_date_field(prop: Any) -> bool:
 
 
 def _valid_iso_date(value: str) -> bool:
-    """Whether ``value`` is a ``YYYY-MM-DD`` calendar date the ``DatePicker`` accepts."""
+    """Whether ``value`` is a ``YYYY-MM-DD`` calendar date the ``CalendarPicker`` accepts."""
     if not _ISO_DATE_RE.match(value):
         return False
     try:
@@ -205,21 +206,16 @@ def _chips_component(cname: str, label: str, required: bool, prop: dict[str, Any
     return component
 
 
-def _date_has_constraints(prop: dict[str, Any]) -> bool:
-    """Whether a date property carries any platform date constraint (bounds, excluded days, a range pairing)."""
-    return any(key in prop for key in DATE_CONSTRAINT_KEYS)
-
-
 def _calendar_component(cname: str, label: str, required: bool, prop: dict[str, Any], init: str) -> dict[str, Any]:
-    """A single-mode ``CalendarPicker`` for a constrained date field.
+    """A single-mode ``CalendarPicker`` for a date field.
 
-    Bounds (``min-date``/``max-date``), excluded explicit dates (``unavailable-dates``) and
-    excluded weekdays (dropped from ``include-days``, the days that stay selectable) are baked
-    as literals from the schema (they are fixed per published Flow). The control sets and
-    returns a ``YYYY-MM-DD`` string, exactly like the bare DatePicker, so a date answer's shape
-    is unchanged. A range pairing's span (``minDays``/``maxDays``) is enforced at the single
-    answer facet, not drawn here (two independent date controls), so the submitted answer stays
-    the two scalar date fields.
+    Every date draws this control: unlike Meta's ``DatePicker`` it carries ``required``, a
+    ``helper-text`` and an ``error-message``. Bounds (``min-date``/``max-date``), excluded explicit
+    dates (``unavailable-dates``) and excluded weekdays (dropped from ``include-days``, the days
+    that stay selectable) are baked as literals from the schema (they are fixed per published
+    Flow). The control sets and returns a ``YYYY-MM-DD`` string. A range pairing drawn as two
+    controls has its span (``minDays``/``maxDays``) checked at the data endpoint and the answer
+    door, so the submitted answer stays the two scalar date fields.
     """
     component: dict[str, Any] = {
         "type": "CalendarPicker",
@@ -382,12 +378,14 @@ def _calendar_range_component(
     required_start: bool,
     required_end: bool,
     start_cname: str,
+    end_cname: str,
 ) -> dict[str, Any]:
     """A range-mode ``CalendarPicker`` for a ``rangeStart`` pair drawn as ONE control.
 
     Emitted at the START's position and keyed by the START's component name; the END emits no
-    control. ``label`` and ``required`` are each the paired object Meta's range mode takes
-    (``{start-date, end-date}``), so the two ends carry their own titles and required flags. The
+    control. ``label``, ``required`` and ``error-message`` are each the paired object Meta's range
+    mode takes (``{start-date, end-date}``), so the two ends carry their own titles, required flags
+    and error bindings (each end's own ``__err`` key). The
     bounds are never looser than either field (:func:`_merged_date_bounds`) and the span rides the
     END's ``minDays``/``maxDays`` (:func:`_range_span`). The value is the object ``{start-date,
     end-date}``; the inbound decode splits it back onto the two schema date keys, so the submitted
@@ -403,6 +401,7 @@ def _calendar_range_component(
     }
     component.update(_merged_date_bounds(start_prop, end_prop))
     component.update(_range_span(end_prop))
+    component["error-message"] = {"start-date": error_binding(start_cname), "end-date": error_binding(end_cname)}
     return component
 
 
@@ -477,6 +476,10 @@ def _text_input_component(
     """
     plain: dict[str, Any] = {"type": "TextInput", "name": cname, "label": label, "required": required}
     length = _length_attrs(prop)
+    if prop.get("format") == "email":
+        # ``format: email`` draws the email keyboard (the subset refuses an ``inputMode`` beside it);
+        # the address shape itself is checked at the data endpoint.
+        return {**plain, "input-type": "email", **length, "init-value": init}
     raw = prop.get("inputMode")
     if raw is None:
         return {**plain, **length, "init-value": init}
@@ -585,7 +588,12 @@ def _string_component(
 
 
 def _dynamic_component(
-    name: str, prop: dict[str, Any], required: bool, option_fields: set[str], names: dict[str, str]
+    name: str,
+    prop: dict[str, Any],
+    required: bool,
+    option_fields: set[str],
+    names: dict[str, str],
+    invalid: str | None = None,
 ) -> dict[str, Any]:
     """One Flow field component for the dynamic (per-send) form.
 
@@ -598,8 +606,27 @@ def _dynamic_component(
     ``ChannelInputError`` naming a property outside the supported subset. A field's second line
     (its schema ``description``) rides the control as ``helper-text`` where Meta allows it
     (:func:`_with_helper_text`); elsewhere :func:`field_caption` draws it beside the control.
+
+    A shape Meta checks with a ``pattern`` (:func:`~tai42_channel_whatsapp.flows_shapes.native_pattern`)
+    is drawn on the control with the ``helper-text`` Meta then requires — the field's second line,
+    else the caller's ``invalid`` sentence, else this channel's helper word for the shape. A control that
+    can show an error binds ``error-message`` to its ``__err`` screen-data key.
     """
-    return _with_helper_text(name, _field_control(name, prop, required, option_fields, names), prop)
+    component = _with_helper_text(name, _field_control(name, prop, required, option_fields, names), prop)
+    drawn = native_pattern(prop, component)
+    if drawn is not None:
+        component["pattern"] = drawn.pattern
+        if "helper-text" not in component:
+            helper = invalid or helper_word(drawn.kind, drawn.params)
+            if len(helper) > _HELPER_TEXT_MAX_CHARS:
+                raise ChannelInputError(
+                    f"form property {name!r} invalid sentence is {len(helper)} characters; WhatsApp caps the "
+                    f"helper text a pattern field requires at {_HELPER_TEXT_MAX_CHARS}"
+                )
+            component["helper-text"] = helper
+    if component["type"] in ERROR_MESSAGE_TYPES:
+        component["error-message"] = error_binding(names[name])
+    return component
 
 
 def _field_control(
@@ -620,12 +647,7 @@ def _field_control(
     if _is_choice_field(name, prop, option_fields):
         return _choice_component(cname, label, required, prop, init)
     if _is_date_field(prop):
-        if _date_has_constraints(prop):
-            return _calendar_component(cname, label, required, prop, init)
-        # A plain (unconstrained) date stays a bare DatePicker: its reference defines no
-        # ``required`` parameter (unlike every other input control) and Meta rejects an unknown
-        # component property at publish, so the required flag is deliberately not emitted here.
-        return {"type": "DatePicker", "name": cname, "label": label, "init-value": init}
+        return _calendar_component(cname, label, required, prop, init)
     if prop_type == "string":
         return _string_component(name, cname, label, required, prop, init)
     if prop_type == "boolean":

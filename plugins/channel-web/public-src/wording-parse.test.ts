@@ -32,7 +32,32 @@ describe('wordingOf', () => {
       form: {
         submit: 'File it',
         back: 'Previous',
-        fields: { kind: { choiceLabel: 'Pick a kind' } },
+        fields: { kind: { choiceLabel: 'Pick a kind', invalid: null } },
+      },
+      choice: null,
+      answer: null,
+      status: null,
+    });
+  });
+
+  it("parses a field's invalid sentence alone or beside its choice label", () => {
+    expect(
+      wordingOf({
+        form: {
+          fields: {
+            email: { invalid: 'Use your work address' },
+            kind: { choice_label: 'Pick a kind', invalid: 'Pick one of the kinds' },
+          },
+        },
+      }),
+    ).toEqual({
+      form: {
+        submit: null,
+        back: null,
+        fields: {
+          email: { choiceLabel: null, invalid: 'Use your work address' },
+          kind: { choiceLabel: 'Pick a kind', invalid: 'Pick one of the kinds' },
+        },
       },
       choice: null,
       answer: null,
@@ -56,6 +81,7 @@ describe('wordingOf', () => {
     expect(wordingOf({ form: { fields: [] } })).toBeUndefined();
     expect(wordingOf({ form: { fields: { kind: { bogus: 'x' } } } })).toBeUndefined();
     expect(wordingOf({ form: { fields: { kind: { choice_label: '' } } } })).toBeUndefined();
+    expect(wordingOf({ form: { fields: { email: { invalid: '  ' } } } })).toBeUndefined();
   });
 
   it('parses the choice chapter down to the group label', () => {

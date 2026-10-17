@@ -36,6 +36,7 @@ from tai42_kit.interactions.form_vocabulary import RADIO_OPTION_THRESHOLD
 
 from tai42_skeleton.interactions.form_schema import channel_form_fields
 
+from .form_shape_attrs import _attr, _invalid, _number_bounds, _shape_attrs
 from .pages import _FORM_SUBMIT_SCRIPT
 
 
@@ -49,6 +50,8 @@ def _text_input_attrs(prop: dict[str, Any]) -> str:
     is pre-validated by ``channel_form_fields``, so the value is one of the known kinds; the match
     is exhaustive, so a kind added later is a type error here until it is drawn.
     """
+    if prop.get("format") == "email":
+        return 'type="email"'
     mode = prop.get("inputMode")
     if mode is None:
         return 'type="text"'
@@ -78,11 +81,6 @@ class _FormRenderError(Exception):
     ``ask``), so it surfaces as a loud 500 with a logged reason, never a blank
     or half-rendered page silently dropping fields.
     """
-
-
-def _attr(value: Any) -> str:
-    # A double-quoted attribute value, HTML-escaped (quotes included).
-    return html.escape(str(value), quote=True)
 
 
 def _second_line(text: Any) -> str | None:
@@ -234,16 +232,25 @@ def _length_bounds(prop: dict[str, Any]) -> tuple[str, str]:
     return attrs, hint
 
 
-def _textarea_control(esc_name: str, req_attr: str, prop: dict[str, Any], value: Any) -> str:
+def _textarea_control(esc_name: str, req_attr: str, prop: dict[str, Any], value: Any, shape: str) -> str:
     # A multi-line text control. ``data-kind="string"`` is kept so the submit script posts the
-    # typed string; the length bounds and the ceiling hint are drawn by :func:`_length_bounds`.
+    # typed string; the length bounds and the ceiling hint are drawn by :func:`_length_bounds`, the
+    # shape attributes by :func:`_shape_attrs`.
     bounds, hint = _length_bounds(prop)
     content = html.escape(str(value)) if value is not None else ""
-    control = f'<textarea data-field="{esc_name}" data-kind="string" rows="4"{bounds}{req_attr}>{content}</textarea>'
+    control = (
+        f'<textarea data-field="{esc_name}" data-kind="string" rows="4"{bounds}{req_attr}{shape}>{content}</textarea>'
+    )
     return control + hint
 
 
-def _date_range_group(start: str, end: str, field_by_name: dict[str, tuple[dict[str, Any], bool]], values: Any) -> str:
+def _date_range_group(
+    start: str,
+    end: str,
+    field_by_name: dict[str, tuple[dict[str, Any], bool]],
+    values: Any,
+    field_wording: dict[str, Any],
+) -> str:
     # A drawable ``rangeStart`` pair as ONE ``<fieldset>``: the two native date inputs side by side,
     # each keeping its own ``data-field``, bounds, unavailable days, ``required`` and prefilled
     # value and its own second line (its schema ``description``) under its label, under a legend
@@ -253,8 +260,20 @@ def _date_range_group(start: str, end: str, field_by_name: dict[str, tuple[dict[
     end_prop, end_required = field_by_name[end]
     start_label = html.escape(str(start_prop.get("title") or start))
     end_label = html.escape(str(end_prop.get("title") or end))
-    start_input = _date_input(_attr(start), " required" if start_required else "", start_prop, values.get(start))
-    end_input = _date_input(_attr(end), " required" if end_required else "", end_prop, values.get(end))
+    start_input = _date_input(
+        _attr(start),
+        " required" if start_required else "",
+        start_prop,
+        values.get(start),
+        _shape_attrs(start_prop, _invalid(field_wording, start)),
+    )
+    end_input = _date_input(
+        _attr(end),
+        " required" if end_required else "",
+        end_prop,
+        values.get(end),
+        _shape_attrs(end_prop, _invalid(field_wording, end)),
+    )
     legend = f"{start_label} {chr(0x2013)} {end_label}"  # an en dash between the two end labels
     start_hint = _field_hint(_second_line(start_prop.get("description")))
     end_hint = _field_hint(_second_line(end_prop.get("description")))
@@ -296,10 +315,11 @@ def _drawable_date_ranges(names: list[str], field_by_name: dict[str, tuple[dict[
     return merged
 
 
-def _date_input(esc_name: str, req_attr: str, prop: dict[str, Any], value: Any) -> str:
-    # A native date input carrying its min/max bounds (the picker restricts the range) and,
-    # as a best-effort client hint, the unavailable dates/weekdays the submit script checks —
-    # the server enforces them regardless.
+def _date_input(esc_name: str, req_attr: str, prop: dict[str, Any], value: Any, shape: str) -> str:
+    # A native date input carrying its min/max bounds (the picker restricts the range), its shape
+    # attributes (:func:`_shape_attrs` — a range END's start and span among them) and, as a
+    # best-effort client hint, the unavailable dates/weekdays the submit script checks — the
+    # server enforces them regardless.
     bounds = ""
     if isinstance(prop.get("minDate"), str):
         bounds += f' min="{_attr(prop["minDate"])}"'
@@ -309,7 +329,7 @@ def _date_input(esc_name: str, req_attr: str, prop: dict[str, Any], value: Any) 
     if isinstance(unavailable, list):
         bounds += f' data-unavailable="{_attr(json.dumps(unavailable))}"'
     val_attr = f' value="{_attr(value)}"' if value is not None else ""
-    return f'<input data-field="{esc_name}" data-kind="string" type="date"{bounds}{val_attr}{req_attr}>'
+    return f'<input data-field="{esc_name}" data-kind="string" type="date"{bounds}{val_attr}{req_attr}{shape}>'
 
 
 def _field_hint(hint: str | None) -> str:
@@ -380,10 +400,12 @@ def _render_string_field(
     options: list[dict[str, Any]] | None,
     hint: str | None,
     choice_label: str | None = None,
+    shape: str = "",
 ) -> str:
     # A string property: a choice (chips / radio group / select), a multi-line text area
-    # (``control: textarea``), a native date input, or a plain text input keyed by its inputMode.
-    # ``hint`` is the field's second line, drawn under its label.
+    # (``control: textarea``), a native date input, or a plain text input keyed by its format or
+    # inputMode. ``hint`` is the field's second line, drawn under its label; ``shape`` the
+    # control's shape attributes (:func:`_shape_attrs`).
     choices = _string_choices(prop, options)
     if choices is not None:
         if prop.get("control") == FormControl.CHIPS:
@@ -400,12 +422,12 @@ def _render_string_field(
             esc_label, _string_select(esc_name, req_attr, choices, value, choice_label), grouped=False, hint=hint
         )
     if prop.get("control") == FormControl.TEXTAREA:
-        return _labelled(esc_label, _textarea_control(esc_name, req_attr, prop, value), grouped=False, hint=hint)
+        return _labelled(esc_label, _textarea_control(esc_name, req_attr, prop, value, shape), grouped=False, hint=hint)
     if prop.get("format") == "date":
-        return _labelled(esc_label, _date_input(esc_name, req_attr, prop, value), grouped=False, hint=hint)
+        return _labelled(esc_label, _date_input(esc_name, req_attr, prop, value, shape), grouped=False, hint=hint)
     val_attr = f' value="{_attr(value)}"' if value is not None else ""
     bounds, length_hint = _length_bounds(prop)
-    attrs = f"{_text_input_attrs(prop)}{bounds}{val_attr}{req_attr}"
+    attrs = f"{_text_input_attrs(prop)}{bounds}{val_attr}{req_attr}{shape}"
     control = f'<input data-field="{esc_name}" data-kind="string" {attrs}>{length_hint}'
     return _labelled(esc_label, control, grouped=False, hint=hint)
 
@@ -418,29 +440,33 @@ def _render_field(
     value: Any = None,
     options: list[dict[str, Any]] | None = None,
     choice_label: str | None = None,
+    invalid: str | None = None,
 ) -> str:
     """Render one subset-validated schema property into an escaped form control.
 
     A choice (``enum`` or per-send ``options``) renders as a radio group at or below
     :data:`RADIO_OPTION_THRESHOLD` options, a ``<select>`` above it. An array of strings renders
     a checkbox group over its choices (or a one-entry-per-line text area when it declares none).
-    A ``format: date`` string renders a native date input with its min/max bounds; ``time`` /
-    ``date-time`` render as text (no native control emits their value shape). A plain string's
-    ``inputMode`` picks the keyboard (``email``/``url``/``tel`` -> that input type; ``numeric`` /
-    ``decimal`` -> ``type="text"`` with an ``inputmode`` hint so the value stays the typed
-    string), ``data-kind="string"`` kept for every kind. ``boolean`` -> checkbox,
-    ``integer``/``number`` -> number input. The property is pre-validated by
+    A ``format: date`` string renders a native date input with its min/max bounds; ``format:
+    email`` the native email input; ``time`` / ``date-time`` render as text (no native control
+    emits their value shape). A plain string's ``inputMode`` picks the keyboard (``email``/``url``/
+    ``tel`` -> that input type; ``numeric`` / ``decimal`` -> ``type="text"`` with an ``inputmode``
+    hint so the value stays the typed string), ``data-kind="string"`` kept for every kind.
+    ``boolean`` -> checkbox, ``integer``/``number`` -> number input with its native ``min``/``max``.
+    Every text, date and number control carries its shape attributes (:func:`_shape_attrs`) — the
+    caller's ``invalid`` sentence among them. The property is pre-validated by
     ``channel_form_fields``; an unexpected type is a server bug and raises ``_FormRenderError``.
     """
     esc_name = _attr(name)
     esc_label = html.escape(str(prop.get("title") or name))
     hint = _second_line(prop.get("description"))
     req_attr = " required" if is_required else ""
+    shape = _shape_attrs(prop, invalid)
     ptype = prop.get("type")
     if ptype == "array":
         return _render_array_field(esc_name, esc_label, req_attr, prop, is_required, value, options, hint)
     if ptype == "string":
-        return _render_string_field(esc_name, esc_label, req_attr, prop, value, options, hint, choice_label)
+        return _render_string_field(esc_name, esc_label, req_attr, prop, value, options, hint, choice_label, shape)
     if ptype == "boolean":
         # A checkbox always submits a boolean (checked/unchecked), so the field is always
         # present — no ``required`` attribute, which would force it checked.
@@ -450,7 +476,10 @@ def _render_field(
     if ptype in ("integer", "number"):
         step = ' step="1"' if ptype == "integer" else ' step="any"'
         val_attr = f' value="{_attr(value)}"' if value is not None else ""
-        control = f'<input data-field="{esc_name}" data-kind="number" type="number"{step}{val_attr}{req_attr}>'
+        control = (
+            f'<input data-field="{esc_name}" data-kind="number" type="number"{step}{_number_bounds(prop)}'
+            f"{val_attr}{req_attr}{shape}>"
+        )
         return _labelled(esc_label, control, grouped=False, hint=hint)
     raise _FormRenderError(f"form schema property {name!r} has unsupported type {ptype!r}")
 
@@ -523,14 +552,21 @@ def _render_steps_body(
     plus its display blocks and, in a ``data-button-label`` attribute, its primary-button label; a
     review page carries the generic readback target and no inputs. A page-less form draws ONE step
     whose terminal button reads ``submit_label`` (``wording.form.submit``) when set. A select field's
-    empty-state prompt reads the caller's ``wording.form.fields[name].choice_label`` (``field_wording``).
+    empty-state prompt reads the caller's ``wording.form.fields[name].choice_label`` and every
+    shape-checked control carries its ``invalid`` sentence (``field_wording``).
     """
 
     def render_one(name: str) -> str:
         prop, is_required = field_by_name[name]
         choice_label = (field_wording.get(name) or {}).get("choice_label")
         inner = _render_field(
-            name, prop, is_required, value=values.get(name), options=options_map.get(name), choice_label=choice_label
+            name,
+            prop,
+            is_required,
+            value=values.get(name),
+            options=options_map.get(name),
+            choice_label=choice_label,
+            invalid=_invalid(field_wording, name),
         )
         return _field_row(name, prop, inner)
 
@@ -542,7 +578,7 @@ def _render_steps_body(
             if name in merged_ends:
                 continue
             if name in merged:
-                group = _date_range_group(name, merged[name], field_by_name, values)
+                group = _date_range_group(name, merged[name], field_by_name, values, field_wording)
                 rendered.append(_field_row(name, field_by_name[name][0], group))
             else:
                 rendered.append(render_one(name))
@@ -609,8 +645,11 @@ def _render_form_page(format_payload: dict[str, Any] | None) -> str:
     Per-send ``data`` prefills known values and renders per-send option lists; ``pages`` split
     the fields into ordered steps (Back/Next/Submit, one visible at a time), each carrying its
     ordered display blocks, a REVIEW page showing a generic readback of the entered values, and
-    conditional show/hide per field. A schema outside the subset raises ``_FormRenderError``; the
-    GET door maps that to a loud 500 (the server-bug backstop for a record that bypassed ``ask``).
+    conditional show/hide per field. The form carries ``novalidate``: its submit script runs every
+    check itself (the browser's own prompt only for a missing required value), so a broken shape
+    shows the field's sentence rather than the browser's words. A schema outside the subset raises
+    ``_FormRenderError``; the GET door maps that to a loud 500 (the server-bug backstop for a record
+    that bypassed ``ask``).
     """
     payload = format_payload or {}
     schema = payload.get("schema")
@@ -660,7 +699,7 @@ def _render_form_page(format_payload: dict[str, Any] | None) -> str:
         "button{font-size:1rem;padding:.6rem 1.4rem;margin-top:1rem;margin-right:.5rem}"
         "#err{color:#b00020;margin-top:1rem}.field-error{color:#b00020;margin:.3rem 0}</style></head><body>\n"
         f"<h1>{heading}</h1>\n"
-        f'<form id="askform" data-labels="{labels_attr}"{reactions_attr}{text_attrs}>\n'
+        f'<form id="askform" novalidate data-labels="{labels_attr}"{reactions_attr}{text_attrs}>\n'
         f"{body}\n"
         '<div id="err" role="alert"></div>\n'
         '<div class="nav">\n'

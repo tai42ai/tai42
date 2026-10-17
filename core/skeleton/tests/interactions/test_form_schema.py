@@ -5,14 +5,20 @@ form renderer use as the ONE definition of the subset.
 
 from __future__ import annotations
 
+import re
+
+import jsonschema
 import pytest
 from pydantic import BaseModel
+from tai42_contract.interactions import FormShapeKind
 
 from tai42_skeleton.interactions.form_schema import (
     channel_form_fields,
+    date_constraint_errors,
     date_constraint_mismatch,
     effective_answer_schema,
     validate_channel_form_schema,
+    validate_form_answer_schema,
 )
 
 
@@ -188,7 +194,7 @@ def test_rejects_non_object_property():
         validate_channel_form_schema({"type": "object", "properties": {"x": "string"}})
 
 
-@pytest.mark.parametrize("fmt", ["date", "time", "date-time"])
+@pytest.mark.parametrize("fmt", ["date", "time", "date-time", "email"])
 def test_accepts_the_allowed_string_formats(fmt):
     schema = {"type": "object", "properties": {"when": {"type": "string", "format": fmt}}}
     assert validate_channel_form_schema(schema) is None
@@ -264,6 +270,14 @@ def test_rejects_input_mode_alongside_a_format():
     with pytest.raises(ValueError, match="property 'd' carries inputMode alongside format 'date'"):
         validate_channel_form_schema(
             {"type": "object", "properties": {"d": {"type": "string", "format": "date", "inputMode": "numeric"}}}
+        )
+
+
+def test_rejects_input_mode_alongside_the_email_format():
+    # The email control IS the email keyboard on every surface, so the hint names nothing more.
+    with pytest.raises(ValueError, match="property 'e' carries inputMode alongside format 'email'"):
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"e": {"type": "string", "format": "email", "inputMode": "email"}}}
         )
 
 
@@ -378,10 +392,150 @@ def test_rejects_min_length_above_max_length():
         )
 
 
+# === number and selection-count bounds no answer can meet ====================
+
+
+@pytest.mark.parametrize(
+    ("prop", "words"),
+    [
+        ({"type": "integer", "minimum": 5, "maximum": 1}, "no whole number can meet (minimum 5, maximum 1)"),
+        ({"type": "integer", "minimum": 1.2, "maximum": 1.8}, "no whole number can meet (minimum 1.2, maximum 1.8)"),
+        (
+            {"type": "integer", "exclusiveMinimum": 1, "exclusiveMaximum": 2},
+            "no whole number can meet (exclusiveMinimum 1, exclusiveMaximum 2)",
+        ),
+        ({"type": "number", "minimum": 5, "maximum": 1}, "no number can meet (minimum 5, maximum 1)"),
+        (
+            {"type": "number", "minimum": 1, "exclusiveMaximum": 1},
+            "no number can meet (minimum 1, exclusiveMaximum 1)",
+        ),
+    ],
+)
+def test_rejects_number_bounds_no_value_can_meet(prop, words):
+    with pytest.raises(ValueError, match=re.escape(f"form schema property 'qty' has bounds {words}")):
+        validate_channel_form_schema({"type": "object", "properties": {"qty": prop}})
+
+
+@pytest.mark.parametrize(
+    "prop",
+    [
+        {"type": "integer", "minimum": 1.5, "maximum": 2},
+        {"type": "integer", "minimum": 2, "maximum": 2},
+        {"type": "integer", "exclusiveMinimum": 1, "maximum": 2},
+        {"type": "number", "minimum": 1.2, "maximum": 1.8},
+        {"type": "number", "minimum": 1, "maximum": 1},
+        {"type": "number", "exclusiveMinimum": 1, "exclusiveMaximum": 1.5},
+    ],
+)
+def test_admits_number_bounds_some_value_meets(prop):
+    validate_channel_form_schema({"type": "object", "properties": {"qty": prop}})
+
+
+def test_rejects_min_items_above_max_items():
+    prop = {"type": "array", "items": {"type": "string", "enum": ["a", "b", "c"]}, "minItems": 3, "maxItems": 2}
+    with pytest.raises(ValueError, match="property 'picks' has minItems 3 above maxItems 2"):
+        validate_channel_form_schema({"type": "object", "properties": {"picks": prop}})
+
+
+def test_admits_min_items_within_max_items():
+    prop = {"type": "array", "items": {"type": "string", "enum": ["a", "b", "c"]}, "minItems": 2, "maxItems": 2}
+    validate_channel_form_schema({"type": "object", "properties": {"picks": prop}})
+
+
 def test_admits_min_length_within_max_length():
     validate_channel_form_schema(
         {"type": "object", "properties": {"bio": {"type": "string", "minLength": 2, "maxLength": 200}}}
     )
+
+
+# === schemas no answer could be checked against ==============================
+
+
+@pytest.mark.parametrize(
+    ("prop", "words"),
+    [
+        ({"type": "integer", "minimum": True}, "True is not of type 'number'"),
+        ({"type": "integer", "minimum": "1"}, "'1' is not of type 'number'"),
+        ({"type": "integer", "maximum": None}, "None is not of type 'number'"),
+        ({"type": "string", "minLength": -1}, "-1 is less than the minimum of 0"),
+        ({"type": "string", "pattern": "("}, "'(' is not a 'regex'"),
+    ],
+)
+def test_rejects_a_property_breaking_the_json_schema_rules(prop, words):
+    with pytest.raises(
+        ValueError, match=re.escape(f"form schema property 'qty' breaks the JSON Schema rules: {words}")
+    ):
+        validate_channel_form_schema({"type": "object", "properties": {"qty": prop}})
+
+
+@pytest.mark.parametrize(
+    ("pattern", "fault"),
+    [
+        ("a{4294967296}", "the repetition number is too large"),
+        ("(" * 2000 + ")" * 2000, "maximum recursion depth exceeded"),
+    ],
+)
+def test_rejects_a_pattern_the_regex_engine_cannot_compile(pattern, fault):
+    with pytest.raises(
+        ValueError, match=re.escape("form schema property 's' breaks the JSON Schema rules: ")
+    ) as caught:
+        validate_channel_form_schema({"type": "object", "properties": {"s": {"type": "string", "pattern": pattern}}})
+    rules_fault = caught.value.__cause__
+    assert isinstance(rules_fault, jsonschema.SchemaError)
+    assert fault in str(rules_fault.cause)
+
+
+@pytest.mark.parametrize("ptype", ["integer", "number"])
+@pytest.mark.parametrize("key", ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"])
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+def test_rejects_a_bound_that_is_not_a_finite_number(ptype, key, value):
+    with pytest.raises(
+        ValueError,
+        match=re.escape(f"form schema property 'qty' has a value at {key} that is not a finite number ({value})"),
+    ):
+        validate_channel_form_schema({"type": "object", "properties": {"qty": {"type": ptype, key: value}}})
+
+
+@pytest.mark.parametrize(
+    ("prop", "where", "value"),
+    [
+        ({"type": "string", "enum": ["a", float("nan")]}, "at enum/1", float("nan")),
+        ({"type": "number", "default": float("inf")}, "at default", float("inf")),
+        ({"type": "array", "items": {"type": "number", "maximum": float("-inf")}}, "at items/maximum", float("-inf")),
+    ],
+)
+def test_rejects_a_number_that_is_not_finite_anywhere_in_a_property(prop, where, value):
+    with pytest.raises(
+        ValueError,
+        match=re.escape(f"form schema property 'qty' has a value {where} that is not a finite number ({value})"),
+    ):
+        validate_channel_form_schema({"type": "object", "properties": {"qty": prop}})
+
+
+def test_rejects_a_number_that_is_not_finite_outside_the_properties():
+    schema = {"type": "object", "properties": {"qty": {"type": "integer"}}, "$defs": {"n": {"const": float("nan")}}}
+    with pytest.raises(
+        ValueError, match=re.escape("form schema has a value at $defs/n/const that is not a finite number (nan)")
+    ):
+        validate_channel_form_schema(schema)
+
+
+def test_rejects_a_schema_that_holds_itself():
+    schema: dict = {"type": "object", "properties": {"qty": {"type": "array"}}}
+    schema["properties"]["qty"]["items"] = schema["properties"]["qty"]
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "form schema property 'qty' has a value at items that loops back to a value it sits inside; "
+            "a schema must be plain JSON, which has no cycles"
+        ),
+    ):
+        validate_channel_form_schema(schema)
+
+
+def test_admits_a_value_shared_by_two_places_in_the_schema():
+    shared = {"type": "string"}
+    validate_channel_form_schema({"type": "object", "properties": {"a": shared, "b": shared}})
 
 
 # === date constraint keys (send-time shape check) ===========================
@@ -571,3 +725,52 @@ def test_date_constraint_mismatch_range_order_and_span():
     assert _field(date_constraint_mismatch(schema, {"start": "2024-01-05", "end": "2024-01-01"})) == "end"
     assert _field(date_constraint_mismatch(schema, {"start": "2024-01-01", "end": "2024-01-01"})) == "end"  # 1 day < 2
     assert _field(date_constraint_mismatch(schema, {"start": "2024-01-01", "end": "2024-01-10"})) == "end"  # 10 > 3
+
+
+def _date_errors(schema, answer) -> list[tuple[str, FormShapeKind, dict]]:
+    return list(date_constraint_errors(schema, answer))
+
+
+def test_date_constraint_errors_bounds_and_unavailable():
+    schema = _date_prop(minDate="2024-01-01", maxDate="2024-12-31", unavailableDates=["2024-07-04", "sunday"])
+    assert _date_errors(schema, {"d": "2024-06-15"}) == []  # a Saturday in range
+    assert _date_errors(schema, {"d": "2023-12-31"}) == [("d", FormShapeKind.MIN_DATE, {"minDate": "2024-01-01"})]
+    assert _date_errors(schema, {"d": "2025-01-01"}) == [("d", FormShapeKind.MAX_DATE, {"maxDate": "2024-12-31"})]
+    assert _date_errors(schema, {"d": "2024-07-04"}) == [("d", FormShapeKind.DATE_UNAVAILABLE, {"date": "2024-07-04"})]
+    assert _date_errors(schema, {"d": "2024-07-07"}) == [("d", FormShapeKind.DATE_UNAVAILABLE, {"date": "2024-07-07"})]
+
+
+def test_date_constraint_errors_range_order_and_span():
+    schema = _range_schema(minDays=2, maxDays=3)
+    assert _date_errors(schema, {"start": "2024-01-01", "end": "2024-01-02"}) == []  # 2 inclusive days
+    assert _date_errors(schema, {"start": "2024-01-05", "end": "2024-01-01"}) == [
+        ("end", FormShapeKind.RANGE_ORDER, {"rangeStart": "start"})
+    ]
+    span = {"minDays": 2, "maxDays": 3}
+    assert _date_errors(schema, {"start": "2024-01-01", "end": "2024-01-01"}) == [
+        ("end", FormShapeKind.RANGE_SPAN, {**span, "days": 1})
+    ]
+    assert _date_errors(schema, {"start": "2024-01-01", "end": "2024-01-10"}) == [
+        ("end", FormShapeKind.RANGE_SPAN, {**span, "days": 10})
+    ]
+
+
+def test_date_constraint_errors_yield_every_failing_date_field():
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {"type": "string", "format": "date", "minDate": "2024-01-01"},
+            "b": {"type": "string", "format": "date", "maxDate": "2024-01-01"},
+            "c": {"type": "string", "format": "date"},
+        },
+    }
+    answer = {"a": "2023-01-01", "b": "2025-01-01", "c": "not-a-date"}
+    assert [field for field, _, _ in _date_errors(schema, answer)] == ["a", "b"]
+
+
+def test_channel_form_subset_refuses_a_property_named_proto():
+    schema = {"type": "object", "properties": {"__proto__": {"type": "string"}, "name": {"type": "string"}}}
+    with pytest.raises(ValueError, match=re.escape("form schema property '__proto__' is not an allowed name")):
+        validate_channel_form_schema(schema)
+    with pytest.raises(ValueError, match=re.escape("form schema property '__proto__' is not an allowed name")):
+        validate_form_answer_schema(schema)

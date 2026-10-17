@@ -405,48 +405,56 @@ async def test_missing_redis_url_raises_on_every_store_function(fake_redis: Fake
             await call
 
 
-# --- Reacting-form sidecar (schema + inputs keyed by interaction id) ----------------
+# --- Endpoint-driven form sidecar (keyed by interaction id) ---------------------------
 
 
-async def test_reaction_form_sidecar_round_trips(fake_redis: FakeRedis):
-    from tai42_channel_whatsapp.correlation import cache_reaction_form, get_reaction_form
+async def test_endpoint_form_sidecar_round_trips(fake_redis: FakeRedis):
+    from tai42_channel_whatsapp.correlation import EndpointForm, cache_endpoint_form, get_endpoint_form
 
-    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
-    pages = [{"title": "T", "fields": ["a"], "kind": "input", "display": []}]
-    await cache_reaction_form("int-9", schema, pages, {"a": "x"}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    form = EndpointForm(
+        schema={"type": "object", "properties": {"a": {"type": "string", "format": "email"}}},
+        pages=[{"title": "T", "fields": ["a"], "kind": "input", "display": []}],
+        reactions={"field_changed": [], "page_advanced": ["T"], "submitted": False, "choices": []},
+        option_fields=["a"],
+        invalid={"a": "Use your work address"},
+    )
+    await cache_endpoint_form("int-9", form, datetime.now(UTC) + timedelta(minutes=5))
 
-    assert await get_reaction_form("int-9") == (schema, pages, {"a": "x"}, {})
+    assert await get_endpoint_form("int-9") == form
     # The TTL is the remaining answer budget.
-    assert fake_redis.ttls["channel:whatsapp:reaction-form:int-9"] > 0
+    assert fake_redis.ttls["channel:whatsapp:endpoint-form:int-9"] > 0
 
 
-async def test_reaction_form_sidecar_miss_returns_none(fake_redis: FakeRedis):
-    from tai42_channel_whatsapp.correlation import get_reaction_form
+async def test_endpoint_form_sidecar_miss_returns_none(fake_redis: FakeRedis):
+    from tai42_channel_whatsapp.correlation import get_endpoint_form
 
-    assert await get_reaction_form("nope") is None
-
-
-async def test_reaction_form_sidecar_not_written_past_deadline(fake_redis: FakeRedis):
-    from tai42_channel_whatsapp.correlation import cache_reaction_form, get_reaction_form
-
-    await cache_reaction_form("int-past", {"type": "object"}, None, {}, {}, datetime.now(UTC) - timedelta(minutes=1))
-    assert await get_reaction_form("int-past") is None
+    assert await get_endpoint_form("nope") is None
 
 
-async def test_reaction_form_sidecar_bad_json_is_a_miss(fake_redis: FakeRedis):
-    from tai42_channel_whatsapp.correlation import get_reaction_form
+async def test_endpoint_form_sidecar_not_written_past_deadline(fake_redis: FakeRedis):
+    from tai42_channel_whatsapp.correlation import EndpointForm, cache_endpoint_form, get_endpoint_form
 
-    fake_redis.store["channel:whatsapp:reaction-form:int-bad"] = "{not json"
-    assert await get_reaction_form("int-bad") is None
+    form = EndpointForm(schema={"type": "object"}, pages=None, reactions=None, option_fields=[], invalid={})
+    await cache_endpoint_form("int-past", form, datetime.now(UTC) - timedelta(minutes=1))
+    assert await get_endpoint_form("int-past") is None
 
 
-async def test_reaction_form_sidecar_without_schema_is_a_miss(fake_redis: FakeRedis):
+async def test_endpoint_form_sidecar_bad_json_is_a_miss(fake_redis: FakeRedis):
+    from tai42_channel_whatsapp.correlation import get_endpoint_form
+
+    fake_redis.store["channel:whatsapp:endpoint-form:int-bad"] = "{not json"
+    assert await get_endpoint_form("int-bad") is None
+
+
+async def test_endpoint_form_sidecar_without_its_parts_is_a_miss(fake_redis: FakeRedis):
     import json
 
-    from tai42_channel_whatsapp.correlation import get_reaction_form
+    from tai42_channel_whatsapp.correlation import get_endpoint_form
 
-    fake_redis.store["channel:whatsapp:reaction-form:int-noschema"] = json.dumps({"pages": None})
-    assert await get_reaction_form("int-noschema") is None
+    fake_redis.store["channel:whatsapp:endpoint-form:int-noschema"] = json.dumps({"pages": None})
+    assert await get_endpoint_form("int-noschema") is None
+    fake_redis.store["channel:whatsapp:endpoint-form:int-partial"] = json.dumps({"schema": {}, "pages": None})
+    assert await get_endpoint_form("int-partial") is None
 
 
 async def test_release_pending_for_drops_the_pair_only_for_its_own_ask(fake_redis: FakeRedis):
@@ -465,10 +473,27 @@ async def test_release_pending_for_drops_the_pair_only_for_its_own_ask(fake_redi
     assert await release_pending_for(_PNID, _WA, "int-A") is False
 
 
-async def test_drop_reaction_form_deletes_the_sidecar_and_is_idempotent(fake_redis: FakeRedis):
-    from tai42_channel_whatsapp.correlation import cache_reaction_form, drop_reaction_form, get_reaction_form
+async def test_drop_endpoint_form_deletes_the_sidecar_and_is_idempotent(fake_redis: FakeRedis):
+    from tai42_channel_whatsapp.correlation import (
+        EndpointForm,
+        cache_endpoint_form,
+        drop_endpoint_form,
+        get_endpoint_form,
+    )
 
-    await cache_reaction_form("int-9", {"type": "object"}, None, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
-    await drop_reaction_form("int-9")
-    assert await get_reaction_form("int-9") is None
-    await drop_reaction_form("int-9")
+    form = EndpointForm(schema={"type": "object"}, pages=None, reactions=None, option_fields=[], invalid={})
+    await cache_endpoint_form("int-9", form, datetime.now(UTC) + timedelta(minutes=5))
+    await drop_endpoint_form("int-9")
+    assert await get_endpoint_form("int-9") is None
+    await drop_endpoint_form("int-9")
+
+
+async def test_notify_form_sidecar_round_trips_its_pages_and_option_fields(fake_redis: FakeRedis):
+    from tai42_channel_whatsapp.correlation import CachedFlowForm, cache_flow_form, get_cached_flow_form
+
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    pages = [{"title": "T", "fields": ["a"], "kind": "input", "display": []}]
+    await cache_flow_form("waba-1", "h1", schema, {"a": "a"}, pages, ["a"])
+    assert await get_cached_flow_form("waba-1", "h1") == CachedFlowForm(
+        schema=schema, names={"a": "a"}, pages=pages, option_fields=["a"]
+    )

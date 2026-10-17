@@ -26,7 +26,7 @@ from tai42_channel_whatsapp.channel.recipients import _NO_DEFAULT_RECIPIENT, _re
 from tai42_channel_whatsapp.channel.template_params import parse_template_parameters
 from tai42_channel_whatsapp.client import mark_read_typing, send_message
 from tai42_channel_whatsapp.correlation import (
-    drop_reaction_form,
+    drop_endpoint_form,
     release_pending,
     release_pending_for,
     reserve_pending,
@@ -165,8 +165,8 @@ class WhatsAppChannel:
         """Release what this channel kept for a delivered question the platform has taken down.
 
         The pair's pending reservation is dropped only while it is still held for
-        ``withdrawal.interaction_id`` (a newer ask's hold on the same pair stays), and a reacting
-        form's data-endpoint sidecar is deleted. The pair is resolved exactly as ``deliver``
+        ``withdrawal.interaction_id`` (a newer ask's hold on the same pair stays), and an
+        endpoint-driven form's data-endpoint sidecar is deleted. The pair is resolved exactly as ``deliver``
         resolved it: the configured default ``phone_number_id`` and the recipient ``wa_id``; a
         withdrawal with no recipient holds nothing, since ``deliver`` refuses a missing recipient
         before any reservation. Idempotent, and a no-op when nothing is held (a link-answered
@@ -180,7 +180,7 @@ class WhatsAppChannel:
         )
         try:
             released = await release_pending_for(phone_number_id, withdrawal.recipient, withdrawal.interaction_id)
-            await drop_reaction_form(withdrawal.interaction_id)
+            await drop_endpoint_form(withdrawal.interaction_id)
         except RedisError as exc:
             raise ChannelDeliveryError(
                 f"could not release the withdrawn question {withdrawal.interaction_id}: {exc}", retryable=True

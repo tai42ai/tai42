@@ -86,12 +86,17 @@ async def test_answer_invalid_value_raises_bad_request(wired):
 
 
 async def test_answer_form_schema_mismatch_names_the_field(wired):
-    # The 400 text names the failing field (its json_path), so a human on any
-    # surface can tell WHICH field failed — not a bare "is not of type 'integer'".
-    schema = {"type": "object", "properties": {"count": {"type": "integer"}}}
+    # The 400 text is the plain sentence led by the failing field's label (its title, else its
+    # name), so a human on any surface can tell WHICH field failed and how.
+    schema = {
+        "type": "object",
+        "properties": {"count": {"type": "integer"}, "qty": {"type": "integer", "title": "Qty"}},
+    }
     await wired.store.add(wired.fake, _req(wired.store, AnswerFormat.FORM, payload={"schema": schema}), idle_ttl=86400)
-    with pytest.raises(BadRequestError, match="at count: 'abc' is not of type 'integer'"):
+    with pytest.raises(BadRequestError, match=r"^count: Enter a whole number$"):
         await ops.answer_interaction("p1", {"count": "abc"})
+    with pytest.raises(BadRequestError, match=r"^Qty: Enter a whole number$"):
+        await ops.answer_interaction("p1", {"qty": "abc"})
 
 
 async def test_answer_form_array_per_send_options_accept_and_reject(wired):

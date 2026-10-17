@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol, runtime_checkable
 
@@ -16,7 +17,7 @@ from tai42_contract.conversations import (
 )
 from tai42_contract.interactions.answer_check import QuestionFormat
 from tai42_contract.interactions.asker import Ask
-from tai42_contract.interactions.models import FormReactionEvent, LocationElement, MediaItem
+from tai42_contract.interactions.models import FormReactionEvent, FormShapeError, LocationElement, MediaItem
 from tai42_contract.interactions.visit import ParkedEntry, RunAnswer, Visit, VisitOutcome
 from tai42_contract.states import StateContext
 from tai42_contract.webhooks import WebhookVerifier
@@ -38,6 +39,30 @@ class AppInteractions(Protocol):
         dotted path when the fault locates to one) otherwise. The answer door, the callback
         door, a resumed run's ``visit`` and plugins all validate through this one callable so
         every surface applies identical rules per format.
+        """
+        ...
+
+    def form_shape_errors(
+        self,
+        question: QuestionFormat,
+        values: Mapping[str, Any],
+        *,
+        fields: Collection[str] | None = None,
+        partial: bool = False,
+    ) -> list[FormShapeError]:
+        """Every FORM field whose value in ``values`` breaks its declared shape — the ONE shape check.
+
+        ``question`` is a FORM :class:`~tai42_contract.interactions.QuestionFormat`; the check runs
+        the same effective schema the answer door applies (per-send option lists, reaction-fed
+        choices typed only, fields hidden by their ``visibleWhen`` dropped) plus the platform date
+        constraints, and returns at most one :class:`~tai42_contract.interactions.FormShapeError` per
+        field (the first broken shape, in schema order) carrying a typed kind, the bound it names
+        and the platform's plain sentence. ``fields`` restricts the check to the named top-level
+        properties (one step of a stepped form); ``partial=True`` is a mid-form check: nothing is
+        demanded (no ``required`` error) and an absent field is not checked. Pure — no store read.
+        A surface calls it inside the form before the submit leaves it; the answer door refuses a
+        FORM answer with the first error's sentence and field. Raises ``ValueError`` when
+        ``question`` is not a FORM carrying an object schema.
         """
         ...
 

@@ -61,14 +61,15 @@ const FORM_WORDING_STRING_KEYS: readonly string[] = [
   'review_empty',
 ];
 
-const FIELD_WORDING_KEYS: ReadonlySet<string> = new Set(['choice_label']);
+const FIELD_WORDING_KEYS: ReadonlySet<string> = new Set(['choice_label', 'invalid']);
 
-/** One form field's wording: a non-blank `choice_label` and no other key. */
+/** One form field's wording: a non-blank `choice_label` and/or `invalid`, and no other key. */
 function fieldWordingOf(raw: unknown): FieldWording | undefined {
   if (!isRecord(raw) || !onlyKnownKeys(raw, FIELD_WORDING_KEYS)) return undefined;
   const choiceLabel = wordingMemberOf(raw, 'choice_label');
-  if (choiceLabel === undefined) return undefined;
-  return { choiceLabel };
+  const invalid = wordingMemberOf(raw, 'invalid');
+  if (choiceLabel === undefined || invalid === undefined) return undefined;
+  return { choiceLabel, invalid };
 }
 
 /** The per-field wording map: absent → `{}`; an object whose every value is a valid

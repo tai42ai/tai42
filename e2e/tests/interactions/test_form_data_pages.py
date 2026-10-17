@@ -161,6 +161,82 @@ async def test_form_data_pages_render_prefilled_stepped_and_the_post_carries_eve
     assert resolved == answer
 
 
+_SHAPED_SCHEMA = {
+    "type": "object",
+    "required": ["email"],
+    "properties": {
+        "email": {"type": "string", "format": "email", "title": "Email address"},
+        "qty": {"type": "integer", "minimum": 1},
+        "code": {"type": "string", "pattern": "^[0-9]{4}$"},
+    },
+}
+
+
+@pytest.mark.needs("store:redis", "setting:INTERACTIONS_PUBLIC_BASE_URL")
+async def test_form_shapes_ride_the_page_and_the_door_refuses_with_the_fields_sentence(
+    replicas_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    stack = replicas_stack
+    question = uniq("form_shape_q")
+
+    async def ask() -> object:
+        async with stack.mcp(port=stack.port_a) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "stub",
+                    "answer_format": "form",
+                    "schema": _SHAPED_SCHEMA,
+                    "wording": {"form": {"fields": {"email": {"invalid": "Enter your full address"}}}},
+                },
+                retry_on_reloading=True,
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        add = await _find_pending(stack, stack.port_b, question)
+        ticket = _resolve_ticket(stack, add["interaction_id"])
+        api_b = stack.api(port=stack.port_b)
+
+        # The page carries every shape its script checks before the answer leaves it, with the
+        # caller's sentence and the platform's per-shape sentences.
+        page = await api_b.request_raw("GET", f"/api/interactions/callback/{ticket}")
+        assert page.status_code == 200, page.text
+        body = page.text
+        assert 'data-field="email" data-kind="string" type="email" required' in body
+        assert 'data-invalid="Enter your full address"' in body
+        assert 'data-msg-format="Enter a valid email address"' in body
+        assert 'type="number" step="1" min="1"' in body
+        assert 'data-msg-minimum="Enter a number of at least 1"' in body
+        assert 'data-pattern="^[0-9]{4}$"' in body
+
+        # The door is the authority: each broken shape is refused with the platform's plain
+        # sentence and the field it names (the page pins it under that field), the ask kept.
+        for answer, sentence, field in (
+            ({"email": "dhdhdh"}, "Enter a valid email address", "email"),
+            ({"email": "alice@example.org", "qty": 0}, "Enter a number of at least 1", "qty"),
+            ({"email": "alice@example.org", "code": "12a4"}, "This value is not in the expected form", "code"),
+            ({}, "This field is required", "email"),
+        ):
+            refused = await api_b.request_raw("POST", f"/api/interactions/callback/{ticket}", json={"answer": answer})
+            assert refused.status_code == 400, refused.text
+            assert refused.json()["error"] == sentence
+            assert refused.json()["field"] == field
+        assert not ask_task.done()
+
+        good = {"email": "alice@example.org", "qty": 2, "code": "1234"}
+        posted = await api_b.request_raw("POST", f"/api/interactions/callback/{ticket}", json={"answer": good})
+        assert posted.status_code == 200, posted.text
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        if not ask_task.done():
+            ask_task.cancel()
+
+    assert resolved == good
+
+
 def _content_text(result: object) -> str:
     """The full text of an MCP result's content blocks. On an error result the ask
     door's refusal message surfaces here (the exception class does not survive MCP

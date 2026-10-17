@@ -177,3 +177,28 @@ def test_channel_modules_render_per_profile() -> None:
     # A bare profile omits the key entirely (the SUT's contract manifest defaults it
     # to []), so a non-interactions stack loads no channel plugins at all.
     assert "channel_modules" not in build_bare_stack(_sentinel(), variants).manifest
+
+
+def test_fake_whatsapp_encrypts_a_flow_request_the_plugin_decrypts_and_reads_its_reply() -> None:
+    # The stub's request encryption and reply decryption are the vendor's: the plugin's own
+    # Flow crypto decrypts the request and encrypts the reply the stub then reads.
+    import json
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from tai42_channel_whatsapp.flow_crypto import decrypt_request, encrypt_response
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    fake = FakeWhatsApp()
+    payload = {"version": "3.0", "action": "data_exchange", "flow_token": "t-1", "data": {"a": "b"}}
+    exchange = fake.build_flow_exchange(app_secret="secret", private_key_pem=pem, payload=payload)
+    assert exchange.inbound.headers["X-Hub-Signature-256"].startswith("sha256=")
+    request, aes_key, iv = decrypt_request(json.loads(exchange.inbound.body), key)
+    assert request == payload
+    reply = encrypt_response({"screen": "SCREEN_A", "data": {}}, aes_key, iv)
+    assert fake.decrypt_flow_response(reply.encode(), exchange) == {"screen": "SCREEN_A", "data": {}}

@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import itertools
 import json
+import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -657,6 +658,15 @@ class FakeTwilio:
         return app
 
 
+@dataclass(frozen=True)
+class FlowExchange:
+    """One encrypted Flow data-endpoint request: the signed body to POST, and the key + IV its reply decrypts with."""
+
+    inbound: SignedInbound
+    aes_key: bytes
+    iv: bytes
+
+
 class FakeWhatsApp:
     """A recording stub of the Meta WhatsApp (Graph) API.
 
@@ -674,14 +684,15 @@ class FakeWhatsApp:
     so nothing is served for startup. The builders synthesize the requests aimed at the SUT's own
     ``/api/channels/whatsapp/inbound`` door: the GET verify handshake, a genuinely
     X-Hub-Signature-256-signed inbound text message, an interactive button/list reply, a
-    completed-Flow ``nfm_reply``, and a signed status webhook."""
+    completed-Flow ``nfm_reply``, a signed status webhook, and an encrypted Flow data-endpoint
+    request (:meth:`build_flow_exchange`) whose reply :meth:`decrypt_flow_response` reads."""
 
     def __init__(self, host: str = "127.0.0.1") -> None:
         self.host = host
         self.port = allocate_port()
         self.sent: list[dict[str, Any]] = []
         # The Flows created / published on the form-delivery path (Flow uncached):
-        # ``flows`` records each create's ``{waba_id, name, flow_json, id}``,
+        # ``flows`` records each create's ``{waba_id, name, flow_json, endpoint_uri, id}``,
         # ``published_flows`` the ids the publish step confirmed. The flow list serves both.
         self.flows: list[dict[str, Any]] = []
         self.published_flows: list[str] = []
@@ -906,6 +917,48 @@ class FakeWhatsApp:
         }
         return self._sign_batch(value, app_secret=app_secret, valid=valid)
 
+    def build_flow_exchange(
+        self, *, app_secret: str, private_key_pem: str, payload: dict[str, Any], valid: bool = True
+    ) -> FlowExchange:
+        """A Flow data-endpoint request encrypted exactly as Meta encrypts it, signed like a webhook.
+
+        A fresh AES-128 key and 16-byte IV encrypt ``payload`` (AES-GCM); the key is wrapped with
+        the business key's PUBLIC half (RSA-OAEP, SHA-256) into Meta's three-field envelope, and the
+        raw body is signed X-Hub-Signature-256 (``valid=False`` signs under the WRONG secret). The
+        returned key and IV decrypt the endpoint's reply (:meth:`decrypt_flow_response`).
+        """
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding, rsa
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        private_key = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
+        assert isinstance(private_key, rsa.RSAPrivateKey), "the Flow business key must be an RSA key"
+        aes_key = os.urandom(16)
+        iv = os.urandom(16)
+        wrapped = private_key.public_key().encrypt(
+            aes_key, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+        )
+        envelope = {
+            "encrypted_aes_key": base64.b64encode(wrapped).decode(),
+            "initial_vector": base64.b64encode(iv).decode(),
+            "encrypted_flow_data": base64.b64encode(
+                AESGCM(aes_key).encrypt(iv, json.dumps(payload).encode(), None)
+            ).decode(),
+        }
+        body = json.dumps(envelope).encode()
+        key = app_secret if valid else app_secret + "-tampered"
+        digest = hmac.new(key.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        headers = {"content-type": "application/json", "X-Hub-Signature-256": f"sha256={digest}"}
+        return FlowExchange(inbound=SignedInbound(headers=headers, body=body), aes_key=aes_key, iv=iv)
+
+    @staticmethod
+    def decrypt_flow_response(body: bytes, exchange: FlowExchange) -> dict[str, Any]:
+        """The data endpoint's reply decrypted as Meta decrypts it: the request's AES key, the bit-flipped IV."""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        flipped = bytes(byte ^ 0xFF for byte in exchange.iv)
+        return json.loads(AESGCM(exchange.aes_key).decrypt(flipped, base64.b64decode(body), None))
+
     def _sign_batch(self, value: dict[str, Any], *, app_secret: str, valid: bool) -> SignedInbound:
         body = json.dumps({"object": "whatsapp_business_account", "entry": [{"changes": [{"value": value}]}]}).encode()
         key = app_secret if valid else app_secret + "-tampered"
@@ -965,6 +1018,7 @@ class FakeWhatsApp:
                     "waba_id": waba_id,
                     "name": payload.get("name"),
                     "flow_json": payload.get("flow_json"),
+                    "endpoint_uri": payload.get("endpoint_uri"),
                     "id": flow_id,
                 }
             )

@@ -31,9 +31,9 @@ inherited connection-tuning fields) point the plugin-owned correlation store.
 | `CHANNEL_WHATSAPP_TEMPLATE_CONTACT_WINDOW_DAYS` | `30` | Rolling "seen within N days" window for template-send recipient policy; `0` disables known-contact tracking (allowlist-only). |
 | `CHANNEL_WHATSAPP_REDIS_URL` | unset | Connection for the correlation store. |
 | `CHANNEL_WHATSAPP_WABA_ID` | unset | WhatsApp Business Account id that owns Flows; required on the `form` paths. |
-| `CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY` | unset | Business RSA-2048 private key (PEM) the Flow data endpoint decrypts with; required only for a **reacting** form. Secret. |
+| `CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY` | unset | Business RSA-2048 private key (PEM) the Flow data endpoint decrypts with; required only for an **endpoint-driven** form (one that reacts, or carries a shape the Flow cannot check itself). Secret. |
 | `CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY_PASSPHRASE` | unset | Passphrase for an encrypted `CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY` PEM. Secret. |
-| `CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI` | unset | Public URL of the Flow data endpoint, configured on a reacting Flow; required only for a reacting form. |
+| `CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI` | unset | Public URL of the Flow data endpoint, configured on an endpoint-driven Flow; required only for an endpoint-driven form. |
 
 ## Point the webhook at the deployment
 
@@ -90,15 +90,47 @@ A `form` ask (an `ask` whose answer is a small JSON object) renders as an in-cha
 values return as the answer. A multi-page layout renders one screen per page, and
 per-send prefill values and option lists open the form already filled in. A short
 string `enum` renders a radio group (longer, a dropdown), an array of strings a
-checkbox group, a constrained `format: date` a bounded calendar picker; a page's
+checkbox group, a `format: date` a calendar picker (bounded by its date constraints); a page's
 display blocks and a review page render too, and a `visibleWhen` field is shown or
 hidden client-side.
 
 A string field's `inputMode` hint picks the text field's keyboard: `numeric` and
 `decimal` draw the numeric keypad (it admits a decimal separator), `tel` the phone
 keypad, `email` the email keyboard, and `url` degrades to a plain text field (Meta
-has no `url` input-type); `text` (or no hint) is the plain text field. `inputMode`
-only chooses the keyboard — the value is always submitted as the typed string.
+has no `url` input-type); `text` (or no hint) is the plain text field. The value is
+always submitted as the typed string. A `format: email` field draws the email keyboard
+too, and its address shape is checked inside the form (below).
+
+**Shapes are caught inside the form.** A field's declared shape stops the person on
+the screen, with the field's sentence under it, before the submit leaves the form:
+
+| Shape (schema) | Checked by |
+|---|---|
+| `required` | The control itself, on every control (a date is a calendar picker, which takes `required`) |
+| `pattern` | The control itself on a text or numeric keyboard (drawn as Meta's `pattern`, with the field's second line — else its sentence — as the helper text Meta then requires); the data endpoint on the email or phone keyboard and on a text area |
+| `integer` | The control itself (a whole-number pattern on the numeric keypad) |
+| `format: time` / `date-time` | The control itself (the platform's regex as its pattern) and the data endpoint (a real calendar value) |
+| `format: email` | The data endpoint (the platform's one address shape) |
+| `minLength` / `maxLength` | The control's character limits (a text area has no minimum: the data endpoint checks it) |
+| `minimum` / `maximum`, `exclusiveMinimum` / `exclusiveMaximum`, `multipleOf` | The data endpoint |
+| `minItems` / `maxItems` | The checkbox group's or chip grid's selection limits |
+| `minDate` / `maxDate` / `unavailableDates` | The calendar picker's bounds and excluded days |
+| a date range's order and `minDays` / `maxDays` | The range calendar picker when the pair draws as one control; else the data endpoint |
+| any other keyword | The data endpoint |
+
+A form carrying any shape only the data endpoint checks is published
+**endpoint-driven** (as a reacting form is): every footer calls this plugin's Flow data
+endpoint, which runs the platform's one form-shape check on the screen's values (on a
+step) or on the whole answer (on submit). A broken shape keeps the person on the screen:
+the failing field shows its sentence under the control (Meta's `error-message`) and the
+screen shows a *Label: sentence* error line; a clean step moves on, a clean submit
+completes the form. The field's sentence is `wording.form.fields[<name>].invalid` (the
+sender's words, in the end user's language) when set, else this channel's own word for
+the broken shape; the error line carries the sentence or the platform's own sentence
+naming the bound (*Quantity: Enter a number of at least 1*). The sentence is refused at
+deliver past Meta's `error-message` cap — 30 characters on a text field or text area, 80
+on a calendar or choice control — naming the field. A shape the control checks itself
+shows Meta's own message on the control.
 
 A `control: chips` choice draws a chip grid (single-pick for a string `enum`,
 multi-pick for an array of strings) for Meta's 2–20 choices, else it degrades to the
@@ -141,14 +173,17 @@ door rejects a form answer, the re-sent Flow's body reads `wording.answer.reject
 (its `{reason}` token filled with the door's reason, else a generic lead), capped at
 deliver so the reason always fits Meta's message body.
 
-A form that **reacts while open** (its ask declares reaction triggers) publishes as
-an endpoint-driven Flow whose controls call this plugin's encrypted Flow **data
-endpoint** (`/api/channels/whatsapp/flow-data`, which answers the encrypted reply as a
-`text/plain` body); it needs the business key material
+A form that **reacts while open** (its ask declares reaction triggers) or carries a
+shape only the data endpoint checks publishes as an endpoint-driven Flow whose footers
+and reacting controls call this plugin's encrypted Flow **data endpoint**
+(`/api/channels/whatsapp/flow-data`, which answers the encrypted reply as a `text/plain`
+body); a declared reaction runs only once the screen's shapes are clean. Such a form —
+an ask or an ask-less form notification alike — needs the business key material
 (`CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY` + `CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI`, and the
 public key registered for the sending number through the admin-only
 `POST /api/channels/whatsapp/flow-encryption` route, which derives it from the private
-key) and refuses loudly without it. See the plugin README for the provisioning steps.
+key) and is refused loudly, before anything is sent, without it. See the plugin README
+for the provisioning steps.
 
 Each schema property name may use any character, while a Flow component name must be
 an identifier (`[A-Za-z_][A-Za-z0-9_]*`). The channel maps each property to a unique
@@ -162,8 +197,10 @@ summary reads in words rather than in the identifier-safe names; the channel map
 labels back to the schema keys when it decodes the reply.
 
 If the platform rejects a submitted answer (a value fails the answer schema at the
-door), the **same form is re-sent** — same steps, same prefill, with the door's
-reason shown above it — so the participant can correct and resubmit. This repeats
+door — a case no in-form check could see), the **same form is re-sent** — same steps,
+same prefill, with the door's reason shown above it as *Label: sentence* (*Your last
+answer could not be accepted: Email address: Enter a valid email address*) — so the
+participant can correct and resubmit. This repeats
 up to a fixed retry cap; past the cap the participant is told once that the form
 could not be processed and the ask times out.
 

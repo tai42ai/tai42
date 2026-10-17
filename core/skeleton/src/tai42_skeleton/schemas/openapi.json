@@ -5325,7 +5325,7 @@
       },
       "FieldWording": {
         "additionalProperties": false,
-        "description": "The caller's words for one form field's platform-drawn controls. Frozen, strict keys.\n\n``choice_label`` is the placeholder of the field's picker (its empty-state prompt). It is the\nsender's own words, in the end-user's language; absent, the surface shows its own generic word.\nA set value is non-blank; an empty object names nothing and is refused; an unknown key is\nrefused.",
+        "description": "The caller's words for one form field's platform-drawn controls. Frozen, strict keys.\n\n``choice_label`` is the placeholder of the field's picker (its empty-state prompt); ``invalid``\nis the sentence shown when the field's value does not have its declared shape. Each is the\nsender's own words, in the end-user's language; absent, the surface shows its own generic word\n(for ``invalid``, its own word for the failing shape). A set value is non-blank; an empty object\nnames nothing and is refused; an unknown key is refused.",
         "properties": {
           "choice_label": {
             "anyOf": [
@@ -5338,6 +5338,18 @@
             ],
             "default": null,
             "title": "Choice Label"
+          },
+          "invalid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Invalid"
           }
         },
         "title": "FieldWording",

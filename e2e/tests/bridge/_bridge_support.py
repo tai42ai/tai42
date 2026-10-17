@@ -32,6 +32,7 @@ from tai42_e2e.waiting import wait_for_async
 TWILIO_INBOUND_PATH = "/api/channels/twilio/inbound"
 TWILIO_STATUS_PATH = "/api/channels/twilio/status"
 WHATSAPP_INBOUND_PATH = "/api/channels/whatsapp/inbound"
+WHATSAPP_FLOW_DATA_PATH = "/api/channels/whatsapp/flow-data"
 TELEGRAM_INBOUND_PATH = "/api/channels/telegram/inbound"
 SLACK_INBOUND_PATH = "/api/channels/slack/inbound"
 
@@ -55,6 +56,61 @@ INVALID_CODE_TEXT = "That pairing code is not valid. It may have expired or alre
 # The pair-code shape (``LINK-`` + 8 ``[A-Z0-9]``), matched as a whole token — a leg pulls
 # the minted code out of a link reply or a rendered greeting with this.
 PAIR_CODE_RE = re.compile(r"\bLINK-[A-Z0-9]{8}\b")
+
+
+# A Flow action payload value that is exactly one dynamic reference (``${form.x}`` / ``${data.x}``).
+_FLOW_REFERENCE_RE = re.compile(r"^\$\{(form|data)\.([A-Za-z0-9_]+)\}$")
+
+
+def whatsapp_flow_action_request(
+    flow_json: dict[str, Any],
+    *,
+    screen: str,
+    flow_token: str,
+    form: dict[str, Any],
+    data: dict[str, Any],
+    control: str | None = None,
+) -> dict[str, Any]:
+    """The decrypted ``data_exchange`` request Meta posts when the person fires an action of a published Flow.
+
+    The action is ``screen``'s Footer ``on-click-action``, or the ``on-select-action`` of the
+    component named ``control`` on that screen; it must be a ``data_exchange``. Its payload is
+    resolved the way the vendor resolves it: a literal rides as is, ``${form.x}`` reads what the
+    person entered in ``form`` and ``${data.k}`` reads the screen's ``data`` (the send's
+    ``flow_action_payload`` data on the entry screen, else the data the endpoint answered with).
+    A reference to a value the leg did not supply, a person's entry the action never forwards,
+    or any other dynamic text fails the leg, so a wrong payload in the published Flow reds.
+    """
+    screens = [entry for entry in flow_json["screens"] if entry["id"] == screen]
+    assert len(screens) == 1, f"the Flow has no single screen {screen!r}"
+    children = screens[0]["layout"]["children"]
+    if control is None:
+        footers = [child for child in children if child.get("type") == "Footer"]
+        assert len(footers) == 1, f"screen {screen!r} carries {len(footers)} Footers"
+        action = footers[0]["on-click-action"]
+    else:
+        named = [child for child in children if child.get("name") == control]
+        assert len(named) == 1, f"screen {screen!r} carries {len(named)} components named {control!r}"
+        assert "on-select-action" in named[0], f"{control!r} on {screen!r} fires no on-select-action"
+        action = named[0]["on-select-action"]
+    assert action["name"] == "data_exchange", f"the action is {action['name']!r}, not a data_exchange"
+    resolved: dict[str, Any] = {}
+    forwarded: set[str] = set()
+    for key, value in action["payload"].items():
+        reference = _FLOW_REFERENCE_RE.match(value) if isinstance(value, str) else None
+        if reference is None:
+            assert not (isinstance(value, str) and "${" in value), f"payload {key!r} carries dynamic text {value!r}"
+            resolved[key] = value
+            continue
+        source, name = reference.groups()
+        supplied = form if source == "form" else data
+        assert name in supplied, f"payload {key!r} reads ${{{source}.{name}}}, which the leg did not supply"
+        resolved[key] = supplied[name]
+        if source == "form":
+            forwarded.add(name)
+    unforwarded = set(form) - forwarded
+    assert not unforwarded, f"the action forwards none of the entries {sorted(unforwarded)!r}"
+    return {"version": "3.0", "action": "data_exchange", "screen": screen, "flow_token": flow_token, "data": resolved}
 
 
 def extract_pair_code(text: str) -> str:
@@ -386,6 +442,22 @@ class BridgeHarness:
             wamid=wamid,
             valid=valid,
         )
+
+    async def whatsapp_flow_exchange(self, payload: dict[str, Any], *, port: int | None = None) -> dict[str, Any]:
+        """POST one encrypted Flow data-endpoint request to a replica (default B) and return its decrypted reply.
+
+        ``payload`` is the decrypted request Meta sends (``action``/``screen``/``flow_token``/``data``),
+        encrypted to the stack's Flow business key and signed under its app secret; a non-200 reply
+        fails the leg naming the status.
+        """
+        exchange = self.fake_whatsapp.build_flow_exchange(
+            app_secret=self.whatsapp_secret,
+            private_key_pem=self.stack.config.env["CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY"],
+            payload=payload,
+        )
+        resp = await post_inbound(self.stack, WHATSAPP_FLOW_DATA_PATH, exchange.inbound, port=port)
+        assert resp.status_code == 200, f"flow data endpoint answered {resp.status_code}: {resp.text}"
+        return self.fake_whatsapp.decrypt_flow_response(resp.content, exchange)
 
     def whatsapp_status(
         self, *, phone_number_id: str, wamid: str, status: str, recipient_id: str = "", valid: bool = True

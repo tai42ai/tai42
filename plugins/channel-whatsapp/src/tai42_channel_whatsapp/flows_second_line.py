@@ -32,7 +32,7 @@ _TEXT_CAPTION_MAX_CHARS = 409
 #: :func:`range_captions` — is drawn as a sibling ``TextCaption`` instead (:func:`field_caption`), so
 #: its content is never dropped. Meta caps ``helper-text`` at 80 characters and a ``TextCaption`` at
 #: 409; a longer second line is refused at build naming the property, never truncated.
-_HELPER_TEXT_TYPES = frozenset({"TextInput", "TextArea", "DatePicker", "CalendarPicker"})
+_HELPER_TEXT_TYPES = frozenset({"TextInput", "TextArea", "CalendarPicker"})
 
 
 def _field_second_line(prop: dict[str, Any]) -> str | None:

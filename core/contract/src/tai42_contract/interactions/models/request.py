@@ -20,6 +20,7 @@ from tai42_contract.interactions.models.forms import (
     FormReactions,
     check_form_data,
     check_form_pages,
+    check_form_property_names,
     check_form_reactions,
     check_form_wording_fields,
 )
@@ -60,6 +61,8 @@ def _check_form_payload(payload: dict[str, Any], wording: Wording | None) -> Non
     if (data is not None or pages is not None or reactions is not None) and not isinstance(schema, dict):
         raise ValueError("form data/pages/reactions require an object schema")
     schema_obj = cast("dict[str, Any]", schema)
+    if isinstance(schema, dict):
+        check_form_property_names(schema_obj)
     data_model = FormData.model_validate(data) if data is not None else None
     page_models = [FormPage.model_validate(page) for page in cast("list[Any]", pages)] if pages is not None else None
     if data_model is not None:

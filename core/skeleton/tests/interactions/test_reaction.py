@@ -446,3 +446,54 @@ async def test_enforce_submitted_handler_raise_surfaces_loudly(wired, monkeypatc
     monkeypatch.setattr(reaction_module, "_run_reaction", _boom)
     with pytest.raises(FormReactionHandlerError, match="blew up"):
         await enforce_submitted_check("r1", AnswerFormat.FORM, request.format_payload, {"slot": "9am"})
+
+
+_SHAPED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "email": {"type": "string", "pattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", "format": "email"},
+        "qty": {"type": "integer", "minimum": 1, "maximum": 9},
+        "on": {"type": "string", "format": "date", "minDate": "2026-01-01"},
+        "tags": {"type": "array", "items": {"type": "string", "minLength": 2}, "minItems": 2},
+        "pick": {"type": "string", "enum": ["a", "b"]},
+    },
+    "required": ["email"],
+}
+
+
+async def test_a_partial_value_breaking_its_shape_still_reaches_the_handler(wired, monkeypatch):
+    # The reaction type-checks partial values only; the shape is the surface's and the door's check.
+    await wired.store.add(
+        wired.fake,
+        _reacting(wired.store, schema=_SHAPED_SCHEMA, reactions={"field_changed": ["pick"]}),
+        idle_ttl=86400,
+    )
+    captured: dict = {}
+    _stub_handler(monkeypatch, captured=captured)
+    partial = {"email": "dhdhdh", "qty": 0, "on": "not-a-date", "tags": ["x"], "pick": "a"}
+    assert await react("r1", {"kind": "field_changed", "field": "pick"}, partial) == {}
+    assert captured["values"] == partial
+
+
+async def test_a_handler_value_breaking_its_shape_is_accepted_but_a_wrong_type_is_not(wired, monkeypatch):
+    await wired.store.add(
+        wired.fake,
+        _reacting(wired.store, schema=_SHAPED_SCHEMA, reactions={"field_changed": ["pick"]}),
+        idle_ttl=86400,
+    )
+    _stub_handler(monkeypatch, returns={"values": {"qty": 0, "email": "x"}})
+    assert await react("r1", {"kind": "field_changed", "field": "pick"}, {}) == {"values": {"qty": 0, "email": "x"}}
+    _stub_handler(monkeypatch, returns={"values": {"qty": "many"}})
+    with pytest.raises(FormReactionHandlerError, match="do not fit the schema"):
+        await react("r1", {"kind": "field_changed", "field": "pick"}, {})
+
+
+def test_types_only_schema_keeps_only_the_types():
+    out = _types_only_schema(_SHAPED_SCHEMA)
+    assert out["properties"] == {
+        "email": {"type": "string"},
+        "qty": {"type": "integer"},
+        "on": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "pick": {"type": "string"},
+    }
