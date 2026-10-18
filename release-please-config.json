@@ -7,7 +7,6 @@
     "core/contract": {
       "package-name": "tai42-contract",
       "component": "tai42-contract",
-      "release-as": "20.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -23,7 +22,6 @@
     "core/kit": {
       "package-name": "tai42-kit",
       "component": "tai42-kit",
-      "release-as": "11.0.0",
       "skip-changelog": true,
       "exclude-paths": [
         "core/kit/tests"
@@ -40,7 +38,6 @@
     "core/skeleton": {
       "package-name": "tai42-skeleton",
       "component": "tai42-skeleton",
-      "release-as": "27.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -242,7 +239,6 @@
     "plugins/channel-whatsapp": {
       "package-name": "tai42-channel-whatsapp",
       "component": "tai42-channel-whatsapp",
-      "release-as": "10.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
