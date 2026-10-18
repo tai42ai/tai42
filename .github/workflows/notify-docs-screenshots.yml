@@ -1,0 +1,60 @@
+# Callback-page screenshot regeneration hook.
+#
+# On a push to `main` that touches the server-rendered callback form page (its
+# route, its renderer and the shape attributes it draws, its submit script, the
+# platform's shape sentences, or the browser spec that captures its docs
+# screenshot), this fires a `repository_dispatch` at the docs repo, triggering
+# the `callback-page` job of its docs-screenshots workflow. That job boots this
+# repo's browser-e2e stack, recaptures the callback-page docs screenshot, and
+# opens an automated PR if it changed.
+#
+# Separate from notify-docs.yml (which fires on EVERY push to regenerate the
+# reference): screenshots are heavy and only track the page's own paths, so this
+# hook is path-filtered and names its capture set in the payload.
+#
+# The dispatch needs a `TAI_DOCS_DISPATCH_TOKEN` secret (`contents: write` on the
+# docs repo). A fork has no such secret, so the step is skipped there. The docs
+# repo is the `DOCS_REPO` repository variable (default `tai-docs`) under this
+# repository's owner.
+
+name: notify-docs-screenshots
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # The callback door that serves the page.
+      - 'core/skeleton/src/tai42_skeleton/routers/interactions/callback.py'
+      # The form renderer and the shape attributes its controls carry.
+      - 'core/skeleton/src/tai42_skeleton/routers/interactions/form_render.py'
+      - 'core/skeleton/src/tai42_skeleton/routers/interactions/form_shape_attrs.py'
+      # The page's constant submit script, which draws the field errors.
+      - 'core/skeleton/src/tai42_skeleton/routers/interactions/pages.py'
+      # The platform's sentences for a broken shape.
+      - 'core/skeleton/src/tai42_skeleton/interactions/form_shape_words.py'
+      # The browser spec that captures the docs screenshot.
+      - 'e2e/ui/tests/form-callback-page.spec.ts'
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DOCS_DISPATCH_TOKEN: ${{ secrets.TAI_DOCS_DISPATCH_TOKEN }}
+    steps:
+      - name: Trigger the docs callback-page screenshot regeneration
+        if: env.DOCS_DISPATCH_TOKEN != ''
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
+        with:
+          token: ${{ env.DOCS_DISPATCH_TOKEN }}
+          repository: ${{ github.repository_owner }}/${{ vars.DOCS_REPO || 'tai-docs' }}
+          event-type: studio-screenshots
+          client-payload: |
+            {
+              "repo": "${{ github.repository }}",
+              "sha": "${{ github.sha }}",
+              "set": "callback-page"
+            }

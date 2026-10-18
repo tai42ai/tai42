@@ -3,3 +3,5 @@
 .stack-handoff.json
 # Screenshot output of the widget spec (the screenshot tooling copies what it needs).
 form-shots-output/
+# Docs screenshots the `@docs` test writes when SHOTS_OUT is unset.
+docs-shots-output/
