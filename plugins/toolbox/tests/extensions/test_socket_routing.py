@@ -13,7 +13,19 @@ import trustme
 from pydantic import ValidationError
 from tai42_kit.net import url_guard
 from tai42_kit.net.url_guard import UrlGuardError
-from tests.extensions._proxy_support import (
+
+import tai42_toolbox._internal.extensions.proxy_context as proxy_context_module
+from tai42_toolbox._internal.extensions.proxy_context import (
+    ProxySettings,
+    _select_proxy_url,
+    build_route,
+)
+from tai42_toolbox._internal.extensions.socket_routing import (
+    RoutingSocket,
+    route,
+)
+
+from ._proxy_support import (
     _ClosingProxy,
     _enable_guard,
     _FakeConnectProxy,
@@ -26,17 +38,6 @@ from tests.extensions._proxy_support import (
     _socks_route,
     _TlsConnectProxy,
     _TrickleConnectProxy,
-)
-
-import tai42_toolbox._internal.extensions.proxy_context as proxy_context_module
-from tai42_toolbox._internal.extensions.proxy_context import (
-    ProxySettings,
-    _select_proxy_url,
-    build_route,
-)
-from tai42_toolbox._internal.extensions.socket_routing import (
-    RoutingSocket,
-    route,
 )
 
 

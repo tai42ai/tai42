@@ -37,8 +37,6 @@ from tai42_contract.template import TemplatedText
 from tai42_kit.llm import RunTrace
 from tai42_kit.monitoring import encode_payload, resolve_refs
 from tai42_kit.monitoring.testing import span_to_observation
-from tests._deep_agent_fakes import _FakeCompiledGraph, _install_fake_resolve
-from tests._retrieval_tools_agent_support import StubStore
 
 from tai42_agents._internal import base_tool_agent as bta
 from tai42_agents.langchain_deep_agent.agent import DeepAgent
@@ -53,7 +51,9 @@ from tai42_agents.voting_agent.model import VoterSpec
 from tai42_agents.vqa_agent import VqaAgent
 
 from ._client_tool import client_tool
+from ._deep_agent_fakes import _FakeCompiledGraph, _install_fake_resolve
 from ._graph_support import invoke_tools_agent
+from ._retrieval_tools_agent_support import StubStore
 from .conftest import RecordingMonitoringWriter
 
 

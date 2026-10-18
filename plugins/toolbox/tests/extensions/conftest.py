@@ -179,8 +179,15 @@ def capture_registration() -> Callable[[ModuleType], list[tuple[str, ExtensionKi
 
 
 def capture_extensions(module: ModuleType) -> CapturingExtensions:
-    """Re-run a module's import body under a capturing app and return its capturing extensions facet."""
+    """Re-run a module's import body under a capturing app and return its capturing extensions facet.
+
+    The body re-runs on the module ``sys.modules`` holds under ``module``'s name. A package
+    re-import (an app's config reload drops a manifest's modules and imports them again)
+    replaces that entry, so the object a test module bound at its own import may no longer be
+    the imported one.
+    """
+    imported = importlib.import_module(module.__name__)
     app = CapturingApp()
     tai42_app.bind(app)
-    importlib.reload(module)
+    importlib.reload(imported)
     return app.extensions

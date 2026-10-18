@@ -386,15 +386,23 @@ def _ensure_redis_identity_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     ``start()`` calls ``reset_registry()`` and then re-registers from the manifest, so
     a minimal test manifest that omits the identity plugin would leave the registry
     empty — and the AC-enabled startup probe (``probe_identity_provider``) would fail
-    to resolve the active provider. Emulate a manifest that lists the plugin: register
-    ``"redis"`` before each test, AND wrap ``start()``'s registry reset so the default
+    to resolve the active provider. Emulate a manifest that lists the plugin and no
+    other provider: each test starts on an identity registry holding ``"redis"`` alone
+    and an empty accounts registry, whatever providers other imports in the process
+    registered (each registry gets a fresh generation for the test, and the process's
+    own comes back after it), AND ``start()``'s registry reset is wrapped so the default
     is re-registered after the clear (the reset still runs, so a manifest re-import's
     duplicate guard is unaffected). Suites that isolate the registry snapshot this
     baseline and restore it."""
     from tai42_identity_redis.redis_api_key_provider import RedisApiKeyProvider
     from tai42_kit.access_control import registry
+    from tai42_kit.accounts import registry as accounts_registry
+    from tai42_kit.registry.staged import StagedGeneration
 
     import tai42_skeleton.app.lifecycle as lifecycle
+
+    monkeypatch.setattr(registry._PROVIDERS, "_generation", StagedGeneration(dict))
+    monkeypatch.setattr(accounts_registry._PROVIDERS, "_generation", StagedGeneration(dict))
 
     def _ensure() -> None:
         # Guard/register against the WRITE TARGET (the staged generation during an epoch

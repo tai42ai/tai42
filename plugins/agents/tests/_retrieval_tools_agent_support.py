@@ -17,13 +17,14 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import StructuredTool
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
-from tests.conftest import fake_run_trace
 
 from tai42_agents.retrieval_tools_agent import agent as ragent
 from tai42_agents.retrieval_tools_agent.agent import (
     _embedding_dims_cache,
 )
 from tai42_agents.retrieval_tools_agent.graph import RetrievalToolsGraph
+
+from .conftest import fake_run_trace
 
 AGENT_NAME = "retrieval_tools_agent"
 

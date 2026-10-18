@@ -10,15 +10,16 @@ from typing import Any
 import pytest
 from deepagents.backends import CompositeBackend, StateBackend
 from tai42_contract.app import tai42_app
-from tests._langchain_deep_agent_backend_support import (
-    _FakeResourceManager,
-    _TemplateMissingError,
-)
 
 from tai42_agents.langchain_deep_agent.backend import (
     SKILLS_ROOT,
     TemplateSkillsBackend,
     build_backend,
+)
+
+from ._langchain_deep_agent_backend_support import (
+    _FakeResourceManager,
+    _TemplateMissingError,
 )
 
 

@@ -15,7 +15,7 @@ from typing import Any, ClassVar
 
 import dotenv.main
 import pytest
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, ValidationError
 from pydantic_settings import PydanticBaseSettingsSource, SettingsConfigDict
 
 from tai42_kit.clients.settings import RedisConnectionSettings
@@ -323,7 +323,9 @@ def _registered_classes() -> list[type[TaiBaseSettings]]:
 
     Another test may clear the registry after the groups' modules were imported; the
     subclass walk applies the registration rule (own ``registry_exclude`` unset, at
-    least one field) so the set does not depend on test order.
+    least one field) so the set does not depend on test order. The walk leaves out the
+    groups a test module defines, whose module path holds a ``tests`` package both in
+    this suite's own run and in a whole-repo run.
     """
     found: dict[str, type[TaiBaseSettings]] = {}
     for info in registered_settings():
@@ -337,7 +339,7 @@ def _registered_classes() -> list[type[TaiBaseSettings]]:
     while pending:
         cls = pending.pop()
         pending.extend(cls.__subclasses__())
-        if "<locals>" in cls.__qualname__ or cls.__module__.startswith("tests"):
+        if "<locals>" in cls.__qualname__ or "tests" in cls.__module__.split("."):
             continue
         if cls.__dict__.get("registry_exclude") is True or not cls.model_fields:
             continue
@@ -350,6 +352,19 @@ def _dump_or_error(cls: type[TaiBaseSettings]) -> Any:
         return cls().model_dump()
     except Exception as exc:
         return (type(exc).__name__, str(exc))
+
+
+def _resolved_or_failures(cls: type[TaiBaseSettings]) -> Any:
+    """The values ``cls`` resolves, or which fields fail to resolve and why.
+
+    A validation failure is reduced to each error's location, type and message: the
+    error text also names the model and echoes the raw input, and both differ between
+    a class and a subclass that reads a different set of dotenv keys.
+    """
+    try:
+        return cls().model_dump()
+    except ValidationError as exc:
+        return ("ValidationError", exc.errors(include_url=False, include_input=False))
 
 
 def _fixture_env(tmp_path: Path) -> None:
@@ -410,7 +425,7 @@ def test_every_registered_class_resolves_the_same_values_with_only_existing(tmp_
             registry_exclude: ClassVar[bool] = True
             model_config = SettingsConfigDict(dotenv_filtering=None)
 
-        assert _dump_or_error(cls) == _dump_or_error(ExtrasLoop), cls.__qualname__
+        assert _resolved_or_failures(cls) == _resolved_or_failures(ExtrasLoop), cls.__qualname__
 
 
 def test_redis_connection_settings_resolve_the_shared_url_from_the_file(tmp_path: Path) -> None:

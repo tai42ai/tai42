@@ -16,13 +16,6 @@ from tai42_contract.template import TemplatedText
 from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
 from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
-from tests._langchain_deep_agent_factory_support import (
-    _FAKE_LLM,
-    _assert_bound_to_model,
-    _FakeRunnable,
-    _injected_gp,
-    _tool,
-)
 
 from tai42_agents._internal.recovery import _tool_error_middleware
 from tai42_agents.langchain_deep_agent import factory
@@ -33,6 +26,14 @@ from tai42_agents.langchain_deep_agent.factory import (
     build_langchain_deep_agent,
 )
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
+
+from ._langchain_deep_agent_factory_support import (
+    _FAKE_LLM,
+    _assert_bound_to_model,
+    _FakeRunnable,
+    _injected_gp,
+    _tool,
+)
 
 
 def test_resolve_subagent_emits_only_set_keys() -> None:

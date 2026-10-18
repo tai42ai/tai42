@@ -26,14 +26,13 @@ from tai42_contract.interactions import (
 from tai42_contract.tools import ClientTool, ClientToolError, UndeclaredPauseError
 from tai42_kit.llm import ToolNameTooLongError
 from tests.app._fixtures.pause_counter import BODY_RUNS as PAUSE_BODY_RUNS
+from tests.tools._client_handle_counter import BODY_RUNS, OVERLONG_NAME
 
 import tai42_skeleton.operations._authority as authority
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations.errors import ForbiddenError
 from tai42_skeleton.tools.binding.errors import UnknownToolError
-
-from ._client_handle_counter import BODY_RUNS, OVERLONG_NAME
 
 tai42_app.bind(app)
 

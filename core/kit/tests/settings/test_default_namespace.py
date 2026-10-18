@@ -18,7 +18,7 @@ from pydantic_settings import SettingsConfigDict
 
 from tai42_kit.clients.settings import RedisConnectionSettings
 from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, registered_settings
-from tai42_kit.settings.registry import _clear_registry
+from tai42_kit.settings.registry import _REGISTRY, _clear_registry
 
 _LOGGER_NAME = "tai42_kit.settings.default_namespace"
 
@@ -70,10 +70,12 @@ def _isolated_env(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    """Clear the registry around every test so locally-defined classes don't leak."""
+    """Run every test on an empty registry, then restore the registrations it replaced."""
+    saved = dict(_REGISTRY)
     _clear_registry()
     yield
     _clear_registry()
+    _REGISTRY.update(saved)
 
 
 def _write_dotenv(path, **values: str) -> str:

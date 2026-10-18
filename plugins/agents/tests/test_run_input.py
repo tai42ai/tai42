@@ -14,10 +14,11 @@ import pytest
 from pydantic import ValidationError
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.template import TemplatedText
-from tests._deep_agent_fakes import _drain_astream
 
 from tai42_agents.langchain_deep_agent.agent import DeepAgent
 from tai42_agents.langchain_deep_agent.run_input import DeepAgentInput
+
+from ._deep_agent_fakes import _drain_astream
 
 
 def test_deep_agent_input_rejects_unknown_key() -> None:

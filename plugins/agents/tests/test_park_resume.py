@@ -34,8 +34,6 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.template import TemplatedText
 from tai42_kit.interactions.park_index import DriveInProgressError, superstep_id
-from tests._client_tool import FakeClientTool, client_tool
-from tests.conftest import bind_park_index
 
 from tai42_agents._internal.park import agent_resume, finalize_drive
 from tai42_agents._internal.park import capability as cap
@@ -49,7 +47,8 @@ from tai42_agents.langchain_deep_agent import agent as agent_mod
 from tai42_agents.langchain_deep_agent import run_thread as run_thread_mod
 from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec
 
-from .conftest import fake_run_trace
+from ._client_tool import FakeClientTool, client_tool
+from .conftest import bind_park_index, fake_run_trace
 
 
 class ScriptedChatModel(BaseChatModel):

@@ -86,6 +86,7 @@ xfail_strict = true
 # instead of passing green.
 filterwarnings = ["error"]
 markers = [
+    "scoped_install: needs this member's own package-scoped install (uv sync --package <member>); a whole-repo session, whose venv holds every member, skips it",
     "integration: live tests that hit the real Telegram Bot API (skip cleanly without CHANNEL_TELEGRAM_* credentials)",
 ]
 

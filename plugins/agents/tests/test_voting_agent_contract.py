@@ -14,7 +14,12 @@ from tai42_contract.agent.events import (
 )
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
-from tests._voting_agent_support import (
+
+from tai42_agents.voting_agent import agent as agent_module
+from tai42_agents.voting_agent.agent import VotingAgentInput
+from tai42_agents.voting_agent.model import VoterSpec, VotingOutput
+
+from ._voting_agent_support import (
     AGENT_NAME,
     _collect,
     _fake_checkpoint_judge_stream,
@@ -24,10 +29,6 @@ from tests._voting_agent_support import (
     _NotVotingOutput,
     script_voting_graphs,
 )
-
-from tai42_agents.voting_agent import agent as agent_module
-from tai42_agents.voting_agent.agent import VotingAgentInput
-from tai42_agents.voting_agent.model import VoterSpec, VotingOutput
 
 
 @pytest.fixture(autouse=True)

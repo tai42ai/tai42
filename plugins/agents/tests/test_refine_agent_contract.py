@@ -15,17 +15,18 @@ from tai42_contract.agent import (
 )
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
-from tests._refine_agent_support import (
+
+from tai42_agents.refine_agent.agent import RefineAgentInput
+from tai42_agents.refine_agent.prompt import (
+    CRITIC_APPROVAL_MESSAGE,
+)
+
+from ._refine_agent_support import (
     AGENT_NAME,
     FakeAgent,
     _a_tool,
     _collect,
     _patch_loop,
-)
-
-from tai42_agents.refine_agent.agent import RefineAgentInput
-from tai42_agents.refine_agent.prompt import (
-    CRITIC_APPROVAL_MESSAGE,
 )
 
 

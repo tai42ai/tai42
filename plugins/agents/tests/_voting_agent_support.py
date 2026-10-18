@@ -18,12 +18,13 @@ from tai42_contract.agent.events import (
     ToolCallStep,
     ToolResultStep,
 )
-from tests._client_tool import FakeClientTool, client_tool
-from tests._tools_agent_support import ScriptedGraph, flatten
 
 from tai42_agents._internal.graph_cache import ToolsAgentGraphSpec
 from tai42_agents._internal.usage import AgentInvokeResult, CallUsage
 from tai42_agents.voting_agent import agent as agent_module
+
+from ._client_tool import FakeClientTool, client_tool
+from ._tools_agent_support import ScriptedGraph, flatten
 
 AGENT_NAME = "voting_agent"
 

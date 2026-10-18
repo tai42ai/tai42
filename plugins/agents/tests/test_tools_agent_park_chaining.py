@@ -39,8 +39,16 @@ from tai42_kit.interactions.park_index import (
     superstep_id,
 )
 from tai42_kit.settings import reset_all_settings
-from tests._client_tool import client_tool
-from tests._tools_agent_park_support import (
+
+from tai42_agents._internal.park import deliver_chained_park, detach_dead_chains
+from tai42_agents._internal.park import persist as park_persist
+from tai42_agents._internal.park.errors import AgentResumeParkEntryNotFoundError
+from tai42_agents._internal.park.park_binding import agents_park_index
+from tai42_agents._internal.park.resume import agent_resume
+from tai42_agents._internal.park.resume_tool import agent_park_giveup_handler
+
+from ._client_tool import client_tool
+from ._tools_agent_park_support import (
     ScriptedChatModel,
     _agent,
     _ask_call,
@@ -50,14 +58,7 @@ from tests._tools_agent_park_support import (
     _tool_messages,
     _wire_tools_build,
 )
-from tests.conftest import bind_park_index
-
-from tai42_agents._internal.park import deliver_chained_park, detach_dead_chains
-from tai42_agents._internal.park import persist as park_persist
-from tai42_agents._internal.park.errors import AgentResumeParkEntryNotFoundError
-from tai42_agents._internal.park.park_binding import agents_park_index
-from tai42_agents._internal.park.resume import agent_resume
-from tai42_agents._internal.park.resume_tool import agent_park_giveup_handler
+from .conftest import bind_park_index
 
 
 @pytest.fixture

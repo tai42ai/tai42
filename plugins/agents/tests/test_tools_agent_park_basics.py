@@ -25,19 +25,20 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.template import TemplatedText
 from tai42_kit.llm.settings import llm_provider_settings
-from tests._tools_agent_park_support import (
+
+from tai42_agents._internal import base_tool_agent as base_mod
+from tai42_agents._internal.park import agent_resume
+from tai42_agents._internal.park.errors import AgentResumeCheckpointMissingError
+from tai42_agents._internal.park.park_binding import agents_park_index
+
+from ._tools_agent_park_support import (
     ScriptedChatModel,
     _agent,
     _ask_call,
     _AskStandIn,
     _wire_tools_build,
 )
-from tests.conftest import APP, bind_park_index
-
-from tai42_agents._internal import base_tool_agent as base_mod
-from tai42_agents._internal.park import agent_resume
-from tai42_agents._internal.park.errors import AgentResumeCheckpointMissingError
-from tai42_agents._internal.park.park_binding import agents_park_index
+from .conftest import APP, bind_park_index
 
 
 @pytest.fixture

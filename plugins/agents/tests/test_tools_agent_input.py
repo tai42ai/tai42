@@ -15,13 +15,14 @@ from tai42_contract.agent import (
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
-from tests._tools_agent_support import (
+
+from tai42_agents.tools_agent import ToolsAgent, ToolsAgentInput
+
+from ._tools_agent_support import (
     AGENT_NAME,
     _collect,
     _get_agent,
 )
-
-from tai42_agents.tools_agent import ToolsAgent, ToolsAgentInput
 
 
 def test_decorator_registers_a_live_instance() -> None:

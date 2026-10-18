@@ -16,13 +16,14 @@ from tai42_contract.agent import (
     StreamEvent,
 )
 from tai42_contract.app import tai42_app
-from tests._client_tool import FakeClientTool, client_tool
 
 from tai42_agents import tools_agent as tools_agent_module
 from tai42_agents._internal.graph_cache import ToolsAgentGraph, ToolsAgentGraphSpec
 from tai42_agents._internal.lc_tools import resolve_tools
 from tai42_agents._internal.usage import AgentInvokeResult, CallUsage
 from tai42_agents.tools_agent import ToolsAgent
+
+from ._client_tool import FakeClientTool, client_tool
 
 AGENT_NAME = "tools_agent"
 

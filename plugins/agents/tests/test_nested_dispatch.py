@@ -44,8 +44,6 @@ from tai42_contract.interactions import (
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import tool_call_frame
 from tai42_kit.interactions.park_adoption import is_chained_park_key
-from tests._client_tool import FakeClientTool, client_tool
-from tests.conftest import bind_park_index
 
 from tai42_agents import tools_agent as tools_mod
 from tai42_agents._internal import base_tool_agent as base_mod
@@ -57,7 +55,8 @@ from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents.langchain_deep_agent import agent as deep_mod
 from tai42_agents.langchain_deep_agent import run_thread as deep_run_thread_mod
 
-from .conftest import fake_run_trace
+from ._client_tool import FakeClientTool, client_tool
+from .conftest import bind_park_index, fake_run_trace
 
 _COMPLETION_TOOL = "conversation_deliver"
 _THREAD = "bridge:acme:alice"

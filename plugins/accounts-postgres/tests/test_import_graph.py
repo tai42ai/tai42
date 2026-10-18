@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 # The shipped package and the public first-party packages it may import.
 PACKAGE = "tai42_accounts_postgres"
 ALLOWED_FIRST_PARTY = frozenset({PACKAGE, "tai42_contract", "tai42_kit"})
@@ -172,6 +174,7 @@ def _static_import_roots() -> dict[str, set[str]]:
     return roots
 
 
+@pytest.mark.scoped_install
 def test_shipped_package_imports_only_allowlisted_roots() -> None:
     result = subprocess.run(
         [sys.executable, "-c", _CHILD_PROGRAM],

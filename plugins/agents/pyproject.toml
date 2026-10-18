@@ -178,6 +178,9 @@ filterwarnings = [
     # behavior, so ignore exactly this message+category (never a bare ignore).
     "ignore:Default value .* is not JSON serializable; excluding default:pydantic.json_schema.PydanticJsonSchemaWarning",
 ]
+markers = [
+    "scoped_install: needs this member's own package-scoped install (uv sync --package <member>); a whole-repo session, whose venv holds every member, skips it",
+]
 
 [tool.coverage.run]
 source = ["tai42_agents"]

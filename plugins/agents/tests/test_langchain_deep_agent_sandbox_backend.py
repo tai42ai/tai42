@@ -18,9 +18,10 @@ from pathlib import Path
 
 import pytest
 from tai42_contract.sandbox import SandboxError, SandboxFileNotFoundError, SandboxSession, SandboxSessionSpec
-from tests._sandbox_fake import FakeSandbox, make_fake_sandbox
 
 from tai42_agents.langchain_deep_agent.sandbox_backend import SandboxSessionBackend
+
+from ._sandbox_fake import FakeSandbox, make_fake_sandbox
 
 
 def _spec(workspace_key: str, *, durability: str = "ephemeral") -> SandboxSessionSpec:

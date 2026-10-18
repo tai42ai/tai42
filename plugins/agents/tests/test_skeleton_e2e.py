@@ -54,11 +54,13 @@ from tai42_contract.agent import PresetSpec
 from tai42_contract.agent.events import MessageFinal, StructuredFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import ParkResumeUnauthorizedError
+from tai42_kit.access_control import registry as identity_registry
 from tai42_kit.access_control.registry import (
     get_identity_provider_factory,
     register_identity_provider,
     reset_registry,
 )
+from tai42_kit.registry.staged import StagedGeneration
 
 # Safe under any binding — these modules touch no tai42_app HTTP decorators at import
 # (unlike the routers, which are imported only after the skeleton app is bound).
@@ -194,7 +196,10 @@ def skeleton(monkeypatch: pytest.MonkeyPatch) -> Any:
       lists such a plugin: it registers a no-op-``healthcheck`` stand-in up front
       AND wraps the lifecycle's registry reset to re-register it after each clear
       (the reset itself still runs, so its duplicate-guard purpose is untouched).
-      Teardown empties the registry so the stand-in never reaches another test.
+      The test runs on a fresh identity registry generation, so it starts empty
+      whatever providers other imports in the process registered, and the
+      process's own generation comes back on teardown, so the stand-in never
+      reaches another test.
 
     ``reset_all_settings()`` runs before the build: the ``@settings_cache``d
     settings the boot reads are process-wide, so the caches earlier tests
@@ -214,6 +219,7 @@ def skeleton(monkeypatch: pytest.MonkeyPatch) -> Any:
         reset_registry()
         _register_offline_identity_provider()
 
+    monkeypatch.setattr(identity_registry._PROVIDERS, "_generation", StagedGeneration(dict))
     monkeypatch.setattr(lifecycle, "reset_identity_registry", reset_then_reregister)
     _register_offline_identity_provider()
 
@@ -228,8 +234,6 @@ def skeleton(monkeypatch: pytest.MonkeyPatch) -> Any:
     finally:
         # Restore the recording app the suite's conftest binds for every other test.
         tai42_app.bind(RECORDING_APP)
-        # Leave the module-level identity registry as this fixture found it: empty.
-        reset_registry()
 
 
 # -- the end-to-end scenario ---------------------------------------------------

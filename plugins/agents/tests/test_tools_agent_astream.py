@@ -21,7 +21,8 @@ from tai42_contract.agent import (
 )
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.template import TemplatedText
-from tests._tools_agent_support import (
+
+from ._tools_agent_support import (
     _STRUCTURED_SCHEMA,
     _capture_config,
     _collect,

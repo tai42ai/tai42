@@ -20,14 +20,15 @@ from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import PrivateAttr
 from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.template import TemplatedText
-from tests._tools_agent_park_support import (
+
+from ._tools_agent_park_support import (
     ScriptedChatModel,
     _agent,
     _ask_call,
     _AskStandIn,
     _wire_tools_build,
 )
-from tests.conftest import bind_park_index
+from .conftest import bind_park_index
 
 
 @pytest.fixture

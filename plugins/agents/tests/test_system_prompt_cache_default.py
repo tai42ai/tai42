@@ -293,10 +293,10 @@ def test_voting_voters_route_through_the_chokepoint_without_overriding_the_defau
     """Voting builds no own graph — each voter's graph comes from the tools-agent graph
     build and runs through ``ainvoke_tools_agent``, the tools-agent chokepoint, with no
     system_content_kwargs, so it inherits the default there."""
-    from tests._voting_agent_support import script_voting_graphs
-
     from tai42_agents._internal.usage import AgentInvokeResult, CallUsage
     from tai42_agents.voting_agent.model import VoterSpec
+
+    from ._voting_agent_support import script_voting_graphs
 
     script_voting_graphs(monkeypatch)
 

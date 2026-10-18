@@ -22,9 +22,10 @@ from tai42_contract.agent import (
     StreamEvent,
 )
 from tai42_kit.llm import RunTrace
-from tests.conftest import fake_run_trace
 
 import tai42_agents.refine_agent.agent as agent_mod
+
+from .conftest import fake_run_trace
 
 AGENT_NAME = "refine_agent"
 

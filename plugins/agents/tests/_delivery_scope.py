@@ -31,7 +31,8 @@ from tai42_contract.interactions import (
     reset_park_completion,
     set_park_completion,
 )
-from tests._client_tool import FakeClientTool, client_tool
+
+from ._client_tool import FakeClientTool, client_tool
 
 # A bound completion standing in for what the conversation door binds around an agent turn.
 BOUND_COMPLETION = DeliveryAddress(tool="conversation_deliver", context=None, thread_id="bridge:acme:alice")

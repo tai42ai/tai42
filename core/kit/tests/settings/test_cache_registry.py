@@ -604,6 +604,16 @@ def _hold_through_a_reload[S: BaseSettings](settings_cls: type[S]) -> tuple[S, i
 _SWEEP_LOGGER = "tai42_kit.settings.cache_registry"
 
 
+def _sweep_reports(caplog: pytest.LogCaptureFixture, settings_cls: type) -> list[logging.LogRecord]:
+    """The sweep's stale-instance reports about ``settings_cls``.
+
+    The sweep reports every group held across the retired epoch, so a group some
+    other imported module holds is reported too; a test reads only its own group's.
+    """
+    report = f"Stale settings instance {settings_cls.__module__}.{settings_cls.__qualname__} (epoch "
+    return [r for r in caplog.records if r.name == _SWEEP_LOGGER and r.getMessage().startswith(report)]
+
+
 @pytest.mark.parametrize("disposition", ["recycle", "excluded"])
 def test_a_held_group_that_changes_only_by_respawn_is_never_reported(caplog, disposition):
     class _RespawnOnlySettings(TaiBaseSettings):
@@ -616,7 +626,7 @@ def test_a_held_group_that_changes_only_by_respawn_is_never_reported(caplog, dis
     held, retired = _hold_through_a_reload(_RespawnOnlySettings)
 
     assert _of_type(sweep_stale_settings(retired), _RespawnOnlySettings) == []
-    assert [r for r in caplog.records if r.name == _SWEEP_LOGGER] == []
+    assert _sweep_reports(caplog, _RespawnOnlySettings) == []
     assert held.value == 1
 
 
@@ -702,5 +712,5 @@ def test_a_held_group_that_changes_only_by_respawn_through_a_keyed_accessor_is_n
     retired = advance_client_epoch()
 
     assert _of_type(sweep_stale_settings(retired), _KeyedRespawnOnlySettings) == []
-    assert [r for r in caplog.records if r.name == _SWEEP_LOGGER] == []
+    assert _sweep_reports(caplog, _KeyedRespawnOnlySettings) == []
     assert held.name == "a"

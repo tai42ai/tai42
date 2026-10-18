@@ -1080,6 +1080,18 @@ def claude_agent_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, l
     )
 
 
+@pytest.fixture
+def checkpoint_redis_configured(infra: Infra) -> None:
+    """Skip, with the compose hint, a test that boots its own stack on the module-capable checkpoint
+    Redis (``fresh_stack(..., allocate_checkpoint_db=True)``) when that Redis is not configured, the
+    same gate the checkpoint-Redis stack fixtures apply."""
+    if infra.checkpoint_redis is None:
+        pytest.skip(
+            "checkpoint Redis not configured; set TAI_E2E_CHECKPOINT_REDIS_URL and start "
+            "`docker compose --profile agents-redis up -d`"
+        )
+
+
 @pytest.fixture(scope="module")
 def deep_agent_durable_stack(
     infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub

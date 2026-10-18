@@ -261,7 +261,7 @@ def test_a_fenced_operation_is_refused_while_the_operation_surface_rebuilds(ac) 
     # and waved through. The refusal is retriable, not a verdict on the key.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            from ._fixtures import execution_probe
+            from tests.authz._fixtures import execution_probe
 
             with _rebuilding_operation_surface():
                 execution_probe.calls.clear()
@@ -282,7 +282,7 @@ def test_the_client_tool_seam_is_refused_while_the_operation_surface_rebuilds(ac
     # resolution wait — the discriminator itself is what refuses on this path.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            from ._fixtures import execution_probe
+            from tests.authz._fixtures import execution_probe
 
             [handle] = await app.tools.get_client_tools([_FENCED_OP])
 
@@ -353,7 +353,7 @@ def test_a_fire_still_refuses_when_the_surface_is_unsettled_with_no_reload_to_wa
     # the dispatch being waved through as a capability tool.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            from ._fixtures import execution_probe
+            from tests.authz._fixtures import execution_probe
 
             with _rebuilding_operation_surface():
                 execution_probe.calls.clear()
@@ -468,7 +468,7 @@ def test_a_hook_firing_a_fenced_operation_is_denied_under_a_non_admin_key(ac, ca
 
     async def run() -> list[tuple[str, str]]:
         async with app.app_context(_manifest()):
-            from ._fixtures import execution_probe
+            from tests.authz._fixtures import execution_probe
 
             manager = InMemoryHooksManager(HooksSettings())
             await manager.register(

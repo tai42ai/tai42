@@ -30,13 +30,14 @@ from tai42_kit.interactions.park_index import (
     ResolutionRecord,
     superstep_id,
 )
-from tests.conftest import APP, bind_park_index
 
 from tai42_agents._internal.park import park_binding
 from tai42_agents._internal.park.chain import deliver_chained_park
 from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents._internal.park.resume import agent_resume, to_contract_outcome
 from tai42_agents._internal.park.resume_tool import agent_park_kill_handler, agent_resume_tool
+
+from .conftest import APP, bind_park_index
 
 ANCESTOR = {"chain_key": "tai42:chained-park:anc", "asked_by": ["caller"]}
 _CHILD_KEY = "tai42:chained-park:child"

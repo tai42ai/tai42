@@ -57,7 +57,8 @@ from tai42_contract.tools import ClientTool
 from tai42_kit.llm import RunTrace
 from tai42_kit.monitoring.otel import OtelWriter
 from tai42_kit.monitoring.testing import InMemoryOtelReader
-from tests._sandbox_fake import FakeSandbox, make_fake_sandbox, permissive_sandbox_policy
+
+from ._sandbox_fake import FakeSandbox, make_fake_sandbox, permissive_sandbox_policy
 
 
 class RecordingAgents:

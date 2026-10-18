@@ -14,9 +14,10 @@ from typing import Any, Protocol
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
-from tests._client_tool import FakeClientTool, client_tool
 
 from tai42_agents.langchain_deep_agent.agent import DeepAgent
+
+from ._client_tool import FakeClientTool, client_tool
 
 
 def _client_tool(name: str) -> FakeClientTool:

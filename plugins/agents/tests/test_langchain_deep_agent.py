@@ -21,15 +21,6 @@ from tai42_contract.agent import Agent
 from tai42_contract.agent.base import AgentInterruptedError
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
-from tests._deep_agent_fakes import (
-    _client_tool,
-    _drain_astream,
-    _FakeCompiledGraph,
-    _install_fake_graph,
-    _install_fake_resolve,
-    _scripted_chunks,
-)
-from tests._delivery_scope import assert_delivery_scoped, probe_tool
 
 from tai42_agents.langchain_deep_agent import agent as agent_mod
 from tai42_agents.langchain_deep_agent import run_thread as run_thread_mod
@@ -38,6 +29,15 @@ from tai42_agents.langchain_deep_agent.run_thread import start_run_config
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec
 
+from ._deep_agent_fakes import (
+    _client_tool,
+    _drain_astream,
+    _FakeCompiledGraph,
+    _install_fake_graph,
+    _install_fake_resolve,
+    _scripted_chunks,
+)
+from ._delivery_scope import assert_delivery_scoped, probe_tool
 from .conftest import fake_run_trace
 
 # ===========================================================================

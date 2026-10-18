@@ -12,17 +12,18 @@ from langchain_core.tools import ToolException
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
-from tests._tools_agent_support import (
+
+from tai42_agents import tools_agent as tools_agent_module
+from tai42_agents._internal.lc_tools import resolve_tools
+from tai42_agents._internal.usage import AgentInvokeResult, CallUsage
+
+from ._tools_agent_support import (
     _STRUCTURED_SCHEMA,
     _get_agent,
     flatten,
     make_tool,
     script_graph,
 )
-
-from tai42_agents import tools_agent as tools_agent_module
-from tai42_agents._internal.lc_tools import resolve_tools
-from tai42_agents._internal.usage import AgentInvokeResult, CallUsage
 
 
 @pytest.fixture(autouse=True)

@@ -27,8 +27,18 @@ from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.monitoring.models import SpanKind, TokenUsage
 from tai42_contract.template import TemplatedText
-from tests._claude_app import LocalApp, RecordingWriter, build_local_app
-from tests._claude_stubs import (
+
+import tai42_agents.claude_code.agent as agent_module
+import tai42_agents.claude_code.live_sessions as live_sessions_module
+import tai42_agents.claude_code.workspace as workspace_module
+from tai42_agents.claude_code.agent import ClaudeCodeAgent
+from tai42_agents.claude_code.errors import ClaudeCodeError
+from tai42_agents.claude_code.inputs import SubagentSpecShape
+from tai42_agents.claude_code.protocol import ProtocolError
+from tai42_agents.claude_code.settings import ClaudeCodeSettings, ConnectionCred, StaticCred
+
+from ._claude_app import LocalApp, RecordingWriter, build_local_app
+from ._claude_stubs import (
     ASYNC_ASK,
     ENV_CRED_ECHO,
     EVENTS_RICH,
@@ -42,15 +52,6 @@ from tests._claude_stubs import (
     VERSION_MISMATCH,
     payload_for,
 )
-
-import tai42_agents.claude_code.agent as agent_module
-import tai42_agents.claude_code.live_sessions as live_sessions_module
-import tai42_agents.claude_code.workspace as workspace_module
-from tai42_agents.claude_code.agent import ClaudeCodeAgent
-from tai42_agents.claude_code.errors import ClaudeCodeError
-from tai42_agents.claude_code.inputs import SubagentSpecShape
-from tai42_agents.claude_code.protocol import ProtocolError
-from tai42_agents.claude_code.settings import ClaudeCodeSettings, ConnectionCred, StaticCred
 
 _DIGEST = "registry.example/claude@sha256:" + "c" * 64
 

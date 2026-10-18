@@ -32,24 +32,6 @@ from tai42_contract.interactions import (
 from tai42_contract.sandbox import ExecResult, SandboxError, SandboxPolicy
 from tai42_contract.template import TemplatedText
 from tai42_kit.interactions.park_index import superstep_id as compute_superstep_id
-from tests._claude_app import LocalApp, build_local_app
-from tests._claude_stubs import (
-    ASYNC_ASK,
-    CRED_ECHO,
-    FORM_ASYNC_REACTING_ASK,
-    MESSAGE,
-    MESSAGE_SESSION_OTHER,
-    QUERY_ECHO,
-    REDACT_TRANSCRIPT,
-    RESUME_ID_ECHO,
-    RESUME_ONCE,
-    RESUME_REDRIVE,
-    TOOL_CALL,
-    TOOL_CALL_PARK,
-    payload_for,
-)
-from tests._sandbox_fake import FakeSandboxSession, make_fake_sandbox
-from tests.conftest import bind_park_index
 
 import tai42_agents._internal.park.lease as lease_mod
 import tai42_agents.claude_code.agent as agent_module
@@ -65,6 +47,25 @@ from tai42_agents.claude_code.errors import ClaudeCodeError
 from tai42_agents.claude_code.protocol import ProtocolError
 from tai42_agents.claude_code.session_records import read_session_id
 from tai42_agents.claude_code.settings import ClaudeCodeSettings, ConnectionCred
+
+from ._claude_app import LocalApp, build_local_app
+from ._claude_stubs import (
+    ASYNC_ASK,
+    CRED_ECHO,
+    FORM_ASYNC_REACTING_ASK,
+    MESSAGE,
+    MESSAGE_SESSION_OTHER,
+    QUERY_ECHO,
+    REDACT_TRANSCRIPT,
+    RESUME_ID_ECHO,
+    RESUME_ONCE,
+    RESUME_REDRIVE,
+    TOOL_CALL,
+    TOOL_CALL_PARK,
+    payload_for,
+)
+from ._sandbox_fake import FakeSandboxSession, make_fake_sandbox
+from .conftest import bind_park_index
 
 # A minimal resume options snapshot (the shape ``astream`` stores on the park identity's
 # ``rebuild_kwargs`` and ``aresume_park`` rebuilds the turn from).

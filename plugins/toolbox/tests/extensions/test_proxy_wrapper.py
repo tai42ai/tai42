@@ -8,10 +8,6 @@ import socket
 
 import pytest
 from tai42_contract.extensions import ExtensionKind
-from tests.extensions._proxy_support import (
-    _settings,
-    _tool,
-)
 
 import tai42_toolbox.extensions.proxy as proxy_module
 from tai42_toolbox._internal.extensions.socket_routing import (
@@ -20,6 +16,11 @@ from tai42_toolbox._internal.extensions.socket_routing import (
     active_route,
 )
 from tai42_toolbox.extensions.proxy import proxy
+
+from ._proxy_support import (
+    _settings,
+    _tool,
+)
 
 
 def test_registers_as_wrapper_named_proxy_requiring_body_locality(capture_registration):

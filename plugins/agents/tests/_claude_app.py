@@ -22,8 +22,9 @@ from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.monitoring.models import SpanKind
 from tai42_contract.sandbox import Sandbox, SandboxPolicy
 from tai42_contract.template import TemplatedText
-from tests._client_tool import FakeClientTool, client_tool
-from tests._sandbox_fake import FakeSandbox, make_fake_sandbox, permissive_sandbox_policy
+
+from ._client_tool import FakeClientTool, client_tool
+from ._sandbox_fake import FakeSandbox, make_fake_sandbox, permissive_sandbox_policy
 
 
 class _Span:

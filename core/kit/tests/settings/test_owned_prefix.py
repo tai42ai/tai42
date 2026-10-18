@@ -22,14 +22,17 @@ from tai42_kit.settings import (
     registered_settings,
     unknown_owned_env_keys,
 )
-from tai42_kit.settings.registry import _clear_registry
+from tai42_kit.settings.registry import _REGISTRY, _clear_registry
 
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
+    """Run every test on an empty registry, then restore the registrations it replaced."""
+    saved = dict(_REGISTRY)
     _clear_registry()
     yield
     _clear_registry()
+    _REGISTRY.update(saved)
 
 
 def _define_synth() -> None:

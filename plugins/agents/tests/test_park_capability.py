@@ -13,12 +13,13 @@ from typing import Any
 import pytest
 from fakeredis import aioredis
 from tai42_kit.interactions.park_index import superstep_id
-from tests.conftest import APP, bind_park_index
 
 from tai42_agents._internal.park import build_park_identity, persist_park
 from tai42_agents._internal.park import capability as cap
 from tai42_agents._internal.park.errors import ParkExpiryExceedsRetentionError
 from tai42_agents._internal.park.park_binding import agents_park_index, threads_with_live_barriers
+
+from .conftest import APP, bind_park_index
 
 
 @pytest.fixture

@@ -9,11 +9,12 @@ from tai42_contract.access_control.identity import AuthIdentity
 from tai42_contract.accounts.models import FormField, FormMethod, LoginMethod, MemberAction, MemberListing
 from tai42_contract.accounts.provider import AccountsProvider
 
+from tai42_kit.access_control import registry as identity_registry
 from tai42_kit.access_control.registry import (
     get_identity_provider_factory,
     register_identity_provider,
 )
-from tai42_kit.access_control.registry import reset_registry as reset_identity_registry
+from tai42_kit.accounts import registry as accounts_registry
 from tai42_kit.accounts.registry import (
     abort_staging,
     begin_staging,
@@ -24,17 +25,19 @@ from tai42_kit.accounts.registry import (
     register_accounts_provider,
     reset_registry,
 )
+from tai42_kit.registry.staged import StagedGeneration
 
 
 @pytest.fixture(autouse=True)
-def _clean_registries():  # pyright: ignore[reportUnusedFunction]
-    # Both registries are module-global state, and register_accounts_provider
-    # dual-writes into the identity registry; isolate every test from the others.
-    reset_registry()
-    reset_identity_registry()
-    yield
-    reset_registry()
-    reset_identity_registry()
+def _clean_registries(monkeypatch: pytest.MonkeyPatch):  # pyright: ignore[reportUnusedFunction]
+    """Run each test against empty accounts and identity registries.
+
+    Both registries are module-global state, and register_accounts_provider dual-writes into the
+    identity registry. Each test gets fresh generations; the process's own generations, holding
+    what plugin modules registered at import, are put back when it ends.
+    """
+    monkeypatch.setattr(accounts_registry._PROVIDERS, "_generation", StagedGeneration(dict))
+    monkeypatch.setattr(identity_registry._PROVIDERS, "_generation", StagedGeneration(dict))
 
 
 class _FakeAccounts(AccountsProvider):

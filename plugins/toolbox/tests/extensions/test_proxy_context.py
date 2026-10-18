@@ -7,10 +7,6 @@ import socket
 from typing import cast
 
 import pytest
-from tests.extensions._proxy_support import (
-    _http_route,
-    _socks_route,
-)
 
 from tai42_toolbox._internal.extensions.socket_routing import (
     RouteConfig,
@@ -18,6 +14,11 @@ from tai42_toolbox._internal.extensions.socket_routing import (
     active_route,
     install_dispatcher,
     route,
+)
+
+from ._proxy_support import (
+    _http_route,
+    _socks_route,
 )
 
 
