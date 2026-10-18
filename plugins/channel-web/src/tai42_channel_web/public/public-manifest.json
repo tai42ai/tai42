@@ -1,13 +1,13 @@
 {
   "name": "tai42_channel_web",
   "version": "8.2.0",
-  "entry": "tai42-channel-web-8NbwIgzn.js",
+  "entry": "tai42-channel-web-BkuzhaBD.js",
   "styles": [
     "tai42-channel-web-mVLCC1aR.css"
   ],
   "integrity": {
-    "tai42-channel-web-8NbwIgzn.js": "sha384-HPKSHLK33zf0bIU0EcJ0lD3MMZfv0sfWmztKXUi0J1NRTTF8yuNlJ6NzqZhjJoZM",
     "tai42-channel-web-BOeWTOD4.woff2": "sha384-swBecAL27qLsDDPbdyf4m+eOb3hVqthbGOSWWsQAWGQRrC7Mv26pPhoNQD/pG+fc",
+    "tai42-channel-web-BkuzhaBD.js": "sha384-efXh0fnPOFnyJb50nT5+8xnHKSs9PCPFbbnyCHtm6E35ybncq4fjmZgy8oHSFWHd",
     "tai42-channel-web-Bwz-egvJ.woff2": "sha384-jD+2tV8PS0ZpEIfiAhBqoCBwVMpmiMHRKP4tlQ4zx8YgACGy5A+J+UQlKh0a+z65",
     "tai42-channel-web-CBcvBZtf.woff2": "sha384-Add/AMGDcvhLuCRrQsVxY4SzrdqLkUv2MC9f/lB3IYYM5dCHI0PdX2L2YQmKtcb0",
     "tai42-channel-web-CO5SzqOn.woff2": "sha384-aX5Q+/q04jYtOh47yjtEY5w8d3foriFN9lBrZRkfXy5gg96QYD8KOcCKL4PlH4iX",

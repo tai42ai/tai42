@@ -51,17 +51,26 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** The first import of the entry transforms and evaluates the page's whole module graph
+ * (the app, the SDK and its UI primitives) cold, inside the test that makes it; on a busy
+ * host that alone can outrun the default 5s test budget, so that test carries its own. */
+const COLD_ENTRY_IMPORT_TIMEOUT_MS = 30_000;
+
 describe('the page entry', () => {
-  it('mounts the chat into #root, reading the route from data-identity', async () => {
-    shell({ 'data-identity': 'site-alpha' });
+  it(
+    'mounts the chat into #root, reading the route from data-identity',
+    async () => {
+      shell({ 'data-identity': 'site-alpha' });
 
-    await act(async () => {
-      await import('@/index');
-    });
+      await act(async () => {
+        await import('@/index');
+      });
 
-    expect(document.querySelector('.tcw-app')).not.toBeNull();
-    expect(document.querySelector('h1')?.textContent).toBe('Chat');
-  });
+      expect(document.querySelector('.tcw-app')).not.toBeNull();
+      expect(document.querySelector('h1')?.textContent).toBe('Chat');
+    },
+    COLD_ENTRY_IMPORT_TIMEOUT_MS,
+  );
 
   it('refuses a shell with no root element', async () => {
     await expect(import('@/index')).rejects.toThrow('missing its #root element');
