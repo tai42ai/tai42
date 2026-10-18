@@ -15,23 +15,10 @@ import { Badge, Button, isFieldVisible, SchemaForm, Spinner } from '@tai42/studi
 import type { ReactElement, RefObject } from 'react';
 
 import { DisplayBlocks, ReviewReadback } from '@/form-display';
-import { isPlainObject, singleFieldSchema } from '@/schema-form-helpers';
+import { isPlainObject, singleFieldSchema, toSdkFieldWording } from '@/schema-form-helpers';
 import type { FieldWording, FormOptionData, FormPage } from '@/transcript-model';
 import type { ReactingFormInput } from '@/use-reacting-form';
 import { useReactingForm } from '@/use-reacting-form';
-
-/** The parsed per-field wording as the SDK's `fieldWording` prop — a map of property
- * name to `{choiceLabel}` carrying the caller's word, omitting the unset ones so the
- * SDK's `enum` select draws its own default placeholder. */
-function toSdkFieldWording(
-  fields: Readonly<Record<string, FieldWording>>,
-): Readonly<Record<string, { choiceLabel?: string }>> {
-  const out: Record<string, { choiceLabel?: string }> = {};
-  for (const [name, field] of Object.entries(fields)) {
-    if (field.choiceLabel !== null) out[name] = { choiceLabel: field.choiceLabel };
-  }
-  return out;
-}
 
 /** A LOUD inline notice for a structurally-malformed schema: a visible `alert`
  * rather than an empty or silently-dropped control. */
@@ -350,8 +337,6 @@ export function SchemaFormAnswer(
     readonly sendingLabel: string;
     /** The button that returns to the previous step of a stepped form. */
     readonly backLabel: string;
-    /** The caller's per-field picker placeholders, keyed by property name. */
-    readonly fieldWording: Readonly<Record<string, FieldWording>>;
     /** The placeholder of a per-send option field when the caller set none. */
     readonly fieldPlaceholder: string;
   },

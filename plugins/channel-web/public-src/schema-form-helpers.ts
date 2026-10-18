@@ -1,15 +1,16 @@
 /**
  * The pure value/schema/step helpers the form renderer and its reaction hook share:
  * object guards, the per-send page resolution and initial value, per-page error slicing,
- * the single-field schema the SDK renders one control from, and the step-focus hook. No
- * JSX — the presentational pieces live in `schema-form-answer`.
+ * the single-field schema the SDK renders one control from, the caller's per-field words
+ * in the SDK's `fieldWording` shape, and the step-focus hook. No JSX — the presentational
+ * pieces live in `schema-form-answer`.
  */
 import type { JsonSchema, SchemaFormErrors } from '@tai42/studio-sdk';
 import { defaultValueForSchema } from '@tai42/studio-sdk';
 import type { RefObject } from 'react';
 import { useEffect, useRef } from 'react';
 
-import type { FormPage, FormPrefill } from '@/transcript-model';
+import type { FieldWording, FormPage, FormPrefill } from '@/transcript-model';
 
 /** A plain JS object (a form's values bag), or not. */
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -89,6 +90,24 @@ export function singleFieldSchema(schema: JsonSchema, field: string): JsonSchema
 function fieldOfPath(path: string): string {
   const cut = [path.indexOf('.'), path.indexOf('[')].filter((i) => i !== -1);
   return cut.length > 0 ? path.slice(0, Math.min(...cut)) : path;
+}
+
+/** The SDK's per-field words: a field's `choiceLabel` and `invalid` sentence. */
+export type SdkFieldWording = Readonly<Record<string, { choiceLabel?: string; invalid?: string }>>;
+
+/** The parsed per-field wording as the SDK's `fieldWording` record, keyed by property
+ * name, carrying only the words the caller set. `SchemaForm` reads `choiceLabel` (an
+ * unset one leaves the `enum` select its default placeholder); `validateAgainstSchema`
+ * reads `invalid` (an unset one leaves the SDK's word for the failing shape). */
+export function toSdkFieldWording(fields: Readonly<Record<string, FieldWording>>): SdkFieldWording {
+  const out: Record<string, { choiceLabel?: string; invalid?: string }> = {};
+  for (const [name, field] of Object.entries(fields)) {
+    const words: { choiceLabel?: string; invalid?: string } = {};
+    if (field.choiceLabel !== null) words.choiceLabel = field.choiceLabel;
+    if (field.invalid !== null) words.invalid = field.invalid;
+    if (Object.keys(words).length > 0) out[name] = words;
+  }
+  return out;
 }
 
 /** Just the errors whose field is one of `fields` — the per-page slice used to

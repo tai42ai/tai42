@@ -13,6 +13,7 @@ import type { RefObject } from 'react';
 import { useRef, useState } from 'react';
 
 import { reactToForm } from '@/api';
+import type { SdkFieldWording } from '@/schema-form-helpers';
 import {
   changedTopLevelKeys,
   errorsForFields,
@@ -20,9 +21,11 @@ import {
   initialFormValue,
   isPlainObject,
   resolvePages,
+  toSdkFieldWording,
   useStepFocus,
 } from '@/schema-form-helpers';
 import type {
+  FieldWording,
   FormOptionData,
   FormPage,
   FormPrefill,
@@ -41,6 +44,10 @@ export interface ReactingFormInput {
    * not react. A reaction fires only when both this and `reactions` are set. */
   readonly interactionId: string | null;
   readonly sending: boolean;
+  /** The caller's per-field words, keyed by property name: a field's picker placeholder
+   * (`choiceLabel`) and the sentence (`invalid`) that replaces the validator's word for an
+   * answer outside that field's shape. */
+  readonly fieldWording: Readonly<Record<string, FieldWording>>;
   readonly onSubmit: (answer: unknown) => void;
 }
 
@@ -173,6 +180,7 @@ function useReactionRunner(
 
 interface HandlerContext {
   readonly schema: JsonSchema;
+  readonly fieldWording: SdkFieldWording;
   readonly reactions: FormReactions | null;
   readonly page: FormPage;
   readonly stepped: boolean;
@@ -192,6 +200,7 @@ function makeHandlers(
 ): Pick<ReactingForm, 'onChange' | 'onBack' | 'onNext' | 'onSubmit'> {
   const {
     schema,
+    fieldWording,
     reactions,
     page,
     stepped,
@@ -227,7 +236,10 @@ function makeHandlers(
     }
   };
   const onNext = (): void => {
-    const found = errorsForFields(validateAgainstSchema(schema, st.value), page.fields);
+    const found = errorsForFields(
+      validateAgainstSchema(schema, st.value, { fieldWording }),
+      page.fields,
+    );
     st.setErrors(found);
     if (Object.keys(found).length > 0) return;
     if (reactions?.pageAdvanced.includes(page.title)) {
@@ -237,7 +249,7 @@ function makeHandlers(
     advance();
   };
   const onSubmitForm = (): void => {
-    const found = validateAgainstSchema(schema, st.value);
+    const found = validateAgainstSchema(schema, st.value, { fieldWording });
     st.setErrors(found);
     if (Object.keys(found).length > 0) {
       const target = stepped ? firstPageWithError(resolvedPages, found) : -1;
@@ -260,7 +272,8 @@ function makeHandlers(
 }
 
 export function useReactingForm(input: ReactingFormInput): ReactingForm {
-  const { schema, formData, pages, reactions, interactionId, sending, onSubmit } = input;
+  const { schema, formData, pages, reactions, interactionId, sending, fieldWording, onSubmit } =
+    input;
   const resolvedPages = resolvePages(schema, pages);
   const stepped = resolvedPages.length > 1;
   const [pageIndex, setPageIndex] = useState(0);
@@ -271,6 +284,7 @@ export function useReactingForm(input: ReactingFormInput): ReactingForm {
   const page = resolvedPages[Math.min(pageIndex, resolvedPages.length - 1)] ?? EMPTY_PAGE;
   const handlers = makeHandlers({
     schema,
+    fieldWording: toSdkFieldWording(fieldWording),
     reactions,
     page,
     stepped,

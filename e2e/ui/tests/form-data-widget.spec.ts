@@ -276,8 +276,8 @@ test('a notify_user form with data + pages opens in the widget already filled in
  * The `wording` catalogue the web widget draws, per send. Each test fires a real web-channel
  * send carrying one chapter of `wording` and asserts the REAL widget bundle renders the
  * caller's own words where it would otherwise draw the platform's default — the answer
- * controls, field picker placeholders, the settled-state badges, the live countdown and the
- * select ask's option-group name.
+ * controls, field picker placeholders, a field's sentence for an answer outside its shape, the
+ * settled-state badges, the live countdown and the select ask's option-group name.
  *
  * Locators are EXACT: a caller word can substring-collide with a default a sibling control
  * still draws (a decline word carrying "No", a confirm word carrying "Yes"), so every
@@ -423,6 +423,54 @@ test.describe('the web widget draws the per-send wording catalogue', () => {
     expect(askRes.status(), await askRes.text()).toBe(200);
     const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
     expect(body.data).toEqual({ kind: 'result', result: { count: 5, notes } });
+  });
+
+  test("a form field shows the caller's sentence for an answer outside its shape", async ({
+    page,
+    request,
+    browserName,
+  }) => {
+    test.skip(browserName === 'webkit', 'Linux CI WebKit delivers fetch-streams unreliably');
+    const { identity, visitorId } = await registerVisitor(page);
+    const question = uniq('form_q');
+    const schema = {
+      type: 'object',
+      required: [] as string[],
+      properties: { code: { type: 'string', title: 'Code', pattern: '^[0-9]{4}$' } },
+    };
+    // The field's `invalid` sentence replaces the widget's own word for a value that breaks the
+    // field's declared shape.
+    const wording = { form: { fields: { code: { invalid: 'Escribe cuatro cifras' } } } };
+
+    const askPromise = fireAsk(request, `${identity}:${visitorId}`, {
+      question,
+      answer_format: 'form',
+      schema,
+      wording,
+      timeout: 120,
+    });
+
+    const card = page.locator('.tcw-question-form');
+    const code = card.getByLabel('Code', { exact: true });
+    const answer = card.getByRole('button', { name: 'Answer', exact: true });
+    // "12a4" breaks the pattern: the card stays open and shows the caller's sentence, not the
+    // widget's own "must match the required pattern".
+    await code.fill('12a4');
+    await answer.click();
+    await expect(card.getByText('Escribe cuatro cifras', { exact: true })).toBeVisible();
+    await expect(card.getByText('must match the required pattern')).toHaveCount(0);
+
+    // A value in the field's shape resolves the parked ask.
+    await code.fill('1234');
+    await answer.click();
+    await expect(
+      page.locator('.tcw-question').filter({ hasText: question }).getByText('Answered', { exact: true }),
+    ).toBeVisible();
+
+    const askRes = await askPromise;
+    expect(askRes.status(), await askRes.text()).toBe(200);
+    const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
+    expect(body.data).toEqual({ kind: 'result', result: { code: '1234' } });
   });
 
   test('a confirm question draws the caller decline button', async ({
