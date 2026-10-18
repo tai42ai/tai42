@@ -136,6 +136,16 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     # interactions_callback / trigger are lifted for their own harness fan-outs.
     env["TAI_RATE_LIMIT_FAMILIES__ROOT__LIMIT"] = "100000"
     env["TAI_RATE_LIMIT_FAMILIES__ROOT__BURST"] = "100000"
+    # Lift the ``interactions_callback`` family too. The browser suite's answers — the
+    # callback form page posting to the door, and every web widget answer this server
+    # forwards to it — all land on ``/api/interactions/callback/{ticket}`` from the one
+    # 127.0.0.1 bucket, and the door's declared budget allows 10 per fixed 10s window. The
+    # serial form specs answer more than that within a few seconds, so whenever their answers
+    # fall inside one window the next is refused 429 (the widget then shows its send-failure
+    # alert instead of the answered badge) — a failure that depends only on wall-clock phase.
+    # The limiter stays ON.
+    env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__LIMIT"] = "100000"
+    env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__BURST"] = "100000"
     # No failed-MCP reprobe-interval override: the reprobe probes OFF the reload gate (only the
     # brief snapshot and apply take the gate, never the network probe), so the never-recovering
     # stub MCPs the secret-ref / mcp specs seed no longer stall reload-gated writes — the default
