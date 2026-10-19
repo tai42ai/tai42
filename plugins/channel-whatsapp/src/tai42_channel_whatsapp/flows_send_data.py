@@ -23,7 +23,7 @@ from tai42_channel_whatsapp.flows_components import (
     _valid_iso_date,
     component_names,
 )
-from tai42_channel_whatsapp.flows_endpoint import error_fields, form_endpoint_driven, shaped_fields
+from tai42_channel_whatsapp.flows_endpoint import error_carriers, error_fields, form_endpoint_driven, shaped_fields
 from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages, slot_datanames
 from tai42_channel_whatsapp.flows_second_line import data_source_rows
 
@@ -54,7 +54,8 @@ def build_flow_data(
     of both ends' prefills (a merged END carries no ``init`` of its own); every other field's a
     string. ``pages`` (the same step layout the Flow was built with) decides which ``rangeStart``
     pairs merge, so the data agrees with the published controls. Every field whose control binds an
-    ``error-message`` gets an empty ``__err`` (no error shown); with ``carry_invalid`` (an ask-less
+    ``error-message`` gets an empty ``__err`` (no error shown; a merged range START's is the object
+    ``{start-date, end-date}`` of two empty strings); with ``carry_invalid`` (an ask-less
     endpoint-driven form) every shaped field's ``__invalid`` carries the caller's ``field_invalid``
     sentence, else the empty string. Each display slot of the entry page reads the empty string.
     Raises ``ChannelInputError``.
@@ -108,13 +109,12 @@ def _shape_carriers(
     range_merges: dict[str, str],
     field_invalid: dict[str, str] | None,
     carry_invalid: bool,
-) -> dict[str, str]:
-    # The per-send shape carriers: an empty ``__err`` for every control binding an error-message, and
-    # (an ask-less endpoint-driven form) each shaped field's ``__invalid`` sentence, empty when unset.
-    carriers = {
-        f"{names[name]}__err": ""
-        for name in error_fields(properties, required, option_fields, names, set(range_merges))
-    }
+) -> dict[str, Any]:
+    # The per-send shape carriers: an empty ``__err`` for every control binding an error-message (a
+    # merged range's the empty ``{start-date, end-date}`` object), and (an ask-less endpoint-driven
+    # form) each shaped field's ``__invalid`` sentence, empty when unset.
+    bound = error_fields(properties, required, option_fields, names, set(range_merges))
+    carriers = error_carriers(properties, names, bound, range_merges, {})
     if carry_invalid and form_endpoint_driven(properties, required, option_fields, names, range_merges, reacting=False):
         sentences = field_invalid or {}
         for name in shaped_fields(properties):

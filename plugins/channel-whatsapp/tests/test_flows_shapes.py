@@ -169,19 +169,89 @@ def test_the_send_data_clears_every_error_binding():
     }
 
 
-def test_a_merged_range_binds_both_ends_error_message():
-    schema = _schema(
-        {
-            "start": {"type": "string", "format": "date"},
-            "end": {"type": "string", "format": "date", "rangeStart": "start", "maxDays": 5},
-        }
-    )
+_RANGE_PAIR = {
+    "start": {"type": "string", "format": "date", "title": "From"},
+    "end": {"type": "string", "format": "date", "rangeStart": "start", "maxDays": 5, "title": "To"},
+}
+
+# The screen-data declaration of a merged range's error text: one object carrying each end's sentence.
+_RANGE_ERROR_DECL = {
+    "type": "object",
+    "properties": {"start-date": {"type": "string"}, "end-date": {"type": "string"}},
+    "__example__": {"start-date": "Not an accepted value", "end-date": "Not an accepted value"},
+}
+
+
+def _bound_error_objects(node: Any) -> list[Any]:
+    # Every ``error-message`` object anywhere in the Flow JSON that carries a ``${data`` binding.
+    found: list[Any] = []
+    if isinstance(node, dict):
+        message = node.get("error-message")
+        if isinstance(message, dict) and any("${data" in str(value) for value in message.values()):
+            found.append(message)
+        for value in node.values():
+            found.extend(_bound_error_objects(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_bound_error_objects(value))
+    return found
+
+
+def test_a_merged_range_binds_one_error_object_for_both_ends():
+    schema = _schema({**_RANGE_PAIR, "name": {"type": "string"}})
     flow, _ = build_form_flow(schema)
     control = _control(flow, "start")
     assert control["mode"] == "range"
-    assert control["error-message"] == {"start-date": "${data.start__err}", "end-date": "${data.end__err}"}
-    assert {"start__err", "end__err"} <= set(flow["screens"][0]["data"])
-    assert {"start__err", "end__err"} <= set(build_flow_data(schema, {}, {}))
+    assert control["error-message"] == "${data.start__err}"
+    assert _bound_error_objects(flow) == []
+    data = flow["screens"][0]["data"]
+    assert data["start__err"] == _RANGE_ERROR_DECL
+    assert "end__err" not in data
+    # A field drawn on its own keeps its string error text.
+    assert data["name__err"] == {"type": "string", "__example__": "Not an accepted value"}
+
+
+def test_the_send_data_clears_a_merged_range_error_object():
+    data = build_flow_data(_schema({**_RANGE_PAIR, "name": {"type": "string"}}), {}, {})
+    assert {key: value for key, value in data.items() if key.endswith("__err")} == {
+        "start__err": {"start-date": "", "end-date": ""},
+        "name__err": "",
+    }
+
+
+def test_a_range_split_over_two_controls_keeps_a_string_error_per_end():
+    split = [{"title": "A", "fields": ["start"]}, {"title": "B", "fields": ["end"]}]
+    flow, _ = build_form_flow(_schema(_RANGE_PAIR), split)
+    assert _control(flow, "start")["error-message"] == "${data.start__err}"
+    assert _control(flow, "end", 1)["error-message"] == "${data.end__err}"
+    assert flow["screens"][0]["data"]["start__err"] == {"type": "string", "__example__": "Not an accepted value"}
+    data = build_flow_data(_schema(_RANGE_PAIR), {}, {}, split)
+    assert (data["start__err"], data["end__err"]) == ("", "")
+
+
+@pytest.mark.parametrize("endpoint", [False, True])
+def test_a_merged_range_on_a_later_screen_carries_its_error_object_forward(endpoint: bool):
+    # The pair sits on the second screen: the entry screen declares and forwards its one error
+    # object (never a per-end key), and the second screen declares it and binds it.
+    properties = {"name": {"type": "string", "title": "Name"}, **_RANGE_PAIR}
+    if endpoint:
+        properties["name"] = {**properties["name"], "format": "email"}
+    pages = [{"title": "One", "fields": ["name"]}, {"title": "Two", "fields": ["start", "end"]}]
+    flow, _ = build_form_flow(_schema(properties), pages)
+    assert _bound_error_objects(flow) == []
+    first, second = flow["screens"][0]["data"], flow["screens"][1]["data"]
+    assert first["start__err"] == _RANGE_ERROR_DECL
+    assert second["start__err"] == _RANGE_ERROR_DECL
+    assert "end__err" not in first
+    assert "end__err" not in second
+    action = _footer(flow)["on-click-action"]
+    assert action["name"] == ("data_exchange" if endpoint else "navigate")
+    assert action["payload"]["start__err"] == "${data.start__err}"
+    assert "end__err" not in action["payload"]
+    assert _control(flow, "start", 1)["error-message"] == "${data.start__err}"
+    data = build_flow_data(_schema(properties), {}, {}, pages)
+    assert data["start__err"] == {"start-date": "", "end-date": ""}
+    assert "end__err" not in data
 
 
 _PAGES = [
