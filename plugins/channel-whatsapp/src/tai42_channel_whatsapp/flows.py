@@ -35,9 +35,10 @@ date's required flag is checked by the control. An enum or option-bearing string
 A field's declared shape is checked inside the form (:mod:`tai42_channel_whatsapp.flows_shapes`):
 Meta's controls check what they can natively (``required``, a ``pattern`` on the text/number
 keyboard, the length/selection/calendar bounds), and a form carrying any other shape — or a
-consumer reaction — is ENDPOINT-DRIVEN (:func:`form_needs_endpoint`): every footer fires a
-``data_exchange`` the data endpoint answers with the platform's one form-shape check, keeping the
-person on the screen with the failing field's ``error-message`` while a shape is broken.
+consumer reaction, or a field drawn as several per-case controls — is ENDPOINT-DRIVEN
+(:func:`form_needs_endpoint`): every footer fires a ``data_exchange`` the data endpoint answers
+with the platform's one form-shape check, keeping the person on the screen with the failing
+field's ``error-message`` while a shape is broken.
 
 Each property's ``title`` (else the property name) is the field label; the
 ``required`` list flags the components. Anything outside the subset — a nested
@@ -130,7 +131,12 @@ from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pa
 from tai42_channel_whatsapp.flows_second_line import data_source_rows, field_caption, range_captions
 from tai42_channel_whatsapp.flows_send_data import build_flow_data
 from tai42_channel_whatsapp.flows_shapes import ERROR_EXAMPLE
-from tai42_channel_whatsapp.flows_visibility import emit_field_variants, form_ref, screen_field_variants
+from tai42_channel_whatsapp.flows_visibility import (
+    emit_field_variants,
+    form_case_names,
+    form_ref,
+    screen_field_variants,
+)
 
 __all__ = [
     "FORM_ENTRY_SCREEN",
@@ -509,8 +515,10 @@ def _build_form_screen(
     and binds its ``error-message``; a reacting field carries a ``data_exchange`` action; a
     ``visibleWhen`` field renders under client-side ``If``s — one per
     matching value when shown for several (Meta's ``||`` refuses a disjunction of equality
-    comparisons), each case uniquely named and its answer coalesced back under the field's own name
-    (:func:`screen_field_variants`, :func:`emit_field_variants`, :func:`form_ref`); a review page adds
+    comparisons), each case uniquely named, its answer riding the data_exchange payload one plain
+    reference per case for the data endpoint to read from the shown case
+    (:func:`screen_field_variants`, :func:`emit_field_variants`,
+    :func:`~tai42_channel_whatsapp.flows_visibility.answer_refs`); a review page adds
     the generic value readback. The footer records any transition in ``routing_model``.
     """
     this_fields = fields_by_screen[index]
@@ -612,11 +620,12 @@ def form_needs_endpoint(
     option_fields: set[str] | None = None,
     reactions: dict[str, Any] | None = None,
 ) -> bool:
-    """Whether this form is published ENDPOINT-DRIVEN: it reacts, or a field's shape is not native.
+    """Whether this form is published ENDPOINT-DRIVEN: it reacts, a shape is not native, or it splits a field.
 
     The same decision :func:`build_form_flow` draws the Flow by — a form declaring a consumer
-    reaction, or carrying a shape no drawn Meta control checks
-    (:func:`~tai42_channel_whatsapp.flows_shapes.field_needs_endpoint`), goes through the data
+    reaction, carrying a shape no drawn Meta control checks
+    (:func:`~tai42_channel_whatsapp.flows_shapes.field_needs_endpoint`), or drawing a field shown
+    for several values of a controller as several per-case controls, goes through the data
     endpoint. Pure. Raises ``ChannelInputError`` as :func:`build_form_flow` does for a schema
     outside the subset.
     """
@@ -627,7 +636,7 @@ def form_needs_endpoint(
     resolved_pages, fields_by_screen = _resolve_pages(properties, pages)
     reacting = _reaction_sets(reactions, properties, option_fields, names)[3]
     range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen)
-    return form_endpoint_driven(properties, required, option_fields, names, range_merges, reacting)
+    return form_endpoint_driven(properties, required, option_fields, names, range_merges, reacting, fields_by_screen)
 
 
 def build_form_flow(
@@ -658,10 +667,11 @@ def build_form_flow(
     the shapes Meta checks natively and binds its ``error-message``. A page's ``display`` blocks render ahead
     of its inputs, a ``review`` page adds a generic value readback, and a ``visibleWhen``
     field renders under client-side ``If``s — one per matching value when shown for several, each
-    uniquely named with its answer coalesced back under the field's own name.
+    uniquely named.
 
-    ``reactions`` (optional, a :class:`FormReactions` dump) or a field shape no control checks
-    natively makes the Flow ENDPOINT-DRIVEN (:func:`form_needs_endpoint`): it carries
+    ``reactions`` (optional, a :class:`FormReactions` dump), a field shape no control checks
+    natively, or a field drawn as several per-case controls (its answer is read by the data endpoint
+    from the shown case) makes the Flow ENDPOINT-DRIVEN (:func:`form_needs_endpoint`): it carries
     ``data_api_version`` + a ``routing_model``, every footer fires a ``data_exchange`` the data
     endpoint answers (shape check, then any declared reaction), and the reacting fields fire their
     own. Otherwise the Flow is the static navigate Flow. ``field_invalid`` is the caller's per-field
@@ -682,10 +692,12 @@ def build_form_flow(
     resolved_pages, fields_by_screen = _resolve_pages(properties, pages, form_title, form_submit)
     field_changed, page_advanced, submitted, reacting = _reaction_sets(reactions, properties, option_fields, names)
     range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen)
-    endpoint = form_endpoint_driven(properties, required, option_fields, names, range_merges, reacting)
+    endpoint = form_endpoint_driven(
+        properties, required, option_fields, names, range_merges, reacting, fields_by_screen
+    )
     slots = slot_datanames(resolved_pages)
     if endpoint:
-        guard_endpoint_names(properties, names, slots.values())
+        guard_endpoint_names(properties, names, slots.values(), form_case_names(properties, names, fields_by_screen))
     spec = _RenderSpec(
         properties=properties,
         required=required,

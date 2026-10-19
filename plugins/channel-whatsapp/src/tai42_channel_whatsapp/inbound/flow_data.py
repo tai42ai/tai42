@@ -1,10 +1,11 @@
 """The WhatsApp Flow data endpoint — the in-form transport for an endpoint-driven form.
 
-A form that declares a consumer reaction or carries a shape no Meta control checks natively is
-published endpoint-driven: every footer (and each reacting field) fires a ``data_exchange`` that
-Meta sends here, encrypted. This route is a pure TRANSLATOR between Meta's wire and the platform's
-two form seams — the one form-shape check (``tai42_app.interactions.form_shape_errors``) and the
-one reaction chokepoint (``tai42_app.interactions.react``) — it holds no business logic:
+A form that declares a consumer reaction, carries a shape no Meta control checks natively, or draws
+a field as several per-case controls is published endpoint-driven: every footer (and each reacting
+field) fires a ``data_exchange`` that Meta sends here, encrypted. This route is a pure TRANSLATOR
+between Meta's wire and the platform's two form seams — the one form-shape check
+(``tai42_app.interactions.form_shape_errors``) and the one reaction chokepoint
+(``tai42_app.interactions.react``) — it holds no business logic:
 
 * authenticate (``X-Hub-Signature-256`` over the raw body; a mismatch is HTTP 432);
 * decrypt the request (RSA-unwrap the AES key, AES-128-GCM the payload; undecryptable is 421);
@@ -12,16 +13,17 @@ one reaction chokepoint (``tai42_app.interactions.react``) — it holds no busin
   the entry screen through its navigate payload);
 * ``data_exchange`` → recover the form from its ``flow_token`` (an ask's interaction id → its
   :class:`~tai42_channel_whatsapp.correlation.EndpointForm` sidecar; an ask-less ``tai42-nf:``
-  token → the notify sidecar of its schema hash; an unknown or expired token is HTTP 427) and
-  coerce the values filled so far. A step advance checks THIS screen's fields (nothing demanded),
-  a submit the whole answer; a broken shape keeps the person on the screen with each failing
-  field's sentence bound to its ``error-message`` and a ``Label: sentence`` snackbar. Only a clean
-  check runs a DECLARED consumer reaction, whose FORM UPDATE is translated into the vendor
-  ``{screen, data}`` response (per-field errors → the snackbar; values/options/display → the
-  screen data). The ``data`` of a response becomes the screen's state, so every answer carries a
-  screen's whole data: one that keeps the person on the screen starts from the whole data the
-  action carried, each control holding the value the person left in it; a clean advance names the
-  next screen, built from the carriers the request carried; a clean submit completes the Flow;
+  token → the notify sidecar of its schema hash; an unknown or expired token is HTTP 427), read
+  each per-case field's answer from its shown case, and coerce the values filled so far. A step
+  advance checks THIS screen's fields (nothing demanded), a submit the whole answer; a broken shape
+  keeps the person on the screen with each failing field's sentence bound to its ``error-message``
+  and a ``Label: sentence`` snackbar. Only a clean check runs a DECLARED consumer reaction, whose
+  FORM UPDATE is translated into the vendor ``{screen, data}`` response (per-field errors → the
+  snackbar; values/options/display → the screen data). The ``data`` of a response becomes the
+  screen's state, so every answer carries a screen's whole data: one that keeps the person on the
+  screen starts from the whole data the action carried, each control holding the value the person
+  left in it; a clean advance names the next screen, built from the carriers the request carried; a
+  clean submit completes the Flow;
 * anything a seam raises (closed/malformed/handler-fail/deadline) surfaces as the vendor's error
   surface (a screen ``error_message``) plus a LOUD log — never a stale or silent value;
 * encrypt the response under the same AES key with the bit-flipped IV.
@@ -48,6 +50,7 @@ from tai42_contract.interactions import (
     QuestionFormat,
     SubmittedEvent,
 )
+from tai42_kit.interactions import evaluate_visible_when
 from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 from tai42_kit.settings import require_secret
 
@@ -81,6 +84,7 @@ from tai42_channel_whatsapp.flows_endpoint import (
 )
 from tai42_channel_whatsapp.flows_send_data import _field_init_value, _init_value
 from tai42_channel_whatsapp.flows_shapes import channel_word
+from tai42_channel_whatsapp.flows_visibility import split_answer_cases
 from tai42_channel_whatsapp.inbound.auth import _SIGNATURE_HEADER, SignatureRejectedError, _validate_signature
 from tai42_channel_whatsapp.inbound.forms import _coerce_value, _parse_notify_form_token
 from tai42_channel_whatsapp.settings import whatsapp_settings
@@ -222,6 +226,7 @@ async def _handle_data_exchange(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(flow_token, str) or not flow_token:
         raise _FlowTokenInvalidError
     form, is_ask = await _resolve_form(flow_token)
+    data = _read_split_answers(form, screen, data)
     properties = form.schema.get("properties")
     properties = properties if isinstance(properties, dict) else {}
     reactions = FormReactions.model_validate(form.reactions) if is_ask and form.reactions else FormReactions()
@@ -270,6 +275,70 @@ def _build_event(data: dict[str, Any]) -> FormReactionEvent | None:
     if kind == FormReactionEventKind.SUBMITTED:
         return SubmittedEvent()
     return None
+
+
+def _read_split_answers(form: EndpointForm, screen: str, data: dict[str, Any]) -> dict[str, Any]:
+    """The request data with each per-case field's answer read from its shown case.
+
+    A field drawn as several per-case controls rides the payload one entry per case, keyed by the
+    case's component name (:func:`~tai42_channel_whatsapp.flows_visibility.answer_refs`). The shown
+    case is the one whose visibility predicates all hold for the values the request carries — this
+    screen's (a per-case controller's own answer read first) and the earlier screens' — evaluated as
+    the platform evaluates ``visibleWhen``; its value is kept under the field's schema name. A field
+    none of whose cases holds is hidden and carries no value, whatever its undrawn cases carried.
+    Every case entry is dropped, so the rest of the exchange reads the field as one value.
+    """
+    properties = form.schema.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    fields_by_screen, current = _screen_fields(form, screen)
+    if current is None:
+        return data
+    earlier = [field for group in fields_by_screen[:current] for field in group]
+    cases = split_answer_cases(fields_by_screen[current], earlier, properties, component_names(properties))
+    if not cases:
+        return data
+    case_names = {case_name for field_cases in cases.values() for case_name, _ in field_cases}
+    out = {key: value for key, value in data.items() if key not in case_names}
+    _ShownCases(cases, properties, data, out).read_all()
+    return out
+
+
+class _ShownCases:
+    """Writes each per-case field's shown-case value into ``out`` under its schema name."""
+
+    def __init__(
+        self,
+        cases: dict[str, list[tuple[str, list[dict[str, Any]]]]],
+        properties: dict[str, Any],
+        data: dict[str, Any],
+        out: dict[str, Any],
+    ) -> None:
+        self._cases = cases
+        self._properties = properties
+        self._data = data
+        self._out = out
+        self._read: set[str] = set()
+
+    def read_all(self) -> None:
+        for name in self._cases:
+            self._pick(name)
+
+    def _value(self, name: str) -> Any:
+        # A controller's value as the platform's ``visibleWhen`` reads it: coerced to its schema type,
+        # a per-case controller's own answer read first; ``None`` when the request carries none.
+        if name in self._cases:
+            self._pick(name)
+        return _coerce_value(self._out[name], self._properties.get(name)) if name in self._out else None
+
+    def _pick(self, name: str) -> None:
+        if name in self._read:
+            return
+        self._read.add(name)
+        for case_name, predicates in self._cases[name]:
+            if all(evaluate_visible_when(p, {p["field"]: self._value(p["field"])}) for p in predicates):
+                if case_name in self._data:
+                    self._out[name] = self._data[case_name]
+                return
 
 
 def _partial_values(data: dict[str, Any], properties: dict[str, Any]) -> dict[str, Any]:

@@ -1182,6 +1182,122 @@ async def test_shape_checked_step_refuses_its_own_bad_email_and_advances_on_a_go
     assert resolved == {"label": label, "email": "alice@example.org", "note": note}
 
 
+# A required Dropdown and a required date, each shown for several values of ``kind`` and so drawn
+# as one control per case, which alone makes the form endpoint-driven.
+_MULTI_VALUE_TARGETS = ["t1", "t2", "t3", "t4", "t5", "t6"]
+_MULTI_VALUE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "enum": ["a", "b", "c"], "title": "Kind"},
+        "target": {
+            "type": "string",
+            "enum": _MULTI_VALUE_TARGETS,
+            "title": "Target",
+            "visibleWhen": {"field": "kind", "in": ["a", "b"]},
+        },
+        "day": {"type": "string", "format": "date", "title": "Day", "visibleWhen": {"field": "kind", "in": ["a", "c"]}},
+    },
+    "required": ["kind", "target", "day"],
+}
+
+
+def _if_conditions_of(children: list[dict], name: str, conditions: tuple[str, ...] = ()) -> tuple[str, ...] | None:
+    # The ``If`` conditions enclosing the control ``name``, outermost first.
+    for child in children:
+        if child.get("type") == "If":
+            found = _if_conditions_of(child["then"], name, (*conditions, child["condition"]))
+            if found is not None:
+                return found
+        elif child.get("name") == name:
+            return conditions
+    return None
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_multi_value_visible_when_fields_answer_from_the_shown_case_and_an_empty_one_is_required(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-multi-q")
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": _MULTI_VALUE_SCHEMA,
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_json, flow_token, screen_data = _sent_flow(bridge, send)
+        children = flow_json["screens"][0]["layout"]["children"]
+        # Each field is one control per case, each under its own ``If`` on one value.
+        assert flow_json["data_api_version"] == "3.0"
+        for name, condition in (
+            ("target__a", "${form.kind} == 'a'"),
+            ("target__b", "${form.kind} == 'b'"),
+            ("day__a", "${form.kind} == 'a'"),
+            ("day__c", "${form.kind} == 'c'"),
+        ):
+            assert _if_conditions_of(children, name) == (condition,), name
+        for case in ("target__a", "target__b"):
+            assert _component_by_name(flow_json, "Dropdown", case)["required"] is True
+        for case in ("day__a", "day__c"):
+            assert _component_by_name(flow_json, "CalendarPicker", case)["required"] is True
+
+        # ``kind`` b draws ``target__b`` and hides both days; the undrawn cases carry stale values the
+        # endpoint must ignore. The person leaves the shown target empty and taps submit: the
+        # platform's check keeps them on the screen naming the empty shown field only.
+        undrawn = {"target__a": "t1", "day__a": "2026-01-05", "day__c": "2026-01-06"}
+        refused = await bridge.whatsapp_flow_exchange(
+            whatsapp_flow_action_request(
+                flow_json,
+                screen="SCREEN_A",
+                flow_token=flow_token,
+                form={"kind": "b", "target__b": "", **undrawn},
+                data=screen_data,
+            )
+        )
+        assert refused["screen"] == "SCREEN_A", refused
+        assert refused["data"]["target__err"] == "This field is required"
+        assert refused["data"]["day__err"] == ""
+        assert refused["data"]["error_message"] == "Target: This field is required"
+        assert not ask_task.done()
+
+        # Picking a target completes the form with the shown case's answer under the field's own key.
+        await _complete_flow(
+            bridge,
+            whatsapp_flow_action_request(
+                flow_json,
+                screen="SCREEN_A",
+                flow_token=flow_token,
+                form={"kind": "b", "target__b": "t2", **undrawn},
+                data=refused["data"],
+            ),
+            wa_id,
+            expected={"Kind": "b", "Target": "t2"},
+        )
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        await cancel_and_join(ask_task)
+
+    assert resolved == {"kind": "b", "target": "t2"}
+
+
 @pytest.mark.needs(
     "kind:channels:whatsapp",
     "helper:whatsapp",

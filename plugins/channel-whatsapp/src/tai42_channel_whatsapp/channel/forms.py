@@ -334,12 +334,13 @@ def _reactions_dict(reactions: FormReactions | None) -> dict[str, Any] | None:
 def _require_reaction_settings(settings: WhatsAppSettings) -> str:
     """The data-endpoint URI an endpoint-driven form publishes against; raise loudly when key material is missing.
 
-    An endpoint-driven form (one that reacts, or carries a shape no Meta control checks natively)
-    CANNOT publish or be served without the business private key (to decrypt the endpoint's
-    requests) and the public endpoint URI (configured on the Flow so Meta routes data-exchange back
-    here). Either unset is refused loudly — never a silent fall back to a static flow that would let
-    a broken shape leave the form. The public key must also be registered for the sending number
-    (operator step; see :mod:`tai42_channel_whatsapp.provisioning_route`).
+    An endpoint-driven form (one that reacts, carries a shape no Meta control checks natively, or
+    draws a field per case) CANNOT publish or be served without the business private key (to
+    decrypt the endpoint's requests) and the public endpoint URI (configured on the Flow so Meta
+    routes data-exchange back here). Either unset is refused loudly — never a silent fall back to a
+    static flow that would let a broken shape leave the form or leave a per-case answer unread. The
+    public key must also be registered for the sending number (operator step; see
+    :mod:`tai42_channel_whatsapp.provisioning_route`).
     """
     require_delivery_secret(settings.flow_private_key, "CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY")
     return require_delivery_setting(settings.flow_endpoint_uri, "CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI")
@@ -392,10 +393,10 @@ async def send_form_ask_flow(
     resolves the SAME published Flow through the same Flow identity — found on the WABA
     by name, else re-created, if the cache was lost, never raising a stale-lookup miss —
     and navigates to the entry screen with the same prefill and option lists the first
-    send carried. An endpoint-driven form (``reactions`` declared, or a shape no Meta control
-    checks natively — :func:`~tai42_channel_whatsapp.flows.form_needs_endpoint`) publishes the
-    Flow against the configured data endpoint; the endpoint-driven flow and the endpoint URI fold
-    into the Flow identity, so its published Flow is distinct from a static one and from one bound
+    send carried. An endpoint-driven form (``reactions`` declared, a shape no Meta control checks
+    natively, or a field drawn per case — :func:`~tai42_channel_whatsapp.flows.form_needs_endpoint`)
+    publishes the Flow against the configured data endpoint; the endpoint-driven flow and the
+    endpoint URI fold into the Flow identity, so its published Flow is distinct from a static one and from one bound
     to another endpoint. ``field_invalid`` is the caller's per-field ``invalid`` sentence (the
     helper text a native pattern field without a second line shows).
 

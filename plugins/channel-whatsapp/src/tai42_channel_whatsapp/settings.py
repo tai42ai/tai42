@@ -40,9 +40,9 @@ class WhatsAppSettings(TaiBaseSettings):
     waba_id: str | None = None
     # The business RSA-2048 PRIVATE key (PEM), held as a secret: the data endpoint decrypts
     # each endpoint-driven form request's AES key with it. Required only to publish/serve an
-    # ENDPOINT-DRIVEN form (one that reacts, or carries a shape the Flow's controls cannot check);
-    # a static form never touches it. The matching PUBLIC key must be registered for the
-    # sending number (operator step: the admin-only `/flow-encryption` route; see the README).
+    # ENDPOINT-DRIVEN form (one that reacts, carries a shape the Flow's controls cannot check, or
+    # draws a field per case); a static form never touches it. The matching PUBLIC key must be
+    # registered for the sending number (operator step: the admin-only `/flow-encryption` route; see the README).
     flow_private_key: SecretStr | None = None
     # Optional passphrase protecting `flow_private_key` (PEM encrypted with a passphrase).
     flow_private_key_passphrase: SecretStr | None = None

@@ -262,12 +262,13 @@ def range_pairs(this_fields: list[str], properties: dict[str, Any], has_review_p
 
     A ``rangeStart`` pair (the END names its START) draws as one :func:`_calendar_range_component`
     when both ends sit on THIS screen, both are ``format: date``, both carry the SAME ``visibleWhen``
-    (both absent or deep-equal), and no OTHER field anywhere in the form has a ``visibleWhen`` naming
-    either end (:func:`_sibling_depends_on`, checked over all ``properties`` so a dependant on a
-    later screen degrades the pair too). Any pair failing a condition is omitted — it draws as two
-    date controls, the documented degrade. This is the ONE authority on "merged here"; the screen
-    builder, the per-send data, the footers and the inbound decode all consult it, so every surface's
-    merge decision agrees and no object value is ever read where a scalar is expected.
+    (both absent or deep-equal) and it is not shown for several values, and no OTHER field anywhere
+    in the form has a ``visibleWhen`` naming either end (:func:`_sibling_depends_on`, checked over
+    all ``properties`` so a dependant on a later screen degrades the pair too). Any pair failing a
+    condition is omitted — it draws as two date controls, the documented degrade. This is the ONE
+    authority on "merged here"; the screen builder, the per-send data, the footers and the inbound
+    decode all consult it, so every surface's merge decision agrees and no object value is ever read
+    where a scalar is expected.
 
     ``has_review_page`` disables EVERY merge for the form: a ``review`` page reads each field's scalar
     ``${data.<name>__val}`` carrier back into a text line, and a merged range START's ``__val`` is the
@@ -292,9 +293,10 @@ def range_pairs(this_fields: list[str], properties: dict[str, Any], has_review_p
             continue
         shared = end_prop.get("visibleWhen")
         if shared != start_prop.get("visibleWhen") or _splits_into_variants(shared):
-            # The two ends must share the SAME predicate, and it must not split the control into
-            # several per-value cases — the one range control carries a single object value, which a
-            # per-case backtick concatenation cannot express. Either draws two date controls instead.
+            # The two ends must share the SAME predicate, and a shared predicate shown for several
+            # values (a multi-entry ``in``) draws the pair as two date controls. A pair whose own
+            # predicate is single-valued merges even under a controller drawn per case: it then
+            # draws one range control per inherited case.
             continue
         if _sibling_depends_on(list(properties), properties, {start, end}):
             continue
