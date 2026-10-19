@@ -12,7 +12,7 @@
   "plugins/channel-telegram": "6.1.0",
   "plugins/channel-twilio": "7.1.0",
   "plugins/channel-web": "8.3.0",
-  "plugins/channel-whatsapp": "10.0.0",
+  "plugins/channel-whatsapp": "10.0.1",
   "plugins/connector-atlassian": "3.1.0",
   "plugins/connector-github": "2.1.0",
   "plugins/connector-google": "3.1.0",
