@@ -95,7 +95,11 @@ def build_flow_data(
         data[f"{cname}__init"] = _field_init_value(name, prop, values)
         if isinstance(prop, dict) and _is_choice_field(name, prop, option_fields):
             data[f"{cname}__ds"] = _choice_data_source(name, prop, options)
-    data.update(_shape_carriers(properties, required, option_fields, names, range_merges, field_invalid, carry_invalid))
+    data.update(
+        _shape_carriers(
+            properties, required, option_fields, names, range_merges, fields_by_screen, field_invalid, carry_invalid
+        )
+    )
     # The entry screen's display slots read empty until a reaction fills them.
     data.update(dict.fromkeys(slot_datanames(resolved_pages[:1]).values(), ""))
     return data
@@ -107,6 +111,7 @@ def _shape_carriers(
     option_fields: set[str],
     names: dict[str, str],
     range_merges: dict[str, str],
+    fields_by_screen: list[list[str]],
     field_invalid: dict[str, str] | None,
     carry_invalid: bool,
 ) -> dict[str, Any]:
@@ -115,7 +120,10 @@ def _shape_carriers(
     # form) each shaped field's ``__invalid`` sentence, empty when unset.
     bound = error_fields(properties, required, option_fields, names, set(range_merges))
     carriers = error_carriers(properties, names, bound, range_merges, {})
-    if carry_invalid and form_endpoint_driven(properties, required, option_fields, names, range_merges, reacting=False):
+    endpoint = form_endpoint_driven(
+        properties, required, option_fields, names, range_merges, reacting=False, fields_by_screen=fields_by_screen
+    )
+    if carry_invalid and endpoint:
         sentences = field_invalid or {}
         for name in shaped_fields(properties):
             carriers[f"{names[name]}__invalid"] = sentences.get(name, "")

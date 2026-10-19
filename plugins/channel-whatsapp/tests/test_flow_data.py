@@ -25,10 +25,19 @@ from tai42_kit.settings import reset_all_settings
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (registers the /flow-data route on the bound stub app)
 from tai42_channel_whatsapp.correlation import EndpointForm, cache_endpoint_form, cache_flow_form
+from tai42_channel_whatsapp.flows import build_form_flow
 from tai42_channel_whatsapp.flows_shapes import channel_word
 from tai42_channel_whatsapp.inbound.flow_data import _partial_values
 
-from .conftest import APP_SECRET, FakeRedis, _StubApp, build_request, compute_signature
+from .conftest import (
+    APP_SECRET,
+    FakeRedis,
+    _StubApp,
+    build_request,
+    compute_signature,
+    phone_footer_payload,
+    phone_payload,
+)
 
 
 def test_partial_values_unwraps_a_single_pick_chips_string():
@@ -1178,3 +1187,229 @@ async def test_a_range_error_on_a_later_screen_fills_its_one_error_object(
         "start__err": {"start-date": "", "end-date": channel_word(FormShapeKind.RANGE_SPAN, {})},
         "note__err": "",
     }
+
+
+# A form whose required text field and required date are each shown for several values of one
+# controller, and a note shown on one value of the split text field (a chained split). Each split
+# field is drawn as one control per case (``target__a``/``target__b``, ``day__a``/``day__c``,
+# ``note__a``/``note__b``), which alone makes the form endpoint-driven; the second screen asks an email.
+_MULTI_TOKEN = "int-multi-1"
+_MULTI_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "title": "Kind", "enum": ["a", "b", "c"]},
+        "target": {"type": "string", "title": "Target", "visibleWhen": {"field": "kind", "in": ["a", "b"]}},
+        "day": {"type": "string", "title": "Day", "format": "date", "visibleWhen": {"field": "kind", "in": ["a", "c"]}},
+        "note": {"type": "string", "title": "Note", "visibleWhen": {"field": "target", "equals": "x"}},
+        "email": {"type": "string", "format": "email", "title": "Email"},
+    },
+    "required": ["kind", "target", "day"],
+}
+_MULTI_PAGES = [
+    {"title": "First", "fields": ["kind", "target", "day", "note"], "kind": "input", "display": []},
+    {"title": "Second", "fields": ["email"], "kind": "input", "display": []},
+]
+
+
+async def _seed_multi(
+    pages: list[dict[str, Any]] | None, schema: dict[str, Any] = _MULTI_SCHEMA
+) -> list[dict[str, Any]]:
+    """Cache the multi-value form and return its rendered screens."""
+    form = EndpointForm(schema=schema, pages=pages, reactions=None, option_fields=[], invalid={})
+    await cache_endpoint_form(_MULTI_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
+    return build_form_flow(schema, pages)[0]["screens"]
+
+
+@pytest.mark.parametrize("undrawn", ["", "stale"])
+async def test_a_step_hands_the_shown_multi_value_fields_answers_to_the_check(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, undrawn: str
+):
+    # Whatever an undrawn case carries, the shown case's value is the field's answer.
+    screens = await _seed_multi(_MULTI_PAGES)
+    entered = {"kind": "a", "target__a": "x", "day__a": "2026-01-05", "note__a": "n"}
+    data = phone_footer_payload(screens[0], entered, undrawn=undrawn)
+    request, aes_key, iv = _request(_shape_exchange(data, token=_MULTI_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert stub_app.interactions.shape_calls[-1]["values"] == {
+        "kind": "a",
+        "target": "x",
+        "day": "2026-01-05",
+        "note": "n",
+    }
+    assert out["screen"] == "SCREEN_B"
+    assert {key: out["data"][key] for key in ("kind__val", "target__val", "day__val", "note__val")} == {
+        "kind__val": "a",
+        "target__val": "x",
+        "day__val": "2026-01-05",
+        "note__val": "n",
+    }
+    # No per-case entry rides on into the next screen's data.
+    assert not [key for key in out["data"] if key.startswith(("target__a", "target__b", "day__a", "day__c"))]
+
+
+async def test_a_step_reads_a_chained_split_fields_answer_from_its_controllers_shown_case(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    screens = await _seed_multi(_MULTI_PAGES)
+    entered = {"kind": "b", "target__b": "x", "note__b": "m", "target__a": "y", "note__a": "old"}
+    request, _, _ = _request(
+        _shape_exchange(phone_footer_payload(screens[0], entered, undrawn="stale"), token=_MULTI_TOKEN)
+    )
+    await flow_handler(request)
+    assert stub_app.interactions.shape_calls[-1]["values"] == {"kind": "b", "target": "x", "note": "m"}
+
+
+async def test_a_step_leaves_a_hidden_multi_value_field_unfilled(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    screens = await _seed_multi(_MULTI_PAGES)
+    entered = {"kind": "c", "target__a": "stale", "day__c": "2026-01-05"}
+    data = phone_footer_payload(screens[0], entered, undrawn="stale")
+    request, aes_key, iv = _request(_shape_exchange(data, token=_MULTI_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert stub_app.interactions.shape_calls[-1]["values"] == {"kind": "c", "day": "2026-01-05"}
+    assert out["screen"] == "SCREEN_B"
+    assert out["data"]["target__val"] == ""
+
+
+async def test_a_step_with_a_shown_multi_value_field_left_empty_hands_no_value_to_the_check(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # An empty shown field is unfilled: the check receives no value for it (a step's check is partial,
+    # so the platform does not demand it until the submit).
+    screens = await _seed_multi(_MULTI_PAGES)
+    data = phone_footer_payload(screens[0], {"kind": "b", "target__b": ""}, undrawn="stale")
+    request, _, _ = _request(_shape_exchange(data, token=_MULTI_TOKEN))
+    await flow_handler(request)
+    call = stub_app.interactions.shape_calls[-1]
+    assert (call["partial"], call["values"]) == (True, {"kind": "b"})
+
+
+async def test_a_request_from_a_screen_outside_the_form_reads_no_per_case_answer(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # No screen of the form names the cases the request could carry, so none is read as an answer.
+    screens = await _seed_multi(_MULTI_PAGES)
+    data = phone_footer_payload(screens[0], {"kind": "a", "target__a": "x"}, undrawn="stale")
+    request, _, _ = _request(_shape_exchange(data, screen="ELSEWHERE", token=_MULTI_TOKEN))
+    await flow_handler(request)
+    assert stub_app.interactions.shape_calls[-1]["values"] == {"kind": "a"}
+
+
+async def test_a_refused_step_puts_the_shown_cases_value_back_into_the_shared_init_carrier(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # Every case of a split field reads the one ``<field>__init`` carrier, so a refusal that keeps the
+    # person on the screen hands it the shown case's value (never an empty one).
+    screens = await _seed_multi(None)
+    stub = stub_app.interactions
+    stub.shape_errors = [_shape_error("email", FormShapeKind.FORMAT, "Not an email")]
+    entered = {"kind": "a", "target__a": "x", "day__a": "2026-01-05", "email": "nope"}
+    request, aes_key, iv = _request(_shape_exchange(phone_footer_payload(screens[0], entered), token=_MULTI_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert (out["data"]["target__init"], out["data"]["day__init"]) == ("x", "2026-01-05")
+    assert not [key for key in out["data"] if key in ("target__a", "target__b", "day__a", "day__c")]
+
+
+async def test_a_submit_hands_the_shown_multi_value_fields_answers_to_the_check_and_completes(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    screens = await _seed_multi(None)
+    entered = {"kind": "a", "target__a": "x", "day__a": "2026-01-05", "email": "alice@example.org"}
+    request, aes_key, iv = _request(
+        _shape_exchange(phone_footer_payload(screens[0], entered, undrawn="stale"), token=_MULTI_TOKEN)
+    )
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert stub_app.interactions.shape_calls[-1]["values"] == {
+        "kind": "a",
+        "target": "x",
+        "day": "2026-01-05",
+        "email": "alice@example.org",
+    }
+    assert out["screen"] == "SUCCESS"
+    assert out["data"]["extension_message_response"]["params"] == {
+        "flow_token": _MULTI_TOKEN,
+        "Kind": "a",
+        "Target": "x",
+        "Day": "2026-01-05",
+        "Email": "alice@example.org",
+    }
+
+
+async def test_a_submit_with_a_shown_multi_value_date_left_empty_is_refused_as_required(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    screens = await _seed_multi(None)
+    stub = stub_app.interactions
+    stub.shape_errors = [_shape_error("day", FormShapeKind.REQUIRED, "This field is required")]
+    entered = {"kind": "c", "day__c": "", "email": "alice@example.org"}
+    request, aes_key, iv = _request(
+        _shape_exchange(phone_footer_payload(screens[0], entered, undrawn="stale"), token=_MULTI_TOKEN)
+    )
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert stub.shape_calls[-1]["values"] == {"kind": "c", "email": "alice@example.org"}
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["error_message"] == "Day: This field is required"
+
+
+# A split field on a later screen, gated on a controller collected on the first screen.
+_LATER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "title": "Kind", "enum": ["a", "b", "c"]},
+        "later": {"type": "string", "title": "Later", "visibleWhen": {"field": "kind", "in": ["a", "b"]}},
+    },
+    "required": ["kind", "later"],
+}
+_LATER_PAGES = [
+    {"title": "First", "fields": ["kind"], "kind": "input", "display": []},
+    {"title": "Second", "fields": ["later"], "kind": "input", "display": []},
+]
+
+
+async def test_a_submit_reads_a_later_screens_split_field_from_the_earlier_controllers_value(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    screens = await _seed_multi(_LATER_PAGES, _LATER_SCHEMA)
+    carried = {"kind__val": "b", "later__init": "", "later__err": ""}
+    data = phone_footer_payload(screens[1], {"later__b": "y"}, carried, undrawn="stale")
+    request, aes_key, iv = _request(_shape_exchange(data, screen="SCREEN_B", token=_MULTI_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert stub_app.interactions.shape_calls[-1]["values"] == {"kind": "b", "later": "y"}
+    assert out["data"]["extension_message_response"]["params"] == {
+        "flow_token": _MULTI_TOKEN,
+        "Kind": "b",
+        "Later": "y",
+    }
+
+
+async def test_a_field_change_on_a_split_field_hands_the_shown_cases_value_to_the_reaction(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    schema = {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "title": "Kind", "enum": ["a", "b", "c"]},
+            "size": {
+                "type": "string",
+                "title": "Size",
+                "enum": ["s", "m"],
+                "visibleWhen": {"field": "kind", "in": ["a", "b"]},
+            },
+        },
+    }
+    reactions = {"field_changed": ["size"], "page_advanced": [], "submitted": False}
+    form = EndpointForm(schema=schema, pages=None, reactions=reactions, option_fields=[], invalid={})
+    await cache_endpoint_form(_MULTI_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
+    screen = build_form_flow(schema, None, reactions=reactions)[0]["screens"][0]
+    case_b = next(
+        node["then"][0]
+        for node in screen["layout"]["children"]
+        if node.get("type") == "If" and node["then"][0]["name"] == "size__b"
+    )
+    payload = case_b["on-select-action"]["payload"]
+    data = phone_payload(screen, payload, {"kind": "b", "size__b": "m"}, undrawn="stale")
+    request, _, _ = _request(_shape_exchange(data, token=_MULTI_TOKEN))
+    await flow_handler(request)
+    assert stub_app.interactions.react_calls[-1]["partial_values"] == {"kind": "b", "size": "m"}

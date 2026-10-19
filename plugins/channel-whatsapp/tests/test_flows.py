@@ -16,8 +16,10 @@ from tai42_channel_whatsapp.flows import (
     build_flow_data,
     build_form_flow,
     component_names,
+    form_needs_endpoint,
     payload_labels,
 )
+from tai42_channel_whatsapp.flows_visibility import form_ref
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _REFERENCE_RE = re.compile(r"\$\{(?:data|form|screen)\.([^}]+)\}")
@@ -1634,9 +1636,25 @@ def test_visible_when_in_renders_sibling_ifs_per_value_never_an_or():
     _assert_only_identifier_safe_wire_names(flow_json)
 
 
-def test_visible_when_in_coalesces_the_split_answer_in_the_completion_payload():
-    # The per-case controls carry one answer under the field's own label: a backtick concatenation of
-    # both variant refs (mutually exclusive cases, so at most one is non-empty).
+def _action_payloads(node: object) -> list[dict]:
+    # Every action payload in a Flow JSON subtree (footers and reacting controls).
+    found: list[dict] = []
+    if isinstance(node, list):
+        for item in node:
+            found.extend(_action_payloads(item))
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("on-click-action", "on-select-action") and isinstance(value, dict):
+                found.append(value.get("payload") or {})
+            else:
+                found.extend(_action_payloads(value))
+    return found
+
+
+def test_a_split_field_rides_the_data_exchange_one_plain_reference_per_case():
+    # The per-case ``If`` shape stays; the answer never rides one expression over several references.
+    # Each case is its own plain ``${form.<case>}`` entry, keyed by the case's component name, for the
+    # data endpoint to keep the shown one — so the form is endpoint-driven and has no ``complete``.
     schema = {
         "type": "object",
         "properties": {
@@ -1644,9 +1662,186 @@ def test_visible_when_in_coalesces_the_split_answer_in_the_completion_payload():
             "detail": {"type": "string", "title": "Detail", "visibleWhen": {"field": "role", "in": ["a", "b"]}},
         },
     }
-    payload = _screen_children(build_form_flow(schema)[0])[-1]["on-click-action"]["payload"]
-    assert payload["Detail"] == "`${form.detail__a}${form.detail__b}`"
-    assert payload["role"] == "${form.role}"  # an unsplit field keeps its plain single reference
+    flow_json = build_form_flow(schema)[0]
+    children = _screen_children(flow_json)
+    ifs = [c for c in children if c.get("type") == "If"]
+    assert [c["condition"] for c in ifs] == ["${form.role} == 'a'", "${form.role} == 'b'"]
+    assert [c["then"][0]["name"] for c in ifs] == ["detail__a", "detail__b"]
+    assert flow_json["data_api_version"] == "3.0"
+    action = children[-1]["on-click-action"]
+    assert action["name"] == "data_exchange"
+    payload = action["payload"]
+    assert (payload["role"], payload["detail__a"], payload["detail__b"]) == (
+        "${form.role}",
+        "${form.detail__a}",
+        "${form.detail__b}",
+    )
+    assert "detail" not in payload
+    assert "`" not in json.dumps(flow_json)
+    assert '"complete"' not in json.dumps(flow_json)
+    _assert_only_identifier_safe_wire_names(flow_json)
+
+
+def test_a_split_field_makes_the_form_endpoint_driven_and_a_single_value_one_does_not():
+    def schema(values: list[str]) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "role": {"type": "string"},
+                "detail": {"type": "string", "visibleWhen": {"field": "role", "in": values}},
+            },
+        }
+
+    assert form_needs_endpoint(schema(["a", "b"])) is True
+    assert form_needs_endpoint(schema(["a"])) is False
+
+
+def test_a_field_gated_on_a_later_screens_field_is_not_split_and_keeps_the_form_static():
+    # A controller drawn after its dependent cannot gate it there: the dependent is one unconditional
+    # control, so nothing is drawn per case and the form stays static.
+    schema = {
+        "type": "object",
+        "properties": {
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "in": ["a", "b"]}},
+            "role": {"type": "string"},
+        },
+    }
+    pages = [
+        {"title": "First", "fields": ["detail"], "kind": "input", "display": []},
+        {"title": "Second", "fields": ["role"], "kind": "input", "display": []},
+    ]
+    assert form_needs_endpoint(schema, pages) is False
+    assert "data_api_version" not in build_form_flow(schema, pages)[0]
+
+
+def test_a_split_field_on_a_later_screen_makes_the_earlier_step_a_data_exchange():
+    # The step that collects the controller fires a data_exchange, so the endpoint builds the next
+    # screen's ``__val`` carriers; the later screen draws its cases on the controller's carrier.
+    schema = {
+        "type": "object",
+        "properties": {
+            "pick": {"type": "string"},
+            "extra": {"type": "string", "visibleWhen": {"field": "pick", "in": ["alpha", "beta"]}},
+        },
+    }
+    pages = [
+        {"title": "First", "fields": ["pick"], "kind": "input", "display": []},
+        {"title": "Second", "fields": ["extra"], "kind": "input", "display": []},
+    ]
+    flow_json = build_form_flow(schema, pages)[0]
+    assert _screen_children(flow_json, 0)[-1]["on-click-action"]["name"] == "data_exchange"
+    payload = _screen_children(flow_json, 1)[-1]["on-click-action"]["payload"]
+    assert (payload["pick"], payload["extra__alpha"], payload["extra__beta"]) == (
+        "${data.pick__val}",
+        "${form.extra__alpha}",
+        "${form.extra__beta}",
+    )
+    assert "extra" not in payload
+
+
+def test_a_reacting_split_field_carries_its_action_on_every_case_with_one_reference_per_case():
+    schema = {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["a", "b", "c"]},
+            "size": {"type": "string", "enum": ["s", "m"], "visibleWhen": {"field": "kind", "in": ["a", "b"]}},
+        },
+    }
+    reactions = {"field_changed": ["size"], "page_advanced": [], "submitted": False}
+    children = _screen_children(build_form_flow(schema, reactions=reactions)[0])
+    cases = [node["then"][0] for node in children if node.get("type") == "If"]
+    assert [case["name"] for case in cases] == ["size__a", "size__b"]
+    for case in cases:
+        payload = case["on-select-action"]["payload"]
+        assert (payload["tai42_field"], payload["size__a"], payload["size__b"]) == (
+            "size",
+            "${form.size__a}",
+            "${form.size__b}",
+        )
+        assert "size" not in payload
+
+
+def test_every_action_payload_of_a_split_form_reads_each_reference_on_its_own():
+    # No payload value anywhere combines several references (Meta reads such a value empty).
+    schema = {
+        "type": "object",
+        "properties": {
+            "pick": {"type": "string"},
+            "extra": {"type": "string", "visibleWhen": {"field": "pick", "in": ["alpha", "beta"]}},
+            "extra_note": {"type": "string", "visibleWhen": {"field": "extra", "equals": "other"}},
+            "later": {"type": "string", "visibleWhen": {"field": "pick", "in": ["alpha", "beta"]}},
+        },
+    }
+    pages = [
+        {"title": "First", "fields": ["pick", "extra", "extra_note"], "kind": "input", "display": []},
+        {"title": "Second", "fields": ["later"], "kind": "input", "display": []},
+    ]
+    payloads = _action_payloads(build_form_flow(schema, pages)[0]["screens"])
+    assert len(payloads) == 2
+    for payload in payloads:
+        for value in payload.values():
+            assert not isinstance(value, str) or "${" not in value or re.fullmatch(r"\$\{\w+\.\w+\}", value)
+
+
+def test_a_per_case_control_named_like_a_carrier_is_refused():
+    # ``detail__init`` would be both the ``init`` case's payload entry and the field's init carrier.
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "in": ["init", "b"]}},
+        },
+    }
+    with pytest.raises(ChannelInputError, match=r"\['detail__init'\] name both a per-case control"):
+        build_form_flow(schema)
+
+
+def test_a_per_case_control_named_like_a_property_is_refused():
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "in": ["a", "b"]}},
+            "detail__a": {"type": "string"},
+        },
+    }
+    with pytest.raises(ChannelInputError, match=r"\['detail__a'\] name both a per-case control"):
+        build_form_flow(schema)
+
+
+def test_a_per_case_control_named_like_another_fields_control_is_refused():
+    # ``detail-_a`` draws its control as ``detail__a``, the name of ``detail``'s ``a`` case.
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string", "enum": ["a", "b", "c"]},
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "in": ["a", "b"]}},
+            "detail-_a": {"type": "string"},
+        },
+    }
+    with pytest.raises(ChannelInputError, match=r"\['detail__a'\] name both a per-case control"):
+        build_form_flow(schema)
+
+
+def test_a_per_case_control_drawn_by_two_fields_is_refused():
+    # ``detail`` inherits ``group``'s cases (``detail__a__x`` …) and ``detail__a`` splits on its own
+    # values (``detail__a__x`` …): both fields would draw a ``detail__a__x`` control.
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string", "enum": ["a", "b", "x"]},
+            "group": {"type": "string", "enum": ["x", "y"], "visibleWhen": {"field": "role", "in": ["a", "b"]}},
+            "detail": {"type": "string", "visibleWhen": {"field": "group", "in": ["x", "y"]}},
+            "detail__a": {"type": "string", "visibleWhen": {"field": "role", "in": ["x", "b"]}},
+        },
+    }
+    with pytest.raises(ChannelInputError, match=r"\['detail__a__x'\] name more than one per-case control"):
+        build_form_flow(schema)
+
+
+def test_form_ref_refuses_a_field_drawn_per_case():
+    with pytest.raises(ValueError, match="drawn per case"):
+        form_ref("detail", [("__a", ["${form.role} == 'a'"]), ("__b", ["${form.role} == 'b'"])], {"detail": "detail"})
 
 
 def test_visible_when_single_value_in_stays_one_plain_if():
@@ -1667,7 +1862,7 @@ def test_visible_when_single_value_in_stays_one_plain_if():
 
 def test_visible_when_chained_dependent_nests_under_its_controllers_case():
     # A field shown on a MULTI-VALUE field renders nested ``If`` per case (no ``||``), both uniquely
-    # named; each answer coalesces across cases under its own completion label.
+    # named; each case rides the data_exchange as its own plain reference.
     schema = {
         "type": "object",
         "properties": {
@@ -1696,13 +1891,17 @@ def test_visible_when_chained_dependent_nests_under_its_controllers_case():
     assert inner["condition"] == "${form.extra__alpha} == 'other'"
     assert inner["then"][0]["name"] == "extra_note__alpha"
     payload = children[-1]["on-click-action"]["payload"]
-    assert payload["Extra"] == "`${form.extra__alpha}${form.extra__beta}`"
-    assert payload["Extra note"] == "`${form.extra_note__alpha}${form.extra_note__beta}`"
+    assert {key: payload[key] for key in ("extra__alpha", "extra__beta", "extra_note__alpha", "extra_note__beta")} == {
+        "extra__alpha": "${form.extra__alpha}",
+        "extra__beta": "${form.extra__beta}",
+        "extra_note__alpha": "${form.extra_note__alpha}",
+        "extra_note__beta": "${form.extra_note__beta}",
+    }
     _assert_only_identifier_safe_wire_names(flow_json)
 
 
-def test_visible_when_in_over_an_earlier_screen_controller_reads_the_coalesced_carrier():
-    # A multi-value controller on an EARLIER screen is read from its single coalesced ``__val`` carrier,
+def test_visible_when_in_over_an_earlier_screen_controller_reads_its_carrier():
+    # A multi-value controller on an EARLIER screen is read from its single ``__val`` carrier,
     # so the dependent is one If per value with no controller suffix.
     schema = {
         "type": "object",
@@ -1724,9 +1923,8 @@ def test_visible_when_in_over_an_earlier_screen_controller_reads_the_coalesced_c
 
 
 def test_visible_when_multi_value_on_a_boolean_or_array_field_is_refused():
-    # A split field's answer coalesces as a backtick string concatenation (string-only). A boolean or
-    # array field shown for several values cannot coalesce to one typed value — refused loudly, never
-    # rendered into Meta-refused (boolean) or value-losing (array) Flow JSON.
+    # A multi-value ``visibleWhen`` is supported on string-valued fields only: a boolean or array
+    # field shown for several values is refused loudly.
     for field_type, extra in (("boolean", {}), ("array", {"items": {"type": "string", "enum": ["x", "y"]}})):
         schema = {
             "type": "object",
@@ -1735,7 +1933,7 @@ def test_visible_when_multi_value_on_a_boolean_or_array_field_is_refused():
                 "opt": {"type": field_type, "visibleWhen": {"field": "pick", "in": ["alpha", "beta"]}, **extra},
             },
         }
-        with pytest.raises(ChannelInputError, match="cannot coalesce to one typed value"):
+        with pytest.raises(ChannelInputError, match="only string-valued conditional fields"):
             build_form_flow(schema, option_fields={"opt"})
 
 

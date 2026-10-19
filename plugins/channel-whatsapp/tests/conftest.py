@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -957,3 +958,74 @@ def flow_list_page(*flows: dict[str, Any], after: str | None = None, more: bool 
     if more:
         paging["next"] = "https://graph.facebook.com/v23.0/next-page-of-flows"
     return response(200, json={"data": list(flows), "paging": paging})
+
+
+# --- The phone side of a rendered Flow screen -------------------------------------
+
+_REFERENCE = re.compile(r"\$\{(form|data)\.(\w+)\}")
+
+
+def _read(match: re.Match[str], entered: Mapping[str, Any], data: Mapping[str, Any]) -> Any:
+    return (entered if match.group(1) == "form" else data).get(match.group(2), "")
+
+
+def _drawn_names(node: object, entered: Mapping[str, Any], data: Mapping[str, Any], out: set[str]) -> None:
+    # The control names the phone draws: an ``If`` branch only when its one ``<reference> == '<v>'``
+    # (or ``!= ''``) comparison holds for the entered values and the screen's data.
+    if isinstance(node, list):
+        for item in node:
+            _drawn_names(item, entered, data, out)
+    elif isinstance(node, dict):
+        if node.get("type") == "If":
+            match = re.fullmatch(r"(\$\{(?:form|data)\.\w+\}) (==|!=) '(.*)'", node["condition"])
+            assert match is not None, f"unmodelled If condition {node['condition']!r}"
+            value = _read(_REFERENCE.fullmatch(match.group(1)), entered, data)  # type: ignore[arg-type]
+            if (value == match.group(3)) == (match.group(2) == "=="):
+                _drawn_names(node["then"], entered, data, out)
+            return
+        if isinstance(node.get("name"), str):
+            out.add(node["name"])
+
+
+def phone_payload(
+    screen: dict[str, Any],
+    payload: Mapping[str, Any],
+    entered: Mapping[str, Any],
+    data: Mapping[str, Any] | None = None,
+    *,
+    undrawn: Any = "",
+) -> dict[str, Any]:
+    """An action ``payload`` of ``screen`` as the phone sends it, from the values the person entered.
+
+    ``entered`` is keyed by control name. A plain ``${form.<name>}`` reads the entered value of a drawn
+    control (empty when the person left it empty) and ``undrawn`` for a control under an ``If`` that
+    does not hold; a ``${data.<key>}`` reads the screen's ``data``. Any other expression over several
+    references reaches the endpoint empty.
+    """
+    data = data or {}
+    drawn: set[str] = set()
+    _drawn_names(screen["layout"]["children"], entered, data, drawn)
+    out: dict[str, Any] = {}
+    for key, value in payload.items():
+        match = _REFERENCE.fullmatch(value) if isinstance(value, str) else None
+        if match is not None and match.group(1) == "form":
+            out[key] = entered.get(match.group(2), "") if match.group(2) in drawn else undrawn
+        elif match is not None:
+            out[key] = _read(match, entered, data)
+        elif isinstance(value, str) and "${" in value:
+            out[key] = ""
+        else:
+            out[key] = value
+    return out
+
+
+def phone_footer_payload(
+    screen: dict[str, Any],
+    entered: Mapping[str, Any],
+    data: Mapping[str, Any] | None = None,
+    *,
+    undrawn: Any = "",
+) -> dict[str, Any]:
+    """The footer payload of ``screen`` as the phone sends it (:func:`phone_payload`)."""
+    payload = screen["layout"]["children"][-1]["on-click-action"]["payload"]
+    return phone_payload(screen, payload, entered, data, undrawn=undrawn)

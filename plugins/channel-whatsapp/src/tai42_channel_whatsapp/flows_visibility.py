@@ -3,9 +3,12 @@
 A field carrying a ``visibleWhen`` predicate renders under Meta's client-side
 ``If`` components. This module turns a screen's fields into their render VARIANTS
 — the component-name suffix and the ordered ``If`` conditions each needs — wraps a
-control in those ``If`` nodes, and builds the ``${form.…}`` reference that coalesces
-a split field's answer back under its own name. The screen assembly in
-:mod:`tai42_channel_whatsapp.flows` consumes these builders.
+control in those ``If`` nodes, and builds the plain ``${form.…}`` references that carry
+each control's answer. A field shown for several values of a controller is drawn as one
+control per case; its cases ride the ``data_exchange`` payload one reference each, and the
+data endpoint keeps the shown case's value under the field's own name
+(:func:`split_answer_cases`). The screen assembly in :mod:`tai42_channel_whatsapp.flows`
+consumes these builders.
 """
 
 from __future__ import annotations
@@ -40,6 +43,10 @@ _MAX_IF_NESTING = 3
 # values of a controller has one variant per value, each under a distinct suffixed name.
 _Variant = tuple[str, list[str]]
 
+# One ``If`` condition of a variant: its Flow expression and the single-valued ``visibleWhen``
+# predicate (``{"field", "equals"}`` or ``{"field", "notEmpty"}``) that expression checks.
+_Condition = tuple[str, dict[str, Any]]
+
 
 def _controller_ref(
     field: str, suffix: str, this_fields: list[str], earlier_fields: list[str], names: dict[str, str]
@@ -48,7 +55,7 @@ def _controller_ref(
 
     A controller rendered on this screen is read live as ``${form.<name><suffix>}`` (the suffix
     names the controller's own matching variant); one collected on an earlier screen is read from
-    its coalesced carrier ``${data.<name>__val}`` (a single value, so no suffix). ``None`` means the
+    its carrier ``${data.<name>__val}`` (a single value, so no suffix). ``None`` means the
     controller is on neither — the dependent cannot be gated here and renders unconditionally (the
     answer facet still enforces its visibility).
     """
@@ -59,24 +66,17 @@ def _controller_ref(
     return None
 
 
-def screen_field_variants(
+def _screen_cases(
     this_fields: list[str], earlier_fields: list[str], properties: dict[str, Any], names: dict[str, str]
-) -> dict[str, list[_Variant]]:
-    """The render variants of every field on a screen, keyed by schema property name.
+) -> dict[str, list[tuple[str, list[_Condition]]]]:
+    """Every field's render variants on a screen, each condition with the predicate it checks.
 
-    A field with no ``visibleWhen``, or one whose controller is unreadable here, has the single
-    unconditional variant ``("", [])``. A field shown when a controller equals ONE value (``equals``,
-    a single-entry ``in``) or is non-empty (``notEmpty``) keeps one variant with an empty suffix and
-    one ``If`` condition — byte-identical to the former single-``If`` output. A field shown for
-    SEVERAL values (a multi-entry ``in``) splits into one variant per value, each with a distinct
-    ``__<value>`` suffix and its own ``== <value>`` condition — Meta's ``||`` refuses a disjunction of
-    equality comparisons, so the disjunction is expressed as sibling ``If`` branches instead. When the
-    controller is itself split, the dependent inherits each of the controller's variants (its
-    conditions prepended), so a dependency chain renders as nested ``If`` under the matching case.
+    The one derivation behind :func:`screen_field_variants` (the drawn ``If`` expressions) and
+    :func:`split_answer_cases` (the predicates the data endpoint evaluates to pick the shown case).
     """
-    memo: dict[str, list[_Variant]] = {}
+    memo: dict[str, list[tuple[str, list[_Condition]]]] = {}
 
-    def resolve(name: str) -> list[_Variant]:
+    def resolve(name: str) -> list[tuple[str, list[_Condition]]]:
         if name in memo:
             return memo[name]
         predicate = properties[name].get("visibleWhen")
@@ -90,28 +90,89 @@ def screen_field_variants(
             if not values:
                 raise ChannelInputError(f"form property {name!r}: visibleWhen 'in' names no value")
             split = len(values) > 1
-            comparisons = [f"== {_cond_literal(choice)}" for choice in values]
+            tests = [(f"== {_cond_literal(choice)}", {"field": controller, "equals": choice}) for choice in values]
             suffixes = [f"__{_slug_value(choice)}" if split else "" for choice in values]
         elif "equals" in predicate:
-            comparisons = [f"== {_cond_literal(predicate['equals'])}"]
+            tests = [(f"== {_cond_literal(predicate['equals'])}", {"field": controller, "equals": predicate["equals"]})]
             suffixes = [""]
         else:
-            comparisons = ["!= ''"]
+            tests = [("!= ''", {"field": controller, "notEmpty": True})]
             suffixes = [""]
-        variants: list[_Variant] = []
+        variants: list[tuple[str, list[_Condition]]] = []
         for controller_suffix, controller_conditions in controller_variants:
             ref = _controller_ref(controller, controller_suffix, this_fields, earlier_fields, names)
             if ref is None:
                 variants.append((controller_suffix, controller_conditions))
                 continue
-            for suffix, comparison in zip(suffixes, comparisons, strict=True):
-                variants.append((controller_suffix + suffix, [*controller_conditions, f"{ref} {comparison}"]))
-        _guard_variants(name, variants)
-        _guard_coalescible(name, properties[name], variants)
+            for suffix, (comparison, test) in zip(suffixes, tests, strict=True):
+                variants.append((controller_suffix + suffix, [*controller_conditions, (f"{ref} {comparison}", test)]))
+        drawn = [(suffix, [expression for expression, _ in conditions]) for suffix, conditions in variants]
+        _guard_variants(name, drawn)
+        _guard_split_value_type(name, properties[name], drawn)
         memo[name] = variants
         return variants
 
     return {name: resolve(name) for name in this_fields}
+
+
+def screen_field_variants(
+    this_fields: list[str], earlier_fields: list[str], properties: dict[str, Any], names: dict[str, str]
+) -> dict[str, list[_Variant]]:
+    """The render variants of every field on a screen, keyed by schema property name.
+
+    A field with no ``visibleWhen``, or one whose controller is unreadable here, has the single
+    unconditional variant ``("", [])``. A field shown when a controller equals ONE value (``equals``,
+    a single-entry ``in``) or is non-empty (``notEmpty``) keeps one variant with an empty suffix and
+    one ``If`` condition. A field shown for SEVERAL values (a multi-entry ``in``) splits into one
+    variant per value, each with a distinct ``__<value>`` suffix and its own ``== <value>``
+    condition — Meta's ``||`` refuses a disjunction of equality comparisons, so the disjunction is
+    expressed as sibling ``If`` branches instead. When the controller is itself split, the dependent
+    inherits each of the controller's variants (its conditions prepended), so a dependency chain
+    renders as nested ``If`` under the matching case.
+    """
+    cases = _screen_cases(this_fields, earlier_fields, properties, names)
+    return {
+        name: [(suffix, [expression for expression, _ in conditions]) for suffix, conditions in variants]
+        for name, variants in cases.items()
+    }
+
+
+def split_answer_cases(
+    this_fields: list[str], earlier_fields: list[str], properties: dict[str, Any], names: dict[str, str]
+) -> dict[str, list[tuple[str, list[dict[str, Any]]]]]:
+    """The per-case controls of every field on a screen drawn as several, keyed by schema property name.
+
+    Each case is its control's component name and the single-valued ``visibleWhen`` predicates that
+    must all hold for it to show — the same conditions its ``If`` nodes draw, outermost first. A
+    field drawn as one control (no suffix) is absent.
+    """
+    cases = _screen_cases(this_fields, earlier_fields, properties, names)
+    return {
+        name: [(names[name] + suffix, [test for _, test in conditions]) for suffix, conditions in variants]
+        for name, variants in cases.items()
+        if is_split(variants)
+    }
+
+
+def is_split(variants: Sequence[tuple[str, Any]]) -> bool:
+    """Whether a field's variants draw it as several per-case controls (each under a suffixed name)."""
+    return any(suffix for suffix, _ in variants)
+
+
+def form_case_names(properties: dict[str, Any], names: dict[str, str], fields_by_screen: list[list[str]]) -> list[str]:
+    """The component name of every per-case control the form draws, across its screens."""
+    case_names: list[str] = []
+    earlier: list[str] = []
+    for this_fields in fields_by_screen:
+        cases = split_answer_cases(this_fields, earlier, properties, names)
+        case_names.extend(case_name for field_cases in cases.values() for case_name, _ in field_cases)
+        earlier = [*earlier, *this_fields]
+    return case_names
+
+
+def form_splits_fields(properties: dict[str, Any], names: dict[str, str], fields_by_screen: list[list[str]]) -> bool:
+    """Whether any screen of the form draws a field as several per-case controls."""
+    return bool(form_case_names(properties, names, fields_by_screen))
 
 
 def _slug_value(value: Any) -> str:
@@ -141,28 +202,21 @@ def _guard_variants(name: str, variants: list[_Variant]) -> None:
             )
 
 
-def _guard_coalescible(name: str, prop: dict[str, Any], variants: list[_Variant]) -> None:
-    """Refuse a split field whose answer cannot coalesce to one typed value across its cases.
+def _guard_split_value_type(name: str, prop: dict[str, Any], variants: list[_Variant]) -> None:
+    """Refuse a ``boolean``, ``array`` or chips field drawn as several per-case controls.
 
-    A field shown for several values renders one control per case and its answer is coalesced by
-    :func:`form_ref` as a backtick string concatenation — correct only for a STRING value (at most one
-    case shows, so the concatenation is that case's string). A ``boolean`` (OptIn) or ``array``
-    (CheckboxGroup) field cannot be coalesced this way: the concatenation is a string where Meta
-    expects a boolean/array, and stringifying a list loses it. Such a field is refused loudly rather
-    than rendered into Meta-refused or value-losing Flow JSON (only string-valued conditional fields
-    support a multi-value ``visibleWhen`` on this channel).
+    A multi-value ``visibleWhen`` is supported on string-valued conditional fields only on this
+    channel; an OptIn, CheckboxGroup or ChipsSelector shown for several values of its controller is
+    refused loudly.
     """
     if len(variants) <= 1:
         return
     prop_type = prop.get("type")
     if prop_type in ("boolean", "array") or _chips_single_pick(prop):
-        # A single-pick chips field's value is a one-element LIST (like an array), so its per-case
-        # answers cannot coalesce by string concatenation either.
         kind = "chips" if _chips_single_pick(prop) else prop_type
         raise ChannelInputError(
             f"form property {name!r}: a {kind} field shown for several values of its controller is not "
-            "renderable on WhatsApp — its per-case answers cannot coalesce to one typed value (only "
-            "string-valued conditional fields support a multi-value visibleWhen here)"
+            "renderable on WhatsApp (only string-valued conditional fields support a multi-value visibleWhen here)"
         )
 
 
@@ -190,16 +244,26 @@ def emit_field_variants(
 
 
 def form_ref(name: str, variants: list[_Variant], names: dict[str, str]) -> str:
-    """The ``${form.…}`` reference carrying a field's answer, coalesced across its render variants.
+    """The ``${form.<name>}`` reference carrying a field drawn as one control.
 
-    A single-variant field reads ``${form.<name>}`` as before. A split field (always string-valued —
-    :func:`_guard_coalescible` refuses a split boolean/array) reads a backtick concatenation of every
-    variant's reference; the variants' render conditions are mutually exclusive, so at most one is ever
-    shown and the concatenation equals that one's string value (an unshown control resolves to empty),
-    keeping one answer under the field's own name.
+    A field drawn as several per-case controls has no one reference to its answer: its cases ride a
+    ``data_exchange`` payload one plain reference each (:func:`answer_refs`) and the data endpoint
+    reads the shown one, so a form with such a field is always endpoint-driven and never reaches a
+    static ``navigate``/``complete`` payload. Raises ``ValueError`` when handed one.
     """
-    component_name = names[name]
-    if len(variants) == 1 and variants[0][0] == "":
-        return f"${{form.{component_name}}}"
-    references = "".join(f"${{form.{component_name}{suffix}}}" for suffix, _ in variants)
-    return f"`{references}`"
+    if is_split(variants):
+        raise ValueError(f"form property {name!r} is drawn per case; its answer is read by the data endpoint")
+    return f"${{form.{names[name]}}}"
+
+
+def answer_refs(name: str, variants: list[_Variant], names: dict[str, str]) -> dict[str, str]:
+    """The ``data_exchange`` payload entries carrying a field's answer, each one plain ``${form.…}`` reference.
+
+    A field drawn as one control rides under its schema name. A field drawn as several per-case
+    controls rides one entry per case, keyed by the case's component name — never one expression over
+    several references — and the data endpoint keeps the entry of the case whose conditions hold
+    (:func:`split_answer_cases`) under the field's schema name.
+    """
+    if not is_split(variants):
+        return {name: form_ref(name, variants, names)}
+    return {f"{names[name]}{suffix}": f"${{form.{names[name]}{suffix}}}" for suffix, _ in variants}

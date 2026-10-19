@@ -182,8 +182,12 @@ class _ProbeFlows:
         self._api_base_url = api_base_url
         self._states: dict[str, str] = {}
 
-    async def create(self, name: str, flow_json: dict[str, Any] | None = None) -> FlowCreateResult:
-        created = await create_flow(waba_id=self._waba_id, name=name, flow_json=flow_json or _probe_flow_json())
+    async def create(
+        self, name: str, flow_json: dict[str, Any] | None = None, endpoint_uri: str | None = None
+    ) -> FlowCreateResult:
+        created = await create_flow(
+            waba_id=self._waba_id, name=name, flow_json=flow_json or _probe_flow_json(), endpoint_uri=endpoint_uri
+        )
         self._states[created.flow_id] = "DRAFT"
         return created
 
@@ -368,6 +372,42 @@ async def test_a_merged_range_publishes_without_validation_errors():
     async with _probe_flows() as flows:
         created = await flows.create(_probe_name(), flow_json)
         assert created.validation_errors == []
+
+
+@_needs_flow_endpoint
+async def test_a_multi_value_visible_when_publishes_without_validation_errors():
+    # The vendor authority for a field shown for several values of its controller: one Dropdown and
+    # one CalendarPicker drawn per case, each case under its own ``If`` on one value, and a field
+    # chained under the Dropdown's cases — on one screen (a ``${form.…}`` controller) and with the
+    # controller on an earlier screen (a ``${data.…}`` carrier). Each is an endpoint-driven Flow whose
+    # payloads carry one plain reference per case, created as a draft against the configured data
+    # endpoint — Meta returns its validation errors for anything it refuses.
+    schema = {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "title": "Kind", "enum": ["a", "b", "c"]},
+            "target": {"type": "string", "title": "Target", "visibleWhen": {"field": "kind", "in": ["a", "b"]}},
+            "day": {
+                "type": "string",
+                "title": "Day",
+                "format": "date",
+                "visibleWhen": {"field": "kind", "in": ["a", "c"]},
+            },
+            "note": {"type": "string", "title": "Note", "visibleWhen": {"field": "target", "equals": "x"}},
+        },
+        "required": ["kind", "target", "day"],
+    }
+    two_pages = [
+        {"title": "First", "fields": ["kind"], "kind": "input", "display": []},
+        {"title": "Second", "fields": ["target", "day", "note"], "kind": "input", "display": []},
+    ]
+    layouts = [build_form_flow(schema, pages, option_fields={"target"})[0] for pages in (None, two_pages)]
+    endpoint_uri = whatsapp_settings().flow_endpoint_uri
+    async with _probe_flows() as flows:
+        for flow_json in layouts:
+            assert flow_json["data_api_version"] == "3.0"
+            created = await flows.create(_probe_name(), flow_json, endpoint_uri=endpoint_uri)
+            assert created.validation_errors == []
 
 
 _needs_host_store = pytest.mark.skipif(
