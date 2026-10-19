@@ -10,11 +10,13 @@ two controls, any other keyword — is checked by the platform's one form-shape 
 data endpoint, so a form carrying one is published endpoint-driven (:func:`field_needs_endpoint`).
 
 A control that can show an error carries Meta's ``error-message`` bound to the screen-data key
-``<name>__err``; the endpoint fills it with the caller's ``wording.form.fields[<name>].invalid``, else
-this channel's own word for the broken shape (:func:`channel_word`, each within Meta's tightest
-``error-message`` cap). A shape drawn as a native ``pattern`` carries the helper text Meta requires:
-the field's description, else the caller's ``invalid`` sentence, else :func:`helper_word`, which names
-the expected form with an example where the shape has one.
+``<name>__err``; a ``rangeStart`` pair drawn as one range control binds its START's ``__err``,
+the object ``{start-date, end-date}`` carrying each end's text. The endpoint fills each text with
+the caller's ``wording.form.fields[<name>].invalid``, else this channel's own word for the broken
+shape (:func:`channel_word`, each within Meta's tightest ``error-message`` cap). A shape drawn as
+a native ``pattern`` carries the helper text Meta requires: the field's description, else the
+caller's ``invalid`` sentence, else :func:`helper_word`, which names the expected form with an
+example where the shape has one.
 """
 
 from __future__ import annotations
@@ -216,5 +218,5 @@ def field_needs_endpoint(prop: dict[str, Any], component: dict[str, Any], merged
 
 
 def error_binding(cname: str) -> str:
-    """The ``${data.<cname>__err}`` reference a control's ``error-message`` reads."""
+    """The ``${data.<cname>__err}`` reference a control's ``error-message`` reads (a range control's, an object)."""
     return f"${{data.{cname}__err}}"

@@ -1021,3 +1021,160 @@ async def test_a_notify_token_with_no_sidecar_is_427(flow_env, flow_handler, stu
     request, _, _ = _request(_shape_exchange(_SHAPE_ADVANCE, token="tai42-nf:missing:nonce"))
     response = await flow_handler(request)
     assert response.status_code == 427
+
+
+# --- a merged range pair: one error object carries each end's sentence -------------------
+
+_RANGE_TOKEN = "int-range-1"
+_RANGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "title": "Name"},
+        "start": {"type": "string", "format": "date", "title": "From"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start", "minDays": 2, "title": "To"},
+        "note": {"type": "string", "pattern": "^[a-z]+$"},
+    },
+}
+_RANGE_FIRST = [
+    {"title": "Dates", "fields": ["name", "start", "end"], "kind": "input", "display": []},
+    {"title": "Notes", "fields": ["note"], "kind": "input", "display": []},
+]
+_RANGE_LATER = [
+    {"title": "Contact", "fields": ["name"], "kind": "input", "display": []},
+    {"title": "Dates", "fields": ["start", "end", "note"], "kind": "input", "display": []},
+]
+_NO_RANGE_ERROR = {"start-date": "", "end-date": ""}
+_PICKED = {"start-date": "2026-05-04", "end-date": "2026-05-01"}
+# The entry screen's whole data with the pair on it, as its footer carries it to the endpoint.
+_DATES_DATA = {
+    "name__init": "",
+    "name__err": "",
+    "start__init": _NO_RANGE_ERROR,
+    "start__err": _NO_RANGE_ERROR,
+    "note__init": "",
+    "note__err": "",
+}
+_DATES_ADVANCE = {
+    "tai42_event": "page_advanced",
+    "tai42_page": "Dates",
+    "name": "alice",
+    "start": _PICKED,
+    **_DATES_DATA,
+}
+
+
+async def _seed_range(
+    pages: list[dict[str, Any]], *, reactions: dict[str, Any] | None = None, invalid: dict[str, str] | None = None
+) -> None:
+    form = EndpointForm(schema=_RANGE_SCHEMA, pages=pages, reactions=reactions, option_fields=[], invalid=invalid or {})
+    await cache_endpoint_form(_RANGE_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
+
+
+def _errors_of(out: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in out["data"].items() if key.endswith("__err")}
+
+
+async def test_a_range_start_error_shows_on_the_start_end_of_the_one_error_object(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_range(_RANGE_FIRST, invalid={"start": "Pick a later first day"})
+    stub_app.interactions.shape_errors = [_shape_error("start", FormShapeKind.MIN_DATE, "Too early")]
+    request, aes_key, iv = _request(_shape_exchange(_DATES_ADVANCE, token=_RANGE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert _errors_of(out) == {
+        "name__err": "",
+        "start__err": {"start-date": "Pick a later first day", "end-date": ""},
+        "note__err": "",
+    }
+    assert out["data"]["start__init"] == _PICKED
+    assert out["data"]["error_message"] == "From: Pick a later first day"
+
+
+async def test_a_range_end_error_shows_on_the_end_end_of_the_one_error_object(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_range(_RANGE_FIRST)
+    stub_app.interactions.shape_errors = [_shape_error("end", FormShapeKind.RANGE_ORDER, "The end is before the start")]
+    request, aes_key, iv = _request(_shape_exchange(_DATES_ADVANCE, token=_RANGE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert _errors_of(out) == {
+        "name__err": "",
+        "start__err": {"start-date": "", "end-date": channel_word(FormShapeKind.RANGE_ORDER, {})},
+        "note__err": "",
+    }
+    assert out["data"]["error_message"] == "To: The end is before the start"
+
+
+async def test_errors_on_both_range_ends_show_each_on_its_own_end(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_range(_RANGE_FIRST, invalid={"end": "Pick a later last day"})
+    stub_app.interactions.shape_errors = [
+        _shape_error("start", FormShapeKind.REQUIRED, "Required"),
+        _shape_error("end", FormShapeKind.MIN_DATE, "Too early"),
+        _shape_error("name", FormShapeKind.REQUIRED, "Required"),
+    ]
+    request, aes_key, iv = _request(_shape_exchange(_DATES_ADVANCE, token=_RANGE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert _errors_of(out) == {
+        "name__err": channel_word(FormShapeKind.REQUIRED, {}),
+        "start__err": {"start-date": channel_word(FormShapeKind.REQUIRED, {}), "end-date": "Pick a later last day"},
+        "note__err": "",
+    }
+
+
+async def test_a_clean_range_step_a_reaction_refuses_clears_the_range_error_object(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_range(_RANGE_FIRST, reactions={"page_advanced": ["Dates"]})
+    stub_app.interactions.react_result = {"errors": {"start": "not available"}}
+    data = {**_DATES_ADVANCE, "start__err": {"start-date": "Too early", "end-date": "Too early"}, "name__err": "Bad"}
+    request, aes_key, iv = _request(_shape_exchange(data, token=_RANGE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert _errors_of(out) == {"name__err": "", "start__err": _NO_RANGE_ERROR, "note__err": ""}
+    assert out["data"]["error_message"] == "From: not available"
+
+
+async def test_a_range_on_a_later_screen_receives_its_error_object_forwarded(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_range(_RANGE_LATER)
+    data = {"tai42_event": "page_advanced", "tai42_page": "Contact", "name": "alice", **_DATES_DATA}
+    request, aes_key, iv = _request(_shape_exchange(data, token=_RANGE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out == {
+        "screen": "SCREEN_B",
+        "data": {
+            "start__init": _NO_RANGE_ERROR,
+            "start__err": _NO_RANGE_ERROR,
+            "note__init": "",
+            "note__err": "",
+            "name__val": "alice",
+        },
+    }
+
+
+async def test_a_range_error_on_a_later_screen_fills_its_one_error_object(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_range(_RANGE_LATER)
+    stub_app.interactions.shape_errors = [_shape_error("end", FormShapeKind.RANGE_SPAN, "Too short a span")]
+    data = {
+        "tai42_event": "submitted",
+        "name": "alice",
+        "start": _PICKED,
+        "start__init": _NO_RANGE_ERROR,
+        "start__err": _NO_RANGE_ERROR,
+        "note__init": "",
+        "note__err": "",
+        "name__val": "alice",
+    }
+    request, aes_key, iv = _request(_shape_exchange(data, screen="SCREEN_B", token=_RANGE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    assert _errors_of(out) == {
+        "start__err": {"start-date": "", "end-date": channel_word(FormShapeKind.RANGE_SPAN, {})},
+        "note__err": "",
+    }

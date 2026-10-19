@@ -314,6 +314,16 @@ def _error_decl() -> dict[str, Any]:
     return {"type": "string", "__example__": ERROR_EXAMPLE}
 
 
+def _range_error_decl() -> dict[str, Any]:
+    # The screen-``data`` declaration of a merged range START's ``__err``: the one object the range
+    # control's ``error-message`` binds, carrying each end's error text.
+    return {
+        "type": "object",
+        "properties": {"start-date": {"type": "string"}, "end-date": {"type": "string"}},
+        "__example__": {"start-date": ERROR_EXAMPLE, "end-date": ERROR_EXAMPLE},
+    }
+
+
 def _screen_data_model(
     index: int, this_fields: list[str], later_fields: list[str], earlier_fields: list[str], spec: _RenderSpec
 ) -> dict[str, Any]:
@@ -321,7 +331,8 @@ def _screen_data_model(
 
     The entry screen declares EVERY field's init/ds/err (the send injects them all there); a later screen
     declares its own and its successors' init/ds/err plus a ``__val`` carrier for each field collected
-    earlier. A merged range END declares only its ``__err`` (its START's range control binds it).
+    earlier. A merged range START's ``__err`` is the pair's one error object (:func:`_range_error_decl`)
+    and a merged range END declares nothing.
     Every screen of an ask-less endpoint-driven form declares each shaped field's ``__invalid``.
     """
     merged_ends = set(spec.range_merges)
@@ -333,8 +344,8 @@ def _screen_data_model(
             data_model.update(
                 _field_data_decls(name, spec.properties[name], spec.option_fields, spec.names, name in merged_starts)
             )
-        if name in spec.err_fields:
-            data_model[f"{spec.names[name]}__err"] = _error_decl()
+        if name in spec.err_fields and name not in merged_ends:
+            data_model[f"{spec.names[name]}__err"] = _range_error_decl() if name in merged_starts else _error_decl()
     if index > 0:
         for name in earlier_fields:
             if name in merged_ends:
@@ -350,13 +361,14 @@ def _screen_data_model(
 
 def _later_carriers(later_fields: list[str], spec: _RenderSpec) -> dict[str, str]:
     # The carriers each later (unrendered) field still needs on a later screen: its init/ds and its
-    # ``__err`` (a merged END only its ``__err``), forwarded from this screen's data.
+    # ``__err`` (a merged START's the pair's one error object, a merged END none), forwarded from
+    # this screen's data.
     merged_ends = set(spec.range_merges)
     forward: dict[str, str] = {}
     for name in later_fields:
         if name not in merged_ends:
             forward.update(_forward_field_data(name, spec.properties[name], spec.option_fields, spec.names))
-        if name in spec.err_fields:
+        if name in spec.err_fields and name not in merged_ends:
             forward[f"{spec.names[name]}__err"] = f"${{data.{spec.names[name]}__err}}"
     return forward
 
@@ -533,7 +545,6 @@ def _build_form_screen(
                 name in spec.required,
                 end in spec.required,
                 spec.names[name],
-                spec.names[end],
             )
             # A field_changed on EITHER end attaches the one on-select-action, named by the end that
             # declared the trigger.

@@ -308,7 +308,7 @@ async def test_create_under_a_deleted_draft_name_outcome(record_property):
 # Every shape family the Flow draws natively (required on a CalendarPicker date, a pattern with its
 # helper text, the whole-number pattern on an integer, the platform regex on a time) and one each
 # that only the data endpoint checks (an email format, a number bound), with every control binding
-# its ``error-message`` and a merged range binding the paired one.
+# its ``error-message`` and a merged range binding its one error object.
 _SHAPED_LIVE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -353,6 +353,23 @@ async def test_native_shapes_publish_without_validation_errors():
         assert created.validation_errors == []
 
 
+@_needs_waba
+async def test_a_merged_range_publishes_without_validation_errors():
+    # The vendor authority for a merged range pair's error text: a static Flow whose one range-mode
+    # CalendarPicker binds its ``error-message`` to one screen-data object ``{start-date, end-date}``,
+    # created as a draft — Meta returns its validation errors for any shape it refuses.
+    pair = {
+        "type": "object",
+        "properties": {key: _SHAPED_LIVE_SCHEMA["properties"][key] for key in ("start", "end")},
+        "required": ["start", "end"],
+    }
+    flow_json, _ = build_form_flow(pair)
+    assert "data_api_version" not in flow_json
+    async with _probe_flows() as flows:
+        created = await flows.create(_probe_name(), flow_json)
+        assert created.validation_errors == []
+
+
 _needs_host_store = pytest.mark.skipif(
     not os.environ.get("CHANNEL_WHATSAPP_REDIS_URL"),
     reason=(
@@ -385,16 +402,17 @@ async def test_shape_checked_form_publishes_endpoint_driven_and_sends(host_store
     # The whole shape-checked form delivered through the real Graph API, published endpoint-driven
     # against the configured data endpoint (served by this plugin on the host), with the form's
     # sidecar written to the host's own store so its data endpoint serves every screen. deliver()
-    # SUCCEEDS only if Meta created the Flow with no validation errors (the paired range
-    # ``error-message`` object included), published it, and accepted the send. What the person reads
-    # on each failure is then observed on the phone and recorded beside the run: the native refusals
-    # (an empty required field; a pattern mismatch; whether the email/phone keyboards refuse on their
-    # own), that native checks run before a ``data_exchange`` footer, that a same-screen refusal keeps
-    # the person on the screen with the bound ``error-message`` showing its sentence and an empty one
-    # showing nothing, the longest dynamic error text shown whole, and that every control keeps what
-    # the person typed after a refusal (the refusal carries the screen's whole data, each control's
-    # ``__init`` set to the value the person left in it). The final submit reaches a host that holds no parked ask
-    # for this probe's interaction, so what follows the submit is not part of this leg.
+    # SUCCEEDS only if Meta created the Flow with no validation errors (the range control's one
+    # ``error-message`` binding to its error object included), published it, and accepted the send.
+    # What the person reads on each failure is then observed on the phone and recorded beside the run:
+    # the native refusals (an empty required field; a pattern mismatch; whether the email/phone
+    # keyboards refuse on their own), that native checks run before a ``data_exchange`` footer, that a
+    # same-screen refusal keeps the person on the screen with the bound ``error-message`` showing its
+    # sentence and an empty one showing nothing, the longest dynamic error text shown whole, and that
+    # every control keeps what the person typed after a refusal (the refusal carries the screen's whole
+    # data, each control's ``__init`` set to the value the person left in it). The final submit reaches
+    # a host that holds no parked ask for this probe's interaction, so what follows the submit is not
+    # part of this leg.
     settings = whatsapp_settings()
     delivery = make_delivery(
         recipient=settings.allowed_recipients[0],

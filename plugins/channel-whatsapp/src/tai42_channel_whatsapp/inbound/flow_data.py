@@ -76,6 +76,7 @@ from tai42_channel_whatsapp.flows_endpoint import (
     REACTION_FIELD_KEY,
     REACTION_PAGE_KEY,
     RESERVED_REACTION_KEYS,
+    error_carriers,
     error_fields,
 )
 from tai42_channel_whatsapp.flows_send_data import _field_init_value, _init_value
@@ -323,21 +324,36 @@ def _screen_answer(
     screen's controls gets its ``__init`` set to the value the person left in it (a merged range
     END has none — its START's value is the pair's object), so the answer never puts back a value
     they changed. With ``clear_errors`` (the screen's values passed the shape check) each of its
-    ``error-message`` bindings is cleared. ``overrides`` apply last.
+    ``error-message`` bindings is cleared (a merged range's to the object of two empty strings).
+    ``overrides`` apply last.
     """
     properties = form.schema.get("properties")
     properties = properties if isinstance(properties, dict) else {}
     names = component_names(properties)
     fields_by_screen, current = _screen_fields(form, screen)
+    this_fields = fields_by_screen[current] if current is not None else []
     out = {key: value for key, value in data.items() if key not in properties and key not in RESERVED_REACTION_KEYS}
-    for name in fields_by_screen[current] if current is not None else []:
-        cname = names[name]
+    for name in this_fields:
         if name in data:
-            out[f"{cname}__init"] = data[name]
-        if clear_errors and f"{cname}__err" in out:
-            out[f"{cname}__err"] = ""
+            out[f"{names[name]}__init"] = data[name]
+    if clear_errors:
+        bound, range_merges = _error_bindings(form, properties, names)
+        cleared = error_carriers(this_fields, names, bound, range_merges, {})
+        out.update({key: value for key, value in cleared.items() if key in out})
     out.update(overrides)
     return out
+
+
+def _error_bindings(
+    form: EndpointForm, properties: dict[str, Any], names: dict[str, str]
+) -> tuple[frozenset[str], dict[str, str]]:
+    # The fields binding an ``error-message`` and the form's ``END -> START`` range merge map — the
+    # same ones the published Flow and its send data were built from.
+    resolved, fields_by_screen = _resolve_pages(properties, form.pages)
+    range_merges = _form_range_merges(properties, resolved, fields_by_screen)
+    required_raw = form.schema.get("required")
+    required = {str(name) for name in required_raw} if isinstance(required_raw, list) else set()
+    return error_fields(properties, required, set(form.option_fields), names, set(range_merges)), range_merges
 
 
 def _screen_fields(form: EndpointForm, screen: str) -> tuple[list[list[str]], int | None]:
@@ -367,9 +383,10 @@ def _shape_refusal(
     A picker's membership in a per-send option list is never refused here (the list it drew is
     the list it offers; the answer door judges membership against the stored list). Each failing
     field on the screen shows its sentence — the caller's ``invalid``, else this channel's word for
-    the shape (``required`` always the channel's word) — in its ``error-message``; every other
-    field's is cleared; the snackbar names each failing field's label and sentence. The answer
-    carries the screen's whole data (:func:`_screen_answer`).
+    the shape (``required`` always the channel's word) — in its ``error-message`` (a merged range
+    end's on its own end of the pair's one error object); every other field's is cleared; the
+    snackbar names each failing field's label and sentence. The answer carries the screen's whole
+    data (:func:`_screen_answer`).
     """
     properties = form.schema.get("properties")
     properties = properties if isinstance(properties, dict) else {}
@@ -388,18 +405,15 @@ def _shape_refusal(
         return None
     names = component_names(properties)
     labels = payload_labels(properties)
-    required_raw = form.schema.get("required")
-    required = {str(name) for name in required_raw} if isinstance(required_raw, list) else set()
-    resolved, _ = _resolve_pages(properties, form.pages)
-    merged_ends = set(_form_range_merges(properties, resolved, fields_by_screen))
-    bound = error_fields(properties, required, set(form.option_fields), names, merged_ends)
-    out: dict[str, Any] = {f"{names[name]}__err": "" for name in this_fields if name in bound}
+    bound, range_merges = _error_bindings(form, properties, names)
+    shown: dict[str, str] = {}
     lines: list[str] = []
     for error in errors:
         sentence = _sentence(form, data, names, error.field) if error.kind is not FormShapeKind.REQUIRED else None
-        if error.field in this_fields and error.field in bound:
-            out[f"{names[error.field]}__err"] = sentence or channel_word(error.kind, error.params)
+        if error.field in this_fields:
+            shown[error.field] = sentence or channel_word(error.kind, error.params)
         lines.append(f"{labels.get(error.field, error.field)}: {sentence or error.message}")
+    out: dict[str, Any] = error_carriers(this_fields, names, bound, range_merges, shown)
     out["error_message"] = "; ".join(lines)
     return {"screen": screen, "data": _screen_answer(form, screen, data, out)}
 

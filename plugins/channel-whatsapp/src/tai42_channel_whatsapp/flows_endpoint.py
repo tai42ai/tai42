@@ -12,7 +12,7 @@ the next one — from the request alone.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from tai42_contract.channels import ChannelInputError
@@ -55,6 +55,35 @@ def error_fields(
         if _field_control(name, prop, name in required, option_fields, names)["type"] in ERROR_MESSAGE_TYPES:
             out.add(name)
     return frozenset(out)
+
+
+def error_carriers(
+    fields: Iterable[str],
+    names: dict[str, str],
+    bound: frozenset[str],
+    range_merges: Mapping[str, str],
+    sentences: Mapping[str, str],
+) -> dict[str, Any]:
+    """The ``__err`` screen-data value of each of ``fields`` whose control binds an ``error-message``.
+
+    ``bound`` is :func:`error_fields` and ``range_merges`` the ``END -> START`` map of the pairs
+    drawn as one range control. Each field's sentence comes from ``sentences`` (the empty string,
+    no error shown, when absent). A merged range START's value is the object ``{start-date,
+    end-date}`` its range control's ``error-message`` reads — the START's sentence on
+    ``start-date``, its END's on ``end-date`` — so each end shows its own sentence; a merged END
+    has no value of its own; every other field's is the sentence string.
+    """
+    starts = {start: end for end, start in range_merges.items()}
+    out: dict[str, Any] = {}
+    for name in fields:
+        if name not in bound or name in range_merges:
+            continue
+        key = f"{names[name]}__err"
+        if name in starts:
+            out[key] = {"start-date": sentences.get(name, ""), "end-date": sentences.get(starts[name], "")}
+        else:
+            out[key] = sentences.get(name, "")
+    return out
 
 
 def shaped_fields(properties: dict[str, Any]) -> frozenset[str]:

@@ -378,15 +378,15 @@ def _calendar_range_component(
     required_start: bool,
     required_end: bool,
     start_cname: str,
-    end_cname: str,
 ) -> dict[str, Any]:
     """A range-mode ``CalendarPicker`` for a ``rangeStart`` pair drawn as ONE control.
 
     Emitted at the START's position and keyed by the START's component name; the END emits no
-    control. ``label``, ``required`` and ``error-message`` are each the paired object Meta's range
-    mode takes (``{start-date, end-date}``), so the two ends carry their own titles, required flags
-    and error bindings (each end's own ``__err`` key). The
-    bounds are never looser than either field (:func:`_merged_date_bounds`) and the span rides the
+    control. ``label`` and ``required`` are each the paired object Meta's range mode takes
+    (``{start-date, end-date}``), so the two ends carry their own titles and required flags. The
+    ``error-message`` is ONE binding to the START's ``__err`` screen-data key, declared as the object
+    ``{start-date, end-date}`` that carries each end's error text (Meta's validator refuses a binding
+    per end). The bounds are never looser than either field (:func:`_merged_date_bounds`) and the span rides the
     END's ``minDays``/``maxDays`` (:func:`_range_span`). The value is the object ``{start-date,
     end-date}``; the inbound decode splits it back onto the two schema date keys, so the submitted
     answer stays the two scalar date strings.
@@ -401,7 +401,7 @@ def _calendar_range_component(
     }
     component.update(_merged_date_bounds(start_prop, end_prop))
     component.update(_range_span(end_prop))
-    component["error-message"] = {"start-date": error_binding(start_cname), "end-date": error_binding(end_cname)}
+    component["error-message"] = error_binding(start_cname)
     return component
 
 

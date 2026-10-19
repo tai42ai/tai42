@@ -861,6 +861,12 @@ async def test_form_controls_render_native_flow_components_and_answer_resolves(
         assert ranges[0]["label"] == {"start-date": "start", "end-date": "end"}
         assert ranges[0]["min-days"] == 1
         assert ranges[0]["max-days"] == 4
+        # Its error-message is ONE binding to the start's error object, which the send's entry
+        # data carries empty for both ends.
+        assert ranges[0]["error-message"] == "${data.start__err}"
+        entry_data = interactive["action"]["parameters"]["flow_action_payload"]["data"]
+        assert entry_data["start__err"] == {"start-date": "", "end-date": ""}
+        assert "end__err" not in entry_data
         # The page's button_label is the terminal screen's footer (the submit button).
         assert _terminal_footer_label(flow_json) == "Send it"
 
