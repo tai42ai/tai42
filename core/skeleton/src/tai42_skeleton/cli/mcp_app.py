@@ -1,6 +1,7 @@
 """The ``tai serve`` CLI: build and run the MCP app across the http/sse/stdio transports."""
 
 import asyncio
+import faulthandler
 import logging
 import os
 import socket
@@ -18,6 +19,7 @@ from tai42_kit.utils.runtime.uvicorn_util import parse_and_validate_uvicorn_args
 from tai42_skeleton import asgi
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.boot_rules import require_bus_for_shared_config, require_bus_for_workers
+from tai42_skeleton.cli.worker_supervisor import run_workers
 from tai42_skeleton.config.config_mode import ConfigMode, config_mode
 from tai42_skeleton.connectors.meta_log_redactor import register_connector_log_redaction
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
@@ -34,14 +36,28 @@ _HTTP_TRANSPORTS = frozenset({"http", "streamable-http"})
 _STATEFUL_TRANSPORTS = frozenset({"http", "streamable-http", "sse"})
 
 
+def _enable_fault_handler() -> None:
+    """Dump every thread's Python traceback to stderr on a fatal signal (SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL).
+
+    A native crash otherwise kills the process with no Python trace in the serve log. A
+    handler already enabled (``PYTHONFAULTHANDLER``, ``-X faulthandler``) is left as it is,
+    and a process started with stderr closed (``sys.stderr`` is None) has nowhere to write
+    the dump, so it runs without one.
+    """
+    if sys.stderr is not None and not faulthandler.is_enabled():
+        faulthandler.enable(file=sys.stderr, all_threads=True)
+
+
 def create_app():
     """The uvicorn worker factory: configure the worker process and build the ASGI app from the stamped env."""
-    # Configure the root logger in every uvicorn worker process: multi-worker
-    # ``uvicorn.run(..., factory=True)`` imports this factory string and never runs
-    # ``main()``, so without this the workers (which do all the real logging) stay
+    # Configure the root logger in every uvicorn worker process: a multi-worker
+    # ``factory=True`` run imports this factory string and never runs ``main()``,
+    # so without this the workers (which do all the real logging) stay
     # unconfigured. ``force=True`` inside ``setup_logging`` makes the repeat call in
-    # a single-process run harmless.
+    # a single-process run harmless. The fault handler is armed per worker process
+    # for the same reason.
     setup_logging(logging_settings())
+    _enable_fault_handler()
 
     # This worker is a metrics WRITER (its tool calls increment counters), so the
     # multiproc mmap backend must have frozen — verify before serving. The worker
@@ -121,7 +137,7 @@ async def run_debug(config_kwargs: dict[str, Any]) -> int:
     :func:`create_app` builds the shim app (boot-epoch install + swap slot), so a debug run gets
     the fresh-FastMCP-per-epoch serving surface and a profile apply swaps a fresh epoch in place
     exactly as a served worker does. Only the process shape differs — one uvicorn ``Server`` here
-    versus ``uvicorn.run``'s worker pool. The transport / stateless-http selection travels to
+    versus the supervised worker pool. The transport / stateless-http selection travels to
     ``create_app`` through the env ``run_mcp_app`` stamped before dispatching here.
     """
     config_kwargs["app"] = create_app()
@@ -255,7 +271,7 @@ def _stamp_serve_env(manifest_path: str, transport: str, stateless_http: bool) -
 
 
 def _build_serve_config(uds: str | None, host: str, port: int, uvicorn_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """The uvicorn ``config_kwargs`` for both the served (``uvicorn.run``) and debug (``uvicorn.Config``) paths.
+    """The uvicorn ``config_kwargs`` for the served (``uvicorn.run``, :func:`run_workers`) and debug paths.
 
     Carries the transport defaults plus a settings-backed graceful-shutdown timeout (inserted
     BEFORE the extra-arg update so a shipped ``--timeout-graceful-shutdown`` still wins), then the
@@ -296,6 +312,7 @@ def run_mcp_app(
     # are separate processes that reconfigure via ``create_app``. ``force=True`` inside
     # ``setup_logging`` keeps a repeat call idempotent.
     setup_logging(logging_settings())
+    _enable_fault_handler()
 
     if uvicorn_kwargs is None:
         uvicorn_kwargs = {}
@@ -344,7 +361,11 @@ def run_mcp_app(
         )
 
     logger.info("Starting Tai MCP Server with %d worker(s).", workers)
-    uvicorn.run("tai42_skeleton.cli.mcp_app:create_app", workers=workers, factory=True, **config_kwargs)
+    if workers > 1:
+        # The worker supervisor logs why each dead worker is replaced (see worker_supervisor).
+        run_workers("tai42_skeleton.cli.mcp_app:create_app", workers=workers, factory=True, **config_kwargs)
+    else:
+        uvicorn.run("tai42_skeleton.cli.mcp_app:create_app", workers=workers, factory=True, **config_kwargs)
 
     logger.info("Tai MCP Server shutdown.")
     return 0

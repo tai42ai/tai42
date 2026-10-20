@@ -67,7 +67,9 @@ dependencies = [
     "prometheus-client>=0.24",
     "fastapi>=0.135",
     "starlette>=0.40",
-    "uvicorn>=0.52.4",
+    # Capped at the minor range cli/worker_supervisor.py is verified against: it
+    # overrides a step of uvicorn's non-exported multi-worker supervisor.
+    "uvicorn>=0.52.4,<0.55",
     "redis>=5",
     # uvicorn runtime accelerators — not imported directly; uvicorn loads them at
     # serve time for the websocket protocol, a faster event loop, and faster HTTP

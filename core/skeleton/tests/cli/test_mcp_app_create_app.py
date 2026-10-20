@@ -342,6 +342,23 @@ def test_wrapper_registers_cli_logging_reload(
     assert _LOGGING_RELOAD_KEY in app.lifecycle.reload_handlers
 
 
+def test_wrapper_enables_the_fault_handler(
+    patch_app_seam, root_logger_restored, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every served worker arms the fault handler (all threads, to stderr), so a native
+    # crash leaves a Python traceback in the serve log.
+    monkeypatch.setenv("TAI_TRANSPORT", "http")
+    monkeypatch.delenv("TAI_STATELESS_HTTP", raising=False)
+    patch_app_seam(_FakeApp(_FakeInnerApp()))
+    enabled: list = []
+    monkeypatch.setattr(mcp_app.faulthandler, "is_enabled", lambda: False)
+    monkeypatch.setattr(mcp_app.faulthandler, "enable", lambda **kw: enabled.append(kw))
+
+    mcp_app.create_app()
+
+    assert enabled == [{"file": mcp_app.sys.stderr, "all_threads": True}]
+
+
 async def test_run_stdio_registers_cli_logging_reload(patch_app_seam) -> None:
     app = patch_app_seam(_FakeApp(_FakeInnerApp()))
 

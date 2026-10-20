@@ -249,8 +249,9 @@ _SURFACE_MODULE = _SKELETON_SRC / "tools" / "binding" / "surface.py"
 # A sub-MCP mount is its own server, not the listed surface.
 _OTHER_SERVERS = {_SKELETON_SRC / "app" / "sub_mcp_app.py"}
 # Receivers whose ``enable``/``disable`` names no listed component: the monitoring writer's
-# ``disable()`` suspends record writing for a block.
-_NOT_COMPONENTS = {"get_monitoring().writer"}
+# ``disable()`` suspends record writing for a block, and ``faulthandler.enable()`` arms the
+# serve processes' fatal-signal traceback dump.
+_NOT_COMPONENTS = {"get_monitoring().writer", "faulthandler"}
 
 
 def _calls(attribute: str) -> list[str]:
