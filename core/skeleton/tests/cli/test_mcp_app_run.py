@@ -2,7 +2,7 @@
 shutdown, and the cli / main entry points.
 
 The launcher wiring runs up to (but not through) the blocking server start —
-``uvicorn.run`` / ``uvicorn.Server.serve`` / ``asyncio.run`` are mocked, and the
+``uvicorn.run`` / ``run_workers`` / ``uvicorn.Server.serve`` / ``asyncio.run`` are mocked, and the
 ``app`` / ``Manifest`` seams are replaced with fakes.
 """
 
@@ -136,7 +136,7 @@ def test_stateless_http_lifts_multi_worker_refusal(transport: str, monkeypatch: 
     monkeypatch.setattr(mcp_app.sys, "platform", "linux")
     monkeypatch.delenv("TAI_RUN_MODE", raising=False)
     recorded: list = []
-    monkeypatch.setattr(mcp_app.uvicorn, "run", lambda target, **kw: recorded.append((target, kw)))
+    monkeypatch.setattr(mcp_app, "run_workers", lambda target, **kw: recorded.append((target, kw)))
     host, port = _defaults()
 
     rc = mcp_app.run_mcp_app("m.yaml", transport, host, port, workers=4, stateless_http=True)
@@ -244,11 +244,34 @@ def test_run_mcp_app_activates_multiproc_env_before_wipe(monkeypatch: pytest.Mon
     assert order == ["activate", ("wipe", settings_dir)]
 
 
-def test_run_mcp_app_tcp_path_calls_uvicorn_run(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_mcp_app_single_worker_path_calls_uvicorn_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One worker has no supervisor: it is served by ``uvicorn.run`` itself.
     monkeypatch.setattr(mcp_app.sys, "platform", "linux")
     monkeypatch.delenv("TAI_RUN_MODE", raising=False)
     recorded: list = []
     monkeypatch.setattr(mcp_app.uvicorn, "run", lambda target, **kw: recorded.append((target, kw)))
+    monkeypatch.setattr(mcp_app, "run_workers", lambda *a, **kw: pytest.fail("run_workers must not be reached"))
+    host, port = _defaults()
+
+    rc = mcp_app.run_mcp_app("manifest.yaml", "http", host, port, workers=1)
+
+    assert rc == 0
+    target, kwargs = recorded[0]
+    assert target == "tai42_skeleton.cli.mcp_app:create_app"
+    assert kwargs["factory"] is True
+    assert kwargs["workers"] == 1
+    assert kwargs["host"] == host
+    assert kwargs["port"] == port
+
+
+def test_run_mcp_app_multi_worker_path_calls_run_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    # More than one worker runs under the worker-death-reporting supervisor, with the
+    # same target and uvicorn kwargs ``uvicorn.run`` takes.
+    monkeypatch.setattr(mcp_app.sys, "platform", "linux")
+    monkeypatch.delenv("TAI_RUN_MODE", raising=False)
+    recorded: list = []
+    monkeypatch.setattr(mcp_app, "run_workers", lambda target, **kw: recorded.append((target, kw)))
+    monkeypatch.setattr(mcp_app.uvicorn, "run", lambda *a, **kw: pytest.fail("uvicorn.run must not be reached"))
     host, port = _defaults()
 
     # >1 worker on an http transport is only allowed under --stateless-http.
@@ -341,7 +364,7 @@ def test_run_mcp_app_unknown_run_mode_raises(monkeypatch: pytest.MonkeyPatch) ->
 def test_run_mcp_app_normal_path_logs_worker_count(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     monkeypatch.setattr(mcp_app.sys, "platform", "linux")
     monkeypatch.delenv("TAI_RUN_MODE", raising=False)
-    monkeypatch.setattr(mcp_app.uvicorn, "run", lambda target, **kw: None)
+    monkeypatch.setattr(mcp_app, "run_workers", lambda target, **kw: None)
     # run_mcp_app configures logging (basicConfig force=True, which would drop the
     # caplog handler); no-op it here so this test can capture the run-mode message.
     monkeypatch.setattr(mcp_app, "setup_logging", lambda *a, **k: None)
@@ -363,7 +386,7 @@ def test_run_mcp_app_configures_logging_on_serve_path(monkeypatch: pytest.Monkey
     # ``logging_settings()`` before the (faked) uvicorn launch.
     monkeypatch.setattr(mcp_app.sys, "platform", "linux")
     monkeypatch.delenv("TAI_RUN_MODE", raising=False)
-    monkeypatch.setattr(mcp_app.uvicorn, "run", lambda target, **kw: None)
+    monkeypatch.setattr(mcp_app, "run_workers", lambda target, **kw: None)
     recorded: list = []
     monkeypatch.setattr(mcp_app, "setup_logging", lambda cfg: recorded.append(cfg))
     host, port = _defaults()
@@ -372,6 +395,39 @@ def test_run_mcp_app_configures_logging_on_serve_path(monkeypatch: pytest.Monkey
 
     assert rc == 0
     assert recorded == [mcp_app.logging_settings()]
+
+
+def test_run_mcp_app_enables_the_fault_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The serve master arms the fault handler (all threads, to stderr) before launching.
+    monkeypatch.setattr(mcp_app.sys, "platform", "linux")
+    monkeypatch.delenv("TAI_RUN_MODE", raising=False)
+    monkeypatch.setattr(mcp_app.uvicorn, "run", lambda target, **kw: None)
+    enabled: list = []
+    monkeypatch.setattr(mcp_app.faulthandler, "is_enabled", lambda: False)
+    monkeypatch.setattr(mcp_app.faulthandler, "enable", lambda **kw: enabled.append(kw))
+    host, port = _defaults()
+
+    rc = mcp_app.run_mcp_app("manifest.yaml", "http", host, port, workers=1)
+
+    assert rc == 0
+    assert enabled == [{"file": mcp_app.sys.stderr, "all_threads": True}]
+
+
+def test_enable_fault_handler_keeps_an_enabled_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A handler already enabled (PYTHONFAULTHANDLER, ``-X faulthandler``) is left as it is.
+    monkeypatch.setattr(mcp_app.faulthandler, "is_enabled", lambda: True)
+    monkeypatch.setattr(mcp_app.faulthandler, "enable", lambda **kw: pytest.fail("enable must not be called"))
+
+    mcp_app._enable_fault_handler()
+
+
+def test_enable_fault_handler_without_stderr_leaves_it_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A process started with stderr closed has ``sys.stderr`` set to None: the dump has
+    # nowhere to go, and serving must still start.
+    monkeypatch.setattr(mcp_app.sys, "stderr", None)
+    monkeypatch.setattr(mcp_app.faulthandler, "is_enabled", lambda: False)
+
+    mcp_app._enable_fault_handler()
 
 
 def test_run_mcp_app_merges_uvicorn_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
