@@ -182,7 +182,7 @@ jobs:
           attestations: false
 
   # Image refresh hook: every published component pokes tai-distribution, whose
-  # refresh-pins pipeline re-reads PyPI and rebuilds the platform image when
+  # image-input refresh re-reads PyPI and rebuilds the platform image when
   # the pinned roster changed. Fork runs carry no token and skip.
   notify-distribution:
     needs: release
