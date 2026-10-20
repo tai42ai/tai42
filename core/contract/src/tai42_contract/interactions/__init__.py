@@ -12,7 +12,9 @@ park markers' reserved keys, their JSON Schemas and the malformed-marker error;
 ``door_contract`` holds the parkable-door jq mixin and the pure parsers that turn its
 cancel/resume jq results into ``visit`` arguments; ``visit`` holds the ``Visit`` Protocol
 every door drives a parkable run through, the ``VisitOutcome``/``ParkedEntry`` value types, and the
-``RunAnswer`` a run door hands its caller.
+``RunAnswer`` a run door hands its caller; ``reply_text`` holds the one participant-facing reply
+type (``ReplyText``) and its validator, shared by a terminal failure's ``reply`` and a route's
+``error_reply_text``.
 """
 
 from __future__ import annotations
@@ -140,6 +142,12 @@ from tai42_contract.interactions.park_markers import (
     SUSPENDED_INTERACTION_MARKER_SCHEMA,
     MalformedParkMarkerError,
 )
+from tai42_contract.interactions.reply_text import (
+    NON_BLANK_PATTERN,
+    REPLY_TEXT_MAX_CHARS,
+    ReplyText,
+    validate_reply_text,
+)
 from tai42_contract.interactions.visit import (
     ParkableRunFailedError,
     ParkedEntry,
@@ -173,11 +181,13 @@ __all__ = [
     "MEDIA_ROUTE_PREFIX",
     "MEDIA_TOTAL_URI_CHARS",
     "MEDIA_URL_MAX_CHARS",
+    "NON_BLANK_PATTERN",
     "PARK_COMPLETION_FAILED",
     "PARK_COMPLETION_REPARKED",
     "PARK_COMPLETION_SUCCEEDED",
     "PARK_COMPLETION_WITHDRAWN",
     "REJECTION_NOTICE_MAX_CHARS",
+    "REPLY_TEXT_MAX_CHARS",
     "RESUME_BUFFERED_MARKER_KEY",
     "RESUME_BUFFERED_MARKER_SCHEMA",
     "SHAPE_KEYWORDS",
@@ -240,6 +250,7 @@ __all__ = [
     "ParkedEntryGoneError",
     "ParkedStatus",
     "QuestionFormat",
+    "ReplyText",
     "ResumeBuffered",
     "ResumeItem",
     "RunAnswer",
@@ -283,4 +294,5 @@ __all__ = [
     "set_park_completion",
     "set_resume_continuation_tool",
     "validate_action_url",
+    "validate_reply_text",
 ]

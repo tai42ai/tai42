@@ -135,6 +135,8 @@
   "tests/bridge/test_retention.py::test_checkpoint_sweep_runs_and_reports_provider": 9.01752108708024,
   "tests/bridge/test_state_turn.py::test_multichannel_target_turn_keys_state_on_person": 3.262099288403988,
   "tests/bridge/test_state_turn.py::test_web_participant_turn_keys_state_on_thread_and_ledgers_the_conversation_door": 9.182021245360374,
+  "tests/bridge/test_target_failure_reply.py::test_a_live_tool_turn_failing_with_a_reply_shows_the_visitor_the_reply": 8.0,
+  "tests/bridge/test_target_failure_reply.py::test_a_resumed_tool_turn_failing_with_a_reply_shows_the_visitor_the_reply": 3.0,
   "tests/bridge/test_thread_busy_lease.py::test_a_contended_thread_lease_refuses_a_bounded_sync_door_then_releases": 18.662996295839548,
   "tests/bridge/test_thread_delete.py::test_deleting_a_thread_forgets_its_memory_and_its_transcript": 11.042662348598242,
   "tests/bridge/test_thread_filters.py::test_thread_filters_narrow_the_listing_and_the_search": 11.114005770534277,

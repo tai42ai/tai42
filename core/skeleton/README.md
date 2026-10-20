@@ -268,11 +268,12 @@ string — here the raw code — so the route replies with just the code. The to
 mints for the conversation named by `(channel, our_identity)`, whose resolved
 target must itself have `multichannel` on.
 
-`reply_expr` maps a SUCCESSFUL result: a result whose own `status` names a
-non-success terminal (`aborted`, `stopped`, `error`) fails the turn regardless of
-the mapping — its result is partial by construction, so the participant gets the route's
-error reply and the status rides the record's `error` detail. A status naming a
-PAUSED run (`suspended`, `interrupt`) is neither mapped nor failed: the turn ends
+`reply_expr` maps a RETURNED result, whatever keys it carries. A target that fails
+RAISES `RunTerminalFailed(outcome)`: the turn fails regardless of the mapping, the
+participant reads the target's own reply when the failure carries one
+(`RunTerminalFailed(outcome, reply="...")`), else the route's `error_reply_text`, else
+the built-in line, and the opaque outcome rides the record's `error` detail. A run that
+PARKS (returns a `SuspendedInteraction`) is neither mapped nor failed: the turn ends
 silently and the reply delivers out of band when the run resumes past the pause.
 
 ## Development

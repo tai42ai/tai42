@@ -72,14 +72,15 @@ def to_contract_outcome(value: Any, *, raise_failed: bool = False) -> Any:
     and :func:`~tai42_agents._internal.park.chain.deliver_chained_park`) apply this to what
     :func:`agent_resume` returns. A :class:`RunFailed` — this run's own failed terminal, a replayed
     failed record, or a failure that came UP a cross-driver chain fire — RAISES
-    :class:`RunTerminalFailed` carrying its outcome WHOLE when ``raise_failed`` is set (the
-    PLATFORM-continuation face, so the platform's delivery ladder delivers FAILED); a CHAIN-fire face
+    :class:`RunTerminalFailed` carrying its outcome WHOLE and its participant-facing ``reply`` when
+    ``raise_failed`` is set (the PLATFORM-continuation face, so the platform's delivery ladder
+    delivers FAILED with that reply); a CHAIN-fire face
     leaves it unset so the failure RETURNS by type into the firing run's drive. Every other value (a
     plain terminal, a :class:`SuspendedInteraction`, a :class:`ResumeBuffered`, ``None`` for a
     benign detached landing) is returned as is. No value is ever read by a status word inside it.
     """
     if isinstance(value, RunFailed) and raise_failed:
-        raise RunTerminalFailed(value.outcome)
+        raise RunTerminalFailed(value.outcome, reply=value.reply)
     return value
 
 
@@ -217,7 +218,7 @@ async def _drive_superstep(entry: Mapping[str, Any], thread_id: str, superstep_i
                 raise resumed.cancelled
             outcome = await epilogue
             if terminal_routing is None:
-                raise RunTerminalFailed(resumed.failed.outcome)
+                raise RunTerminalFailed(resumed.failed.outcome, reply=resumed.failed.reply)
             return outcome
 
         # A kill can reclaim a lease that lapsed during the drive (a heartbeat that
@@ -294,7 +295,7 @@ async def _run_resumed(
     except TurnSupersededError as exc:
         return _ResumedRun(failed=_aborted_outcome(type(exc).__name__), aborted=True)
     except RunTerminalFailed as exc:
-        return _ResumedRun(failed=RunFailed(outcome=exc.outcome))
+        return _ResumedRun(failed=RunFailed(outcome=exc.outcome, reply=exc.reply))
     except Exception as exc:
         logger.error(
             "resumed agent run of thread %r super-step %r raised; ending it FAILED",

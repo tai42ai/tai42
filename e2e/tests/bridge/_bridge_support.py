@@ -28,6 +28,7 @@ from tai42_e2e.manifests import BRIDGE_TWILIO_FROM
 from tai42_e2e.provider_stub import SignedInbound
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+from tai42_e2e.webchat import WebChatClient
 
 TWILIO_INBOUND_PATH = "/api/channels/twilio/inbound"
 TWILIO_STATUS_PATH = "/api/channels/twilio/status"
@@ -775,3 +776,55 @@ async def mint_execution_key(bridge: BridgeHarness, uniq: Callable[[str], str], 
     user_id = uniq("execkey")
     await bridge.mint_key(user_id=user_id, scopes=scopes)
     return user_id
+
+
+def outbound_message(text: str) -> Callable[[str, dict], bool]:
+    """Predicate for an outbound chat message carrying ``text`` arriving on a web visitor's stream."""
+    return lambda event, data: event == "chat.message" and data["direction"] == "out" and text in data["text"]
+
+
+async def open_tool_target_web_visitor(
+    bridge: BridgeHarness, uniq: Callable[[str], str], tag: str
+) -> tuple[WebChatClient, str]:
+    """Create a ``target_kind=tool`` web route onto ``e2e_tool_target_park`` (message → ``marker``
+    kwarg; resumed outcome → ``.result.answer`` reply) and open its chat page as a first-time
+    visitor, returning the door client bound to the session the page minted and the route name."""
+    identity = uniq(f"{tag}-site").replace("_", "-")
+    route_name = uniq(f"{tag}-route").replace("_", "-")
+    execution_key = uniq(f"{tag}-exec")
+    await bridge.mint_key(user_id=execution_key, scopes=["e2e-all"])
+    await bridge.create_tool_channel_route(
+        route_name=route_name,
+        tool="e2e_tool_target_park",
+        execution_key=execution_key,
+        channel="web",
+        our_identity=identity,
+        start_expr="{marker: .message}",
+        reply_expr=".result.answer",
+    )
+    base_url = bridge.stack.origin(bridge.stack.port_b)
+    web, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
+    assert page.status_code == 200, page.text
+    return web, route_name
+
+
+async def park_tool_target_message(bridge: BridgeHarness, web: WebChatClient, marker: str) -> str:
+    """Send ``marker`` into the visitor's conversation, assert the tool turn PARKED SILENTLY (the
+    park barrier lands and the transcript holds only the inbound message, no reply), and return
+    the parked ``interaction_id``."""
+    sent = await web.send(marker)
+    assert sent.status_code == 200, sent.text
+
+    # The park barrier: the tool ran to the async park and stashed its interaction id under the
+    # marker. For a silent turn (no outbound send, no readable channel id) this side effect is
+    # the completion barrier the turn otherwise lacks.
+    parked = await wait_probe_record(bridge, f"tool_target_park:{marker}", deadline=20.0)
+    assert len(parked) == 1, f"expected exactly one park record, got {parked!r}"
+    interaction_id = parked[0]["interaction_id"]
+
+    # Silent: the parked turn posted nothing back — the transcript holds only the inbound message.
+    replayed = await web.frames()
+    exchange = [(data["direction"], data["text"]) for event, data in replayed if event == "chat.message"]
+    assert [direction for direction, _text in exchange] == ["in"], f"a parked turn must post no reply, saw {exchange!r}"
+    assert marker in exchange[0][1]
+    return interaction_id

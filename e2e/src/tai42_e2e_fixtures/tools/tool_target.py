@@ -35,6 +35,12 @@ _TOOL_TARGET_PARK_EXPIRY_SECONDS = 3600.0
 # waiting on the expiry reaper.
 _TOOL_TARGET_ABORT_ANSWER = "__abort__"
 
+# A sentinel answer the resume continuation reads as a NON-SUCCESS terminal that carries its own
+# participant-facing reply: it RAISES the typed run failure with ``reply`` set to
+# ``_TOOL_TARGET_ABORT_REPLY``, so the ladder delivers that text instead of the route's fixed line.
+_TOOL_TARGET_ABORT_REPLY_ANSWER = "__abort_reply__"
+_TOOL_TARGET_ABORT_REPLY = "That request could not be completed. Please start again."
+
 
 @tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def e2e_tool_target_park(
@@ -116,7 +122,10 @@ async def e2e_tool_target_deliver(interaction_id: str, answer: object) -> dict:
       which is always a success, so the ladder delivers it ``succeeded`` mapped through ``reply_expr``;
     * the generic expiry marker OR the abort sentinel is a NON-SUCCESS terminal — the continuation
       RAISES the typed run failure — so the ladder delivers ``failed`` and the route's uniform
-      client-safe notice is sent (never a mapped reply, never silence).
+      client-safe notice is sent (never a mapped reply, never silence);
+    * the abort-with-reply sentinel is a NON-SUCCESS terminal whose typed run failure carries a
+      participant-facing ``reply``, so the ladder delivers ``failed`` and that reply is sent in
+      place of the route's notice.
 
     RPUSHes ``{status, pid}`` onto ``e2e:rec:tool_target_deliver:{interaction_id}`` so a spec reads
     that the resume fired and through which terminal; the platform keys delivery on the run's
@@ -133,7 +142,7 @@ async def e2e_tool_target_deliver(interaction_id: str, answer: object) -> dict:
     from tai42_kit.clients import client_ctx
     from tai42_kit.clients.impl.redis import RedisClient
 
-    non_success = answer in (EXPIRY_ANSWER, _TOOL_TARGET_ABORT_ANSWER)
+    non_success = answer in (EXPIRY_ANSWER, _TOOL_TARGET_ABORT_ANSWER, _TOOL_TARGET_ABORT_REPLY_ANSWER)
     status = PARK_COMPLETION_FAILED if non_success else PARK_COMPLETION_SUCCEEDED
     record = json.dumps({"status": status, "pid": os.getpid()})
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
@@ -142,8 +151,10 @@ async def e2e_tool_target_deliver(interaction_id: str, answer: object) -> dict:
     if non_success:
         # A FAILED terminal is signalled by RAISING the typed run failure — a return is always a
         # success. The delivery ladder catches it, fires ``deliver_tool_completion`` with the FAILED
-        # status, and the route (carrying no error mapping) delivers its uniform client-safe notice.
-        raise RunTerminalFailed({"reason": "aborted"})
+        # status, and the route (carrying no error mapping) delivers its uniform client-safe notice,
+        # or the failure's own reply when it carries one.
+        reply = _TOOL_TARGET_ABORT_REPLY if answer == _TOOL_TARGET_ABORT_REPLY_ANSWER else None
+        raise RunTerminalFailed({"reason": "aborted"}, reply=reply)
     # A clean success: no failure status, shaped so the route's ``reply_expr`` (``.result.answer``)
     # maps it.
     return {"result": {"answer": answer}}

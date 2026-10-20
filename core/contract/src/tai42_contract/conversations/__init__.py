@@ -50,7 +50,6 @@ from tai42_contract.conversations.routes import (
     CHANNEL_NAME_PATTERN,
     CONVERSATION_MODES,
     HTTPS_CALLBACK_PATTERN,
-    NON_BLANK_PATTERN,
     ROUTE_NAME_RE,
     ApiConversationRoute,
     ApiConversationRouteCreate,
@@ -89,6 +88,7 @@ from tai42_contract.entry_params import (
     ENTRY_PARAMS_MAX_TOTAL_BYTES,
     validate_entry_params,
 )
+from tai42_contract.interactions.reply_text import NON_BLANK_PATTERN
 
 __all__ = [
     "CHANNEL_NAME_PATTERN",

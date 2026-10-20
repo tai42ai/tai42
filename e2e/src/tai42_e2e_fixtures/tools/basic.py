@@ -328,6 +328,18 @@ async def e2e_failed_terminal(reason: str) -> str:
 
 
 @tai42_app.tools.tool(tags={"e2e"})
+async def e2e_failed_terminal_reply(reason: str, reply: str) -> str:
+    """Reach a FAILED terminal at start carrying a participant-facing reply.
+
+    Raises the contract's typed run failure with the internal ``{"reason": reason}`` outcome and
+    ``reply`` as the text a conversation door shows the participant in place of its fixed line.
+    """
+    from tai42_contract.interactions import RunTerminalFailed
+
+    raise RunTerminalFailed({"reason": reason}, reply=reply)
+
+
+@tai42_app.tools.tool(tags={"e2e"})
 def e2e_external_link(callback_url: str) -> str:
     """Build and return an external action URL embedding ``callback_url`` — the
     subject the ``ask_external`` extension wraps. The extension supplies

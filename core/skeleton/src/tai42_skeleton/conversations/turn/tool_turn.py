@@ -36,13 +36,13 @@ from tai42_skeleton.conversations.turn.outcome import (
     _ResolvedOutcome,
     _SilentOutcome,
     _SupersededOutcome,
+    _terminal_failure,
     _text_part,
     _tool_error,
     _ToolOutcome,
 )
 from tai42_skeleton.conversations.turn.overlap import is_message_turn
 from tai42_skeleton.conversations.turn.tool_result import _result_shape
-from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
 from tai42_skeleton.interactions.visit import list_parked, visit
 from tai42_skeleton.operations.errors import PermissionDeniedError
 
@@ -358,12 +358,13 @@ async def _run_tool_turn(
     except RunTerminalFailed as exc:
         # The run reached a failed terminal: the failure is RAISED (never a returned status-keyed
         # value), carrying the driver's outcome as an OPAQUE payload. Record the payload WHOLE as
-        # the turn's failure detail — no key is read out of it — and deliver the route's generic
-        # client-safe error reply. Caught BEFORE the generic arm so the payload is preserved as the
-        # detail rather than collapsed to ``str(exc)``.
-        detail = failed_outcome_detail(exc.outcome)
-        logger.exception("conversations: tool turn for route %r failed: %s", route.route_name, detail)
-        return _tool_error(detail, route)
+        # the turn's failure detail — no key is read out of it — and deliver the target's reply when
+        # the failure carries one, else the route's generic client-safe error reply. Caught BEFORE
+        # the generic arm so the payload is preserved as the detail rather than collapsed to
+        # ``str(exc)``.
+        failed = _terminal_failure(exc, route)
+        logger.exception("conversations: tool turn for route %r failed: %s", route.route_name, failed.error)
+        return failed
     except PermissionDeniedError as exc:
         return _tool_error(f"turn denied: {exc}", route)
     except Exception as exc:

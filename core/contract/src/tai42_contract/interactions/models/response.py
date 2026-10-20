@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from tai42_contract.entry_params import validate_entry_params
 from tai42_contract.interactions.models.request import InteractionRequest
+from tai42_contract.interactions.reply_text import ReplyText
 
 
 class InteractionResponse(BaseModel):
@@ -128,8 +129,14 @@ class RunFailed(BaseModel):
     TYPE, never by a status word inside the outcome: the outcome stays the failing driver's own
     JSON mapping, carried whole. A continuation face raises
     :class:`~tai42_contract.interactions.RunTerminalFailed` with it, so the platform delivers FAILED.
+
+    ``reply`` is the optional participant-facing text a conversation door shows in place of its
+    fixed failure line, under the same rules as :class:`~tai42_contract.interactions.RunTerminalFailed`'s
+    ``reply``: the platform never inspects or changes it, and the target that sets it owns that it
+    is safe for the participant. ``None`` means no reply.
     """
 
     model_config = ConfigDict(frozen=True)
 
     outcome: dict[str, Any]
+    reply: ReplyText | None = None

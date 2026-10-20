@@ -104,6 +104,14 @@ def test_conversion_a_run_failed_raises_on_the_platform_face_and_returns_on_the_
     assert raised.value.outcome == {"status": "error", "error": "down"}
 
 
+@pytest.mark.parametrize("reply", ["Sorry, that option is no longer available.", None])
+def test_conversion_keeps_the_failed_terminals_reply(reply: str | None) -> None:
+    failed = RunFailed(outcome={"status": "error"}, reply=reply)
+    with pytest.raises(RunTerminalFailed) as raised:
+        to_contract_outcome(failed, raise_failed=True)
+    assert raised.value.reply == reply
+
+
 def test_conversion_never_reads_a_status_word_of_a_plain_value() -> None:
     # Another driver's plain answer is returned whole, whatever words it carries.
     for value in ({"status": "error"}, {"status": "aborted"}, {"status": "buffered", "remaining_ids": ["x"]}):

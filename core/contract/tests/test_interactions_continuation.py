@@ -79,10 +79,17 @@ def test_completion_carries_the_opaque_context_and_the_thread():
     assert address.context == {"route_name": "chat", "message_id": "m-1"}
 
 
-@pytest.mark.parametrize("key", ["thread_id", "result", "completion_id", "status"])
+@pytest.mark.parametrize("key", ["thread_id", "result", "completion_id", "status", "reply"])
 def test_completion_context_may_not_carry_a_fire_payload_key(key: str):
     with pytest.raises(ValidationError, match=f"fire payload's own key\\(s\\) \\['{key}'\\]"):
         set_park_completion("deliver_tool_completion", {key: "x"})
+
+
+def test_a_delivery_address_may_not_carry_the_reply_key():
+    # ``reply`` is the fire's own key on a failed fire that carries a target reply; a bound
+    # context carrying it would pass itself off as the target's participant-facing text.
+    with pytest.raises(ValidationError, match="fire payload's own key\\(s\\) \\['reply'\\]"):
+        DeliveryAddress(tool="deliver_tool_completion", context={"reply": "x"}, thread_id="thread-1")
 
 
 def test_a_delivery_address_round_trips_its_json():

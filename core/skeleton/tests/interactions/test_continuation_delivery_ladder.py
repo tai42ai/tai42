@@ -29,6 +29,7 @@ from tai42_contract.interactions import (
     ParkDeliveryUnauthorizedError,
     ParkResumeUnauthorizedError,
     ResumeBuffered,
+    RunFailed,
     RunTerminalFailed,
     SuspendedInteraction,
 )
@@ -223,6 +224,90 @@ async def test_run_terminal_failed_delivers_failed_and_clears_due(wired, monkeyp
     assert fire["arguments"]["status"] == PARK_COMPLETION_FAILED
     assert fire["arguments"]["result"] == {"aborted": True}
     assert not await _due_present(wired, "iid-1")
+
+
+async def test_a_receiver_less_failure_carrying_a_reply_fires_it_beside_the_result(wired, monkeypatch):
+    # The target's participant-facing reply rides the failed fire as its own ``reply`` key; the
+    # opaque outcome stays the ``result``.
+    def _raise(_a):
+        raise RunTerminalFailed({"aborted": True}, reply="Sorry, that option is no longer available.")
+
+    tools = _wire_tools(monkeypatch, {"resume_tool": _raise, "deliver_tool": lambda a: None})
+    await _seed_due(wired, "iid-1")
+    await _drive(
+        wired,
+        tool="resume_tool",
+        delivery=DeliveryAddress(tool="deliver_tool", context={"route_name": "line"}, thread_id="t1"),
+        run_delivery_id="rd-1",
+    )
+    fire = next(c for c in tools.calls if c["key"] == "deliver_tool")
+    assert fire["arguments"] == {
+        "route_name": "line",
+        "thread_id": "t1",
+        "result": {"aborted": True},
+        "completion_id": _cid("rd-1"),
+        "status": PARK_COMPLETION_FAILED,
+        "reply": "Sorry, that option is no longer available.",
+    }
+    assert not await _due_present(wired, "iid-1")
+
+
+async def test_a_receiver_less_failure_without_a_reply_fires_no_reply_key(wired, monkeypatch):
+    def _raise(_a):
+        raise RunTerminalFailed({"aborted": True})
+
+    tools = _wire_tools(monkeypatch, {"resume_tool": _raise, "deliver_tool": lambda a: None})
+    await _drive(
+        wired,
+        tool="resume_tool",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-1",
+    )
+    fire = next(c for c in tools.calls if c["key"] == "deliver_tool")
+    assert fire["arguments"] == {
+        "thread_id": "t1",
+        "result": {"aborted": True},
+        "completion_id": _cid("rd-1"),
+        "status": PARK_COMPLETION_FAILED,
+    }
+
+
+async def test_a_returned_run_failed_carrying_a_reply_fires_it_beside_the_result(wired, monkeypatch):
+    tools = _wire_tools(
+        monkeypatch,
+        {
+            "resume_tool": lambda _a: RunFailed(
+                outcome={"error": "x"}, reply="Sorry, that option is no longer available."
+            ),
+            "deliver_tool": lambda a: None,
+        },
+    )
+    await _drive(
+        wired,
+        tool="resume_tool",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-1",
+    )
+    fire = next(c for c in tools.calls if c["key"] == "deliver_tool")
+    assert fire["arguments"]["status"] == PARK_COMPLETION_FAILED
+    assert fire["arguments"]["result"] == {"error": "x"}
+    assert fire["arguments"]["reply"] == "Sorry, that option is no longer available."
+
+
+async def test_a_reply_on_a_non_failed_terminal_is_a_loud_platform_bug(wired, monkeypatch):
+    tools = _wire_tools(monkeypatch, {"deliver_tool": lambda a: None})
+    with pytest.raises(ValueError, match="only a failed terminal carries a reply"):
+        await continuation_module._deliver_terminal(
+            wired.store,
+            interaction_id="iid-1",
+            outcome={"value": 1},
+            status=PARK_COMPLETION_SUCCEEDED,
+            reply="Sorry.",
+            delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+            run_delivery_id="rd-1",
+            candidates=None,
+        )
+    assert not any(c["key"] == "deliver_tool" for c in tools.calls)
 
 
 async def test_plain_raise_keeps_the_due_record_and_fires_nothing(wired, monkeypatch):
@@ -467,10 +552,11 @@ async def test_inline_receiver_gets_the_outcome_and_nothing_is_fired(wired, monk
 
 async def test_inline_receiver_propagates_a_run_terminal_failed(wired, monkeypatch):
     def _raise(_a):
-        raise RunTerminalFailed({"aborted": True})
+        raise RunTerminalFailed({"aborted": True}, reply="Sorry, that option is no longer available.")
 
     tools = _wire_tools(monkeypatch, {"resume_tool": _raise, "deliver_tool": lambda a: None})
-    with pytest.raises(RunTerminalFailed):
+    # The live receiver gets the SAME failure, its participant-facing reply intact.
+    with pytest.raises(RunTerminalFailed) as raised:
         await _drive(
             wired,
             tool="resume_tool",
@@ -478,6 +564,8 @@ async def test_inline_receiver_propagates_a_run_terminal_failed(wired, monkeypat
             run_delivery_id="rd-1",
             receives_outcome=True,
         )
+    assert raised.value.outcome == {"aborted": True}
+    assert raised.value.reply == "Sorry, that option is no longer available."
     assert not any(c["key"] == "deliver_tool" for c in tools.calls)
 
 

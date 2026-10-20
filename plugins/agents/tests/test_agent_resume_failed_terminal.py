@@ -225,6 +225,28 @@ def test_a_run_terminal_failed_inside_the_resumed_run_carries_its_outcome(
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("reply", ["Sorry, that option is no longer available.", None])
+def test_a_run_terminal_failed_inside_the_resumed_run_keeps_its_reply(
+    park_redis: Any, agent: _ResumableAgent, reply: str | None
+) -> None:
+    async def go() -> None:
+        step = await _park(["i1"], chained=False)
+        agent.body = _raising(RunTerminalFailed({"k": "v"}, reply=reply))
+
+        with pytest.raises(RunTerminalFailed) as raised:
+            await agent_resume("i1", "x")
+
+        assert raised.value.outcome == {"k": "v"}
+        assert raised.value.reply == reply
+        assert await _record(step) == ResolutionRecord("terminal", RunFailed(outcome={"k": "v"}, reply=reply))
+        # A lapped redelivery replays the stored failure, reply included, on the platform face.
+        with pytest.raises(RunTerminalFailed) as replayed:
+            await agent_resume_tool("i1", "late")
+        assert replayed.value.reply == reply
+
+    asyncio.run(go())
+
+
 # ---- the supersede / cancel arm ---------------------------------------------------------------
 
 

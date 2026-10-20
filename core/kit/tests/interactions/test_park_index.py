@@ -554,6 +554,14 @@ def test_the_codec_round_trips_every_tag(value: Any) -> None:
     assert type(decoded) is type(value)
 
 
+def test_the_codec_keeps_a_failed_terminals_reply() -> None:
+    failed = RunFailed(outcome={"status": "error"}, reply="Sorry, that option is no longer available.")
+    decoded = decode_value(json.loads(json.dumps(encode_value(failed))))
+    assert isinstance(decoded, RunFailed)
+    assert decoded == failed
+    assert decoded.reply == "Sorry, that option is no longer available."
+
+
 def test_the_codec_refuses_a_foreign_model_an_unserializable_value_and_an_unknown_tag() -> None:
     with pytest.raises(ParkValueCodecError, match="_Foreign"):
         encode_value(_Foreign())

@@ -38,13 +38,13 @@ from tai42_skeleton.conversations.turn.outcome import (
     _ResolvedOutcome,
     _serialize_structured,
     _SilentOutcome,
+    _terminal_failure,
     _text_part,
     _tool_error,
     _ToolOutcome,
 )
 from tai42_skeleton.conversations.turn.tool_turn import _reply_parts, _tool_payload, _tool_reply
 from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
-from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
 from tai42_skeleton.interactions.visit import list_parked, visit
 from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.tools.turn_budget import drive_live_caller_astream
@@ -329,13 +329,14 @@ async def _run_agent_turn(
                 finally:
                     reset_park_completion(completion_token)
     except RunTerminalFailed as exc:
-        # A caller ask with no landing (the fail-fast above, or the seam inside the run) RAISES this
-        # typed run failure — never a tool-level error the model could route around. Surface it
-        # through the door's failure path: record the opaque payload WHOLE and deliver the route's
-        # generic client-safe error. Caught BEFORE the generic arm so the payload is preserved.
-        detail = failed_outcome_detail(exc.outcome)
-        logger.exception("conversations: agent turn for route %r failed: %s", route.route_name, detail)
-        return _tool_error(detail, route)
+        # A run's failed terminal RAISES this typed run failure — the agent's own, or a caller ask
+        # with no landing (the fail-fast above, or the seam inside the run), never a tool-level error
+        # the model could route around. Surface it through the door's failure path: record the
+        # opaque payload WHOLE and deliver the target's reply when the failure carries one, else the
+        # route's generic client-safe error. Caught BEFORE the generic arm so the payload is preserved.
+        failed = _terminal_failure(exc, route)
+        logger.exception("conversations: agent turn for route %r failed: %s", route.route_name, failed.error)
+        return failed
     except PermissionDeniedError as exc:
         return _tool_error(f"turn denied: {exc}", route)
     except Exception as exc:

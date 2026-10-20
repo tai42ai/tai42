@@ -14,11 +14,12 @@ from collections.abc import Iterator
 
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 
+from tai42_contract.interactions.reply_text import REPLY_TEXT_MAX_CHARS
+
 #: Cap on a caller-set refusal sentence (``answer.rejected`` / ``answer.rejected_final``) — the
-#: participant-facing text drawn when an answer is refused. A single participant-facing message,
-#: so a small bound; channels impose their own tighter message caps. Matches the conversation
-#: route's ``error_reply_text`` bound.
-REJECTION_NOTICE_MAX_CHARS = 2000
+#: participant-facing text drawn when an answer is refused. The shared participant-facing reply
+#: bound, :data:`~tai42_contract.interactions.reply_text.REPLY_TEXT_MAX_CHARS`.
+REJECTION_NOTICE_MAX_CHARS = REPLY_TEXT_MAX_CHARS
 
 
 def _member_non_blank(value: str | None, info: ValidationInfo, prefix: str) -> str | None:

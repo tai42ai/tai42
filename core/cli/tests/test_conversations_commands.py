@@ -511,6 +511,20 @@ def test_conversations_create_help_lists_the_overlap_options(monkeypatch: pytest
     assert "--overlap-settle-seconds" in text
 
 
+def test_conversations_create_help_says_the_error_reply_yields_to_the_targets_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - --help exits before any call
+        raise AssertionError("--help must not reach the server")
+
+    result = run_cli(monkeypatch, handler, ["conversations", "create", "--help"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "Participant-facing reply sent when a turn on this route fails and the target supplied no reply of its "
+        "own; unset uses the built-in default."
+    ) in visible(result.output)
+
+
 def test_conversations_list_renders_the_overlap_column(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/conversations"

@@ -11,7 +11,12 @@ import logging
 from typing import Any, Literal
 
 from tai42_contract.conversations import AnswerPart, ConversationRoute
-from tai42_contract.interactions import PARK_COMPLETION_FAILED, PARK_COMPLETION_SUCCEEDED, PARK_COMPLETION_WITHDRAWN
+from tai42_contract.interactions import (
+    PARK_COMPLETION_FAILED,
+    PARK_COMPLETION_SUCCEEDED,
+    PARK_COMPLETION_WITHDRAWN,
+    validate_reply_text,
+)
 
 from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.delivery import spawn_delivery
@@ -20,7 +25,12 @@ from tai42_skeleton.conversations.person_thread import newest_person_thread_reco
 from tai42_skeleton.conversations.thread_ids import BRIDGE_THREAD_PREFIX, PersonThreadId, ThreadIdError, parse_thread_id
 from tai42_skeleton.conversations.turn.context import _turn_block
 from tai42_skeleton.conversations.turn.errors import CompletionDeliveryError
-from tai42_skeleton.conversations.turn.outcome import _error_answer_text, _serialize_structured, _text_part
+from tai42_skeleton.conversations.turn.outcome import (
+    _error_answer_text,
+    _failure_answer_text,
+    _serialize_structured,
+    _text_part,
+)
 from tai42_skeleton.conversations.turn.record import _answer_fields, _new_record
 from tai42_skeleton.conversations.turn.tool_turn import _reply_parts, _tool_reply
 from tai42_skeleton.interactions.authorization import assert_delivery_authorized
@@ -31,8 +41,8 @@ logger = logging.getLogger("tai42_skeleton.conversations.turn")
 # (``set_park_completion``) around an agent turn, carrying this turn's thread on the delivery
 # address, so an async ``ask`` may park with a path back to this thread; the platform fires it
 # with the generic contract payload (the address's context merged with ``{thread_id, result,
-# completion_id, status}``) and it mints the answered record + spawns delivery. Must equal the
-# registered tool name.
+# completion_id, status}``, plus ``reply`` on a failed fire whose failure carries one) and it
+# mints the answered record + spawns delivery. Must equal the registered tool name.
 COMPLETION_TOOL_NAME = "conversation_deliver"
 
 # The registered name of the hidden GENERIC tool-route completion-delivery tool. The
@@ -119,20 +129,33 @@ def _terminal_kind(status: str | None) -> _TerminalKind:
     return "failed"
 
 
-def _admitted_terminal(function_name: str, completion_id: str | None, status: str | None) -> tuple[str, _TerminalKind]:
-    """Admit a completion fire: the delivery-fire authorization, then the idempotency key; return both and the kind.
+def _admitted_terminal(
+    function_name: str, completion_id: str | None, status: str | None, reply: object
+) -> tuple[str, _TerminalKind]:
+    """Admit a completion fire (delivery-fire authorization, idempotency key, reply); return the id and kind.
 
     Only the platform's own delivery-ladder fire may pass: a call named at the run-tool door or the
-    MCP edge — or one with no completion id — is refused before any record read or mint.
+    MCP edge — or one with no completion id — is refused before any record read or mint. A
+    ``reply`` read off the wire is validated (:func:`validate_reply_text`, a loud
+    :class:`pydantic.ValidationError` on a bad value) and is admitted only on an explicit
+    :data:`PARK_COMPLETION_FAILED` fire — the platform puts it on no other — so a reply on any other
+    status raises.
     """
     assert_delivery_authorized(completion_id)
     if not completion_id:
         raise ValueError(f"{function_name} requires a completion_id — it is the exactly-once delivery key")
+    if reply is not None:
+        validate_reply_text(reply)
+        if status != PARK_COMPLETION_FAILED:
+            raise ValueError(
+                f"{function_name}: only a failed terminal carries a reply; completion {completion_id!r} "
+                f"has status {status!r}"
+            )
     return completion_id, _terminal_kind(status)
 
 
 def _announce_non_success(tool_name: str, completion_id: str, status: str | None) -> None:
-    """Warn that a ``"failed"``-kind fire delivers the client-safe notice, naming which shape arrived.
+    """Warn that a ``"failed"``-kind fire delivers the failure reply, naming which shape arrived.
 
     The unstamped and the unrecognized shapes are a version skew between the resumer and this
     delivery tool, and the skew is otherwise INVISIBLE: the fire still returns a delivered record,
@@ -151,7 +174,7 @@ def _announce_non_success(tool_name: str, completion_id: str, status: str | None
     else:
         reason = f"it carried the unrecognized status {status!r} (not in the contract vocabulary)"
     logger.warning(
-        "conversations: %s (%s) delivers the client-safe notice instead of the result because %s",
+        "conversations: %s (%s) delivers the failure reply instead of the result because %s",
         tool_name,
         completion_id,
         reason,
@@ -164,6 +187,7 @@ async def deliver_agent_completion(
     completion_id: str | None = None,
     status: str | None = None,
     message_id: str | None = None,
+    reply: str | None = None,
 ) -> dict[str, str | None]:
     """Deliver a resumed agent turn's FINAL answer back into its originating thread.
 
@@ -214,8 +238,13 @@ async def deliver_agent_completion(
 
     ``message_id`` is the originating turn's intake record id, carried on the completion binding so
     a ``reply_expr`` reply rebuilds ``$turn`` from that record (:func:`_rebuilt_turn`).
+
+    ``reply`` is the participant-facing text the run's failure carried, present only on a
+    :data:`PARK_COMPLETION_FAILED` fire: the non-success notice is that reply in place of the
+    route's fixed text (:func:`_failure_answer_text`). It is validated at entry, and a reply on any
+    other status raises, before any record read or mint (:func:`_admitted_terminal`).
     """
-    completion_id, kind = _admitted_terminal("deliver_agent_completion", completion_id, status)
+    completion_id, kind = _admitted_terminal("deliver_agent_completion", completion_id, status, reply)
     if kind == "withdrawn":
         # A deliberate takedown: nothing is said to the person, and nothing anchors a record.
         return {"message_id": None}
@@ -248,7 +277,7 @@ async def deliver_agent_completion(
             # turn does — over the run's result, with ``$turn`` rebuilt from the originating record.
             turn = await _rebuilt_turn(message_id, route)
             try:
-                reply = await _tool_reply(route, result, turn=turn, asks=[], parked=[])
+                mapped = await _tool_reply(route, result, turn=turn, asks=[], parked=[])
             except Exception as exc:
                 logger.exception(
                     "conversations: mapping a resumed agent result for route %r failed",
@@ -257,7 +286,7 @@ async def deliver_agent_completion(
                 )
                 answer = _error_answer_text(route)
             else:
-                parts = _reply_parts(reply)
+                parts = _reply_parts(mapped)
                 if parts is None:
                     # A designed silent outcome delivers nothing; it re-maps to the same null on a
                     # redelivery, so it anchors no record.
@@ -279,10 +308,10 @@ async def deliver_agent_completion(
             text = _serialize_structured(result)
             answer = text if text.strip() else _error_answer_text(route)
     else:
-        # A non-success terminal: deliver the uniform client-safe notice — never the raw terminal
-        # detail, never silence.
+        # A non-success terminal: deliver the target's reply when the failure carries one, else the
+        # uniform client-safe notice — never the raw terminal detail, never silence.
         _announce_non_success(COMPLETION_TOOL_NAME, completion_id, status)
-        answer = _error_answer_text(route)
+        answer = _failure_answer_text(route, reply)
     record = _new_record(
         route=route,
         message_id=completion_id,
@@ -309,6 +338,7 @@ async def deliver_tool_completion(
     status: str | None = PARK_COMPLETION_FAILED,
     route_name: str | None = None,
     message_id: str | None = None,
+    reply: str | None = None,
 ) -> dict[str, str | None]:
     """Deliver a resumed TOOL route's deferred outcome back into its originating thread.
 
@@ -372,8 +402,13 @@ async def deliver_tool_completion(
 
     ``message_id`` is the originating turn's intake record id, carried on the completion binding so a
     ``reply_expr`` rebuilds ``$turn`` from that record (:func:`_rebuilt_turn`).
+
+    ``reply`` is the participant-facing text the run's failure carried, present only on a
+    :data:`PARK_COMPLETION_FAILED` fire: the non-success notice is that reply in place of the
+    delivery route's fixed text (:func:`_failure_answer_text`). It is validated at entry, and a
+    reply on any other status raises, before any record read or mint (:func:`_admitted_terminal`).
     """
-    completion_id, kind = _admitted_terminal("deliver_tool_completion", completion_id, status)
+    completion_id, kind = _admitted_terminal("deliver_tool_completion", completion_id, status, reply)
     if kind == "withdrawn":
         # A deliberate takedown: nothing is said to the person, and nothing anchors a record.
         return {"message_id": None}
@@ -407,7 +442,7 @@ async def deliver_tool_completion(
         mapping_route = pinned
     if kind == "succeeded":
         try:
-            reply = await _tool_reply(
+            mapped = await _tool_reply(
                 mapping_route, result, turn=await _rebuilt_turn(message_id, mapping_route), asks=[], parked=[]
             )
         except Exception as exc:
@@ -424,17 +459,17 @@ async def deliver_tool_completion(
         else:
             # A resumed tool reply carries the same ordered-parts shape a live tool turn does
             # (null/blank → silent, a string → one message, an array → ordered messages).
-            parts = _reply_parts(reply)
+            parts = _reply_parts(mapped)
             if parts is None:
                 # A designed silent outcome delivers nothing; it re-maps to the same null on a
                 # redelivery, so it needs no idempotency record.
                 return {"message_id": None}
     else:
-        # A non-success terminal: the route carries no error mapping, so deliver the uniform
-        # client-safe notice (the delivery route's ``error_reply_text`` when set) — never the
-        # raw internal detail, never silence.
+        # A non-success terminal: the route carries no error mapping, so deliver the target's reply
+        # when the failure carries one, else the uniform client-safe notice (the delivery route's
+        # ``error_reply_text`` when set) — never the raw internal detail, never silence.
         _announce_non_success(DELIVER_TOOL_COMPLETION_NAME, completion_id, status)
-        parts = [_text_part(_error_answer_text(route))]
+        parts = [_text_part(_failure_answer_text(route, reply))]
     answer, answer_parts = _answer_fields(parts)
     record = _new_record(
         route=route,
