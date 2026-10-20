@@ -12,6 +12,7 @@ from pydantic import AfterValidator, ConfigDict, Field, RootModel, field_validat
 from tai42_contract.conversation_target import ConversationTargetKind
 from tai42_contract.conversations.overlap import OverlapPolicy
 from tai42_contract.interactions.door_contract import PARKED_VARIABLE_ANNOTATION, ParkableDoorMixin
+from tai42_contract.interactions.reply_text import NON_BLANK_PATTERN, ReplyText
 from tai42_contract.locale import normalize_optional_locale
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
 
@@ -59,9 +60,6 @@ HTTPS_CALLBACK_PATTERN: Final = r"^[hH][tT][tT][pP][sS]://[^/?#@]+(?:[/?#]|$)"
 #: A channel name: non-blank and ``:``-free. It prefixes the inbound-dedupe and outbound-index
 #: keys, so a ``:`` in it would shift the separator and let one channel read another's entry.
 CHANNEL_NAME_PATTERN: Final = r"^[^:]*[^:\s][^:]*$"
-
-#: A non-blank text: at least one non-whitespace character.
-NON_BLANK_PATTERN: Final = r"\S"
 
 
 def _require_https_url(value: str) -> str:
@@ -207,11 +205,12 @@ class _ConversationRouteFields(ParkableDoorMixin):
     # per-hour turn rate this route's per-address buckets run at, or ``None`` to run at the
     # global rate.
     turns_per_hour_override: int | None = Field(default=None, gt=0)
-    # The participant-facing reply sent when a conversational turn on this route fails; ``None`` uses
-    # the built-in English default. LITERAL text — no placeholders/templating. Non-blank when
-    # set: a whitespace-only reply would deliver an empty message where the default was
-    # intended. (2000 is a defensible bound for a single participant-facing reply.)
-    error_reply_text: Annotated[str, Field(min_length=1, max_length=2000, pattern=NON_BLANK_PATTERN)] | None = None
+    # The participant-facing reply sent when a conversational turn on this route fails and the
+    # target supplied no reply of its own; ``None`` uses the built-in English default. LITERAL
+    # text — no placeholders/templating. Non-blank when set: a whitespace-only reply would
+    # deliver an empty message where the default was intended. Bounded by the shared
+    # :data:`~tai42_contract.interactions.REPLY_TEXT_MAX_CHARS`.
+    error_reply_text: ReplyText | None = None
     # The operator-declared default locale for templated reply parts when the turn states none;
     # the last fallback under a per-turn or stored-contact locale, canonicalized through the one
     # locale seam (a malformed tag is rejected loudly, never guessed). ``None`` declares no

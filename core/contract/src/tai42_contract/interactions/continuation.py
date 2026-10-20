@@ -35,6 +35,7 @@ from typing import Any, Final, NamedTuple
 from pydantic import BaseModel, model_validator
 
 from tai42_contract.errors import ErrorKind
+from tai42_contract.interactions.reply_text import validate_reply_text
 
 __all__ = [
     "CHAINED_PARK_KEY_PREFIX",
@@ -62,8 +63,9 @@ __all__ = [
 ]
 
 # The keys the completion fire itself writes into its payload beside the bound context; a
-# context carrying one of them would be silently overwritten by the fire, so it is refused.
-_FIRE_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset({"thread_id", "result", "completion_id", "status"})
+# context carrying one of them would be silently overwritten by the fire (or, for ``reply``,
+# reach the address tool as if it were the target's participant-facing text), so it is refused.
+_FIRE_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset({"thread_id", "result", "completion_id", "status", "reply"})
 
 
 class DeliveryAddress(BaseModel, frozen=True, extra="forbid"):
@@ -189,12 +191,24 @@ class RunTerminalFailed(Exception):  # noqa: N818 (a control-flow signal, not an
     plain, JSON-serializable mapping, since a driver whose nested-dispatch seam serializes the
     failure (a checkpointed graph) carries ``outcome`` across that seam and re-raises this type with
     the payload intact.
+
+    ``reply`` is optional participant-facing text for a conversation door: the platform shows it
+    to the participant in place of its fixed failure line, and never inspects or changes it. It is
+    validated to the same bound as a route's ``error_reply_text`` (a non-blank string of at most
+    :data:`~tai42_contract.interactions.REPLY_TEXT_MAX_CHARS` characters), so an invalid value
+    raises :class:`pydantic.ValidationError` at the raise site. The target that sets it owns that
+    it is safe for the participant and carries no internal detail; ``None`` means no reply, and
+    the door keeps its fixed text. A seam that converts the SAME failure
+    (:class:`~tai42_contract.interactions.RunFailed` to this type and back, or a re-raise with the
+    payload intact) keeps the reply. A driver that reshapes a nested failure into a failure of its
+    own sets its own reply, or none: a nested failure's reply is never forwarded on its own.
     """
 
-    def __init__(self, outcome: Any) -> None:
-        """Carry the failed terminal ``outcome`` the ladder delivers with a FAILED status."""
+    def __init__(self, outcome: Any, *, reply: str | None = None) -> None:
+        """Carry the failed terminal ``outcome`` the ladder delivers FAILED, and its optional ``reply``."""
         super().__init__("run reached a terminal to deliver FAILED")
         self.outcome = outcome
+        self.reply = validate_reply_text(reply) if reply is not None else None
 
 
 class ParkResumeUnauthorizedError(Exception):
@@ -249,11 +263,16 @@ EXPIRY_ANSWER: Final[dict[str, bool]] = {"tai42:interaction_expired": True}
 # is the opaque bound context merged with the thread and the terminal outcome:
 #
 #     {**address.context, "thread_id": <str|None>, "result": <terminal outcome>,
-#      "completion_id": <str>, "status": <status>}
+#      "completion_id": <str>, "status": <status>[, "reply": <str>]}
 #
 # where ``address`` is the bound :class:`DeliveryAddress`, ``result`` is the run's terminal
 # outcome value, ``completion_id`` is the stable idempotency id of the resolved terminal, and
-# ``status`` is one of the three terminal constants below.
+# ``status`` is one of the three terminal constants below. ``reply`` is present ONLY on a
+# ``PARK_COMPLETION_FAILED`` fire whose failure carries a target reply
+# (:class:`RunTerminalFailed` / :class:`~tai42_contract.interactions.RunFailed` ``reply``) and
+# absent otherwise; an address tool bound for a door that shows participant-facing text accepts
+# an optional ``reply`` and shows it in place of its fixed failure line. Every fire key is
+# reserved: a bound context may not carry one (:class:`DeliveryAddress` refuses it).
 # ``PARK_COMPLETION_SUCCEEDED`` names a clean-success terminal whose ``result`` the delivery
 # tool maps back to the caller. ``PARK_COMPLETION_FAILED`` names ANY non-success terminal
 # (failed/stopped/aborted/errored/lapsed) the delivery tool surfaces as its uniform notice; a
@@ -372,6 +391,11 @@ def set_park_completion(
     ``tai42_app.interactions.assert_delivery_authorized(completion_id)`` on the payload's
     ``completion_id`` — so a caller naming it directly at the run-tool door or the MCP edge
     is refused (:class:`ParkDeliveryUnauthorizedError`) before it delivers anything.
+
+    The fire payload carries the fire's own keys beside ``context`` (``thread_id``, ``result``,
+    ``completion_id``, ``status`` and, on a failed fire whose failure carries one, ``reply``);
+    a ``context`` carrying any of them is refused. An address tool bound for a door that shows
+    participant-facing text accepts an optional ``reply``.
     """
     address = DeliveryAddress(tool=tool, context=dict(context) if context is not None else None, thread_id=thread_id)
     return _park_completion.set(address)

@@ -239,6 +239,7 @@ async def _deliver_terminal(
     delivery: _Delivery,
     run_delivery_id: str | None,
     candidates: SubjectCandidates | None,
+    reply: str | None = None,
 ) -> None:
     """Deliver a run's TERMINAL through the ladder — fire the address, else subject-track, else drop.
 
@@ -253,7 +254,17 @@ async def _deliver_terminal(
     stored ``run_delivery_id`` RAISES loudly — a park that stored none is a platform bug, never a
     per-interaction fallback id. A transient failure of the fire propagates, so the caller keeps the
     due record for the reaper.
+
+    ``reply`` is the participant-facing text a target's failure carries
+    (:class:`~tai42_contract.interactions.RunTerminalFailed` / :class:`RunFailed` ``reply``): the
+    address fire carries it as the payload's ``reply`` key on a ``failed`` terminal, and the key is
+    absent when there is none. Only a failed terminal carries a reply, so a reply on any other
+    status RAISES (a platform bug). The subject rung stores only the opaque ``outcome``.
     """
+    if reply is not None and status != PARK_COMPLETION_FAILED:
+        raise ValueError(
+            f"only a failed terminal carries a reply; interaction {interaction_id!r} has status {status!r}"
+        )
     if run_delivery_id is None:
         raise RuntimeError(
             f"interaction {interaction_id!r} reached delivery with no stored run_delivery_id "
@@ -268,6 +279,8 @@ async def _deliver_terminal(
             "completion_id": completion_id,
             "status": status,
         }
+        if reply is not None:
+            payload["reply"] = reply
         # Fire the door's address under the platform's delivery-fire context so the address tool
         # passes ``assert_delivery_authorized`` — the ONE place an address is fired.
         with delivery_fire(completion_id):
@@ -370,6 +383,7 @@ async def _deliver_receiverless_failure(
         delivery=delivery,
         run_delivery_id=run_delivery_id,
         candidates=candidates,
+        reply=failure.reply,
     )
     await _clear_due(store, interaction_id)
 
@@ -579,7 +593,7 @@ async def _deliver_run_outcome(
     """Deliver a run's outermost outcome to the run's address with no live receiver.
 
     A still-parked step (a re-park, a buffered step) delivers nothing; a :class:`RunFailed` delivers
-    FAILED with its outcome; any other value is a SUCCESS: the run's deferred door binding updates
+    FAILED with its outcome and its ``reply``; any other value is a SUCCESS: the run's deferred door binding updates
     apply over it, then SUCCEEDED is delivered.
     """
     if _is_nonterminal(result):
@@ -593,6 +607,7 @@ async def _deliver_run_outcome(
             delivery=delivery,
             run_delivery_id=run_delivery_id,
             candidates=candidates,
+            reply=result.reply,
         )
         return
     await _apply_deferred_binding(

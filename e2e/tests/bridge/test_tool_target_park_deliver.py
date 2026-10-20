@@ -30,65 +30,20 @@ from collections.abc import Callable
 
 import pytest
 
-from tai42_e2e.webchat import WebChatClient
-
-from ._bridge_support import ERROR_ANSWER_TEXT, BridgeHarness, wait_probe_record
+from ._bridge_support import (
+    ERROR_ANSWER_TEXT,
+    BridgeHarness,
+    open_tool_target_web_visitor,
+    outbound_message,
+    park_tool_target_message,
+    wait_probe_record,
+)
 
 # The sentinel answer the ``e2e_tool_target_deliver`` fixture reads as a NON-SUCCESS terminal (an
 # aborted/failed resume): it drives ``deliver_tool_completion`` with the ``failed`` status. Kept
 # in lockstep with the fixture's own constant — a drift shows up loudly here (the resume would map
 # it as a success reply, and the error-notice assertion below would fail).
 _ABORT_ANSWER = "__abort__"
-
-
-def _outbound(text: str) -> Callable[[str, dict], bool]:
-    """Predicate for the delivered reply arriving on the visitor's stream."""
-    return lambda event, data: event == "chat.message" and data["direction"] == "out" and text in data["text"]
-
-
-async def _open_tool_target_web_visitor(bridge: BridgeHarness, uniq: Callable[[str], str], tag: str) -> WebChatClient:
-    """Create a ``target_kind=tool`` web route onto ``e2e_tool_target_park`` (message → ``marker``
-    kwarg; resumed outcome → ``.result.answer`` reply) and open its chat page as a first-time
-    visitor, returning the door client bound to the session the page minted."""
-    identity = uniq(f"{tag}-site").replace("_", "-")
-    route_name = uniq(f"{tag}-route").replace("_", "-")
-    execution_key = uniq(f"{tag}-exec")
-    await bridge.mint_key(user_id=execution_key, scopes=["e2e-all"])
-    await bridge.create_tool_channel_route(
-        route_name=route_name,
-        tool="e2e_tool_target_park",
-        execution_key=execution_key,
-        channel="web",
-        our_identity=identity,
-        start_expr="{marker: .message}",
-        reply_expr=".result.answer",
-    )
-    base_url = bridge.stack.origin(bridge.stack.port_b)
-    web, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
-    assert page.status_code == 200, page.text
-    return web
-
-
-async def _park_a_message(bridge: BridgeHarness, web: WebChatClient, marker: str) -> str:
-    """Send ``marker`` into the visitor's conversation, assert the tool turn PARKED SILENTLY (the
-    park barrier lands and the transcript holds only the inbound message, no reply), and return
-    the parked ``interaction_id``."""
-    sent = await web.send(marker)
-    assert sent.status_code == 200, sent.text
-
-    # The park barrier: the tool ran to the async park and stashed its interaction id under the
-    # marker. For a silent turn (no outbound send, no readable channel id) this side effect is
-    # the completion barrier the turn otherwise lacks.
-    parked = await wait_probe_record(bridge, f"tool_target_park:{marker}", deadline=20.0)
-    assert len(parked) == 1, f"expected exactly one park record, got {parked!r}"
-    interaction_id = parked[0]["interaction_id"]
-
-    # Silent: the parked turn posted nothing back — the transcript holds only the inbound message.
-    replayed = await web.frames()
-    exchange = [(data["direction"], data["text"]) for event, data in replayed if event == "chat.message"]
-    assert [direction for direction, _text in exchange] == ["in"], f"a parked turn must post no reply, saw {exchange!r}"
-    assert marker in exchange[0][1]
-    return interaction_id
 
 
 pytestmark = pytest.mark.needs(
@@ -105,9 +60,9 @@ pytestmark = pytest.mark.needs(
 async def test_tool_target_park_delivers_its_resumed_reply_back_to_the_conversation(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
-    web = await _open_tool_target_web_visitor(bridge, uniq, "ttdeliver")
+    web, _route_name = await open_tool_target_web_visitor(bridge, uniq, "ttdeliver")
     marker = uniq("ttdeliver-msg")
-    interaction_id = await _park_a_message(bridge, web, marker)
+    interaction_id = await park_tool_target_message(bridge, web, marker)
 
     # Answer the park OUT OF BAND through replica A's interactions door — a DIFFERENT worker than
     # the one that ran the web turn on replica B. That door claims the answer and fires the stored
@@ -122,7 +77,7 @@ async def test_tool_target_park_delivers_its_resumed_reply_back_to_the_conversat
     # not the raw result — is delivered back into the visitor's transcript.
     fired = await wait_probe_record(bridge, f"tool_target_deliver:{interaction_id}", deadline=20.0)
     assert fired[0]["status"] == "succeeded"
-    delivered = await web.frames(until=_outbound(answer), deadline=40.0)
+    delivered = await web.frames(until=outbound_message(answer), deadline=40.0)
     out_texts = [data["text"] for event, data in delivered if event == "chat.message" and data["direction"] == "out"]
     assert any(answer in text for text in out_texts), f"the resumed reply was not delivered, saw {out_texts!r}"
 
@@ -145,9 +100,9 @@ async def test_tool_target_park_delivers_its_resumed_reply_back_to_the_conversat
 async def test_tool_target_park_non_success_resume_delivers_the_error_notice(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
-    web = await _open_tool_target_web_visitor(bridge, uniq, "ttabort")
+    web, _route_name = await open_tool_target_web_visitor(bridge, uniq, "ttabort")
     marker = uniq("ttabort-msg")
-    interaction_id = await _park_a_message(bridge, web, marker)
+    interaction_id = await park_tool_target_message(bridge, web, marker)
 
     # Resolve the park with the abort sentinel: the resume drives a NON-SUCCESS terminal, so the
     # route (which carries no error mapping) delivers its UNIFORM client-safe notice.
@@ -160,7 +115,7 @@ async def test_tool_target_park_non_success_resume_delivers_the_error_notice(
     assert fired[0]["status"] == "failed"
 
     # The delivered reply is the client-safe error notice — never a mapped reply, never silence.
-    delivered = await web.frames(until=_outbound(ERROR_ANSWER_TEXT), deadline=40.0)
+    delivered = await web.frames(until=outbound_message(ERROR_ANSWER_TEXT), deadline=40.0)
     out_texts = [data["text"] for event, data in delivered if event == "chat.message" and data["direction"] == "out"]
     assert any(ERROR_ANSWER_TEXT in text for text in out_texts), f"no error notice was delivered, saw {out_texts!r}"
     # The abort sentinel never leaked back as a reply (it was not mapped through reply_expr).
