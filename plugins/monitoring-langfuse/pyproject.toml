@@ -29,7 +29,7 @@ dependencies = [
     "tai42-contract>=21.0,<22",
     # TaiBaseSettings + the settings cache registry, and the monitoring feature's
     # OpenTelemetry writer every record is written through (the monitoring extra).
-    "tai42-kit[monitoring]>=11.0,<12",
+    "tai42-kit[monitoring]>=11.1,<12",
     # The Langfuse SDK: read API only (``tracing_enabled=False``).
     "langfuse~=4.0.6",
     # Decodes the recorded ``tai42.metadata`` attribute (trace_query.py).

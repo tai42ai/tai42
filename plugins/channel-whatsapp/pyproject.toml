@@ -30,7 +30,7 @@ dependencies = [
     # HttpxClient (pooled outbound HTTP), RedisClient (correlation store),
     # TaiBaseSettings + the settings cache registry. [redis] pulls redis-py, whose
     # Lock error types the Flow resolve lock imports directly.
-    "tai42-kit[redis]>=11.0,<12",
+    "tai42-kit[redis]>=11.1,<12",
     # Imported directly (transport error types).
     "httpx>=0.28",
     # Imported directly by inbound.py (Request/Response handler types).
