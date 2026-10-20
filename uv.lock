@@ -6173,7 +6173,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "27.1.1"
+version = "27.2.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "anyio" },
