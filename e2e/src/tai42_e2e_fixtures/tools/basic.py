@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+from typing import Any
 
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.app import tai42_app
@@ -224,6 +225,14 @@ async def e2e_record(key: str, value: str) -> str:
         # The pooled client yields an async Redis; rpush returns an awaitable.
         await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", record))
     return "recorded"
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+def e2e_typed_echo(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return ``payload`` unchanged. Its hints name ``Any``, which only this module's
+    globals resolve under postponed annotations — the shape a branch presenting this
+    signature from another namespace must still run."""
+    return payload
 
 
 @tai42_app.tools.tool(tags={"e2e"})

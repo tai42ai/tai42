@@ -66,3 +66,18 @@ async def test_different_arguments_are_a_cache_miss(extensions_stack: TaiStack, 
     assert len(extensions_stack.records(second_key)) == 1
     assert "recorded" in str(first.data)
     assert "recorded" in str(second.data)
+
+
+async def test_branch_over_a_typing_name_hint_runs_by_name(extensions_stack: TaiStack) -> None:
+    """A tool declared under postponed annotations carries string hints such as
+    ``"dict[str, Any]"``. The cache branch presents them from makefun's namespace, so
+    the run-by-name door (the ``run_tool`` probe dispatches in-process, the way flows
+    and presets do) must resolve them in the tool's own module and run the branch."""
+    payload = {"k": "v"}
+
+    async with extensions_stack.mcp() as mcp:
+        result = await mcp.call_tool(
+            "run_tool", {"tool_name": "e2e_typed_echo_cache", "arguments": {"payload": payload}}
+        )
+
+    assert result.data == payload
