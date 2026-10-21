@@ -41,7 +41,10 @@ async def classify(
     fixed set, with a probability per label), or an ordinal ``score`` (an
     expected value over an ordered rubric). The response carries one answer per
     question, keyed by the same name, plus token usage and the provider's
-    request id.
+    request id. The answers always stay inside what the questions declare (one
+    answer per question, of its kind; a ``choice`` label from its criteria; a
+    ``score`` over its levels): a response outside them fails the call with
+    ``ClassifierAnswerError``.
 
     ``classifier_kwargs`` keys such as ``base_url`` and ``api_key`` are
     legitimate multi-model routing options, but they are caller-supplied on an

@@ -178,6 +178,62 @@ async def test_classify_is_deterministic_against_the_stub(core_stack: TaiStack, 
     assert other_response.answers != first_response.answers, (other_response, first_response)
 
 
+# An answer outside a set the request declares is refused by the platform itself: the stub
+# answers one question outside its declared set, and the tool call fails with the kit's error
+# naming the question and what the request declared.
+_OUT_OF_SET_ANSWERS = {
+    "choice-label": (
+        "status",
+        {"type": "choice", "choice": "pending", "probabilities": {"open": 0.4, "closed": 0.6}, "confidence": 0.6},
+        ["'status'", "'pending'", "['closed', 'open']"],
+    ),
+    "score-level": (
+        "severity",
+        {
+            "type": "score",
+            "score": 3.5,
+            "legend": {"0": "low", "1": "medium", "2": "high"},
+            "probabilities": {"0": 0.2, "1": 0.3, "2": 0.5},
+            "confidence": 0.5,
+        },
+        ["'severity'", "3.5", "0 to 2"],
+    ),
+    "answer-kind": (
+        "is_active",
+        {"type": "choice", "choice": "open", "probabilities": {"open": 0.5, "closed": 0.5}, "confidence": 0.5},
+        ["'is_active'", "noul", "choice"],
+    ),
+}
+
+
+@pytest.mark.skipif(
+    HarnessSettings().is_real("classifier"),
+    reason="the out-of-set answer is scripted on the stub; the real vendor cannot be made to give one",
+)
+@pytest.mark.needs("setting:tool:toolbox.classify", "helper:llm")
+@pytest.mark.parametrize("case", list(_OUT_OF_SET_ANSWERS))
+async def test_classify_refuses_an_answer_outside_its_declared_sets(
+    core_stack: TaiStack, llm_stub: LlmStub, case: str
+) -> None:
+    name, answer, named = _OUT_OF_SET_ANSWERS[case]
+    call_args = {
+        "state": _CLASSIFY_STATE,
+        "questions": _CLASSIFY_QUESTIONS,
+        "classifier_kwargs": {"base_url": llm_stub.root_url, "api_key": "e2e-test"},
+    }
+    llm_stub.override_classifier_answer(name, answer)
+    try:
+        async with core_stack.mcp(port=core_stack.port_a) as mcp:
+            result = await mcp.call_tool("classify", call_args, raise_on_error=False, retry_on_reloading=True)
+    finally:
+        llm_stub.reset()
+
+    assert result.is_error, result.structured_content
+    text = " ".join(getattr(part, "text", "") for part in result.content)
+    for word in named:
+        assert word in text, text
+
+
 # The real classifier leg runs the tool against the live vendor instead of the stub, so it
 # runs only when the 'classifier' seam is real (creds host); the provider and key flow from
 # the stack env, so the call passes NO classifier_kwargs.
