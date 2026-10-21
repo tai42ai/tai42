@@ -22,7 +22,6 @@
     "core/kit": {
       "package-name": "tai42-kit",
       "component": "tai42-kit",
-      "release-as": "11.2.0",
       "skip-changelog": true,
       "exclude-paths": [
         "core/kit/tests"
