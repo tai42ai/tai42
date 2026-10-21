@@ -3,10 +3,11 @@
 Recovery runs where the deployment runs: it reads the manifest and the stores the server
 reads, so it holds the same trust level as reading the boot log. It resolves the deployment's
 manifest (``--manifest-path`` or ``TAI_MANIFEST_PATH``), bridges the stored env and validates
-it through the one boot-manifest read every serving entrypoint crosses, imports the manifest's
-lifecycle modules so the identity/accounts providers register, and then re-mints ONE surviving
-owner key through :func:`~tai42_skeleton.access_control.setup_recovery.recover_owner_key`. A
-recovery refusal or an unreachable store surfaces as a clean, credential-free message and a
+it through the one boot-manifest read every serving entrypoint crosses, binds the process app
+onto the ``tai42_app`` handle as a server boot does, imports the manifest's lifecycle modules so
+the identity/accounts providers register, and then, with the app still bound, re-mints ONE
+surviving owner key through :func:`~tai42_skeleton.access_control.setup_recovery.recover_owner_key`.
+A recovery refusal or an unreachable store surfaces as a clean, credential-free message and a
 non-zero exit rather than a raw traceback.
 """
 
@@ -15,12 +16,15 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import click
 import psycopg
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
+from tai42_contract.app import tai42_app
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.access_control.setup_recovery import SetupRecoveryError, recover_owner_key
@@ -34,14 +38,18 @@ def _pg_target() -> str:
     return f"{settings.pg_host}:{settings.pg_port}/{settings.pg_db}"
 
 
-def _load_deployment(manifest_path: str | None) -> None:
-    """Resolve the manifest and register the deployment's providers, exactly as a server boot does.
+@contextmanager
+def _deployment(manifest_path: str | None) -> Iterator[None]:
+    """Load the deployment's manifest and lifecycle modules and keep its app bound for the block.
 
     Stamps the resolved manifest path so the one boot-manifest read finds it, reads and
     validates the manifest under the bridged stored env, activates the configured plugin
-    prefix so a prefix-installed lifecycle module imports, then imports every lifecycle
-    module — the side effect that registers the identity/accounts providers this command
-    re-mints through. A failing import raises loudly, aborting the command.
+    prefix so a prefix-installed lifecycle module imports, then binds the process app onto
+    ``tai42_app`` and imports each named lifecycle module — the side effect that registers the
+    identity/accounts providers this command re-mints through. A lifecycle module may
+    register on an app facet at import (``tai42_app.webhook_verifiers``, …), so the imports
+    run under the binding, and the block that re-mints runs under it too. The binding is
+    restored on exit. A failing import raises loudly, aborting the command.
     """
     resolved = manifest_path or default_manifest_path()
     if resolved is None:
@@ -58,8 +66,10 @@ def _load_deployment(manifest_path: str | None) -> None:
     # idempotent. Imported function-locally to keep the app import chain free of the marketplace
     # package.
     activate_prefix()
-    for name in manifest.lifecycle_modules:
-        importlib.import_module(name)
+    with tai42_app.bound(app):
+        for name in manifest.lifecycle_modules:
+            importlib.import_module(name)
+        yield
 
 
 def recover(
@@ -68,18 +78,20 @@ def recover(
     """Re-mint the owner's key on this deployment and return the result payload.
 
     The one door of the recovery behaviour: it runs in a process holding the deployment's env,
-    so no HTTP route exists. Maps a recovery refusal and a store connection failure to a loud,
-    credential-free :class:`click.ClickException` (the root group renders ``Error: …`` and exits
-    non-zero); the plaintext key rides in the returned payload, never a log line.
+    so no HTTP route exists. The deployment's app stays bound on ``tai42_app`` from the
+    lifecycle-module imports through the re-mint. Maps a recovery refusal and a store connection
+    failure to a loud, credential-free :class:`click.ClickException` (the root group renders
+    ``Error: …`` and exits non-zero); the plaintext key rides in the returned payload, never a
+    log line.
     """
-    _load_deployment(manifest_path)
-    try:
-        return asyncio.run(recover_owner_key(setup_token, key_user_id=key_user, key_description=key_description))
-    except SetupRecoveryError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except psycopg.OperationalError as exc:
-        raise click.ClickException(f"could not connect to Postgres {_pg_target()}: {exc}") from exc
-    except (RedisConnectionError, RedisTimeoutError) as exc:
-        raise click.ClickException(
-            f"could not connect to the access-control Redis (ACCESS_CONTROL_REDIS_URL): {exc}"
-        ) from exc
+    with _deployment(manifest_path):
+        try:
+            return asyncio.run(recover_owner_key(setup_token, key_user_id=key_user, key_description=key_description))
+        except SetupRecoveryError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except psycopg.OperationalError as exc:
+            raise click.ClickException(f"could not connect to Postgres {_pg_target()}: {exc}") from exc
+        except (RedisConnectionError, RedisTimeoutError) as exc:
+            raise click.ClickException(
+                f"could not connect to the access-control Redis (ACCESS_CONTROL_REDIS_URL): {exc}"
+            ) from exc

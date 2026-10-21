@@ -6,7 +6,9 @@ only orphaned rows remain, the host-side ``tai setup --recover`` re-mints the ow
 while the backup doors carry the export/re-mint round trip. The shared ``setup_stack`` mounts
 a lean router set without the backup router, so a dedicated stack adds it — only additively
 over ``build_setup_stack``, mutating no shared builder (the trigger-link suite adds its own
-backup router the same way).
+backup router the same way). The dedicated stack also lists the built-in ``shared_secret``
+webhook verifier in ``lifecycle_modules``: that module registers on an app facet at import,
+so the recovery command must import it under the same bound app a server boot does.
 """
 
 from __future__ import annotations
@@ -24,11 +26,17 @@ from tai42_e2e.variants import Variants
 
 
 def build_setup_backup_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """The setup profile PLUS the backup router — the fresh, keyless install whose setup door
-    initializes it and whose backup doors carry the export/re-mint round trip. Only additive
-    over ``build_setup_stack``; no shared builder is mutated."""
+    """The setup profile PLUS the backup router and the ``shared_secret`` lifecycle module — the
+    fresh, keyless install whose setup door initializes it, whose backup doors carry the
+    export/re-mint round trip, and whose manifest carries a lifecycle module that registers on
+    an app facet at import. Only additive over ``build_setup_stack``; no shared builder is
+    mutated."""
     base = build_setup_stack(res, variants)
     manifest = {**base.manifest}
+    manifest["lifecycle_modules"] = [
+        *base.manifest["lifecycle_modules"],
+        "tai42_skeleton.webhooks.builtin.shared_secret",
+    ]
     manifest["routers_modules"] = [*base.manifest["routers_modules"], "tai42_skeleton.routers.backup"]
     return replace(base, name="setup-backup", manifest=manifest)
 
