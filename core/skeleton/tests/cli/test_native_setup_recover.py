@@ -4,13 +4,15 @@ No live stores: the deployment read (the boot-manifest read and the lifecycle-mo
 and the recovery orchestration are faked, so the tests assert the command wiring — it stamps
 the resolved manifest path, reads the manifest, imports the lifecycle modules, renders the
 recovery result, and surfaces a recovery refusal and a missing manifest path as loud,
-non-zero failures.
+non-zero failures. One test imports a real lifecycle module that registers on an app facet
+at import, proving the command binds the deployment's app for the imports and the recovery.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 from types import SimpleNamespace
 
 import psycopg
@@ -18,9 +20,11 @@ import pytest
 from click.testing import CliRunner
 from redis.exceptions import ConnectionError as RedisConnectionError
 from tai42_cli import app as app_module
+from tai42_contract.app import tai42_app
 
 import tai42_skeleton.app.instance as instance
 from tai42_skeleton.access_control.setup_recovery import SetupRecoveryError
+from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.cli.native import setup_recover
 
 _RESULT = {
@@ -149,3 +153,42 @@ def test_recover_redis_connection_failure_names_the_ac_redis(
 
     assert result.exit_code == 1, result.output
     assert "could not connect to the access-control Redis" in result.output
+
+
+_SHARED_SECRET_MODULE = "tai42_skeleton.webhooks.builtin.shared_secret"
+
+
+def test_recover_binds_the_app_for_lifecycle_modules_and_the_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lifecycle module that registers on a ``tai42_app`` facet at import loads, and recovery runs bound.
+
+    The command starts from an unbound handle, as a fresh ``tai`` process does. The manifest
+    lists the built-in ``shared_secret`` verifier, whose import registers on
+    ``tai42_app.webhook_verifiers``; the registration lands on the deployment's app, the
+    recovery itself runs with that app bound, and the handle is unbound again afterwards.
+    """
+    server = TaiMCP(name="recover-under-test")
+    monkeypatch.setattr(
+        server, "_read_boot_manifest", lambda: SimpleNamespace(lifecycle_modules=[_SHARED_SECRET_MODULE])
+    )
+    monkeypatch.setattr(instance, "app", server)
+    # A fresh import, so the module's import-time registration runs inside this command.
+    monkeypatch.delitem(sys.modules, _SHARED_SECRET_MODULE, raising=False)
+    seen: dict = {}
+
+    async def _fake_recover(setup_token: str, *, key_user_id: str | None, key_description: str) -> dict:
+        seen["verifier_during_recovery"] = tai42_app.webhook_verifiers.get("shared_secret")
+        return _RESULT
+
+    monkeypatch.setattr(setup_recover, "recover_owner_key", _fake_recover)
+
+    with tai42_app.bound(None):
+        result = CliRunner().invoke(
+            app_module.app,
+            ["--json", "setup", "--recover", "--token", "t", "--manifest-path", "/deploy/manifest.yaml"],
+        )
+        assert not hasattr(tai42_app, "webhook_verifiers")
+
+    assert result.exception is None, repr(result.exception)
+    assert result.exit_code == 0, result.output
+    assert "shared_secret" in server.webhook_verifiers.names()
+    assert seen["verifier_during_recovery"] is server.webhook_verifiers.get("shared_secret")
