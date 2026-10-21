@@ -5617,7 +5617,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "20.4.2"
+version = "20.4.3"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -5776,7 +5776,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "11.1.0"
+version = "11.1.1"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -6457,7 +6457,7 @@ dev = [
 
 [[package]]
 name = "tai42-toolbox"
-version = "5.2.1"
+version = "5.2.2"
 source = { editable = "plugins/toolbox" }
 dependencies = [
     { name = "makefun" },
