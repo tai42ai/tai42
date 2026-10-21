@@ -18,7 +18,9 @@ from tai42_toolbox._internal.extensions.batch_executor import (
     execute_batch,
 )
 from tai42_toolbox.extensions.batch import batch
+from tai42_toolbox.extensions.cache import cache
 
+from . import _postponed_tool
 from .conftest import FakeTools
 
 
@@ -28,6 +30,16 @@ def _tool(n: int) -> int:
 
 def test_registers_as_transformer_named_batch(capture_registration):
     assert capture_registration(batch_module) == [("batch", ExtensionKind.TRANSFORMER, False)]
+
+
+def test_batches_a_branch_over_a_postponed_annotation_tool():
+    # The cache branch presents ``keep``'s string hints from makefun's namespace; batch
+    # still types each item by the tool's own module.
+    branch = cache(_postponed_tool.keep, "keep", "desc")
+
+    item_model = inspect.signature(batch(branch, "keep_cache", "desc")).parameters["params"].annotation.__args__[0]
+
+    assert item_model.model_fields["payload"].annotation == dict[str, Any]
 
 
 def test_composed_signature_is_concrete():

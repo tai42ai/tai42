@@ -1,8 +1,25 @@
-"""Callable-signature helpers for injecting extra keyword params and dropping the fastmcp context."""
+"""Callable-signature helpers: resolve a tool's type hints, inject keyword params, drop the fastmcp context."""
 
 import inspect
+import sys
 from collections.abc import Callable
-from typing import Any
+from typing import Any, get_type_hints
+
+
+def resolved_type_hints(func: Callable) -> dict[str, Any]:
+    """``func``'s type hints, every string annotation evaluated in the module ``func`` declares.
+
+    A tool under ``from __future__ import annotations`` carries its hints as strings (e.g.
+    ``"dict[str, Any]"``). An extension branch built with makefun presents those strings while its
+    code lives in makefun's namespace, and names its tool's module through ``__module__``
+    (``module_name=func.__module__``), so the strings resolve only there, not in
+    ``func.__globals__``. That module is also the namespace pydantic resolves the presented schema
+    in. A plain function's ``__globals__`` is that module's namespace anyway; a function whose
+    module is not loaded resolves in its own globals. ``Annotated`` metadata is kept. An
+    unresolvable hint raises.
+    """
+    module = sys.modules.get(func.__module__)
+    return get_type_hints(func, globalns=vars(module) if module is not None else None, include_extras=True)
 
 
 def add_signature_params(

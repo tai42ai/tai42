@@ -2,10 +2,11 @@
 
 import inspect
 from collections.abc import Callable
-from typing import Any, get_type_hints
+from typing import Any
 
 from fastmcp.tools.function_parsing import ParsedFunction
 from fastmcp.utilities.types import get_cached_typeadapter
+from tai42_kit.utils.lc import resolved_type_hints
 
 _VAR_PARAM_KINDS = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
 
@@ -73,10 +74,12 @@ def _resolved_signature(func: Callable[..., Any]) -> inspect.Signature:
     pydantic ``TypeAdapter`` (schema parse or argument validation) evaluates the string in
     the wrong namespace and raises a bare ``NameError``. Resolving the hints here against the
     ORIGINAL function's own module globals turns the strings into real types the wrapper can
-    carry in any namespace. ``include_extras`` keeps ``Annotated`` metadata; an unannotated
-    parameter keeps its empty annotation. An unresolvable hint raises loudly.
+    carry in any namespace — :func:`~tai42_kit.utils.lc.resolved_type_hints` evaluates them in
+    the module ``func.__module__`` names, which for a makefun extension branch is the wrapped
+    tool's. An unannotated parameter keeps its empty annotation. An unresolvable hint raises
+    loudly.
     """
-    hints = get_type_hints(func, include_extras=True)
+    hints = resolved_type_hints(func)
     signature = inspect.signature(func)
     parameters = [
         param.replace(annotation=hints.get(param.name, param.annotation)) for param in signature.parameters.values()

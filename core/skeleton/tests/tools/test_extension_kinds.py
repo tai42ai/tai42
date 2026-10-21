@@ -74,6 +74,29 @@ def test_wrapper_preserving_schema_binds_and_runs():
     asyncio.run(run())
 
 
+def test_wrapper_over_a_postponed_annotation_tool_runs_by_name():
+    async def run():
+        manifest = Manifest.model_validate(
+            {
+                "extensions_modules": ["tests.app._fixtures.ext_kinds"],
+                "tools": [
+                    {
+                        "title": "fxt",
+                        "module": "tests.app._fixtures.tools_postponed",
+                        "include": ["keep"],
+                        "extensions": {"keep": [["sigwrap"]]},
+                    }
+                ],
+            }
+        )
+        async with app.app_context(manifest):
+            # The branch presents ``keep``'s string hints; the run-by-name door resolves
+            # them in the tool's own module, never in makefun's.
+            assert await app.tools.run_tool("keep_sigwrap", {"payload": {"k": "v"}}) == {"k": "v"}
+
+    asyncio.run(run())
+
+
 def test_wrapper_changing_schema_rejected():
     async def run():
         async with app.app_context(_manifest("shout", "renamep")):

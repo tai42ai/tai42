@@ -15,6 +15,7 @@ from pydantic import create_model
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
 from tai42_kit.utils.data import makefun_func_name, snake_to_pascal
+from tai42_kit.utils.lc import resolved_type_hints
 
 from tai42_toolbox._internal.extensions.batch_executor import execute_batch
 
@@ -22,7 +23,7 @@ from tai42_toolbox._internal.extensions.batch_executor import execute_batch
 @tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="batch", pauses=True)
 def batch(func, orig_name, orig_desc):
     """Branch ``func`` into a batched ``<orig_name>_batch`` variant."""
-    type_hints = inspect.get_annotations(func, eval_str=True)
+    type_hints = resolved_type_hints(func)
     sig = inspect.signature(func)
 
     # Per-tool pydantic input model so each batch item validates against the tool's own schema.

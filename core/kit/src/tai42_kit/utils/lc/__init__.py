@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from tai42_kit.utils.lc.signature_util import (
     add_signature_params,
     exclude_fastmcp_ctx_from_kwargs,
+    resolved_type_hints,
 )
 
 if TYPE_CHECKING:
@@ -25,6 +26,7 @@ __all__ = [
     "exclude_fastmcp_ctx_from_kwargs",
     "mcp_tool_to_lc_tool",
     "mcp_tools_to_lc_tools",
+    "resolved_type_hints",
 ]
 
 _LC_UTIL_EXPORTS = ("mcp_tool_to_lc_tool", "mcp_tools_to_lc_tools")

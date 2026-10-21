@@ -60,6 +60,9 @@ def build_extensions_stack(res: StackResources, variants: Variants) -> StackConf
                     # cache: a repeat identical call is served from the store, so
                     # the wrapped tool's record side effect fires only once.
                     "e2e_record": [["cache"]],
+                    # cache over a tool whose hints are typing names: the branch runs
+                    # by name (the in-process run_tool door), not only over MCP.
+                    "e2e_typed_echo": [["cache"]],
                     # chain: transform e2e_echo's output with jq into e2e_record's args;
                     # monitor: trace a standalone call as one TOOL span; output_schema:
                     # echo's string result violates the bound schema (validate-and-raise half).

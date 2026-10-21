@@ -10,6 +10,7 @@ the impl body.
 """
 
 import functools
+import inspect
 
 from makefun import create_function
 from tai42_contract.app import tai42_app
@@ -31,6 +32,23 @@ def argswrap(func, name, desc, config=None):
     variant.__name__ = f"{name}_argswrap"
     variant.__qualname__ = variant.__name__
     return variant
+
+
+@tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="sigwrap")
+def sigwrap(func, name, desc, config=None):
+    """Re-present ``func``'s own signature with makefun under ``func``'s module name,
+    the shape the cache and monitor wrappers build. The branch's code lives in
+    makefun's namespace, so a postponed hint is resolvable only through that module."""
+
+    def impl(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return create_function(
+        func_signature=inspect.signature(func),
+        func_impl=impl,
+        func_name=f"{name}_sigwrap",
+        module_name=func.__module__,
+    )
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="renamep")
