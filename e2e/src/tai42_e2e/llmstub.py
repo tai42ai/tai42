@@ -42,7 +42,9 @@ class LlmStub:
     classify tool runs offline and a ``state`` dropped or corrupted on the wire
     shows up as a different answer. The classifier vendor points at
     :attr:`root_url` (no ``/v1``) and appends ``/v1/systemone`` itself. These
-    calls are NOT scripted either."""
+    calls are NOT scripted either; :meth:`override_classifier_answer` replaces
+    one named question's answer, for a leg that needs an answer the hash would
+    never give (one outside a set its request declares)."""
 
     # The fixed embedding dimensionality the stub reports; small but nonzero so a
     # store index has a stable width across put + query + the dims probe.
@@ -65,6 +67,9 @@ class LlmStub:
         self._response_delay_seconds = 0.0
         self._in_flight_completions = 0
         self._max_in_flight_completions = 0
+        # Vendor answers that replace the hashed answer of the named classification
+        # question, until reset.
+        self._classifier_overrides: dict[str, dict[str, Any]] = {}
         self._server = ThreadedServer(self._build_app(), host, self.port)
 
     @property
@@ -95,6 +100,12 @@ class LlmStub:
         self._in_flight_completions = 0
         self._max_in_flight_completions = 0
         self._refuse_forced_tool_choice = False
+        self._classifier_overrides.clear()
+
+    def override_classifier_answer(self, name: str, answer: dict[str, Any]) -> None:
+        """Answer the classification question ``name`` with ``answer`` (a vendor answer
+        body) instead of its hashed answer, on every ``/v1/systemone`` call until reset."""
+        self._classifier_overrides[name] = answer
 
     def refuse_forced_tool_choice(self) -> None:
         """Answer the vendor's 400 to any completion that binds a forced ``tool_choice``.
@@ -227,7 +238,12 @@ class LlmStub:
                 )
             state = body.get("state")
             try:
-                answers = {name: _classifier_answer(name, question, state) for name, question in questions.items()}
+                answers = {
+                    name: self._classifier_overrides[name]
+                    if name in self._classifier_overrides
+                    else _classifier_answer(name, question, state)
+                    for name, question in questions.items()
+                }
             except _MalformedQuestionError as error:
                 return JSONResponse(status_code=400, content={"error": {"message": f"llmstub: {error}"}})
             return JSONResponse(

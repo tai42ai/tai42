@@ -14,6 +14,12 @@ provider-keyed runnable that accepts a :class:`ClassifyRequest` and returns a
 :class:`ClassifyResponse`; each provider adapts this contract to its own wire
 shape behind the factory. The models take no vendor import, so the contract can
 be read and constructed without any provider package installed.
+
+Every set a request declares is enforced by the factory's runnable on every
+call, whatever the provider: one answer per question name, of the question's
+kind; a ``choice`` label from the keys of its ``criteria``; a ``score`` over
+its levels. A response outside any of them raises :class:`ClassifierAnswerError`,
+so a caller never receives an answer it did not declare.
 """
 
 import asyncio
@@ -23,6 +29,7 @@ from typing import Annotated, Any, Literal, cast
 from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import ErrorKind
 from tai42_contract.monitoring import MonitoringLevel, SpanKind, TokenUsage
 
 from tai42_kit.llm._secret_kwargs import KwargsCacheKey, unwrap_secret_kwargs
@@ -104,6 +111,21 @@ ClassifyAnswer = Annotated[NoulAnswer | ChoiceAnswer | ScoreAnswer, Field(discri
 """An answer of one of the three kinds, discriminated on ``type``."""
 
 
+class ClassifierAnswerError(Exception):
+    """The provider's response falls outside a set its request declares.
+
+    A request declares its question names and each question's kind; a ``choice`` question
+    declares its labels (the keys of its ``criteria``) and a ``score`` question its levels
+    (``0`` to ``len(criteria) - 1``). A response that answers other questions, answers one
+    with another kind, picks a label outside the labels, scores outside the levels, or keys
+    its probabilities or legend by anything but exactly those labels or levels breaks the
+    classifier contract. The request was valid, so the failure is the provider's, and the
+    message names the question, what the provider gave, and what was declared.
+    """
+
+    __tai_error_kind__ = ErrorKind.UPSTREAM_ERROR
+
+
 class ClassifyUsage(BaseModel):
     """Token usage reported for a classification request; either count may be unreported."""
 
@@ -144,10 +166,72 @@ def _usage(usage: ClassifyUsage) -> TokenUsage | None:
     return TokenUsage(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
 
 
+# Slack on a score's upper bound: the expected value is a probability-weighted sum, so a
+# distribution that sums to 1 within float rounding can land a hair above the top level.
+_SCORE_BOUND_SLACK = 1e-9
+
+
+def _check_choice(name: str, question: ChoiceQuestion, answer: ChoiceAnswer) -> None:
+    """Raise when a ``choice`` answer's label or probabilities fall outside its question's labels."""
+    labels = sorted(question.criteria)
+    if answer.choice not in question.criteria:
+        raise ClassifierAnswerError(
+            f"The classifier answered choice question '{name}' with {answer.choice!r}, "
+            f"which is not one of its labels {labels}"
+        )
+    if answer.probabilities.keys() != question.criteria.keys():
+        raise ClassifierAnswerError(
+            f"The classifier's probabilities for choice question '{name}' are keyed by "
+            f"{sorted(answer.probabilities)}, not by its labels {labels}"
+        )
+
+
+def _check_score(name: str, question: ScoreQuestion, answer: ScoreAnswer) -> None:
+    """Raise when a ``score`` answer's legend, probabilities or score fall outside its question's levels."""
+    levels = list(range(len(question.criteria)))
+    for field, keyed in (("legend", answer.legend), ("probabilities", answer.probabilities)):
+        if sorted(keyed) != levels:
+            raise ClassifierAnswerError(
+                f"The classifier's {field} for score question '{name}' is keyed by "
+                f"{sorted(keyed)}, not by its levels {levels}"
+            )
+    if not 0 <= answer.score <= levels[-1] + _SCORE_BOUND_SLACK:
+        raise ClassifierAnswerError(
+            f"The classifier scored score question '{name}' {answer.score}, outside its levels 0 to {levels[-1]}"
+        )
+
+
+def _check_answers(request: ClassifyRequest, response: ClassifyResponse) -> None:
+    """Raise :class:`ClassifierAnswerError` when the response falls outside any set the request declares.
+
+    * The answers are keyed by exactly the request's question names, and each answer is of
+      its question's kind.
+    * A ``choice`` answer's label is one of its question's labels (the keys of its
+      ``criteria``), and its probabilities are keyed by exactly those labels.
+    * A ``score`` answer's legend and probabilities are keyed by exactly its question's levels
+      (``0`` to ``len(criteria) - 1``), and its score lies between the first and last level.
+    """
+    if response.answers.keys() != request.questions.keys():
+        raise ClassifierAnswerError(
+            f"The classifier answered the questions {sorted(response.answers)}, "
+            f"not the questions asked {sorted(request.questions)}"
+        )
+    for name, question in request.questions.items():
+        answer = response.answers[name]
+        if answer.type != question.type:
+            raise ClassifierAnswerError(
+                f"The classifier answered {question.type} question '{name}' with a {answer.type} answer"
+            )
+        if isinstance(question, ChoiceQuestion) and isinstance(answer, ChoiceAnswer):
+            _check_choice(name, question, answer)
+        elif isinstance(question, ScoreQuestion) and isinstance(answer, ScoreAnswer):
+            _check_score(name, question, answer)
+
+
 def _recording_classifier(
     pipeline: Runnable[ClassifyRequest, ClassifyResponse],
 ) -> Runnable[ClassifyRequest, ClassifyResponse]:
-    """Wrap ``pipeline`` so every classifier call is recorded to monitoring as a MODEL call.
+    """Wrap ``pipeline`` so every classifier call is checked and recorded to monitoring as a MODEL call.
 
     A classifier is its own model kind, not a chat model, so its call never fires the
     chat-model callbacks the monitoring backend records a generation from. This seam opens
@@ -160,6 +244,12 @@ def _recording_classifier(
     goes through the contract writer, which is fail-safe; a provider failure records the span
     as an error and propagates unchanged, never swallowed. The inner pipeline still runs under
     the caller's config, so its framework step record is unaffected.
+
+    Every response is checked against its request before it is returned (see
+    :func:`_check_answers`): this seam is the one place that sees both, for every provider,
+    so a response outside any set its request declares raises :class:`ClassifierAnswerError`
+    here. The span keeps that response's model, usage and request id, since the provider
+    answered and billed the call, and records the failure like any other.
 
     The added work is one lineage resolve and one span open/update per call — constant and
     dominated by the provider's network round trip, so the hot path carries no avoidable cost.
@@ -178,10 +268,11 @@ def _recording_classifier(
         with writer.start_span(name="classifier", kind=SpanKind.LLM, trace_context=context) as span:
             try:
                 response = pipeline.invoke(request, config)
+                _record(response, span)
+                _check_answers(request, response)
             except Exception as exc:
                 span.update(level=MonitoringLevel.ERROR, status_message=str(exc))
                 raise
-            _record(response, span)
             return response
 
     async def ainvoke(request: ClassifyRequest, config: RunnableConfig | None = None) -> ClassifyResponse:
@@ -190,10 +281,11 @@ def _recording_classifier(
         with writer.start_span(name="classifier", kind=SpanKind.LLM, trace_context=context) as span:
             try:
                 response = await pipeline.ainvoke(request, config)
+                _record(response, span)
+                _check_answers(request, response)
             except Exception as exc:
                 span.update(level=MonitoringLevel.ERROR, status_message=str(exc))
                 raise
-            _record(response, span)
             return response
 
     return RunnableLambda(invoke, afunc=ainvoke, name="classifier")
