@@ -1,0 +1,29 @@
+spec_version: 1
+namespace: tai42
+name: storage-oci
+package: tai42-storage-oci
+version: 0.1.0
+description: >-
+  OCI Object Storage backend for the TAI ecosystem — text, binary, and media
+  content over an Object Storage bucket.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/storage-oci
+contract: '>=21.0,<22'
+categories:
+  - storage
+tags:
+  - storage
+  - oci
+  - oracle
+permissions:
+  network: true
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: storage
+    name: oci
+    module: tai42_storage_oci
+    description: Storage backend serving text, binary, and media content over an OCI Object Storage bucket.
+    tags:
+      - oci

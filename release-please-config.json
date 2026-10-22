@@ -429,6 +429,27 @@
         "plugins/storage-local/tests"
       ]
     },
+    "plugins/storage-oci": {
+      "package-name": "tai42-storage-oci",
+      "component": "tai42-storage-oci",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_storage_oci/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ],
+      "exclude-paths": [
+        "plugins/storage-oci/tests",
+        "plugins/storage-oci/examples"
+      ]
+    },
     "plugins/storage-s3": {
       "package-name": "tai42-storage-s3",
       "component": "tai42-storage-s3",
