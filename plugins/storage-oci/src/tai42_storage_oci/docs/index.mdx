@@ -1,0 +1,50 @@
+---
+title: "OCI storage"
+description: "Configure the OCI Object Storage provider, its principal and its bucket."
+---
+
+Backs stored content with an OCI Object Storage bucket, authenticating as a
+principal rather than with a key. Select it in the manifest:
+
+```yaml manifest.yml
+storage_module: tai42_storage_oci
+```
+
+## Configuration
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `STORAGE_OCI_BUCKET` | unset | Target bucket. The first operation raises when it is unset. |
+| `STORAGE_OCI_NAMESPACE` | unset | Object Storage namespace. Unset resolves it once per client from the principal's tenancy. |
+| `STORAGE_OCI_REGION` | unset | Overrides the region the principal or profile carries. |
+| `STORAGE_OCI_AUTH` | `workload_identity` | `workload_identity` / `instance_principal` / `config_file`. |
+| `STORAGE_OCI_SERVICE_ACCOUNT_TOKEN_PATH` | unset | Where the projected service-account token is mounted; unset uses the SDK default. |
+| `STORAGE_OCI_CONNECT_TIMEOUT` | `5` | Connect timeout (seconds). |
+| `STORAGE_OCI_READ_TIMEOUT` | `30` | Read timeout (seconds). |
+
+No credential variable exists. The backend authenticates as a principal, so
+there is nowhere to put a static key.
+
+## Auth modes
+
+`workload_identity` exchanges the pod's projected service-account token for a
+resource principal, which needs an OCI policy granting that service account
+access to the bucket. `instance_principal` covers a VM outside Kubernetes.
+`config_file` reads `~/.oci/config` on a developer machine.
+
+Each mode fails loudly when its prerequisite is absent: there is no fallback
+chain, so a misconfigured pod reports the mode it could not satisfy rather than
+authenticating as something else.
+
+## Content-type behavior
+
+Object Storage stores bytes and content-types natively. `upload` tags
+`text/plain; charset=utf-8`; `upload_bytes` stores the type it is given, or none.
+`stat` returns the stored type and raises `FileNotFoundError` for a missing
+object.
+
+## Directory deletes
+
+The API has no batch delete, so `delete_dir` lists the prefix and deletes each
+object on its own call. Existence is checked before the first delete, so an
+empty prefix raises `FileNotFoundError` before anything is removed.
