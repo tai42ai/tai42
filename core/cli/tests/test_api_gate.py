@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from tai42_cli import api_gate
+from tai42_cli import api_gate, api_gate_values
 
 # ----------------------------------------------------------------- version parse
 
@@ -131,9 +131,9 @@ def test_allowed_set_renders_comma_joined_sorted_no_brackets():
 # ------------------------------------------------------ doc-only call filter
 # A doc-only change to a known decorator/constructor call (``Field``, ``Typer``,
 # ``Option``/``Argument``) confined to that callee's documentation keywords is
-# metadata, not API surface — griffe flags it ATTRIBUTE_CHANGED_VALUE, the filter
+# metadata, not API surface — the gate reports the changed value, the filter
 # drops it. Every non-doc change stays breaking, and any unknown callee or
-# unparseable expression keeps griffe's classification (breaking-by-default).
+# unparseable expression keeps the value change breaking (breaking-by-default).
 
 
 @pytest.mark.parametrize(
@@ -193,7 +193,7 @@ def test_allowed_set_renders_comma_joined_sorted_no_brackets():
     ],
 )
 def test_doc_only_call_change_is_not_breaking(old: str, new: str):
-    assert api_gate._is_doc_only_call_change(old, new) is True
+    assert api_gate_values._is_doc_only_call_change(old, new) is True
 
 
 @pytest.mark.parametrize(
@@ -203,7 +203,7 @@ def test_doc_only_call_change_is_not_breaking(old: str, new: str):
         ("Field(default=None, gt=0)", "Field(default=5, gt=0)"),
         # A constraint (gt) change is real surface.
         ("Field(default=None, gt=0)", "Field(default=None, gt=1)"),
-        # Unknown-callee attribute value changes keep griffe's classification.
+        # Unknown-callee attribute value changes stay breaking.
         ("some_call(a=1)", "some_call(a=2)"),
         ("42", "43"),
         # A description edit paired with a real default change is still breaking.
@@ -278,7 +278,7 @@ def test_doc_only_call_change_is_not_breaking(old: str, new: str):
     ],
 )
 def test_non_doc_call_change_stays_breaking(old: str, new: str):
-    assert api_gate._is_doc_only_call_change(old, new) is False
+    assert api_gate_values._is_doc_only_call_change(old, new) is False
 
 
 # ----------------------------------------------------- additive collection growth
@@ -307,7 +307,7 @@ def test_non_doc_call_change_stays_breaking(old: str, new: str):
     ],
 )
 def test_additive_collection_growth_is_not_breaking(old: str, new: str):
-    assert api_gate._is_additive_collection_growth(old, new) is True
+    assert api_gate_values._is_additive_collection_growth(old, new) is True
 
 
 @pytest.mark.parametrize(
@@ -340,7 +340,7 @@ def test_additive_collection_growth_is_not_breaking(old: str, new: str):
     ],
 )
 def test_non_additive_collection_change_stays_breaking(old: str, new: str):
-    assert api_gate._is_additive_collection_growth(old, new) is False
+    assert api_gate_values._is_additive_collection_growth(old, new) is False
 
 
 @pytest.mark.parametrize(
@@ -362,7 +362,7 @@ def test_non_additive_collection_change_stays_breaking(old: str, new: str):
     ],
 )
 def test_additive_literal_growth_is_not_breaking(old: str, new: str):
-    assert api_gate._is_additive_literal_growth(old, new) is True
+    assert api_gate_values._is_additive_literal_growth(old, new) is True
 
 
 @pytest.mark.parametrize(
@@ -397,7 +397,7 @@ def test_additive_literal_growth_is_not_breaking(old: str, new: str):
     ],
 )
 def test_non_additive_literal_change_stays_breaking(old: str, new: str):
-    assert api_gate._is_additive_literal_growth(old, new) is False
+    assert api_gate_values._is_additive_literal_growth(old, new) is False
 
 
 # ------------------------------------------------------------------- config read
@@ -610,7 +610,8 @@ def test_voided_tags_missing_tag_fails_loudly(tmp_path: Path):
 
 # ---------------------------------------------------------- griffe end-to-end run
 # Full main() over a synthetic git repo, exercising the module diff + griffe
-# breakage classification + decision together. Skipped where griffe is absent.
+# breakage classification + the gate's attribute-value rule + decision together.
+# Skipped where griffe is absent.
 
 
 def _run_main(
@@ -719,7 +720,7 @@ def test_end_to_end_breaking_removal(
     ],
 )
 def test_is_logger_binding(value: str | None, expected: bool):
-    assert api_gate._is_logger_binding(value) is expected
+    assert api_gate_values.is_logger_binding(value) is expected
 
 
 def test_end_to_end_module_logger_removal_passes_at_minor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -758,7 +759,7 @@ _LITERAL_NEW = 'from typing import Literal\n\nStatus = Literal["a", "b", "c"]\n'
 
 
 def test_end_to_end_literal_growth_passes_at_minor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    # A Literal type alias gaining members: griffe flags ATTRIBUTE_CHANGED_VALUE, the
+    # A Literal type alias gaining members: the gate reports the changed value, the
     # additive-literal-growth filter drops it, so a minor under label-honesty at >=1.0 passes.
     pytest.importorskip("griffe")
     _build_release_repo(
@@ -789,9 +790,8 @@ _FIELD_DEFAULT_NEW = (
 
 
 def test_end_to_end_field_description_only_passes_at_patch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    # The skeleton-2.1.0 incident end to end: only a Field description changed.
-    # griffe flags ATTRIBUTE_CHANGED_VALUE, the filter drops it, so even a patch
-    # under strict passes.
+    # Only a Field description changed: the gate reports the changed value, the
+    # doc-only filter drops it, so even a patch under strict passes.
     pytest.importorskip("griffe")
     _build_release_repo(
         tmp_path,
@@ -829,6 +829,177 @@ def test_end_to_end_field_default_change_stays_breaking_at_patch(monkeypatch: py
         )
 
 
+# ---------------------------------------------------------- attribute-value rule
+# The gate compares every public attribute's bound value expression itself, walking
+# the same public-member tree griffe walks for its other breakages.
+
+
+def _load_pair(tmp_path: Path, package: str, old_files: dict[str, str], new_files: dict[str, str]):
+    griffe = pytest.importorskip("griffe")
+    for side, files in (("old", old_files), ("new", new_files)):
+        for rel, body in files.items():
+            path = tmp_path / side / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body)
+    old = griffe.load(package, search_paths=[tmp_path / "old"], modules_collection=griffe.ModulesCollection())
+    new = griffe.load(package, search_paths=[tmp_path / "new"], modules_collection=griffe.ModulesCollection())
+    return old, new
+
+
+_WALK_ALL = (
+    '__all__ = ["ANN_ONLY", "Base", "Child", "LIMIT", "SAME", "SUB_CONST", "SubThing", "TurnSettings", "UNSET_LATER"'
+)
+_WALK_OLD = {
+    "valpkg/__init__.py": (
+        "from valpkg.base import Base\n"
+        "from valpkg.sub import SUB_CONST, SubThing\n"
+        f'{_WALK_ALL}, "GONE"]\n'
+        "LIMIT = 1\n"
+        "SAME = 1\n"
+        "_PRIVATE = 1\n"
+        "GONE = 1\n"
+        "ANN_ONLY: int\n"
+        "UNSET_LATER = 3\n"
+        "class TurnSettings:\n"
+        "    timeout = 5\n"
+        "    def __init__(self) -> None:\n"
+        "        self.inst = 1\n"
+        "class Child(Base):\n"
+        "    pass\n"
+    ),
+    "valpkg/sub.py": "SUB_CONST = 'a'\nclass SubThing:\n    attr = 1\n",
+    "valpkg/base.py": "class Base:\n    inherited = 1\n",
+}
+_WALK_NEW = {
+    "valpkg/__init__.py": (
+        "from valpkg.base import Base\n"
+        "from valpkg.sub import SUB_CONST, SubThing\n"
+        f"{_WALK_ALL}]\n"
+        "LIMIT = 2\n"
+        "SAME = 1\n"
+        "_PRIVATE = 2\n"
+        "ANN_ONLY: int = 7\n"
+        "UNSET_LATER: int\n"
+        "class TurnSettings:\n"
+        "    timeout = 6\n"
+        "    def __init__(self) -> None:\n"
+        "        self.inst = 2\n"
+        "class Child(Base):\n"
+        "    pass\n"
+    ),
+    "valpkg/sub.py": "SUB_CONST = 'b'\nclass SubThing:\n    attr = 2\n",
+    "valpkg/base.py": "class Base:\n    inherited = 2\n",
+}
+
+
+def test_attribute_value_changes_walks_the_public_member_tree(tmp_path: Path):
+    old, new = _load_pair(tmp_path, "valpkg", _WALK_OLD, _WALK_NEW)
+    changes = sorted(
+        (attribute.path, str(old_value), str(new_value))
+        for attribute, old_value, new_value in api_gate_values._attribute_value_changes(old, new)
+    )
+    # Each change once, at its canonical path: a re-export is not reported again at the
+    # alias, and the attribute ``Child`` inherits is reported once, at ``Base.inherited``.
+    # The private ``_PRIVATE``, the unchanged ``SAME`` and the removed ``GONE`` are absent.
+    assert changes == [
+        ("valpkg.ANN_ONLY", "None", "7"),
+        ("valpkg.LIMIT", "1", "2"),
+        ("valpkg.TurnSettings.inst", "1", "2"),
+        ("valpkg.TurnSettings.timeout", "5", "6"),
+        ("valpkg.UNSET_LATER", "3", "None"),
+        ("valpkg.base.Base.inherited", "1", "2"),
+        ("valpkg.sub.SUB_CONST", "'a'", "'b'"),
+        ("valpkg.sub.SubThing.attr", "1", "2"),
+    ]
+
+
+def test_attribute_value_changes_skips_unresolvable_aliases_and_kind_changes(tmp_path: Path):
+    # A re-export of an object outside the loaded packages cannot be resolved, and an
+    # attribute that became a function is griffe's kind-change finding: neither is a value change.
+    exports = '__all__ = ["LIMIT", "outside"]\nfrom outside_pkg import outside\n'
+    old, new = _load_pair(
+        tmp_path,
+        "kindpkg",
+        {"kindpkg/__init__.py": exports + "LIMIT = 1\n"},
+        {"kindpkg/__init__.py": exports + "def LIMIT() -> int:\n    return 2\n"},
+    )
+    assert list(api_gate_values._attribute_value_changes(old, new)) == []
+
+
+def test_explain_value_change_uses_the_one_line_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    old, new = _load_pair(
+        tmp_path,
+        "fmtpkg",
+        {"fmtpkg/__init__.py": "class TurnSettings:\n    timeout_seconds = 5\n\n\nX = 3\n"},
+        {"fmtpkg/__init__.py": "class TurnSettings:\n    timeout_seconds = 6\n\n\nX: int\n"},
+    )
+    monkeypatch.chdir(tmp_path / "new")
+    lines = sorted(
+        api_gate_values._explain_value_change(*change) for change in api_gate_values._attribute_value_changes(old, new)
+    )
+    assert lines == [
+        "fmtpkg/__init__.py:2: TurnSettings.timeout_seconds: Attribute value was changed: 5 -> 6",
+        "fmtpkg/__init__.py:5: X: Attribute value was changed: 3 -> unset",
+    ]
+
+
+def test_end_to_end_constant_value_change_fails_at_patch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    pytest.importorskip("griffe")
+    _build_release_repo(tmp_path, mode="strict", old_version="1.0.0", old_body="LIMIT = 1\n", new_body="LIMIT = 2\n")
+    with pytest.raises(SystemExit):
+        _run_main(monkeypatch, tmp_path, package="widget", member_dir="core/widget", version="1.0.1")
+    findings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("  - ")]
+    assert len(findings) == 1
+    assert findings[0].endswith("LIMIT: Attribute value was changed: 1 -> 2")
+
+
+def test_end_to_end_constant_value_change_passes_at_major(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    pytest.importorskip("griffe")
+    _build_release_repo(
+        tmp_path, mode="label-honesty", old_version="1.0.0", old_body="LIMIT = 1\n", new_body="LIMIT = 2\n"
+    )
+    _run_main(monkeypatch, tmp_path, package="widget", member_dir="core/widget", version="2.0.0")
+    out = capsys.readouterr().out
+    assert "LIMIT: Attribute value was changed: 1 -> 2" in out
+    assert out.rstrip().endswith("gate passes.")
+
+
+def test_end_to_end_constant_losing_its_value_fails_at_patch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    pytest.importorskip("griffe")
+    _build_release_repo(tmp_path, mode="strict", old_version="1.0.0", old_body="LIMIT = 1\n", new_body="LIMIT: int\n")
+    with pytest.raises(SystemExit):
+        _run_main(monkeypatch, tmp_path, package="widget", member_dir="core/widget", version="1.0.1")
+    findings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("  - ")]
+    assert len(findings) == 1
+    assert findings[0].endswith("LIMIT: Attribute value was changed: 1 -> unset")
+
+
+def test_end_to_end_griffe_breakage_and_value_change_are_both_listed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    pytest.importorskip("griffe")
+    _build_release_repo(
+        tmp_path,
+        mode="strict",
+        old_version="1.0.0",
+        old_body="LIMIT = 1\n" + _KEEP + _REMOVE,
+        new_body="LIMIT = 2\n" + _KEEP,
+    )
+    with pytest.raises(SystemExit):
+        _run_main(monkeypatch, tmp_path, package="widget", member_dir="core/widget", version="1.0.1")
+    out = capsys.readouterr().out
+    assert "2 breaking surface item(s)" in out
+    findings = [line for line in out.splitlines() if line.startswith("  - ")]
+    assert any("gone: Public object was removed" in line for line in findings)
+    assert any(line.endswith("LIMIT: Attribute value was changed: 1 -> 2") for line in findings)
+
+
 # ------------------------------------------------------------ fail-closed helpers
 
 
@@ -837,14 +1008,14 @@ def test_pop_kwarg_absent_returns_none():
 
     call = ast.parse("Field(default=1)", mode="eval").body
     assert isinstance(call, ast.Call)
-    assert api_gate._pop_kwarg(call, "json_schema_extra") is None
+    assert api_gate_values._pop_kwarg(call, "json_schema_extra") is None
 
 
 def test_literal_str_key_dict_duplicate_key_is_non_literal():
     import ast
 
     node = ast.parse("{'a': 1, 'a': 2}", mode="eval").body
-    assert api_gate._literal_str_key_dict(node) is None
+    assert api_gate_values._literal_str_key_dict(node) is None
 
 
 @pytest.mark.parametrize(
@@ -860,12 +1031,12 @@ def test_literal_to_doc_field_rejects_non_forgivable(expr: str):
     old = ast.parse("None", mode="eval").body
     new = ast.parse(expr, mode="eval").body
     assert isinstance(new, ast.Call)
-    assert api_gate._is_literal_to_doc_field(old, new) is False
+    assert api_gate_values._is_literal_to_doc_field(old, new) is False
 
 
 def test_doc_only_call_change_literal_to_non_call_stays_breaking():
     # A literal replaced by a plain literal (not a call) is a real value change.
-    assert api_gate._is_doc_only_call_change("1", "2") is False
+    assert api_gate_values._is_doc_only_call_change("1", "2") is False
 
 
 @pytest.mark.parametrize(
@@ -876,11 +1047,11 @@ def test_doc_only_call_change_literal_to_non_call_stays_breaking():
     ],
 )
 def test_additive_collection_growth_rejects_non_literal(old: str, new: str):
-    assert api_gate._is_additive_collection_growth(old, new) is False
+    assert api_gate_values._is_additive_collection_growth(old, new) is False
 
 
 def test_additive_tuple_growth_is_not_breaking():
-    assert api_gate._is_additive_collection_growth("(1, 2)", "(1, 2, 3)") is True
+    assert api_gate_values._is_additive_collection_growth("(1, 2)", "(1, 2, 3)") is True
 
 
 # ----------------------------------------------------------- main() gate reports
@@ -999,3 +1170,22 @@ def test_end_to_end_a_member_removed_from_the_first_party_base_is_reported(
     with pytest.raises(SystemExit):
         _run_main(monkeypatch, tmp_path, package="child", member_dir="core/child", version="1.1.0")
     assert "Child.extra" in capsys.readouterr().out
+
+
+def test_end_to_end_an_inherited_first_party_value_change_is_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    pytest.importorskip("griffe")
+    _build_workspace(
+        tmp_path,
+        base_old=_BASE_WITH_ONE,
+        child_old="from base_kit import Base\n\n\nclass Child(Base):\n    pass\n",
+    )
+    (tmp_path / "core" / "basekit" / "src" / "base_kit" / "__init__.py").write_text("class Base:\n    kept: int = 1\n")
+    # ``Child`` inherits ``kept`` from the first-party base, so its changed default is
+    # part of the child package's surface: a patch may not carry it.
+    with pytest.raises(SystemExit):
+        _run_main(monkeypatch, tmp_path, package="child", member_dir="core/child", version="1.0.1")
+    findings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("  - ")]
+    assert len(findings) == 1
+    assert findings[0].endswith("Base.kept: Attribute value was changed: 0 -> 1")

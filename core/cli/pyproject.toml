@@ -61,10 +61,10 @@ dev = [
     "pyright>=1.1.389",
 ]
 # The `tai42-api-gate` console script only; griffe classifies the public-API diff
-# and pyyaml reads the mode file. Kept off the runtime deps so a plain install of
-# the client stays light.
+# (the gate adds its own attribute-value rule) and pyyaml reads the mode file.
+# Kept off the runtime deps so a plain install of the client stays light.
 api-gate = [
-    "griffe>=2.1,<3",
+    "griffe>=2.4.1,<3",
     "pyyaml>=6",
 ]
 
