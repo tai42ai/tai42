@@ -152,7 +152,8 @@ def _cli(stack: TaiStack, tmp_path: Path, *args: str) -> Any:
     """Run ``tai --server <url> --json <args...>`` against the auth-off stack and parse its output.
 
     ``TAI_API_KEY`` is a fake constant so the CLI never falls through to its interactive key
-    prompt (the auth-off stack accepts any value)."""
+    prompt (the auth-off stack accepts any value). Callers put ``--`` before a run id: the
+    server mints ids with ``secrets.token_urlsafe``, so one can begin with ``-``."""
     env = {
         "PATH": os.pathsep.join([str(Path(sys.executable).parent), "/usr/local/bin", "/usr/bin", "/bin"]),
         "HOME": str(tmp_path),
@@ -309,7 +310,7 @@ async def test_an_unflagged_start_is_held_failed_after_a_crash_and_an_operator_r
     await _elapse(2.0)
     assert len(_records(stack, key)) == 1
 
-    retried = _cli(stack, tmp_path, "hooks", "runs", "retry", run["id"])
+    retried = _cli(stack, tmp_path, "hooks", "runs", "retry", "--", run["id"])
     assert retried["id"] == run["id"]
     _first, replay = _wait_records(stack, key, 2)
     assert replay["idempotency_key"] == first["idempotency_key"] == run["id"]
@@ -379,7 +380,7 @@ async def test_a_condition_that_cannot_evaluate_is_held_failed_and_an_operator_r
     assert _records(stack, key) == []
 
     await api.post("/api/hooks", json={**hook, "condition": {"content": _WORKING_CONDITION}})
-    _cli(stack, tmp_path, "hooks", "runs", "retry", run["id"])
+    _cli(stack, tmp_path, "hooks", "runs", "retry", "--", run["id"])
     [record] = _wait_records(stack, key, 1)
     assert record["value"] == "fired"
     await _gone(api, topic)
@@ -387,7 +388,7 @@ async def test_a_condition_that_cannot_evaluate_is_held_failed_and_an_operator_r
     await api.post("/api/hooks", json={**hook, "condition": {"content": _RAISING_CONDITION}})
     await _fire(api, topic)
     second = _cli_failed_run(stack, tmp_path, topic)
-    _cli(stack, tmp_path, "hooks", "runs", "discard", second["id"], "--yes")
+    _cli(stack, tmp_path, "hooks", "runs", "discard", "--yes", "--", second["id"])
     assert await _runs(api, topic) == []
     assert len(_records(stack, key)) == 1
 
