@@ -119,7 +119,7 @@ skeleton = "tai42_skeleton.cli.local:register"
 # (chain, batch) and a collection of generic tools — loaded from the manifest,
 # never imported by skeleton code. Toolbox's own extras still gate its heavier
 # modules. Loose pin: track compatibility, don't pin the patch.
-toolbox = ["tai42-toolbox>=5.2,<6"]
+toolbox = ["tai42-toolbox>=5.3,<6"]
 
 # File loading + media: opt-in backing deps for the ResourceManager type-detect
 # registry (``load_file``) and the ``file_loader`` builtin. A module whose dep is
@@ -148,7 +148,7 @@ dev = [
     # (which ships NO concrete identity provider) — a deployment names it in its
     # manifest — but the test suite and the example manifest register it as the
     # default "redis" provider, so it is installed for dev/test.
-    "tai42-identity-redis>=4.2,<5",
+    "tai42-identity-redis>=4.3,<5",
     # The monitoring feature's OpenTelemetry writer: the masking and counting tests
     # record through it over an in-memory exporter.
     "tai42-kit[monitoring]>=11.3,<12",
