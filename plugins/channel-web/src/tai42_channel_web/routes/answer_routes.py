@@ -30,6 +30,7 @@ from tai42_channel_web.routes.session_access import (
 )
 from tai42_channel_web.session import is_cross_origin
 from tai42_channel_web.settings import web_settings
+from tai42_channel_web.store.connection import _mint_id
 from tai42_channel_web.store.questions import QuestionRecord, claim_question, peek_question, restore_question
 from tai42_channel_web.store.transcript import append_answered, transcript_order
 
@@ -37,20 +38,22 @@ logger = logging.getLogger(__name__)
 
 _QUESTION_NOT_FOUND = "question not found (unknown, expired, or already answered)"
 _ALREADY_ANSWERED = "that question was already answered"
-# What a visitor is told when the callback door refused their answer without an error
-# message of its own — never the raw body an intermediary may have written.
+# The line answered when the callback door refused an answer without an error message of
+# its own — never the raw body an intermediary may have written.
 _CALLBACK_REFUSED = "the answer was refused"
-# Appended once the refused question has been restored as often as it may be: the
-# record is gone, so the visitor is told rather than left retrying into a 404.
-_ANSWER_RETRIES_SPENT = "that question can no longer be answered"
+# The 400's code while the refused question was restored, and once it has been restored as
+# often as it may be: the record is then gone, so the widget tells the visitor so rather
+# than leaving them retrying into a 404.
+_ANSWER_REFUSED_CODE = "answer_refused"
+_ANSWER_RETRIES_SPENT_CODE = "answer_retries_spent"
 
 
 class AnswerForwardError(Exception):
     """The interactions callback door did not accept the forwarded answer (mapped to 500)."""
 
 
-def _door_error_detail(response: httpx.Response) -> str:
-    """The callback door's OWN error message, or a fixed refusal when the reply does not carry one.
+def _door_error_detail(response: httpx.Response) -> str | None:
+    """The callback door's OWN error message, or ``None`` when the reply does not carry one.
 
     Only a body in this platform's envelope is relayed. Anything else — a proxy or WAF
     page that answered instead of the door, a framework traceback, an upstream banner
@@ -69,7 +72,7 @@ def _door_error_detail(response: httpx.Response) -> str:
         response.status_code,
         response.text[:500],
     )
-    return _CALLBACK_REFUSED
+    return None
 
 
 def _is_already_answered(response: httpx.Response) -> bool:
@@ -87,15 +90,18 @@ def _is_already_answered(response: httpx.Response) -> bool:
     return isinstance(data, dict) and data.get("status") == "already_answered"
 
 
-async def _forward_answer(callback_url: str, answer: Any, params: dict[str, str] | None = None) -> httpx.Response:
+async def _forward_answer(
+    callback_url: str, answer: Any, medium_message_id: str, params: dict[str, str] | None = None
+) -> httpx.Response:
     """POST the answer to the interaction's callback door and return its response.
 
-    Sends ``{"answer": <value>}`` plus ``"params"`` when the session carried link enrichment; the caller
-    applies the status policy. Mirrors the skeleton seam's body shape, so a web answer
-    delivers the same enrichment beside its answer that a MESSAGE turn does; absent
-    params keep the body byte-identical to a plain forward.
+    Sends ``{"answer": <value>, "medium_message_id": <id>}`` plus ``"params"`` when the session
+    carried link enrichment; the caller applies the status policy. Mirrors the skeleton seam's
+    body shape, so a web answer delivers the same enrichment beside its answer that a MESSAGE
+    turn does. ``medium_message_id`` is the id of the ``chat.answered`` entry this answer is
+    appended under once the door accepts it.
     """
-    body: dict[str, Any] = {"answer": answer}
+    body: dict[str, Any] = {"answer": answer, "medium_message_id": medium_message_id}
     if params:
         body["params"] = params
     async with tai42_app.clients.client_ctx(HttpxClient, timeout=web_settings().http_timeout_seconds) as client:
@@ -136,33 +142,48 @@ async def _claim_owned_question(registration: Any, interaction_id: str) -> Quest
 
 
 async def _apply_forward_result(
-    forwarded: httpx.Response, record: QuestionRecord, interaction_id: str, answer: Any, restores: int
+    forwarded: httpx.Response,
+    record: QuestionRecord,
+    interaction_id: str,
+    answer: Any,
+    answered_id: str,
+    restores: int,
 ) -> Response:
     """Apply the callback door's reply to a forwarded answer.
 
     A 2xx carrying ``already_answered`` recorded someone else's answer, so the record
     stays dropped and no ``chat.answered`` frame is written; any other 2xx appends the
-    frame (under the write-order gate, like every agent-side append) and acks. A 404 is
+    frame under ``answered_id`` (under the write-order gate, like every agent-side append) and
+    acks; a sensitive question's frame carries no answer. A 404 is
     terminal (the ticket is gone). A 400 rejected THIS answer: the record is restored
-    so the visitor can re-answer — until the restore cap is spent, when the question is
-    gone and they are told so — and the door's OWN error is surfaced. Anything else
-    restores the record and raises so the visitor can retry.
+    so the visitor can re-answer (code ``answer_refused``) — until the restore cap is
+    spent, when the question is gone (code ``answer_retries_spent``). The 400's ``error``
+    is the door's OWN error, else the fixed refusal, and its ``reason`` the door's own
+    error when it gave one. Anything else restores the record and raises so the visitor
+    can retry.
     """
     if forwarded.status_code // 100 == 2:
         if _is_already_answered(forwarded):
             logger.info("interaction %s was already answered elsewhere; this forward recorded nothing", interaction_id)
             return _error(_ALREADY_ANSWERED, 409)
         async with transcript_order(record.identity, record.address):
-            await append_answered(record.identity, record.address, interaction_id, answer)
+            await append_answered(
+                record.identity,
+                record.address,
+                interaction_id,
+                answer,
+                sensitive=record.sensitive,
+                entry_id=answered_id,
+            )
         return _ok({"status": "answered"})
     if forwarded.status_code == 404:
         logger.warning("callback door returned terminal HTTP 404 for %s; dropping the question", interaction_id)
         return _error("question expired or withdrawn", 404)
     if forwarded.status_code == 400:
-        detail = _door_error_detail(forwarded)
-        if not await restore_question(interaction_id, record, restores):
-            return _error(f"{detail}; {_ANSWER_RETRIES_SPENT}", 400)
-        return _error(detail, 400)
+        reason = _door_error_detail(forwarded)
+        restored = await restore_question(interaction_id, record, restores)
+        code = _ANSWER_REFUSED_CODE if restored else _ANSWER_RETRIES_SPENT_CODE
+        return _error(reason or _CALLBACK_REFUSED, 400, code, reason=reason)
     await restore_question(interaction_id, record, restores)
     raise AnswerForwardError(
         f"interactions callback rejected the answer: HTTP {forwarded.status_code}: {forwarded.text[:500]}"
@@ -236,10 +257,13 @@ async def web_answer(request: Request) -> Response:
     pin_stored_callback(record.callback_url, interaction_id=interaction_id, forwarded="answer")
 
     restores = settings.max_answer_restores
+    # The answer's medium id is the id its chat.answered entry is appended under, minted
+    # before the forward so the callback door records the same id the transcript shows.
+    answered_id = _mint_id()
     try:
-        forwarded = await _forward_answer(record.callback_url, answer, params)
+        forwarded = await _forward_answer(record.callback_url, answer, answered_id, params)
     except httpx.HTTPError:
         # Transport failure — restore so the visitor's retry still resolves it.
         await restore_question(interaction_id, record, restores)
         raise
-    return await _apply_forward_result(forwarded, record, interaction_id, answer, restores)
+    return await _apply_forward_result(forwarded, record, interaction_id, answer, answered_id, restores)

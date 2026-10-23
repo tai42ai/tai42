@@ -13,7 +13,15 @@ Two generic context variables naming registered tools a resuming driver binds:
   run and keeps it with its own resume state; an address naming no tool (the default) means no
   completion delivery is wired.
 
-The resume continuation is a bare tool name. Both are a generic platform mechanism that never
+The resume continuation is a bare tool name. The platform runs it with
+``{"interaction_id", "answer", "reply_to", "params"}``: ``answer`` is the answer value (or
+:data:`EXPIRY_ANSWER`); ``reply_to`` is the message the answering reply quoted, as
+:class:`~tai42_contract.conversations.ReplyTo` JSON, or ``null``; ``params`` is the answer's
+:attr:`~tai42_contract.interactions.models.InteractionResponse.params`, or ``null`` (both are
+always ``null`` on expiry). Every continuation tool declares ``reply_to: ReplyTo | None`` and
+``params: dict[str, str] | None``. A driver that hands the answer back to a waiting ``ask`` hands
+it ``AskAnswer(answer=answer, reply_to=reply_to, params=params)`` as JSON, so a parked asker
+reads what a synchronous asker reads. Both are a generic platform mechanism that never
 names a flow, a session, or any engine state — the address's ``context`` is fully opaque to this
 contract (it carries no route/flow/thread meaning here) and MUST be JSON-serializable, since a
 durable resume path round-trips it. A resume name of ``None`` (the default) means no resuming
@@ -194,7 +202,7 @@ class RunTerminalFailed(Exception):  # noqa: N818 (a control-flow signal, not an
 
     ``reply`` is optional participant-facing text for a conversation door: the platform shows it
     to the participant in place of its fixed failure line, and never inspects or changes it. It is
-    validated to the same bound as a route's ``error_reply_text`` (a non-blank string of at most
+    validated to the same bound as a route's ``reply_texts`` members (a non-blank string of at most
     :data:`~tai42_contract.interactions.REPLY_TEXT_MAX_CHARS` characters), so an invalid value
     raises :class:`pydantic.ValidationError` at the raise site. The target that sets it owns that
     it is safe for the participant and carries no internal detail; ``None`` means no reply, and
@@ -250,6 +258,7 @@ class ParkDeliveryUnauthorizedError(Exception):
 
 # The answer value a continuation receives when its interaction expired unanswered — the
 # generic marker a resuming consumer reads to run its expiry branch instead of a real answer.
+# An expiry run carries ``reply_to`` and ``params`` as ``null``.
 EXPIRY_ANSWER: Final[dict[str, bool]] = {"tai42:interaction_expired": True}
 
 

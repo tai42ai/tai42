@@ -155,11 +155,75 @@ Settings are read from the `CELERY_` environment group (see `CelerySettings`):
 | `CELERY_RESULT_BACKEND` | `redis://localhost:6379/0` | Celery result backend URL |
 | `CELERY_REDBEAT_REDIS_URL` | `redis://localhost:6379/0` | Redis URL for the RedBeat schedule store |
 | `CELERY_REDBEAT_KEY_PREFIX` | `redbeat:` | RedBeat key prefix (schedule zset is `redbeat::schedule`) |
+| `CELERY_REDBEAT_REDIS_MAX_CONNECTIONS` | — | Caps the RedBeat store's connection pool; uncapped when unset |
+| `CELERY_REDBEAT_RETRY_ATTEMPTS` | `0` | Times a failed RedBeat Redis connect or command is retried, each retry logged as a warning; `0` makes one attempt |
+| `CELERY_REDBEAT_RETRY_ON_TIMEOUT` | `false` | With `CELERY_REDBEAT_RETRY_ATTEMPTS` at `0`, retries a timed-out command once at once |
+| `CELERY_REDBEAT_SOCKET_TIMEOUT` | — | Seconds a RedBeat command may wait on its socket; redis-py's default when unset |
+| `CELERY_REDBEAT_SOCKET_CONNECT_TIMEOUT` | — | Seconds a RedBeat connect may take; redis-py's default when unset |
+| `CELERY_RESULT_BACKEND_RETRY_ATTEMPTS` | `0` | A Redis result backend: times a failed connect or command is retried, each retry logged as a warning; `0` makes one attempt |
+| `CELERY_RESULT_BACKEND_RETRY_ON_TIMEOUT` | `false` | A Redis result backend: with `…_RETRY_ATTEMPTS` at `0`, retries a timed-out command once at once |
+| `CELERY_RESULT_BACKEND_SOCKET_TIMEOUT` | — | A Redis result backend: seconds a command may wait on its socket; celery's default when unset |
+| `CELERY_RESULT_BACKEND_SOCKET_CONNECT_TIMEOUT` | — | A Redis result backend: seconds a connect may take; celery's default when unset |
+| `CELERY_BROKER_RETRY_ATTEMPTS` | `0` | A Redis broker, read and write sides alike: times a failed connect or command is retried, each retry logged as a warning; `0` makes one attempt. Never retried: the reads kombu polls (a worker's task and fanout reads, a control command's reply read), where a drop raises |
+| `CELERY_BROKER_RETRY_ON_TIMEOUT` | `false` | A Redis broker: with `…_RETRY_ATTEMPTS` at `0`, retries a timed-out command once at once |
+| `CELERY_BROKER_SOCKET_TIMEOUT` | — | A Redis broker: seconds a command may wait on its socket; kombu's default when unset |
+| `CELERY_BROKER_SOCKET_CONNECT_TIMEOUT` | — | A Redis broker: seconds a connect may take; kombu's default when unset |
 | `CELERY_BEAT_MAX_LOOP_INTERVAL` | `60` | Maximum seconds between beat scheduler ticks |
 | `CELERY_TOOL_NAME_ARG` | `backend_tool_name` | Kwarg name the dispatch injects the target tool into |
 | `CELERY_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the longest a task may run on the worker (`task_time_limit`), and how long a `sync_task` branch waits for the result |
 | `CELERY_MANIFEST_KEY` | `MANIFEST_KEY` | Env var carrying the live manifest JSON (prefork inheritance) |
 | `CELERY_WORKER_CONCURRENCY` | `1` | Prefork pool size — one child by default |
+
+`CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `CELERY_REDBEAT_REDIS_URL` and
+`CELERY_REDBEAT_REDIS_MAX_CONNECTIONS` fall back to the shared
+`TAI_DEFAULT_REDIS_URL` / `TAI_DEFAULT_REDIS_MAX_CONNECTIONS` when unset; the
+retry and socket settings are read from their own namespace alone.
+
+### Redis connections
+
+A Redis result backend takes its retry and timeouts from
+`CELERY_RESULT_BACKEND_RETRY_ATTEMPTS`, `…_RETRY_ON_TIMEOUT`,
+`…_SOCKET_TIMEOUT` and `…_SOCKET_CONNECT_TIMEOUT`; a Redis broker takes the
+same four under `CELERY_BROKER_`, for the read and the write side alike; the
+RedBeat store takes them under `CELERY_REDBEAT_`. A knob left unset keeps
+celery's or kombu's own default. Every retry is logged as a warning, and the
+last failure is raised.
+
+- The plugin picks the Redis result backend and broker transport classes
+  itself, so a URL from `CELERY_RESULT_BACKEND`, `CELERY_BROKER_URL`,
+  `CELERY_BROKER_READ_URL` or `CELERY_BROKER_WRITE_URL` goes through them
+  alike. `CELERY_LOADER` and `--loader` do not change the app's loader.
+- The Redis URL forms taken are `redis://`, `rediss://` and `redis+socket://`
+  (and `redis://`, `rediss://` and `unix://` for `CELERY_REDBEAT_REDIS_URL`).
+  Every other Redis form — `sentinel://`, a `;` failover list, `unix://` or
+  `socket://` for the result backend or the broker, `redis-cluster://` or
+  `redis-sentinel://` for RedBeat — stops the app at startup with an error
+  naming the setting. A non-Redis broker or result backend (AMQP, `rpc://`, …)
+  is left to celery, with celery's own retries.
+- With `RETRY_ATTEMPTS` unset, a Redis connection makes one attempt: a result
+  write fails on the first error, a worker whose Redis read side is not
+  reachable at start exits, and a publish over a Redis write side fails at
+  once. Celery's own startup connect retry is switched off when the read side
+  is Redis, and its publish retry when the write side is Redis, each side on
+  its own; the namespace's `RETRY_ATTEMPTS` takes their place.
+- A running worker that loses its Redis broker keeps reconnecting through
+  celery's own loop (`broker_connection_max_retries`), logged at ERROR.
+- `CELERY_BROKER_RETRY_ATTEMPTS` never retries a read kombu polls: a worker's
+  task and fanout reads, and a control command's reply read (`inspect()`,
+  `control`) in any process. A drop there raises at once. A worker's drop
+  restarts celery's consumer, which reconnects; a control call fails with the
+  connection error, and a retry of that call reconnects.
+- A result wait whose Redis result backend drops is reconnected and
+  re-subscribed by `CELERY_RESULT_BACKEND_RETRY_ATTEMPTS`; after each reconnect
+  it reads the stored state of every task it still awaits, so a result written
+  meanwhile still arrives. When that retry runs out, the wait raises the
+  connection error, and the next wait, on any task, connects again, re-subscribes
+  every task still awaited and reads their stored state.
+- kombu's own connect step retries once after 2 s, and its channel open
+  retries within `broker_connection_timeout`; neither is logged.
+- flower's events, inspector and results go through the plugin's app and the
+  settings above. Its broker and queue-length views open their own Redis
+  connection per request, outside these settings, with no retry.
 
 ### Live reload and the prefork pool
 

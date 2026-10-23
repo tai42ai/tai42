@@ -15,6 +15,8 @@ def _inbound_bridge_kwargs(**overrides: Any) -> dict[str, Any]:
         "cap_key": "+15550001111",
         "provider_message_id": "prov-1",
         "bridge_text": "hello",
+        "medium_message_id": None,
+        "reply_to_medium_message_id": None,
     }
     base.update(overrides)
     return base
@@ -66,3 +68,30 @@ def test_inbound_answer_types_exported():
 
     for name in ("InboundBridge", "InboundAnswerOutcome", "InboundAnswerResult", "AnswerForwardError"):
         assert name in channels_module.__all__
+
+
+def test_inbound_bridge_requires_medium_message_id():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import InboundBridge
+
+    kwargs = _inbound_bridge_kwargs()
+    kwargs.pop("medium_message_id")
+    with pytest.raises(ValidationError, match="medium_message_id"):
+        InboundBridge(**kwargs)
+    assert InboundBridge(**_inbound_bridge_kwargs(medium_message_id=None)).medium_message_id is None
+    assert InboundBridge(**_inbound_bridge_kwargs(medium_message_id="42")).medium_message_id == "42"
+
+
+def test_inbound_bridge_requires_reply_to_medium_message_id():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import InboundBridge
+
+    kwargs = _inbound_bridge_kwargs()
+    kwargs.pop("reply_to_medium_message_id")
+    with pytest.raises(ValidationError, match="reply_to_medium_message_id"):
+        InboundBridge(**kwargs)
+    assert InboundBridge(**_inbound_bridge_kwargs()).reply_to_medium_message_id is None
+    quoting = InboundBridge(**_inbound_bridge_kwargs(reply_to_medium_message_id="41"))
+    assert quoting.reply_to_medium_message_id == "41"

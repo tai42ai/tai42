@@ -85,6 +85,7 @@ async def test_uncorrelated_routed_message_reaches_accept_with_bridge_args(fake_
     assert call.cap_key == call.client_address
     assert call.text == "how do I reset my password?"
     assert call.provider_message_id == "Ev001"
+    assert call.medium_message_id == "1712345679.000200"
     assert _DEDUPE_KEY in fake_redis.store  # processed: retries ack as duplicate
 
 
@@ -249,7 +250,9 @@ async def test_an_over_bound_params_set_bridges_without_params_and_is_counted(fa
     before = _dropped()
     over_bound = {f"k{i}": "v" for i in range(17)}
     with caplog.at_level("WARNING"):
-        response = await _bridge("U-BOT", "C-1", "hello", "Ev-1", params=over_bound)
+        response = await _bridge(
+            "U-BOT", "C-1", "hello", "Ev-1", medium_message_id="1.2", reply_to_medium_message_id=None, params=over_bound
+        )
 
     assert body_json(response) == {"status": "accepted"}
     (call,) = stub_conversations.accept_calls

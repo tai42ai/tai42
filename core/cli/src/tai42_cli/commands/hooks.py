@@ -13,6 +13,7 @@ import typer
 
 from tai42_cli.commands._common import (
     app_context,
+    compact,
     covers,
     emit_records,
     emit_result,
@@ -275,4 +276,75 @@ def delete_topic_verifier(ctx: typer.Context, topic: Annotated[str, typer.Argume
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.delete(f"/api/hooks/topics/{seg(topic)}/verifier")
+    emit_result(ctx_obj, data)
+
+
+# -- hook runs ----------------------------------------------------------------
+# ``tai hooks runs`` — the kept runs of accepted events. A run that fails before its hook acts
+# is retried with backoff; one that is out of attempts, or failed after its hook acted, is held
+# as failed until an operator retries or discards it.
+runs_app = typer.Typer(name="runs", help="List, retry or discard hook runs.", no_args_is_help=True)
+app.add_typer(runs_app)
+
+
+@runs_app.command("list")
+@covers(("GET", "/api/hook-runs"))
+def list_hook_runs(
+    ctx: typer.Context,
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="'outstanding' (pending and running runs) or 'failed' (the failed ones)."),
+    ] = None,
+    limit: Annotated[int | None, typer.Option("--limit", help="Page size.")] = None,
+    cursor: Annotated[str | None, typer.Option("--cursor", help="The next_cursor of a prior page.")] = None,
+) -> None:
+    """List the kept hook runs, never their payloads; ``--json`` adds the outstanding and failed totals.
+
+    The ``acted`` column says whether the hook had acted when the run failed: ``start`` (a
+    retry replays the tool's start), ``""`` or ``cancel`` (a retry runs the hook again), or
+    ``resume`` or ``take`` (it can only be discarded).
+
+    Example: ``tai hooks runs list --status failed``
+    """
+    ctx_obj = app_context(ctx)
+    params = compact({"status": status, "limit": limit, "cursor": cursor})
+    with ctx_obj.client() as client:
+        data = client.get("/api/hook-runs", params=params or None)
+    emit_records(ctx_obj, data, route=("GET", "/api/hook-runs"))
+
+
+@runs_app.command("retry")
+@covers(("POST", "/api/hook-runs/{id}/retry"))
+def retry_hook_run(
+    ctx: typer.Context, run_id: Annotated[str, typer.Argument(metavar="ID", help="The failed hook run's id.")]
+) -> None:
+    """Retry a failed hook run with the same id, and so the same idempotency key.
+
+    A run whose hook started its tool replays that start alone; any other runs its hook again.
+    A run whose hook committed a resume or a take is refused, and the refusal says why.
+
+    Example: ``tai hooks runs retry RUN_ID``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.post(f"/api/hook-runs/{seg(run_id)}/retry")
+    emit_result(ctx_obj, data)
+
+
+@runs_app.command("discard")
+@covers(("DELETE", "/api/hook-runs/{id}"))
+def discard_hook_run(
+    ctx: typer.Context,
+    run_id: Annotated[str, typer.Argument(metavar="ID", help="The failed hook run's id.")],
+    yes: Annotated[bool, typer.Option("--yes", help="Confirm: its hook never runs again for that event.")] = False,
+) -> None:
+    """Discard a failed hook run for good.
+
+    Example: ``tai hooks runs discard RUN_ID --yes``
+    """
+    if not yes:
+        raise typer.BadParameter("pass --yes to discard a hook run")
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.delete(f"/api/hook-runs/{seg(run_id)}")
     emit_result(ctx_obj, data)

@@ -19,8 +19,9 @@ import logging
 
 import pytest
 from pydantic import BaseModel
-from tai42_contract.conversations import ChannelConversationRoute, ConversationRoute
+from tai42_contract.conversations import ChannelConversationRoute, ConversationRoute, ReplyTexts
 from tai42_contract.interactions import PARK_COMPLETION_SUCCEEDED
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations import caps as caps_module
@@ -44,7 +45,7 @@ class _EchoInput(BaseModel):
     user_message: str = ""
 
 
-class FakeChannel:
+class FakeChannel(AddressingChannel):
     # A neutral fixture channel declares its OWN outbound split cap through the generic
     # ``max_message_chars`` seam, read off the channel by the conversation-delivery machine.
     max_message_chars = 1600
@@ -54,7 +55,7 @@ class FakeChannel:
 
     async def notify(self, notification):
         self.sends.append(notification)
-        return [f"out-{len(self.sends)}"]
+        return self.outcome(notification, [f"out-{len(self.sends)}"])
 
 
 class _FakeChannels:
@@ -190,12 +191,12 @@ async def test_completion_empty_result_delivers_error_reply(env, monkeypatch):
     assert channel.sends[0].message == "Sorry, something went wrong handling your message. Please try again."
 
 
-async def test_completion_empty_result_uses_the_route_error_reply_text_when_set(env, monkeypatch):
-    # A blank resumed answer delivers the route's own ``error_reply_text`` when it carries one,
+async def test_completion_empty_result_uses_the_route_reply_texts_error_when_set(env, monkeypatch):
+    # A blank resumed answer delivers the route's own ``reply_texts.error`` when it carries one,
     # not the built-in default (turn.py:1501) — the SAME custom reply a fresh empty turn sends.
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
     channel = FakeChannel()
-    route = _channel_route().model_copy(update={"error_reply_text": spanish})
+    route = _channel_route().model_copy(update={"reply_texts": ReplyTexts(error=spanish)})
     _wire(monkeypatch, FakeManager(route), channel)
 
     out = await _fire("bridge:line:+15550002222", "   ", "cmpl-empty-es")
@@ -300,10 +301,10 @@ async def test_completion_non_success_delivers_the_uniform_error_notice(env, mon
     assert "boom" not in record.answer
 
 
-async def test_completion_non_success_uses_the_route_error_reply_text_when_set(env, monkeypatch):
+async def test_completion_non_success_uses_the_route_reply_texts_error_when_set(env, monkeypatch):
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
     channel = FakeChannel()
-    route = _channel_route().model_copy(update={"error_reply_text": spanish})
+    route = _channel_route().model_copy(update={"reply_texts": ReplyTexts(error=spanish)})
     _wire(monkeypatch, FakeManager(route), channel)
 
     out = await _fire("bridge:line:+15550002222", "the raw terminal", "cmpl-fail-es", status="failed")

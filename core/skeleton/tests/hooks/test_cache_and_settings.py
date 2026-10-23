@@ -14,6 +14,7 @@ from tai42_kit.settings import reset_all_settings
 from tai42_skeleton.hooks.cache import get_hooks_manager
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
 from tai42_skeleton.hooks.managers.redis_hooks_manager import RedisHooksManager
+from tai42_skeleton.hooks.runs.models import HookRun
 from tai42_skeleton.hooks.settings import HooksRedisSettings, HooksSettings
 
 
@@ -205,3 +206,80 @@ def test_max_workers_defaults_and_rejects_non_positive():
         HooksSettings(max_workers=0)
     with pytest.raises(ValidationError):
         HooksSettings(max_workers=-1)
+
+
+def test_hook_run_settings_defaults():
+    settings = HooksSettings()
+    assert settings.run_max_attempts == 5
+    assert settings.run_retry_base_seconds == 10.0
+    assert settings.run_retry_cap_seconds == 600.0
+    assert settings.run_lease_seconds == 60.0
+    assert settings.run_sweep_seconds == 5.0
+    assert settings.run_shutdown_grace_seconds == 20.0
+
+
+def test_hook_run_settings_read_the_environment(monkeypatch):
+    monkeypatch.setenv("HOOKS_RUN_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("HOOKS_RUN_RETRY_BASE_SECONDS", "2")
+    monkeypatch.setenv("HOOKS_RUN_SHUTDOWN_GRACE_SECONDS", "0")
+    settings = HooksSettings()
+    assert (settings.run_max_attempts, settings.run_retry_base_seconds) == (3, 2.0)
+    assert settings.run_shutdown_grace_seconds == 0.0
+
+
+def test_a_retry_base_above_its_cap_is_rejected():
+    with pytest.raises(
+        ValidationError, match="HOOKS_RUN_RETRY_BASE_SECONDS must not exceed HOOKS_RUN_RETRY_CAP_SECONDS"
+    ):
+        HooksSettings(run_retry_base_seconds=601, run_retry_cap_seconds=600)
+    assert HooksSettings(run_retry_base_seconds=600, run_retry_cap_seconds=600).run_retry_base_seconds == 600
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["run_max_attempts", "run_retry_base_seconds", "run_retry_cap_seconds", "run_lease_seconds", "run_sweep_seconds"],
+)
+def test_hook_run_settings_reject_non_positive(field):
+    with pytest.raises(ValidationError):
+        HooksSettings.model_validate({field: 0})
+
+
+def test_a_negative_shutdown_grace_is_rejected():
+    with pytest.raises(ValidationError):
+        HooksSettings(run_shutdown_grace_seconds=-1)
+
+
+def _job(run_id: str) -> HookRun:
+    return HookRun(
+        id=run_id,
+        topic="events",
+        hook="h1",
+        payload={},
+        status="pending",
+        attempts=0,
+        next_attempt_at=0.0,
+        created_at=0.0,
+    )
+
+
+async def test_reset_warns_naming_the_hook_runs_it_drops(monkeypatch, caplog):
+    monkeypatch.delenv("HOOKS_REDIS_URL", raising=False)
+    _clear_singleton()
+    try:
+        manager = get_hooks_manager()
+        assert isinstance(manager, InMemoryHooksManager)
+        await manager._accept_runs("events", [_job(f"r{i}") for i in range(6)], None, None, None)
+        # Claim three (running), then fail one of them.
+        claimed = await manager._claim_due_runs(1.0, 3, "me", 100.0, frozenset())
+        await manager._fail_run(claimed[0].id, "me", "boom", "unknown", 1.0, "", (), None)
+
+        with caplog.at_level(logging.WARNING, logger="tai42_skeleton.hooks.cache"):
+            reset_all_settings()
+
+        assert (
+            "discarding the in-memory hooks manager with 0 registered hook(s) and 3 pending, 2 running and "
+            "1 failed hook run(s)"
+        ) in caplog.text
+        assert get_hooks_manager() is not manager
+    finally:
+        _clear_singleton()

@@ -22,11 +22,23 @@ def person_routes(person: Person) -> set[str]:
 async def newest_person_thread_record(
     store: ConversationRecordStore, person: Person, thread_id: str
 ) -> ConversationRecord | None:
-    """The newest record of ``person``'s aggregated thread ``thread_id``, or ``None`` when it holds none.
+    """The newest record of ``person``'s aggregated thread ``thread_id`` that is not a send record.
 
-    Each caller raises its own error on ``None``.
+    A send record (``origin`` ``"send"``) marks where the deployment sent to, not where the person
+    last wrote from, so it is skipped. The merged index is read newest first in batches of
+    ``thread_queue_depth`` until such a record is found or the index ends. ``None`` when none is
+    left; each caller raises its own error on ``None``.
     """
-    newest, _unreadable = await store.list_person_thread_records(
-        sorted(person_routes(person)), thread_id, offset=0, limit=1, newest_first=True
-    )
-    return newest.records[0] if newest.records else None
+    routes = sorted(person_routes(person))
+    depth = store.settings.thread_queue_depth
+    offset = 0
+    while True:
+        page, _unreadable = await store.list_person_thread_records(
+            routes, thread_id, offset=offset, limit=depth, newest_first=True
+        )
+        for record in page.records:
+            if record.origin != "send":
+                return record
+        offset += depth
+        if offset >= page.total:
+            return None

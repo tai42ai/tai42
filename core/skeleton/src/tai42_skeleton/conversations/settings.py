@@ -11,6 +11,8 @@ from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
+from tai42_skeleton.conversations.thread_ids import BRIDGE_THREAD_PREFIX
+
 
 def _require_key_segment(name: str, value: str) -> None:
     """Raise on a blank key segment.
@@ -276,12 +278,17 @@ class ConversationsSettings(TaiBaseSettings):
 
     # -- Keyspace helpers ----------------------------------------------------
     #
-    # The twenty conversation keyspaces. Every literal key string lives ONLY here. A
+    # The conversation keyspaces, a send record's message-ref lists, ask index and per-route
+    # in-flight sets among them. Every literal key string lives ONLY here. A
     # provider-supplied id sits LAST in its key and the segment before it is checked
     # ``:``-free, so no provider value can bleed across a segment boundary — the sole
-    # exceptions are ``open_code_key`` and the two redeem-throttle keys, whose variable
-    # part is a single opaque ``sha256`` terminal segment folding charset-unconstrained
-    # inputs into a hash, so they carry no qualifier guard.
+    # exceptions are ``message_ref_key``, ``open_code_key`` and the two redeem-throttle keys,
+    # whose variable part is a single opaque ``sha256`` terminal segment folding
+    # charset-unconstrained inputs into a hash, so they carry no qualifier guard.
+    # The person keyspaces beside the person row hold its erase mark, the ids it absorbed, its
+    # thread's recorded routes and an absorbed id's absorbed-into pointer; each writer's threads
+    # list the route-keyed threads it wrote in, so a person's erase visits them and wipes those only
+    # that person and the ids it absorbed wrote in.
 
     def dedupe_key(self, channel: str, provider_message_id: str) -> str:
         """Inbound-dedupe marker key, channel-qualified (a provider message id is unique only within its channel).
@@ -305,7 +312,12 @@ class ConversationsSettings(TaiBaseSettings):
 
     def record_key(self, message_id: str) -> str:
         """Answer/delivery record key, keyed by the record's uuid4 ``message_id``."""
-        return f"{self.prefix}:record:{message_id}"
+        return f"{self.record_key_prefix}{message_id}"
+
+    @property
+    def record_key_prefix(self) -> str:
+        """The record key prefix the writer scripts build a record key from in-script."""
+        return f"{self.prefix}:record:"
 
     def status_index_key(self, delivery_status: str) -> str:
         """Per-status record index — the sorted set of the ``message_id``s in that state.
@@ -328,6 +340,51 @@ class ConversationsSettings(TaiBaseSettings):
         _require_key_segment("outbound_message_id", outbound_message_id)
         return f"{self.prefix}:outbound:{channel}:{outbound_message_id}"
 
+    @property
+    def outbound_index_key_prefix(self) -> str:
+        """The outbound reverse-index key prefix (the segment every :meth:`outbound_index_key` starts with)."""
+        return f"{self.prefix}:outbound:"
+
+    def message_ref_key(self, channel: str, our_identity: str, client_address: str, medium_message_id: str) -> str:
+        """Message-ref key: the ordered list of the record ``message_id``s that carry one medium message id.
+
+        A medium id is unique only within one chat on some media, so the key names the channel, our
+        identity and the participant address with it. Its variable part is a SINGLE opaque terminal
+        segment, the sha256 of the deterministic JSON array of the four, because the address and the
+        medium id are charset-unconstrained and so can never be raw non-terminal segments.
+        """
+        _require_key_segment("channel", channel)
+        _require_key_segment("our_identity", our_identity)
+        _require_key_segment("client_address", client_address)
+        _require_key_segment("medium_message_id", medium_message_id)
+        opaque = hashlib.sha256(
+            json.dumps([channel, our_identity, client_address, medium_message_id], separators=(",", ":")).encode()
+        ).hexdigest()
+        return f"{self.message_ref_key_prefix}{opaque}"
+
+    @property
+    def message_ref_key_prefix(self) -> str:
+        """The message-ref key prefix (the segment every :meth:`message_ref_key` starts with)."""
+        return f"{self.prefix}:message_ref:"
+
+    def ask_send_key(self, interaction_id: str) -> str:
+        """Ask index key: an ask's ``interaction_id`` → the ``message_id`` of the send record that carried it."""
+        _require_key_segment("interaction_id", interaction_id)
+        return f"{self.ask_send_key_prefix}{interaction_id}"
+
+    @property
+    def ask_send_key_prefix(self) -> str:
+        """The ask index key prefix (the segment every :meth:`ask_send_key` starts with)."""
+        return f"{self.prefix}:ask_send:"
+
+    def route_sending_key(self, route_name: str) -> str:
+        """Per-route in-flight set: the ``message_id``s of the send records begun on the route and still ``sending``.
+
+        The route name is checked exactly as :meth:`thread_index_key` checks it.
+        """
+        _require_qualifier_segment("route_name", route_name)
+        return f"{self.prefix}:route_sending:{route_name}"
+
     def thread_index_key(self, route_name: str, thread_id: str) -> str:
         """Per-thread transcript index — the sorted set of one thread's ``message_id``s, scored by ``created_at``.
 
@@ -336,7 +393,12 @@ class ConversationsSettings(TaiBaseSettings):
         """
         _require_qualifier_segment("route_name", route_name)
         _require_key_segment("thread_id", thread_id)
-        return f"{self.prefix}:thread:{route_name}:{thread_id}"
+        return f"{self.thread_index_key_prefix}{route_name}:{thread_id}"
+
+    @property
+    def thread_index_key_prefix(self) -> str:
+        """The transcript-index key prefix the writer scripts build a thread's index key from in-script."""
+        return f"{self.prefix}:thread:"
 
     def route_threads_key(self, route_name: str) -> str:
         """Per-route thread index — the sorted set of the route's ``thread_id``s, scored by last-active time.
@@ -434,6 +496,85 @@ class ConversationsSettings(TaiBaseSettings):
         A survivor id chosen server-side is not known to the caller.
         """
         return f"{self.prefix}:person:"
+
+    def person_erasing_key(self, person_id: str) -> str:
+        """A person's erase mark (value ``"1"``, no TTL), set while its erase runs (terminal ``person_id``).
+
+        A key of its own beside the row, deleted with the row in the erase's last step.
+        """
+        _require_key_segment("person_id", person_id)
+        return f"{self.prefix}:person_erasing:{person_id}"
+
+    @property
+    def person_erasing_key_prefix(self) -> str:
+        """The erase-mark key prefix the person scripts build a mark key from in-script."""
+        return f"{self.prefix}:person_erasing:"
+
+    def person_thread_routes_key(self, person_id: str) -> str:
+        """A SET of the route names a person's thread is indexed under (terminal ``person_id``).
+
+        Written in the same step as the person thread's index, so it names every route the thread
+        holds records on.
+        """
+        _require_key_segment("person_id", person_id)
+        return f"{self.prefix}:person_thread_routes:{person_id}"
+
+    @property
+    def person_thread_routes_key_prefix(self) -> str:
+        """The person-thread-routes key prefix the person scripts build the key from in-script."""
+        return f"{self.prefix}:person_thread_routes:"
+
+    def person_absorbed_key(self, person_id: str) -> str:
+        """A SET of every id a person absorbed by a link, the ids those absorbed in turn included.
+
+        Terminal ``person_id``; no TTL.
+        """
+        _require_key_segment("person_id", person_id)
+        return f"{self.prefix}:person_absorbed:{person_id}"
+
+    def person_absorbed_into_key(self, person_id: str) -> str:
+        """An absorbed person's pointer to the person that absorbed it by a link (terminal ``person_id``, no TTL)."""
+        _require_key_segment("person_id", person_id)
+        return f"{self.prefix}:person_absorbed_into:{person_id}"
+
+    @property
+    def person_absorbed_into_key_prefix(self) -> str:
+        """The absorbed-into pointer prefix the person and record scripts build a pointer key from in-script."""
+        return f"{self.prefix}:person_absorbed_into:"
+
+    def writer_threads_key(self, writer: str) -> str:
+        """A writer's threads: the append-only SET of the route-keyed threads it wrote in (no TTL).
+
+        An erase of the writer visits each; an entry for a thread since cleared costs one visit that
+        finds nothing. The ``writer`` is the ``person_id`` the target's person index named for the
+        record's door at the write, or, while the index named nobody for it, the door itself: the
+        self-delimiting JSON ``[target_kind, target_name, door_address_key]``, terminal.
+        """
+        _require_key_segment("writer", writer)
+        return f"{self.prefix}:writer_threads:{writer}"
+
+    @property
+    def writer_threads_key_prefix(self) -> str:
+        """The writer-threads prefix the record and person scripts build the key from in-script."""
+        return f"{self.prefix}:writer_threads:"
+
+    def writer_prefixes(self) -> str:
+        """The JSON object of key prefixes the scripts that stamp or read a thread's writers build their keys from.
+
+        Besides the person index and the writer threads: the record and transcript-index keys (an
+        adopting person rewrites the writer its door's records carry, an erase reads them) and the
+        route-keyed thread prefix (a thread's route, read in-script).
+        """
+        return json.dumps(
+            {
+                "index": self.person_index_key_prefix,
+                "threads": self.writer_threads_key_prefix,
+                "records": self.record_key_prefix,
+                "thread_index": self.thread_index_key_prefix,
+                "route_thread": BRIDGE_THREAD_PREFIX,
+            },
+            separators=(",", ":"),
+        )
 
     def person_index_key(self, target_kind: str, target_name: str) -> str:
         """Per-target person index — a HASH ``door_address_key`` → ``person_id``.

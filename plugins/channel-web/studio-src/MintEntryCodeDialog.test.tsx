@@ -11,8 +11,8 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, type Mock, vi } from 'vitest';
 
 import { MintEntryCodeDialog } from './MintEntryCodeDialog';
-import { gateQueryClient } from './query-client';
-import { gateRequest, MOUNT_BASE, renderWithClient, stubClient } from './test-utils';
+import { panelQueryClient } from './query-client';
+import { doorRequest, MOUNT_BASE, renderWithClient, stubClient } from './test-utils';
 
 /** A host api error as the api-client raises it. */
 function apiError(message: string, status: number): Error {
@@ -28,9 +28,9 @@ const MINTED = {
 /** Render the dialog under the host providers and its own query cache, its mint door
  *  routed to `mintCode`. */
 function renderMint(mintCode: Mock, onClose: () => void, baseUrl = '', base = MOUNT_BASE) {
-  const client = stubClient(gateRequest({ mintCode }, base), baseUrl);
+  const client = stubClient(doorRequest({ mintCode }, base), baseUrl);
   return renderWithClient(
-    <QueryClientProvider client={gateQueryClient(vi.fn())}>
+    <QueryClientProvider client={panelQueryClient(vi.fn())}>
       <MintEntryCodeDialog base={base} identity="web-1" onClose={onClose} />
     </QueryClientProvider>,
     client,

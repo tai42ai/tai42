@@ -49,7 +49,11 @@ async def insert_pending_save(
     subjects: list[OutboxSubject],
     calls: list[OutboxCall],
 ) -> int | None:
-    """Write the pending save in one transaction and return its id; ``None`` when nothing was staged."""
+    """Write the pending save in one transaction and return its id; ``None`` when nothing was staged.
+
+    A staged ``person`` subject being erased refuses the save inside that transaction with
+    :class:`~tai42_skeleton.conversations.persons.PersonErasingError`, nothing written.
+    """
     if not items and not calls:
         return None
     record_keys: set[str] = set()
@@ -71,6 +75,7 @@ async def insert_pending_save(
         records=items,
         subjects=subjects,
         calls=calls,
+        admit_persons_in_txn=service._refuse_erasing_persons,
     )
     outbox_metrics().enqueued.inc()
     return row_id

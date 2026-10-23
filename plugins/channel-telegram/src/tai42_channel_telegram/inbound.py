@@ -47,6 +47,7 @@ from tai42_channel_telegram.inbound_bridge import (
     _misconfigured,
     _our_identity,
     _reply_params,
+    _reply_to_message_id,
     _resolve_answer,
     _resolve_or_bridge,
 )
@@ -123,11 +124,30 @@ async def _resolve_callback(settings: TelegramSettings, update: dict[str, object
     # A recipient-chat tap on a select/suggested-reply ask resolves via the ladder; a
     # miss (a notify option, or an expired ask) falls through to the bridge — the same
     # split the typed-reply path takes, keyed on the anchor message id.
+    # A tap is a reply to the message holding the keyboard, in the tapping chat.
+    tapped_message_id = str(message_id)
     if _is_recipient_chat(chat, settings):
-        resolved = await _resolve_answer(settings, message_id, chat_id, text, update, params=reply_params)
+        resolved = await _resolve_answer(
+            settings,
+            message_id,
+            chat_id,
+            text,
+            update,
+            medium_message_id=None,
+            reply_to_medium_message_id=tapped_message_id,
+            params=reply_params,
+        )
         if resolved is not None:
             return resolved
-    return await _bridge(settings, chat_id, text, update, params=reply_params)
+    return await _bridge(
+        settings,
+        chat_id,
+        text,
+        update,
+        medium_message_id=None,
+        reply_to_medium_message_id=tapped_message_id,
+        params=reply_params,
+    )
 
 
 def _verify_secret(request: Request, settings: TelegramSettings) -> Response | None:
@@ -222,7 +242,13 @@ def _message_fields(message: dict[str, object]) -> _Bridgeable | _MediaMessage |
     if member is not None:
         raw_caption = message.get("caption")
         caption = raw_caption.strip() if isinstance(raw_caption, str) and raw_caption.strip() else None
-        return _MediaMessage(chat=chat, chat_id=chat_id, member=member, caption=caption)
+        return _MediaMessage(
+            chat=chat,
+            chat_id=chat_id,
+            member=member,
+            caption=caption,
+            reply_to_medium_message_id=_reply_to_message_id(message),
+        )
     for name in _UNSUPPORTED_MEMBERS:
         if name in message:
             return _Unsupported(chat_id, name)
@@ -294,4 +320,12 @@ async def inbound(request: Request) -> Response:
     if isinstance(fields, _MediaMessage):
         return await _bridge_media(settings, fields, message, update)
 
-    return await _resolve_or_bridge(settings, fields.chat, fields.chat_id, fields.text, message, update)
+    return await _resolve_or_bridge(
+        settings,
+        fields.chat,
+        fields.chat_id,
+        fields.text,
+        message,
+        update,
+        reply_to_medium_message_id=_reply_to_message_id(message),
+    )

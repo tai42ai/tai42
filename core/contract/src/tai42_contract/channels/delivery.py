@@ -1,4 +1,8 @@
-"""``ChannelDelivery`` — one question handed to a channel for out-of-band delivery."""
+"""``ChannelDelivery`` — one question handed to a channel — and what a channel send reports.
+
+``SendOutcome`` is what a completed ``notify`` or ``deliver`` reports about itself;
+``ChannelAddress`` is where a channel would send before it sends.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from tai42_contract.channels.notification import NOTIFICATION_ADDRESS_MAX_CHARS
 from tai42_contract.interactions.models import (
     AnswerFormat,
     AnswerMismatchPolicy,
@@ -91,6 +96,9 @@ with warnings.catch_warnings():
         on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY
         callback_url: str  # public /api/interactions/callback/{ticket} — the answer sink
         timeout_at: datetime  # tz-aware; the plugin may surface a deadline to the human
+        # True when the answer body must not be persisted. A channel that stores what passed
+        # through it keeps that an answer was given, never the answer.
+        sensitive: bool
 
         @field_validator("recipient")
         @classmethod
@@ -184,3 +192,53 @@ with warnings.catch_warnings():
                     has_pages=self.pages is not None,
                 )
             return self
+
+
+def _check_address(value: str) -> str:
+    if not value.strip():
+        raise ValueError("must be a non-empty address")
+    if len(value) > NOTIFICATION_ADDRESS_MAX_CHARS:
+        raise ValueError(f"address must be at most {NOTIFICATION_ADDRESS_MAX_CHARS} characters, got {len(value)}")
+    return value
+
+
+class ChannelAddress(BaseModel):
+    """The identity and participant address a channel would send to, known before sending.
+
+    ``our_identity`` is the identity the send goes from; a completed send's
+    :class:`SendOutcome` reports the same identity. ``address`` may not be the canonical
+    one: a medium that resolves a handle only when it sends gives the handle here.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    our_identity: str
+    address: str
+
+    @field_validator("our_identity", "address")
+    @classmethod
+    def _bounded(cls, value: str) -> str:
+        return _check_address(value)
+
+
+class SendOutcome(BaseModel):
+    """What a completed channel send reports about itself.
+
+    ``our_identity`` is the identity the message went out from. ``address`` is the
+    participant address the medium delivered to, in the same form the channel's inbound
+    door passes to ``accept`` as ``client_address`` (taken from the send response where
+    the medium reveals that form only there). ``message_ids`` are the provider ids of the
+    messages sent, in send order (several when the medium splits a long message, empty
+    when it exposes no id).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    our_identity: str
+    address: str
+    message_ids: list[str]
+
+    @field_validator("our_identity", "address")
+    @classmethod
+    def _bounded(cls, value: str) -> str:
+        return _check_address(value)

@@ -228,7 +228,7 @@ def _register_feature_lifecycles(app: TaiMCP) -> None:
 
     The conversation completion tools and re-drive run every epoch build, the delivery sweep
     on the serving loop after every swap; the advisory poll starts only where the
-    ``marketplace_advisories`` operation is served.
+    ``marketplace_advisories`` operation is served; the hook-run sweep starts after every swap.
     """
     app.lifecycle.on_startup(register_conversation_completion_tools)
     app.lifecycle.on_startup(redrive_pending_conversations)
@@ -236,6 +236,12 @@ def _register_feature_lifecycles(app: TaiMCP) -> None:
     app.lifecycle.on_shutdown(stop_conversations_delivery_sweep)
     app.lifecycle.on_post_swap(start_advisories_poll)
     app.lifecycle.on_shutdown(stop_advisories_poll)
+    # Every process that runs the app lifespan sweeps the kept hook runs, so any serve process
+    # or backend worker runs, retries and reclaims them. Its stop is the lifespan's own
+    # ordered shutdown step, ahead of the shutdown handlers.
+    from tai42_skeleton.hooks.runs.sweep import start_hook_runs_sweep
+
+    app.lifecycle.on_post_swap(start_hook_runs_sweep)
 
 
 def _register_states_lifecycles(app: TaiMCP) -> None:

@@ -18,6 +18,7 @@ from tai42_contract.conversations import (
     TargetConversationConfig,
 )
 from tai42_contract.template import TemplatedText
+from tests._helpers import AddressingChannel
 from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.authz.identity import CallerIdentity
@@ -41,10 +42,11 @@ from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
 from tai42_skeleton.conversations.turn import overlap as overlap_module
 from tai42_skeleton.conversations.turn import record as record_module
+from tai42_skeleton.conversations.turn import reply_window as reply_window_module
 from tai42_skeleton.conversations.turn import target as target_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
-from .conftest import FakeManager, _connected, _settle, rendered_user_message, serve_stores
+from .conftest import FakeManager, _connected, _settle, create_record, rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -107,7 +109,7 @@ class ContextModeAgent(MemorylessTestAgent):
         return None
 
 
-class FakeChannel:
+class FakeChannel(AddressingChannel):
     # A neutral fixture channel declares its OWN outbound split cap through the generic
     # ``max_message_chars`` seam, read off the channel by the conversation-delivery machine.
     max_message_chars = 1600
@@ -117,7 +119,7 @@ class FakeChannel:
 
     async def notify(self, notification):
         self.sends.append(notification)
-        return [f"out-{len(self.sends)}"]
+        return self.outcome(notification, [f"out-{len(self.sends)}"])
 
 
 class _FakeApp:
@@ -206,7 +208,9 @@ def _wire(monkeypatch, manager: FakeManager, agent: Agent | None = None, channel
     if agent is not None:
         monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     if channel is not None:
+        # The reply's send and the turn's reply-window read resolve the SAME registered channel.
         monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
+        monkeypatch.setattr(reply_window_module, "tai42_app", _FakeApp(channel))
 
 
 # -- channel door ------------------------------------------------------------
@@ -217,7 +221,16 @@ async def test_manual_channel_agent_appends_the_inbound_and_runs_no_turn(env, mo
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route(initial_mode="manual")), agent, channel)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "help", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "help",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     # No agent turn ran; the inbound was appended as a user message to the thread's memory.
@@ -243,7 +256,16 @@ async def test_manual_channel_tool_appends_nothing_and_dispatches_no_tool(env, m
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route(initial_mode="manual", target_kind="tool")), channel=channel)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "help", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "help",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert dispatched == []
@@ -261,7 +283,16 @@ async def test_manual_channel_memoryless_agent_appends_nothing_and_records_silen
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route(initial_mode="manual")), agent, channel)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "help", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "help",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert agent.runs == []
@@ -306,9 +337,7 @@ async def test_person_thread_manual_fold_to_a_memoryless_target_records_silent_n
         ],
     )
 
-    class _FakePersonStore:
-        async def get_by_id(self, person_id: str):
-            return person if person_id == "p9" else None
+    env.seed_person(person)
 
     line_b = ChannelConversationRoute(
         route_name="line-b",
@@ -322,7 +351,7 @@ async def test_person_thread_manual_fold_to_a_memoryless_target_records_silent_n
         execution_key_fingerprint="fp-1",
     )
     agent = MemorylessAgent()
-    manager = serve_stores(FakeManager(_channel_route(initial_mode="agent"), line_b), persons=_FakePersonStore())
+    manager = FakeManager(_channel_route(initial_mode="agent"), line_b)
     _wire(monkeypatch, manager, agent)
     route = _channel_route(initial_mode="agent")
     person_thread = "bridge:@person:p9"
@@ -336,7 +365,7 @@ async def test_person_thread_manual_fold_to_a_memoryless_target_records_silent_n
         inbound_text="help",
         delivery_status=DeliveryStatus.ACCEPTED,
     )
-    await _store().create_record(intake, intake_token="tok")
+    await create_record(_store(), intake, intake_token="tok")
 
     completed = await target_module._complete_turn(
         route=route, intake=intake, text="help", batch=overlap_module.Batch(lead=intake, members=[intake])
@@ -359,7 +388,16 @@ async def test_manual_mode_via_a_thread_override_over_an_agent_default_route(env
     # The route defaults to agent, but a per-thread override flips this one thread to manual.
     await ConversationModeStore(ConversationsSettings()).set_mode("bridge:line:+15550002222", "manual")
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "help", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "help",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert agent.runs == []
@@ -373,7 +411,16 @@ async def test_agent_default_route_still_runs_the_turn(env, monkeypatch):
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route(initial_mode="agent")), agent, channel)
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "help", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "help",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert agent.runs == [("help", "bridge:line:+15550002222")]
@@ -386,7 +433,16 @@ async def test_manual_channel_append_failure_is_a_loud_error_outcome(env, monkey
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route(initial_mode="manual")), agent, channel)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "help", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "help",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     # An append that fails is never a silent drop: the record takes the error outcome and the
@@ -431,7 +487,16 @@ async def test_manual_mode_keeps_a_pairing_turn_live(env, monkeypatch):
     # Seed the multichannel config row (the record fake carries no config put Lua).
     env.seed_target_config(TargetConversationConfig(target_kind="agent", target_name="echo", multichannel=True))
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "/link", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "/link",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     # The pairing reply went out (a code was minted and sent), and the target turn never ran.
@@ -454,7 +519,16 @@ async def test_agent_calling_set_conversation_mode_flips_the_current_thread(env,
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route(initial_mode="agent")), agent, channel)
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "help", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "help",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert await ConversationModeStore(ConversationsSettings()).get_mode("bridge:line:+15550002222") == "manual"

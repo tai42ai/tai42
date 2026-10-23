@@ -11,6 +11,7 @@ from tai42_contract.channels import ChannelDelivery, ChannelInputError, ChannelN
 from tai42_contract.interactions.models import ChoiceWording
 
 from tai42_channel_whatsapp.client import (
+    SentMessage,
     send_interactive_buttons,
     send_interactive_list,
     send_message,
@@ -129,8 +130,8 @@ async def _send_choice(
     options: list[str],
     ids: list[tuple[str, str]],
     choice: ChoiceWording | None = None,
-) -> list[str]:
-    """Send one tappable-choice message in its native shape and return its ``wamid`` (one message).
+) -> list[SentMessage]:
+    """Send one tappable-choice message in its native shape and return it (one message).
 
     ``ids`` are the ``(id, title)`` reply ids; the numbered fallback carries no ids (the
     human types an option). ``choice`` is the caller's choice wording: its ``label`` draws the

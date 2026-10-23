@@ -163,6 +163,13 @@ class _LeaseReleaseListener:
             for woken in events:
                 woken.set()
 
+    def _on_reconnect(self) -> None:
+        logger.warning(
+            "conversations: thread lease release listener reconnected; waking every waiter, as a "
+            "release sent while it was disconnected is not heard"
+        )
+        self._wake_all()
+
     async def _run(self, subscribed: asyncio.Future[None]) -> None:
         backoff = _RESUBSCRIBE_BACKOFF_INITIAL
 
@@ -199,7 +206,10 @@ class _LeaseReleaseListener:
         # long as a turn waits, and a pooled connection would be pinned for that whole wait.
         listener_redis = redis.model_copy(update={"socket_timeout": None})
         async with client_ctx(RedisClient, listener_redis, fresh=True) as r:
-            pubsub = r.pubsub()
+            # A reconnect the connection retry hides (the read reconnects and re-subscribes
+            # inside the call, raising nothing) wakes every waiter too: a release published
+            # while the connection was down was not heard.
+            pubsub = r.pubsub(on_reconnect=self._on_reconnect)
             try:
                 await pubsub.subscribe(self._channel)
                 # The confirmation read is bounded by the configured read timeout, so a Redis that

@@ -17,6 +17,7 @@ from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStat
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
+from .conftest import create_record
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 _ROUTE = "line"
@@ -76,7 +77,7 @@ def _route_threads_key() -> str:
 
 async def test_creating_a_record_indexes_it_in_its_thread_and_the_route(store, fake):
     now = time.time()
-    await store.create_record(_record("m1", created_at=now))
+    await create_record(store, _record("m1", created_at=now))
 
     assert await fake.zrange(_thread_key(), 0, -1) == ["m1"]
     assert await fake.zrange(_route_threads_key(), 0, -1) == [_THREAD]
@@ -85,15 +86,16 @@ async def test_creating_a_record_indexes_it_in_its_thread_and_the_route(store, f
 async def test_the_transcript_index_is_scored_by_creation_so_it_reads_in_order(store, fake):
     now = time.time()
     # Written newest-first: the index must still read oldest-first.
-    await store.create_record(_record("m2", created_at=now + 5))
-    await store.create_record(_record("m1", created_at=now))
+    await create_record(store, _record("m2", created_at=now + 5))
+    await create_record(store, _record("m1", created_at=now))
 
     assert await fake.zrange(_thread_key(), 0, -1) == ["m1", "m2"]
 
 
 async def test_the_route_thread_index_tracks_the_last_activity(store, fake):
     now = time.time()
-    await store.create_record(
+    await create_record(
+        store,
         _record("m1", created_at=now, delivery_status=DeliveryStatus.ACCEPTED, answer_status=None, answer=None),
         intake_token="worker-1",
     )
@@ -106,7 +108,8 @@ async def test_the_route_thread_index_tracks_the_last_activity(store, fake):
 
 async def test_a_silent_turn_re_scores_the_thread_too(store, fake):
     now = time.time()
-    await store.create_record(
+    await create_record(
+        store,
         _record("m1", created_at=now, delivery_status=DeliveryStatus.ACCEPTED, answer_status=None, answer=None),
         intake_token="worker-1",
     )
@@ -119,8 +122,8 @@ async def test_deleting_the_last_record_takes_its_thread_out_of_the_route_index(
     now = time.time()
     first = _record("m1", created_at=now)
     second = _record("m2", created_at=now + 1)
-    await store.create_record(first)
-    await store.create_record(second)
+    await create_record(store, first)
+    await create_record(store, second)
 
     # A thread outlives any ONE of its records.
     assert await store.delete_record(first) is True
@@ -137,9 +140,9 @@ async def test_deleting_the_last_record_takes_its_thread_out_of_the_route_index(
 
 async def test_the_thread_listing_summarizes_each_thread_from_its_newest_record(store):
     now = time.time()
-    await store.create_record(_record("m1", created_at=now))
-    await store.create_record(_record("m2", created_at=now + 10, delivery_status=DeliveryStatus.FAILED))
-    await store.create_record(_record("o1", created_at=now + 20, thread_id="bridge:line:+15550009999"))
+    await create_record(store, _record("m1", created_at=now))
+    await create_record(store, _record("m2", created_at=now + 10, delivery_status=DeliveryStatus.FAILED))
+    await create_record(store, _record("o1", created_at=now + 20, thread_id="bridge:line:+15550009999"))
 
     page, _ = await store.list_route_threads(_ROUTE, offset=0, limit=10)
 
@@ -158,7 +161,8 @@ async def test_the_listed_activity_moment_is_the_key_the_listing_sorts_by(store,
     # place in the route index. The summary must carry the moment it was ORDERED by, or the
     # door advertises "newest activity first" and hands back rows out of that order.
     now = time.time()
-    await store.create_record(
+    await create_record(
+        store,
         _record("m1", created_at=now, delivery_status=DeliveryStatus.ACCEPTED, answer_status=None, answer=None),
         intake_token="worker-1",
     )
@@ -176,8 +180,8 @@ async def test_the_listed_activity_moment_is_the_key_the_listing_sorts_by(store,
 async def test_the_thread_listing_pages(store):
     now = time.time()
     for index in range(3):
-        await store.create_record(
-            _record(f"m{index}", created_at=now + index, thread_id=f"bridge:line:+1555000{index}")
+        await create_record(
+            store, _record(f"m{index}", created_at=now + index, thread_id=f"bridge:line:+1555000{index}")
         )
 
     first, _ = await store.list_route_threads(_ROUTE, offset=0, limit=2)
@@ -191,7 +195,7 @@ async def test_the_thread_listing_pages(store):
 async def test_the_transcript_reads_oldest_first_and_pages(store):
     now = time.time()
     for index in range(3):
-        await store.create_record(_record(f"m{index}", created_at=now + index))
+        await create_record(store, _record(f"m{index}", created_at=now + index))
 
     first, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=2)
     second, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=2, limit=2)
@@ -207,7 +211,7 @@ async def test_the_transcript_reads_newest_first_and_pages_from_that_end(store):
     # sees each new message instead of the first page of history forever.
     now = time.time()
     for index in range(3):
-        await store.create_record(_record(f"m{index}", created_at=now + index))
+        await create_record(store, _record(f"m{index}", created_at=now + index))
 
     first, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=2, newest_first=True)
     second, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=2, limit=2, newest_first=True)
@@ -228,8 +232,8 @@ async def test_an_unknown_thread_reads_as_an_empty_index(store):
 
 async def test_a_transcript_read_leaves_a_rowless_member_for_the_prune_pass(store, fake, caplog):
     now = time.time()
-    await store.create_record(_record("m1", created_at=now))
-    await store.create_record(_record("m2", created_at=now + 1))
+    await create_record(store, _record("m1", created_at=now))
+    await create_record(store, _record("m2", created_at=now + 1))
     # The row swept by the retention TTL from under its index.
     fake._hashes.pop(ConversationsSettings().record_key("m1"))
 
@@ -248,7 +252,7 @@ async def test_paging_a_transcript_holding_rowless_members_never_skips_a_live_re
     # next page started past records it had never returned.
     now = time.time()
     for index in range(6):
-        await store.create_record(_record(f"m{index}", created_at=now + index))
+        await create_record(store, _record(f"m{index}", created_at=now + index))
     for gone in ("m0", "m2"):
         fake._hashes.pop(ConversationsSettings().record_key(gone))
 
@@ -263,7 +267,7 @@ async def test_paging_a_transcript_holding_rowless_members_never_skips_a_live_re
 
 async def test_a_thread_listing_leaves_a_thread_with_no_readable_record_for_the_prune_pass(store, fake, caplog):
     now = time.time()
-    await store.create_record(_record("m1", created_at=now))
+    await create_record(store, _record("m1", created_at=now))
     fake._hashes.pop(ConversationsSettings().record_key("m1"))
 
     page, unreadable = await store.list_route_threads(_ROUTE, offset=0, limit=10)
@@ -280,8 +284,8 @@ async def test_a_thread_listing_leaves_a_thread_with_no_readable_record_for_the_
 async def test_paging_a_thread_listing_holding_dead_threads_never_skips_a_live_one(store, fake):
     now = time.time()
     for index in range(5):
-        await store.create_record(
-            _record(f"m{index}", created_at=now + index, thread_id=f"bridge:line:+1555000{index}")
+        await create_record(
+            store, _record(f"m{index}", created_at=now + index, thread_id=f"bridge:line:+1555000{index}")
         )
     for gone in ("m4", "m2"):
         fake._hashes.pop(ConversationsSettings().record_key(gone))
@@ -301,8 +305,8 @@ async def test_paging_a_thread_listing_holding_dead_threads_never_skips_a_live_o
 async def test_the_prune_pass_reclaims_an_idle_thread_and_leaves_a_live_one(store, fake):
     now = time.time()
     retention = ConversationsSettings().answer_retention_ttl_seconds
-    await store.create_record(_record("old", created_at=now - retention - 60, thread_id="bridge:line:+15550000000"))
-    await store.create_record(_record("new", created_at=now))
+    await create_record(store, _record("old", created_at=now - retention - 60, thread_id="bridge:line:+15550000000"))
+    await create_record(store, _record("new", created_at=now))
     # Only the idle thread's row has been swept by the retention TTL.
     fake._hashes.pop(ConversationsSettings().record_key("old"))
 
@@ -318,7 +322,7 @@ async def test_the_prune_pass_keeps_an_idle_thread_whose_rows_are_still_retained
     retention = ConversationsSettings().answer_retention_ttl_seconds
     # Old enough to be a candidate, but its row is still there — the row, not the clock,
     # decides.
-    await store.create_record(_record("old", created_at=now - retention - 60))
+    await create_record(store, _record("old", created_at=now - retention - 60))
 
     await store.prune_expired_terminal_indexes([_ROUTE])
 
@@ -332,8 +336,8 @@ async def test_the_prune_pass_reclaims_the_expired_members_of_an_ACTIVE_thread(s
     now = time.time()
     retention = ConversationsSettings().answer_retention_ttl_seconds
     for index in range(3):
-        await store.create_record(_record(f"old{index}", created_at=now - retention - 60 + index))
-    await store.create_record(_record("live", created_at=now))
+        await create_record(store, _record(f"old{index}", created_at=now - retention - 60 + index))
+    await create_record(store, _record("live", created_at=now))
     for index in range(3):
         fake._hashes.pop(ConversationsSettings().record_key(f"old{index}"))
     assert (await store.list_route_threads(_ROUTE, offset=0, limit=10))[0].threads[0].message_count == 4
@@ -350,7 +354,7 @@ async def test_the_prune_pass_reads_a_thread_in_bounded_batches(store, fake, mon
     now = time.time()
     retention = ConversationsSettings().answer_retention_ttl_seconds
     for index in range(5):
-        await store.create_record(_record(f"old{index}", created_at=now - retention - 60 + index))
+        await create_record(store, _record(f"old{index}", created_at=now - retention - 60 + index))
         fake._hashes.pop(ConversationsSettings().record_key(f"old{index}"))
     reads: list[int] = []
     inner = fake.zrangebyscore
@@ -378,7 +382,7 @@ async def test_the_prune_pass_charges_its_budget_for_every_thread_it_examines(st
     monkeypatch.setattr(records_module, "_PRUNE_WORK_PER_PASS", 2)
     now = time.time()
     for index in range(5):
-        await store.create_record(_record(f"m{index}", created_at=now, thread_id=f"bridge:line:+1555000{index}"))
+        await create_record(store, _record(f"m{index}", created_at=now, thread_id=f"bridge:line:+1555000{index}"))
     examined: list[str] = []
     inner = fake.zrangebyscore
 
@@ -406,10 +410,11 @@ async def test_the_prune_pass_resumes_where_the_last_one_stopped(store, fake, mo
     for index in range(3):
         # Aged past the retention window, but the rows are still there — a record carries no
         # expiry until it turns terminal, so nothing here is reclaimable.
-        await store.create_record(
-            _record(f"live{index}", created_at=now - retention - 60 + index, thread_id=f"bridge:line:+1555000{index}")
+        await create_record(
+            store,
+            _record(f"live{index}", created_at=now - retention - 60 + index, thread_id=f"bridge:line:+1555000{index}"),
         )
-    await store.create_record(_record("dead", created_at=now - retention - 30, thread_id="bridge:line:+15550009"))
+    await create_record(store, _record("dead", created_at=now - retention - 30, thread_id="bridge:line:+15550009"))
     fake._hashes.pop(ConversationsSettings().record_key("dead"))
 
     cursor = records_module.PRUNE_START
@@ -431,7 +436,7 @@ async def test_the_prune_pass_walks_the_route_index_in_bounded_windows(store, fa
     monkeypatch.setattr(records_module, "_PRUNE_THREADS_PER_BATCH", 2)
     now = time.time()
     for index in range(5):
-        await store.create_record(_record(f"m{index}", created_at=now, thread_id=f"bridge:line:+1555000{index}"))
+        await create_record(store, _record(f"m{index}", created_at=now, thread_id=f"bridge:line:+1555000{index}"))
     windows: list[tuple[int, int]] = []
     inner = fake.zrange
 
@@ -450,14 +455,14 @@ async def test_the_prune_pass_walks_the_route_index_in_bounded_windows(store, fa
 
 async def test_the_prune_pass_wraps_to_the_start_once_every_route_is_walked(store, fake):
     now = time.time()
-    await store.create_record(_record("m1", created_at=now))
+    await create_record(store, _record("m1", created_at=now))
     assert await store.prune_expired_terminal_indexes([_ROUTE]) == records_module.PRUNE_START
 
 
 async def test_the_prune_pass_ignores_a_cursor_naming_a_deleted_route(store, fake):
     now = time.time()
     retention = ConversationsSettings().answer_retention_ttl_seconds
-    await store.create_record(_record("old", created_at=now - retention - 60))
+    await create_record(store, _record("old", created_at=now - retention - 60))
     fake._hashes.pop(ConversationsSettings().record_key("old"))
 
     await store.prune_expired_terminal_indexes([_ROUTE], records_module.PruneCursor("deleted-route", 7, 9))
@@ -475,7 +480,7 @@ async def test_the_prune_pass_drops_index_members_only_inside_the_atomic_step(st
 
     now = time.time()
     retention = ConversationsSettings().answer_retention_ttl_seconds
-    await store.create_record(_record("old", created_at=now - retention - 60))
+    await create_record(store, _record("old", created_at=now - retention - 60))
     fake._hashes.pop(ConversationsSettings().record_key("old"))
     monkeypatch.setattr(fake, "zrem", _refuse)
 
@@ -490,8 +495,8 @@ async def test_the_prune_pass_drops_index_members_only_inside_the_atomic_step(st
 
 async def test_dropping_a_route_reclaims_its_thread_indexes(store, fake):
     now = time.time()
-    await store.create_record(_record("m1", created_at=now))
-    await store.create_record(_record("o1", created_at=now + 1, thread_id="bridge:line:+15550009999"))
+    await create_record(store, _record("m1", created_at=now))
+    await create_record(store, _record("o1", created_at=now + 1, thread_id="bridge:line:+15550009999"))
 
     await store.drop_route_threads(_ROUTE)
 
@@ -507,7 +512,7 @@ async def test_dropping_a_route_reads_its_thread_index_in_bounded_windows(store,
     monkeypatch.setattr(records_module, "_PRUNE_THREADS_PER_BATCH", 2)
     now = time.time()
     for index in range(5):
-        await store.create_record(_record(f"m{index}", created_at=now, thread_id=f"bridge:line:+1555000{index}"))
+        await create_record(store, _record(f"m{index}", created_at=now, thread_id=f"bridge:line:+1555000{index}"))
     windows: list[tuple[int, int]] = []
     inner = fake.zrange
 
@@ -534,7 +539,7 @@ async def test_a_create_landing_after_the_route_delete_indexes_nothing(store, fa
     now = time.time()
     fake.drop_route(_ROUTE)
 
-    await store.create_record(_record("m1", created_at=now))
+    await create_record(store, _record("m1", created_at=now))
 
     assert await fake.zrange(_thread_key(), 0, -1) == []
     assert await fake.zrange(_route_threads_key(), 0, -1) == []
@@ -550,7 +555,7 @@ async def test_the_prune_pass_reclaims_a_thread_whose_index_is_already_empty(sto
     # points at an all-omitted page, and a door edit is blocked behind a count with no
     # visible thread.
     now = time.time()
-    await store.create_record(_record("m1", created_at=now))
+    await create_record(store, _record("m1", created_at=now))
     # The transcript index gone from under the route index — what an interrupted route
     # reclamation leaves behind (it deletes the thread's own index first).
     fake._zsets.pop(_thread_key())
@@ -564,7 +569,7 @@ async def test_the_prune_pass_leaves_a_thread_that_still_holds_a_live_member(sto
     # The flip side: a thread with members but no EXPIRED member is healthy, and the same
     # step must leave it exactly where it is.
     now = time.time()
-    await store.create_record(_record("m1", created_at=now))
+    await create_record(store, _record("m1", created_at=now))
 
     await store.prune_expired_terminal_indexes([_ROUTE])
 
@@ -578,7 +583,9 @@ async def _two_reclaimable_members(store, fake, thread_id: str) -> None:
     now = time.time()
     retention = ConversationsSettings().answer_retention_ttl_seconds
     for index in range(2):
-        await store.create_record(_record(f"dead{index}", created_at=now - retention - 60 + index, thread_id=thread_id))
+        await create_record(
+            store, _record(f"dead{index}", created_at=now - retention - 60 + index, thread_id=thread_id)
+        )
         fake._hashes.pop(ConversationsSettings().record_key(f"dead{index}"))
 
 
@@ -622,7 +629,8 @@ async def test_a_turn_completing_after_a_route_delete_never_resurrects_the_index
     # so a completion that re-stamped the route index would leave a thread nothing can
     # reclaim: no read reaches it, no TTL expires it, and the prune walks LIVE routes only.
     now = time.time()
-    await store.create_record(
+    await create_record(
+        store,
         _record("m1", created_at=now, delivery_status=DeliveryStatus.ACCEPTED, answer_status=None, answer=None),
         intake_token="worker-1",
     )
@@ -652,8 +660,8 @@ async def test_the_thread_listing_scans_past_a_corrupt_record_to_the_next_readab
     # up on it removes it from the operator listing permanently, because the prune never
     # reclaims a thread whose rows are all there.
     now = time.time()
-    await store.create_record(_record("m1", created_at=now))
-    await store.create_record(_record("m2", created_at=now + 1))
+    await create_record(store, _record("m1", created_at=now))
+    await create_record(store, _record("m2", created_at=now + 1))
     fake.seed_hash(
         ConversationsSettings().record_key("m2"),
         {"data": "{not json", "delivery_status": "delivered", "outbound_ids": "[]", "attempts": "0", "updated_at": "0"},
@@ -670,7 +678,7 @@ async def test_a_transcript_skips_a_corrupt_record_and_keeps_the_readable_ones(s
     # A regression here turns a transcript read into an unmapped 500 for the whole thread.
     now = time.time()
     for index in range(3):
-        await store.create_record(_record(f"m{index}", created_at=now + index))
+        await create_record(store, _record(f"m{index}", created_at=now + index))
     fake.seed_hash(
         ConversationsSettings().record_key("m1"),
         {"data": "{not json", "delivery_status": "delivered", "outbound_ids": "[]", "attempts": "0", "updated_at": "0"},
@@ -693,4 +701,4 @@ async def test_a_non_finite_number_is_refused_at_the_persist_seam(store):
     # ``Infinity``/``NaN`` render as bare tokens no standard JSON parser reads back, so the
     # row would persist unreadable and every later read of it would blow up.
     with pytest.raises(ValueError, match="not JSON compliant"):
-        await store.create_record(_record("m1", created_at=float("inf")))
+        await create_record(store, _record("m1", created_at=float("inf")))

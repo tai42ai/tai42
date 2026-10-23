@@ -10,7 +10,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from tai42_contract.interactions import AnswerFormat, InteractionRequest
+from tai42_contract.interactions import AnswerFormat, FormReactionHandlerError, InteractionRequest
 
 from tai42_skeleton.interactions import reaction as reaction_module
 from tai42_skeleton.operations import interactions as ops
@@ -110,11 +110,12 @@ async def test_callback_react_on_static_form_is_409(wired, fake_client_ctx):
 
 
 async def test_callback_react_handler_error_is_502(wired, fake_client_ctx):
-    _wire_reaction(wired, fake_client_ctx, raises=reaction_module.FormReactionHandlerError("boom"))
+    _wire_reaction(wired, fake_client_ctx, raises=FormReactionHandlerError("boom"))
     await wired.store.add(wired.fake, _reacting_req(wired.store), idle_ttl=86400, ticket="TKT", ticket_ttl=60)
     body = _body({"kind": "field_changed", "field": "name"}, {"name": "x"})
     resp = await router.callback_react(make_request("POST", path_params={"ticket": "TKT"}, body=body))
     assert resp.status_code == 502
+    assert _json(resp)["error"] == "boom"
 
 
 async def test_callback_react_an_event_outside_the_contract_vocabulary_is_400(wired, fake_client_ctx):
@@ -154,7 +155,7 @@ async def test_react_operation_honours_the_audience_gate(wired, fake_client_ctx)
 
 
 async def test_react_operation_handler_error_is_upstream(wired, fake_client_ctx):
-    _wire_reaction(wired, fake_client_ctx, raises=reaction_module.FormReactionHandlerError("boom"))
+    _wire_reaction(wired, fake_client_ctx, raises=FormReactionHandlerError("boom"))
     await wired.store.add(wired.fake, _reacting_req(wired.store), idle_ttl=86400)
     with pytest.raises(UpstreamError):
         await ops.react_interaction("r1", {"kind": "field_changed", "field": "name"}, {"name": "x"})

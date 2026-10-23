@@ -271,10 +271,19 @@ target must itself have `multichannel` on.
 `reply_expr` maps a RETURNED result, whatever keys it carries. A target that fails
 RAISES `RunTerminalFailed(outcome)`: the turn fails regardless of the mapping, the
 participant reads the target's own reply when the failure carries one
-(`RunTerminalFailed(outcome, reply="...")`), else the route's `error_reply_text`, else
+(`RunTerminalFailed(outcome, reply="...")`), else the route's `reply_texts.error`, else
 the built-in line, and the opaque outcome rides the record's `error` detail. A run that
 PARKS (returns a `SuspendedInteraction`) is neither mapped nor failed: the turn ends
 silently and the reply delivers out of band when the run resumes past the pause.
+
+A route's `reply_texts` catalogue carries its own words, in the line's language, for the
+platform's fixed participant replies: `error` (a failed turn with no target reply),
+`slow_down` (an address over the turn cap), the pairing replies `pairing_linked`,
+`pairing_unlinked`, `pairing_not_linked`, `pairing_code_invalid` and `pairing_code` (the
+`/link` reply, a template that must reference `{pairing_code}` and may reference
+`{expires_at}`), and the inbound refusal notices `rejected_unsupported_type`,
+`rejected_too_large` and `rejected_could_not_receive`. An unset member sends the built-in
+English reply.
 
 ## Development
 

@@ -41,7 +41,27 @@ _SELECTABLE_CONTROLS = frozenset(
 )
 
 # The per-field screen-data carriers, by suffix on the field's component name.
-CARRIER_SUFFIXES = ("__init", "__ds", "__err", "__invalid", "__val")
+CARRIER_SUFFIXES = ("__init", "__ds", "__err", "__invalid", "__required", "__val")
+
+# The caller's form-level lines the data endpoint draws: ``error_line`` (the pop-up summary of a
+# refusal) and ``update_failed`` (the could-not-update notice). An ask reads them from its sidecar;
+# an ask-less form carries each as screen data under :func:`form_line_carrier`. The carriers are
+# reserved property names but NOT reaction markers: an answer's echo of the screen data keeps them.
+FORM_LINE_MEMBERS = ("error_line", "update_failed")
+
+
+def form_line_carrier(member: str) -> str:
+    """The screen-data key an ask-less endpoint-driven form carries the caller's ``member`` line under."""
+    return f"tai42_{member}"
+
+
+def required_fields(properties: dict[str, Any], required: set[str]) -> frozenset[str]:
+    """The fields the form-shape check can report missing — the ones a caller's ``required`` sentence may word.
+
+    The check reports a missing value only for a top-level ``required`` name; a nested ``required``
+    inside a field is a shape of the field's value, worded by its ``invalid`` sentence.
+    """
+    return frozenset(name for name in properties if name in required)
 
 
 def error_fields(
@@ -122,7 +142,7 @@ def form_endpoint_driven(
     merged = set(range_merges) | set(range_merges.values())
     for name, prop in properties.items():
         component = _field_control(name, prop, name in required, option_fields, names)
-        if field_needs_endpoint(prop, component, name in merged):
+        if field_needs_endpoint(prop, component, name in merged, properties):
             return True
     return False
 
@@ -133,23 +153,27 @@ def guard_endpoint_names(
     """Refuse an endpoint-driven form whose component names or payload keys collide with each other.
 
     An endpoint-driven payload keys each value by its schema name — a per-case field's by its cases'
-    component names (``case_names``, one entry per drawn control) — beside the event markers, every
-    field's carriers (``<name>__init`` …) and the display slots' data keys (``slot_keys``); a key
-    spelled like another would be read as the other. A per-case control also shares the screen's
+    component names (``case_names``, one entry per drawn control) — beside the event markers, the
+    form-line carriers (:func:`form_line_carrier`), every field's carriers (``<name>__init`` …) and
+    the display slots' data keys (``slot_keys``); a key spelled like another would be read as the
+    other. A per-case control also shares the screen's
     component namespace with every field's own control (``names``), so a case named like another
     field's control, or drawn by two fields, would bind two controls to one name. Raises
     ``ChannelInputError`` naming the colliding keys.
     """
+    line_carriers = {form_line_carrier(member) for member in FORM_LINE_MEMBERS}
     reserved = (
         set(RESERVED_REACTION_KEYS)
+        | line_carriers
         | {f"{cname}{suffix}" for cname in names.values() for suffix in CARRIER_SUFFIXES}
         | set(slot_keys)
     )
     collision = sorted(reserved & set(properties))
     if collision:
         raise ChannelInputError(
-            f"form property names {collision} collide with the reserved data-endpoint markers, field "
-            f"carriers or display slots of this form ({sorted(RESERVED_REACTION_KEYS)}, "
+            f"form property names {collision} collide with the reserved data-endpoint markers, form-line "
+            f"carriers, field carriers or display slots of this form "
+            f"({sorted(RESERVED_REACTION_KEYS | line_carriers)}, "
             f"<field>{'/<field>'.join(CARRIER_SUFFIXES)} and slot_<slot>)"
         )
     drawn = Counter(case_names)

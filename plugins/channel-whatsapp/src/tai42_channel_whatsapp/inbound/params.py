@@ -15,8 +15,6 @@ option). Keys, and where each is set:
   reply_description   — a ``list_reply.description`` when the picked row carried one.
   button_payload      — a template quick-reply tap's ``button.payload`` (the developer-
                         defined payload behind the visible ``button.text``).
-  context_message_id  — a reply-to's ``context.id`` (the quoted/replied-to ``wamid``),
-                        on any message that quotes an earlier one.
   referral_source_url — a click-to-WhatsApp / QR ``referral.source_url``.
   referral_source_id  — the ad/post ``referral.source_id``.
   referral_source_type— the ``referral.source_type`` (e.g. ``ad``/``post``).
@@ -51,6 +49,7 @@ dropped and the turn bridges without it — a participant message is never lost 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from tai42_kit.conversations.entry_params import put_entry_param
@@ -67,23 +66,50 @@ _REFERRAL_PARAM_KEYS: dict[str, str] = {
 }
 
 
+@dataclass(frozen=True)
+class _MessageContext:
+    """What one inbound message carries to whichever turn or answer it becomes.
+
+    ``params`` are its message-level entry-params (the referral keys); ``reply_to_medium_message_id``
+    is the ``wamid`` of the message it quotes (its ``context.id``), ``None`` when it quotes none.
+    """
+
+    params: dict[str, str]
+    reply_to_medium_message_id: str | None
+
+
 def _message_context_params(message: dict[str, Any]) -> dict[str, str]:
-    """The opaque entry-params a bridged turn carries from a message's ``referral`` and reply-to ``context``.
+    """The opaque entry-params a bridged turn carries from a message's ``referral``.
 
     ``referral`` is a click-to-WhatsApp / QR entry. Forwarded verbatim as strings,
     no interpretation. A missing/non-string/empty field is skipped, and a value over
     the contract's per-value cap is dropped (logged and counted); the key vocabulary is the
-    module's ``_REFERRAL_PARAM_KEYS`` plus ``context_message_id``.
+    module's ``_REFERRAL_PARAM_KEYS``.
     """
     params: dict[str, str] = {}
     referral = message.get("referral")
     if isinstance(referral, dict):
         for field, key in _REFERRAL_PARAM_KEYS.items():
             put_entry_param(params, key, referral.get(field), door="whatsapp")
-    context = message.get("context")
-    if isinstance(context, dict):
-        put_entry_param(params, "context_message_id", context.get("id"), door="whatsapp")
     return params
+
+
+def _reply_to_message_id(message: dict[str, Any]) -> str | None:
+    """The ``wamid`` of the message ``message`` quotes: its ``context.id`` when that is a non-blank string."""
+    context = message.get("context")
+    if not isinstance(context, dict):
+        return None
+    quoted = context.get("id")
+    if isinstance(quoted, str) and quoted.strip():
+        return quoted
+    return None
+
+
+def _message_context(message: dict[str, Any]) -> _MessageContext:
+    """The entry-params and the quoted ``wamid`` of one inbound message."""
+    return _MessageContext(
+        params=_message_context_params(message), reply_to_medium_message_id=_reply_to_message_id(message)
+    )
 
 
 def _merged_params(base: dict[str, str], extra: dict[str, str]) -> dict[str, str] | None:

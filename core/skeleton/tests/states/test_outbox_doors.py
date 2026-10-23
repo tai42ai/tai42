@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from fastmcp import Client
 from tai42_contract.app import tai42_app
+from tai42_contract.conversations import ReplyTo
 from tai42_contract.errors import UnavailableError
 from tai42_contract.interactions import RunResultAnswer
 from tai42_contract.states import StateSubject
@@ -192,6 +193,7 @@ def test_a_hook_fire_drains_at_its_visit_and_a_recorded_child_run_re_checks(
     from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
     from tai42_skeleton.operations import tool_runs as tool_runs_pkg
 
+    from .._fakes.hook_runs import MarkRecorder
     from .._fakes.tool_runs_redis import FakeRedis
 
     spy = spy_on_drains(monkeypatch)
@@ -220,7 +222,9 @@ def test_a_hook_fire_drains_at_its_visit_and_a_recorded_child_run_re_checks(
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
             _register_probe_tools(inner)
-            await InMemoryHooksManager._run_hook(hook, {"thread": "t-1"})
+            await InMemoryHooksManager._run_hook(
+                hook, {"thread": "t-1"}, idempotency_key="run-1", mark_acted=MarkRecorder()
+            )
 
     asyncio.run(run())
     assert inner == ["inner"]
@@ -249,7 +253,9 @@ def test_a_detached_continuation_and_a_form_reaction_drain_at_dispatch_scope(mon
         async with app.app_context(Manifest.model_validate({})):
 
             @app.tools.tool(force=True)
-            async def probe_resume(interaction_id: str, answer: Any) -> str:
+            async def probe_resume(
+                interaction_id: str, answer: Any, reply_to: ReplyTo | None, params: dict[str, str] | None
+            ) -> str:
                 """The continuation a park resumes."""
                 seen.append(f"resume:{answer}")
                 return "resumed"
@@ -260,7 +266,16 @@ def test_a_detached_continuation_and_a_form_reaction_drain_at_dispatch_scope(mon
                 seen.append("react")
                 return {}
 
-            await continuation._run_continuation("svc-key", "fp", "probe_resume", "i-1", "yes", park_context=ctx)
+            await continuation._run_continuation(
+                "svc-key",
+                "fp",
+                "probe_resume",
+                "i-1",
+                "yes",
+                park_context=ctx,
+                reply_to_medium_message_id=None,
+                params=None,
+            )
             await reaction._run_reaction(
                 reaction_tool="probe_react",
                 identity="svc-key",
@@ -305,7 +320,7 @@ def test_a_crash_resume_re_drive_drains_again_in_its_new_task(monkeypatch: pytes
 
             async def _re_drive() -> None:
                 with state_context(ctx):
-                    await supervisor.run_recorded("probe_door", {})
+                    await supervisor.run_recorded("probe_door", {}, crash_resume_eligible=True)
 
             # A read path that itself runs inside an ordered entry on the same subject spawns the
             # re-drive as a plain task: the inherited mark never skips the re-drive's own drain.

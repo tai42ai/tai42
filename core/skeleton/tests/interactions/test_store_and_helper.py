@@ -12,6 +12,7 @@ import pytest
 from tai42_contract.interactions import (
     MEDIA_ROUTE_PREFIX,
     AnswerFormat,
+    AskAnswer,
     InteractionRequest,
     InteractionResponse,
     MediaItem,
@@ -386,7 +387,7 @@ async def test_ask_blocks_until_answer(monkeypatch, fake_redis, fake_client_ctx)
     result = await ask("anything?", timeout=5)
     await answerer
 
-    assert result == "hello human"
+    assert result == AskAnswer(answer="hello human", reply_to=None, params=None)
 
 
 async def test_ask_sensitive_returns_secret_value(monkeypatch, fake_redis, fake_client_ctx):
@@ -413,9 +414,11 @@ async def test_ask_sensitive_returns_secret_value(monkeypatch, fake_redis, fake_
     result = await ask("your password?", timeout=5, sensitive=True)
     await answerer
 
-    assert isinstance(result, SecretValue)
-    assert result.reveal() == "hunter2"
-    # The real answer never leaks through the wrapper's repr.
+    assert isinstance(result, AskAnswer)
+    assert isinstance(result.answer, SecretValue)
+    assert result.answer.reveal() == "hunter2"
+    # The real answer never leaks through the wrapper's repr, nor through the answer object's.
+    assert "hunter2" not in repr(result.answer)
     assert "hunter2" not in repr(result)
 
 

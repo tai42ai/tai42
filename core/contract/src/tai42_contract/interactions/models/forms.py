@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 
+from tai42_contract.interactions.models.form_dates import check_time_pages
+
 if TYPE_CHECKING:
     from tai42_contract.interactions.models.wording import FieldWording
 
@@ -81,8 +83,9 @@ class FormControl(StrEnum):
 
 
 #: The form-schema keywords that declare a SHAPE a field's value can break — the JSON-Schema string,
-#: number and array bounds, ``pattern`` and ``format``, and the platform date constraints. A field
-#: carrying none of them (on itself or on an array's ``items``) has no shape to word an error for.
+#: number and array bounds, ``pattern`` and ``format``, the platform date constraints, and the
+#: ``timeOf`` of a range end's time (the END's time can break the range order). A field carrying
+#: none of them (on itself or on an array's ``items``) has no shape to word an error for.
 SHAPE_KEYWORDS: tuple[str, ...] = (
     "pattern",
     "format",
@@ -101,6 +104,7 @@ SHAPE_KEYWORDS: tuple[str, ...] = (
     "rangeStart",
     "minDays",
     "maxDays",
+    "timeOf",
 )
 
 
@@ -109,7 +113,9 @@ class FormShapeKind(StrEnum):
 
     ``required`` a demanded field is missing; ``type`` the value is not the declared type; the
     keyword kinds name the JSON-Schema keyword broken; ``min_date``/``max_date``/
-    ``date_unavailable``/``range_order``/``range_span`` name the platform date constraint broken;
+    ``date_unavailable``/``range_order``/``range_span`` name the platform date constraint broken
+    (``range_order`` is keyed to the END date, or to the END's ``timeOf`` time when the two dates
+    are equal and the times decide; its ``params["by"]`` reads ``"date"`` or ``"time"``);
     ``other`` is any other keyword (its name rides the error's ``params["keyword"]``).
     """
 
@@ -138,7 +144,9 @@ class FormShapeError(BaseModel):
     ``field`` is the top-level property name; ``kind`` the shape broken; ``params`` the bound the
     shape names (``{"minimum": 1}``, ``{"format": "email"}``, ``{"keyword": "multipleOf"}`` for
     ``other``); ``message`` the platform's plain sentence for it. A surface shows the caller's
-    ``wording.form.fields[field].invalid`` when set, else its own word for ``kind`` or ``message``.
+    ``wording.form.fields[field].required`` for a ``required`` error and
+    ``wording.form.fields[field].invalid`` for any other kind, when set, else its own word for
+    ``kind`` or ``message``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -561,6 +569,33 @@ def _form_property_has_shape(prop: dict[str, Any]) -> bool:
     return any(key in prop or key in item_keys for key in SHAPE_KEYWORDS)
 
 
+def _form_property_demands_a_value(prop: dict[str, Any], top_level_required: bool) -> bool:
+    # Whether a form property can miss a required value, at the field or anywhere inside it: the
+    # field is named in the schema's top-level ``required``, or the property (or a nested object or
+    # array item inside it) carries a non-empty ``required`` list of its own.
+    if top_level_required:
+        return True
+    inner = prop.get("required")
+    if isinstance(inner, list) and inner:
+        return True
+    nested: list[Any] = []
+    properties = prop.get("properties")
+    if isinstance(properties, dict):
+        nested.extend(cast("dict[str, Any]", properties).values())
+    if isinstance(prop.get("items"), dict):
+        nested.append(prop["items"])
+    return any(
+        isinstance(child, dict) and _form_property_demands_a_value(cast("dict[str, Any]", child), False)
+        for child in nested
+    )
+
+
+def _form_property_draws_free_list(prop: dict[str, Any], named_in_options: bool) -> bool:
+    # Whether a form property draws the add/remove list a list word could label: an array that does
+    # not draw a choice list (a choice list is a checkbox group with no add or remove control).
+    return prop.get("type") == "array" and not _form_property_draws_choice(prop, named_in_options)
+
+
 def check_form_wording_fields(schema: dict[str, Any], data: FormData | None, fields: dict[str, FieldWording]) -> None:
     """Validate a form's per-field ``wording`` keys against its schema and per-send data.
 
@@ -569,18 +604,42 @@ def check_form_wording_fields(schema: dict[str, Any], data: FormData | None, fie
     property must DRAW a choice list — a string with an ``enum`` or named in the per-send
     ``data.options``, or an array of strings with an ``items.enum`` or named in ``data.options``;
     ``invalid`` words a value that breaks the field's declared shape, so the property must carry at
-    least one of :data:`SHAPE_KEYWORDS`. Raises ``ValueError`` naming the offending property.
+    least one of :data:`SHAPE_KEYWORDS`; ``required`` words a missing required value, so the field
+    must be named in the schema's ``required`` or carry a ``required`` list inside it;
+    ``true_label`` / ``false_label`` word a boolean's two values, so the property must be a
+    ``boolean``; ``length_hint`` words a text control's maximum, so the property must be a
+    ``string`` with an integer ``maxLength``; ``add_item`` / ``remove_item`` / ``item_label`` /
+    ``no_items`` word a free list's controls, so the property must be an array that draws no choice
+    list. Raises ``ValueError`` naming the offending property.
     """
     props = _schema_properties(schema)
     option_names: set[str] = set(data.options) if data is not None else set()
+    raw_required = schema.get("required")
+    required_names: set[str] = (
+        {name for name in cast("list[Any]", raw_required) if isinstance(name, str)}
+        if isinstance(raw_required, list)
+        else set()
+    )
     for name, wording in fields.items():
         prop = props.get(name)
         if prop is None:
             raise ValueError(f"wording.form.fields names {name!r}, which is not a declared property")
-        if wording.choice_label is not None and not _form_property_draws_choice(prop, name in option_names):
+        named_in_options = name in option_names
+        if wording.choice_label is not None and not _form_property_draws_choice(prop, named_in_options):
             raise ValueError(f"wording.form.fields names {name!r}, which draws no choice list")
         if wording.invalid is not None and not _form_property_has_shape(prop):
             raise ValueError(f"wording.form.fields names {name!r}, which declares no shape to break")
+        if wording.required is not None and not _form_property_demands_a_value(prop, name in required_names):
+            raise ValueError(f"wording.form.fields names {name!r}, which is never required")
+        if (wording.true_label is not None or wording.false_label is not None) and prop.get("type") != "boolean":
+            raise ValueError(f"wording.form.fields names {name!r}, which is not a boolean field")
+        if wording.length_hint is not None and not (
+            prop.get("type") == "string" and isinstance(prop.get("maxLength"), int)
+        ):
+            raise ValueError(f"wording.form.fields names {name!r}, which declares no maxLength")
+        list_words = (wording.add_item, wording.remove_item, wording.item_label, wording.no_items)
+        if any(word is not None for word in list_words) and not _form_property_draws_free_list(prop, named_in_options):
+            raise ValueError(f"wording.form.fields names {name!r}, which draws no free list")
 
 
 def check_form_pages(schema: dict[str, Any], pages: list[FormPage]) -> None:
@@ -589,8 +648,10 @@ def check_form_pages(schema: dict[str, Any], pages: list[FormPage]) -> None:
     Every top-level property must appear exactly once across the INPUT pages (a review
     page carries no input fields and so contributes none), and every named field must be
     a declared property. A display ``slot`` name is unique across all pages (two blocks
-    cannot fill the same slot) and is not ``__proto__``. Raises ``ValueError`` naming the
-    missing / duplicate / unknown field or the repeated or refused slot.
+    cannot fill the same slot) and is not ``__proto__``. A ``timeOf`` time sits on the page of its
+    date (:func:`~tai42_contract.interactions.models.form_dates.check_time_pages`). Raises
+    ``ValueError`` naming the missing / duplicate / unknown field, the misplaced time, or the
+    repeated or refused slot.
     """
     declared = list(_schema_properties(schema))
     seen: list[str] = []
@@ -604,6 +665,7 @@ def check_form_pages(schema: dict[str, Any], pages: list[FormPage]) -> None:
     missing = [name for name in declared if name not in seen]
     if missing:
         raise ValueError(f"form pages omit properties: {missing}")
+    check_time_pages(schema, [(page.title, list(page.fields)) for page in pages])
     _check_display_slots(pages)
 
 

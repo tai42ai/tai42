@@ -301,29 +301,56 @@ class TurnCaps:
         :class:`ThreadBusyError` (503) instead of blocking the caller past the proxy timeout. The
         bound is disarmed before ``yield``, so it never fires once the turn body is running.
         """
-        lock = self._thread_locks.setdefault(thread_id, asyncio.Lock())
         try:
-            async with AsyncExitStack() as stack:
-                # Local lock FIRST preserves this worker's arrival order; the cross-worker lease
-                # SECOND, so a turn waiting on a sibling worker holds no global gate slot while it
-                # waits; the global ceiling LAST (its waits are short and the heartbeat covers the
-                # lease across them). The bound wraps ALL THREE, then exits before the body: a
-                # TimeoutError mid-acquire unwinds the stack (each entered context's own cancel-safe
-                # release runs) and surfaces the loud 503.
-                try:
-                    async with asyncio.timeout(acquire_timeout_seconds):
-                        await stack.enter_async_context(lock)
-                        await stack.enter_async_context(self._lease.held(thread_id))
-                        await stack.enter_async_context(self._gate.held())
-                except TimeoutError as exc:
-                    raise ThreadBusyError(
-                        f"conversation thread {thread_id!r} is busy with an in-flight turn; the sync "
-                        f"door's {acquire_timeout_seconds}s wait to acquire its turn slot elapsed; "
-                        f"retry once it drains"
-                    ) from exc
+            async with self._acquire_thread(thread_id, acquire_timeout_seconds, with_gate=True):
                 yield
         finally:
             self.release_thread_slot(thread_id)
+
+    @asynccontextmanager
+    async def hold_thread(self, thread_id: str, *, acquire_timeout_seconds: float):
+        """Hold ``thread_id``'s FIFO lock and cross-worker lease, with no global gate slot, while the body runs.
+
+        Reserves its own place in the thread's FIFO (a full queue raises
+        :class:`ThreadQueueOverflowError`) and gives it back on exit. For a caller that already holds
+        a gate slot through :meth:`run_reserved` on another thread: a second slot taken while holding
+        the first could wait on itself when the gate is full. The acquisition is bounded by
+        ``acquire_timeout_seconds``; a wait past it raises :class:`ThreadBusyError` (503). The wait
+        can last up to that bound behind a turn on the thread that holds its lock while it waits for a
+        gate slot, and behind a ``delete-person`` call of the thread's person, which holds the lock
+        only for its short already-gone steps or its 409.
+        """
+        self.reserve_thread_slot(thread_id)
+        try:
+            async with self._acquire_thread(thread_id, acquire_timeout_seconds, with_gate=False):
+                yield
+        finally:
+            self.release_thread_slot(thread_id)
+
+    @asynccontextmanager
+    async def _acquire_thread(self, thread_id: str, acquire_timeout_seconds: float | None, *, with_gate: bool):
+        """Take ``thread_id``'s local FIFO lock, its cross-worker lease and, ``with_gate``, a global slot."""
+        lock = self._thread_locks.setdefault(thread_id, asyncio.Lock())
+        async with AsyncExitStack() as stack:
+            # Local lock FIRST preserves this worker's arrival order; the cross-worker lease
+            # SECOND, so a turn waiting on a sibling worker holds no global gate slot while it
+            # waits; the global ceiling LAST (its waits are short and the heartbeat covers the
+            # lease across them). The bound wraps them ALL, then exits before the body: a
+            # TimeoutError mid-acquire unwinds the stack (each entered context's own cancel-safe
+            # release runs) and surfaces the loud 503.
+            try:
+                async with asyncio.timeout(acquire_timeout_seconds):
+                    await stack.enter_async_context(lock)
+                    await stack.enter_async_context(self._lease.held(thread_id))
+                    if with_gate:
+                        await stack.enter_async_context(self._gate.held())
+            except TimeoutError as exc:
+                raise ThreadBusyError(
+                    f"conversation thread {thread_id!r} is busy with an in-flight turn; the sync "
+                    f"door's {acquire_timeout_seconds}s wait to acquire its turn slot elapsed; "
+                    f"retry once it drains"
+                ) from exc
+            yield
 
     def release_thread_slot(self, thread_id: str) -> None:
         """Give back one reservation :meth:`reserve_thread_slot` took, so an aborted accept leaves the FIFO intact."""

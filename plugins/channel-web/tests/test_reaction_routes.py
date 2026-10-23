@@ -179,7 +179,9 @@ async def test_react_relays_the_ticket_door_refusal(
     fake_httpx.responses.append(response(door_status, json={"error": "nope"}))
     resp = await _handler(stub_app, _REACT)(_react_request())
     assert resp.status_code == expected
-    assert _body(resp)["error"] == "nope"
+    # The door's own reason rides twice: as the line a plain client shows, and as the
+    # ``reason`` the widget fills into the caller's could-not-update sentence.
+    assert _body(resp) == {"error": "nope", "reason": "nope"}
 
 
 async def test_react_terminal_404_from_the_ticket_door(
@@ -207,7 +209,9 @@ async def test_react_relays_a_fixed_refusal_for_a_non_envelope_door_body(
     fake_httpx.responses.append(response(400, json={"unexpected": "x"}))
     resp = await _handler(stub_app, _REACT)(_react_request())
     assert resp.status_code == 400
-    assert _body(resp)["error"] == "the reaction was refused"
+    # No reason of the door's own: the fixed line only, and no ``reason`` key, so the
+    # widget never fills the fixed line into the caller's sentence.
+    assert _body(resp) == {"error": "the reaction was refused"}
 
 
 async def test_react_relays_a_fixed_refusal_for_a_non_json_door_body(
@@ -217,7 +221,7 @@ async def test_react_relays_a_fixed_refusal_for_a_non_json_door_body(
     fake_httpx.responses.append(response(502, text="<html>gateway</html>"))
     resp = await _handler(stub_app, _REACT)(_react_request())
     assert resp.status_code == 502
-    assert _body(resp)["error"] == "the reaction was refused"
+    assert _body(resp) == {"error": "the reaction was refused"}
 
 
 async def test_react_unexpected_status_raises(web_env, stub_app, registered_session: FakeRedis, fake_httpx: FakeHttpx):

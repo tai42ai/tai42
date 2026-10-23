@@ -82,6 +82,7 @@ async def create_recorded_run(
     arguments: dict[str, Any],
     extras: Mapping[str, Any] | None,
     state_context: StateContext | None,
+    crash_resume_eligible: bool,
 ) -> str:
     """Persist a new ``running`` record through the ONE create seam both detached-record doors share.
 
@@ -98,9 +99,11 @@ async def create_recorded_run(
     the hook door its ambient fire context, the submit door the ``door="api"`` context built from
     the submitted ``StateSubject`` (the same context the supervisor deposits around the live run).
     The record's TTLs and index bound are read from the tool-runs settings at the write.
-    Returns the generated ``run_id``.
+    ``crash_resume_eligible`` gates the flag: ``False`` stores an un-flagged record whatever the tool
+    declares (a hook run, whose own job replays its start), and the tool's meta is read only when it
+    is ``True``. Returns the generated ``run_id``.
     """
-    crash_resume = await _tool_declares_crash_resume(tool_name)
+    crash_resume = await _tool_declares_crash_resume(tool_name) if crash_resume_eligible else False
     run_id = secrets.token_urlsafe(16)
     started = _pkg._now()
     await store.create_run(
@@ -208,7 +211,7 @@ async def _crash_resume(run_id: str, record: dict[str, str]) -> None:
     secret_token = set_request_secret_capability(identity.is_admin if identity is not None else False)
     try:
         with context_scope:
-            await supervisor.run_recorded(tool_name, arguments, extras=extras)
+            await supervisor.run_recorded(tool_name, arguments, extras=extras, crash_resume_eligible=True)
     finally:
         reset_request_secret_capability(secret_token)
         reset_execution_identity(token)

@@ -20,7 +20,6 @@ import tai42_skeleton.states.store as states_store_module
 from tai42_skeleton.app import instance
 from tai42_skeleton.operations import conversations as ops
 
-from .conftest import serve_stores
 from .test_thread_delete_ops import _PERSON_THREAD, _THREAD, _FakeCheckpointRegistry, _RecordingSaver, _seed_record
 
 _STATE = "assistant_memory"
@@ -178,16 +177,9 @@ async def test_person_delete_drains_and_erases_a_pending_only_person_subject_sta
         ],
     )
 
-    class _FakePersonStore:
-        async def get_by_id(self, person_id: str) -> Person | None:
-            return person if person_id == "p1" else None
-
-        async def erase(self, p: Person):
-            return True, 1
-
-    serve_stores(ops.get_conversations_manager(), persons=_FakePersonStore())
+    record_redis.seed_person(person)
     # The states admission of a ``person`` subject resolves the identity through the conversations
-    # cache manager; point it at the served fake so the enqueue admits p1 without a live identity store.
+    # cache manager; point it at the wired manager so the enqueue admits p1 from its seeded row.
     from tai42_skeleton.conversations import cache as cache_module
 
     monkeypatch.setattr(cache_module, "get_conversations_manager", ops.get_conversations_manager)
@@ -223,14 +215,7 @@ async def test_person_delete_erases_person_and_aggregate_thread_state(wired, rec
         ],
     )
 
-    class _FakePersonStore:
-        async def get_by_id(self, person_id: str) -> Person | None:
-            return person if person_id == "p1" else None
-
-        async def erase(self, p: Person):
-            return True, 1
-
-    serve_stores(ops.get_conversations_manager(), persons=_FakePersonStore())
+    record_redis.seed_person(person)
     record_redis.seed_route("chat")
     await _seed_record(message_id="pa", route_name="chat", thread_id=_PERSON_THREAD)
     states_pg.seed_declaration(_STATE, subject_kinds=["thread", "person"])

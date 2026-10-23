@@ -72,6 +72,7 @@ import tai42_skeleton.tool_meta.store as tool_meta_store
 import tai42_skeleton.versioning.store as versioning_store
 
 from ._fakes.advisory_locks import FakeAdvisoryLocks
+from ._fakes.hook_runs import HookRunsHarness, fresh_runtime
 from ._fakes.interactions_redis import FakeRedis
 from ._module_identity import restore_states_module_identity
 from ._staged_generations import preserved_staged_generations
@@ -227,6 +228,20 @@ def _load_full_route_universe():
 
     with tai42_app.bound(_SpecApp()):
         _import_all_router_modules()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_hook_runs_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test its own hook-run attempt registry, stopping flag and slot count."""
+    fresh_runtime(monkeypatch)
+
+
+@pytest.fixture
+async def hook_runs(monkeypatch: pytest.MonkeyPatch):
+    """Run the test's accepted hook runs in its event loop; at teardown none may be left running."""
+    harness = HookRunsHarness(monkeypatch)
+    yield harness
+    await harness.close()
 
 
 @pytest.fixture(autouse=True)

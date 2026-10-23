@@ -305,6 +305,7 @@ def test_app_interactions_exposes_ask_typed_by_the_contract_protocol():
         "question_format",
         "react",
         "visit",
+        "settle_visit_claim",
         "run_answer",
         "normalise_started",
         "list_parked",
@@ -335,7 +336,7 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
     import inspect
 
     from tai42_contract.app import AppInteractions
-    from tai42_contract.interactions import AnswerMismatchPolicy, Ask, FormReactionEvent
+    from tai42_contract.interactions import AnswerMismatchPolicy, Ask, AskAnswer, FormReactionEvent
 
     # The kwargs a facet double threads must be part of the CONTRACT's own Ask
     # surface — not merely accepted by some impl double — so a caller reaches them
@@ -354,11 +355,11 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
             on_mismatch: AnswerMismatchPolicy = AnswerMismatchPolicy.RETRY,
             wording: object = None,
             **kwargs: object,
-        ) -> object:
+        ) -> AskAnswer:
             captured["question"] = question
             captured["on_mismatch"] = on_mismatch
             captured["wording"] = wording
-            return "ok"
+            return AskAnswer(answer="ok", reply_to=None, params=None)
 
     class _InteractionsDouble:
         def __init__(self) -> None:
@@ -386,6 +387,10 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
 
         @property
         def visit(self) -> object:
+            return None
+
+        @property
+        def settle_visit_claim(self) -> object:
             return None
 
         def run_answer(self, outcome: object) -> object:
@@ -433,7 +438,7 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
             "confirm?", on_mismatch=AnswerMismatchPolicy.BRIDGE, wording={"answer": {"rejected": "try again: {reason}"}}
         )
     )
-    assert answer == "ok"
+    assert answer == AskAnswer(answer="ok", reply_to=None, params=None)
     assert captured["on_mismatch"] is AnswerMismatchPolicy.BRIDGE
     assert captured["wording"] == {"answer": {"rejected": "try again: {reason}"}}
 

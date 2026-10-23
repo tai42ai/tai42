@@ -148,6 +148,15 @@ class RedisAdmin:
         """Release an ``e2e_hold_until_released`` probe held on ``key`` (logical DB 0)."""
         self._probe.rpush(f"e2e:rel:{key}", "1")
 
+    def open_gate(self, key: str) -> None:
+        """Release an ``e2e_deferred_gate`` probe blocked on ``key`` (logical DB 0)."""
+        self._probe.rpush(f"e2e:gate:{key}", "1")
+
+    def count(self, key: str) -> int:
+        """How many calls the ``e2e_fail_until`` probes counted under ``key`` (logical DB 0)."""
+        value = self._probe.get(f"e2e:count:{key}")
+        return 0 if value is None else int(cast(str, value))
+
     def record_keys(self) -> list[str]:
         """Every ``e2e_record`` probe key present (logical DB 0), the ``e2e:rec:``
         prefix stripped — for reading back records keyed on a value a test cannot

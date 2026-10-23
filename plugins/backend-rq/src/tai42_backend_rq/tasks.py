@@ -21,7 +21,7 @@ from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
 from tai42_backend_rq.queue import TaskBudgetQueue
-from tai42_backend_rq.settings import rq_settings
+from tai42_backend_rq.settings import rq_client_kwargs, rq_settings
 
 # Task options every backend extension appends to its branch tool's signature.
 RQ_TASK_OPTS: dict[str, Any] = {
@@ -72,7 +72,7 @@ async def callback_job(previous_job_id: str, callback: CallbackSchema) -> Any:
     closed before its fresh event loop is torn down.
     """
     try:
-        async with client_ctx(SyncRedisClient, url=rq_settings().redis_url) as r:
+        async with client_ctx(SyncRedisClient, **rq_client_kwargs()) as r:
 
             def _read_outcome() -> tuple[str, Any]:
                 job = Job.fetch(previous_job_id, connection=r)
@@ -104,7 +104,7 @@ async def enqueue_task(*args: Any, **kwargs: Any) -> Job:
     via ``enqueue_in``, ``expires`` maps to the job ``ttl``, and ``callback_kwargs``
     chains a ``callback_job`` dependent on the primary job. Returns the primary job.
     """
-    async with client_ctx(SyncRedisClient, url=rq_settings().redis_url) as r:
+    async with client_ctx(SyncRedisClient, **rq_client_kwargs()) as r:
         queue = TaskBudgetQueue(rq_settings().queue_name, connection=r)
 
         task_kwargs = {k: kwargs.pop(k) for k in RQ_TASK_OPTS if k in kwargs}

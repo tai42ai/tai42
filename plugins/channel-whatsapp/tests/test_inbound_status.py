@@ -21,17 +21,24 @@ async def test_status_sent_or_delivered_records_delivered(handler, stub_app, sta
 
     assert result.status_code == 200
     assert stub_app.conversations.status_calls == [
-        {"channel": "whatsapp", "provider_message_id": "wamid.OUT", "status": DeliveryReceipt.DELIVERED}
+        {"channel": "whatsapp", "provider_message_id": "wamid.OUT", "status": DeliveryReceipt.DELIVERED, "errors": None}
     ]
 
 
-async def test_status_failed_records_failed_loudly(handler, stub_app, caplog: pytest.LogCaptureFixture):
+async def test_status_failed_records_failed_loudly_with_the_providers_errors(
+    handler, stub_app, caplog: pytest.LogCaptureFixture
+):
     with caplog.at_level("WARNING"):
         result = await handler(signed_request(status_payload(wamid="wamid.OUT", state="failed")))
 
     assert result.status_code == 200
     assert stub_app.conversations.status_calls == [
-        {"channel": "whatsapp", "provider_message_id": "wamid.OUT", "status": DeliveryReceipt.FAILED}
+        {
+            "channel": "whatsapp",
+            "provider_message_id": "wamid.OUT",
+            "status": DeliveryReceipt.FAILED,
+            "errors": [{"code": 131047, "title": "Re-engagement message"}],
+        }
     ]
     assert any("delivery failure" in record.message for record in caplog.records)
 

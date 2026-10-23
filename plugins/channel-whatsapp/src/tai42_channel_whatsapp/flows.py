@@ -12,7 +12,8 @@ properties map one-to-one onto Flow field components:
   its ``pattern`` (the vendor has no time-of-day picker, and its ``CalendarPicker`` is a calendar,
   not a date-time control)
 * ``string`` + ``format: email`` → ``TextInput`` with ``input-type: "email"``
-* ``boolean``                   → ``OptIn``
+* ``boolean``                   → ``OptIn`` (a review page reads it back as one of two baked words,
+  the caller's ``true_label`` / ``false_label`` else ``Yes`` / ``No``)
 * ``integer`` / ``number``      → ``TextInput`` with ``input-type: "number"`` (an integer also draws
   the whole-number ``pattern``)
 
@@ -71,11 +72,10 @@ So each schema property is first mapped to a unique identifier-safe COMPONENT NA
 the ``<field>`` every component ``name``, data key, reference and navigate-payload key
 above is spelled with. The terminal completion payload is keyed differently: by each
 property's human-readable LABEL (:func:`payload_labels` — the property ``title`` when a non-empty
-string, else the property key), because WhatsApp shows those keys to the participant in the
-submitted-form summary. Its VALUES stay the identifier-safe component references, and the
+string, else the property key). Its VALUES stay the identifier-safe component references, and the
 inbound ``nfm_reply`` decode maps each label back to the schema key before coercion. The
-field label a control shows uses the same :func:`_field_label` rule, so the summary key
-matches the label the participant filled, and either may carry any character.
+field label a control shows uses the same :func:`_field_label` rule, so each completion key is
+the label shown on its field, and either may carry any character.
 
 A string property renders as a dynamic ``Dropdown`` when it carries a schema ``enum``
 OR when the ask marks it option-bearing (``option_fields`` — the set of
@@ -96,12 +96,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
 from typing import Any
 
 from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import FormReactionEventKind
-from tai42_kit.interactions import RADIO_OPTION_THRESHOLD
+from tai42_kit.interactions import RADIO_OPTION_THRESHOLD, drawing_order
 
 from tai42_channel_whatsapp.flows_components import (
     _RESERVED_PROPERTY,
@@ -109,10 +108,6 @@ from tai42_channel_whatsapp.flows_components import (
     _display_component_list,
     _dynamic_component,
     _field_control,
-    _field_data_decls,
-    _forward_field_data,
-    _range_value_type_decl,
-    _value_type_decl,
     component_names,
     payload_labels,
 )
@@ -124,13 +119,14 @@ from tai42_channel_whatsapp.flows_endpoint import (
     event_payload,
     form_endpoint_driven,
     guard_endpoint_names,
+    required_fields,
     screen_data_refs,
     shaped_fields,
 )
 from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages, slot_datanames
+from tai42_channel_whatsapp.flows_screen_data import _later_carriers, _RenderSpec, _screen_data_model
 from tai42_channel_whatsapp.flows_second_line import data_source_rows, field_caption, range_captions
 from tai42_channel_whatsapp.flows_send_data import build_flow_data
-from tai42_channel_whatsapp.flows_shapes import ERROR_EXAMPLE
 from tai42_channel_whatsapp.flows_visibility import (
     emit_field_variants,
     form_case_names,
@@ -169,6 +165,11 @@ _SCREEN_DIGIT_LETTERS = "ABCDEFGHIJ"
 _FOOTER_LABEL = "Submit"
 # The non-terminal step's footer — advances to the next screen.
 _CONTINUE_LABEL = "Continue"
+# A review page's readback of a boolean value — the caller's ``true_label`` / ``false_label`` override them.
+_TRUE_LABEL = "Yes"
+_FALSE_LABEL = "No"
+# Meta's ``TextBody.text`` cap. A review readback line over it is refused loudly at build (never truncated).
+_TEXT_BODY_MAX_CHARS = 4096
 # Meta's ``Footer.label`` cap. A per-page ``button_label`` over this is refused loudly at build
 # (never truncated), the same discipline the per-send caps take.
 _FOOTER_LABEL_MAX_CHARS = 35
@@ -269,114 +270,50 @@ def _validate_form_properties(
         _field_control(name, prop, name in required, option_fields, names)
 
 
-@dataclass(frozen=True)
-class _RenderSpec:
-    """The cross-cutting inputs every screen reads while a Flow is built.
-
-    ``field_changed`` are the schema keys whose change fires a reaction; ``page_advanced`` the
-    page TITLES whose advance fires one; ``submitted`` whether the submission is reaction-checked.
-    ``endpoint`` is True for an endpoint-driven Flow (a reacting form, or one carrying a shape no
-    control checks natively) and drives the ``data_exchange`` footers + ``data_api_version``.
-    ``slots`` maps each display slot to its screen-``data`` key. ``field_invalid`` is the caller's
-    per-field ``invalid`` sentence; ``err_fields`` the fields binding an ``error-message``;
-    ``invalid_fields`` the shaped fields whose sentence rides the Flow as ``__invalid`` (an ask-less
-    endpoint-driven form only, else empty).
-    """
-
-    properties: dict[str, Any]
-    required: set[str]
-    option_fields: set[str]
-    names: dict[str, str]
-    labels: dict[str, str]
-    slots: dict[str, str]
-    field_changed: frozenset[str]
-    page_advanced: frozenset[str]
-    submitted: bool
-    endpoint: bool
-    # ``END name -> START name`` for every ``rangeStart`` pair drawn as ONE range control; a merged
-    # END emits no control/data and a merged START carries the pair's object value.
-    range_merges: dict[str, str]
-    field_invalid: dict[str, str]
-    err_fields: frozenset[str]
-    invalid_fields: frozenset[str]
-
-
 def _review_readback(spec: _RenderSpec) -> list[dict[str, Any]]:
-    """Generic readback lines for a review screen: one ``TextBody`` per field, label + collected value.
+    """Generic readback lines for a review screen: one line per field, label + collected value.
 
-    Each field's value rides forward as its ``__val`` carrier; the line interpolates it (Flow
+    Each field's value rides forward as its ``__val`` carrier; a field's line interpolates it (Flow
     JSON ≥ 6.0 supports string concatenation within text), so the human sees every entered answer
-    before submitting. The platform renders the readback from the schema labels — no per-form chrome.
+    before submitting. A boolean's line is instead an ``If`` on its ``__val`` choosing one of two
+    literal ``TextBody`` lines, the label with the caller's ``true_label`` / ``false_label`` (else
+    ``Yes`` / ``No``) baked into the Flow JSON. The platform renders the readback from the schema
+    labels — no per-form chrome. The lines come in drawing order, each ``timeOf`` time right after its
+    date. A line over Meta's ``TextBody`` cap raises ``ChannelInputError`` naming the field.
     """
-    return [
-        {"type": "TextBody", "text": f"{spec.labels[name]}: ${{data.{spec.names[name]}__val}}"}
-        for name in spec.properties
-        if name not in spec.range_merges  # a merged END carries no value of its own
-    ]
-
-
-def _error_decl() -> dict[str, Any]:
-    # The screen-``data`` declaration of a field's ``__err`` (its error-message text) or ``__invalid``.
-    return {"type": "string", "__example__": ERROR_EXAMPLE}
-
-
-def _range_error_decl() -> dict[str, Any]:
-    # The screen-``data`` declaration of a merged range START's ``__err``: the one object the range
-    # control's ``error-message`` binds, carrying each end's error text.
-    return {
-        "type": "object",
-        "properties": {"start-date": {"type": "string"}, "end-date": {"type": "string"}},
-        "__example__": {"start-date": ERROR_EXAMPLE, "end-date": ERROR_EXAMPLE},
-    }
-
-
-def _screen_data_model(
-    index: int, this_fields: list[str], later_fields: list[str], earlier_fields: list[str], spec: _RenderSpec
-) -> dict[str, Any]:
-    """The screen's ``data`` declarations.
-
-    The entry screen declares EVERY field's init/ds/err (the send injects them all there); a later screen
-    declares its own and its successors' init/ds/err plus a ``__val`` carrier for each field collected
-    earlier. A merged range START's ``__err`` is the pair's one error object (:func:`_range_error_decl`)
-    and a merged range END declares nothing.
-    Every screen of an ask-less endpoint-driven form declares each shaped field's ``__invalid``.
-    """
-    merged_ends = set(spec.range_merges)
-    merged_starts = set(spec.range_merges.values())
-    data_model: dict[str, Any] = {}
-    rendered = list(spec.properties) if index == 0 else [*this_fields, *later_fields]
-    for name in rendered:
-        if name not in merged_ends:
-            data_model.update(
-                _field_data_decls(name, spec.properties[name], spec.option_fields, spec.names, name in merged_starts)
+    lines: list[dict[str, Any]] = []
+    for name in drawing_order(list(spec.properties), spec.properties):
+        if name in spec.range_merges:  # a merged END carries no value of its own
+            continue
+        label = spec.labels[name]
+        value_ref = f"${{data.{spec.names[name]}__val}}"
+        if spec.properties[name].get("type") == "boolean":
+            true_word, false_word = spec.boolean_words.get(name, (_TRUE_LABEL, _FALSE_LABEL))
+            then_text, else_text = (
+                _readback_text(name, f"{label}: {true_word}"),
+                _readback_text(name, f"{label}: {false_word}"),
             )
-        if name in spec.err_fields and name not in merged_ends:
-            data_model[f"{spec.names[name]}__err"] = _range_error_decl() if name in merged_starts else _error_decl()
-    if index > 0:
-        for name in earlier_fields:
-            if name in merged_ends:
-                continue
-            data_model[f"{spec.names[name]}__val"] = (
-                _range_value_type_decl() if name in merged_starts else _value_type_decl(spec.properties[name])
+            lines.append(
+                {
+                    "type": "If",
+                    "condition": value_ref,
+                    "then": [{"type": "TextBody", "text": then_text}],
+                    "else": [{"type": "TextBody", "text": else_text}],
+                }
             )
-    for name in spec.properties:
-        if name in spec.invalid_fields:
-            data_model[f"{spec.names[name]}__invalid"] = _error_decl()
-    return data_model
+        else:
+            lines.append({"type": "TextBody", "text": _readback_text(name, f"{label}: {value_ref}")})
+    return lines
 
 
-def _later_carriers(later_fields: list[str], spec: _RenderSpec) -> dict[str, str]:
-    # The carriers each later (unrendered) field still needs on a later screen: its init/ds and its
-    # ``__err`` (a merged START's the pair's one error object, a merged END none), forwarded from
-    # this screen's data.
-    merged_ends = set(spec.range_merges)
-    forward: dict[str, str] = {}
-    for name in later_fields:
-        if name not in merged_ends:
-            forward.update(_forward_field_data(name, spec.properties[name], spec.option_fields, spec.names))
-        if name in spec.err_fields and name not in merged_ends:
-            forward[f"{spec.names[name]}__err"] = f"${{data.{spec.names[name]}__err}}"
-    return forward
+def _readback_text(name: str, text: str) -> str:
+    # A review readback line, refused loudly when Meta's TextBody cannot carry it.
+    if len(text) > _TEXT_BODY_MAX_CHARS:
+        raise ChannelInputError(
+            f"form property {name!r}: review readback line is {len(text)} characters; WhatsApp caps a text "
+            f"body at {_TEXT_BODY_MAX_CHARS}"
+        )
+    return text
 
 
 def _resolve_button_label(page: dict[str, Any]) -> str | None:
@@ -648,6 +585,7 @@ def build_form_flow(
     form_submit: str | None = None,
     field_invalid: dict[str, str] | None = None,
     carry_invalid: bool = False,
+    boolean_words: dict[str, tuple[str, str]] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """The ``(flow_json, key)`` for a per-send/stepped form ask — publishable Flow JSON.
 
@@ -677,7 +615,10 @@ def build_form_flow(
     own. Otherwise the Flow is the static navigate Flow. ``field_invalid`` is the caller's per-field
     ``invalid`` sentence (the helper text a native pattern requires when the field has no second
     line); ``carry_invalid`` (an ask-less endpoint-driven form, which has no per-send sidecar) makes
-    every shaped field's sentence ride the Flow as ``__invalid`` screen data.
+    every shaped field's sentence ride the Flow as ``__invalid`` screen data, every field the shape
+    check can report missing carry a ``__required`` one, and the caller's form-level lines ride the
+    form-line carriers. ``boolean_words`` (property name → ``(true, false)`` words) are the words a
+    review page reads a boolean back with, baked into the Flow JSON (default ``Yes`` / ``No``).
 
     ``key`` is the hash of the ``(schema, pages, option_fields)`` and the emitted ``flow_json``
     — which folds in the reactions/display/date-constraint/``visibleWhen``/shape layout, so a
@@ -713,6 +654,9 @@ def build_form_flow(
         field_invalid=dict(field_invalid or {}),
         err_fields=error_fields(properties, required, option_fields, names, set(range_merges)),
         invalid_fields=shaped_fields(properties) if endpoint and carry_invalid else frozenset(),
+        required_fields=required_fields(properties, required) if endpoint and carry_invalid else frozenset(),
+        form_lines=endpoint and carry_invalid,
+        boolean_words=dict(boolean_words or {}),
     )
 
     screen_count = len(resolved_pages)

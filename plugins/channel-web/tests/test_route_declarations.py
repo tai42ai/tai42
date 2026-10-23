@@ -62,8 +62,9 @@ def test_the_upload_door_declares_its_own_family(stub_app: _StubApp) -> None:
 
 def test_every_public_door_declares_a_family_and_a_budget(stub_app: _StubApp) -> None:
     # The stub records ``authed`` only when a route passes it; a declared plugin route takes
-    # its publicness from tai-plugin.yml, so the public set is every non-gate door.
-    public = [route for route in stub_app.http.routes if not route.path.startswith("/gates")]
+    # its publicness from tai-plugin.yml, so the public set is every door that declares no
+    # action-class (the gate and words management doors each declare one).
+    public = [route for route in stub_app.http.routes if route.action is None]
     assert {route.path for route in public} >= {path for _method, path in _CHAT_DOORS} | {"/uploads"}
     for route in public:
         assert route.declared is not None, route.path

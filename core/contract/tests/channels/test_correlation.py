@@ -9,6 +9,18 @@ from typing import Any
 import pytest
 
 
+def _address() -> Any:
+    from tai42_contract.channels import ChannelAddress
+
+    return ChannelAddress(our_identity="bot-1", address="alice")
+
+
+def _outcome() -> Any:
+    from tai42_contract.channels import SendOutcome
+
+    return SendOutcome(our_identity="bot-1", address="alice", message_ids=["m-1"])
+
+
 def _correlation_kwargs(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "callback_url": "https://host.example/api/interactions/callback/tkt",
@@ -93,11 +105,14 @@ def test_correlation_store_is_not_an_extension_of_channel():
     from tai42_contract.channels import Channel, ChannelDelivery, ChannelNotification, Correlation, CorrelationStore
 
     class _Channel:
-        async def deliver(self, delivery: ChannelDelivery) -> None:
-            return None
+        def resolve_address(self, recipient: str | None, sender_identity: str | None) -> Any:
+            return _address()
 
-        async def notify(self, notification: ChannelNotification) -> list[str]:
-            return []
+        async def deliver(self, delivery: ChannelDelivery) -> Any:
+            return _outcome()
+
+        async def notify(self, notification: ChannelNotification) -> Any:
+            return _outcome()
 
     class _Store:
         async def set_correlation(self, key: str, entry: Correlation, *, ttl_seconds: int) -> bool:

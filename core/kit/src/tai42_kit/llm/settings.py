@@ -8,7 +8,9 @@ masked everywhere upstream of that seam. The LangGraph ``checkpoint_conn_string`
 / ``store_conn_string`` stay opaque connection URLs (addresses, not discrete
 secrets); they default to ``None`` and are resolved per provider at the
 checkpoint/store call sites, falling back to the shared connection settings when
-left unset.
+left unset. A set conn string takes its identity from the string alone and its
+connection behaviour (retry, timeouts) from its own namespace:
+:class:`LlmStoreConnectionOptions` / :class:`LlmCheckpointConnectionOptions`.
 """
 
 from collections.abc import Sequence
@@ -18,6 +20,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.template import TemplatedText
 
+from tai42_kit.clients.settings import PostgresConnectionOptions, RedisConnectionOptions
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 ContextOverflowMethod = Literal["trimming", "summarization", "context_editing"]
@@ -223,6 +226,28 @@ class LLMProviderSettings(TaiBaseSettings):
         return self
 
 
+class LlmStoreConnectionOptions(RedisConnectionOptions, PostgresConnectionOptions):
+    """Connection behaviour of the store opened on ``LLM_PROVIDER_STORE_CONN_STRING``.
+
+    Read only when that conn string is set: the string is the store's whole identity,
+    and these options are its retry and timeouts (the Redis ones for a Redis string,
+    ``pg_retry_attempts`` for a Postgres one). With the conn string unset the store
+    uses the base connection namespace, these options included.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="LLM_PROVIDER_STORE_")
+
+
+class LlmCheckpointConnectionOptions(RedisConnectionOptions, PostgresConnectionOptions):
+    """Connection behaviour of the checkpointer opened on ``LLM_PROVIDER_CHECKPOINT_CONN_STRING``.
+
+    Read only when that conn string is set, as :class:`LlmStoreConnectionOptions` is for
+    the store.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="LLM_PROVIDER_CHECKPOINT_")
+
+
 @settings_cache
 def trimming_middleware_settings() -> TrimmingMiddlewareSettings:
     """Return the process-wide :class:`TrimmingMiddlewareSettings`, cached after first load."""
@@ -251,6 +276,18 @@ def context_editing_settings() -> ContextEditingSettings:
 def llm_provider_settings() -> LLMProviderSettings:
     """Return the process-wide :class:`LLMProviderSettings`, cached after first load."""
     return LLMProviderSettings()
+
+
+@settings_cache
+def llm_store_connection_options() -> LlmStoreConnectionOptions:
+    """Return the process-wide :class:`LlmStoreConnectionOptions`, cached after first load."""
+    return LlmStoreConnectionOptions()
+
+
+@settings_cache
+def llm_checkpoint_connection_options() -> LlmCheckpointConnectionOptions:
+    """Return the process-wide :class:`LlmCheckpointConnectionOptions`, cached after first load."""
+    return LlmCheckpointConnectionOptions()
 
 
 @settings_cache

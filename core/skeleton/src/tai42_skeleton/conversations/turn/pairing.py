@@ -19,7 +19,7 @@ from tai42_contract.states import PERSON_KIND
 
 from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.pairing import Link, Redeem, Unlink
-from tai42_skeleton.conversations.persons import PairingTarget
+from tai42_skeleton.conversations.persons import PairingTarget, PersonErasingError
 from tai42_skeleton.conversations.thread_ids import person_thread_id
 from tai42_skeleton.conversations.turn.outcome import (
     _pairing_reply,
@@ -29,6 +29,7 @@ from tai42_skeleton.conversations.turn.outcome import (
     _text_part,
     _tool_error,
     _ToolOutcome,
+    reply_text,
 )
 from tai42_skeleton.conversations.turn.routing import _Multichannel
 
@@ -45,6 +46,13 @@ _NOT_LINKED_TEXT = "This conversation is not linked to anything, so there is not
 # The UNIFORM redeem refusal: an unknown/expired/already-redeemed code, a cross-target code,
 # or a throttled attempt all read the same, so the reply reveals no oracle.
 _INVALID_CODE_TEXT = "That pairing code is not valid. It may have expired or already been used."
+# A person on either side is being erased: the redeem already consumed the code, so a new one is
+# needed, minted in the other conversation.
+_LINK_UNAVAILABLE_TEXT = (
+    "This conversation can't be linked right now. "
+    "Please try again in a moment with a new code: send /link in your other conversation."
+)
+_UNLINK_UNAVAILABLE_TEXT = "This conversation can't be unlinked right now. Please try again in a moment."
 
 
 def _template_references_code(template: str) -> bool:
@@ -142,7 +150,10 @@ async def _run_pairing_turn(
 
     Error scoping: ONLY the named pairing domain errors (``PairCodeInvalidError``,
     ``CrossTargetMergeError``, ``NotLinkedError``) become the uniform answered refusal — it
-    IS the answer, detail logged. ANY other exception (a redis fault, a reset) takes
+    IS the answer, detail logged. A person being erased (``PersonErasingError``, from the
+    redeem's ``ensure_provisional`` or ``merge`` or the ``/unlink`` ``detach``) is its own answered
+    refusal, ``pairing_link_unavailable`` or ``pairing_unlink_unavailable``, logged at WARNING.
+    ANY other exception (a redis fault, a reset) takes
     the platform's standard client-safe ``error`` outcome, so an infra fault never
     masquerades as an invalid code.
     """
@@ -151,7 +162,7 @@ async def _run_pairing_turn(
             code, expires_at = greeting_code or await cache.get_conversations_manager().pair_codes.mint(
                 multichannel.minting_conversation()
             )
-            return _pairing_reply(_link_reply(code, expires_at))
+            return _pairing_reply(_link_reply(code, expires_at, route))
         if isinstance(action, Unlink):
             await cache.get_conversations_manager().persons.detach(
                 person.person_id,
@@ -160,20 +171,29 @@ async def _run_pairing_turn(
                 our_identity=multichannel.our_identity,
                 address=multichannel.address,
             )
-            return _pairing_reply(_UNLINKED_TEXT)
-        return await _redeem_turn(multichannel, person, action)
+            return _pairing_reply(reply_text(route, "pairing_unlinked", _UNLINKED_TEXT))
+        return await _redeem_turn(multichannel, person, action, route)
+    except PersonErasingError as exc:
+        logger.warning(
+            "conversations: pairing turn on route %r met a person being erased: %s", multichannel.route_name, exc
+        )
+        if isinstance(action, Unlink):
+            return _pairing_reply(reply_text(route, "pairing_unlink_unavailable", _UNLINK_UNAVAILABLE_TEXT))
+        return _pairing_reply(reply_text(route, "pairing_link_unavailable", _LINK_UNAVAILABLE_TEXT))
     except NotLinkedError as exc:
         logger.info("conversations: /unlink refused on route %r: %s", multichannel.route_name, exc)
-        return _pairing_reply(_NOT_LINKED_TEXT)
+        return _pairing_reply(reply_text(route, "pairing_not_linked", _NOT_LINKED_TEXT))
     except (PairCodeInvalidError, CrossTargetMergeError) as exc:
         logger.info("conversations: pairing refused on route %r: %s", multichannel.route_name, exc)
-        return _pairing_reply(_INVALID_CODE_TEXT)
+        return _pairing_reply(reply_text(route, "pairing_code_invalid", _INVALID_CODE_TEXT))
     except Exception as exc:
         logger.exception("conversations: pairing turn on route %r failed", multichannel.route_name, exc_info=exc)
         return _tool_error(f"pairing turn error: {exc}", route)
 
 
-async def _redeem_turn(multichannel: _Multichannel, person: Person, action: Redeem) -> _ToolOutcome:
+async def _redeem_turn(
+    multichannel: _Multichannel, person: Person, action: Redeem, route: ConversationRoute
+) -> _ToolOutcome:
     """Redeem a pair code and merge the two persons — behind the brute-force throttle.
 
     A locked source, and an invalid code, both return the SAME uniform reply (no
@@ -187,12 +207,12 @@ async def _redeem_turn(multichannel: _Multichannel, person: Person, action: Rede
     throttle = manager.redeem_throttle
     source = multichannel.throttle_source_key()
     if await throttle.is_locked(multichannel.target, source):
-        return _pairing_reply(_INVALID_CODE_TEXT)
+        return _pairing_reply(reply_text(route, "pairing_code_invalid", _INVALID_CODE_TEXT))
     try:
         minting = await manager.pair_codes.redeem(action.code)
     except PairCodeInvalidError:
         await throttle.record_failure(multichannel.target, source)
-        return _pairing_reply(_INVALID_CODE_TEXT)
+        return _pairing_reply(reply_text(route, "pairing_code_invalid", _INVALID_CODE_TEXT))
     await throttle.clear(multichannel.target, source)
     minting_person, _created = await manager.persons.ensure_provisional(
         PairingTarget(target_kind=minting.target_kind, target_name=minting.target_name),
@@ -217,11 +237,19 @@ async def _redeem_turn(multichannel: _Multichannel, person: Person, action: Rede
                 ("thread", person_thread_id(absorbed_id), person_thread_id(survivor.person_id)),
             ]
         )
-    return _pairing_reply(_LINKED_TEXT)
+    return _pairing_reply(reply_text(route, "pairing_linked", _LINKED_TEXT))
 
 
-def _link_reply(code: str, expires_at: datetime) -> str:
-    """The fixed neutral ``/link`` reply carrying the fresh code and its expiry."""
+def _link_reply(code: str, expires_at: datetime, route: ConversationRoute) -> str:
+    """The ``/link`` reply carrying the fresh code and its expiry.
+
+    The route's ``reply_texts.pairing_code`` template rendered with the code and the expiry's
+    ISO-8601 text when the route sets one (its fields are checked at the route write), else the
+    fixed neutral sentence.
+    """
+    template = route.reply_texts.pairing_code if route.reply_texts is not None else None
+    if template is not None:
+        return template.format(pairing_code=code, expires_at=expires_at.isoformat())
     return (
         f"Your pairing code is {code}. Send it from your other conversation to link the two. "
         f"It expires at {expires_at.isoformat()}."

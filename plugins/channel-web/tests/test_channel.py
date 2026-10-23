@@ -55,6 +55,7 @@ async def test_deliver_reserves_record_and_appends_question(fake_redis: FakeRedi
         "identity": IDENTITY,
         "address": VISITOR_ID,
         "timeout_at": record["timeout_at"],
+        "sensitive": False,
         "restores": 0,
     }
     payload = _only_entry(fake_redis)
@@ -481,23 +482,23 @@ async def test_deliver_releases_reservation_when_append_fails(fake_redis: FakeRe
 
 
 async def test_notify_appends_out_message_and_returns_id(fake_redis: FakeRedis):
-    ids = await WebChannel().notify(make_notification(message="Working on it."))
-    assert len(ids) == 1
+    outcome = await WebChannel().notify(make_notification(message="Working on it."))
+    assert len(outcome.message_ids) == 1
     payload = json.loads(fake_redis.streams[_TRANSCRIPT_KEY][0][1]["data"])
     assert payload["direction"] == "out"
     assert payload["text"] == "Working on it."
-    assert payload["id"] == ids[0]
+    assert payload["id"] == outcome.message_ids[0]
 
 
 async def test_notify_without_sender_identity_splits_composite_recipient(fake_redis: FakeRedis):
     # The ``notify_user`` door sets no sender_identity, so the identity rides in the
     # recipient — the entry must still land on the same transcript.
-    ids = await WebChannel().notify(
+    outcome = await WebChannel().notify(
         make_notification(sender_identity=None, recipient=f"{IDENTITY}:{VISITOR_ID}", message="No bridge.")
     )
     payload = json.loads(fake_redis.streams[_TRANSCRIPT_KEY][0][1]["data"])
     assert payload["text"] == "No bridge."
-    assert payload["id"] == ids[0]
+    assert payload["id"] == outcome.message_ids[0]
 
 
 async def test_notify_without_sender_identity_rejects_bare_recipient(fake_redis: FakeRedis):
@@ -525,7 +526,7 @@ def _only_media_entry(fake: FakeRedis) -> dict:
 async def test_notify_media_appends_one_media_card(fake_redis: FakeRedis):
     # A media notification lands as ONE chat.media card carrying the message text, the
     # image items, and its minted id — no separate chat.message entry.
-    ids = await WebChannel().notify(
+    outcome = await WebChannel().notify(
         ChannelNotification(
             message="see this",
             recipient=VISITOR_ID,
@@ -534,7 +535,7 @@ async def test_notify_media_appends_one_media_card(fake_redis: FakeRedis):
         )
     )
     payload = _only_media_entry(fake_redis)
-    assert payload["id"] == ids[0]
+    assert payload["id"] == outcome.message_ids[0]
     assert payload["direction"] == "out"
     assert payload["text"] == "see this"
     assert payload["media"] == [{"kind": "image", "url": "https://cdn.example/p.png", "caption": "a pattern"}]
@@ -544,7 +545,7 @@ async def test_notify_media_appends_one_media_card(fake_redis: FakeRedis):
 async def test_notify_media_only_card_carries_an_empty_text(fake_redis: FakeRedis):
     # A media-only notification (blank message) lands as ONE chat.media card with an EMPTY text —
     # the page renders the media card with no text bubble.
-    ids = await WebChannel().notify(
+    outcome = await WebChannel().notify(
         ChannelNotification(
             message="",
             recipient=VISITOR_ID,
@@ -553,7 +554,7 @@ async def test_notify_media_only_card_carries_an_empty_text(fake_redis: FakeRedi
         )
     )
     payload = _only_media_entry(fake_redis)
-    assert payload["id"] == ids[0]
+    assert payload["id"] == outcome.message_ids[0]
     assert payload["text"] == ""  # no text bubble
     assert payload["media"] == [{"kind": "image", "url": "https://cdn.example/p.png", "caption": "a pattern"}]
 
@@ -618,7 +619,7 @@ async def test_notify_options_appends_a_card_with_options(fake_redis: FakeRedis)
     # A text-with-options notification lands as ONE chat.media card. Options are the
     # typed vocabulary now: reply chips (a tap submits their text; an authored id and a
     # secondary description ride the frame) and link-action buttons (a tap opens a url).
-    ids = await WebChannel().notify(
+    outcome = await WebChannel().notify(
         ChannelNotification(
             message="pick one",
             recipient=VISITOR_ID,
@@ -631,7 +632,7 @@ async def test_notify_options_appends_a_card_with_options(fake_redis: FakeRedis)
         )
     )
     payload = _only_media_entry(fake_redis)
-    assert payload["id"] == ids[0]
+    assert payload["id"] == outcome.message_ids[0]
     assert payload["text"] == "pick one"
     assert payload["options"] == [
         {"kind": "reply", "text": "Item A", "description": "the first one", "id": "opt-a"},
@@ -661,7 +662,7 @@ async def test_notify_sections_append_a_card_with_a_sectioned_list(fake_redis: F
     # A sectioned reply list rides the card's ``sections`` key: each section is a title
     # and its non-empty reply rows; options and sections are mutually exclusive, so a
     # sectioned card never carries a flat ``options`` list.
-    ids = await WebChannel().notify(
+    outcome = await WebChannel().notify(
         ChannelNotification(
             message="choose a slot",
             recipient=VISITOR_ID,
@@ -673,7 +674,7 @@ async def test_notify_sections_append_a_card_with_a_sectioned_list(fake_redis: F
         )
     )
     payload = _only_media_entry(fake_redis)
-    assert payload["id"] == ids[0]
+    assert payload["id"] == outcome.message_ids[0]
     assert payload["sections"] == [
         {
             "title": "Today",
@@ -706,7 +707,7 @@ async def test_notify_header_and_footer_ride_the_interactive_card(fake_redis: Fa
 async def test_notify_location_appends_a_card_with_a_map_pin(fake_redis: FakeRedis):
     # A location notification lands as a chat.media card carrying a ``location`` map-pin
     # element (coordinates + any name/address); a content-only location keeps an empty text.
-    ids = await WebChannel().notify(
+    outcome = await WebChannel().notify(
         ChannelNotification(
             message="",
             recipient=VISITOR_ID,
@@ -715,7 +716,7 @@ async def test_notify_location_appends_a_card_with_a_map_pin(fake_redis: FakeRed
         )
     )
     payload = _only_media_entry(fake_redis)
-    assert payload["id"] == ids[0]
+    assert payload["id"] == outcome.message_ids[0]
     assert payload["text"] == ""
     assert payload["location"] == {
         "latitude": 51.5074,
@@ -777,12 +778,12 @@ async def test_notify_schema_appends_form_card_and_writes_token_record(fake_redi
     # a server-minted submission token; the token record is what the submission door
     # later resolves — {identity, address, schema, message}, aging out with the card
     # (TTL = the transcript TTL, so a card still in the replay buffer is answerable).
-    ids = await WebChannel().notify(make_notification(message="Fill this in", schema=_FORM_SCHEMA))
+    outcome = await WebChannel().notify(make_notification(message="Fill this in", schema=_FORM_SCHEMA))
 
     payload = _only_form_entry(fake_redis)
     token, record = _only_form_record(fake_redis)
     assert payload == {
-        "id": ids[0],
+        "id": outcome.message_ids[0],
         "text": "Fill this in",
         "schema": _FORM_SCHEMA,
         "token": token,

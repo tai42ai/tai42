@@ -19,10 +19,12 @@ from tai42_contract.conversations import ConversationAnswer, ThreadQueueOverflow
 
 import tai42_skeleton.conversations as conversations_package
 from tai42_skeleton.conversations.caps import AddressRateLimitedError
+from tai42_skeleton.conversations.models import PersonThreadClosedError
 from tai42_skeleton.conversations.turn import (
     ApiSubmitResult,
     ConversationRouteResolutionError,
     EventTargetNotToolError,
+    ThreadAddressUnknownError,
     ThreadNotFoundError,
 )
 from tai42_skeleton.operations import BadRequestError
@@ -66,11 +68,23 @@ class _Engine:
         location=None,
         locale=None,
         form_tag=None,
+        reply_to_message_id=None,
         *,
         client_connected,
     ):
         self.calls.append(
-            (route_name, external_user_id, text, caller_principal, wait_seconds, params, form, locale, form_tag)
+            (
+                route_name,
+                external_user_id,
+                text,
+                caller_principal,
+                wait_seconds,
+                params,
+                form,
+                locale,
+                form_tag,
+                reply_to_message_id,
+            )
         )
         if self._raises is not None:
             raise self._raises
@@ -194,6 +208,7 @@ def test_an_oversized_wait_seconds_reaches_the_engine_which_owns_the_clamp(monke
         (ConversationRouteResolutionError("no such route"), 404),
         (AddressRateLimitedError("over cap"), 429),
         (ThreadQueueOverflowError("full"), 503),
+        (PersonThreadClosedError("bridge:@person:p-1"), 503),
         (NotSupportedError("no backend"), 501),
     ],
 )
@@ -265,6 +280,40 @@ def test_an_absent_form_tag_reaches_the_engine_as_none(monkeypatch):
     client = _client(monkeypatch, engine)
     _post(client)
     assert engine.calls[0][8] is None
+
+
+def test_a_reply_to_message_id_threads_through_to_the_engine_as_a_string(monkeypatch):
+    # ConversationMessage.reply_to_message_id names an earlier platform message of this
+    # conversation; the engine receives it as the string id it resolves against the thread.
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    quoted = "3f2b8c1e-5a4d-4e6f-9b7a-1c2d3e4f5a6b"
+    response = client.post(_PATH, json={"external_user_id": "u-7", "text": "hi", "reply_to_message_id": quoted})
+    assert response.status_code == 202
+    assert engine.calls[0][9] == quoted
+
+
+def test_an_absent_reply_to_message_id_reaches_the_engine_as_none(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    _post(client)
+    assert engine.calls[0][9] is None
+
+
+@pytest.mark.parametrize(
+    "reply_to_message_id",
+    ["not-a-uuid", "3f2b8c1e-5a4d-1e6f-9b7a-1c2d3e4f5a6b", 42],
+    ids=["malformed", "not_version_4", "non_string"],
+)
+def test_a_reply_to_message_id_that_is_not_a_uuid4_is_a_400(monkeypatch, reply_to_message_id):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(
+        _PATH, json={"external_user_id": "u-7", "text": "hi", "reply_to_message_id": reply_to_message_id}
+    )
+    assert response.status_code == 400
+    assert "invalid conversation message" in response.json()["error"]
+    assert engine.calls == []
 
 
 def test_a_non_object_form_is_a_400(monkeypatch):
@@ -364,10 +413,12 @@ def test_event_finished_turn_answers_200_with_the_answer_inline(monkeypatch):
     ("error", "status"),
     [
         (ThreadNotFoundError("no such thread"), 404),
+        (ThreadAddressUnknownError("no participant message to address"), 400),
         (ConversationRouteResolutionError("no such route"), 404),
         (EventTargetNotToolError("agent target"), 409),
         (AddressRateLimitedError("over cap"), 429),
         (ThreadQueueOverflowError("full"), 503),
+        (PersonThreadClosedError("bridge:@person:p-1"), 503),
         (NotSupportedError("no backend"), 501),
     ],
 )

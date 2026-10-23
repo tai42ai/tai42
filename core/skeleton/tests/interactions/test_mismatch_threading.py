@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery, ChannelNotification, Correlation
+from tai42_contract.channels import ChannelDelivery, ChannelNotification, Correlation, SendOutcome
 from tai42_contract.interactions import (
     AnswerMismatchPolicy,
     SuspendedInteraction,
@@ -23,6 +23,7 @@ from tai42_contract.interactions import (
     set_resume_continuation_tool,
 )
 from tai42_contract.tools import tool_call_frame
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
@@ -37,7 +38,7 @@ from tai42_skeleton.interactions.settings import InteractionsSettings
 _PUBLIC_BASE = "https://host.example"
 
 
-class CapturingChannel:
+class CapturingChannel(AddressingChannel):
     """Records the ``ChannelDelivery`` the helper builds; on delivery it parks a
     ``Correlation`` copying the delivery's mismatch policy and per-send wording onto a shared store
     — the exact copy a real correlated channel performs so its ladder read is authoritative."""
@@ -46,7 +47,7 @@ class CapturingChannel:
         self.deliveries: list[ChannelDelivery] = []
         self._store = store
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
         self.deliveries.append(delivery)
         await self._store.set_correlation(
             "participant-key",
@@ -59,9 +60,10 @@ class CapturingChannel:
             ),
             ttl_seconds=300,
         )
+        return self.outcome(delivery, [])
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:  # pragma: no cover - unused
-        return []
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:  # pragma: no cover - unused
+        return self.outcome(notification, [])
 
 
 class FakeCorrelationStore:
@@ -129,6 +131,8 @@ def wired(monkeypatch, fake_client_ctx):
         cap_key,
         text,
         provider_message_id,
+        medium_message_id,
+        reply_to_medium_message_id,
         params=None,
         form=None,
         attachments=None,
@@ -152,7 +156,7 @@ def wired(monkeypatch, fake_client_ctx):
 
 
 def _stub_forward(monkeypatch, response: httpx.Response):
-    async def _fake(callback_url, answer, params=None):
+    async def _fake(callback_url, answer, params, medium_message_id, reply_to_medium_message_id):
         return response
 
     monkeypatch.setattr(inbound_module, "_forward_answer", _fake)
@@ -239,6 +243,8 @@ async def test_bridge_policy_reaches_the_ladder_through_the_real_helper(wired, f
         client_address="+15550001111",
         cap_key="+15550001111",
         provider_message_id="prov-msg-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
         bridge_text="tell me about the schedule",
         owns_retry_notice=False,
     )

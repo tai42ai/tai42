@@ -214,6 +214,14 @@ class StatesFacet(_Facet):
         """
         return await self._app._states_service.drain_target_saves(target_kind, target_name)
 
+    async def settle_person_writes(self, target_kind: str, target_name: str, person_id: str) -> None:
+        """Wait out every write on a ``person`` subject that took its person gate before this call.
+
+        Skeleton-only (the conversation person erase, after its erase mark), off the ``AppStates``
+        protocol.
+        """
+        await self._app._states_service.settle_person_writes(target_kind, target_name, person_id)
+
     # -- pending saves (skeleton-only operator doors, off the ``AppStates`` protocol) --
     async def list_pending_saves(
         self, *, status: Literal["outstanding", "failed"] | None, limit: int, before: int | None

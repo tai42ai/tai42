@@ -9,7 +9,6 @@ import subprocess
 import sys
 import textwrap
 from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +25,6 @@ class FakeWriter(NoOpWriter):
     def __init__(self) -> None:
         super().__init__()
         self.health = MonitoringExportHealth()
-        self.disabled = False
 
     def is_recording(self) -> bool:
         return True
@@ -45,14 +43,6 @@ class FakeWriter(NoOpWriter):
         if self._listener is not None:
             self._listener(self.health)
 
-    @contextmanager
-    def disable(self) -> Iterator[None]:
-        self.disabled = True
-        try:
-            yield
-        finally:
-            self.disabled = False
-
 
 class _Backend:
     def __init__(self, writer: Any) -> None:
@@ -66,10 +56,10 @@ class _Hooks:
         self.writer = writer
         self.fail = fail
 
-    async def on_event(self, *, topic: str, payload: dict[str, Any]) -> None:
+    async def on_event(self, *, topic: str, payload: dict[str, Any], monitoring_disabled: bool = False) -> None:
         if self.fail:
             raise RuntimeError("hooks down")
-        self.events.append((topic, payload, self.writer.disabled))
+        self.events.append((topic, payload, monitoring_disabled))
 
 
 @pytest.fixture(autouse=True)
@@ -185,7 +175,7 @@ def test_record_first_called_in_a_forked_child_starts_from_zero():
     assert delta == "1"
 
 
-async def test_in_process_watch_emits_one_event_per_growth_under_disable(monkeypatch: pytest.MonkeyPatch):
+async def test_in_process_watch_emits_one_event_per_growth_with_monitoring_disabled(monkeypatch: pytest.MonkeyPatch):
     writer = FakeWriter()
     _install(writer)
     hooks = _Hooks(writer)

@@ -32,6 +32,7 @@ from tai42_skeleton.conversations.turn.outcome import (
     _text_part,
 )
 from tai42_skeleton.conversations.turn.record import _answer_fields, _new_record
+from tai42_skeleton.conversations.turn.reply_window import read_turn_reply_window
 from tai42_skeleton.conversations.turn.tool_turn import _reply_parts, _tool_reply
 from tai42_skeleton.interactions.authorization import assert_delivery_authorized
 
@@ -59,20 +60,27 @@ DELIVER_TOOL_COMPLETION_NAME = "deliver_tool_completion"
 _COMPLETION_PRINCIPAL = "system:agent-resume"
 
 
-async def _rebuilt_turn(message_id: str | None, route: ConversationRoute) -> dict[str, object] | None:
+async def _rebuilt_turn(
+    message_id: str | None, route: ConversationRoute, *, delivery_route: ConversationRoute, client_address: str
+) -> dict[str, object] | None:
     """Rebuild the ``$turn`` block a late reply maps against, from the turn's originating intake record.
 
     The completion binding carries the originating turn's ``message_id``; this loads that record and
     builds the SAME generic ``turn`` block a live tool turn surfaces, so an out-of-band reply reads
     ``$turn`` symmetric to a live one. ``None`` when no id was carried or the record has aged out of
     retention — ``reply_expr`` then reads ``$turn`` as null rather than a guessed value.
+
+    ``route`` is the route the reply maps through; ``delivery_route`` and ``client_address`` are the
+    target the reply is sent to. The block's ``reply_window`` is read FRESH for that target, so a
+    long run sees the window as it stands when it replies. A failed read raises to the caller.
     """
     if not message_id:
         return None
     record = await cache.get_conversations_manager().records.get_record(message_id)
     if record is None:
         return None
-    return _turn_block(record, route, person=None, thread_id=record.thread_id)
+    window = await read_turn_reply_window(delivery_route.channel, delivery_route.our_identity, client_address)
+    return _turn_block(record, route, person=None, thread_id=record.thread_id, reply_window=window)
 
 
 async def _resolve_completion_target(thread_id: str) -> tuple[ConversationRoute, str]:
@@ -80,9 +88,10 @@ async def _resolve_completion_target(thread_id: str) -> tuple[ConversationRoute,
 
     A route-keyed thread (``bridge:{route_name}:{address}``) carries both directly. A LINKED
     person's aggregated thread (``bridge:@person:{id}``) has no single address, so the reply
-    returns to where they LAST wrote from — the newest record's route + client_address. A
-    thread outside the reserved namespace, an unknown/deleted route, or an empty person
-    thread raises loudly rather than delivering to a guessed target.
+    returns to where they LAST wrote from — the route + client_address of the newest record
+    that is not a send record. A thread outside the reserved namespace, an unknown/deleted
+    route, or a person thread with no such record raises loudly rather than delivering to a
+    guessed target.
     """
     try:
         parsed = parse_thread_id(thread_id)
@@ -269,14 +278,16 @@ async def deliver_agent_completion(
     if kind == "succeeded":
         # A blank resumed answer delivers the SAME client-safe error text the fresh-turn path
         # replies for an empty answer, so the client sees a consistent outcome either way — the
-        # route's own ``error_reply_text`` when it carries one. It rides the operator record as
+        # route's own ``reply_texts.error`` when it carries one. It rides the operator record as
         # an ``answered`` reply (an operator record is always answered) — the text is the reply,
         # there is no client turn to mark ``error`` against.
         if route.reply_expr is not None:
             # The route maps the resumed final through its ``reply_expr`` exactly as a live agent
             # turn does — over the run's result, with ``$turn`` rebuilt from the originating record.
-            turn = await _rebuilt_turn(message_id, route)
+            # A failed rebuild (the reply-window read) takes the same client-safe notice as a
+            # failed mapping.
             try:
+                turn = await _rebuilt_turn(message_id, route, delivery_route=route, client_address=client_address)
                 mapped = await _tool_reply(route, result, turn=turn, asks=[], parked=[])
             except Exception as exc:
                 logger.exception(
@@ -326,7 +337,7 @@ async def deliver_agent_completion(
         answer_parts=answer_parts,
         origin="operator",
     )
-    await cache.get_conversations_manager().records.create_record(record, refresh_mode=True)
+    await cache.get_conversations_manager().records.create_record(record, route=route, refresh_mode=True)
     spawn_delivery(completion_id)
     return {"message_id": completion_id}
 
@@ -442,19 +453,19 @@ async def deliver_tool_completion(
         mapping_route = pinned
     if kind == "succeeded":
         try:
-            mapped = await _tool_reply(
-                mapping_route, result, turn=await _rebuilt_turn(message_id, mapping_route), asks=[], parked=[]
-            )
+            turn = await _rebuilt_turn(message_id, mapping_route, delivery_route=route, client_address=client_address)
+            mapped = await _tool_reply(mapping_route, result, turn=turn, asks=[], parked=[])
         except Exception as exc:
-            # A terminal the route's reply_expr cannot map is delivered as the client-safe
-            # notice rather than crashing the resumer or dropping the outcome.
+            # A terminal whose ``$turn`` cannot be rebuilt (the reply-window read failed) or that
+            # the route's reply_expr cannot map is delivered as the client-safe notice rather than
+            # crashing the resumer or dropping the outcome.
             logger.exception(
                 "conversations: mapping a resumed tool result for route %r failed",
                 mapping_route.route_name,
                 exc_info=exc,
             )
             # The participant-facing notice resolves through the DELIVERY route (where the record is
-            # filed and the participant is conversing), so its own ``error_reply_text`` applies.
+            # filed and the participant is conversing), so its own ``reply_texts.error`` applies.
             parts: list[AnswerPart] | None = [_text_part(_error_answer_text(route))]
         else:
             # A resumed tool reply carries the same ordered-parts shape a live tool turn does
@@ -467,7 +478,7 @@ async def deliver_tool_completion(
     else:
         # A non-success terminal: the route carries no error mapping, so deliver the target's reply
         # when the failure carries one, else the uniform client-safe notice (the delivery route's
-        # ``error_reply_text`` when set) — never the raw internal detail, never silence.
+        # ``reply_texts.error`` when set) — never the raw internal detail, never silence.
         _announce_non_success(DELIVER_TOOL_COMPLETION_NAME, completion_id, status)
         parts = [_text_part(_failure_answer_text(route, reply))]
     answer, answer_parts = _answer_fields(parts)
@@ -485,6 +496,6 @@ async def deliver_tool_completion(
         answer_parts=answer_parts,
         origin="operator",
     )
-    await cache.get_conversations_manager().records.create_record(record, refresh_mode=True)
+    await cache.get_conversations_manager().records.create_record(record, route=route, refresh_mode=True)
     spawn_delivery(completion_id)
     return {"message_id": completion_id}

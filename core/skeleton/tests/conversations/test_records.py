@@ -14,6 +14,7 @@ from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStat
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
+from .conftest import create_record, sent, sent_ids
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -159,7 +160,7 @@ async def test_an_overlap_terminal_transitions_only_from_intake(monkeypatch, sta
     fake = FakeRecordRedis()
     fake.seed_route("line")
     store = _store(monkeypatch, fake)
-    await store.create_record(_intake("m1"), intake_token="worker-1")
+    await create_record(store, _intake("m1"), intake_token="worker-1")
 
     terminal = _channel_merged("m1", status=status, successor_id="lead")
     assert await getattr(store, transition)(terminal) == 1
@@ -201,9 +202,9 @@ async def test_accepted_after_returns_later_accepted_messages_in_order(monkeypat
     fake = FakeRecordRedis()
     fake.seed_route("line")
     store = _store(monkeypatch, fake)
-    await store.create_record(_thread_intake("lead", 100.0), intake_token="w")
-    await store.create_record(_thread_intake("f1", 101.0), intake_token="w")
-    await store.create_record(_thread_intake("f2", 102.0), intake_token="w")
+    await create_record(store, _thread_intake("lead", 100.0), intake_token="w")
+    await create_record(store, _thread_intake("f1", 101.0), intake_token="w")
+    await create_record(store, _thread_intake("f2", 102.0), intake_token="w")
 
     followers = await store.accepted_after("line", _THREAD, 100.0)
     assert [record.message_id for record in followers] == ["f1", "f2"]
@@ -215,9 +216,9 @@ async def test_accepted_after_skips_a_follower_that_left_accepted(monkeypatch):
     fake = FakeRecordRedis()
     fake.seed_route("line")
     store = _store(monkeypatch, fake)
-    await store.create_record(_thread_intake("lead", 100.0), intake_token="w")
-    await store.create_record(_thread_intake("f1", 101.0), intake_token="w")
-    await store.create_record(_thread_intake("f2", 102.0), intake_token="w")
+    await create_record(store, _thread_intake("lead", 100.0), intake_token="w")
+    await create_record(store, _thread_intake("f1", 101.0), intake_token="w")
+    await create_record(store, _thread_intake("f2", 102.0), intake_token="w")
     # f1's turn completed — it has left intake, so it is no longer pending.
     assert await store.complete_turn(_record("f1", thread_id=_THREAD, created_at=101.0, answer="done")) == 1
 
@@ -228,9 +229,10 @@ async def test_accepted_after_excludes_events_and_honours_the_kind_and_origin(mo
     fake = FakeRecordRedis()
     fake.seed_route("line")
     store = _store(monkeypatch, fake)
-    await store.create_record(_thread_intake("lead", 100.0), intake_token="w")
-    await store.create_record(_thread_intake("msg", 101.0), intake_token="w")
-    await store.create_record(
+    await create_record(store, _thread_intake("lead", 100.0), intake_token="w")
+    await create_record(store, _thread_intake("msg", 101.0), intake_token="w")
+    await create_record(
+        store,
         _thread_intake("evt", 102.0, inbound_kind="event", inbound_event={"kind": "x"}, inbound_text=""),
         intake_token="w",
     )
@@ -249,7 +251,7 @@ async def test_accepted_after_is_bounded_by_the_thread_fifo_depth(monkeypatch):
     fake.seed_route("line")
     store = _store(monkeypatch, fake)
     for index in range(6):
-        await store.create_record(_thread_intake(f"f{index}", 100.0 + index), intake_token="w")
+        await create_record(store, _thread_intake(f"f{index}", 100.0 + index), intake_token="w")
 
     followers = await store.accepted_after("line", _THREAD, 100.0)
     # At most ``thread_queue_depth`` rows are read back, oldest-of-the-window first.
@@ -293,7 +295,7 @@ async def test_get_inbound_owner_reads_without_claiming(monkeypatch):
 
 async def test_complete_turn_is_guarded_on_the_intake_state(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_intake("m1"), intake_token="worker-1")
+    await create_record(store, _intake("m1"), intake_token="worker-1")
     completed = _record("m1", answer="the answer")
 
     assert await store.complete_turn(completed) == 1
@@ -321,14 +323,14 @@ async def test_complete_turn_refuses_a_record_that_is_not_pending_delivery(monke
 async def test_claim_delivery_refuses_an_intake_record(monkeypatch):
     # An intake record carries no answer, so the delivery machine must never take it.
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_intake("m1"), intake_token="worker-1")
+    await create_record(store, _intake("m1"), intake_token="worker-1")
     assert await store.claim_delivery("m1", time.time(), "tok", 120) == -2
 
 
 async def test_delete_record_removes_an_abandoned_intake_record(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
     record = _intake("m1")
-    await store.create_record(record, intake_token="worker-1")
+    await create_record(store, record, intake_token="worker-1")
     assert await store.delete_record(record) is True
     assert await store.get_record("m1") is None
     assert await store.delete_record(record) is False
@@ -345,7 +347,7 @@ async def test_a_shed_record_is_created_terminal_with_the_retention_ttl(monkeypa
         answer=None,
         error="over the rate cap",
     )
-    await store.create_record(shed)
+    await create_record(store, shed)
 
     got = await store.get_record("m1")
     assert got is not None
@@ -355,20 +357,20 @@ async def test_a_shed_record_is_created_terminal_with_the_retention_ttl(monkeypa
     assert fake.ttl_ms[settings.record_key("m1")] == settings.answer_retention_ttl_seconds * 1000
     assert await store.claim_delivery("m1", time.time(), "tok", 120) == 0
     assert await store.mark_delivered("m1", [], 1, time.time(), "tok") == -2
-    assert await store.mark_failed("m1", 1, time.time(), "tok") == -2
+    assert await store.mark_failed("m1", 1, time.time(), "tok", sends=[]) == -2
 
 
 async def test_an_intake_record_never_expires(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
-    await store.create_record(_intake("m1"), intake_token="worker-1")
+    await create_record(store, _intake("m1"), intake_token="worker-1")
     assert ConversationsSettings().record_key("m1") not in fake.ttl_ms
 
 
 async def test_create_and_get_round_trip(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    record = _record(answer="hi", outbound_message_ids=[], attempts=0)
-    await store.create_record(record)
+    record = _record(answer="hi", attempts=0)
+    await create_record(store, record)
     got = await store.get_record("m1")
     assert got is not None
     assert got.answer == "hi"
@@ -390,7 +392,7 @@ async def test_answer_parts_round_trip(monkeypatch):
         AnswerPart(message="the picture", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")]),
     ]
     record = _record(answer="hi\n\nthe picture", answer_parts=parts)
-    await store.create_record(record)
+    await create_record(store, record)
 
     got = await store.get_record("m1")
     assert got is not None
@@ -421,7 +423,7 @@ async def test_all_media_answer_round_trip_and_empty_answer_consumers(monkeypatc
         AnswerPart(media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/b.png")]),
     ]
     record = _record(answer="", answer_parts=parts)
-    await store.create_record(record)
+    await create_record(store, record)
 
     got = await store.get_record("m1")
     assert got is not None
@@ -447,7 +449,7 @@ async def test_all_media_answer_round_trip_and_empty_answer_consumers(monkeypatc
 
 async def test_claim_delivery_is_exactly_once(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_record())
+    await create_record(store, _record())
     now = time.time()
     # First worker wins the lease.
     assert await store.claim_delivery("m1", now, "tokA", 120) == 1
@@ -461,19 +463,19 @@ async def test_claim_delivery_is_exactly_once(monkeypatch):
 
 async def test_claim_delivery_skips_terminal_record(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_record())
+    await create_record(store, _record())
     await store.mark_delivered("m1", [], 1, time.time(), "tok")
     assert await store.claim_delivery("m1", time.time(), "tok", 120) == 0
 
 
 async def test_channel_provisional_then_receipt_delivered(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_record())
-    assert await store.mark_provisional("m1", ["out-1"], 1, time.time(), "tok") == 1
+    await create_record(store, _record())
+    assert await store.mark_provisional("m1", sent("out-1"), 1, time.time(), "tok") == 1
     got = await store.get_record("m1")
     assert got is not None
     assert got.delivery_status is DeliveryStatus.PROVISIONAL
-    assert got.outbound_message_ids == ["out-1"]
+    assert sent_ids(got) == ["out-1"]
     # A positive receipt confirms it delivered.
     assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, time.time()) == 1
     got = await store.get_record("m1")
@@ -485,8 +487,8 @@ async def test_channel_provisional_then_receipt_delivered(monkeypatch):
 
 async def test_receipt_failed_marks_failed(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_record())
-    await store.mark_provisional("m1", ["out-1"], 1, time.time(), "tok")
+    await create_record(store, _record())
+    await store.mark_provisional("m1", sent("out-1"), 1, time.time(), "tok")
     assert await store.ingest_receipt("m1", DeliveryReceipt.FAILED, time.time()) == 1
     got = await store.get_record("m1")
     assert got is not None
@@ -495,7 +497,7 @@ async def test_receipt_failed_marks_failed(monkeypatch):
 
 async def test_receipt_conflicts_with_opposite_terminal(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_record())
+    await create_record(store, _record())
     await store.mark_delivered("m1", [], 1, time.time(), "tok")
     # A late FAILED receipt on an already-delivered record is a conflict, not an override.
     assert await store.ingest_receipt("m1", DeliveryReceipt.FAILED, time.time()) == -2
@@ -503,22 +505,23 @@ async def test_receipt_conflicts_with_opposite_terminal(monkeypatch):
 
 async def test_mark_delivered_idempotent_and_failed_guard(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_record())
+    await create_record(store, _record())
     assert await store.mark_delivered("m1", [], 1, time.time(), "tok") == 1
     assert await store.mark_delivered("m1", [], 1, time.time(), "tok") == 0  # already delivered
-    assert await store.mark_failed("m1", 1, time.time(), "tok") == -2  # cannot fail a delivered record
+    assert await store.mark_failed("m1", 1, time.time(), "tok", sends=[]) == -2  # cannot fail a delivered record
 
 
 async def test_bump_attempt(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_record())
+    await create_record(store, _record())
     assert await store.bump_attempt("m1") == 1
     assert await store.bump_attempt("m1") == 2
 
 
 async def test_outbound_reverse_index(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.index_outbound("twilio", ["o-1", "o-2"], "m1")
+    await create_record(store, _record())
+    assert await store.index_outbound("twilio", "+15550001111", "+15550002222", ["o-1", "o-2"], "m1") == 1
     assert await store.resolve_outbound("twilio", "o-1") == "m1"
     assert await store.resolve_outbound("twilio", "o-2") == "m1"
     assert await store.resolve_outbound("twilio", "unknown") is None
@@ -526,10 +529,10 @@ async def test_outbound_reverse_index(monkeypatch):
 
 async def test_pending_work_reports_non_terminal_only(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_record("pend"))
-    await store.create_record(_record("prov"))
-    await store.mark_provisional("prov", ["o"], 1, 1000.0, "tok")
-    await store.create_record(_record("done"))
+    await create_record(store, _record("pend"))
+    await create_record(store, _record("prov"))
+    await store.mark_provisional("prov", sent("o"), 1, 1000.0, "tok")
+    await create_record(store, _record("done"))
     await store.mark_delivered("done", [], 1, time.time(), "tok")
 
     work = {w.message_id: w for w in await store.pending_work(due_only=False)}
@@ -545,7 +548,7 @@ async def test_pending_work_skips_corrupt_rows_and_still_reports_the_rest(monkey
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
-    await store.create_record(_record("good"))
+    await create_record(store, _record("good"))
     fake.seed_hash(
         settings.record_key("unknown-status"),
         {"data": "{}", "delivery_status": "in_flight", "outbound_ids": "[]", "attempts": "0", "updated_at": "1"},
@@ -582,9 +585,9 @@ async def test_pending_work_skips_corrupt_rows_and_still_reports_the_rest(monkey
 
 async def test_list_by_status_failed(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_record("a"))
-    await store.mark_failed("a", 3, time.time(), "tok")
-    await store.create_record(_record("b"))
+    await create_record(store, _record("a"))
+    await store.mark_failed("a", 3, time.time(), "tok", sends=[])
+    await create_record(store, _record("b"))
     await store.mark_delivered("b", [], 1, time.time(), "tok")
 
     failed = await store.list_by_status(frozenset({DeliveryStatus.FAILED}))
@@ -598,13 +601,13 @@ async def test_retention_ttl_applied_only_on_a_terminal_transition(monkeypatch):
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
     key = settings.record_key("m1")
-    await store.create_record(_record("m1"))
+    await create_record(store, _record("m1"))
     assert key not in fake.ttl_ms  # pending_delivery never expires
 
-    await store.mark_provisional("m1", ["o"], 1, time.time(), "tok")
+    await store.mark_provisional("m1", sent("o"), 1, time.time(), "tok")
     assert key not in fake.ttl_ms  # provisional still does not expire
 
-    await store.mark_delivered("m1", ["o"], 1, time.time(), "tok")
+    await store.mark_delivered("m1", sent("o"), 1, time.time(), "tok")
     assert fake.ttl_ms[key] == settings.answer_retention_ttl_seconds * 1000
 
 
@@ -613,8 +616,8 @@ async def test_retention_ttl_applied_on_a_failed_transition(monkeypatch):
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
     key = settings.record_key("m1")
-    await store.create_record(_record("m1"))
-    await store.mark_failed("m1", 8, time.time(), "tok")
+    await create_record(store, _record("m1"))
+    await store.mark_failed("m1", 8, time.time(), "tok", sends=[])
     assert fake.ttl_ms[key] == settings.answer_retention_ttl_seconds * 1000
 
 
@@ -625,7 +628,7 @@ async def test_message_id_is_a_uuid4(monkeypatch):
     minted = str(uuid4())
     assert UUID(minted).version == 4
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_record(minted))
+    await create_record(store, _record(minted))
     got = await store.get_record(minted)
     assert got is not None
     assert got.message_id == minted
@@ -642,10 +645,10 @@ async def test_a_transition_moves_the_record_between_status_indexes(monkeypatch)
     settings = ConversationsSettings()
     pending = settings.status_index_key(DeliveryStatus.PENDING_DELIVERY.value)
     failed = settings.status_index_key(DeliveryStatus.FAILED.value)
-    await store.create_record(_record("m1"))
+    await create_record(store, _record("m1"))
     assert await fake.zrange(pending, 0, -1) == ["m1"]
 
-    await store.mark_failed("m1", 1, time.time(), "tok")
+    await store.mark_failed("m1", 1, time.time(), "tok", sends=[])
     assert await fake.zrange(pending, 0, -1) == []
     assert await fake.zrange(failed, 0, -1) == ["m1"]
     # A terminal member is scored to expire with the row it names.
@@ -656,9 +659,9 @@ async def test_a_transition_moves_the_record_between_status_indexes(monkeypatch)
 async def test_a_terminal_index_member_expires_with_its_row(monkeypatch):
     monkeypatch.setenv("CONVERSATIONS_ANSWER_RETENTION_TTL_SECONDS", "1")
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_record("old"))
+    await create_record(store, _record("old"))
     # Terminal a full retention window ago: the index must not name it any more.
-    await store.mark_failed("old", 1, time.time() - 10, "tok")
+    await store.mark_failed("old", 1, time.time() - 10, "tok", sends=[])
 
     assert (await store.list_by_status(frozenset({DeliveryStatus.FAILED}))).items == []
 
@@ -667,7 +670,7 @@ async def test_a_member_whose_row_is_gone_is_unindexed(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
-    await store.create_record(_record("gone"))
+    await create_record(store, _record("gone"))
     # The row removed from under the index rather than through ``delete_record``.
     fake._hashes.pop(settings.record_key("gone"))
 
@@ -679,7 +682,7 @@ async def test_delete_record_unindexes_the_row_it_removes(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     record = _record("m1")
-    await store.create_record(record)
+    await create_record(store, record)
 
     assert await store.delete_record(record) is True
     assert await store.pending_work(due_only=False) == []
@@ -696,7 +699,7 @@ async def test_pending_work_moves_a_corrupt_row_to_terminal_failed(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
-    await store.create_record(_record("good"))
+    await create_record(store, _record("good"))
     fake.seed_hash(
         settings.record_key("bad-data"),
         {
@@ -760,7 +763,7 @@ async def test_list_by_status_counts_unreadable(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
-    await store.create_record(_record("good"))
+    await create_record(store, _record("good"))
     fake.seed_hash(
         settings.record_key("bad"),
         {
@@ -784,7 +787,7 @@ async def test_list_by_status_counts_orphan_member(monkeypatch, caplog):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
-    await store.create_record(_record("gone"))
+    await create_record(store, _record("gone"))
     fake._hashes.pop(settings.record_key("gone"))
 
     with caplog.at_level("WARNING"):
@@ -801,7 +804,7 @@ async def test_create_marks_route_missing_when_route_gone(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
-    await store.create_record(_record("m1"))
+    await create_record(store, _record("m1"))
 
     assert fake._hashes[settings.record_key("m1")].get("route_missing") == "1"
     record = await store.get_record("m1")
@@ -818,7 +821,7 @@ async def test_create_route_present_not_missing(monkeypatch):
     fake.seed_route("line")
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
-    await store.create_record(_record("m1"))
+    await create_record(store, _record("m1"))
 
     record = await store.get_record("m1")
     assert record is not None

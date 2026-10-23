@@ -68,7 +68,7 @@ async def test_empty_allowlist_freeform_sends_but_cold_template_rejected(
 async def test_notify_template_maps_body_parameters(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     fake_httpx.responses.append(_accepted("wamid.TPL"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         ChannelNotification(
             message="Item done.",
             recipient=ALLOWED_A,
@@ -78,7 +78,7 @@ async def test_notify_template_maps_body_parameters(fake_redis: FakeRedis, fake_
         )
     )
 
-    assert ids == ["wamid.TPL"]
+    assert outcome.message_ids == ["wamid.TPL"]
     payload = fake_httpx.calls[0]["json"]
     assert payload["type"] == "template"
     assert payload["template"]["components"] == [
@@ -92,7 +92,7 @@ async def test_template_to_known_contact_sends(fake_redis: FakeRedis, fake_httpx
     fake_redis.store[_known_contact_key(_UNLISTED)] = "1"
     fake_httpx.responses.append(_accepted("wamid.KC"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         ChannelNotification(
             message="Hi again.",
             recipient=_UNLISTED,
@@ -100,7 +100,7 @@ async def test_template_to_known_contact_sends(fake_redis: FakeRedis, fake_httpx
         )
     )
 
-    assert ids == ["wamid.KC"]
+    assert outcome.message_ids == ["wamid.KC"]
     assert fake_httpx.calls[0]["json"]["to"] == _UNLISTED
 
 

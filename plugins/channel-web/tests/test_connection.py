@@ -27,7 +27,9 @@ async def test_every_store_op_raises_when_redis_url_unset(fake_redis: FakeRedis,
     monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
     reset_all_settings()
 
-    record = QuestionRecord(callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline())
+    record = QuestionRecord(
+        callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(), sensitive=False
+    )
     for call in (
         register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY, {}),
         resolve_session(SESSION_TOKEN),
@@ -35,7 +37,7 @@ async def test_every_store_op_raises_when_redis_url_unset(fake_redis: FakeRedis,
         append_message(IDENTITY, VISITOR_ID, "in", "x"),
         append_media(IDENTITY, VISITOR_ID, "x", None, None),
         append_question(IDENTITY, VISITOR_ID, "int-1", "q", "text", None, _deadline()),
-        append_answered(IDENTITY, VISITOR_ID, "int-1", "a"),
+        append_answered(IDENTITY, VISITOR_ID, "int-1", "a", sensitive=False),
         reserve_question("int-1", record),
         release_question("int-1"),
         claim_question("int-1"),

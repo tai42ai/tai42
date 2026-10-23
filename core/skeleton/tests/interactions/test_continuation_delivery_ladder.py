@@ -38,6 +38,7 @@ from tai42_contract.tools import RunDelivery, get_run_delivery, get_run_delivery
 
 from tai42_skeleton.interactions import authorization, giveup_delivery
 from tai42_skeleton.interactions import continuation as continuation_module
+from tai42_skeleton.interactions.run_completion import run_completion_id
 from tai42_skeleton.interactions.store import ContinuationDue, serde
 from tai42_skeleton.runs.chokepoint import delivery_fire, resume_origin
 
@@ -119,6 +120,8 @@ async def _drive(
         tool=tool,
         interaction_id=interaction_id,
         answer={"a": 1},
+        reply_to_medium_message_id=None,
+        params=None,
         park_context=None,
         park_asked_by=("main",),
         delivery=delivery,
@@ -129,7 +132,7 @@ async def _drive(
 
 
 def _cid(run_delivery_id: str) -> str:
-    return continuation_module._completion_id(run_delivery_id)
+    return run_completion_id(run_delivery_id)
 
 
 async def _seed_due(wired, interaction_id: str) -> None:

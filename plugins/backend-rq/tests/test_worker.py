@@ -304,7 +304,12 @@ def worker_env(monkeypatch) -> dict[str, Any]:
     record: dict[str, Any] = {"prepared": 0, "gevent": 0, "hooks": 0}
     conn = FakeRedisConn()
     record["conn"] = conn
-    monkeypatch.setattr(worker_module, "Redis", type("R", (), {"from_url": staticmethod(lambda url: conn)}))
+
+    def _from_url(**kwargs: Any) -> FakeRedisConn:
+        record["from_url"] = kwargs
+        return conn
+
+    monkeypatch.setattr(worker_module, "KitSyncRedis", type("R", (), {"from_url": staticmethod(_from_url)}))
     monkeypatch.setattr(worker_module, "TaskBudgetQueue", FakeQueue)
     monkeypatch.setattr(
         worker_module, "prepare_forking_worker", lambda: record.__setitem__("prepared", record["prepared"] + 1)
@@ -330,6 +335,44 @@ def test_start_rq_worker_prefork(worker_env):
     assert worker_env["default_result_ttl"] == 500
     assert worker_env["work"] == {"burst": False, "logging_level": "INFO", "with_scheduler": True}
     assert worker_env["conn"].closed
+
+
+def test_the_worker_connection_carries_the_kit_sync_retry(worker_env, monkeypatch):
+    """The worker's own connection is built by the kit seam: the ``RQ_*`` retry and socket
+    timeouts reach every command the worker loop runs, read as bytes, and its pub/sub is
+    the kit's re-entrant one."""
+    from tai42_kit.clients.impl.redis import KitSyncRedis, ReentrantPubSub, _LoggedSyncRetry
+
+    from tai42_backend_rq.settings import rq_settings
+
+    monkeypatch.setattr(worker_module, "KitSyncRedis", KitSyncRedis)
+    monkeypatch.setenv("RQ_REDIS_URL", "redis://configured:6390/2")
+    monkeypatch.setenv("RQ_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("RQ_SOCKET_TIMEOUT", "3")
+    rq_settings.cache_clear()
+    try:
+        _worker, conn = worker_module._build_worker(None, "w1", 500, "solo")
+    finally:
+        rq_settings.cache_clear()
+
+    assert isinstance(conn, KitSyncRedis)
+    assert isinstance(conn.pubsub(), ReentrantPubSub)
+    connection_kwargs = conn.connection_pool.connection_kwargs
+    assert (connection_kwargs["host"], connection_kwargs["port"], connection_kwargs["db"]) == ("configured", 6390, 2)
+    assert connection_kwargs["decode_responses"] is False
+    assert connection_kwargs["socket_timeout"] == 3
+    retry = connection_kwargs["retry"]
+    assert isinstance(retry, _LoggedSyncRetry)
+    assert retry._budget == 2
+    assert retry._label == "RQ_REDIS_URL"
+    conn.close()
+
+
+def test_the_redis_url_flag_wins_for_the_worker_connection(worker_env):
+    worker_module.start_rq_worker("redis://custom:6391/3", "w2", "debug", True, 100, "solo")
+
+    assert worker_env["from_url"]["url"] == "redis://custom:6391/3"
+    assert worker_env["from_url"]["decode_responses"] is False
 
 
 def test_start_rq_worker_solo(worker_env):

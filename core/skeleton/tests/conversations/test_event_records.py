@@ -15,6 +15,7 @@ from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStat
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
+from .conftest import create_record
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -92,7 +93,7 @@ async def test_thread_exists_is_true_only_for_a_created_thread_of_the_route(monk
     fake = FakeRecordRedis()
     fake.seed_route("line")
     store = _store(monkeypatch, fake)
-    await store.create_record(_event_record("e1", thread_id="bridge:line:t1"))
+    await create_record(store, _event_record("e1", thread_id="bridge:line:t1"))
     assert await store.thread_exists("line", "bridge:line:t1") is True
     # A thread the route never created, and the same id on another route, are both absent.
     assert await store.thread_exists("line", "bridge:line:unknown") is False
@@ -107,13 +108,13 @@ async def test_latest_thread_record_returns_the_newest_record(monkeypatch):
     fake.seed_route("line")
     store = _store(monkeypatch, fake)
     base = time.time()
-    await store.create_record(_event_record("older", thread_id="bridge:line:t1", created_at=base))
-    await store.create_record(_event_record("newer", thread_id="bridge:line:t1", created_at=base + 5))
-    latest = await store.latest_thread_record("line", "bridge:line:t1")
+    await create_record(store, _event_record("older", thread_id="bridge:line:t1", created_at=base))
+    await create_record(store, _event_record("newer", thread_id="bridge:line:t1", created_at=base + 5))
+    latest = await store.latest_thread_record("line", "bridge:line:t1", skip_sends=False)
     assert latest is not None
     assert latest.message_id == "newer"
     # A thread with no record reads as ``None``, never a silent empty record.
-    assert await store.latest_thread_record("line", "bridge:line:absent") is None
+    assert await store.latest_thread_record("line", "bridge:line:absent", skip_sends=False) is None
 
 
 # -- record round-trip of the event fields ------------------------------------
@@ -123,7 +124,7 @@ async def test_event_record_round_trips_the_new_fields(monkeypatch):
     fake = FakeRecordRedis()
     fake.seed_route("line")
     store = _store(monkeypatch, fake)
-    await store.create_record(_event_record("e1"))
+    await create_record(store, _event_record("e1"))
     loaded = await store.get_record("e1")
     assert loaded is not None
     assert loaded.inbound_kind == "event"
@@ -155,7 +156,7 @@ async def test_message_record_carries_the_field_defaults(monkeypatch):
     assert record.inbound_kind == "message"
     assert record.inbound_event is None
     assert record.submitted_by is None
-    await store.create_record(record)
+    await create_record(store, record)
     loaded = await store.get_record("m1")
     assert loaded is not None
     assert loaded.inbound_kind == "message"

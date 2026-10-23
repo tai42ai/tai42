@@ -44,7 +44,16 @@ async def _never_connected() -> bool:
 
 async def test_accept_refuses_while_reloading(reloading) -> None:
     with pytest.raises(ServerReloadingError, match="reloading") as excinfo:
-        await intake.accept("synthetic", "line-1", "addr-1", "addr-1", "hello", "provider-1")
+        await intake.accept(
+            "synthetic",
+            "line-1",
+            "addr-1",
+            "addr-1",
+            "hello",
+            "provider-1",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
+        )
     assert error_kind(excinfo.value) is ErrorKind.UNAVAILABLE
 
 
@@ -74,7 +83,16 @@ def test_a_plugin_channel_door_answers_the_reload_503(reloading) -> None:
 
     async def synthetic_inbound(request: Request) -> Response:
         try:
-            await conversations.accept("synthetic", "line-1", "addr-1", "addr-1", "hello", "provider-1")
+            await conversations.accept(
+                "synthetic",
+                "line-1",
+                "addr-1",
+                "addr-1",
+                "hello",
+                "provider-1",
+                medium_message_id=None,
+                reply_to_medium_message_id=None,
+            )
         except (ValueError, LookupError):
             # The channel acknowledges and drops bad input; a reload refusal is neither.
             return JSONResponse({"status": "ignored"})

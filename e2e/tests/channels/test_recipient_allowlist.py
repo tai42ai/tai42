@@ -42,7 +42,7 @@ async def test_allowlisted_recipient_is_delivered_to(channel_case: ChannelCase, 
             result = await mcp.call_tool(
                 "ask", {"question": question, "channel": case.name, "recipient": case.allowlisted_recipient}
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:

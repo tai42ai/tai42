@@ -43,9 +43,9 @@ def iter_subject_keys(descriptor: dict[str, Any]) -> list[tuple[ConversationTarg
 class ContinuationDue:
     """A durable continuation-due record read back for redelivery — self-contained and FLOW-BLIND.
 
-    Carries a registered tool NAME, the generic ``{interaction_id, answer}`` the continuation
-    runs with, and the stored execution identity + key fingerprint. It carries no consumer-specific
-    data.
+    Carries a registered tool NAME, the generic answer the continuation runs with (the answer, the
+    medium id of the message the answering reply quoted and the answer's ``params``), and the
+    stored execution identity + key fingerprint. It carries no consumer-specific data.
     """
 
     interaction_id: str
@@ -80,6 +80,10 @@ class ContinuationDue:
     # The chained calls the park is nested under (``InteractionRequest.chain_keys``), deposited
     # around the reaper's redelivery as the drive's resume lineage. Empty when nested under none.
     chain_keys: list[str] = field(default_factory=list)
+    # The medium id of the message the answering reply quoted (never its text, resolved when the
+    # continuation runs) and the answer's opaque ``params``. ``None`` when the answer carried none.
+    reply_to_medium_message_id: str | None = None
+    params: dict[str, str] | None = None
 
 
 class ContinuationRetryDrop(enum.Enum):
@@ -126,6 +130,8 @@ def _continuation_due_mapping(
     run_input: str | None = None,
     door_id: str | None = None,
     chain_keys: str | None = None,
+    reply_to_medium_message_id: str | None = None,
+    params: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """The flow-blind continuation-due record fields.
 
@@ -137,10 +143,12 @@ def _continuation_due_mapping(
     chain the immediate fire did, the chained calls it is nested under (``chain_keys``, JSON) so a
     redelivery deposits the same resume lineage, and the run's ``delivery`` address (JSON) and ``run_delivery_id``
     when the park carried them, so the reaper's DETACHED redelivery binds the run's address and
-    re-establishes its delivery identity without re-reading the request. It carries no
-    consumer-specific data. Written into the SAME MULTI as the resolving claim
-    (``record_answer``), so the outbox enqueue commits atomically with the ``answered`` state
-    change — a crash can never leave a claimed answer with no due-record.
+    re-establishes its delivery identity without re-reading the request. The medium id of the
+    message the answering reply quoted (never its text) and the answer's ``params`` (JSON) ride
+    beside the answer when it carried them. It carries no consumer-specific data. Written into
+    the SAME MULTI as the resolving claim (``record_answer``), so the outbox enqueue commits
+    atomically with the ``answered`` state change — a crash can never leave a claimed answer with
+    no due-record.
     """
     mapping = {
         "tool": tool,
@@ -149,24 +157,21 @@ def _continuation_due_mapping(
         "answer": json.dumps(answer),
         "attempts": "0",
     }
-    if state_context is not None:
-        mapping["state_context"] = state_context
     if asked_by:
         mapping["asked_by"] = json.dumps(asked_by)
-    if delivery is not None:
-        mapping["delivery"] = delivery
-    if run_delivery_id is not None:
-        mapping["run_delivery_id"] = run_delivery_id
-    if caller_ask_landing is not None:
-        mapping["caller_ask_landing"] = caller_ask_landing
-    if deferred_binding is not None:
-        mapping["deferred_binding"] = deferred_binding
-    if run_input is not None:
-        mapping["run_input"] = run_input
-    if door_id is not None:
-        mapping["door_id"] = door_id
-    if chain_keys is not None:
-        mapping["chain_keys"] = chain_keys
+    optional = {
+        "state_context": state_context,
+        "delivery": delivery,
+        "run_delivery_id": run_delivery_id,
+        "caller_ask_landing": caller_ask_landing,
+        "deferred_binding": deferred_binding,
+        "run_input": run_input,
+        "door_id": door_id,
+        "chain_keys": chain_keys,
+        "reply_to_medium_message_id": reply_to_medium_message_id,
+        "params": None if params is None else json.dumps(params),
+    }
+    mapping.update({name: value for name, value in optional.items() if value is not None})
     return mapping
 
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelInputError, ChannelNotification
@@ -21,6 +21,7 @@ from tai42_contract.interactions.models import FormReactions, FormWording
 from tai42_channel_whatsapp.channel.media import _send_media_prelude
 from tai42_channel_whatsapp.client import (
     FlowSummary,
+    SentMessage,
     create_flow,
     delete_flow,
     list_flows,
@@ -39,6 +40,8 @@ from tai42_channel_whatsapp.correlation import (
     reserve_pending,
 )
 from tai42_channel_whatsapp.flows import (
+    _FALSE_LABEL,
+    _TRUE_LABEL,
     FORM_ENTRY_SCREEN,
     build_flow_data,
     build_form_flow,
@@ -47,6 +50,7 @@ from tai42_channel_whatsapp.flows import (
     payload_labels,
 )
 from tai42_channel_whatsapp.flows_components import _field_control
+from tai42_channel_whatsapp.flows_endpoint import FORM_LINE_MEMBERS
 from tai42_channel_whatsapp.flows_shapes import ERROR_MESSAGE_MAX_CHARS
 from tai42_channel_whatsapp.settings import (
     WhatsAppSettings,
@@ -99,6 +103,10 @@ _OPEN_LABEL_MAX_CHARS = 20
 # template's worst-case expansion (its fixed text plus every token filled) is capped at the body size.
 _FLOW_BODY_MAX_CHARS = 1024
 _DOOR_REJECTION_MAX_CHARS = 500
+# Meta caps a text message body at this many characters. The closing sentence a refused answer at
+# the re-send cap draws (``wording.answer.rejected_final``) rides a text message with the door's line
+# in every ``{reason}`` token, so its worst-case expansion is capped at the text body size.
+_TEXT_BODY_MAX_CHARS = 4096
 
 
 def _form_wording(send: ChannelDelivery | ChannelNotification) -> FormWording | None:
@@ -119,21 +127,71 @@ def _guard_open_label(label: str | None) -> None:
         )
 
 
-def _field_invalid(send: ChannelDelivery | ChannelNotification) -> dict[str, str]:
-    """The caller's per-field ``wording.form.fields[<name>].invalid`` sentences, by property name."""
-    form = _form_wording(send)
+def _field_words(form: FormWording | None, member: Literal["invalid", "required"]) -> dict[str, str]:
+    """The caller's per-field ``wording.form.fields[<name>].<member>`` sentences, by property name.
+
+    ``invalid`` words a value that breaks its field's shape, ``required`` a missing value. Every door
+    that builds a form's Flow or its endpoint sidecar reads them here: the two sends pass the send's
+    form chapter, the door-rejection re-send the stored one.
+    """
     if form is None:
         return {}
-    return {name: words.invalid for name, words in form.fields.items() if words.invalid is not None}
+    sentences = {name: getattr(words, member) for name, words in form.fields.items()}
+    return {name: sentence for name, sentence in sentences.items() if sentence is not None}
 
 
-def _guard_invalid_sentences(schema: dict[str, Any], option_fields: set[str], invalid: dict[str, str]) -> None:
-    """Refuse a caller ``invalid`` sentence over Meta's ``error-message`` cap for its field's control, up front.
+def _boolean_words(form: FormWording | None) -> dict[str, tuple[str, str]]:
+    """The caller's ``(true_label, false_label)`` words for each boolean field that sets at least one.
 
-    The data endpoint shows the sentence in the failing field's ``error-message``, which Meta caps
-    per control (:data:`~tai42_channel_whatsapp.flows_shapes.ERROR_MESSAGE_MAX_CHARS` — 30 characters
-    on a text input or text area, 80 on a calendar or choice control). A sentence over its field's
-    cap is a permanent input refusal (:class:`ChannelInputError`) naming the field and the cap,
+    The Flow's review readback bakes them in; an unset side takes the builder's default word.
+    """
+    if form is None:
+        return {}
+    return {
+        name: (words.true_label or _TRUE_LABEL, words.false_label or _FALSE_LABEL)
+        for name, words in form.fields.items()
+        if words.true_label is not None or words.false_label is not None
+    }
+
+
+def _form_lines(form: FormWording | None) -> dict[str, str]:
+    """The caller's form-level lines the data endpoint draws (``error_line``, ``update_failed``), by member."""
+    if form is None:
+        return {}
+    lines = {member: getattr(form, member) for member in FORM_LINE_MEMBERS}
+    return {member: line for member, line in lines.items() if line is not None}
+
+
+def _guard_ask_error_line(lines: dict[str, str]) -> None:
+    """Refuse an ask's ``wording.form.error_line`` too long to ride a door-rejection re-send, up front.
+
+    A refused form answer is re-asked with a fresh Flow whose body carries the caller's error line in
+    place of the door's own reason, which is bounded at ``_DOOR_REJECTION_MAX_CHARS`` so the body
+    template's worst case (:func:`_guard_rejected_template`) holds. A longer line is a permanent input
+    refusal (:class:`ChannelInputError`), checked at deliver. An ask-less form is never re-sent, so its
+    line takes no such bound.
+    """
+    line = lines.get("error_line")
+    if line is not None and len(line) > _DOOR_REJECTION_MAX_CHARS:
+        raise ChannelInputError(
+            f"wording.form.error_line is {len(line)} characters; it fills the re-sent Flow body in place of "
+            f"the door's reason, which WhatsApp bounds at {_DOOR_REJECTION_MAX_CHARS}"
+        )
+
+
+def _guard_field_sentences(
+    schema: dict[str, Any],
+    option_fields: set[str],
+    member: Literal["invalid", "required"],
+    sentences: dict[str, str],
+) -> None:
+    """Refuse a caller per-field sentence over Meta's ``error-message`` cap for its field's control, up front.
+
+    The data endpoint shows an ``invalid`` or ``required`` sentence in the failing field's
+    ``error-message``, which Meta caps per control
+    (:data:`~tai42_channel_whatsapp.flows_shapes.ERROR_MESSAGE_MAX_CHARS` — 30 characters on a text
+    input or text area, 80 on a calendar or choice control). A sentence over its field's cap is a
+    permanent input refusal (:class:`ChannelInputError`) naming the field, the member and the cap,
     checked before any store or send — never truncated. A field drawn without an ``error-message``
     (an opt-in, a chip grid) shows its sentence only in the screen's error line, which takes no cap here.
     """
@@ -141,7 +199,7 @@ def _guard_invalid_sentences(schema: dict[str, Any], option_fields: set[str], in
     if not isinstance(properties, dict):
         return
     names = component_names(properties)
-    for name, sentence in invalid.items():
+    for name, sentence in sentences.items():
         prop = properties.get(name)
         if not isinstance(prop, dict):
             continue
@@ -149,7 +207,7 @@ def _guard_invalid_sentences(schema: dict[str, Any], option_fields: set[str], in
         cap = ERROR_MESSAGE_MAX_CHARS.get(control)
         if cap is not None and len(sentence) > cap:
             raise ChannelInputError(
-                f"wording.form.fields[{name!r}].invalid is {len(sentence)} characters; WhatsApp caps the error "
+                f"wording.form.fields[{name!r}].{member} is {len(sentence)} characters; WhatsApp caps the error "
                 f"message of a {control} at {cap}"
             )
 
@@ -174,6 +232,27 @@ def _guard_rejected_template(template: str | None) -> None:
             f"wording.answer.rejected expands to up to {worst_case} characters once each of its "
             f"{reason_count} {{reason}} token(s) is filled (up to {_DOOR_REJECTION_MAX_CHARS} characters each); "
             f"WhatsApp caps the re-sent Flow body at Meta's {_FLOW_BODY_MAX_CHARS}-character limit"
+        )
+
+
+def _guard_rejected_final_template(template: str | None) -> None:
+    """Refuse a caller ``wording.answer.rejected_final`` too long for the closing text message, up front.
+
+    When a refused form answer reaches the re-send cap, the question closes with a text message: the
+    caller's closing sentence with the door's line (bounded at ``_DOOR_REJECTION_MAX_CHARS``) in EACH
+    ``{reason}`` token. Meta caps a text body at ``_TEXT_BODY_MAX_CHARS``, so the template's worst-case
+    expansion must fit; a longer one is a permanent input refusal (:class:`ChannelInputError`), checked
+    at deliver — never at inbound time, where nothing can recover the closing message.
+    """
+    if template is None:
+        return
+    reason_count = template.count("{reason}")
+    worst_case = len(template.replace("{reason}", "")) + reason_count * _DOOR_REJECTION_MAX_CHARS
+    if worst_case > _TEXT_BODY_MAX_CHARS:
+        raise ChannelInputError(
+            f"wording.answer.rejected_final expands to up to {worst_case} characters once each of its "
+            f"{reason_count} {{reason}} token(s) is filled (up to {_DOOR_REJECTION_MAX_CHARS} characters each); "
+            f"WhatsApp caps a text message body at Meta's {_TEXT_BODY_MAX_CHARS}-character limit"
         )
 
 
@@ -385,8 +464,9 @@ async def send_form_ask_flow(
     form_title: str | None = None,
     form_submit: str | None = None,
     field_invalid: dict[str, str] | None = None,
-) -> str:
-    """Build, resolve and send a form ask's Flow; return its ``wamid``.
+    boolean_words: dict[str, tuple[str, str]] | None = None,
+) -> SentMessage:
+    """Build, resolve and send a form ask's Flow; return its :class:`SentMessage`.
 
     The ONE sender for a form ask's Flow: the first send and every door-rejection
     re-send call it with the same inputs the pending record holds, so the re-send
@@ -398,7 +478,8 @@ async def send_form_ask_flow(
     publishes the Flow against the configured data endpoint; the endpoint-driven flow and the
     endpoint URI fold into the Flow identity, so its published Flow is distinct from a static one and from one bound
     to another endpoint. ``field_invalid`` is the caller's per-field ``invalid`` sentence (the
-    helper text a native pattern field without a second line shows).
+    helper text a native pattern field without a second line shows); ``boolean_words`` the caller's
+    words a review page reads a boolean back with (Flow JSON, so they re-key).
 
     ``open_label`` is the caller's text for the chat button that opens the Flow, drawn as the
     message ``flow_cta`` (not Flow JSON, so it never re-keys the Flow); ``form_title`` is the
@@ -407,7 +488,14 @@ async def send_form_ask_flow(
     the correction message draws the same button, title and submit label.
     """
     flow_json, schema_hash = build_form_flow(
-        schema, pages, set(options), reactions, form_title, form_submit, field_invalid=field_invalid
+        schema,
+        pages,
+        set(options),
+        reactions,
+        form_title,
+        form_submit,
+        field_invalid=field_invalid,
+        boolean_words=boolean_words,
     )
     flow_data = build_flow_data(schema, values, options, pages)
     settings = whatsapp_settings()
@@ -429,8 +517,8 @@ async def send_form_ask_flow(
 
 async def _deliver_form(
     settings: WhatsAppSettings, phone_number_id: str, target: str, delivery: ChannelDelivery
-) -> None:
-    """Deliver a form ask as a WhatsApp Flow (Tier-2: reserve BEFORE send).
+) -> SentMessage:
+    """Deliver a form ask as a WhatsApp Flow (Tier-2: reserve BEFORE send); return the Flow message.
 
     The Flow (one screen per page) and its per-send data are built and validated
     BEFORE any network work — an unsupported schema, an unmappable per-send option, or
@@ -449,9 +537,11 @@ async def _deliver_form(
     or a shape no Meta control checks natively) publishes the Flow endpoint-driven and refuses
     loudly, before any reservation, when the data-endpoint key material is missing
     (:func:`_require_reaction_settings`); its :class:`~tai42_channel_whatsapp.correlation.EndpointForm`
-    (schema, pages, reactions, option fields and the caller's ``invalid`` sentences) is cached under
-    the ``interaction_id`` so the data endpoint can check its steps. A caller ``invalid`` sentence
-    over its control's ``error-message`` cap is refused before any reservation. The send goes
+    (schema, pages, reactions, option fields, the caller's ``invalid`` and ``required`` sentences and
+    its ``error_line`` / ``update_failed`` lines) is cached under the ``interaction_id`` so the data
+    endpoint can check its steps. A caller ``invalid`` or ``required`` sentence over its control's
+    ``error-message`` cap, an ``error_line`` too long for the re-sent body and a ``rejected_final``
+    too long for the closing text message are refused before any reservation. The send goes
     through the one sender :func:`send_form_ask_flow`; a failure writing the sidecar, resolving
     the Flow or sending releases the reservation, drops the sidecar and raises — never a fallback
     format.
@@ -467,16 +557,30 @@ async def _deliver_form(
     form_submit = form.submit if form is not None else None
     answer = delivery.wording.answer if delivery.wording is not None else None
     rejected_template = answer.rejected if answer is not None else None
+    rejected_final_template = answer.rejected_final if answer is not None else None
     # Build + validate before any reservation (raises on an unsupported schema, an
     # unmappable per-send option, an unknown page field, an unrenderable reaction trigger, an
-    # over-cap open-button label / footer label, or an over-cap rejection template), so an
-    # unrenderable send reserves nothing.
-    field_invalid = _field_invalid(delivery)
+    # over-cap open-button label / footer label / per-field sentence / error line / readback line,
+    # or an over-cap refusal template), so an unrenderable send reserves nothing.
+    field_invalid = _field_words(form, "invalid")
+    field_required = _field_words(form, "required")
+    boolean_words = _boolean_words(form)
+    lines = _form_lines(form)
     _guard_open_label(open_label)
     _guard_rejected_template(rejected_template)
-    _guard_invalid_sentences(delivery.schema, set(options), field_invalid)
+    _guard_rejected_final_template(rejected_final_template)
+    _guard_ask_error_line(lines)
+    _guard_field_sentences(delivery.schema, set(options), "invalid", field_invalid)
+    _guard_field_sentences(delivery.schema, set(options), "required", field_required)
     build_form_flow(
-        delivery.schema, pages, set(options), reactions, form_title, form_submit, field_invalid=field_invalid
+        delivery.schema,
+        pages,
+        set(options),
+        reactions,
+        form_title,
+        form_submit,
+        field_invalid=field_invalid,
+        boolean_words=boolean_words,
     )
     build_flow_data(delivery.schema, values, options, pages)
     require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
@@ -512,9 +616,11 @@ async def _deliver_form(
                 reactions=reactions,
                 option_fields=sorted(options),
                 invalid=field_invalid,
+                required=field_required,
+                lines=lines,
             )
             await cache_endpoint_form(delivery.interaction_id, endpoint_form, delivery.timeout_at)
-        await send_form_ask_flow(
+        sent = await send_form_ask_flow(
             phone_number_id=phone_number_id,
             to=target,
             body_text=delivery.question,
@@ -528,6 +634,7 @@ async def _deliver_form(
             form_title=form_title,
             form_submit=form_submit,
             field_invalid=field_invalid,
+            boolean_words=boolean_words,
         )
     except Exception:
         # Any sidecar-write/create/publish/store/send failure frees the pair instead of holding it
@@ -539,12 +646,13 @@ async def _deliver_form(
             if endpoint:
                 await drop_endpoint_form(delivery.interaction_id)
         raise
+    return sent
 
 
 async def _send_form_notification(
     settings: WhatsAppSettings, phone_number_id: str, target: str, notification: ChannelNotification
-) -> list[str]:
-    """Send an ask-less form notification, returning every ``wamid`` in send order.
+) -> list[SentMessage]:
+    """Send an ask-less form notification, returning every :class:`SentMessage` in send order.
 
     Any display media rides as the standard prelude (the ``link`` items as one
     text line-block, each ``image`` as its own message), then the Flow message
@@ -562,10 +670,11 @@ async def _send_form_notification(
 
     An ENDPOINT-DRIVEN form (one carrying a shape no Meta control checks natively) publishes
     against the data endpoint, which reads this sidecar's pages and option fields to check each
-    step; the caller's ``invalid`` sentences ride the send data as ``__invalid`` carriers (the
-    sidecar is per schema hash, never per send). It refuses loudly, before any send, when the
-    data-endpoint key material is missing, and a caller ``invalid`` sentence over its control's
-    ``error-message`` cap is refused before any send too.
+    step; the caller's ``invalid`` and ``required`` sentences ride the send data as ``__invalid`` /
+    ``__required`` carriers and its ``error_line`` / ``update_failed`` lines as the form-line
+    carriers (the sidecar is per schema hash, never per send). It refuses loudly, before any send,
+    when the data-endpoint key material is missing, and a caller ``invalid`` or ``required``
+    sentence over its control's ``error-message`` cap is refused before any send too.
 
     A caller-set ``form_tag`` rides the token as a 4th ``:``-delimited segment
     (``tai42-nf:{hash}:{nonce}:{form_tag}``) when set — its charset excludes ``:`` so it
@@ -586,9 +695,11 @@ async def _send_form_notification(
     open_label = form.open if form is not None else None
     form_title = form.title if form is not None else None
     form_submit = form.submit if form is not None else None
-    field_invalid = _field_invalid(notification)
+    field_invalid = _field_words(form, "invalid")
+    field_required = _field_words(form, "required")
     _guard_open_label(open_label)
-    _guard_invalid_sentences(notification.schema, set(options), field_invalid)
+    _guard_field_sentences(notification.schema, set(options), "invalid", field_invalid)
+    _guard_field_sentences(notification.schema, set(options), "required", field_required)
     endpoint = form_needs_endpoint(notification.schema, pages, set(options))
     flow_json, schema_hash = build_form_flow(
         notification.schema,
@@ -598,9 +709,17 @@ async def _send_form_notification(
         form_submit=form_submit,
         field_invalid=field_invalid,
         carry_invalid=endpoint,
+        boolean_words=_boolean_words(form),
     )
     flow_data = build_flow_data(
-        notification.schema, values, options, pages, field_invalid=field_invalid, carry_invalid=endpoint
+        notification.schema,
+        values,
+        options,
+        pages,
+        field_invalid=field_invalid,
+        carry_invalid=endpoint,
+        field_required=field_required,
+        form_lines=_form_lines(form),
     )
     waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
     endpoint_uri = _require_reaction_settings(settings) if endpoint else None

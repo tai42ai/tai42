@@ -41,7 +41,7 @@ _ORIGIN = CompletedOrigin(
 )
 
 
-async def _admit(subject_kinds):
+async def _admit(subject_kinds, canonical):
     """A permissive in-txn subject check — these store tests isolate the store, not admission."""
     return None
 
@@ -245,7 +245,9 @@ async def test_fold_switch_lands_old_key_on_survivor_and_search(
     await store.replace(
         state, s1, {"n": 1}, origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subject_in_txn=_admit
     )
-    await store.fold_subject(state, s1, s2, "switch", origin=_ORIGIN, catalog=CatalogSnapshot(store))
+    await store.fold_subject(
+        state, s1, s2, "switch", origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subjects_in_txn=_admit
+    )
     # a read via the OLD key lands on the surviving record (the survivor's data, its subject)
     view = await store.read_record_view(state, s1)
     assert view is not None
@@ -277,7 +279,9 @@ async def test_fold_merge_moves_absent_members(real_store: tuple[PostgresStatesS
     await store.replace(
         state, s2, {"y": "new-wins"}, origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subject_in_txn=_admit
     )
-    report = await store.fold_subject(state, s1, s2, "merge", origin=_ORIGIN, catalog=CatalogSnapshot(store))
+    report = await store.fold_subject(
+        state, s1, s2, "merge", origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subjects_in_txn=_admit
+    )
     # only the member the survivor LACKED moves; the survivor wins the shared member
     assert report["merged_members"] == ["x"]
     merged = {"x": "from-old", "y": "new-wins"}
@@ -299,7 +303,9 @@ async def test_fold_switch_into_empty_survivor_leaves_no_record(
         state, s1, {"n": 1}, origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subject_in_txn=_admit
     )
     # switch into a survivor that has NO record: s1's record is dropped and none is created
-    await store.fold_subject(state, s1, s2, "switch", origin=_ORIGIN, catalog=CatalogSnapshot(store))
+    await store.fold_subject(
+        state, s1, s2, "switch", origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subjects_in_txn=_admit
+    )
     assert (await store.read_record(state, s1))[0] is None
     assert (await store.read_record(state, s2))[0] is None
     assert await store.list_subjects(state, kind=None, limit=10, cursor=None) == []

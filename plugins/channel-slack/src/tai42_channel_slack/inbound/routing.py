@@ -52,6 +52,8 @@ async def _bridge(
     text: object,
     event_id: str,
     *,
+    medium_message_id: str | None,
+    reply_to_medium_message_id: str | None,
     params: dict[str, str] | None = None,
     provider_message_id: str | None = None,
     attachments: list[MediaItem] | None = None,
@@ -67,8 +69,12 @@ async def _bridge(
     share ingested, delivered alongside the parity ``media_*`` params; ``None`` for a
     text-only turn. ``provider_message_id`` overrides the intake dedupe id (a file share
     passes a per-file id so each file of one message dedupes distinctly); it defaults to
-    ``event_id``. No route bound acks with a debug log; an infrastructure failure
-    propagates so Slack redelivers.
+    ``event_id``. ``medium_message_id`` is the message ``ts``, the id a later quote of the
+    message names (every file of one share carries the same one); ``None`` for a tap, which
+    is no message of the participant's own. ``reply_to_medium_message_id`` is the ``ts`` of
+    the message this one quotes (a thread reply's parent, a tap's message with the buttons),
+    ``None`` when it quotes none. No route bound acks with a debug log; an
+    infrastructure failure propagates so Slack redelivers.
     """
     if not isinstance(text, str) or not text or not isinstance(channel, str) or not channel:
         return JSONResponse({"status": "ignored"})
@@ -87,6 +93,8 @@ async def _bridge(
             cap_key=channel,
             text=text,
             provider_message_id=provider_message_id if provider_message_id is not None else event_id,
+            medium_message_id=medium_message_id,
+            reply_to_medium_message_id=reply_to_medium_message_id,
             params=params,
             attachments=attachments,
         )
@@ -106,6 +114,8 @@ async def _resolve_answer(
     channel: str,
     event_id: str,
     *,
+    medium_message_id: str | None,
+    reply_to_medium_message_id: str | None,
     params: dict[str, str] | None = None,
 ) -> Response:
     """Resolve a correlated threaded reply against its pending ask via the ONE shared ladder, or bridge on a miss.
@@ -115,14 +125,24 @@ async def _resolve_answer(
     an ask resolved with ``None`` — while an uncorrelated thread reply bridges. A live
     ask hands the text to the ladder (a threaded reply is re-answerable in place, so the
     ladder owns the retry notice, ``owns_retry_notice=False``). ``event_id`` is the
-    bridge's dedupe key at the conversation seam. An ``AnswerForwardError`` (401/5xx /
+    bridge's dedupe key at the conversation seam and ``medium_message_id`` the reply's
+    quotable id, as ``_bridge`` takes them; ``reply_to_medium_message_id`` is the ``ts`` the
+    reply quotes, carried on every arm. An ``AnswerForwardError`` (401/5xx /
     transport fault) propagates so the outer guard frees the dedupe claim and Slack's
     retry re-runs the ladder.
     """
     entry = await slack_thread_correlation_store.get_correlation(thread_ts)
     if entry is None:
         # No pending ask on this thread (expired / never ours) — bridge like any message.
-        return await _bridge(our_identity, channel, text, event_id, params=params)
+        return await _bridge(
+            our_identity,
+            channel,
+            text,
+            event_id,
+            medium_message_id=medium_message_id,
+            reply_to_medium_message_id=reply_to_medium_message_id,
+            params=params,
+        )
     if not isinstance(text, str) or not text:
         raise ValueError(f"correlated slack reply in thread {thread_ts} carries no text")
 
@@ -144,6 +164,8 @@ async def _resolve_answer(
             # identity and the party the turn cap holds accountable.
             cap_key=channel,
             provider_message_id=event_id,
+            medium_message_id=medium_message_id,
+            reply_to_medium_message_id=reply_to_medium_message_id,
             bridge_text=text,
             owns_retry_notice=False,
             # Opaque enrichment (e.g. ``reply_id`` from a tapped reply option) the ladder
@@ -153,5 +175,13 @@ async def _resolve_answer(
         ),
     )
     if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
-        return await _bridge(our_identity, channel, text, event_id, params=params)
+        return await _bridge(
+            our_identity,
+            channel,
+            text,
+            event_id,
+            medium_message_id=medium_message_id,
+            reply_to_medium_message_id=reply_to_medium_message_id,
+            params=params,
+        )
     return JSONResponse({"status": _EVENTS_ACK[result.outcome]})

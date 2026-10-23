@@ -235,7 +235,7 @@ async def _reap_one_expired_park(r: Redis, store: InteractionStore, interaction_
         # Exactly-once: only the claim that committed fires. A human answer
         # (or a sibling reaper) that claimed first returns False here and its
         # own door fired the continuation.
-        dispatch_continuation(store, state.request, fingerprint, EXPIRY_ANSWER)
+        dispatch_continuation(store, state.request, fingerprint, response)
         # State the expiry as a best-effort platform event AFTER the continuation is
         # dispatched, so a hooks failure (swallowed inside) can never come between the
         # claim and the continuation fire. Rides alongside; never perturbs the flow.

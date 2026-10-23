@@ -42,6 +42,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     PARK_COMPLETION_WITHDRAWN,
     AnswerFormat,
+    FormReactionClosedError,
     InteractionResponse,
     ParkableRunFailedError,
     ParkedEntry,
@@ -57,6 +58,7 @@ from tai42_contract.interactions import (
     SuspendedInteraction,
     TakeItem,
     UndeclaredExtrasKeyError,
+    VisitAct,
     VisitOutcome,
     VisitRequestError,
 )
@@ -69,7 +71,6 @@ from tai42_skeleton.interactions.answer_check import check_answer
 from tai42_skeleton.interactions.continuation import continuation_due_timing, drive_and_deliver
 from tai42_skeleton.interactions.kill import kill_park
 from tai42_skeleton.interactions.reaction import (
-    FormReactionClosedError,
     SubmittedCheckRejectedError,
     enforce_submitted_check,
 )
@@ -107,6 +108,7 @@ async def visit(
     extras: Mapping[str, Any],
     state_binding: StateBinding | None = None,
     receives_outcome: bool = True,
+    on_act: Callable[[VisitAct], Awaitable[None]] | None = None,
 ) -> VisitOutcome:
     """Drive one door's parkable run through the shared cancel / resume / take / start order.
 
@@ -120,6 +122,10 @@ async def visit(
     run, nested runs and the callers waiting on it; nothing of the run is resumed — so a resume of
     another park of that run in the same visit is refused with
     :class:`~tai42_contract.interactions.ParkedEntryGoneError`.
+
+    ``on_act`` is awaited at each point the visit acts, as
+    :class:`~tai42_contract.interactions.VisitAct` states: before the cancels, before and after each
+    resume or take claim, and before the start — never during the pre-check or the run-entry drain.
     """
     resumes = [item for item in resume if isinstance(item, ResumeItem)]
     takes = [item for item in resume if isinstance(item, TakeItem)]
@@ -128,8 +134,60 @@ async def visit(
     ctx = current_state_context()
     candidates = ctx.candidates if ctx is not None else None
 
-    # --- 1. Check EVERYTHING before doing anything. Every raise below leaves the store
-    #        untouched: nothing is cancelled and nothing is resumed. ---
+    # --- 1. Check EVERYTHING before doing anything. ---
+    parked, effective_answers = await _pre_check(
+        store, candidates, target_name=target_name, cancel=cancel, resume=resume, extras=extras
+    )
+
+    # --- Run entry: the subject's outstanding pending saves (records and deferred calls) finish
+    #     before anything is cancelled, resumed, taken or started; a held subject refuses here. ---
+    async with run_entry_drain():
+        # --- 2. Cancel (each id → the one whole-run kill seam). ---
+        if cancel and on_act is not None:
+            await on_act(VisitAct(action="cancel", interaction_ids=tuple(cancel), phase="before"))
+        cancelled = await _cancel_all(store, cancel, parked)
+
+        # --- 3/4/5. At most one action besides cancel, then normalise what came back. ---
+        if resumes:
+            result = await _drive_resumes(
+                store, ctx, candidates, resumes, parked, receives_outcome, effective_answers, on_act
+            )
+            kind, value, asks, suspended = await _normalise(store, candidates, result)
+            return VisitOutcome(
+                action="resumed", cancelled=cancelled, kind=kind, result=value, asks=asks, suspended=suspended
+            )
+        if takes:
+            value = await _take_all(store, takes, on_act)
+            return VisitOutcome(action="taken", cancelled=cancelled, kind="result", result=value)
+        if start is not None:
+            if on_act is not None:
+                await on_act(VisitAct(action="start", interaction_ids=(), phase="before"))
+            started = await _run_start(target_name, start, extras, state_binding)
+            kind, value, asks, suspended = await _normalise(store, candidates, started)
+            return VisitOutcome(
+                action="started", cancelled=cancelled, kind=kind, result=value, asks=asks, suspended=suspended
+            )
+        return VisitOutcome(action="none", cancelled=cancelled, kind="none")
+
+
+# --- the pre-check ---------------------------------------------------------------------
+
+
+async def _pre_check(
+    store: InteractionStore | None,
+    candidates: SubjectCandidates | None,
+    *,
+    target_name: str,
+    cancel: list[str],
+    resume: list[ResumeItem | TakeItem],
+    extras: Mapping[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Check the whole visit before anything acts; answer the parked index and the effective answers.
+
+    Every raise here leaves the store untouched: nothing is cancelled and nothing is resumed.
+    """
+    resumes = [item for item in resume if isinstance(item, ResumeItem)]
+    takes = [item for item in resume if isinstance(item, TakeItem)]
     if resume and extras:
         raise VisitRequestError("resume_extras", "a resume carries no extras — extras are for a start only")
     overlap = sorted(set(cancel) & {item.id for item in resume})
@@ -155,33 +213,7 @@ async def visit(
     # reaction-fed value is refused BEFORE anything is cancelled or resumed — exactly as the
     # authenticated and callback answer doors enforce it.
     await _enforce_resume_submitted(resumes, parked, effective_answers)
-
-    # --- Run entry: the subject's outstanding pending saves (records and deferred calls) finish
-    #     before anything is cancelled, resumed, taken or started; a held subject refuses here. ---
-    async with run_entry_drain():
-        # --- 2. Cancel (each id → the one whole-run kill seam). ---
-        cancelled = await _cancel_all(store, cancel, parked)
-
-        # --- 3/4/5. At most one action besides cancel, then normalise what came back. ---
-        if resumes:
-            result = await _drive_resumes(store, ctx, candidates, resumes, parked, receives_outcome, effective_answers)
-            kind, value, asks, suspended = await _normalise(store, candidates, result)
-            return VisitOutcome(
-                action="resumed", cancelled=cancelled, kind=kind, result=value, asks=asks, suspended=suspended
-            )
-        if takes:
-            value = await _take_all(store, takes)
-            return VisitOutcome(action="taken", cancelled=cancelled, kind="result", result=value)
-        if start is not None:
-            started = await _run_start(target_name, start, extras, state_binding)
-            kind, value, asks, suspended = await _normalise(store, candidates, started)
-            return VisitOutcome(
-                action="started", cancelled=cancelled, kind=kind, result=value, asks=asks, suspended=suspended
-            )
-        return VisitOutcome(action="none", cancelled=cancelled, kind="none")
-
-
-# --- the pre-check ---------------------------------------------------------------------
+    return parked, effective_answers
 
 
 def _check_resumes(resumes: list[ResumeItem], parked: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -322,6 +354,7 @@ async def _drive_resumes(
     parked: dict[str, dict[str, Any]],
     receives_outcome: bool,
     effective_answers: dict[str, Any],
+    on_act: Callable[[VisitAct], Awaitable[None]] | None,
 ) -> Any:
     """Claim each sibling answer and drive it inline through the ONE chokepoint; return the LAST outcome.
 
@@ -334,7 +367,7 @@ async def _drive_resumes(
         raise ParkedEntryGoneError("no interactions store is configured")
     result: Any = None
     for item in resumes:
-        result = await _resume_one(store, ctx, candidates, item, receives_outcome, effective_answers[item.id])
+        result = await _resume_one(store, ctx, candidates, item, receives_outcome, effective_answers[item.id], on_act)
         # The answer was claimed and its continuation driven: record this id on the
         # ambient run record's resumed-interaction list. A pre-check refusal raises
         # before ever reaching here, so nothing is recorded for a refused visit.
@@ -349,6 +382,7 @@ async def _resume_one(
     item: ResumeItem,
     receives_outcome: bool,
     answer: Any,
+    on_act: Callable[[VisitAct], Awaitable[None]] | None,
 ) -> Any:
     """Atomically claim ``item``'s answer and drive its continuation inline through the chokepoint.
 
@@ -360,7 +394,8 @@ async def _resume_one(
     ``receives_outcome``. The deposited state context is MIXED — the resumer's door/turn/actor with
     the PARK's subject candidates. ``answer`` is the EFFECTIVE answer ``check_answer`` returned (a
     FORM's hidden fields dropped) — recorded and delivered, so a resumed run receives the same
-    effective answer every other answer door records.
+    effective answer every other answer door records. ``on_act`` hears ``before`` right before the
+    claim call and ``committed`` right after the claim committed.
     """
     async with client_ctx(RedisClient, interactions_settings().redis) as r:
         state = await store.get_state(r, item.id)
@@ -374,6 +409,8 @@ async def _resume_one(
             answered_at=_now(),
         )
         due_ttl, due_first_attempt_at_ms = continuation_due_timing(interactions_settings())
+        if on_act is not None:
+            await on_act(VisitAct(action="resume", interaction_ids=(item.id,), phase="before"))
         claimed = await store.record_answer(
             r,
             response,
@@ -384,6 +421,8 @@ async def _resume_one(
         )
         if not claimed:
             raise ParkedEntryGoneError(f"interaction {item.id!r} was resolved by another caller before this resume")
+        if on_act is not None:
+            await on_act(VisitAct(action="resume", interaction_ids=(item.id,), phase="committed"))
         fingerprint = await store.continuation_fingerprint(r, item.id)
 
     park_candidates = (
@@ -396,6 +435,9 @@ async def _resume_one(
         tool=request.continuation_tool or "",
         interaction_id=item.id,
         answer=answer,
+        # A caller resume is not a medium message: it quotes nothing and carries no params.
+        reply_to_medium_message_id=None,
+        params=None,
         park_context=_mixed_context(ctx, park_candidates, request),
         park_asked_by=request.asked_by,
         caller_ask_landing=request.caller_ask_landing,
@@ -433,16 +475,28 @@ def _mixed_context(
 # --- take ------------------------------------------------------------------
 
 
-async def _take_all(store: InteractionStore | None, takes: list[TakeItem]) -> Any:
-    """Atomically take each waiting outcome; return the LAST result (``failed`` re-raises)."""
+async def _take_all(
+    store: InteractionStore | None,
+    takes: list[TakeItem],
+    on_act: Callable[[VisitAct], Awaitable[None]] | None,
+) -> Any:
+    """Atomically take each waiting outcome; return the LAST result (``failed`` re-raises).
+
+    ``on_act`` hears ``before`` right before each claim call and ``committed`` right after it took
+    the outcome.
+    """
     if store is None:
         raise ParkedEntryGoneError("no interactions store is configured")
     result: Any = None
     async with client_ctx(RedisClient, interactions_settings().redis) as r:
         for item in takes:
+            if on_act is not None:
+                await on_act(VisitAct(action="take", interaction_ids=(item.id,), phase="before"))
             outcome = await store.claim_outcome(r, item.id)
             if outcome is None:
                 raise ParkedEntryGoneError(f"interaction {item.id!r} has no waiting outcome to take (already taken)")
+            if on_act is not None:
+                await on_act(VisitAct(action="take", interaction_ids=(item.id,), phase="committed"))
             # The waiting outcome was atomically claimed (taken): record this id on the
             # ambient run record's resumed-interaction list, then surface a ``failed``
             # outcome to the caller. A miss above raises before recording anything.
@@ -685,6 +739,32 @@ async def cancel_parked(ids: list[str]) -> VisitOutcome:
     )
 
 
+async def settle_visit_claim(act: VisitAct) -> tuple[str, ...]:
+    """The ids of ``act``'s resume or take claim that are no longer open in the interactions store.
+
+    A resume entry is open while its state is ``pending``; an ``answered`` or missing state is not.
+    A take entry is open while its outcome still waits. The read cannot tell which door resolved an
+    entry no longer open, so a returned id never proves this caller's claim committed; an empty
+    result proves no claim on these ids did. A store fault raises.
+    """
+    if act.action not in ("resume", "take"):
+        raise ValueError(f"only a resume or take claim can be settled, got {act.action!r}")
+    if not interactions_store_configured():
+        raise ParkedEntryGoneError("no interactions store is configured")
+    store = InteractionStore(interactions_settings().key_prefix)
+    gone: list[str] = []
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
+        for iid in act.interaction_ids:
+            if act.action == "resume":
+                state = await store.get_state(r, iid)
+                still_open = state is not None and state.status == "pending"
+            else:
+                still_open = await store.outcome_waiting(r, iid)
+            if not still_open:
+                gone.append(iid)
+    return tuple(gone)
+
+
 # --- small helpers ---------------------------------------------------------------------
 
 
@@ -705,5 +785,6 @@ __all__ = [
     "normalise_started",
     "resume_parked",
     "run_answer",
+    "settle_visit_claim",
     "visit",
 ]

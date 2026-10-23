@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         ParkedEntry,
         QuestionFormat,
         RunAnswer,
+        SettleVisitClaim,
         Visit,
         VisitOutcome,
     )
@@ -87,8 +88,8 @@ class InteractionsFacet(_Facet):
         is an open reacting form, type-validates ``partial_values``, runs the asker's
         ``reaction_tool`` under its stored identity with a deadline, validates the returned form
         update, and returns it. STATELESS — nothing durable is recorded or resolved. Raises a
-        :class:`~tai42_skeleton.interactions.reaction.FormReactionError` subclass on a closed
-        interaction, a malformed request, or a handler failure.
+        :class:`~tai42_contract.interactions.FormReactionError` subclass on a closed
+        interaction, a malformed request, or a handler failure; its ``reason`` is the door's sentence.
         """
         from tai42_skeleton.interactions.reaction import react
 
@@ -139,6 +140,16 @@ class InteractionsFacet(_Facet):
         from tai42_skeleton.interactions.visit import visit
 
         return visit
+
+    @property
+    def settle_visit_claim(self) -> SettleVisitClaim:
+        """The bound ``SettleVisitClaim`` read: the ids of a visit's resume or take claim no longer open.
+
+        A facade EXPOSURE of :func:`tai42_skeleton.interactions.visit.settle_visit_claim`.
+        """
+        from tai42_skeleton.interactions.visit import settle_visit_claim
+
+        return settle_visit_claim
 
     def run_answer(self, outcome: VisitOutcome) -> RunAnswer:
         """The ONE run answer a direct door hands back for a visit outcome, discriminated on ``kind``.

@@ -1,4 +1,4 @@
-"""The answer/record store — keyspaces 1, 2, 3, 6, 7, 8 and 9 of the conversation bridge.
+"""The answer/record store — keyspaces 1, 2, 3, 6, 7, 8, 9 and the send-record keys of the conversation bridge.
 
 All transient runtime state (NOT a backup section) and all Redis-backed:
 
@@ -10,9 +10,13 @@ All transient runtime state (NOT a backup section) and all Redis-backed:
    is taken only once a durable record already stands behind it.
 2. Answer record: ``conversations:record:{message_id}`` — intake, produced answer and
    delivery state, split into a content blob plus the delivery-control fields the atomic
-   transitions mutate. The retention TTL is applied ONLY on reaching a terminal state.
+   transitions mutate. The retention TTL is applied ONLY on reaching a terminal state. A
+   send record (``origin`` ``"send"``) is a record of the same keyspace: one message the
+   deployment sent outside a reply. The row names every key outside it that names the
+   record (``owned_keys``), so the one delete script removes them with the row.
 3. Outbound-id reverse index: ``conversations:outbound:{channel}:{outbound_id}`` →
-   ``message_id``, so an out-of-band receipt resolves back to its record.
+   ``message_id``, so an out-of-band receipt resolves back to its record (a reply's or a
+   send's).
 6. Per-status record index: ``conversations:status:{delivery_status}`` → the ``message_id``s
    in that state, moved by the same atomic step that moves the record. Every listing reads
    it, so a sweep costs the work outstanding and not the whole retained keyspace.
@@ -25,6 +29,18 @@ All transient runtime state (NOT a backup section) and all Redis-backed:
 9. Owed first-contact greeting: ``conversations:overlap:greeting:{thread_id}`` → the rendered
    greeting a thread still owes, parked when it is minted and burned by the first turn that
    delivers a reply, so a greeting whose minting turn was superseded rides the successor turn.
+
+The send-record keys:
+
+- Message-ref list: ``conversations:message_ref:{sha256}`` → the ordered ``message_id``s of the
+  records that carry one medium message id in one chat (the hash folds the channel, our
+  identity, the participant address and the medium id), so a quoted message resolves to the
+  record that holds its text.
+- Ask index: ``conversations:ask_send:{interaction_id}`` → the ``message_id`` of the send record
+  that carried the ask, so the participant's reply over the channel lands on it.
+- Per-route in-flight set: ``conversations:route_sending:{route_name}`` → the ``message_id``s of
+  the send records begun on the route and still ``sending``, so forgetting a thread reaches a
+  send whose outcome is not yet known.
 
 Indexes 7 and 8 name rows that expire under the retention TTL. Reclaiming those members is
 :meth:`ConversationRecordStore.prune_expired_terminal_indexes`'s job ALONE: a read logs the
@@ -58,6 +74,7 @@ from tai42_skeleton.conversations.record_index import RecordIndexMixin
 from tai42_skeleton.conversations.record_pages import PendingWork, ThreadPage, ThreadSummary, TranscriptPage
 from tai42_skeleton.conversations.record_prune import PRUNE_START, PruneCursor, RecordPruneMixin
 from tai42_skeleton.conversations.record_query import RecordQueryMixin
+from tai42_skeleton.conversations.record_send import RecordSendMixin
 from tai42_skeleton.conversations.record_write import RecordWriteMixin
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations.errors import NotSupportedError
@@ -95,6 +112,7 @@ _PRUNE_WORK_PER_PASS = 5_000
 
 class ConversationRecordStore(
     RecordDedupeMixin,
+    RecordSendMixin,
     RecordWriteMixin,
     RecordDeliveryMixin,
     RecordIndexMixin,
@@ -102,10 +120,11 @@ class ConversationRecordStore(
     RecordPruneMixin,
     RecordGreetingMixin,
 ):
-    """The Redis-backed answer/record store (keyspaces 1, 2, 3, 6, 7, 8 and 9), one persistence concern per mixin.
+    """The Redis-backed answer/record store, one persistence concern per mixin.
 
-    Construction refuses with a loud 501 without the redis conversations backend — nothing here may be
-    persisted to state that vanishes with the process.
+    It holds keyspaces 1, 2, 3, 6, 7, 8, 9 and the send-record keys. Construction refuses with a
+    loud 501 without the redis conversations backend — nothing here may be persisted to state that
+    vanishes with the process.
     """
 
     def __init__(self, settings: ConversationsSettings) -> None:

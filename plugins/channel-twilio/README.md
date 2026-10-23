@@ -76,7 +76,7 @@ Settings are read from the `CHANNEL_TWILIO_` environment group (see
 | `CHANNEL_TWILIO_FROM` | yes | The deployment's Twilio number (E.164, or `whatsapp:+...`) |
 | `CHANNEL_TWILIO_DEFAULT_RECIPIENT` | for recipient-less asks | Destination number used when the caller requests no recipient (E.164, or `whatsapp:+...`) |
 | `CHANNEL_TWILIO_ALLOWED_RECIPIENTS` | for caller-requested recipients | Whitelist a caller-requested recipient must be on — comma-separated or a JSON list; an unlisted request is refused loudly |
-| `CHANNEL_TWILIO_REDIS_URL` | yes | Correlation store (plugin-owned Redis) |
+| `CHANNEL_TWILIO_REDIS_URL` | yes | Correlation and reply-window store (plugin-owned Redis) |
 | `CHANNEL_TWILIO_REDIS_MAX_CONNECTIONS` … | no | The rest of the kit `RedisConnectionSettings` fields, same names under this prefix |
 | `CHANNEL_TWILIO_HTTP_TIMEOUT_SECONDS` | no (30.0) | Outbound send + answer-forward timeout, seconds |
 | `CHANNEL_TWILIO_DEDUPE_TTL` | no (172800) | Seen-MessageSid replay-guard window, seconds |
@@ -110,6 +110,14 @@ a time; a second concurrent one is rejected loudly.
 A `confirm` or `external` question arrives as a tappable link and is answered
 in the browser via the callback door — no SMS reply is expected or matched, and
 it never consumes the number pair.
+
+### Replies
+
+On WhatsApp-over-Twilio, a reply to a message from the last 7 days carries
+`OriginalRepliedMessageSid`; the channel passes it to `conversations.accept` (and on the
+ladder's `InboundBridge` when the reply answers an ask) as `reply_to_medium_message_id`, and
+the platform resolves it into the turn's — or the asker's — typed `reply_to`
+(`{message_id, status, text}`). An SMS carries no reply field, so it quotes nothing.
 
 ## Media and the message vocabulary (the medium's honest ceiling)
 
@@ -189,9 +197,9 @@ echoed back on the reply.
 |---|---|---|
 | Recipients fixed by operator env (`_ALLOWED_RECIPIENTS`/`_DEFAULT_RECIPIENT`) | A question can only reach a whitelisted or default number — no dynamic/unlisted destinations | Directory-backed recipient resolution |
 | One pending question per number pair | A second concurrent `ask` over this channel fails loudly with `PendingQuestionExistsError` while the first is unanswered/unexpired. The pair is released at once when the platform withdraws the first question (a cancel, a route's `cancel_expr`, or an erase of its thread, route or person); nothing is sent to the human | Number pool via Messaging Service sticky sender |
-| SMS-first; WhatsApp freeform only | With `whatsapp:` numbers, a question outside the human's 24h session window is rejected by Twilio (error 63016) as a loud delivery failure | Approved-template (`ContentSid`) sends |
+| SMS-first; WhatsApp freeform only | With `whatsapp:` numbers, a question outside the human's 24h session window is rejected by Twilio (error 63016) as a loud delivery failure. The channel reports that window on every bridged turn as `turn.reply_window` (`open` for 24 hours from each inbound's first receipt, else `closed`; `none` on an SMS pair), read once per turn, so 63016 stays the final check | Approved-template (`ContentSid`) sends |
 | Single send attempt | A transient Twilio outage fails the ask instead of retrying (no idempotency key exists → a blind retry risks double-texting) | App-side dedupe + retry |
-| Send delivery receipts are observability only | The Twilio StatusCallback closes the loop on both legs: a **bridge** outbound's `delivered`/`failed`/`undelivered` flips the answer record (a late failure ends it `failed`, not just the ask's timeout), and a **`notify_user` send** (which runs no bridge record) has its receipt resolved through the send-outcome index and posted as a `delivery_receipt` event on the originating trace (`ERROR` on failure). The send receipt is a monitoring signal only — it never re-sends or fails the run — and correlates only when a trace was ambient at the send and the interactions store is configured; a status neither leg owns is acked and logged | — |
+| Send delivery receipts are observability only | The Twilio StatusCallback closes the loop on both legs: a send a conversation record owns (a **bridge** outbound, or a send recorded on a conversation route) has its `delivered`/`failed`/`undelivered` flip that record (a late failure ends it `failed`, not just the ask's timeout), and a **`notify_user` send** made outside any conversation route has its receipt resolved through the send-outcome index and posted as a `delivery_receipt` event on the originating trace (`ERROR` on failure). The send receipt is a monitoring signal only — it never re-sends or fails the run — and correlates only when a trace was ambient at the send and the interactions store is configured; a status neither leg owns is acked and logged | — |
 | No timestamp in Twilio's signature scheme | Replay of a captured request validates forever for that URL+body; MessageSid dedupe (48h default window) + HTTPS are the guards | — (Twilio protocol property) |
 
 ## Development

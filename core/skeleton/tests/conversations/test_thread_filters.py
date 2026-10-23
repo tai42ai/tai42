@@ -18,6 +18,7 @@ from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStat
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
+from .conftest import create_record, standing_person
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 _ROUTE = "line"
@@ -66,9 +67,9 @@ def _record(message_id: str, *, created_at: float, thread_id: str, **over) -> Co
 
 async def test_the_thread_listing_filters_by_summary_status(store):
     now = time.time()
-    await store.create_record(_record("d0", created_at=now, thread_id="bridge:line:+1000"))
-    await store.create_record(
-        _record("f0", created_at=now + 1, thread_id="bridge:line:+2000", delivery_status=DeliveryStatus.FAILED)
+    await create_record(store, _record("d0", created_at=now, thread_id="bridge:line:+1000"))
+    await create_record(
+        store, _record("f0", created_at=now + 1, thread_id="bridge:line:+2000", delivery_status=DeliveryStatus.FAILED)
     )
 
     page, _unreadable = await store.list_route_threads(
@@ -85,8 +86,8 @@ async def test_the_thread_listing_filters_by_summary_status(store):
 
 async def test_the_thread_listing_filters_by_address_substring(store):
     now = time.time()
-    await store.create_record(_record("a0", created_at=now, thread_id="bridge:line:+15550002222"))
-    await store.create_record(_record("a1", created_at=now + 1, thread_id="bridge:line:+15559990000"))
+    await create_record(store, _record("a0", created_at=now, thread_id="bridge:line:+15550002222"))
+    await create_record(store, _record("a1", created_at=now + 1, thread_id="bridge:line:+15559990000"))
 
     page, _unreadable = await store.list_route_threads(_ROUTE, offset=0, limit=10, address="2222")
 
@@ -94,11 +95,12 @@ async def test_the_thread_listing_filters_by_address_substring(store):
     assert page.total == 1
 
 
-async def test_the_address_filter_never_matches_a_person_thread(store):
+async def test_the_address_filter_never_matches_a_person_thread(store, fake):
     # A person thread carries no address suffix, so it can never satisfy a non-empty address
     # filter — never a false match on the ``@person`` literal.
+    fake.seed_person(standing_person("abc", _ROUTE))
     now = time.time()
-    await store.create_record(_record("p0", created_at=now, thread_id="bridge:@person:abc"))
+    await create_record(store, _record("p0", created_at=now, thread_id="bridge:@person:abc"))
 
     page, _unreadable = await store.list_route_threads(_ROUTE, offset=0, limit=10, address="abc")
 
@@ -108,12 +110,14 @@ async def test_the_address_filter_never_matches_a_person_thread(store):
 
 async def test_status_and_address_filters_compose(store):
     now = time.time()
-    await store.create_record(_record("m0", created_at=now, thread_id="bridge:line:+15550002222"))
-    await store.create_record(
-        _record("m1", created_at=now + 1, thread_id="bridge:line:+15550002200", delivery_status=DeliveryStatus.FAILED)
+    await create_record(store, _record("m0", created_at=now, thread_id="bridge:line:+15550002222"))
+    await create_record(
+        store,
+        _record("m1", created_at=now + 1, thread_id="bridge:line:+15550002200", delivery_status=DeliveryStatus.FAILED),
     )
-    await store.create_record(
-        _record("m2", created_at=now + 2, thread_id="bridge:line:+15559990000", delivery_status=DeliveryStatus.FAILED)
+    await create_record(
+        store,
+        _record("m2", created_at=now + 2, thread_id="bridge:line:+15559990000", delivery_status=DeliveryStatus.FAILED),
     )
 
     page, _unreadable = await store.list_route_threads(
@@ -126,15 +130,16 @@ async def test_status_and_address_filters_compose(store):
 async def test_a_filtered_listing_pages_over_matches(store):
     now = time.time()
     for index in range(3):
-        await store.create_record(
+        await create_record(
+            store,
             _record(
                 f"f{index}",
                 created_at=now + index,
                 thread_id=f"bridge:line:+155500{index}",
                 delivery_status=DeliveryStatus.FAILED,
-            )
+            ),
         )
-    await store.create_record(_record("d0", created_at=now + 9, thread_id="bridge:line:+9999"))
+    await create_record(store, _record("d0", created_at=now + 9, thread_id="bridge:line:+9999"))
 
     first, _ = await store.list_route_threads(_ROUTE, offset=0, limit=2, status=frozenset({DeliveryStatus.FAILED}))
     second, _ = await store.list_route_threads(_ROUTE, offset=2, limit=2, status=frozenset({DeliveryStatus.FAILED}))
@@ -150,7 +155,7 @@ async def test_a_filter_scan_that_spends_its_budget_reports_truncated(store, mon
     # Three candidate threads, none matching, so the scan spends its whole budget without
     # finishing — reported LOUDLY, never a silent short page.
     for index in range(3):
-        await store.create_record(_record(f"m{index}", created_at=now + index, thread_id=f"bridge:line:+100{index}"))
+        await create_record(store, _record(f"m{index}", created_at=now + index, thread_id=f"bridge:line:+100{index}"))
 
     page, _unreadable = await store.list_route_threads(
         _ROUTE, offset=0, limit=10, status=frozenset({DeliveryStatus.FAILED})
@@ -164,7 +169,7 @@ async def test_a_filter_scan_reads_the_route_index_in_bounded_windows(store, fak
     monkeypatch.setattr(records_module, "_FILTER_SCAN_WINDOW", 2)
     now = time.time()
     for index in range(5):
-        await store.create_record(_record(f"m{index}", created_at=now + index, thread_id=f"bridge:line:+100{index}"))
+        await create_record(store, _record(f"m{index}", created_at=now + index, thread_id=f"bridge:line:+100{index}"))
     windows: list[tuple[int, int]] = []
     inner = fake.zrevrange
 
@@ -188,10 +193,11 @@ _THREAD = "bridge:line:+15550002222"
 
 async def test_a_transcript_q_search_keeps_only_matching_records(store):
     now = time.time()
-    await store.create_record(_record("m0", created_at=now, thread_id=_THREAD, inbound_text="hello world"))
-    await store.create_record(_record("m1", created_at=now + 1, thread_id=_THREAD, inbound_text="a widget please"))
-    await store.create_record(
-        _record("m2", created_at=now + 2, thread_id=_THREAD, inbound_text="ok", answer="your WIDGET is on the way")
+    await create_record(store, _record("m0", created_at=now, thread_id=_THREAD, inbound_text="hello world"))
+    await create_record(store, _record("m1", created_at=now + 1, thread_id=_THREAD, inbound_text="a widget please"))
+    await create_record(
+        store,
+        _record("m2", created_at=now + 2, thread_id=_THREAD, inbound_text="ok", answer="your WIDGET is on the way"),
     )
 
     page, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10, q="widget")
@@ -204,7 +210,7 @@ async def test_a_transcript_q_search_keeps_only_matching_records(store):
 
 async def test_a_transcript_q_search_with_no_match_is_an_empty_page_not_total_zero_unknown(store):
     now = time.time()
-    await store.create_record(_record("m0", created_at=now, thread_id=_THREAD, inbound_text="hello"))
+    await create_record(store, _record("m0", created_at=now, thread_id=_THREAD, inbound_text="hello"))
 
     page, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10, q="nothing")
 
@@ -216,8 +222,8 @@ async def test_a_transcript_q_search_reports_truncated_on_budget(store, monkeypa
     monkeypatch.setattr(records_module, "_FILTER_RECORD_SCAN", 2)
     now = time.time()
     for index in range(3):
-        await store.create_record(
-            _record(f"m{index}", created_at=now + index, thread_id=_THREAD, inbound_text="no match here")
+        await create_record(
+            store, _record(f"m{index}", created_at=now + index, thread_id=_THREAD, inbound_text="no match here")
         )
 
     page, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10, q="widget")
@@ -227,8 +233,8 @@ async def test_a_transcript_q_search_reports_truncated_on_budget(store, monkeypa
 
 async def test_a_transcript_q_search_counts_an_unreadable_member(store, fake):
     now = time.time()
-    await store.create_record(_record("m0", created_at=now, thread_id=_THREAD, inbound_text="a widget please"))
-    await store.create_record(_record("m1", created_at=now + 1, thread_id=_THREAD, inbound_text="another widget"))
+    await create_record(store, _record("m0", created_at=now, thread_id=_THREAD, inbound_text="a widget please"))
+    await create_record(store, _record("m1", created_at=now + 1, thread_id=_THREAD, inbound_text="another widget"))
     fake._hashes.pop(ConversationsSettings().record_key("m0"))
 
     page, unreadable = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10, q="widget")
@@ -242,12 +248,12 @@ async def test_a_transcript_q_search_counts_an_unreadable_member(store, fake):
 
 async def test_search_route_messages_spans_every_thread(store):
     now = time.time()
-    await store.create_record(
-        _record("a0", created_at=now, thread_id="bridge:line:+1000", inbound_text="widget for account")
+    await create_record(
+        store, _record("a0", created_at=now, thread_id="bridge:line:+1000", inbound_text="widget for account")
     )
-    await store.create_record(_record("a1", created_at=now + 1, thread_id="bridge:line:+1000", inbound_text="thanks"))
-    await store.create_record(
-        _record("b0", created_at=now + 2, thread_id="bridge:line:+2000", answer="your widget posted")
+    await create_record(store, _record("a1", created_at=now + 1, thread_id="bridge:line:+1000", inbound_text="thanks"))
+    await create_record(
+        store, _record("b0", created_at=now + 2, thread_id="bridge:line:+2000", answer="your widget posted")
     )
 
     found, _ = await store.search_route_messages(_ROUTE, offset=0, limit=10, q="widget")
@@ -261,8 +267,8 @@ async def test_search_route_messages_reports_truncated_on_budget(store, monkeypa
     monkeypatch.setattr(records_module, "_FILTER_RECORD_SCAN", 2)
     now = time.time()
     for index in range(3):
-        await store.create_record(
-            _record(f"m{index}", created_at=now + index, thread_id="bridge:line:+1000", inbound_text="no match")
+        await create_record(
+            store, _record(f"m{index}", created_at=now + index, thread_id="bridge:line:+1000", inbound_text="no match")
         )
 
     found, _ = await store.search_route_messages(_ROUTE, offset=0, limit=10, q="widget")
@@ -272,9 +278,9 @@ async def test_search_route_messages_reports_truncated_on_budget(store, monkeypa
 
 async def test_search_route_messages_skips_a_rowless_member_loudly(store, fake, caplog):
     now = time.time()
-    await store.create_record(_record("a0", created_at=now, thread_id="bridge:line:+1000", inbound_text="widget one"))
-    await store.create_record(
-        _record("a1", created_at=now + 1, thread_id="bridge:line:+1000", inbound_text="widget two")
+    await create_record(store, _record("a0", created_at=now, thread_id="bridge:line:+1000", inbound_text="widget one"))
+    await create_record(
+        store, _record("a1", created_at=now + 1, thread_id="bridge:line:+1000", inbound_text="widget two")
     )
     fake._hashes.pop(ConversationsSettings().record_key("a0"))
 

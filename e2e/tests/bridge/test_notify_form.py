@@ -37,6 +37,7 @@ from tai42_e2e.manifests import (
     BRIDGE_WHATSAPP_WABA_ID,
 )
 from tai42_e2e.settings import HarnessSettings
+from tai42_e2e.waiting import wait_for_async
 from tai42_e2e.webchat import WebChatClient
 
 from ._bridge_support import (
@@ -415,7 +416,7 @@ async def test_whatsapp_notify_form_reply_never_touches_a_pending_ask_on_the_sam
     async def ask() -> object:
         async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
             result = await mcp.call_tool("ask", {"question": question, "channel": "whatsapp", "recipient": wa_id})
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -598,6 +599,220 @@ async def test_whatsapp_notify_form_refuses_a_bad_email_inside_the_form_then_bri
     assert resp.status_code == 200, resp.text
     turn = await _recorded_form_turn(bridge, marker)
     assert turn["form"] == {"topic": marker, "email": "alice@example.org"}
+
+
+@_whatsapp_mock_leg
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "probe-tools",
+    "helper:whatsapp",
+    "setting:conversations",
+    "setting:router:notifications",
+    "setting:seeded-access-control",
+    "store:redis",
+)
+async def test_whatsapp_notify_form_refuses_in_the_callers_error_line_and_carries_its_could_not_update_line(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    identity = _fresh_phone_id()
+    await _form_record_route(bridge, uniq, channel="whatsapp", identity=identity)
+    wa_id = _fresh_wa_id()
+    prompt = uniq("l27-wa-lines-prompt")
+    marker = uniq("l27-wa-lines-a")
+    error_line = "Some answers need a second look"
+    update_failed = "No update ({reason})"
+    schema = {
+        "type": "object",
+        "description": f"{uniq('l27-wa-lines')} answer form",
+        "properties": {
+            "topic": {"type": "string", "title": "Topic"},
+            "email": {"type": "string", "format": "email", "title": "Email address"},
+        },
+        "required": ["topic", "email"],
+    }
+
+    await bridge.api().post(
+        "/api/notifications",
+        json={
+            "message": prompt,
+            "channel": "whatsapp",
+            "recipient": wa_id,
+            "schema": schema,
+            "wording": {"form": {"error_line": error_line, "update_failed": update_failed}},
+        },
+    )
+
+    send = await wait_whatsapp_send(bridge.fake_whatsapp, prompt)
+    parameters = send["payload"]["interactive"]["action"]["parameters"]
+    flow_token = parameters["flow_token"]
+    created = next(flow for flow in bridge.fake_whatsapp.flows if flow["id"] == parameters["flow_id"])
+    flow_json = json.loads(created["flow_json"])
+    screen_data = parameters["flow_action_payload"]["data"]
+    # An ask-less form has no sidecar of its own lines: the Flow's data carries both, and its submit
+    # forwards them to the data endpoint.
+    assert screen_data["tai42_error_line"] == error_line
+    assert screen_data["tai42_update_failed"] == update_failed
+
+    refused = await bridge.whatsapp_flow_exchange(
+        whatsapp_flow_action_request(
+            flow_json,
+            screen="SCREEN_A",
+            flow_token=flow_token,
+            form={"topic": marker, "email": "dhdhdh"},
+            data=screen_data,
+        )
+    )
+    assert refused["screen"] == "SCREEN_A", refused
+    assert refused["data"]["email__err"] == "Use name@example.com"
+    assert refused["data"]["error_message"] == error_line
+
+
+# A form schema the channel-renderable subset refuses: a nested object property.
+_UNDRAWABLE_SCHEMA: dict[str, Any] = {"type": "object", "properties": {"address": {"type": "object"}}}
+# WhatsApp's interactive body cap (a Flow's body) sits under its text-message width, so a form
+# question between the two passes the chunking and is refused by the channel's own form check.
+_WHATSAPP_BODY_CAP = 1024
+
+
+async def _refusing_reply_route(
+    bridge: BridgeHarness, uniq: Callable[[str], str], *, channel: str, identity: str, parts: list[dict], notice: str
+) -> str:
+    """A ``target_kind=tool`` route whose reply is ``parts`` and whose ``reply_texts.error`` is ``notice``."""
+    exec_key = uniq("l27-part-exec")
+    await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])
+    route_name = uniq("l27-part-route").replace("_", "-")
+    await bridge.create_tool_channel_route(
+        route_name=route_name,
+        tool="e2e_record",
+        execution_key=exec_key,
+        channel=channel,
+        our_identity=identity,
+        start_expr=f'{{key: "{uniq("l27-part-probe")}", value: .message}}',
+        reply_expr=json.dumps(parts),
+        reply_texts={"error": notice},
+    )
+    return route_name
+
+
+async def _assert_failed_on_route(bridge: BridgeHarness, route_name: str) -> None:
+    """The route's one reply record is listed by the admin failed-delivery listing."""
+
+    async def probe() -> list[dict] | None:
+        failed = await bridge.list_failed()
+        mine = [item for item in failed["items"] if item["route_name"] == route_name]
+        return mine or None
+
+    (record,) = await wait_for_async(probe, deadline=12.0, message=f"no failed record on route {route_name!r}")
+    assert record["delivery_status"] == "failed"
+
+
+@pytest.mark.needs(
+    "kind:channels:web", "probe-tools", "setting:conversations", "setting:seeded-access-control", "store:redis"
+)
+async def test_web_reply_with_an_undrawable_form_part_sends_only_the_route_notice(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    identity = uniq("l27-part-site").replace("_", "-")
+    lead = uniq("l27-part-lead")
+    prompt = uniq("l27-part-prompt")
+    notice = uniq("l27-part-notice")
+    route_name = await _refusing_reply_route(
+        bridge,
+        uniq,
+        channel="web",
+        identity=identity,
+        parts=[{"message": lead}, {"message": prompt, "schema": _UNDRAWABLE_SCHEMA}],
+        notice=notice,
+    )
+    web, page = await WebChatClient.open_page(_base_url(bridge), identity, store_url=bridge.stack.resources.redis_url)
+    assert page.status_code == 200, page.text
+    sent = await web.send(uniq("l27-part-msg"))
+    assert sent.status_code == 200, sent.text
+
+    def _is_notice(event: str, data: dict) -> bool:
+        return event == "chat.message" and data.get("direction") == "out" and data.get("text") == notice
+
+    frames = await web.frames(until=_is_notice)
+    outbound = [data["text"] for event, data in frames if event == "chat.message" and data.get("direction") == "out"]
+    # The whole reply fails before any part is sent: no lead text, no form card, only the notice.
+    assert outbound == [notice], outbound
+    assert not [data for event, data in frames if event == "chat.form"]
+    await _assert_failed_on_route(bridge, route_name)
+
+
+@_whatsapp_mock_leg
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "probe-tools",
+    "helper:whatsapp",
+    "setting:conversations",
+    "setting:seeded-access-control",
+    "store:redis",
+)
+async def test_whatsapp_reply_with_a_form_part_over_the_body_cap_sends_only_the_route_notice(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    identity = _fresh_phone_id()
+    wa_id = _fresh_wa_id()
+    lead = uniq("l27-wa-part-lead")
+    prompt = uniq("l27-wa-part-prompt")
+    notice = uniq("l27-wa-part-notice")
+    question = f"{prompt} " + "x" * (_WHATSAPP_BODY_CAP + 10 - len(prompt))
+    route_name = await _refusing_reply_route(
+        bridge,
+        uniq,
+        channel="whatsapp",
+        identity=identity,
+        parts=[{"message": lead}, {"message": question, "schema": _whatsapp_schema("part-body-cap")}],
+        notice=notice,
+    )
+    inbound = bridge.whatsapp_inbound(phone_number_id=identity, wa_id=wa_id, text=uniq("l27-wa-part-msg"))
+    resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, inbound, port=bridge.stack.port_b)
+    assert resp.status_code == 200, resp.text
+    await _assert_failed_on_route(bridge, route_name)
+    # The channel's form check refused the part before any of the reply went out: the one send
+    # to the end user (any type) is the notice.
+    (only,) = await wait_send_to(bridge.fake_whatsapp, to=wa_id)
+    assert only["body"] == notice
+    assert bridge.fake_whatsapp.sends_matching(lead) == []
+    assert bridge.fake_whatsapp.sends_matching(prompt) == []
+
+
+@_whatsapp_mock_leg
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "probe-tools",
+    "helper:whatsapp",
+    "setting:conversations",
+    "setting:seeded-access-control",
+    "store:redis",
+)
+async def test_whatsapp_reply_with_an_unmappable_template_part_sends_only_the_route_notice(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    identity = _fresh_phone_id()
+    wa_id = _fresh_wa_id()
+    lead = uniq("l27-wa-tpl-lead")
+    notice = uniq("l27-wa-tpl-notice")
+    # ``body`` is no key of this channel's template parameters (its body key is ``body_parameters``).
+    template = {"name": "account_update", "language": "en", "parameters": {"body": ["A-42"]}}
+    route_name = await _refusing_reply_route(
+        bridge,
+        uniq,
+        channel="whatsapp",
+        identity=identity,
+        parts=[{"message": lead}, {"message": uniq("l27-wa-tpl-text"), "template": template}],
+        notice=notice,
+    )
+    inbound = bridge.whatsapp_inbound(phone_number_id=identity, wa_id=wa_id, text=uniq("l27-wa-tpl-msg"))
+    resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, inbound, port=bridge.stack.port_b)
+    assert resp.status_code == 200, resp.text
+    await _assert_failed_on_route(bridge, route_name)
+    # The template check refused the part at admission: no text and no template of the reply went out.
+    (only,) = await wait_send_to(bridge.fake_whatsapp, to=wa_id)
+    assert only["body"] == notice
+    # The one send to the end user (any type, a template included) is the notice.
+    assert bridge.fake_whatsapp.sends_matching(lead) == []
 
 
 @pytest.mark.needs("kind:channels:twilio", "helper:twilio", "setting:router:notifications")

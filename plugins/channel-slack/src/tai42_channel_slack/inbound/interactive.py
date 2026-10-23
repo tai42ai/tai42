@@ -20,7 +20,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
-from tai42_contract.interactions import FieldChangedEvent, SubmittedEvent
+from tai42_contract.interactions import FieldChangedEvent, FormReactionError, SubmittedEvent
 from tai42_kit.utils.data.form_text import render_form_text
 
 from tai42_channel_slack.blocks import decode_reply_value, is_option_tap, is_reply_action
@@ -50,12 +50,13 @@ logger = logging.getLogger(__name__)
 _MODAL_RETRY_TEXT = "That answer wasn't accepted. Please check your entries and submit again."
 
 # Shown in the modal when the question's form record is gone (TTL lapsed between
-# the message and the submission, or the door reports the ticket terminally gone).
+# the message and the submission, or the door reports the ticket terminally gone) and the
+# caller set no ``status.unavailable`` line.
 _FORM_EXPIRED_TEXT = "This question is no longer available; it has expired."
 
 # Shown in the modal (as a banner on a re-render, or an inline error on submit) when a form
-# reaction cannot be computed — the participant's surface, paired with a loud operator log.
-# Never a stale or silent value.
+# reaction cannot be computed and the caller set no ``form.update_failed`` line — the
+# participant's surface, paired with a loud operator log. Never a stale or silent value.
 _REACTION_FAILURE_TEXT = "Sorry, this form could not be updated right now. Please try again."
 
 
@@ -149,6 +150,26 @@ def _form_wording(record: dict[str, Any]) -> dict[str, Any]:
     return form if isinstance(form, dict) else {}
 
 
+def _status_wording(record: dict[str, Any]) -> dict[str, Any]:
+    """The ``wording.status`` chapter off the stored form record, or ``{}`` when the ask set none.
+
+    Its ``unavailable`` line is the modal's error when the form's door no longer resolves.
+    """
+    wording = record.get("wording")
+    status = wording.get("status") if isinstance(wording, dict) else None
+    return status if isinstance(status, dict) else {}
+
+
+def _update_failed_text(template: str | None, reason: str) -> str:
+    """The line the modal shows when it could not update the form.
+
+    ``template`` is the caller's ``form.update_failed`` (its optional ``{reason}`` token takes
+    ``reason``, which is empty when the surface has no reaction-door reason); ``None`` draws the
+    platform's :data:`_REACTION_FAILURE_TEXT`.
+    """
+    return template.replace("{reason}", reason) if template is not None else _REACTION_FAILURE_TEXT
+
+
 def _rejected_template(record: dict[str, Any]) -> str | None:
     """The caller's ``wording.answer.rejected`` refusal sentence off the record, or ``None``.
 
@@ -208,7 +229,8 @@ async def _resolve_option_tap(payload: dict[str, Any], action: dict[str, Any]) -
     select/suggested-reply ask through the shared ladder, or (a notify option / a
     correlation miss) enters the conversation as a visitor message; a tap from a channel
     outside the allowlist bridges directly, exactly as a typed message from that channel
-    would, never touching a pending ask. A malformed tap (no value, no anchor) is
+    would, never touching a pending ask. A tap is a reply to the message holding the buttons, so
+    every arm carries that anchor ``ts`` as the quoted message's id. A malformed tap (no value, no anchor) is
     acked-ignored, never a 5xx.
     """
     raw_value = action.get("value")
@@ -237,8 +259,25 @@ async def _resolve_option_tap(payload: dict[str, Any], action: dict[str, Any]) -
         # Defense-in-depth, mirroring the typed-reply gate: a tap from a non-allowlisted
         # channel is not an answer to any ask — it bridges exactly as a typed message
         # from that channel would (carrying any reply id as enrichment params).
-        return await _bridge(settings.bot_user_id, channel, value, dedupe_id, params=params)
-    return await _resolve_answer(message_ts, value, settings.bot_user_id, channel, dedupe_id, params=params)
+        return await _bridge(
+            settings.bot_user_id,
+            channel,
+            value,
+            dedupe_id,
+            medium_message_id=None,
+            reply_to_medium_message_id=message_ts,
+            params=params,
+        )
+    return await _resolve_answer(
+        message_ts,
+        value,
+        settings.bot_user_id,
+        channel,
+        dedupe_id,
+        medium_message_id=None,
+        reply_to_medium_message_id=message_ts,
+        params=params,
+    )
 
 
 async def _open_form_modal(payload: dict[str, Any], action: dict[str, Any]) -> Response:
@@ -273,6 +312,7 @@ async def _open_form_modal(payload: dict[str, Any], action: dict[str, Any]) -> R
         record.get("pages"),
         reactions=record.get("reactions"),
         form_wording=_form_wording(record),
+        status_unavailable=_status_wording(record).get("unavailable"),
     )
     await open_modal_view(trigger_id, view)
     return JSONResponse({"status": "opened"})
@@ -305,6 +345,7 @@ async def _run_field_reaction(
     meta_options: dict[str, Any],
     merged_display: dict[str, Any],
     meta_display: dict[str, Any],
+    update_failed: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     """Run the consumer's reaction for a changed field through the ONE reaction chokepoint.
 
@@ -313,14 +354,19 @@ async def _run_field_reaction(
     option lists and filled display slots accumulate into both the render maps and the metadata
     carriers (so they survive the next re-render); per-field ``errors`` come back to render as
     context lines. A handler failure surfaces LOUDLY — a logged exception plus a banner notice —
-    never a stale or silent value. Returns ``(values_update, field_errors, banner)``. ``entered``
+    never a stale or silent value; the banner is the caller's ``update_failed`` template (a
+    :class:`FormReactionError`'s ``reason`` fills its ``{reason}``, any other failure leaves it
+    empty), else the platform line. Returns ``(values_update, field_errors, banner)``. ``entered``
     (the values passed to the handler) is never mutated.
     """
     try:
         update = await tai42_app.interactions.react(interaction_id, FieldChangedEvent(field=field), entered)
+    except FormReactionError as exc:
+        logger.exception("slack interactive: reaction for form %s field %r failed", interaction_id, field)
+        return {}, {}, _update_failed_text(update_failed, exc.reason)
     except Exception:
         logger.exception("slack interactive: reaction for form %s field %r failed", interaction_id, field)
-        return {}, {}, _REACTION_FAILURE_TEXT
+        return {}, {}, _update_failed_text(update_failed, "")
     update = update or {}
     for name, option_list in (update.get("options") or {}).items():
         normalized = _normalize_options(option_list)
@@ -350,10 +396,11 @@ async def _handle_form_field_action(payload: dict[str, Any], action: dict[str, A
     if not isinstance(view, dict):
         return JSONResponse({"status": "ignored"})
     try:
-        interaction_id, meta_options, meta_display = decode_private_metadata(view.get("private_metadata"))
+        metadata = decode_private_metadata(view.get("private_metadata"))
     except ValueError:
         # A field dispatch from a view this plugin did not stamp: nothing to re-render.
         return JSONResponse({"status": "ignored"})
+    interaction_id, meta_options, meta_display = metadata.interaction_id, metadata.options, metadata.display
     record = await get_form_record(interaction_id)
     if record is None:
         logger.info("slack interactive: form record %s missing or expired; no re-render", interaction_id)
@@ -371,13 +418,21 @@ async def _handle_form_field_action(payload: dict[str, Any], action: dict[str, A
     field_errors: dict[str, Any] = {}
     banner: str | None = None
     values_update: dict[str, Any] = {}
+    update_failed = _form_wording(record).get("update_failed")
     changed = action.get("block_id")
     reacted = bool(reactions) and isinstance(changed, str) and changed in (reactions.get("field_changed") or [])
     # The pre-reaction state, kept so an update the modal cannot draw falls back to it.
     before = (dict(merged_options), dict(meta_options), dict(merged_display), dict(meta_display))
     if reacted:
         values_update, field_errors, banner = await _run_field_reaction(
-            interaction_id, str(changed), entered, merged_options, meta_options, merged_display, meta_display
+            interaction_id,
+            str(changed),
+            entered,
+            merged_options,
+            meta_options,
+            merged_display,
+            meta_display,
+            update_failed,
         )
 
     def render() -> dict[str, Any]:
@@ -394,6 +449,7 @@ async def _handle_form_field_action(payload: dict[str, Any], action: dict[str, A
             metadata_options=meta_options or None,
             metadata_display=meta_display or None,
             form_wording=_form_wording(record),
+            status_unavailable=_status_wording(record).get("unavailable"),
         )
 
     try:
@@ -402,14 +458,16 @@ async def _handle_form_field_action(payload: dict[str, Any], action: dict[str, A
         if not reacted:
             raise
         # The reaction returned something Slack cannot draw: the same loud path as a failing
-        # handler — a logged exception and the banner over the pre-reaction modal.
+        # handler — a logged exception and the banner over the pre-reaction modal. This is the
+        # channel's own refusal, not the reaction door's reason, so the caller's ``{reason}`` is
+        # empty.
         logger.exception(
             "slack interactive: reaction for form %s field %r returned an update the modal cannot draw",
             interaction_id,
             changed,
         )
         merged_options, meta_options, merged_display, meta_display = before
-        values_update, field_errors, banner = {}, {}, _REACTION_FAILURE_TEXT
+        values_update, field_errors, banner = {}, {}, _update_failed_text(update_failed, "")
         view_out = render()
     if banner is not None:
         view_out["blocks"].insert(1, {"type": "section", "text": {"type": "mrkdwn", "text": banner}})
@@ -431,20 +489,29 @@ def _submitted_errors_response(schema: dict[str, Any], errors: dict[str, Any], f
 
 
 async def _run_submitted_reaction(
-    interaction_id: str, answer: dict[str, Any], schema: dict[str, Any], first_block: str
+    interaction_id: str,
+    answer: dict[str, Any],
+    schema: dict[str, Any],
+    first_block: str,
+    update_failed: str | None,
 ) -> JSONResponse | None:
     """Run the consumer's ``submitted`` check through the ONE reaction chokepoint.
 
     Returns a ``response_action: "errors"`` response (keeping the modal open) when the check
     reports per-field errors or itself fails — a handler failure surfaces LOUDLY as an inline
-    error plus a logged exception, never a silently accepted answer. Returns ``None`` when the
-    check passes, having folded any finalized values into ``answer`` for the forward.
+    error plus a logged exception, never a silently accepted answer; the inline error is the
+    caller's ``update_failed`` template (a :class:`FormReactionError`'s ``reason`` fills its
+    ``{reason}``, any other failure leaves it empty), else the platform line. Returns ``None`` when
+    the check passes, having folded any finalized values into ``answer`` for the forward.
     """
     try:
         update = await tai42_app.interactions.react(interaction_id, SubmittedEvent(), answer)
+    except FormReactionError as exc:
+        logger.exception("slack interactive: submitted reaction for form %s failed", interaction_id)
+        return _errors_response(first_block, _update_failed_text(update_failed, exc.reason))
     except Exception:
         logger.exception("slack interactive: submitted reaction for form %s failed", interaction_id)
-        return _errors_response(first_block, _REACTION_FAILURE_TEXT)
+        return _errors_response(first_block, _update_failed_text(update_failed, ""))
     update = update or {}
     errors = update.get("errors") or {}
     if errors:
@@ -457,7 +524,8 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
     """Resolve one ``tai42_form_submit`` submission against its pending ask via the ONE shared ladder.
 
     Renders the modal's own ack. The interaction id rides in ``private_metadata`` and IS the correlation key. A gone
-    form record shows the expired notice. Otherwise the state is coerced per the stored
+    form record shows the expired notice (the caller's ``status.unavailable`` carried in
+    ``private_metadata`` when set, else the platform line). Otherwise the state is coerced per the stored
     schema and handed to the ladder as ``{"answer": <dict>}`` with
     ``owns_retry_notice=True`` — a completed modal has no re-reply surface, so the
     channel OWNS the participant correction (the ladder sends no separate notice, avoiding a
@@ -467,17 +535,20 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
     turn and the ask stays parked — no expired notice, which would be a lie); RETRY_KEPT
     shows the inline error under the first field (record kept); NO_CORRELATION / BRIDGED
     (the ask is gone — the ladder released it and, on a 404, bridged the submission so it
-    is never lost) show the expired notice; an AnswerForwardError (5xx) propagates (loud
-    500, record kept).
+    is never lost) show the expired notice (the record's ``status.unavailable`` when set); an
+    AnswerForwardError (5xx) propagates (loud 500, record kept).
     """
     view = payload.get("view")
     if not isinstance(view, dict) or view.get("callback_id") != FORM_SUBMIT_CALLBACK_ID:
         return JSONResponse({"status": "ignored"})
-    interaction_id, _, _ = decode_private_metadata(view.get("private_metadata"))
+    metadata = decode_private_metadata(view.get("private_metadata"))
+    interaction_id = metadata.interaction_id
     state_values = _state_values(view)
     record = await get_form_record(interaction_id)
     if record is None:
-        return _errors_response(next(iter(state_values), None), _FORM_EXPIRED_TEXT)
+        # The record is gone, so the caller's ``status.unavailable`` comes from the view's own
+        # carrier, stamped at every build.
+        return _errors_response(next(iter(state_values), None), metadata.unavailable or _FORM_EXPIRED_TEXT)
 
     schema = record["schema"]
     answer = extract_answer(schema, state_values)
@@ -488,7 +559,9 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
         # The consumer's final check runs on submit (it owns membership for any reaction-fed
         # choice list). Its per-field errors keep the modal open as inline errors; a clean
         # check may finalize values before the answer is forwarded.
-        submitted = await _run_submitted_reaction(interaction_id, answer, schema, first_block)
+        submitted = await _run_submitted_reaction(
+            interaction_id, answer, schema, first_block, _form_wording(record).get("update_failed")
+        )
         if submitted is not None:
             return submitted
 
@@ -510,6 +583,10 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
             client_address=user_id or interaction_id,
             cap_key=user_id or interaction_id,
             provider_message_id=view_id,
+            # A modal submission is no message on the medium, so nothing can quote it, and a
+            # ``view_submission`` names a view, not a message, so it quotes none.
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
             bridge_text=render_form_text(answer, schema),
             owns_retry_notice=True,
         ),
@@ -529,17 +606,21 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
     if result.outcome is InboundAnswerOutcome.RETRY_KEPT:
         # The channel owns the correction: the modal stays open with an inline error. The caller's
         # ``wording.answer.rejected`` sentence (its optional ``{reason}`` token taking the door's
-        # reason) carries it when set, else the door's own reason, else the generic line — pinned
-        # under the door-named field's block when it is a declared schema property, else the first.
+        # reason, empty when the door gave none) carries it when set, else the door's own reason,
+        # else the generic line — pinned under the door-named field's block when it is a declared
+        # schema property, else the first.
         logger.warning("slack interactive: door rejected form %s (retry-in-place); record kept", interaction_id)
-        reason = result.retry_reason or _MODAL_RETRY_TEXT
         template = _rejected_template(record)
-        error_text = template.replace("{reason}", reason) if template else reason
+        if template is not None:
+            error_text = template.replace("{reason}", result.retry_reason or "")
+        else:
+            error_text = result.retry_reason or _MODAL_RETRY_TEXT
         block = result.retry_field if _field_has_block(schema, result.retry_field) else first_block
         return _errors_response(block, error_text)
     # NO_CORRELATION / BRIDGED: the ask is gone. The ladder released the record (and, on
-    # a 404, bridged the submission); tell the participant the question is closed.
+    # a 404, bridged the submission); tell the participant the question is closed, in the caller's
+    # ``status.unavailable`` line when set.
     logger.warning(
         "slack interactive: form %s ask is gone (%s); showing the expired notice", interaction_id, result.outcome
     )
-    return _errors_response(first_block, _FORM_EXPIRED_TEXT)
+    return _errors_response(first_block, _status_wording(record).get("unavailable") or _FORM_EXPIRED_TEXT)

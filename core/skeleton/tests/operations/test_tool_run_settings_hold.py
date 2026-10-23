@@ -152,7 +152,7 @@ async def _submit_and_wait() -> None:
 
 
 async def _fire() -> None:
-    await ops.run_recorded("alpha", {"x": 1})
+    await ops.run_recorded("alpha", {"x": 1}, crash_resume_eligible=False)
 
 
 @pytest.mark.parametrize("door", [_submit_and_wait, _fire], ids=["background_submit", "hook_fire"])
@@ -179,11 +179,17 @@ async def test_a_run_suspended_on_its_terminal_write_holds_no_retired_settings(
     _assert_nothing_held(await _held_while_parked(door, gate, caplog), caplog)
 
 
-async def test_a_hook_fire_suspended_reading_the_tool_registration_holds_no_retired_settings(
+async def _re_drive() -> None:
+    await ops.run_recorded("alpha", {"x": 1}, crash_resume_eligible=True)
+
+
+async def test_a_crash_resume_re_drive_suspended_reading_the_tool_registration_holds_no_retired_settings(
     tools: _Tools, caplog: pytest.LogCaptureFixture, gate: asyncio.Future[None], parked_at: Callable[..., None]
 ) -> None:
+    # Only a crash-resume eligible record reads the tool's registration for its flag; a hook
+    # fire's record is never eligible.
     parked_at(tools, "get_tool", SimpleNamespace(name="alpha", meta=None))
-    _assert_nothing_held(await _held_while_parked(_fire, gate, caplog), caplog)
+    _assert_nothing_held(await _held_while_parked(_re_drive, gate, caplog), caplog)
 
 
 @pytest.mark.parametrize("door", [_submit_and_wait, _fire], ids=["background_submit", "hook_fire"])

@@ -195,6 +195,8 @@ def _terminal_stub(output: Any):
         caller_ask_landing=None,
         chain_keys=(),
         *,
+        reply_to_medium_message_id,
+        params,
         mark_detached=True,
     ):
         return output
@@ -229,7 +231,9 @@ async def test_in_process_park_defers_door_updates_to_the_real_terminal(monkeypa
             @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
             async def parker(x: int, injected: dict | None = None) -> SuspendedInteraction:
                 """A bound tool that async-parks instead of returning a clean output."""
-                return await helper_module.ask("proceed?", mode="async", expiry_at=deadline)
+                parked = await helper_module.ask("proceed?", mode="async", expiry_at=deadline)
+                assert isinstance(parked, SuspendedInteraction)
+                return parked
 
             await app.preset_manager.register(
                 "pp", "parker", {}, [], "a parking preset", state_binding=_door_binding(), version=1
@@ -289,7 +293,9 @@ async def test_mcp_edge_park_defers_door_updates_to_the_real_terminal(monkeypatc
             @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
             async def parker(x: int, injected: dict | None = None) -> SuspendedInteraction:
                 """A bound tool that async-parks at the MCP edge."""
-                return await helper_module.ask("proceed?", mode="async", expiry_at=deadline)
+                parked = await helper_module.ask("proceed?", mode="async", expiry_at=deadline)
+                assert isinstance(parked, SuspendedInteraction)
+                return parked
 
             await app.preset_manager.register(
                 "pm", "parker", {}, [], "a parking preset", state_binding=_door_binding(), version=1
@@ -537,6 +543,8 @@ async def test_re_park_carries_the_deferred_binding_to_the_final_terminal(monkey
                 caller_ask_landing=None,
                 chain_keys=(),
                 *,
+                reply_to_medium_message_id,
+                params,
                 mark_detached=True,
             ):
                 # The first resume asks AGAIN (a re-park) under the SAME run; the second returns a
@@ -558,6 +566,8 @@ async def test_re_park_carries_the_deferred_binding_to_the_final_terminal(monkey
                     tool="resume_tool",
                     interaction_id="rpA",
                     answer="go1",
+                    reply_to_medium_message_id=None,
+                    params=None,
                     park_context=None,
                     park_asked_by=[],
                     delivery=None,
@@ -588,6 +598,8 @@ async def test_re_park_carries_the_deferred_binding_to_the_final_terminal(monkey
                     tool="resume_tool",
                     interaction_id=park_b.interaction_id,
                     answer="go2",
+                    reply_to_medium_message_id=None,
+                    params=None,
                     park_context=None,
                     park_asked_by=[],
                     delivery=None,

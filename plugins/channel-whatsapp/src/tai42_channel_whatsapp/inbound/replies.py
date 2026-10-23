@@ -13,16 +13,17 @@ from tai42_kit.conversations.entry_params import put_entry_param
 from tai42_channel_whatsapp.correlation import PendingQuestion, already_seen, peek_pending
 from tai42_channel_whatsapp.inbound.answers import _bridge_inbound, _resolve_answer
 from tai42_channel_whatsapp.inbound.forms import _handle_form_reply
-from tai42_channel_whatsapp.inbound.params import _merged_params
+from tai42_channel_whatsapp.inbound.params import _merged_params, _MessageContext
 
 
 async def _handle_text(
-    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: _MessageContext
 ) -> None:
     """A typed reply: resolve it against a pending question via the shared ladder, else route to the bridge.
 
-    ``params`` are the message-level referral/reply-context entries, carried onto the bridged
-    turn — including the expired-ask fallback bridge (the correlated forward itself takes none).
+    ``context`` carries the message-level referral entries, carried onto the bridged turn —
+    including the expired-ask fallback bridge (the correlated forward itself takes none) — and
+    the quoted message's ``wamid``, carried on both the answer and the bridged turn.
     """
     if await already_seen(wamid):
         return
@@ -33,10 +34,25 @@ async def _handle_text(
     pending = await peek_pending(phone_number_id, wa_id)
     if pending is None:
         # No pending question (unrelated text or expired) — route to the bridge.
-        await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=params or None)
+        await _bridge_inbound(
+            phone_number_id,
+            wa_id,
+            text,
+            wamid,
+            params=context.params or None,
+            reply_to_medium_message_id=context.reply_to_medium_message_id,
+        )
         return
     # A typed reply answers with its body minus outer whitespace.
-    await _resolve_answer(phone_number_id, wa_id, wamid, text.strip(), pending, params=params or None)
+    await _resolve_answer(
+        phone_number_id,
+        wa_id,
+        wamid,
+        text.strip(),
+        pending,
+        params=context.params or None,
+        reply_to_medium_message_id=context.reply_to_medium_message_id,
+    )
 
 
 def _extract_interactive_reply(interactive: Any) -> tuple[str | None, str, str | None]:
@@ -89,7 +105,7 @@ def _map_tap_to_answer(reply_id: str | None, pending: PendingQuestion) -> str | 
 
 
 async def _handle_interactive(
-    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: _MessageContext
 ) -> None:
     """A button tap or list pick: map it to a pending ask's option, else bridge the tap's title.
 
@@ -112,7 +128,14 @@ async def _handle_interactive(
     interactive = message.get("interactive")
     if isinstance(interactive, dict) and interactive.get("type") == "nfm_reply":
         # A completed WhatsApp Flow form arrives as an nfm_reply, not a button/list tap.
-        await _handle_form_reply(interactive, phone_number_id, wa_id, wamid, params)
+        await _handle_form_reply(
+            interactive,
+            phone_number_id,
+            wa_id,
+            wamid,
+            context.params,
+            reply_to_medium_message_id=context.reply_to_medium_message_id,
+        )
         return
     reply_id, title, description = _extract_interactive_reply(interactive)
     reply_params: dict[str, str] = {}
@@ -123,22 +146,44 @@ async def _handle_interactive(
     # must not touch the pending — bridge the tap's title and leave the ask untouched.
     pending = await peek_pending(phone_number_id, wa_id)
     if pending is None:
-        await _bridge_inbound(phone_number_id, wa_id, title, wamid, params=_merged_params(params, reply_params))
+        await _bridge_inbound(
+            phone_number_id,
+            wa_id,
+            title,
+            wamid,
+            params=_merged_params(context.params, reply_params),
+            reply_to_medium_message_id=context.reply_to_medium_message_id,
+        )
         return
     answer = _map_tap_to_answer(reply_id, pending)
     if answer is None:
         # A stale/malformed/out-of-range tap, or a text ask with no options — not an
         # answer to this pending ask; bridge the tap's title and leave the ask intact.
-        await _bridge_inbound(phone_number_id, wa_id, title, wamid, params=_merged_params(params, reply_params))
+        await _bridge_inbound(
+            phone_number_id,
+            wa_id,
+            title,
+            wamid,
+            params=_merged_params(context.params, reply_params),
+            reply_to_medium_message_id=context.reply_to_medium_message_id,
+        )
         return
     # A real answer — resolve it via the shared ladder (which peeks + forwards + keeps
     # or releases). One-pending is enforced on reserve, and the wamid dedupe above
     # guards a redelivery, so the peek-then-resolve needs no destructive claim.
-    await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending, params=_merged_params(params, reply_params))
+    await _resolve_answer(
+        phone_number_id,
+        wa_id,
+        wamid,
+        answer,
+        pending,
+        params=_merged_params(context.params, reply_params),
+        reply_to_medium_message_id=context.reply_to_medium_message_id,
+    )
 
 
 async def _handle_button(
-    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, params: dict[str, str]
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: _MessageContext
 ) -> None:
     """A template quick-reply tap (a ``button`` message): resolve its visible text, else route to the bridge.
 
@@ -161,10 +206,23 @@ async def _handle_button(
 
     pending = await peek_pending(phone_number_id, wa_id)
     if pending is None:
-        await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=_merged_params(params, button_params))
+        await _bridge_inbound(
+            phone_number_id,
+            wa_id,
+            text,
+            wamid,
+            params=_merged_params(context.params, button_params),
+            reply_to_medium_message_id=context.reply_to_medium_message_id,
+        )
         return
     # A quick-reply while a question is pending answers with its visible text minus outer
     # whitespace, mirroring a typed reply.
     await _resolve_answer(
-        phone_number_id, wa_id, wamid, text.strip(), pending, params=_merged_params(params, button_params)
+        phone_number_id,
+        wa_id,
+        wamid,
+        text.strip(),
+        pending,
+        params=_merged_params(context.params, button_params),
+        reply_to_medium_message_id=context.reply_to_medium_message_id,
     )

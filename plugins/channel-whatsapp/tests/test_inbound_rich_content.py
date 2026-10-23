@@ -292,7 +292,7 @@ async def test_inbound_video_bridges_and_dedupes_on_replay(
 async def test_inbound_media_caption_carries_reply_context_params(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, monkeypatch: pytest.MonkeyPatch
 ):
-    # Message-level context (reply-to) merges with the media params on the bridged turn.
+    # The quoted message's id rides beside the media params on the bridged turn.
     fake_httpx.get_responses.append(_meta_response())
     stub_app.media.ingest_result = _ingested()
     _stub_stream(monkeypatch)
@@ -309,7 +309,7 @@ async def test_inbound_media_caption_carries_reply_context_params(
     assert result.status_code == 200
     (call,) = stub_app.conversations.accept_calls
     assert call["text"] == "see this"
-    assert call["params"]["context_message_id"] == "wamid.QUOTED"
+    assert call["reply_to_medium_message_id"] == "wamid.QUOTED"
     assert call["params"]["media_id"] == _SERVED_ID
 
 
@@ -360,6 +360,28 @@ async def test_inbound_media_over_cap_rejects_too_large_and_preserves_caption(
     assert call["attachments"] is None  # the media does not exist — no served attachment
     assert call["params"] == {"media_kind": "image", "media_mime_type": "image/jpeg"}  # no served id/sha/size
     assert _SEEN_KEY in fake_redis.store
+
+
+async def test_a_refused_quoting_media_bridges_its_caption_with_the_quoted_id(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, monkeypatch: pytest.MonkeyPatch
+):
+    # A refused image sent as a reply: its caption's turn still names the message it quotes.
+    fake_httpx.get_responses.append(_meta_response(mime_type="image/jpeg"))
+    stub_app.media.ingest_error = MediaTooLargeError("media body exceeds the cap")
+    _stub_stream(monkeypatch)
+
+    message = {
+        "id": _WAMID,
+        "from": WA_ID,
+        "type": "image",
+        "image": {"id": "m1", "mime_type": "image/jpeg", "caption": "here it is"},
+        "context": {"id": "wamid.QUOTED"},
+    }
+    await handler(signed_request(_params_envelope(message)))
+
+    (call,) = stub_app.conversations.accept_calls
+    assert call["text"] == "here it is"
+    assert call["reply_to_medium_message_id"] == "wamid.QUOTED"
 
 
 async def test_inbound_media_over_cap_without_caption_rejects_and_acks(

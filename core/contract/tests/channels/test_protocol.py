@@ -9,19 +9,37 @@ from typing import Any
 import pytest
 
 
+def _address() -> Any:
+    from tai42_contract.channels import ChannelAddress
+
+    return ChannelAddress(our_identity="bot-1", address="alice")
+
+
+def _outcome() -> Any:
+    from tai42_contract.channels import SendOutcome
+
+    return SendOutcome(our_identity="bot-1", address="alice", message_ids=["m-1"])
+
+
 def test_channel_protocol_is_runtime_checkable_and_shaped():
     from tai42_contract.channels import Channel, ChannelDelivery, ChannelNotification
 
     class _Ok:
-        async def deliver(self, delivery: ChannelDelivery) -> None:
-            return None
+        def resolve_address(self, recipient: str | None, sender_identity: str | None) -> Any:
+            return _address()
 
-        async def notify(self, notification: ChannelNotification) -> None:
-            return None
+        async def deliver(self, delivery: ChannelDelivery) -> Any:
+            return _outcome()
+
+        async def notify(self, notification: ChannelNotification) -> Any:
+            return _outcome()
 
     class _DeliverOnly:
-        async def deliver(self, delivery: ChannelDelivery) -> None:
-            return None
+        def resolve_address(self, recipient: str | None, sender_identity: str | None) -> Any:
+            return _address()
+
+        async def deliver(self, delivery: ChannelDelivery) -> Any:
+            return _outcome()
 
     class _Missing:
         pass
@@ -48,13 +66,31 @@ def test_notify_is_a_coroutine_signature():
     assert list(sig.parameters) == ["self", "notification"]
 
 
-def test_notify_returns_a_list_of_message_ids():
+def test_sends_return_a_send_outcome():
     from tai42_contract.channels import Channel
 
-    # ``notify`` yields the per-message ids the medium assigned the send, so an
-    # out-of-band delivery receipt can be correlated back to what was sent.
-    sig = inspect.signature(Channel.notify)
-    assert sig.return_annotation == "list[str]"
+    # ``notify`` and ``deliver`` both report the identity and address the send went
+    # from and to and the per-message ids the medium assigned it.
+    assert inspect.signature(Channel.notify).return_annotation == "SendOutcome"
+    assert inspect.signature(Channel.deliver).return_annotation == "SendOutcome"
+
+
+def test_resolve_address_is_a_sync_protocol_member():
+    from tai42_contract.channels import Channel
+
+    assert not inspect.iscoroutinefunction(Channel.resolve_address)
+    sig = inspect.signature(Channel.resolve_address)
+    assert list(sig.parameters) == ["self", "recipient", "sender_identity"]
+    assert sig.return_annotation == "ChannelAddress"
+
+    class _NoResolve:
+        async def deliver(self, delivery: Any) -> Any:
+            return _outcome()
+
+        async def notify(self, notification: Any) -> Any:
+            return _outcome()
+
+    assert not isinstance(_NoResolve(), Channel)
 
 
 def test_notify_protocol_default_raises_not_implemented():
@@ -63,8 +99,11 @@ def test_notify_protocol_default_raises_not_implemented():
     class _DeliverCapableOnly(Channel):
         """Explicit subclass keeping the inherited ``notify`` default body."""
 
-        async def deliver(self, delivery: ChannelDelivery) -> None:
-            return None
+        def resolve_address(self, recipient: str | None, sender_identity: str | None) -> Any:
+            return _address()
+
+        async def deliver(self, delivery: ChannelDelivery) -> Any:
+            return _outcome()
 
     # Pyright treats the ``raise NotImplementedError`` protocol body as abstract;
     # the contract supplies it as a real, loud default, so instantiating is intended.
@@ -86,11 +125,14 @@ def test_channel_capability_flags_are_an_optional_getattr_convention():
         supports_media_notifications = True
         supports_template_notifications = True
 
-        async def deliver(self, delivery: Any) -> None:
-            return None
+        def resolve_address(self, recipient: str | None, sender_identity: str | None) -> Any:
+            return _address()
 
-        async def notify(self, notification: Any) -> list[str]:
-            return []
+        async def deliver(self, delivery: Any) -> Any:
+            return _outcome()
+
+        async def notify(self, notification: Any) -> Any:
+            return _outcome()
 
     rich = _Rich()
     # A channel that sets the flags = True advertises support.
@@ -105,11 +147,14 @@ def test_capability_flags_do_not_tighten_structural_channel_check():
     # still a Channel — the flags are not Protocol members, so they play no part
     # in the runtime structural check, and getattr yields the False default.
     class _TextOnly:
-        async def deliver(self, delivery: ChannelDelivery) -> None:
-            return None
+        def resolve_address(self, recipient: str | None, sender_identity: str | None) -> Any:
+            return _address()
 
-        async def notify(self, notification: ChannelNotification) -> list[str]:
-            return []
+        async def deliver(self, delivery: ChannelDelivery) -> Any:
+            return _outcome()
+
+        async def notify(self, notification: ChannelNotification) -> Any:
+            return _outcome()
 
     text_only = _TextOnly()
     assert isinstance(text_only, Channel)
@@ -125,11 +170,14 @@ def test_validate_form_schema_hook_is_optional_and_does_not_tighten_the_check():
     # member, NOT a Protocol method, so a channel that omits it is still a Channel
     # and getattr yields None; a channel that declares it is read the same way.
     class _NoHook:
-        async def deliver(self, delivery: ChannelDelivery) -> None:
-            return None
+        def resolve_address(self, recipient: str | None, sender_identity: str | None) -> Any:
+            return _address()
 
-        async def notify(self, notification: ChannelNotification) -> list[str]:
-            return []
+        async def deliver(self, delivery: ChannelDelivery) -> Any:
+            return _outcome()
+
+        async def notify(self, notification: ChannelNotification) -> Any:
+            return _outcome()
 
     class _WithHook(_NoHook):
         def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
@@ -152,11 +200,14 @@ def test_signal_working_is_optional_and_does_not_tighten_the_check():
     # convention: not Protocol members, so a channel that omits both is still a Channel
     # and getattr yields None; a channel that declares them is read the same way.
     class _NoHook:
-        async def deliver(self, delivery: ChannelDelivery) -> None:
-            return None
+        def resolve_address(self, recipient: str | None, sender_identity: str | None) -> Any:
+            return _address()
 
-        async def notify(self, notification: ChannelNotification) -> list[str]:
-            return []
+        async def deliver(self, delivery: ChannelDelivery) -> Any:
+            return _outcome()
+
+        async def notify(self, notification: ChannelNotification) -> Any:
+            return _outcome()
 
     class _WithSignal(_NoHook):
         working_signal_expiry_seconds: float | None = 25.0
@@ -191,11 +242,14 @@ def test_withdraw_is_optional_and_does_not_tighten_the_check():
     # channel that keeps nothing withdrawable omits it and is still a Channel; a channel
     # that declares it is read the same way, with ``getattr(channel, "withdraw", None)``.
     class _NoWithdraw:
-        async def deliver(self, delivery: ChannelDelivery) -> None:
-            return None
+        def resolve_address(self, recipient: str | None, sender_identity: str | None) -> Any:
+            return _address()
 
-        async def notify(self, notification: ChannelNotification) -> list[str]:
-            return []
+        async def deliver(self, delivery: ChannelDelivery) -> Any:
+            return _outcome()
+
+        async def notify(self, notification: ChannelNotification) -> Any:
+            return _outcome()
 
     class _WithWithdraw(_NoWithdraw):
         def __init__(self) -> None:

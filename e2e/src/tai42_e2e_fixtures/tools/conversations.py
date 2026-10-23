@@ -15,6 +15,8 @@ import os
 
 from tai42_contract.app import tai42_app
 
+from tai42_e2e_fixtures.tools.ask_results import answered
+
 
 @tai42_app.tools.tool(tags={"e2e"})
 async def e2e_sweep_stalled_deliveries() -> dict:
@@ -37,6 +39,7 @@ async def e2e_channel_inbound(
     client_address: str,
     text: str,
     provider_message_id: str,
+    reply_to_medium_message_id: str | None = None,
 ) -> dict:
     """Accept one inbound message on ``channel`` IN THIS process and report its record id.
 
@@ -44,7 +47,9 @@ async def e2e_channel_inbound(
     this probe drives the same ``tai42_app.conversations.accept`` seam a real channel
     adapter calls, scheduling a bridged turn on the ``(channel, our_identity)`` route. The
     accountable per-address cap key is the ``client_address`` (a stub channel's attested
-    address). The turn runs in the background; the accepted ``message_id`` is returned at once."""
+    address). ``reply_to_medium_message_id`` is the medium id of the message this one quotes, or
+    ``None`` when it quotes none. The turn runs in the background; the accepted ``message_id`` is
+    returned at once."""
     message_id = await tai42_app.conversations.accept(
         channel=channel,
         our_identity=our_identity,
@@ -52,5 +57,22 @@ async def e2e_channel_inbound(
         cap_key=client_address,
         text=text,
         provider_message_id=provider_message_id,
+        medium_message_id=None,
+        reply_to_medium_message_id=reply_to_medium_message_id,
     )
     return {"message_id": message_id, "pid": os.getpid()}
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_sensitive_ask(question: str, channel: str, recipient: str | None = None) -> object:
+    """Ask ``question`` over ``channel`` (to ``recipient``, else the channel's default) as a
+    SENSITIVE question and return the answer.
+
+    The ``ask`` tool carries no ``sensitive`` argument, so a test cannot raise a sensitive
+    question through it; this probe calls the same ``tai42_app.interactions.ask`` helper with
+    ``sensitive=True``, blocking until the participant answers, so a test can observe what the
+    platform keeps of a sensitive reply. It returns the answer, never the whole answer object: a
+    sensitive answer object refuses to encode."""
+    return answered(
+        await tai42_app.interactions.ask(question, channel=channel, recipient=recipient, sensitive=True)
+    ).answer

@@ -22,6 +22,7 @@ from tai42_skeleton.states.context import current_state_context
 
 from .conftest import (
     _BASELINE_CHANNEL_PAYLOAD,
+    NO_REPLY_WINDOW,
     FakeChannel,
     FakeManager,
     _accepting_callback,
@@ -62,6 +63,7 @@ async def test_tool_payload_builder_always_carries_the_thread_id(env, monkeypatc
         "+15550002222",
         record=record,
         batch=overlap_module.Batch(lead=record, members=[record]),
+        reply_window=NO_REPLY_WINDOW,
     )
 
     kwargs = tools.calls[0]["arguments"]
@@ -81,6 +83,7 @@ async def test_tool_payload_builder_always_carries_the_thread_id(env, monkeypatc
             "thread": "bridge:tool-line:+15550002222",
             "locale": None,
         },
+        "reply_window": {"state": "none", "closes_at": None},
     }
 
 
@@ -119,6 +122,7 @@ async def test_tool_start_expr_by_id_renders_then_maps(env, monkeypatch):
         "+15550002222",
         record=record,
         batch=overlap_module.Batch(lead=record, members=[record]),
+        reply_window=NO_REPLY_WINDOW,
     )
 
     assert tools.calls[0]["arguments"] == {"echoed": "hello"}
@@ -140,7 +144,16 @@ async def test_tool_route_array_reply_delivers_ordered_parts(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"messages": ["first", "second", "third"]})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -159,7 +172,16 @@ async def test_tool_route_direct_list_result_mixes_string_and_part_object(env, m
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
     _wire_tool(monkeypatch, lambda kw: ["plain", {"message": "rich object"}])
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -186,7 +208,16 @@ async def test_tool_route_mixed_text_and_media_parts_deliver_in_order(env, monke
         },
     )
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -209,7 +240,16 @@ async def test_tool_route_empty_array_reply_is_a_loud_error(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"parts": []})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -228,7 +268,16 @@ async def test_tool_route_blank_array_element_is_a_loud_error(env, monkeypatch, 
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"parts": ["ok", blank]})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -247,7 +296,16 @@ async def test_tool_route_malformed_part_object_is_a_loud_error(env, monkeypatch
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"parts": [{"message": "hi", "bogus": 1}]})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -265,7 +323,15 @@ async def test_tool_payload_carries_params_when_passed(env, monkeypatch):
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
     message_id = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", {"token": "abc-123"}
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        params={"token": "abc-123"},
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
     )
     await _settle()
 
@@ -281,6 +347,7 @@ async def test_tool_payload_carries_params_when_passed(env, monkeypatch):
             "thread": "bridge:tool-line:+15550002222",
             "locale": None,
         },
+        "reply_window": {"state": "none", "closes_at": None},
     }
     assert kwargs == {**_BASELINE_CHANNEL_PAYLOAD, "params": {"token": "abc-123"}}
 
@@ -293,7 +360,15 @@ async def test_tool_payload_omits_params_when_none_or_empty(env, monkeypatch, pa
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
     message_id = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", params
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        params=params,
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
     )
     await _settle()
 
@@ -309,6 +384,7 @@ async def test_tool_payload_omits_params_when_none_or_empty(env, monkeypatch, pa
             "thread": "bridge:tool-line:+15550002222",
             "locale": None,
         },
+        "reply_window": {"state": "none", "closes_at": None},
     }
     assert kwargs == _BASELINE_CHANNEL_PAYLOAD
     assert "params" not in kwargs
@@ -327,7 +403,9 @@ async def test_a_param_named_like_a_root_field_stays_under_params_only(env, monk
         "+15550002222",
         "hi",
         "PID1",
-        {"sender": "spoofed", "message": "spoofed", "channel": "spoofed"},
+        params={"sender": "spoofed", "message": "spoofed", "channel": "spoofed"},
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
     )
     await _settle()
 
@@ -365,7 +443,15 @@ async def test_payload_mapping_failure_is_value_free_in_log_and_record(env, monk
     secret = "super-secret-param-value"
     with caplog.at_level(logging.ERROR):
         message_id = await turn_module.accept(
-            "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", {"secret": secret}
+            "twilio",
+            "+15550001111",
+            "+15550002222",
+            "+15550002222",
+            "hi",
+            "PID1",
+            params={"secret": secret},
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
         )
         await _settle()
 
@@ -386,7 +472,16 @@ async def test_turn_block_on_the_channel_door(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     kwargs = tools.calls[-1]["arguments"]
@@ -405,6 +500,7 @@ async def test_turn_block_on_the_channel_door(env, monkeypatch):
             "thread": "bridge:tool-line:+15550002222",
             "locale": None,
         },
+        "reply_window": {"state": "none", "closes_at": None},
     }
     assert "event" not in kwargs
 
@@ -436,6 +532,7 @@ async def test_turn_block_on_the_api_door(env, monkeypatch):
             "thread": result.thread_id,
             "locale": None,
         },
+        "reply_window": {"state": "none", "closes_at": None},
     }
     assert "event" not in kwargs
 
@@ -472,7 +569,16 @@ async def test_conversation_state_context_deposited_for_the_tool_branch(env, mon
     seen: list = []
     _wire_tool(monkeypatch, lambda kw: seen.append(current_state_context()) or "ok")
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert len(seen) == 1

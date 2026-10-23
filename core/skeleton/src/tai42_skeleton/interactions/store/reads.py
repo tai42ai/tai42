@@ -326,6 +326,7 @@ class _StoreReads(_StoreKeys):
         raw_landing = fields.get("caller_ask_landing")
         raw_binding = fields.get("deferred_binding")
         raw_run_input = fields.get("run_input")
+        raw_params = fields.get("params")
         return ContinuationDue(
             interaction_id=interaction_id,
             tool=fields["tool"],
@@ -342,6 +343,8 @@ class _StoreReads(_StoreKeys):
             run_input=json.loads(raw_run_input) if raw_run_input is not None else None,
             door_id=fields.get("door_id"),
             chain_keys=_chain_keys(fields),
+            reply_to_medium_message_id=fields.get("reply_to_medium_message_id"),
+            params=json.loads(raw_params) if raw_params is not None else None,
         )
 
     async def read_kill_target(self, r: Redis, interaction_id: str) -> KillTarget | None:
@@ -652,6 +655,10 @@ class _StoreReads(_StoreKeys):
             }
         return None
 
+    async def outcome_waiting(self, r: Redis, completion_id: str) -> bool:
+        """Whether a waiting outcome is still stored for ``completion_id`` (not yet taken or swept)."""
+        return await self._record_present(r, self.outcome_key(completion_id))
+
     @staticmethod
     async def _record_present(r: Redis, key: str) -> bool:
         """Whether a hash record exists at ``key`` (a non-empty ``HGETALL``)."""
@@ -683,9 +690,9 @@ class _StoreReads(_StoreKeys):
         }
 
     async def wait_for_reply(
-        self, r: Redis, reply_to: str, timeout_seconds: float, grace_seconds: float
+        self, r: Redis, reply_key: str, timeout_seconds: float, grace_seconds: float
     ) -> InteractionResponse | None:
-        """Block on the reply channel up to ``timeout_seconds``.
+        """Block on the reply list ``reply_key`` up to ``timeout_seconds``.
 
         Returns the recorded response, or ``None`` when the budget elapses with no
         answer.
@@ -710,7 +717,7 @@ class _StoreReads(_StoreKeys):
             result = await asyncio.wait_for(
                 cast(
                     "Awaitable[tuple[Any, Any] | None]",
-                    r.blpop([reply_to], timeout=timeout_seconds),  # type: ignore[arg-type]
+                    r.blpop([reply_key], timeout=timeout_seconds),  # type: ignore[arg-type]
                 ),
                 timeout=timeout_seconds + grace_seconds,
             )

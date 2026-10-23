@@ -1,7 +1,8 @@
 """Cost caps: the per-address rate shed and the global turn ceiling.
 
 * One ``client_address`` over its per-hour turn cap is shed with exactly one client-visible
-  slow-down reply, and the over-limit message runs no turn.
+  slow-down reply (the route's ``reply_texts.slow_down`` when set), and the over-limit message
+  runs no turn.
 * A burst of fresh addresses runs concurrent turns, but never more at once than the global
   in-flight ceiling — the fan-out is bounded, not unbounded.
 """
@@ -54,9 +55,18 @@ pytestmark = [
 ]
 
 
+# The route's own slow-down sentence, for the leg whose route words it.
+_ROUTE_SLOW_DOWN_TEXT = "Too many messages at once, please wait a little."
+
+
 @pytest.mark.needs("setting:CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR=5")
+@pytest.mark.parametrize(
+    ("reply_texts", "slow_down_text"),
+    [(None, SLOW_DOWN_TEXT), ({"slow_down": _ROUTE_SLOW_DOWN_TEXT}, _ROUTE_SLOW_DOWN_TEXT)],
+    ids=["built-in-reply", "route-reply"],
+)
 async def test_over_cap_address_is_shed_with_one_slow_down_reply(
-    bridge: BridgeHarness, uniq: Callable[[str], str]
+    bridge: BridgeHarness, uniq: Callable[[str], str], reply_texts: dict[str, str] | None, slow_down_text: str
 ) -> None:
     identity = BRIDGE_TWILIO_FROM
     client = BRIDGE_TWILIO_CLIENT
@@ -64,30 +74,41 @@ async def test_over_cap_address_is_shed_with_one_slow_down_reply(
     await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])
     route_name = uniq("l10a-route").replace("_", "-")
     await bridge.create_channel_route(
-        route_name=route_name, agent="tools_agent", execution_key=exec_key, channel="twilio", our_identity=identity
+        route_name=route_name,
+        agent="tools_agent",
+        execution_key=exec_key,
+        channel="twilio",
+        our_identity=identity,
+        reply_texts=reply_texts,
     )
-    port = bridge.stack.port_b
+    # The two cases share one stack and one receiving number, which a single route may hold:
+    # the route goes when the case ends.
+    try:
+        port = bridge.stack.port_b
 
-    cap = BRIDGE_PER_ADDRESS_TURNS_PER_HOUR
-    marker = uniq("l10a")
-    script_reply(bridge.llm_stub, *[f"ans {marker} {i}" for i in range(cap)])
+        cap = BRIDGE_PER_ADDRESS_TURNS_PER_HOUR
+        marker = uniq("l10a")
+        script_reply(bridge.llm_stub, *[f"ans {marker} {i}" for i in range(cap)])
 
-    # Fire the whole bucket, one at a time so it drains in door order.
-    for i in range(cap):
-        inbound = bridge.twilio_inbound(our_identity=identity, client=client, text=f"msg {i}", port=port)
-        assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, inbound, port=port)).status_code == 204
+        # Fire the whole bucket, one at a time so it drains in door order.
+        for i in range(cap):
+            inbound = bridge.twilio_inbound(our_identity=identity, client=client, text=f"msg {i}", port=port)
+            assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, inbound, port=port)).status_code == 204
 
-    # The next message from the same pair is over the cap: shed with a slow-down reply.
-    over = bridge.twilio_inbound(our_identity=identity, client=client, text="one too many", port=port)
-    assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, over, port=port)).status_code == 204
+        # The next message from the same pair is over the cap: shed with a slow-down reply.
+        over = bridge.twilio_inbound(our_identity=identity, client=client, text="one too many", port=port)
+        assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, over, port=port)).status_code == 204
 
-    # Every admitted message answered; the shed one delivered exactly one slow-down reply to
-    # the same client and ran no turn.
-    await wait_channel_send_count(bridge.fake_twilio, marker, cap)
-    slow = await wait_twilio_send(bridge.fake_twilio, SLOW_DOWN_TEXT)
-    assert slow["to"] == client
-    assert slow["from"] == identity
-    assert len(bridge.llm_stub.requests) == cap
+        # Every admitted message answered; the shed one delivered exactly one slow-down reply to
+        # the same client (the route's own sentence when it words one) and ran no turn.
+        await wait_channel_send_count(bridge.fake_twilio, marker, cap)
+        slow = await wait_twilio_send(bridge.fake_twilio, slow_down_text)
+        assert slow["body"] == slow_down_text
+        assert slow["to"] == client
+        assert slow["from"] == identity
+        assert len(bridge.llm_stub.requests) == cap
+    finally:
+        await bridge.api().delete(f"/api/conversations/{route_name}", expect=200)
 
 
 @pytest.mark.needs("setting:CONVERSATIONS_MAX_CONCURRENT_TURNS=4")

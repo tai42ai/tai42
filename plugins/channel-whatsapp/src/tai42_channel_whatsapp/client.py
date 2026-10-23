@@ -9,7 +9,8 @@ raises ``ChannelDeliveryError``.
 One builder per message shape (text; interactive buttons / list / cta_url; image,
 document, video, audio, location; template; flow) assembles the payload and hands
 it to the single ``_post`` send seam (auth, transport, error mapping, wamid
-extraction); each returns the send's ``wamid`` (``messages[0].id``). The
+extraction); each returns the send's :class:`SentMessage`: its ``wamid``
+(``messages[0].id``) and the recipient's ``wa_id`` (``contacts[0].wa_id``). The
 interactive builders take an optional pre-built media ``header`` and text
 ``footer``; the template builder maps the template's named components
 (``header_media`` / ``body_parameters`` / ``buttons``). The Flow lifecycle wrappers
@@ -32,6 +33,7 @@ from tai42_contract.channels import (
     ChannelDeliveryError,
     ChannelInputError,
     ChannelTemplate,
+    SendOutcome,
 )
 from tai42_contract.interactions.models import MediaItem, MediaKind
 from tai42_kit.clients.impl.http import HttpxClient
@@ -95,19 +97,51 @@ async def _send(
     return response
 
 
-async def _post(phone_number_id: str, payload: dict[str, object]) -> str:
-    """Send one already-built message payload FROM ``phone_number_id``; return its ``wamid``.
+class SentMessage(NamedTuple):
+    """One message the Cloud API accepted: its ``wamid`` and the ``wa_id`` it went to.
 
-    ``wamid`` is ``messages[0].id``. The send seam for every message shape. Raises
-    ``ChannelDeliveryError`` on the ``_send`` failure modes or a 2xx that carries no
-    message id.
+    ``wa_id`` is Meta's WhatsApp id of the recipient (``contacts[0].wa_id``), the same id an
+    inbound message from them carries as ``from``; it may differ from the ``to`` the send named.
+    """
+
+    wamid: str
+    wa_id: str
+
+
+def send_outcome(phone_number_id: str, sent: list[SentMessage]) -> SendOutcome:
+    """The :class:`SendOutcome` of the messages ``sent`` from ``phone_number_id``, in send order.
+
+    The address is the first message's ``wa_id``, the ``client_address`` an inbound message
+    from that recipient carries. Raises :class:`ChannelDeliveryError` when nothing was sent.
+    """
+    if not sent:
+        raise ChannelDeliveryError("WhatsApp send produced no message")
+    return SendOutcome(
+        our_identity=phone_number_id,
+        address=sent[0].wa_id,
+        message_ids=[message.wamid for message in sent],
+    )
+
+
+async def _post(phone_number_id: str, payload: dict[str, object]) -> SentMessage:
+    """Send one already-built message payload FROM ``phone_number_id``; return its :class:`SentMessage`.
+
+    ``wamid`` is ``messages[0].id`` and ``wa_id`` is ``contacts[0].wa_id``. The send seam for
+    every message shape. Raises ``ChannelDeliveryError`` on the ``_send`` failure modes or a
+    2xx that carries no message id or no contact ``wa_id``.
     """
     url = f"{whatsapp_settings().api_base_url}/{phone_number_id}/messages"
     response = await _send(url, payload)
-    messages = response.json().get("messages") or []
+    body = response.json()
+    messages = body.get("messages") or []
     if not messages or not messages[0].get("id"):
         raise ChannelDeliveryError("WhatsApp accepted the send but returned no message id")
-    return messages[0]["id"]
+    contacts = body.get("contacts") or []
+    contact = contacts[0] if isinstance(contacts, list) and contacts else None
+    wa_id = contact.get("wa_id") if isinstance(contact, dict) else None
+    if not isinstance(wa_id, str) or not wa_id:
+        raise ChannelDeliveryError(f"WhatsApp accepted the send ({messages[0]['id']}) but returned no contact wa_id")
+    return SentMessage(wamid=messages[0]["id"], wa_id=wa_id)
 
 
 async def mark_read(phone_number_id: str, wamid: str) -> None:
@@ -212,8 +246,8 @@ async def open_media_download(url: str) -> AsyncIterator[MediaStream]:
         yield stream
 
 
-async def send_message(phone_number_id: str, to: str, body: str) -> str:
-    """Send one WhatsApp text message; return its ``wamid``."""
+async def send_message(phone_number_id: str, to: str, body: str) -> SentMessage:
+    """Send one WhatsApp text message; return its :class:`SentMessage`."""
     payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": body}}
     return await _post(phone_number_id, payload)
 
@@ -263,8 +297,8 @@ async def send_interactive_buttons(
     *,
     header: dict[str, Any] | None = None,
     footer: str | None = None,
-) -> str:
-    """Send an interactive reply-buttons message; return its ``wamid``.
+) -> SentMessage:
+    """Send an interactive reply-buttons message; return its :class:`SentMessage`.
 
     ``buttons`` is a list of ``(id, title)`` pairs — each becomes a tappable reply
     button whose id the inbound webhook echoes back. ``header`` is an optional pre-built
@@ -292,8 +326,8 @@ async def send_interactive_list(
     *,
     header: dict[str, Any] | None = None,
     footer: str | None = None,
-) -> str:
-    """Send an interactive list message; return its ``wamid``.
+) -> SentMessage:
+    """Send an interactive list message; return its :class:`SentMessage`.
 
     ``button_text`` labels the list-opening button; ``sections`` is the Cloud-API
     ``action.sections`` array — one or more ``{title?, rows: [{id, title, description?}]}``
@@ -319,8 +353,8 @@ async def send_interactive_cta_url(
     *,
     header: dict[str, Any] | None = None,
     footer: str | None = None,
-) -> str:
-    """Send an interactive call-to-action URL message (one URL button); return its ``wamid``.
+) -> SentMessage:
+    """Send an interactive call-to-action URL message (one URL button); return its :class:`SentMessage`.
 
     The Cloud API's ``cta_url`` interactive carries exactly ONE URL button
     (``action.parameters = {display_text, url}``) — the single-link-option mapping; a tap
@@ -339,8 +373,8 @@ async def send_interactive_cta_url(
     return await _post(phone_number_id, payload)
 
 
-async def send_image(phone_number_id: str, to: str, link: str, caption: str | None) -> str:
-    """Send a link-sourced image message; return its ``wamid``.
+async def send_image(phone_number_id: str, to: str, link: str, caption: str | None) -> SentMessage:
+    """Send a link-sourced image message; return its :class:`SentMessage`.
 
     ``link`` must be a public https URL (Meta fetches it) — a ``data:`` URI is
     rejected upstream at the channel, never handed here.
@@ -352,8 +386,10 @@ async def send_image(phone_number_id: str, to: str, link: str, caption: str | No
     return await _post(phone_number_id, payload)
 
 
-async def send_document(phone_number_id: str, to: str, link: str, caption: str | None, filename: str | None) -> str:
-    """Send a link-sourced document message; return its ``wamid``.
+async def send_document(
+    phone_number_id: str, to: str, link: str, caption: str | None, filename: str | None
+) -> SentMessage:
+    """Send a link-sourced document message; return its :class:`SentMessage`.
 
     ``filename`` is the display name WhatsApp shows for the download (per the Cloud API's
     ``document`` object); ``caption`` an optional label. Both keys are added only when set.
@@ -367,8 +403,8 @@ async def send_document(phone_number_id: str, to: str, link: str, caption: str |
     return await _post(phone_number_id, payload)
 
 
-async def send_video(phone_number_id: str, to: str, link: str, caption: str | None) -> str:
-    """Send a link-sourced video message; return its ``wamid``. ``caption`` optional."""
+async def send_video(phone_number_id: str, to: str, link: str, caption: str | None) -> SentMessage:
+    """Send a link-sourced video message; return its :class:`SentMessage`. ``caption`` optional."""
     video: dict[str, str] = {"link": link}
     if caption:
         video["caption"] = caption
@@ -376,8 +412,8 @@ async def send_video(phone_number_id: str, to: str, link: str, caption: str | No
     return await _post(phone_number_id, payload)
 
 
-async def send_audio(phone_number_id: str, to: str, link: str) -> str:
-    """Send a link-sourced audio message; return its ``wamid``.
+async def send_audio(phone_number_id: str, to: str, link: str) -> SentMessage:
+    """Send a link-sourced audio message; return its :class:`SentMessage`.
 
     The Cloud API's ``audio`` object carries no caption or filename — a caption on an
     audio item is dropped at the channel (a pure enhancement the medium cannot render).
@@ -388,8 +424,8 @@ async def send_audio(phone_number_id: str, to: str, link: str) -> str:
 
 async def send_location(
     phone_number_id: str, to: str, latitude: float, longitude: float, name: str | None, address: str | None
-) -> str:
-    """Send a location message; return its ``wamid``.
+) -> SentMessage:
+    """Send a location message; return its :class:`SentMessage`.
 
     Maps a :class:`LocationElement` onto the Cloud API's ``location`` object
     (``latitude``/``longitude`` required; ``name``/``address`` added only when set).
@@ -445,8 +481,8 @@ def _template_button_component(index: int, button: TemplateButtonParam) -> dict[
     }
 
 
-async def send_template(phone_number_id: str, to: str, template: ChannelTemplate) -> str:
-    """Send a pre-approved template message; return its ``wamid``.
+async def send_template(phone_number_id: str, to: str, template: ChannelTemplate) -> SentMessage:
+    """Send a pre-approved template message; return its :class:`SentMessage`.
 
     The template's opaque ``parameters`` are parsed into this channel's own
     :class:`~tai42_channel_whatsapp.channel.template_params.WhatsAppTemplateParameters` (raising
@@ -625,8 +661,8 @@ async def send_flow(
     screen: str,
     data: dict[str, Any],
     open_label: str | None = None,
-) -> str:
-    """Send an interactive Flow message opening the published ``flow_id``; return its ``wamid``.
+) -> SentMessage:
+    """Send an interactive Flow message opening the published ``flow_id``; return its :class:`SentMessage`.
 
     ``flow_token`` correlates the completed form back to its origin: a form ask
     passes the delivery's ``interaction_id`` verbatim, an ask-less form

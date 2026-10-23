@@ -13,6 +13,7 @@ import json
 import logging
 
 import pytest
+from tai42_contract.conversations import ReplyTexts
 from tai42_contract.interactions import PARK_COMPLETION_SUCCEEDED, RunTerminalFailed, SuspendedInteraction
 
 from tai42_skeleton.conversations import delivery as delivery_module
@@ -54,7 +55,16 @@ async def test_a_raised_failure_is_an_error_turn(env, monkeypatch, status):
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, _raise({"status": status, "result": {"reply": "half-finished"}}))
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -90,7 +100,16 @@ async def test_a_raised_failures_payload_is_recorded_whole_and_opaque(env, monke
         ),
     )
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -111,7 +130,16 @@ async def test_a_raised_failures_payload_is_capped_with_a_truncation_marker(env,
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, _raise({"status": "error", "error": "boom-" + "x" * 10_000}))
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -123,15 +151,24 @@ async def test_a_raised_failures_payload_is_capped_with_a_truncation_marker(env,
     assert "boom-" in record.error
 
 
-async def test_a_raised_failure_uses_the_route_error_reply_text(env, monkeypatch):
+async def test_a_raised_failure_uses_the_route_reply_texts_error(env, monkeypatch):
     # A raised failure is surfaced with the route's own participant-facing wording when it carries one.
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
     channel = FakeChannel()
-    route = _tool_channel_route(reply_expr=".result.reply // null", error_reply_text=spanish)
+    route = _tool_channel_route(reply_expr=".result.reply // null", reply_texts=ReplyTexts(error=spanish))
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, _raise({"status": "aborted", "result": {"reply": "half-finished"}}))
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -150,7 +187,16 @@ async def test_a_returned_dict_with_a_status_key_is_delivered_as_a_success(env, 
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"status": status, "result": {"reply": "the real answer"}})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -174,7 +220,16 @@ async def test_a_parked_typed_value_ends_the_turn_silently(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: _park())
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -208,7 +263,16 @@ async def test_a_mapping_failure_logs_the_value_free_result_shape(env, monkeypat
     _wire_tool(monkeypatch, lambda kw: envelope)
 
     with caplog.at_level(logging.ERROR, logger=_TURN_LOGGER):
-        message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+        message_id = await turn_module.accept(
+            "twilio",
+            "+15550001111",
+            "+15550002222",
+            "+15550002222",
+            "hi",
+            "PID1",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
+        )
         await _settle()
 
     record = await _store().get_record(message_id)
@@ -299,7 +363,16 @@ async def test_a_parked_typed_value_binds_completion_and_delivers_on_resume(env,
 
     _wire_tool(monkeypatch, _pause)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)

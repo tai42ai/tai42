@@ -409,14 +409,22 @@ async def test_stripe_payment_webhook_loop(
             forged_ingress = await _deliver(stack, topic, secret, _completed_event(forged_session))
             assert forged_ingress.status_code == 200, forged_ingress.text
 
-            # FIRST: the door's 400 reaches the hook-failure log, matched by the pinned
+            # FIRST: the door's 400 reaches the failed hook run's ERROR log, matched by the pinned
             # status-bearing literal (never a bare "400", which a ValueError line could carry).
             logged = await _until(
                 lambda: _log_has(stack, "callback door refused the answer: HTTP 400"),
                 deadline=20.0,
-                message="the forged delivery's 400 never reached the hook-failure log",
+                message="the forged delivery's 400 never reached the failed hook run's ERROR log",
             )
             assert "callback door refused the answer: HTTP 400" in logged
+            # The run is held as failed after the hook started the tool, for an operator.
+            failed_runs = (await api.get("/api/hook-runs?status=failed&limit=200"))["items"]
+            [forged_run] = [
+                run
+                for run in failed_runs
+                if run["topic"] == topic and "callback door refused the answer: HTTP 400" in run["last_error"]
+            ]
+            assert forged_run["acted"] == "start"
             # THEN: the ask survived the rejection, its ticket unconsumed.
             assert not ask5.done(), "the forged delivery answered the ask instead of being rejected"
             # THEN: the CORRECT event answers it — proof the ticket really survived.

@@ -218,7 +218,9 @@ def _reaction_endpoint(mount_base: str) -> str:
     return f"{mount_base}/questions/{{interaction_id}}/react"
 
 
-def render_page(identity: str, title: str, build: PublicBuild, mount_base: str) -> str:
+def render_page(
+    identity: str, title: str, build: PublicBuild, mount_base: str, words: dict[str, str] | None = None
+) -> str:
     """The chat page shell around the built bundle.
 
     ``mount_base`` is this deployment's absolute mount prefix for the web channel,
@@ -234,10 +236,13 @@ def render_page(identity: str, title: str, build: PublicBuild, mount_base: str) 
     backstop. ``data-reaction-endpoint`` carries the reaction-door URL template the form
     widget posts a reacting form's on-change round-trip to (its ``{interaction_id}``
     placeholder filled with the open question's id), overriding the widget's default in-app
-    door so a web-chat form reacts through this plugin's own session door. Every
-    interpolated value is HTML-escaped — the identity is a URL segment
-    and the title is operator config, neither of which may break out of its attribute
-    or element.
+    door so a web-chat form reacts through this plugin's own session door.
+    ``data-words`` carries the route's own refusal sentences (``words``, the set
+    ``WebWords.transport`` members) as JSON, written only when the route set any, and the
+    bundle draws its built-in sentence for every member absent from it. Every
+    interpolated value is HTML-escaped — the identity is a URL segment, the title is
+    operator config and the words are the route's, none of which may break out of its
+    attribute or element.
     """
     max_attachments = web_settings().max_attachments_per_message
     head = [
@@ -253,10 +258,11 @@ def render_page(identity: str, title: str, build: PublicBuild, mount_base: str) 
         f'integrity="{escape(build.integrity[name])}">'
         for name in build.styles
     ]
+    words_attr = f' data-words="{escape(json.dumps(words))}"' if words else ""
     body = [
         f'<div id="root" data-identity="{escape(identity)}" data-api-base="{escape(mount_base)}" '
         f'data-max-attachments="{escape(str(max_attachments))}" '
-        f'data-reaction-endpoint="{escape(_reaction_endpoint(mount_base))}"></div>',
+        f'data-reaction-endpoint="{escape(_reaction_endpoint(mount_base))}"{words_attr}></div>',
         f'<script type="module" src="{escape(_asset_url(mount_base, build.entry))}" '
         f'integrity="{escape(build.integrity[build.entry])}"></script>',
     ]
@@ -270,8 +276,9 @@ def render_refusal(title: str, message: str, code: str | None = None) -> str:
     Self-contained under ``REFUSAL_CSP``: no script, no stylesheet, and no inline
     ``style`` — the browser's own defaults render it, with ``color-scheme`` so a dark
     browser does not paint it unreadably. ``code`` rides a meta named
-    ``REFUSAL_CODE_META``. Callers pass module constants only, so every refusal page
-    is byte-constant: no request-derived value is ever interpolated.
+    ``REFUSAL_CODE_META``. Callers pass the built-in words, the deployment's settings
+    or the route's own stored words, so every refusal page is byte-constant per route:
+    no request-derived value is ever interpolated.
     """
     head = [
         '<meta charset="utf-8">',

@@ -12,11 +12,12 @@ from tai42_skeleton.conversations.models import DeliveryStatus
 # delivery-control fields the atomic transitions mutate.
 _F_DATA = "data"
 _F_STATUS = "delivery_status"
-_F_OUTBOUND = "outbound_ids"
+_F_SENDS = "sends"
 _F_ATTEMPTS = "attempts"
 _F_GRACE = "grace_deadline"
 _F_UPDATED = "updated_at"
 _F_INTAKE = "intake_claim"
+_F_ASK_REPLY = "ask_reply"
 
 # Every record-mutating script takes the same key layout: KEYS[1]=record key, then one
 # key per DeliveryStatus (the per-status indexes), then the index the transition moves the
@@ -38,6 +39,103 @@ _DELETE_ROUTE_THREADS_KEY = f"KEYS[{3 + len(_INDEXED_STATUSES)}]"
 
 # A live record's index member outlives nothing; a terminal one expires with its row.
 _NO_EXPIRY_SCORE = "+inf"
+
+
+def _status_index_key(status: DeliveryStatus) -> str:
+    """The shared layout's slot of the per-status index of ``status``."""
+    return f"KEYS[{2 + _INDEXED_STATUSES.index(status)}]"
+
+
+# The keys outside a record's row that name the record (its message refs, its outbound reverse-index
+# keys, its ask index key and, for a send record, its route's in-flight set) are named on the row's
+# ``owned_keys`` field, a JSON list, by the script that writes each one. Every writer goes through
+# these helpers, so a key never exists without its name on its row, a gone row gets no key, and a
+# writer re-run for the same record (a resume's re-index, a create re-run under the same id) leaves
+# each ref list holding the record once and each name on the row once. Building key names read off a
+# row inside a script follows the store's single-node Redis assumption.
+_OWNED_LIB = """
+local function owned_names(rk)
+  local raw = redis.call('HGET', rk, 'owned_keys')
+  if not raw or raw == '' then return {} end
+  return cjson.decode(raw)
+end
+local function own(rk, name)
+  local names = owned_names(rk)
+  for _, held in ipairs(names) do if held == name then return false end end
+  names[#names + 1] = name
+  redis.call('HSET', rk, 'owned_keys', cjson.encode(names))
+  return true
+end
+local function disown(rk, name)
+  local kept = {}
+  for _, held in ipairs(owned_names(rk)) do if held ~= name then kept[#kept + 1] = held end end
+  redis.call('HSET', rk, 'owned_keys', #kept == 0 and '[]' or cjson.encode(kept))
+end
+local function own_ref(rk, ref, mid, ttl_ms)
+  if own(rk, ref) then redis.call('RPUSH', ref, mid) end
+  redis.call('PEXPIRE', ref, ttl_ms)
+end
+local function own_value(rk, key, mid, ttl_ms)
+  redis.call('SET', key, mid, 'PX', ttl_ms)
+  own(rk, key)
+end
+local function own_member(rk, set_key, mid)
+  redis.call('SADD', set_key, mid)
+  own(rk, set_key)
+end
+local function refresh_refs(rk, ttl_ms)
+  for _, name in ipairs(owned_names(rk)) do
+    if redis.call('TYPE', name)['ok'] == 'list' then redis.call('PEXPIRE', name, ttl_ms) end
+  end
+end
+local function forget_owned(rk, mid)
+  for _, name in ipairs(owned_names(rk)) do
+    local kind = redis.call('TYPE', name)['ok']
+    if kind == 'list' then
+      redis.call('LREM', name, 0, mid)
+    elseif kind == 'set' then
+      redis.call('SREM', name, mid)
+    elseif kind == 'string' and redis.call('GET', name) == mid then
+      redis.call('DEL', name)
+    end
+  end
+end
+"""
+
+
+# Who wrote into a route-keyed thread. A script that stamps it decodes the key prefixes
+# (``ConversationsSettings.writer_prefixes``) into ``W`` before it calls these helpers, and builds
+# every key in-script under the store's single-node Redis assumption. A door is the JSON
+# ``[target_kind, target_name, door_address_key]`` of the route a record was written under; its
+# writer is the person the target's person index names for it, or the door itself while the index
+# names nobody. ``w_stamp`` keeps the writer on the record's row-only ``writer`` field and the door
+# on ``writer_door``, and adds the thread to the writer's ``writer_threads`` visit list, which an
+# erase walks. ``w_thread_records`` answers the record keys a route-keyed thread's transcript index
+# holds; a thread id that is not route-keyed raises.
+_WRITER_LIB = """
+local W
+local function w_holder(door)
+  local parts = cjson.decode(door)
+  return redis.call('HGET', W.index .. parts[1] .. ':' .. parts[2], parts[3]) or door
+end
+local function w_stamp(thread, door, record_key)
+  local who = w_holder(door)
+  redis.call('SADD', W.threads .. who, thread)
+  redis.call('HSET', record_key, 'writer', who, 'writer_door', door)
+end
+local function w_thread_records(thread)
+  local rest = string.sub(thread, #W.route_thread + 1)
+  local cut = string.find(rest, ':', 1, true)
+  if string.sub(thread, 1, #W.route_thread) ~= W.route_thread or not cut then
+    error('conversations: a writer threads entry is not route-keyed: ' .. thread)
+  end
+  local keys = {}
+  for _, mid in ipairs(redis.call('ZRANGE', W.thread_index .. string.sub(rest, 1, cut - 1) .. ':' .. thread, 0, -1)) do
+    keys[#keys + 1] = W.records .. mid
+  end
+  return keys
+end
+"""
 
 
 def _reindex(member_argv: str, score_argv: str) -> str:
@@ -73,29 +171,47 @@ return ARGV[1]
 # for a route that no longer routes; the record's ``route_missing`` field is then set, so
 # the operator read carries the honest marker and not only a log line.
 #
-# The same step optionally claims the inbound pair and refreshes the thread's mode override.
-# Two OPTIONAL keys follow the routing row, in this order and each only when its ARGV flag is
-# set: the dedupe key (ARGV[12] = its TTL seconds, '' for no claim), then the thread's mode
-# key (ARGV[13] = the retention TTL seconds, '' for no refresh). The claim is the
-# get-or-set of ``_CLAIM_INBOUND_LUA``, decided FIRST: a pair another message owns writes
-# nothing and answers ``{-1, owner}``. Otherwise the record is written, the pair claimed, the
-# mode refreshed (``EXPIRE`` never resurrects an absent override) and the script answers
-# ``{indexed, message_id}`` — indexed 1 when the thread indexes were written, 0 when the
-# route was gone. ARGV = content_json, delivery_status, outbound_json, attempts,
-# updated_at, ttl_ms ('' for a record that must not expire yet), intake_claim ('' off the
-# intake path), message_id, index_score, thread_id, created_at, claim_ttl, mode_ttl.
+# The same step optionally claims the inbound pair, refreshes the thread's mode override, checks a
+# person thread's person and writes the inbound's message ref. Three OPTIONAL key groups follow the
+# routing row, in this order and each only when its ARGV flag is set: the dedupe key (ARGV[12] = its
+# TTL seconds, '' for no claim), then the thread's mode key (ARGV[13] = the retention TTL seconds,
+# '' for no refresh), then, for a person thread (ARGV[14] = '1'), that person's row key, erase-mark
+# key and recorded-routes key. Last comes the inbound's message ref key (ARGV[16] = the retention TTL
+# in milliseconds, '' for none). The claim is the get-or-set of ``_CLAIM_INBOUND_LUA``, decided
+# FIRST: a pair another message owns writes nothing and answers ``{-1, owner}``. A person thread
+# whose person row is gone or carries the erase mark writes nothing either and answers ``{-2, ''}``.
+# Otherwise the record is written, the pair claimed, the mode refreshed (``EXPIRE`` never resurrects
+# an absent override), the ref appended once per record and named on the row, and the script answers
+# ``{indexed, message_id}`` — indexed 1 when the thread indexes were written (and, for a person
+# thread, the route recorded among its routes), 0 when the route was gone. For a route-keyed thread
+# (ARGV[17], the record's door, set) the record stamps its writer on the thread in either case
+# (``_WRITER_LIB``).
+# ARGV = content_json, delivery_status, sends_json, attempts, updated_at, ttl_ms ('' for a record
+# that must not expire yet), intake_claim ('' off the intake path), message_id, index_score,
+# thread_id, created_at, claim_ttl, mode_ttl, person_flag, route_name, ref_ttl_ms, door,
+# writer_prefixes.
 _CREATE_LUA = f"""
 -- conversations:record:create
+{_OWNED_LIB}
+{_WRITER_LIB}
 local optional = {6 + len(_INDEXED_STATUSES)}
-local claim_key, mode_key
+local claim_key, mode_key, person_row, person_mark, person_routes, ref_key
 if ARGV[12] ~= '' then claim_key = KEYS[optional]; optional = optional + 1 end
-if ARGV[13] ~= '' then mode_key = KEYS[optional] end
+if ARGV[13] ~= '' then mode_key = KEYS[optional]; optional = optional + 1 end
+if ARGV[14] ~= '' then
+  person_row = KEYS[optional]; person_mark = KEYS[optional + 1]; person_routes = KEYS[optional + 2]
+  optional = optional + 3
+end
+if ARGV[16] ~= '' then ref_key = KEYS[optional] end
 local owner
 if claim_key then
   owner = redis.call('GET', claim_key)
   if owner and owner ~= ARGV[8] then return {{-1, owner}} end
 end
-redis.call('HSET', KEYS[1], 'data', ARGV[1], 'delivery_status', ARGV[2], 'outbound_ids', ARGV[3],
+if person_row and (redis.call('EXISTS', person_row) == 0 or redis.call('EXISTS', person_mark) == 1) then
+  return {{-2, ''}}
+end
+redis.call('HSET', KEYS[1], 'data', ARGV[1], 'delivery_status', ARGV[2], '{_F_SENDS}', ARGV[3],
   'attempts', ARGV[4], 'claim', '', 'grace_deadline', '', 'updated_at', ARGV[5], 'intake_claim', ARGV[7])
 if ARGV[6] ~= '' then redis.call('PEXPIRE', KEYS[1], ARGV[6]) end
 {_reindex("ARGV[8]", "ARGV[9]")}
@@ -106,9 +222,15 @@ if redis.call('EXISTS', {_ROUTE_ROW_KEY}) == 0 then
 else
   redis.call('ZADD', {_THREAD_INDEX_KEY}, ARGV[11], ARGV[8])
   redis.call('ZADD', {_ROUTE_THREADS_KEY}, ARGV[11], ARGV[10])
+  if person_routes then redis.call('SADD', person_routes, ARGV[15]) end
 end
+if ref_key then own_ref(KEYS[1], ref_key, ARGV[8], ARGV[16]) end
 if claim_key and not owner then redis.call('SET', claim_key, ARGV[8], 'EX', ARGV[12]) end
 if mode_key then redis.call('EXPIRE', mode_key, ARGV[13]) end
+if ARGV[17] ~= '' then
+  W = cjson.decode(ARGV[18])
+  w_stamp(ARGV[10], ARGV[17], KEYS[1])
+end
 return {{indexed, ARGV[8]}}
 """
 
@@ -146,12 +268,14 @@ return 1
 # outcome. ARGV = content_json, now, ttl_ms, message_id, index_score, thread_id.
 _COMPLETE_SILENT_LUA = f"""
 -- conversations:record:complete_silent
+{_OWNED_LIB}
 local status = redis.call('HGET', KEYS[1], 'delivery_status')
 if not status then return -1 end
 if status ~= 'accepted' then return 0 end
 redis.call('HSET', KEYS[1], 'data', ARGV[1], 'delivery_status', 'silent', 'updated_at', ARGV[2],
   'intake_claim', '', 'claim', '')
 redis.call('PEXPIRE', KEYS[1], ARGV[3])
+refresh_refs(KEYS[1], ARGV[3])
 {_reindex("ARGV[4]", "ARGV[5]")}
 {_RESTAMP_LIVE_THREAD.format(slot=6)}
 return 1
@@ -171,12 +295,14 @@ def _accepted_to_overlap_terminal_lua(marker: str, status: str) -> str:
     """
     return f"""
 -- {marker}
+{_OWNED_LIB}
 local status = redis.call('HGET', KEYS[1], 'delivery_status')
 if not status then return -1 end
 if status ~= 'accepted' then return 0 end
 redis.call('HSET', KEYS[1], 'data', ARGV[1], 'delivery_status', '{status}', 'updated_at', ARGV[2],
   'intake_claim', '', 'claim', '')
 redis.call('PEXPIRE', KEYS[1], ARGV[3])
+refresh_refs(KEYS[1], ARGV[3])
 {_reindex("ARGV[4]", "ARGV[5]")}
 {_RESTAMP_LIVE_THREAD.format(slot=6)}
 return 1
@@ -258,24 +384,26 @@ end
 """
 
 
-# Move a record to ``provisional``, recording the outbound ids and grace deadline and
+# Move a record to ``provisional``, recording the parts sent with their ids and the grace deadline and
 # releasing the lease: 1 transitioned, 0 already terminal, -1 gone, -3 a foreign live lease.
 # A receipt that arrived during the send is staged on the record's ``pending_receipt`` field;
 # when it is set, this step applies it in the SAME script — straight to the parked terminal,
 # skipping ``provisional`` — and returns 2 (parked receipt was ``delivered``) or 3 (parked
-# receipt was ``failed``). ARGV = outbound_json, attempts, grace_deadline, now, token,
+# receipt was ``failed``). ARGV = sends_json, attempts, grace_deadline, now, token,
 # message_id, index_score, ttl_ms, terminal_index_score.
 _PROVISIONAL_LUA = f"""
 -- conversations:record:provisional
+{_OWNED_LIB}
 local status = redis.call('HGET', KEYS[1], 'delivery_status')
 if not status then return -1 end
 if status == 'delivered' or status == 'failed' or status == 'shed' then return 0 end
 {_foreign_lease_guard("ARGV[4]", "ARGV[5]")}
 local parked = redis.call('HGET', KEYS[1], 'pending_receipt')
 if parked and parked ~= '' then
-  redis.call('HSET', KEYS[1], 'delivery_status', parked, 'outbound_ids', ARGV[1],
+  redis.call('HSET', KEYS[1], 'delivery_status', parked, '{_F_SENDS}', ARGV[1],
     'attempts', ARGV[2], 'updated_at', ARGV[4], 'claim', '', 'grace_deadline', '', 'pending_receipt', '')
   redis.call('PEXPIRE', KEYS[1], ARGV[8])
+  refresh_refs(KEYS[1], ARGV[8])
   for i = 2, {1 + len(_INDEXED_STATUSES)} do redis.call('ZREM', KEYS[i], ARGV[6]) end
   if parked == 'delivered' then
     redis.call('ZADD', {_DELIVERED_INDEX_KEY}, ARGV[9], ARGV[6])
@@ -284,7 +412,7 @@ if parked and parked ~= '' then
   redis.call('ZADD', {_FAILED_INDEX_KEY}, ARGV[9], ARGV[6])
   return 3
 end
-redis.call('HSET', KEYS[1], 'delivery_status', 'provisional', 'outbound_ids', ARGV[1],
+redis.call('HSET', KEYS[1], 'delivery_status', 'provisional', '{_F_SENDS}', ARGV[1],
   'attempts', ARGV[2], 'grace_deadline', ARGV[3], 'updated_at', ARGV[4], 'claim', '')
 {_reindex("ARGV[6]", "ARGV[7]")}
 return 1
@@ -293,17 +421,19 @@ return 1
 # Terminal delivered write from the send path: 1 transitioned, 0 already delivered
 # (idempotent), -1 gone, -2 already failed (a conflict the caller logs), -3 a foreign live
 # lease. Sets the retention TTL.
-# ARGV = outbound_json, attempts, now, ttl_ms, token, message_id, index_score.
+# ARGV = sends_json, attempts, now, ttl_ms, token, message_id, index_score.
 _DELIVERED_LUA = f"""
 -- conversations:record:delivered
+{_OWNED_LIB}
 local status = redis.call('HGET', KEYS[1], 'delivery_status')
 if not status then return -1 end
 if status == 'failed' or status == 'shed' then return -2 end
 if status == 'delivered' then return 0 end
 {_foreign_lease_guard("ARGV[3]", "ARGV[5]")}
-redis.call('HSET', KEYS[1], 'delivery_status', 'delivered', 'outbound_ids', ARGV[1],
+redis.call('HSET', KEYS[1], 'delivery_status', 'delivered', '{_F_SENDS}', ARGV[1],
   'attempts', ARGV[2], 'updated_at', ARGV[3], 'claim', '', 'grace_deadline', '')
 redis.call('PEXPIRE', KEYS[1], ARGV[4])
+refresh_refs(KEYS[1], ARGV[4])
 {_reindex("ARGV[6]", "ARGV[7]")}
 return 1
 """
@@ -312,18 +442,21 @@ return 1
 # failed, -1 gone, -2 the send already completed (delivered/shed/provisional), -3 a foreign
 # live lease. A staged receipt is cleared in the same step and the write returns 2 when it
 # dropped a non-empty ``pending_receipt`` — first terminal wins, the send-side outcome stands.
-# Sets the retention TTL. ARGV = attempts, now, ttl_ms, token, message_id, index_score.
+# Sets the retention TTL and records the parts already sent (``sends``, the ids of a partially
+# failed reply). ARGV = attempts, now, ttl_ms, token, message_id, index_score, sends_json.
 _FAILED_LUA = f"""
 -- conversations:record:failed
+{_OWNED_LIB}
 local status = redis.call('HGET', KEYS[1], 'delivery_status')
 if not status then return -1 end
 if status == 'delivered' or status == 'shed' or status == 'provisional' then return -2 end
 if status == 'failed' then return 0 end
 {_foreign_lease_guard("ARGV[2]", "ARGV[4]")}
 local parked = redis.call('HGET', KEYS[1], 'pending_receipt')
-redis.call('HSET', KEYS[1], 'delivery_status', 'failed', 'attempts', ARGV[1],
+redis.call('HSET', KEYS[1], 'delivery_status', 'failed', 'attempts', ARGV[1], '{_F_SENDS}', ARGV[7],
   'updated_at', ARGV[2], 'claim', '', 'grace_deadline', '', 'pending_receipt', '')
 redis.call('PEXPIRE', KEYS[1], ARGV[3])
+refresh_refs(KEYS[1], ARGV[3])
 {_reindex("ARGV[5]", "ARGV[6]")}
 if parked and parked ~= '' then return 2 end
 return 1
@@ -337,6 +470,7 @@ return 1
 # target_status, now, ttl_ms, message_id, index_score.
 _RECEIPT_LUA = f"""
 -- conversations:record:receipt
+{_OWNED_LIB}
 local status = redis.call('HGET', KEYS[1], 'delivery_status')
 if not status then return -1 end
 local target = ARGV[1]
@@ -353,6 +487,7 @@ if status ~= 'provisional' then return -3 end
 redis.call('HSET', KEYS[1], 'delivery_status', target, 'updated_at', ARGV[2],
   'claim', '', 'grace_deadline', '')
 redis.call('PEXPIRE', KEYS[1], ARGV[3])
+refresh_refs(KEYS[1], ARGV[3])
 {_reindex("ARGV[4]", "ARGV[5]")}
 return 1
 """
@@ -370,6 +505,7 @@ return 1
 # the sweep's outcome stands. ARGV = now, ttl_ms, message_id, index_score.
 _UNREADABLE_LUA = f"""
 -- conversations:record:unreadable
+{_OWNED_LIB}
 if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
 local status = redis.call('HGET', KEYS[1], 'delivery_status')
 if status == 'failed' then return 0 end
@@ -379,20 +515,36 @@ local parked = redis.call('HGET', KEYS[1], 'pending_receipt')
 redis.call('HSET', KEYS[1], 'delivery_status', 'failed', 'claim', '', 'grace_deadline', '',
   'updated_at', ARGV[1], 'pending_receipt', '')
 redis.call('PEXPIRE', KEYS[1], ARGV[2])
+refresh_refs(KEYS[1], ARGV[2])
 {_reindex("ARGV[3]", "ARGV[4]")}
 if parked and parked ~= '' then return 2 end
 return 1
 """
 
 
+# Delete a record row with everything that names it: the keys its ``owned_keys`` names (each ref
+# list and in-flight set loses the record, each keyspace-3 key and the ask key that still hold the
+# record's id are deleted) and its status-index member. Shared by the delete and the send placement
+# step, so one cleanup serves every path that removes a row on request. The writer the record
+# stamped stays a writer of its thread until the thread is cleared. Returns the keys removed.
+_DELETE_ROW_LIB = f"""
+{_OWNED_LIB}
+local function delete_row(rk, mid)
+  forget_owned(rk, mid)
+  local removed = redis.call('DEL', rk)
+  for i = 2, {1 + len(_INDEXED_STATUSES)} do redis.call('ZREM', KEYS[i], mid) end
+  return removed
+end
+"""
+
 # Delete a record and its index membership in ONE step, so no listing can name a row that
-# is gone. The thread leaves the route index with its LAST record, never before: the other
-# records of a thread outlive any one of them. Returns the number of keys removed.
-# ARGV = message_id, thread_id.
+# is gone. The record's refs, keyspace-3 entries and ask entry go with it (``_DELETE_ROW_LIB``).
+# The thread leaves the route index with its LAST record, never before: the other records of a
+# thread outlive any one of them. Returns the number of keys removed. ARGV = message_id, thread_id.
 _DELETE_LUA = f"""
 -- conversations:record:delete
-local removed = redis.call('DEL', KEYS[1])
-for i = 2, {1 + len(_INDEXED_STATUSES)} do redis.call('ZREM', KEYS[i], ARGV[1]) end
+{_DELETE_ROW_LIB}
+local removed = delete_row(KEYS[1], ARGV[1])
 redis.call('ZREM', {_DELETE_THREAD_INDEX_KEY}, ARGV[1])
 if redis.call('ZCARD', {_DELETE_THREAD_INDEX_KEY}) == 0 then
   redis.call('ZREM', {_DELETE_ROUTE_THREADS_KEY}, ARGV[2])

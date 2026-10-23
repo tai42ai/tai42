@@ -9,6 +9,7 @@ outcome sits in the send machine.
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -18,8 +19,10 @@ from tai42_contract.conversations import (
     AnswerStatus,
     ConversationAnswer,
     ConversationDoor,
+    ReplyTo,
     joined_answer_text,
 )
+from tai42_contract.errors import UnavailableError
 from tai42_contract.interactions.models import LocationElement, MediaItem, check_media_list
 from tai42_contract.locale import normalize_optional_locale
 
@@ -39,6 +42,13 @@ class DeliveryStatus(StrEnum):
     (``superseded``); each names that turn through ``successor_id`` and, like ``silent``, never
     sends. On the API door an overlap outcome rides ``pending_delivery`` carrying the matching
     ``answer_status`` until its marker is delivered, the ``silent`` split.
+
+    Two states belong to a send record (``origin="send"``) alone. ``sending`` is not terminal:
+    the record is written and its send has started; nothing re-sends it, and a row left in it
+    past its settle deadline is settled to ``outcome_unknown``. ``outcome_unknown`` is terminal:
+    the send started and never reported an outcome (it passed its bound, it was cancelled while
+    the medium call was in flight, or the process stopped), so the message may or may not have
+    reached the participant; it is never re-sent.
     """
 
     ACCEPTED = "accepted"
@@ -50,6 +60,8 @@ class DeliveryStatus(StrEnum):
     SILENT = "silent"
     MERGED = "merged"
     SUPERSEDED = "superseded"
+    SENDING = "sending"
+    OUTCOME_UNKNOWN = "outcome_unknown"
 
 
 #: The states nothing drives further; the retention TTL is applied on reaching one.
@@ -61,8 +73,12 @@ TERMINAL_STATUSES = frozenset(
         DeliveryStatus.SILENT,
         DeliveryStatus.MERGED,
         DeliveryStatus.SUPERSEDED,
+        DeliveryStatus.OUTCOME_UNKNOWN,
     }
 )
+
+#: The delivery states only a send record (``origin="send"``) takes.
+SEND_ONLY_STATUSES = frozenset({DeliveryStatus.SENDING, DeliveryStatus.OUTCOME_UNKNOWN})
 
 #: The states carrying no produced answer; every other state carries one. A channel-door
 #: ``merged``/``superseded`` record carries the outcome in its delivery status alone, so its
@@ -87,11 +103,110 @@ OVERLAP_DELIVERY_STATUSES = frozenset({DeliveryStatus.MERGED, DeliveryStatus.SUP
 SUCCESSOR_ANSWER_STATUSES: frozenset[AnswerStatus] = frozenset({"merged", "superseded"})
 
 
+#: The path a send record's message took: ``notify`` is ``notify_user``, ``ask`` an
+#: interaction's question, ``notice`` a platform notice to the participant, ``channel`` a
+#: channel plugin's own send.
+SentBy = Literal["notify", "ask", "notice", "channel"]
+
+
+class SentMessage(BaseModel):
+    """One sent part of a record's answer and the provider ids its medium gave it.
+
+    ``part`` indexes the record's ``answer_parts`` (``0`` for a plain-text answer), ``chars``
+    is how much of that part this message carried, and ``provider_message_ids`` are the ids an
+    out-of-band receipt correlates.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    part: int = Field(ge=0)
+    chars: int = Field(ge=0)
+    provider_message_ids: list[str]
+
+
+class AskSend(BaseModel):
+    """The question an ``ask`` send record carries out, and how its delivery attempts went.
+
+    ``sensitive`` is the question's own flag: a reply to it is recorded without its body.
+    ``attempts`` counts the delivery attempts that ran; ``timed_out_attempts`` numbers the ones
+    that passed their bound with no answer from the medium, each of which may have reached the
+    participant.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    interaction_id: str = Field(min_length=1)
+    answer_format: str
+    sensitive: bool
+    attempts: int = Field(default=0, ge=0)
+    timed_out_attempts: list[int] = Field(default_factory=list)
+
+
+class AskReply(BaseModel):
+    """The participant's reply to an ask, as it came over the channel.
+
+    ``answer`` is ``None`` on a sensitive ask: the record keeps that a reply came, when, and its
+    ``medium_message_id``, never its body. ``reply_to`` is the earlier message the reply quoted, as
+    resolved when the reply was recorded, ``None`` when it quoted none; it is kept on a sensitive
+    ask too, since it is about another message.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    answer: Any | None = None
+    medium_message_id: str | None = None
+    answered_at: datetime
+    reply_to: ReplyTo | None = None
+
+
+class AskSendView(BaseModel):
+    """A record's :class:`AskSend` as a read door serves it.
+
+    An admin read carries every field; the caller-scoped read carries only ``sensitive``, so the
+    others are absent from it.
+    """
+
+    sensitive: bool
+    interaction_id: str | None = Field(default=None, min_length=1)
+    answer_format: str | None = None
+    attempts: int | None = Field(default=None, ge=0)
+    timed_out_attempts: list[int] | None = None
+
+
+class AskReplyView(BaseModel):
+    """A record's :class:`AskReply` as a read door serves it.
+
+    ``answer`` is ``None`` on a sensitive ask. An admin read carries every field; the
+    caller-scoped read carries only ``answer`` and ``reply_to``, so the others are absent from it.
+    """
+
+    answer: Any | None
+    medium_message_id: str | None = None
+    answered_at: datetime | None = None
+    reply_to: ReplyTo | None = None
+
+
 class ConversationsIndexLayoutError(RuntimeError):
     """The conversations store holds an index member in a layout this code does not read.
 
     Raised at boot by the delivery re-drive; the store is reset, never read around.
     """
+
+
+class PersonThreadClosedError(UnavailableError):
+    """A record was refused by a person thread whose person is being erased or no longer exists.
+
+    Nothing was recorded; a message sent again is attributed by its address and lands in its
+    route-keyed thread. A 503, so a caller retries.
+    """
+
+    def __init__(self, thread_id: str) -> None:
+        """Name the refused person thread."""
+        super().__init__(
+            f"person thread {thread_id} takes no new record: its person is being erased or no longer exists; "
+            "nothing was recorded; send it again"
+        )
+        self.thread_id = thread_id
 
 
 class ConversationRecord(BaseModel):
@@ -129,9 +244,15 @@ class ConversationRecord(BaseModel):
 
     # Who produced this record: ``client`` is an inbound message's turn; ``operator`` names a
     # record an operator's key committed — both a hand-injected operator send and a park
-    # completion's resumed reply ride ``operator``. Required — every construction states it, and
-    # a stored blob missing it is corruption that fails loudly.
-    origin: Literal["client", "operator"]
+    # completion's resumed reply ride ``operator``; ``send`` is a message the platform sent
+    # outside a turn's reply (``sent_by`` names its path). Required — every construction states
+    # it, and a stored blob missing it is corruption that fails loudly.
+    origin: Literal["client", "operator", "send"]
+    # The path a ``send`` record's message took; ``None`` on every other origin.
+    sent_by: SentBy | None = None
+    # The ``message_id`` of the turn a send ran inside, set only when the send went to that
+    # turn's own participant; ``None`` on a send outside a turn and on every other origin.
+    turn_message_id: str | None = None
 
     # ``True`` only for an operator's hand-injected message — the one ``operator`` record that is
     # NOT a reply to a participant's own turn (it runs no turn and answers nothing the
@@ -164,11 +285,18 @@ class ConversationRecord(BaseModel):
     # an ``operator`` record carries neither (it answers, it does not submit).
     inbound_attachments: list[MediaItem] | None = None
     inbound_location: LocationElement | None = None
+    # The earlier message this inbound quotes, resolved from this thread's records when the inbound
+    # was accepted. It surfaces to a tool target's payload under the ``reply_to`` key. ``None`` when
+    # the inbound quoted none; an ``operator``, ``send`` or ``event`` record never carries one.
+    inbound_reply_to: ReplyTo | None = None
     # The participant's BCP 47 locale the channel resolved from its native inbound (a
     # per-message language hint), stored beside the text so the scheduled turn resolves
     # the subject's locale for the rendering layer. ``None`` when the door supplied none
     # (channel with no native hint, api caller that set none, every operator/event record).
     inbound_locale: str | None = None
+    # The medium's own id of the inbound message (the id a quote names), ``None`` when the door
+    # supplied none.
+    inbound_message_id: str | None = None
 
     # What kind of inbound this record's turn ran on: ``message`` is an inbound text/form
     # turn (the default every channel/api message and operator send carries); ``event`` is
@@ -210,8 +338,14 @@ class ConversationRecord(BaseModel):
     # the create step's route-gone branch and read back from that hash field; the operator sees
     # the honest marker on the record, not only a log line.
     route_missing: bool = False
-    # Provider-assigned ids of this record's sends, correlated by out-of-band receipts.
-    outbound_message_ids: list[str] = Field(default_factory=list)
+    # This record's sent messages, each with its part and the provider ids out-of-band
+    # receipts correlate.
+    sends: list[SentMessage] = Field(default_factory=list)
+    # The question an ``ask`` send carries and its attempts; present exactly when ``sent_by``
+    # is ``ask``.
+    ask: AskSend | None = None
+    # The participant's reply to that ask over the channel; only on an ask send.
+    ask_reply: AskReply | None = None
     attempts: int = 0
     # A terminal receipt (``delivered``/``failed``) that arrived while the send was still in
     # flight, staged on the record until the completing provisional write applies it straight to
@@ -259,6 +393,10 @@ class ConversationRecord(BaseModel):
                 raise ValueError("an answered/error record with blank answer text must carry media-only answer_parts")
         if self.answer_status == "silent" and self.answer is not None:
             raise ValueError("a silent record carries no answer text")
+        if self.delivery_status in SEND_ONLY_STATUSES and self.origin != "send":
+            raise ValueError(
+                f"only a send record takes delivery_status {self.delivery_status.value!r}, got origin {self.origin!r}"
+            )
         return self
 
     @model_validator(mode="after")
@@ -304,16 +442,26 @@ class ConversationRecord(BaseModel):
 
     @model_validator(mode="after")
     def _origin_matches_fields(self) -> ConversationRecord:
-        """A ``client`` record answers a non-blank inbound; an ``operator`` record carries none.
+        """A ``client`` record answers a non-blank inbound; an ``operator`` or ``send`` record carries none.
 
-        An ``operator`` record carries no inbound (``""``) and is always an
+        Only a ``send`` record carries ``sent_by``, ``turn_message_id`` and the ask fields. An
+        ``operator`` record carries no inbound (``""``) and is always an
         ``answered`` outcome with non-blank answer text — it IS the operator's
         reply, sent into the thread with no turn to run. An ``event`` inbound is a
         structured ``client`` turn with no human text: it carries its
         ``inbound_event`` and an empty ``inbound_text``, while a ``message``
         inbound carries no ``inbound_event``.
         """
-        if self.origin == "operator":
+        if self.origin != "send" and (
+            self.sent_by is not None
+            or self.turn_message_id is not None
+            or self.ask is not None
+            or self.ask_reply is not None
+        ):
+            raise ValueError("only a send record carries sent_by, turn_message_id, ask or ask_reply")
+        if self.origin == "send":
+            self._check_send_fields()
+        elif self.origin == "operator":
             self._check_operator_inbound()
         elif self.inbound_kind == "event":
             self._check_event_inbound()
@@ -340,10 +488,54 @@ class ConversationRecord(BaseModel):
             raise ValueError(
                 "an operator record carries no inbound attachments/location (it answers, it does not submit)"
             )
+        if self.inbound_reply_to is not None:
+            raise ValueError("an operator record carries no inbound_reply_to (it answers, it does not submit)")
         if self.answer_status != "answered":
             raise ValueError(f"an operator record is always answered, got answer_status {self.answer_status!r}")
         if not (self.caller_principal or "").strip():
             raise ValueError("an operator record must name the operator that sent it in caller_principal")
+
+    def _check_send_fields(self) -> None:
+        """A send record names its path, carries no inbound, and is always an ``answered`` outcome.
+
+        An ``ask`` send carries its :class:`AskSend` and no other send does. A reply over the
+        channel proves the question arrived, so ``ask_reply`` never rides ``failed`` or
+        ``outcome_unknown``; a sensitive ask's reply carries no body.
+        """
+        if self.sent_by is None:
+            raise ValueError("a send record names the path it took in sent_by")
+        if self.inbound_kind != "message":
+            raise ValueError("a send record is a message send, never an event")
+        if self.inbound_text != "":
+            raise ValueError("a send record carries no inbound_text (must be '')")
+        if (
+            self.inbound_form is not None
+            or self.inbound_form_tag is not None
+            or self.inbound_attachments is not None
+            or self.inbound_location is not None
+            or self.inbound_message_id is not None
+            or self.inbound_reply_to is not None
+        ):
+            raise ValueError("a send record carries no inbound form, tag, media, location, message id or reply_to")
+        if self.answer_status != "answered":
+            raise ValueError(f"a send record is always answered, got answer_status {self.answer_status!r}")
+        if (self.sent_by == "ask") != (self.ask is not None):
+            raise ValueError("an ask send record carries its ask, and no other send record does")
+        self._check_ask_reply()
+
+    def _check_ask_reply(self) -> None:
+        """An ``ask_reply`` rides only an ask send that arrived, without the body of a sensitive ask."""
+        if self.ask_reply is None:
+            return
+        if self.ask is None:
+            raise ValueError("only an ask send record carries an ask_reply")
+        if self.delivery_status in (DeliveryStatus.FAILED, DeliveryStatus.OUTCOME_UNKNOWN):
+            raise ValueError(
+                f"an ask_reply proves the question arrived, so it never rides delivery_status "
+                f"{self.delivery_status.value!r}"
+            )
+        if self.ask.sensitive and self.ask_reply.answer is not None:
+            raise ValueError("a reply to a sensitive ask is recorded without its answer")
 
     def _check_event_inbound(self) -> None:
         """An event record carries its structured ``inbound_event`` and no human text."""
@@ -351,6 +543,8 @@ class ConversationRecord(BaseModel):
             raise ValueError("an event record carries no inbound_text (must be '')")
         if self.inbound_event is None:
             raise ValueError("an event record carries its structured inbound_event")
+        if self.inbound_reply_to is not None:
+            raise ValueError("an event record carries no inbound_reply_to (it quotes no message)")
 
     def answer_payload(self) -> ConversationAnswer:
         """The :class:`ConversationAnswer` this record delivers.
@@ -389,35 +583,44 @@ class ConversationRecord(BaseModel):
         until deliberately published here. ``error`` and the delivery bookkeeping are
         withheld — the turn ran as the ROUTE's key, not the caller's. ``inbound_text``,
         ``inbound_form``, ``inbound_form_tag``, ``inbound_attachments``, ``inbound_location``,
-        ``inbound_kind``, ``inbound_event`` and ``submitted_by`` are published: they are the
-        message (and the structured submission / tag / media / location / event) this caller sent.
+        ``inbound_reply_to``, ``inbound_kind``, ``inbound_event`` and ``submitted_by`` are published:
+        they are the message (and the structured submission / tag / media / location / quoted
+        message / event) this caller sent. A send record publishes its ``sent_by`` and
+        ``turn_message_id``, whether its ask was ``sensitive`` and the reply's ``answer`` (``None``
+        on a sensitive ask) and ``reply_to``; its ``sends`` are delivery bookkeeping and stay
+        withheld.
         """
         return self.model_dump(
             mode="json",
             include={
-                "message_id",
-                "route_name",
-                "door",
-                "thread_id",
-                "client_address",
-                "caller_principal",
-                "origin",
-                "inbound_text",
-                "inbound_form",
-                "inbound_form_tag",
-                "inbound_attachments",
-                "inbound_location",
-                "inbound_kind",
-                "inbound_event",
-                "submitted_by",
-                "answer_status",
-                "answer",
-                "answer_parts",
-                "successor_id",
-                "delivery_status",
-                "route_missing",
-                "created_at",
-                "updated_at",
+                "message_id": True,
+                "route_name": True,
+                "door": True,
+                "thread_id": True,
+                "client_address": True,
+                "caller_principal": True,
+                "origin": True,
+                "sent_by": True,
+                "turn_message_id": True,
+                "inbound_text": True,
+                "inbound_form": True,
+                "inbound_form_tag": True,
+                "inbound_attachments": True,
+                "inbound_location": True,
+                "inbound_reply_to": True,
+                "inbound_kind": True,
+                "inbound_event": True,
+                "submitted_by": True,
+                "answer_status": True,
+                "answer": True,
+                "answer_parts": True,
+                "successor_id": True,
+                "ask": {"sensitive"},
+                "ask_reply": {"answer", "reply_to"},
+                "delivery_status": True,
+                "route_missing": True,
+                "created_at": True,
+                "updated_at": True,
             },
         )
 
@@ -425,8 +628,15 @@ class ConversationRecord(BaseModel):
 __all__ = [
     "ANSWERLESS_STATUSES",
     "OVERLAP_DELIVERY_STATUSES",
+    "SEND_ONLY_STATUSES",
     "SUCCESSOR_ANSWER_STATUSES",
     "TERMINAL_STATUSES",
+    "AskReply",
+    "AskReplyView",
+    "AskSend",
+    "AskSendView",
     "ConversationRecord",
     "DeliveryStatus",
+    "SentBy",
+    "SentMessage",
 ]

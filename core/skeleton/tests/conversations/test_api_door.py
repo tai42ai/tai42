@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from tai42_contract.conversations import ReplyTexts
 from tai42_contract.template import TemplatedText
 from tests.agent._memoryless import MemorylessTestAgent
 
@@ -63,11 +64,11 @@ async def test_api_wait_fast_returns_answer_and_suppresses_callback(env, monkeyp
     assert posted == []
 
 
-async def test_an_api_error_outcome_carries_the_route_error_reply_text(env, monkeypatch):
-    # An api-door error surfaces the route's ``error_reply_text`` in the sync-wait
+async def test_an_api_error_outcome_carries_the_route_reply_texts_error(env, monkeypatch):
+    # An api-door error surfaces the route's ``reply_texts.error`` in the sync-wait
     # ConversationAnswer: the caller sees the custom reply, not the built-in default.
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
-    _wire(monkeypatch, FakeManager(_tool_api_route(error_reply_text=spanish)))
+    _wire(monkeypatch, FakeManager(_tool_api_route(reply_texts=ReplyTexts(error=spanish))))
 
     def _boom(kw):
         raise RuntimeError("tool blew up")
@@ -436,7 +437,16 @@ async def test_an_api_caller_cannot_drain_a_channel_addresss_bucket(env, monkeyp
         await turn_module.submit_api_message("chat", "+15550002222", "again", "alice", 0, client_connected=_connected)
 
     # The real phone user is untouched: it is admitted and answered.
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hello", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hello",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     record = await _store().get_record(message_id)
     assert record is not None
@@ -456,17 +466,44 @@ async def test_two_routes_sharing_an_address_have_independent_buckets(env, monke
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "one",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     # The address is now over its cap ON THAT ROUTE: the next message buys a slow-down reply.
-    shed = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
+    shed = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "two",
+        "PID2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     shed_record = await store.get_record(shed)
     assert shed_record is not None
     assert shed_record.answer == intake_module._SLOW_DOWN_TEXT
 
     # The same address on the other route still gets its own turn.
-    admitted = await turn_module.accept("twilio", "+15550009999", "+15550002222", "+15550002222", "three", "PID3")
+    admitted = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+15550002222",
+        "+15550002222",
+        "three",
+        "PID3",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     record = await store.get_record(admitted)
     assert record is not None
@@ -486,14 +523,32 @@ async def test_two_addresses_sharing_a_cap_key_share_one_turn_bucket(env, monkey
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    first = await turn_module.accept("twilio", "+15550001111", "visitor-A", "net-bucket", "one", "PID1")
+    first = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "visitor-A",
+        "net-bucket",
+        "one",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     first_record = await store.get_record(first)
     assert first_record is not None
     assert first_record.answer == "echo: one"
 
     # A DIFFERENT identity under the SAME cap key is already over the shared cap: it sheds.
-    shed = await turn_module.accept("twilio", "+15550001111", "visitor-B", "net-bucket", "two", "PID2")
+    shed = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "visitor-B",
+        "net-bucket",
+        "two",
+        "PID2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     shed_record = await store.get_record(shed)
     assert shed_record is not None
@@ -559,7 +614,14 @@ async def test_a_channel_route_override_raises_the_cap_through_the_accept_path(e
     # The override grants three turns where the global cap of 1 would have shed the second.
     for index in range(3):
         admitted = await turn_module.accept(
-            "twilio", "+15550001111", "+15550002222", "+15550002222", f"msg-{index}", f"PID{index}"
+            "twilio",
+            "+15550001111",
+            "+15550002222",
+            "+15550002222",
+            f"msg-{index}",
+            f"PID{index}",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
         )
         await _settle()
         record = await store.get_record(admitted)
@@ -568,7 +630,16 @@ async def test_a_channel_route_override_raises_the_cap_through_the_accept_path(e
 
     # Only the fourth message — past the override budget, not the global one — buys the
     # slow-down reply.
-    shed = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "over", "PID9")
+    shed = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "over",
+        "PID9",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     shed_record = await store.get_record(shed)
     assert shed_record is not None

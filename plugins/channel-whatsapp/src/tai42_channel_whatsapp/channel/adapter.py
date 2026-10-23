@@ -8,12 +8,15 @@ from typing import Any, ClassVar
 from pydantic import ValidationError
 from redis.exceptions import RedisError
 from tai42_contract.channels import (
+    ChannelAddress,
     ChannelDelivery,
     ChannelDeliveryError,
     ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
     ChannelWithdrawal,
+    ReplyWindow,
+    SendOutcome,
 )
 from tai42_contract.interactions import CALLBACK_LINK_FORMATS
 
@@ -24,13 +27,14 @@ from tai42_channel_whatsapp.channel.media import _send_media_prelude
 from tai42_channel_whatsapp.channel.notifications import _send_notification
 from tai42_channel_whatsapp.channel.recipients import _NO_DEFAULT_RECIPIENT, _require_recipient, _send_template
 from tai42_channel_whatsapp.channel.template_params import parse_template_parameters
-from tai42_channel_whatsapp.client import mark_read_typing, send_message
+from tai42_channel_whatsapp.client import SentMessage, mark_read_typing, send_message, send_outcome
 from tai42_channel_whatsapp.correlation import (
     drop_endpoint_form,
     release_pending,
     release_pending_for,
     reserve_pending,
 )
+from tai42_channel_whatsapp.correlation import reply_window as pair_reply_window
 from tai42_channel_whatsapp.flows import build_form_flow
 from tai42_channel_whatsapp.settings import require_delivery_setting, whatsapp_settings
 
@@ -100,7 +104,26 @@ class WhatsAppChannel:
         except ChannelInputError as exc:
             raise ValueError(str(exc)) from exc
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
+    def resolve_address(self, recipient: str | None, sender_identity: str | None) -> ChannelAddress:
+        """The ``phone_number_id`` and ``wa_id`` a send would use, known before sending.
+
+        The identity is ``sender_identity`` when set, else the configured
+        ``CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID`` (missing → :class:`ChannelDeliveryError`).
+        The address is ``recipient`` as given: this channel has no default recipient, so none
+        raises :class:`ChannelAddressError`. A completed send reports the ``wa_id`` Meta
+        resolved it to, which may differ in form from ``recipient``. The template recipient
+        fence reads the contact store, so it runs at send time, never here.
+        """
+        if sender_identity is not None:
+            target = _require_recipient(recipient, "a bridge reply requires a recipient wa_id; none was provided")
+            return ChannelAddress(our_identity=sender_identity, address=target)
+        phone_number_id = require_delivery_setting(
+            whatsapp_settings().default_phone_number_id, "CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID"
+        )
+        target = _require_recipient(recipient, _NO_DEFAULT_RECIPIENT)
+        return ChannelAddress(our_identity=phone_number_id, address=target)
+
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
         """Resolve the destination ``wa_id``, then push the question to it.
 
         The question is a freeform send, so the recipient is required but not
@@ -112,27 +135,27 @@ class WhatsAppChannel:
         widget) stays the last, actionable message; a media failure raises before
         any reservation. A select ask renders in its native shape (buttons/list/
         numbered text); the reservation carries the ask's options and interaction id
-        so an interactive tap resolves back to the exact option text.
+        so an interactive tap resolves back to the exact option text. Returns the
+        :class:`SendOutcome` of every message sent, the media first.
         """
         settings = whatsapp_settings()
-        phone_number_id = require_delivery_setting(
-            settings.default_phone_number_id, "CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID"
-        )
-        target = _require_recipient(delivery.recipient, _NO_DEFAULT_RECIPIENT)
+        address = self.resolve_address(delivery.recipient, None)
+        phone_number_id, target = address.our_identity, address.address
 
         # Display media rides ahead of the question — sent before any reservation, so
         # a media failure raises with nothing reserved.
+        sent: list[SentMessage] = []
         if delivery.media:
-            await _send_media_prelude(phone_number_id, target, list(delivery.media))
+            sent = await _send_media_prelude(phone_number_id, target, list(delivery.media))
 
         if delivery.answer_format in CALLBACK_LINK_FORMATS:
             # Tier-1: answered via the callback link, so no correlation is stored.
-            await send_message(phone_number_id=phone_number_id, to=target, body=_render_link(delivery))
-            return
+            sent.append(await send_message(phone_number_id=phone_number_id, to=target, body=_render_link(delivery)))
+            return send_outcome(phone_number_id, sent)
 
         if delivery.answer_format == "form":
-            await _deliver_form(settings, phone_number_id, target, delivery)
-            return
+            sent.append(await _deliver_form(settings, phone_number_id, target, delivery))
+            return send_outcome(phone_number_id, sent)
 
         # A select ask's list-opening button carries the caller's ``wording.choice.label``; refuse
         # an over-cap label loudly BEFORE the reservation and any send, regardless of the shape the
@@ -155,11 +178,12 @@ class WhatsAppChannel:
             wording=delivery.wording,
         )
         try:
-            await _send_question(phone_number_id, target, delivery)
+            sent.extend(await _send_question(phone_number_id, target, delivery))
         except Exception:
             # Send failed — free the pair instead of holding it until its TTL.
             await release_pending(phone_number_id=phone_number_id, wa_id=target)
             raise
+        return send_outcome(phone_number_id, sent)
 
     async def withdraw(self, withdrawal: ChannelWithdrawal) -> None:
         """Release what this channel kept for a delivered question the platform has taken down.
@@ -191,10 +215,11 @@ class WhatsAppChannel:
             "released the pair's reservation" if released else "no reservation held for it",
         )
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         """Send one fire-and-forget message; raise ``ChannelDeliveryError`` on any failure.
 
-        Returns every ``wamid`` the Cloud API assigned, in send order.
+        Returns the :class:`SendOutcome`: the sending ``phone_number_id``, the ``wa_id`` Meta
+        resolved the recipient to, and every ``wamid`` the Cloud API assigned, in send order.
 
         No reply is expected, so nothing touches the correlation store. Exactly one
         send attempt per part (a plain return means Meta ACCEPTED it, not that a
@@ -211,22 +236,33 @@ class WhatsAppChannel:
         required.
         """
         settings = whatsapp_settings()
-        if notification.sender_identity is not None:
-            phone_number_id = notification.sender_identity
-            target = _require_recipient(
-                notification.recipient, "a bridge reply requires a recipient wa_id; none was provided"
-            )
-        else:
-            phone_number_id = require_delivery_setting(
-                settings.default_phone_number_id, "CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID"
-            )
-            target = _require_recipient(notification.recipient, _NO_DEFAULT_RECIPIENT)
+        address = self.resolve_address(notification.recipient, notification.sender_identity)
+        phone_number_id, target = address.our_identity, address.address
 
         if notification.template is not None:
-            return await _send_template(settings, phone_number_id, target, notification.template)
-        if notification.schema is not None:
-            return await _send_form_notification(settings, phone_number_id, target, notification)
-        return await _send_notification(phone_number_id, target, notification)
+            sent = await _send_template(settings, phone_number_id, target, notification.template)
+        elif notification.schema is not None:
+            sent = await _send_form_notification(settings, phone_number_id, target, notification)
+        else:
+            sent = await _send_notification(phone_number_id, target, notification)
+        return send_outcome(phone_number_id, sent)
+
+    async def reply_window(self, *, recipient: str, sender_identity: str | None = None) -> ReplyWindow:
+        """Meta's 24-hour customer service window for ``recipient`` (a ``wa_id``) on one number.
+
+        The number is ``sender_identity`` (a ``phone_number_id``), else the configured
+        ``CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID``; with neither the pair is unaddressable and
+        :class:`ChannelDeliveryError` is raised, as ``notify`` raises. ``open`` carries the close
+        time (the participant's latest message + 24 hours); ``closed`` means no participant message
+        in the last 24 hours. Meta's 131047 rejection of a send outside the window stays final.
+        """
+        if sender_identity is not None:
+            phone_number_id = sender_identity
+        else:
+            phone_number_id = require_delivery_setting(
+                whatsapp_settings().default_phone_number_id, "CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID"
+            )
+        return await pair_reply_window(phone_number_id, recipient)
 
     async def signal_working(
         self,

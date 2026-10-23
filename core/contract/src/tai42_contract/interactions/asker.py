@@ -2,7 +2,8 @@
 
 ``Ask`` is the engine-agnostic human-in-the-loop entry point: an awaitable
 called with a ``question`` (and an optional answer shape). In ``mode="sync"`` it
-blocks until a human answers and returns the typed answer; in ``mode="async"``
+blocks until a human answers and returns an :class:`AskAnswer` (the typed answer,
+the message the answering reply quoted, and the channel's params); in ``mode="async"``
 it PARKS the caller and returns a sentinel, and a later answer/expiry resumes
 work out of band. An implementation persists the question, blocks on (or parks
 against) a reply channel, and raises on timeout — but the contract fixes only
@@ -25,10 +26,12 @@ if TYPE_CHECKING:
 
     from tai42_contract.hooks.models import TopicVerifierBinding
     from tai42_contract.interactions.models import (
+        AskAnswer,
         FormData,
         FormPage,
         FormReactions,
         MediaItem,
+        SuspendedInteraction,
         Wording,
     )
 
@@ -74,14 +77,18 @@ class Ask(Protocol):
         to: Literal["user", "caller"] = "user",
         payload: dict[str, Any] | None = None,
         on_expiry: Literal["kill", "resume"] = "kill",
-    ) -> Any:
-        """Ask a human ``question`` and return the typed answer.
+    ) -> AskAnswer | SuspendedInteraction:
+        """Ask a human ``question`` and return the answer as an :class:`AskAnswer`.
 
         In ``mode="sync"`` block until the answer returns; in ``mode="async"`` park the caller
         and return a ``SuspendedInteraction`` immediately.
 
-        Returns the typed answer per ``answer_format`` (text->str, confirm->bool,
-        select->chosen value, form->validated dict). Implementations raise a
+        A sync ask returns an :class:`AskAnswer`. Its ``answer`` is the typed answer per
+        ``answer_format`` (text->str, confirm->bool, select->chosen value, form->validated
+        dict); its ``reply_to`` is the message the answering reply quoted
+        (:class:`~tai42_contract.conversations.ReplyTo`), ``None`` when it quoted none or the
+        answer did not come over a channel; its ``params`` is the channel's opaque enrichment of
+        the answering tap or reply, ``None`` when there is none. Implementations raise a
         timeout error when the budget elapses with no answer, and ``ValueError``
         for a bad format/argument combination.
 
@@ -89,7 +96,7 @@ class Ask(Protocol):
         otherwise. A ``str`` link is a template containing the literal placeholder
         ``{callback_url}``; a callable receives the callback URL and returns the
         final external URL (creating the external resource is the callable's job).
-        The returned answer for external is the payload delivered by the callback
+        The returned ``answer`` for external is the payload delivered by the callback
         (a dict from the POST body, or a dict of query params via the GET confirm
         flow), validated against ``schema`` when one was declared.
 
@@ -157,7 +164,7 @@ class Ask(Protocol):
         every surface's own word.
 
         ``sensitive`` marks the answer body as not-to-be-persisted AND wraps the
-        returned answer in a ``SecretValue``: the caller reaches the real answer
+        returned ``answer`` in a ``SecretValue``: the caller reaches the real answer
         only through ``reveal()`` (its repr and JSON dump refuse to expose it),
         while the durable answered record keeps only the status. Use it for
         credentials or personal data.
@@ -194,7 +201,7 @@ class Ask(Protocol):
         media; a present list must be non-empty.
 
         ``mode`` selects the wait discipline: ``"sync"`` (the default) blocks and
-        returns the typed answer; ``"async"`` PARKS the caller, returning a
+        returns the :class:`AskAnswer`; ``"async"`` PARKS the caller, returning a
         ``SuspendedInteraction`` sentinel, and the answer/expiry resumes work out
         of band. ``expiry_at`` is the async deadline — the moment a parked question
         expires; async REQUIRES it (a park always carries a deadline) and it is

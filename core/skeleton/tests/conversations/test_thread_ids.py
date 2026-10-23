@@ -94,21 +94,42 @@ def test_person_routes_spans_every_address() -> None:
 
 
 class _Store:
-    def __init__(self, records: list) -> None:
+    """The merged person-thread index, newest first, paged the way the record store pages it."""
+
+    def __init__(self, records: list, *, depth: int = 2) -> None:
         self.records = records
+        self.settings = SimpleNamespace(thread_queue_depth=depth)
         self.calls: list = []
 
     async def list_person_thread_records(self, route_names, thread_id, *, offset, limit, newest_first=False, q=None):
         self.calls.append((route_names, thread_id, offset, limit, newest_first))
-        return SimpleNamespace(records=self.records[:limit]), 0
+        return SimpleNamespace(records=self.records[offset : offset + limit], total=len(self.records)), 0
+
+
+def _row(origin: str, route_name: str = "b") -> SimpleNamespace:
+    return SimpleNamespace(origin=origin, route_name=route_name, client_address="x")
 
 
 async def test_newest_person_thread_record_reads_one_newest_row() -> None:
-    newest = SimpleNamespace(route_name="b", client_address="x")
-    store = _Store([newest])
+    newest = _row("inbound")
+    store = _Store([newest, _row("inbound", "a")])
     record = await newest_person_thread_record(store, _person(["b", "a"]), "bridge:@person:p")  # type: ignore[arg-type]
     assert record is newest
-    assert store.calls == [(["a", "b"], "bridge:@person:p", 0, 1, True)]
+    assert store.calls == [(["a", "b"], "bridge:@person:p", 0, 2, True)]
+
+
+async def test_newest_person_thread_record_skips_send_records_across_pages() -> None:
+    # A send record marks where the deployment sent to, never where the person last wrote from.
+    written = _row("inbound", "a")
+    store = _Store([_row("send"), _row("send"), written])
+    record = await newest_person_thread_record(store, _person(["b", "a"]), "bridge:@person:p")  # type: ignore[arg-type]
+    assert record is written
+    assert [call[2] for call in store.calls] == [0, 2]
+
+
+async def test_newest_person_thread_record_is_none_when_only_send_records_remain() -> None:
+    store = _Store([_row("send"), _row("send"), _row("send")])
+    assert await newest_person_thread_record(store, _person(["a"]), "bridge:@person:p") is None  # type: ignore[arg-type]
 
 
 async def test_newest_person_thread_record_is_none_for_an_empty_thread() -> None:

@@ -35,6 +35,7 @@ from tai42_skeleton.conversations.turn import record as record_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
 from .conftest import (
+    NO_REPLY_WINDOW,
     BlockingAgent,
     EchoAgent,
     FakeChannel,
@@ -44,6 +45,7 @@ from .conftest import (
     _store,
     _wire,
     _wire_tool,
+    create_record,
 )
 
 _OUR = "+15550001111"
@@ -88,7 +90,9 @@ def _tool_route(
 
 
 async def _accept(text: str, pid: str) -> str:
-    return await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, text, pid)
+    return await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, text, pid, medium_message_id=None, reply_to_medium_message_id=None
+    )
 
 
 async def _poll_until(predicate, *, timeout: float = 5.0) -> None:
@@ -613,7 +617,7 @@ async def test_manual_mode_appends_the_whole_turn_under_cancel_all(env, monkeypa
     lead = _rec("m2", 2.0, "two")
     follower = _rec("m3", 3.0, "three")
     superseded = _rec("m1", 1.0, "one")
-    await _store().create_record(lead, intake_token="tok")
+    await create_record(_store(), lead, intake_token="tok")
     batch = overlap_module.Batch(lead=lead, members=[lead, follower], superseded=[superseded])
     whole = overlap_module.turn_text(route, batch, lead.inbound_text)
 
@@ -716,6 +720,7 @@ def test_the_tool_payload_carries_messages_and_superseded_under_deliver_all():
         form_tag=None,
         attachments=None,
         location=None,
+        reply_window=NO_REPLY_WINDOW,
     )
     assert payload["message"] == "one\n\ntwo\n\nthree"
     # A batch member's own form_tag rides its entry beside its form, only when it carried one.
@@ -744,6 +749,7 @@ def test_the_tool_payload_is_byte_identical_under_deliver_one():
         form_tag=None,
         attachments=None,
         location=None,
+        reply_window=NO_REPLY_WINDOW,
     )
     assert "messages" not in payload
     assert "superseded" not in payload

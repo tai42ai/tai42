@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 import httpx
 import pytest
 from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
-from tai42_contract.interactions import FieldChangedEvent, SubmittedEvent
+from tai42_contract.interactions import FieldChangedEvent, FormReactionError, SubmittedEvent
 
 from tai42_channel_slack.blocks import REPLY_ACTION_PREFIX, SELECT_ACTION_PREFIX, encode_reply_value
 from tai42_channel_slack.correlation import store_correlation, store_form_record
@@ -159,6 +159,7 @@ async def test_select_button_tap_resolves_via_ladder(fake_redis, channels, stub_
     assert call.correlation_key == "123.456"
     assert call.answer == "blue"
     assert call.bridge.provider_message_id == "1700.1"  # the tap's action_ts
+    assert call.bridge.medium_message_id is None  # a tap is no message of the participant's own
 
 
 async def test_notify_option_tap_bridges_on_correlation_miss(fake_redis, channels, stub_conversations):
@@ -493,6 +494,7 @@ async def test_view_submission_forwards_coerced_answer_and_closes(fake_redis, ch
     assert call.answer == {"full_name": "Alice", "count": 3}  # coerced per the schema
     # A completed modal has no re-reply surface — the channel owns the retry notice.
     assert call.bridge.owns_retry_notice is True
+    assert call.bridge.medium_message_id is None  # a modal submission is no message on the medium
     assert _FORM_KEY not in fake_redis.store  # released by the ladder (mirrored)
 
 
@@ -556,6 +558,37 @@ async def test_view_submission_retry_kept_pins_door_named_field_block(fake_redis
         "errors": {"count": "Enter a whole number"},
     }
     assert fake_redis.store[_FORM_KEY]
+
+
+async def test_view_submission_retry_kept_pins_an_end_time_refusal_under_the_end_time_block(fake_redis, channels):
+    # The door refuses a same-day earlier end time on the END's time field: the sentence pins under
+    # that timepicker's block.
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+            "start_time": {"type": "string", "format": "time", "timeOf": "start"},
+            "end_time": {"type": "string", "format": "time", "timeOf": "end"},
+        },
+    }
+    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, datetime.now(UTC) + timedelta(minutes=10))
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "The end time must be on or after the start time"
+    channels.inbound_retry_field = "end_time"
+    state = {
+        "start": {FIELD_ACTION_ID: {"type": "datepicker", "selected_date": "2026-05-01"}},
+        "end": {FIELD_ACTION_ID: {"type": "datepicker", "selected_date": "2026-05-01"}},
+        "start_time": {FIELD_ACTION_ID: {"type": "timepicker", "selected_time": "10:00"}},
+        "end_time": {FIELD_ACTION_ID: {"type": "timepicker", "selected_time": "09:00"}},
+    }
+
+    response = await slack_interactive(_signed(_view_submission(state=state)))
+
+    assert body_json(response) == {
+        "response_action": "errors",
+        "errors": {"end_time": "The end time must be on or after the start time"},
+    }
 
 
 async def test_view_submission_retry_kept_unknown_field_falls_back_to_first(fake_redis, channels):
@@ -624,8 +657,11 @@ async def test_view_submission_retry_kept_caller_rejected_without_reason_token_i
     assert body_json(response) == {"response_action": "errors", "errors": {"full_name": "Please check your entries."}}
 
 
-async def test_view_submission_retry_kept_caller_rejected_without_door_reason_fills_generic(fake_redis, channels):
-    # The caller's template with {reason} but no door reason fills the token with the generic line.
+async def test_view_submission_retry_kept_caller_rejected_without_door_reason_leaves_the_token_empty(
+    fake_redis, channels
+):
+    # The caller's template with {reason} but no door reason fills the token with nothing: the
+    # sentence is the caller's own words, never mixed with the platform's generic line.
     await store_form_record(
         _INTERACTION_ID,
         _CALLBACK,
@@ -641,7 +677,7 @@ async def test_view_submission_retry_kept_caller_rejected_without_door_reason_fi
 
     assert body_json(response) == {
         "response_action": "errors",
-        "errors": {"full_name": f"Not accepted: {_RETRY_TEXT}"},
+        "errors": {"full_name": "Not accepted: "},
     }
 
 
@@ -701,6 +737,69 @@ async def test_view_submission_missing_record_shows_expired(fake_redis, channels
 
     assert body_json(response) == {"response_action": "errors", "errors": {"full_name": _EXPIRED_TEXT}}
     assert channels.inbound_calls == []
+
+
+@pytest.mark.parametrize("outcome", [InboundAnswerOutcome.NO_CORRELATION, InboundAnswerOutcome.BRIDGED])
+async def test_view_submission_gone_ask_draws_the_caller_unavailable_line(fake_redis, channels, outcome):
+    # The ask is gone while the record is in hand: the caller's ``status.unavailable`` is the line.
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _SCHEMA,
+        _QUESTION,
+        _future(),
+        wording={"status": {"unavailable": "This form is closed now."}},
+    )
+    channels.inbound_outcome = outcome
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {"response_action": "errors", "errors": {"full_name": "This form is closed now."}}
+
+
+async def test_view_submission_missing_record_draws_the_carried_unavailable_line(fake_redis, channels):
+    # The record is gone, so the caller's ``status.unavailable`` comes from the view's own carrier.
+    metadata = json.dumps({"id": _INTERACTION_ID, "unavailable": "This form is closed now."})
+
+    response = await slack_interactive(_signed(_view_submission(private_metadata=metadata)))
+
+    assert body_json(response) == {"response_action": "errors", "errors": {"full_name": "This form is closed now."}}
+    assert channels.inbound_calls == []
+
+
+async def test_block_actions_open_carries_the_record_unavailable_line(fake_redis, http_script):
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _SCHEMA,
+        _QUESTION,
+        _future(),
+        wording={"status": {"unavailable": "This form is closed now."}},
+    )
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+
+    await slack_interactive(_signed(_block_actions()))
+
+    view = json.loads(http_script.requests[0].content)["view"]
+    assert decode_private_metadata(view["private_metadata"]).unavailable == "This form is closed now."
+
+
+async def test_field_change_re_render_carries_the_record_unavailable_line(fake_redis, http_script, interactions):
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _COND_SCHEMA,
+        _QUESTION,
+        _future(),
+        wording={"status": {"unavailable": "This form is closed now."}},
+    )
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+    state = {"kind": {FIELD_ACTION_ID: {"type": "radio_buttons", "selected_option": {"value": "b"}}}}
+
+    await slack_interactive(_signed(_field_action("kind", state)))
+
+    view = json.loads(http_script.requests[0].content)["view"]
+    assert decode_private_metadata(view["private_metadata"]).unavailable == "This form is closed now."
 
 
 async def test_view_submission_missing_record_and_empty_state_raises(fake_redis):
@@ -843,9 +942,9 @@ async def test_field_change_runs_reaction_and_applies_the_update(fake_redis, htt
     assert any(b["type"] == "section" and b.get("text", {}).get("text") == "Total: 20" for b in view["blocks"])
     assert any(b["type"] == "context" and "check qty" in b["elements"][0]["text"] for b in view["blocks"])
     # The accumulated reaction state rides private_metadata, surviving the next re-render.
-    _id, opts, disp = decode_private_metadata(view["private_metadata"])
-    assert opts["plan"] == [{"value": "basic", "label": "Basic"}, {"value": "pro", "label": "Pro"}]
-    assert disp == {"total": "Total: 20"}
+    metadata = decode_private_metadata(view["private_metadata"])
+    assert metadata.options["plan"] == [{"value": "basic", "label": "Basic"}, {"value": "pro", "label": "Pro"}]
+    assert metadata.display == {"total": "Total: 20"}
 
 
 async def _react_with_plan_options(fake_redis, http_script, interactions, plan_options: list[dict[str, Any]]):
@@ -888,8 +987,7 @@ async def test_field_change_reaction_option_second_line_draws_on_the_re_rendered
         {"text": {"type": "plain_text", "text": "Express"}, "value": "x"},
     ]
     # The second line survives the next re-render in the accumulated reaction state.
-    _id, opts, _disp = decode_private_metadata(view["private_metadata"])
-    assert opts["plan"] == [
+    assert decode_private_metadata(view["private_metadata"]).options["plan"] == [
         {"value": "s", "label": "Standard", "description": "2-3 days"},
         {"value": "x", "label": "Express"},
     ]
@@ -918,8 +1016,7 @@ async def test_field_change_reaction_option_over_the_cap_shows_the_failure_banne
     assert view["blocks"][1]["text"]["text"] == _REACTION_FAILURE_TEXT
     by_id = {b["block_id"]: b for b in view["blocks"] if b["type"] == "input"}
     assert [o["value"] for o in by_id["plan"]["element"]["options"]] == ["basic"]
-    _id, opts, _disp = decode_private_metadata(view["private_metadata"])
-    assert "plan" not in opts
+    assert "plan" not in decode_private_metadata(view["private_metadata"]).options
     logged = [r for r in caplog.records if r.exc_info]
     assert logged
     exc = logged[-1].exc_info
@@ -944,6 +1041,85 @@ async def test_field_change_reaction_failure_shows_a_banner(fake_redis, http_scr
     view = json.loads(http_script.requests[0].content)["view"]
     assert view["blocks"][1]["type"] == "section"  # banner right after the question section
     assert "could not be updated" in view["blocks"][1]["text"]["text"]
+
+
+_QTY_SCHEMA: dict[str, Any] = {"type": "object", "properties": {"qty": {"type": "integer"}}}
+_QTY_REACTIONS: dict[str, Any] = {"field_changed": ["qty"], "page_advanced": [], "submitted": False, "choices": []}
+
+
+@pytest.mark.parametrize(
+    ("error", "banner"),
+    [
+        (FormReactionError("the price list is offline"), "Could not refresh: the price list is offline."),
+        (RuntimeError("boom"), "Could not refresh: ."),
+    ],
+    ids=["reaction-reason", "other-exception"],
+)
+async def test_field_change_reaction_failure_draws_the_caller_update_failed(
+    fake_redis, http_script, interactions, error, banner
+):
+    # The caller's ``form.update_failed`` is the banner: a FormReactionError fills ``{reason}``
+    # with its reason, any other exception fills it with nothing.
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _QTY_SCHEMA,
+        _QUESTION,
+        _future(),
+        reactions=_QTY_REACTIONS,
+        wording={"form": {"update_failed": "Could not refresh: {reason}."}},
+    )
+    interactions.react_error = error
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+    state = {"qty": {FIELD_ACTION_ID: {"type": "number_input", "value": "1"}}}
+
+    await slack_interactive(_signed(_field_action("qty", state)))
+
+    view = json.loads(http_script.requests[0].content)["view"]
+    assert view["blocks"][1] == {"type": "section", "text": {"type": "mrkdwn", "text": banner}}
+
+
+async def test_field_change_reaction_failure_without_caller_words_keeps_the_default_banner(
+    fake_redis, http_script, interactions
+):
+    await store_form_record(_INTERACTION_ID, _CALLBACK, _QTY_SCHEMA, _QUESTION, _future(), reactions=_QTY_REACTIONS)
+    interactions.react_error = FormReactionError("the price list is offline")
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+    state = {"qty": {FIELD_ACTION_ID: {"type": "number_input", "value": "1"}}}
+
+    await slack_interactive(_signed(_field_action("qty", state)))
+
+    view = json.loads(http_script.requests[0].content)["view"]
+    assert view["blocks"][1]["text"]["text"] == _REACTION_FAILURE_TEXT
+
+
+async def test_field_change_undrawable_update_draws_the_caller_update_failed_with_no_reason(
+    fake_redis, http_script, interactions
+):
+    # An update the modal cannot draw is this channel's own refusal, not the reaction door's
+    # reason, so ``{reason}`` is empty.
+    schema = {
+        "type": "object",
+        "properties": {"qty": {"type": "integer"}, "plan": {"type": "string", "enum": ["basic"]}},
+    }
+    reactions = {"field_changed": ["qty"], "page_advanced": [], "submitted": False, "choices": ["plan"]}
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        schema,
+        _QUESTION,
+        _future(),
+        reactions=reactions,
+        wording={"form": {"update_failed": "Could not refresh: {reason}."}},
+    )
+    interactions.react_result = {"options": {"plan": [{"value": "s", "label": "L" * 76}]}}
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+    state = {"qty": {FIELD_ACTION_ID: {"type": "number_input", "value": "1"}}}
+
+    await slack_interactive(_signed(_field_action("qty", state)))
+
+    view = json.loads(http_script.requests[0].content)["view"]
+    assert view["blocks"][1]["text"]["text"] == "Could not refresh: ."
 
 
 async def test_field_change_with_no_record_is_ignored(fake_redis, http_script, interactions):
@@ -1044,6 +1220,35 @@ async def test_view_submission_submitted_reaction_failure_is_a_loud_inline_error
 
     assert body_json(response) == {"response_action": "errors", "errors": {"full_name": _REACTION_FAILURE_TEXT}}
     assert channels.inbound_calls == []  # never silently accepted
+
+
+@pytest.mark.parametrize(
+    ("error", "line"),
+    [
+        (FormReactionError("the name list is offline"), "Could not check: the name list is offline."),
+        (RuntimeError("boom"), "Could not check: ."),
+    ],
+    ids=["reaction-reason", "other-exception"],
+)
+async def test_view_submission_submitted_reaction_failure_draws_the_caller_update_failed(
+    fake_redis, channels, interactions, error, line
+):
+    reactions = {"field_changed": [], "page_advanced": [], "submitted": True, "choices": []}
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _SCHEMA,
+        _QUESTION,
+        _future(),
+        reactions=reactions,
+        wording={"form": {"update_failed": "Could not check: {reason}."}},
+    )
+    interactions.react_error = error
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {"response_action": "errors", "errors": {"full_name": line}}
+    assert channels.inbound_calls == []
 
 
 async def test_view_submission_without_reactions_runs_no_submitted_check(fake_redis, channels, interactions):

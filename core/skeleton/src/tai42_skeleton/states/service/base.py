@@ -66,11 +66,27 @@ class _StatesServiceBase:
 
     def _complete_origin(self, origin: WriteOrigin) -> CompletedOrigin: ...
 
-    async def _admit_subject(self, state: str, subject: StateSubject) -> tuple[int, list[str], str]: ...
+    async def _admit_subject(
+        self, state: str, subject: StateSubject, *, admit_erasing: bool = False
+    ) -> tuple[int, list[str], str]: ...
 
     async def _validate_subject_admitted(
-        self, subject_kinds: list[str], state_name: str, subject: StateSubject
+        self, subject_kinds: list[str], state_name: str, subject: StateSubject, *, admit_erasing: bool = False
     ) -> None: ...
+
+    async def _validate_written_subject_admitted(
+        self,
+        subject_kinds: list[str],
+        state_name: str,
+        subject: StateSubject,
+        canonical: StateSubject,
+        *,
+        admit_erasing: bool = False,
+    ) -> None: ...
+
+    async def _admit_persons(self, subjects: list[StateSubject]) -> None: ...
+
+    async def _refuse_erasing_persons(self, subjects: list[StateSubject]) -> None: ...
 
     async def _require_declaration(self, state: str) -> dict[str, Any]: ...
 
@@ -178,6 +194,7 @@ class _StatesServiceBase:
         origin: CompletedOrigin,
         conn: AsyncConnection[Any] | None = None,
         validate: bool = True,
+        admit_erasing: bool = False,
     ) -> StateRecord: ...
 
     async def _apply_completed(
@@ -190,6 +207,7 @@ class _StatesServiceBase:
         origin: CompletedOrigin,
         conn: AsyncConnection[Any] | None = None,
         validate: bool = True,
+        admit_erasing: bool = False,
     ) -> ApplyResult: ...
 
     async def _apply_template_jq_completed(
@@ -203,6 +221,7 @@ class _StatesServiceBase:
         origin: CompletedOrigin,
         conn: AsyncConnection[Any] | None = None,
         validate: bool = True,
+        admit_erasing: bool = False,
     ) -> TemplateJqApplyResult: ...
 
     async def _resolve_template_jq_ops(
@@ -213,6 +232,7 @@ class _StatesServiceBase:
         input_: Any,
         *,
         conn: AsyncConnection[Any] | None = None,
+        admit_erasing: bool = False,
     ) -> list[dict[str, Any]]: ...
 
     def open_unit(self) -> AbstractAsyncContextManager[_StateUnit]: ...

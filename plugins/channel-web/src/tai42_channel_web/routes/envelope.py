@@ -32,16 +32,20 @@ _NOSNIFF = {"x-content-type-options": "nosniff"}
 _REFERRER_POLICY = {"referrer-policy": "no-referrer"}
 
 
-def _error(message: str, status_code: int, code: str | None = None) -> JSONResponse:
+def _error(message: str, status_code: int, code: str | None = None, *, reason: str | None = None) -> JSONResponse:
     """A refusal as the API doors answer it.
 
-    Never cached: a refusal is about this caller at this moment, and several of these statuses
+    ``reason`` is the interactions door's own reason for a forwarded refusal, written as a
+    ``reason`` key only when given, so a client fills it into a sentence of its own rather than
+    drawing ``message``. Never cached: a refusal is about this caller at this moment, and several of these statuses
     (404, 501) are heuristically cacheable — a cached one would answer a later visitor on a GET
     door.
     """
     payload: dict[str, str] = {"error": message}
     if code is not None:
         payload["code"] = code
+    if reason is not None:
+        payload["reason"] = reason
     headers = {**_NOSNIFF, "cache-control": _NO_STORE}
     return JSONResponse(payload, status_code=status_code, headers=headers)
 

@@ -136,10 +136,9 @@ def _field_label(name: str, prop: Any) -> str:
     """The human-facing label for a field: its schema ``title`` when a non-empty string, else the property name.
 
     The one definition both the rendered control label and the completion-payload key
-    (:func:`payload_labels`) use, so the key the participant sees in the submitted-form
-    summary is always exactly the label shown on the field. A ``title`` that is not a string,
-    or is empty or whitespace-only, counts as absent — WhatsApp cannot show a blank field
-    label or key — so the property name is used instead.
+    (:func:`payload_labels`) use, so each completion key is exactly the label shown on its
+    field. A ``title`` that is not a string, or is empty or whitespace-only, counts as absent,
+    so the property name is used instead and no label or key is blank.
     """
     title = prop.get("title") if isinstance(prop, dict) else None
     return title if isinstance(title, str) and title.strip() else name
@@ -148,9 +147,9 @@ def _field_label(name: str, prop: Any) -> str:
 def payload_labels(properties: dict[str, Any]) -> dict[str, str]:
     """Map each schema property name to a unique human-readable completion-payload label.
 
-    The terminal ``complete`` action is keyed by these labels — the label WhatsApp shows on
-    each field (its ``title`` when a non-empty string, else the property key; :func:`_field_label`),
-    so the submitted-form summary bubble reads in human words. A collision — two properties
+    The terminal ``complete`` action is keyed by these labels — the label each field's control
+    shows (its ``title`` when a non-empty string, else the property key; :func:`_field_label`).
+    A collision — two properties
     sharing a label, or a label equal to the reserved ``flow_token`` (the correlation token Meta
     injects into every ``nfm_reply``, which the inbound decode strips before the answer reaches
     the door) — is disambiguated deterministically in schema order by appending ``_2``, ``_3`` …

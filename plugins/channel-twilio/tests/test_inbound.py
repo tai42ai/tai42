@@ -105,6 +105,8 @@ async def test_valid_signature_hands_reply_to_shared_ladder(handler, channels, f
     assert call.bridge.client_address == _HUMAN
     assert call.bridge.cap_key == _HUMAN
     assert call.bridge.provider_message_id == "SM777"
+    # The MessageSid is also the id a later quote of this message names.
+    assert call.bridge.medium_message_id == "SM777"
     assert call.bridge.bridge_text == "yes please"
     assert _SEEN_KEY in fake_redis.store  # sid marked seen on a resolved outcome
 
@@ -355,6 +357,8 @@ async def test_uncorrelated_routed_inbound_calls_accept_with_verbatim_args(
             "cap_key": _HUMAN,
             "text": "ship it",
             "provider_message_id": "SM777",
+            "medium_message_id": "SM777",
+            "reply_to_medium_message_id": None,
             "params": None,
             "attachments": None,
         }
@@ -525,6 +529,8 @@ async def test_mms_multiple_media_bridges_one_served_turn_per_item(
     assert [call["url"] for call in calls] == [_MEDIA0, _MEDIA1]
     accepts = stub_app.conversations.accept_calls
     assert [call["provider_message_id"] for call in accepts] == ["SM777-0", "SM777-1"]
+    # Both records come from the one message, so both carry its MessageSid as the quotable id.
+    assert [call["medium_message_id"] for call in accepts] == ["SM777", "SM777"]
     assert accepts[0]["text"] == "[image]"
     assert accepts[0]["attachments"] == [served0.item]
     assert accepts[0]["params"]["media_id"] == served0.media_id
@@ -638,6 +644,7 @@ async def test_permanent_reject_with_caption_bridges_caption_text_turn(
     (accept,) = stub_app.conversations.accept_calls
     assert accept["text"] == "look at this"
     assert accept["provider_message_id"] == "SM777-0"
+    assert accept["medium_message_id"] == "SM777"
     assert accept["attachments"] is None
     assert accept["params"] == {"media_kind": "image", "media_mime_type": "image/jpeg"}
     assert _SEEN_KEY in fake_redis.store
@@ -850,6 +857,8 @@ async def test_sms_text_only_num_media_zero_bridges_single_text_turn(handler, st
             "cap_key": _HUMAN,
             "text": "ship it",
             "provider_message_id": "SM777",
+            "medium_message_id": "SM777",
+            "reply_to_medium_message_id": None,
             "params": None,
             "attachments": None,
         }
@@ -991,11 +1000,12 @@ def _status_pairs(status: str, sid: str = "SM777") -> list[tuple[str, str]]:
 
 @pytest.mark.parametrize("status", ["failed", "undelivered"])
 async def test_status_failed_records_failed(status_handler, stub_app, status: str):
-    result = await status_handler(signed_request(_status_pairs(status), path=_STATUS_PATH))
+    pairs = [*_status_pairs(status), ("ErrorCode", "30003")]
+    result = await status_handler(signed_request(pairs, path=_STATUS_PATH))
 
     assert result.status_code == 204
     assert stub_app.conversations.status_calls == [
-        {"channel": "twilio", "provider_message_id": "SM777", "status": DeliveryReceipt.FAILED}
+        {"channel": "twilio", "provider_message_id": "SM777", "status": DeliveryReceipt.FAILED, "errors": "30003"}
     ]
 
 
@@ -1004,7 +1014,7 @@ async def test_status_delivered_records_delivered(status_handler, stub_app):
 
     assert result.status_code == 204
     assert stub_app.conversations.status_calls == [
-        {"channel": "twilio", "provider_message_id": "SM777", "status": DeliveryReceipt.DELIVERED}
+        {"channel": "twilio", "provider_message_id": "SM777", "status": DeliveryReceipt.DELIVERED, "errors": None}
     ]
 
 
@@ -1132,6 +1142,7 @@ async def test_an_over_bound_params_set_bridges_without_params_and_is_counted(
             declared_mime="image/png",
             message_sid="SM-over-bound",
             index=0,
+            reply_to_medium_message_id=None,
         )
 
     (accept,) = stub_app.conversations.accept_calls
@@ -1139,3 +1150,89 @@ async def test_an_over_bound_params_set_bridges_without_params_and_is_counted(
     assert accept["params"] is None
     assert _dropped() == before + 1
     assert [r for r in caplog.records if "twilio entry params dropped" in r.getMessage()]
+
+
+# --- the quoted message's id ----------------------------------------------------------------------
+
+_WA_TWILIO = f"whatsapp:{_TWILIO}"
+_WA_HUMAN = f"whatsapp:{_HUMAN}"
+_QUOTED = "SMquoted0001"
+
+
+def _wa_pairs(**overrides: str) -> list[tuple[str, str]]:
+    """A WhatsApp-over-Twilio reply to ``_QUOTED``: Twilio sends ``OriginalRepliedMessageSid`` for it."""
+    return _pairs(To=_WA_TWILIO, From=_WA_HUMAN, OriginalRepliedMessageSid=_QUOTED, **overrides)
+
+
+@pytest.mark.parametrize("outcome", [InboundAnswerOutcome.FORWARDED, InboundAnswerOutcome.BRIDGED])
+async def test_a_whatsapp_reply_answering_an_ask_hands_the_ladder_bridge_the_quoted_sid(
+    handler, channels, fake_redis: FakeRedis, outcome
+):
+    channels.inbound_outcome = outcome
+
+    result = await handler(signed_request(_wa_pairs()))
+
+    assert result.status_code == 204
+    (call,) = channels.inbound_calls
+    assert call.bridge.medium_message_id == "SM777"
+    assert call.bridge.reply_to_medium_message_id == _QUOTED
+
+
+async def test_a_whatsapp_reply_with_no_pending_ask_hands_accept_the_quoted_sid(
+    handler, stub_app, fake_redis: FakeRedis
+):
+    result = await handler(signed_request(_wa_pairs()))
+
+    assert result.status_code == 204
+    (accept,) = stub_app.conversations.accept_calls
+    assert accept["text"] == "yes please"
+    assert accept["reply_to_medium_message_id"] == _QUOTED
+
+
+@pytest.mark.parametrize(
+    "pairs", [_pairs(), _pairs(OriginalRepliedMessageSid=""), _pairs(OriginalRepliedMessageSid=" ")]
+)
+async def test_a_message_replying_to_nothing_quotes_nothing(handler, stub_app, channels, fake_redis: FakeRedis, pairs):
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+
+    await handler(signed_request(pairs))
+
+    (call,) = channels.inbound_calls
+    assert call.bridge.reply_to_medium_message_id is None
+    (accept,) = stub_app.conversations.accept_calls
+    assert accept["reply_to_medium_message_id"] is None
+
+
+async def test_every_media_item_of_a_whatsapp_reply_hands_accept_the_quoted_sid(
+    handler, stub_app, stub_media, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
+):
+    _patch_stream(monkeypatch, [], [_FakeStream(), _FakeStream()])
+    stub_media.ingest_results.extend([_ingested(media_id="C" * 43), _ingested(media_id="D" * 43)])
+    pairs = _wa_pairs(
+        NumMedia="2",
+        MediaUrl0=_MEDIA0,
+        MediaContentType0="image/jpeg",
+        MediaUrl1=_MEDIA1,
+        MediaContentType1="image/jpeg",
+    )
+
+    await handler(signed_request(pairs))
+
+    assert [accept["reply_to_medium_message_id"] for accept in stub_app.conversations.accept_calls] == [
+        _QUOTED,
+        _QUOTED,
+    ]
+
+
+async def test_the_caption_of_a_refused_media_item_of_a_whatsapp_reply_hands_accept_the_quoted_sid(
+    handler, stub_app, stub_media, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
+):
+    _patch_stream(monkeypatch, [], [_FakeStream()])
+    stub_media.ingest_results.append(MediaTooLargeError("media exceeds the image cap"))
+
+    await handler(signed_request(_wa_pairs(NumMedia="1", MediaUrl0=_MEDIA0, MediaContentType0="image/jpeg")))
+
+    assert len(stub_app.conversations.rejected_calls) == 1
+    (accept,) = stub_app.conversations.accept_calls
+    assert accept["text"] == "yes please"
+    assert accept["reply_to_medium_message_id"] == _QUOTED

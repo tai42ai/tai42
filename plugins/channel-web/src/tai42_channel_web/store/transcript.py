@@ -288,16 +288,30 @@ async def append_question(
     return entry_id
 
 
-async def append_answered(identity: str, address: str, interaction_id: str, answer: Any) -> str:
-    """Append one ``chat.answered`` entry (the UI settles the question's widget) and return its id."""
-    entry_id = _mint_id()
-    await _append(
-        identity,
-        address,
-        ANSWERED_EVENT,
-        {"id": entry_id, "interaction_id": interaction_id, "answer": answer, "ts": _now_iso()},
-    )
-    return entry_id
+async def append_answered(
+    identity: str,
+    address: str,
+    interaction_id: str,
+    answer: Any,
+    *,
+    sensitive: bool,
+    entry_id: str | None = None,
+) -> str:
+    """Append one ``chat.answered`` entry (the UI settles the question's widget) and return its id.
+
+    An ordinary answer's frame carries the ``answer``. A ``sensitive`` question's frame carries
+    ``"sensitive": true`` and no ``answer`` key: the transcript records that the question was
+    answered and never keeps the body. ``entry_id`` is supplied when the caller already named the
+    answer by it (the answer door forwards it as the answer's medium id); otherwise one is minted.
+    """
+    answered_id = entry_id if entry_id is not None else _mint_id()
+    data: dict[str, Any] = {"id": answered_id, "interaction_id": interaction_id, "ts": _now_iso()}
+    if sensitive:
+        data["sensitive"] = True
+    else:
+        data["answer"] = answer
+    await _append(identity, address, ANSWERED_EVENT, data)
+    return answered_id
 
 
 async def append_form(

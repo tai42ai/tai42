@@ -33,6 +33,10 @@ class InboundBridge(BaseModel):
     (the operator identity the turn answers from, and the participant's attested address /
     thread); ``cap_key`` is the party the per-address turn cap holds accountable;
     ``provider_message_id`` dedupes a provider redelivery at the conversation seam;
+    ``medium_message_id`` is the id the medium gives the message itself, the one a later
+    quote names (``None`` only when the medium has no such id);
+    ``reply_to_medium_message_id`` is the medium's id of the message this reply quotes (``None``
+    when it quotes none); both arms carry it, so the asker or the bridged turn reads the quote;
     ``bridge_text`` is the channel's faithful rendering of the participant's message for a
     bridged turn.
 
@@ -49,7 +53,7 @@ class InboundBridge(BaseModel):
 
     ``params`` is the OPTIONAL opaque channel enrichment this inbound reply carries — the
     ANSWER-path counterpart of a conversation entry's ``params``: a tapped reply id, a template
-    button payload, a referral, the reply-to context the participant quoted. The ladder threads it BOTH
+    button payload, a referral. The ladder threads it BOTH
     ways with the same seam symmetry — forwarded to the ask's callback door alongside the answer
     (landing on :class:`~tai42_contract.interactions.models.InteractionResponse.params`, read by
     the asking flow beside ``answer``) AND, when the reply is instead BRIDGED as a fresh turn,
@@ -65,6 +69,8 @@ class InboundBridge(BaseModel):
     client_address: str
     cap_key: str
     provider_message_id: str
+    medium_message_id: str | None
+    reply_to_medium_message_id: str | None
     bridge_text: str
     owns_retry_notice: bool = False
     params: dict[str, str] | None = None

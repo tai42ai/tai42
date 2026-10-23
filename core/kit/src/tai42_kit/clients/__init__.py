@@ -18,16 +18,22 @@ from tai42_kit.clients.base import (
 from tai42_kit.clients.facade import client_ctx
 from tai42_kit.clients.settings import (
     ClientSettings,
+    PostgresConnectionOptions,
     PostgresConnectionSettings,
+    RedisConnectionOptions,
     RedisConnectionSettings,
+    RedisConnectionSettingsBase,
 )
 
 __all__ = [
     "ClientDisconnectedError",
     "ClientSettings",
     "PooledClient",
+    "PostgresConnectionOptions",
     "PostgresConnectionSettings",
+    "RedisConnectionOptions",
     "RedisConnectionSettings",
+    "RedisConnectionSettingsBase",
     "advance_client_epoch",
     "client_ctx",
     "current_client_epoch",

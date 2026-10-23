@@ -13,12 +13,20 @@ backend_module: tai42_backend_rq
 
 ## Configuration
 
-The `RQ_` env group. `RQ_REDIS_URL` falls back to the shared
-`TAI_DEFAULT_REDIS_URL` when unset; a set `RQ_REDIS_URL` always wins.
+The `RQ_` env group. `RQ_REDIS_URL` and `RQ_REDIS_MAX_CONNECTIONS` fall back to
+the shared `TAI_DEFAULT_REDIS_URL` / `TAI_DEFAULT_REDIS_MAX_CONNECTIONS` when
+unset; a set `RQ_` value always wins. The retry and socket settings are read
+from `RQ_` alone. Every Redis connection of the backend — the tools, the enqueue
+path, the worker and the beat — is built from them.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `RQ_REDIS_URL` | `redis://localhost:6379/0` | Broker and results. |
+| `RQ_REDIS_MAX_CONNECTIONS` | unset | Caps the connection pool; uncapped when unset. |
+| `RQ_RETRY_ATTEMPTS` | `0` | Times a failed Redis connect or command is retried, each retry logged as a warning; `0` makes one attempt. |
+| `RQ_RETRY_ON_TIMEOUT` | `false` | With `RQ_RETRY_ATTEMPTS` at `0`, retries a timed-out command once at once. |
+| `RQ_SOCKET_TIMEOUT` | unset | Seconds a Redis command may wait on its socket; redis-py's default when unset. |
+| `RQ_SOCKET_CONNECT_TIMEOUT` | unset | Seconds a Redis connect may take; redis-py's default when unset. |
 | `RQ_RQ_PREFIX` | `rq:` | Key prefix for every RQ structure in Redis. |
 | `RQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the timeout the worker runs every job under, and how long a synchronous dispatch waits for a result. |
 | `RQ_MANIFEST_KEY` | `MANIFEST_KEY` | Env var the worker stores the manifest JSON under, inherited by forked work-horses. |
@@ -42,6 +50,20 @@ An idle worker stops within one dequeue poll (5s).
 `beat` and `dashboard` pull no queued work, so they run on the event loop and
 keep whatever signal handling their own CLI installs. Nothing else runs in those
 processes, so that is deliberate.
+
+A waiting worker that loses Redis keeps reconnecting through RQ's own loop,
+logged at ERROR, outside `RQ_RETRY_ATTEMPTS`.
+
+`beat` takes rq-scheduler's own options that are not about the connection
+(`-b/--burst`, `-i/--interval`, `-v/--verbose`, `--quiet`, `--path`, `--pid`,
+`-j/--job-class`) and `-u/--url`. Its connection comes from the `RQ_` settings,
+like the worker's: the URL falls back to `TAI_DEFAULT_REDIS_URL`, and `-u/--url`
+replaces only the URL. The scheduler loop has no reconnect of its own, so the
+beat rides a Redis outage only within `RQ_RETRY_ATTEMPTS`; a longer one ends it.
+
+The dashboard opens its own Redis connection from its `--redis-url` option,
+outside the backend's connection settings, so the `RQ_` retry and timeouts do
+not apply to it.
 
 ## Quirks
 

@@ -1,6 +1,6 @@
 """The one type for a participant-facing reply text and its validator.
 
-A conversation route's ``error_reply_text``, the ``reply`` a target's terminal failure carries
+A conversation route's ``reply_texts`` members, the ``reply`` a target's terminal failure carries
 (:class:`~tai42_contract.interactions.RunTerminalFailed`, :class:`~tai42_contract.interactions.RunFailed`)
 and a caller-set refusal sentence share one bound: a single participant-facing message, so a
 small cap (channels impose their own tighter message caps), non-blank so a set value never

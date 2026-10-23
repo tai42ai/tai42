@@ -26,14 +26,26 @@ function emailSchema(required = false): JsonSchema {
 /** A `Wording` whose form chapter carries the given per-field words and nothing else. */
 function fieldsWording(fields: Readonly<Record<string, FieldWording>>): Wording {
   return {
-    form: { submit: null, back: null, fields },
+    form: { submit: null, back: null, updateFailed: null, stepProgress: null, fields },
     choice: null,
     answer: null,
     status: null,
   };
 }
 
-const EMAIL_INVALID = fieldsWording({ email: { choiceLabel: null, invalid: SENTENCE } });
+const EMAIL_INVALID = fieldsWording({
+  email: {
+    choiceLabel: null,
+    invalid: SENTENCE,
+    trueLabel: null,
+    falseLabel: null,
+    required: null,
+    addItem: null,
+    removeItem: null,
+    itemLabel: null,
+    noItems: null,
+  },
+});
 
 describe("a form field's declared invalid sentence", () => {
   it('shows under the field in place of the SDK word after an answer outside its shape', async () => {
@@ -50,7 +62,19 @@ describe("a form field's declared invalid sentence", () => {
 
   it("keeps the SDK word when the field's words carry no invalid sentence", async () => {
     const user = userEvent.setup();
-    const wording = fieldsWording({ email: { choiceLabel: 'Pick one', invalid: null } });
+    const wording = fieldsWording({
+      email: {
+        choiceLabel: 'Pick one',
+        invalid: null,
+        trueLabel: null,
+        falseLabel: null,
+        required: null,
+        addItem: null,
+        removeItem: null,
+        itemLabel: null,
+        noItems: null,
+      },
+    });
     const { onAnswer } = renderCard(formQuestion(emailSchema(), null, null, null, wording));
 
     await user.type(screen.getByRole('textbox'), 'not-an-address');

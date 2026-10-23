@@ -65,16 +65,14 @@ async def test_launch_worker_rejects_unknown_options(backend):
 # --- the inline runtimes (beat / dashboard) -----------------------------------
 
 
-async def test_launch_beat_runs_the_scheduler_cli(backend, monkeypatch):
-    import rq_scheduler.scripts.rqscheduler as rqscheduler_script
+async def test_launch_beat_runs_the_plugin_beat_with_its_args(backend, monkeypatch):
+    from tai42_backend_rq import beat
 
-    seen_argv: list[list[str]] = []
-    monkeypatch.setattr(sys, "argv", list(sys.argv))
-    monkeypatch.setattr(rqscheduler_script, "main", lambda: seen_argv.append(list(sys.argv)))
+    seen: list[list[str]] = []
+    monkeypatch.setattr(beat, "run_beat", lambda args: seen.append(list(args)))
 
     await backend.launch(["beat", "--interval", "5"])
-    # The beat moves due jobs onto the queue class that bounds every job by ``task_timeout``.
-    assert seen_argv == [["rq-scheduler", "--interval", "5", "--queue-class", "tai42_backend_rq.queue.TaskBudgetQueue"]]
+    assert seen == [["--interval", "5"]]
 
 
 async def test_launch_dashboard_runs_the_dashboard_cli(backend, monkeypatch):
@@ -92,11 +90,10 @@ async def test_the_inline_runtimes_block_the_loop_on_purpose(backend, monkeypatc
     """Beat and the dashboard pull no work and nothing else runs on their loop,
     so they run ON it and keep their own vendor signal disposition — the base
     wires them nothing."""
-    import rq_scheduler.scripts.rqscheduler as rqscheduler_script
+    from tai42_backend_rq import beat
 
     threads: list[threading.Thread] = []
-    monkeypatch.setattr(sys, "argv", list(sys.argv))
-    monkeypatch.setattr(rqscheduler_script, "main", lambda: threads.append(threading.current_thread()))
+    monkeypatch.setattr(beat, "run_beat", lambda args: threads.append(threading.current_thread()))
 
     for runtime_cls in (RqBeatRuntime, RqDashboardRuntime):
         assert runtime_cls.mode is ExecutionMode.inline

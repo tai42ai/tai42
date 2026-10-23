@@ -48,8 +48,12 @@ async def test_answer_forwards_and_appends_answered(
 
     assert resp.status_code == 200
     assert _body(resp) == {"data": {"status": "answered"}}
-    assert fake_httpx.calls[0] == {"url": CALLBACK, "json": {"answer": "staging"}, "headers": None}
     answered = json.loads(registered_session.streams[_TRANSCRIPT_KEY][0][1]["data"])
+    assert fake_httpx.calls[0] == {
+        "url": CALLBACK,
+        "json": {"answer": "staging", "medium_message_id": answered["id"]},
+        "headers": None,
+    }
     assert answered["interaction_id"] == "int-1"
     assert answered["answer"] == "staging"
 
@@ -69,7 +73,12 @@ async def test_answer_forwards_the_session_link_params_beside_the_answer(
     resp = await _handler(stub_app, _ANSWER)(_answer_request(answer="staging"))
 
     assert resp.status_code == 200
-    assert fake_httpx.calls[0]["json"] == {"answer": "staging", "params": {"ref": "spring", "n": "3"}}
+    answered = json.loads(fake_redis.streams[_TRANSCRIPT_KEY][0][1]["data"])
+    assert fake_httpx.calls[0]["json"] == {
+        "answer": "staging",
+        "medium_message_id": answered["id"],
+        "params": {"ref": "spring", "n": "3"},
+    }
 
 
 async def test_answer_with_over_limit_session_params_is_a_422_and_keeps_the_record(
@@ -168,8 +177,8 @@ async def test_answer_forwards_a_form_object(web_env, stub_app, registered_sessi
     resp = await _handler(stub_app, _ANSWER)(_answer_request(answer=answer))
 
     assert resp.status_code == 200
-    assert fake_httpx.calls[0]["json"] == {"answer": answer}
     answered = json.loads(registered_session.streams[_TRANSCRIPT_KEY][0][1]["data"])
+    assert fake_httpx.calls[0]["json"] == {"answer": answer, "medium_message_id": answered["id"]}
     assert answered["answer"] == answer
 
 
@@ -232,7 +241,8 @@ async def test_answer_forwards_every_scalar_shape(
     fake_httpx.responses.append(response(200, json={"data": {"status": "answered"}}))
     resp = await _handler(stub_app, _ANSWER)(_answer_request(answer=answer))
     assert resp.status_code == 200
-    assert fake_httpx.calls[0]["json"] == {"answer": answer}
+    answered = json.loads(registered_session.streams[_TRANSCRIPT_KEY][0][1]["data"])
+    assert fake_httpx.calls[0]["json"] == {"answer": answer, "medium_message_id": answered["id"]}
 
 
 async def test_answer_unknown_question_404(web_env, stub_app, registered_session: FakeRedis):
@@ -310,7 +320,7 @@ async def test_answer_door_400_non_json_body_is_never_relayed_to_the_visitor(
         resp = await _handler(stub_app, _ANSWER)(_answer_request(answer="x"))
 
     assert resp.status_code == 400
-    assert _body(resp)["error"] == "the answer was refused"
+    assert _body(resp) == {"error": "the answer was refused", "code": "answer_refused"}
     assert "internal-app-07" not in json.dumps(_body(resp))
     assert any("internal-app-07" in r.getMessage() for r in caplog.records)
 
@@ -322,7 +332,7 @@ async def test_answer_door_400_json_without_the_error_envelope_is_never_relayed(
     fake_httpx.responses.append(response(400, json={"detail": "no error key"}))
     resp = await _handler(stub_app, _ANSWER)(_answer_request(answer="x"))
     assert resp.status_code == 400
-    assert _body(resp)["error"] == "the answer was refused"
+    assert _body(resp) == {"error": "the answer was refused", "code": "answer_refused"}
 
 
 async def test_a_refused_answer_is_only_restored_so_many_times(
@@ -340,13 +350,22 @@ async def test_a_refused_answer_is_only_restored_so_many_times(
     for _ in range(2):
         refused = await handler(_answer_request(answer="nope"))
         assert refused.status_code == 400
-        assert _body(refused)["error"] == "answer does not match a select question"
+        assert _body(refused) == {
+            "error": "answer does not match a select question",
+            "code": "answer_refused",
+            "reason": "answer does not match a select question",
+        }
 
     with caplog.at_level("ERROR"):
         spent = await handler(_answer_request(answer="nope"))
 
     assert spent.status_code == 400
-    assert _body(spent)["error"].endswith("; that question can no longer be answered")
+    # The spent cap is a code, never an English tail on the door's reason.
+    assert _body(spent) == {
+        "error": "answer does not match a select question",
+        "code": "answer_retries_spent",
+        "reason": "answer does not match a select question",
+    }
     # The record is left dropped — a sane state: the ask resolves by its own timeout.
     assert "channel:web:question:int-1" not in registered_session.store
     assert any("already been refused" in r.getMessage() for r in caplog.records)

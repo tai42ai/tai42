@@ -554,3 +554,22 @@ def test_interaction_expiry_at_normalized_to_utc():
     assert req.expiry_at is not None
     assert req.expiry_at.tzinfo == UTC
     assert req.expiry_at.hour == 10
+
+
+def test_interaction_form_refuses_a_range_start_naming_an_undeclared_property():
+    schema = {"type": "object", "properties": {"end": {"type": "string", "format": "date", "rangeStart": "ghost"}}}
+    with pytest.raises(ValidationError, match="rangeStart names undeclared property 'ghost'"):
+        _interaction(answer_format=AnswerFormat.FORM, format_payload={"schema": schema})
+
+
+def test_interaction_form_refuses_a_time_of_on_a_field_that_is_not_a_time():
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+            "note": {"type": "string", "timeOf": "end"},
+        },
+    }
+    with pytest.raises(ValidationError, match="property 'note' carries timeOf but is not a time property"):
+        _interaction(answer_format=AnswerFormat.FORM, format_payload={"schema": schema})

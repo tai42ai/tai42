@@ -24,7 +24,14 @@ from tai42_kit.net.media_faults import MEDIA_FETCH_AND_INGEST_FAULTS, media_faul
 from tai42_kit.settings import require_secret
 
 from tai42_channel_telegram.client import TelegramFilePermanentError, get_file
-from tai42_channel_telegram.inbound_bridge import _bridge, _ignored, _our_identity, _resolve_or_bridge
+from tai42_channel_telegram.inbound_bridge import (
+    _bridge,
+    _ignored,
+    _message_medium_id,
+    _no_message_id,
+    _our_identity,
+    _resolve_or_bridge,
+)
 from tai42_channel_telegram.settings import TelegramSettings
 
 logger = logging.getLogger(__name__)
@@ -54,6 +61,8 @@ class _MediaMessage(NamedTuple):
     chat_id: int
     member: _MediaMember
     caption: str | None
+    # The ``message_id`` the message quotes, ``None`` when it quotes none.
+    reply_to_medium_message_id: str | None
 
 
 class _MediaSpec(NamedTuple):
@@ -169,13 +178,18 @@ async def _bridge_media(
     update_id = update.get("update_id")
     if not isinstance(update_id, int):
         return JSONResponse({"error": "update carries no integer update_id"}, status_code=400)
+    medium_message_id = _message_medium_id(message)
+    if medium_message_id is None:
+        return _no_message_id()
 
     member = media.member
     try:
         file_path = await get_file(token, member.file_id)
     except TelegramFilePermanentError as exc:
         logger.warning("telegram inbound: getFile permanently failed for chat_id=%s: %s", media.chat_id, exc)
-        return await _reject_media(settings, media, update, InboundRejectionReason.COULD_NOT_RECEIVE)
+        return await _reject_media(
+            settings, media, update, InboundRejectionReason.COULD_NOT_RECEIVE, medium_message_id=medium_message_id
+        )
 
     file_url = f"{settings.api_base_url}/file/bot{token}/{file_path}"
     origin = MediaOrigin(channel_id="telegram", participant_identity=str(media.chat_id), message_id=str(update_id))
@@ -192,7 +206,9 @@ async def _bridge_media(
     except MEDIA_FETCH_AND_INGEST_FAULTS as exc:
         if media_fault_is_transient(exc):
             raise
-        return await _reject_media(settings, media, update, media_rejection_reason(exc))
+        return await _reject_media(
+            settings, media, update, media_rejection_reason(exc), medium_message_id=medium_message_id
+        )
 
     text = media.caption or inbound_media_placeholder(member.kind, filename=ingested.item.filename, voice=member.voice)
     params = build_inbound_media_params(
@@ -207,12 +223,25 @@ async def _bridge_media(
         size=ingested.size,
     )
     return await _resolve_or_bridge(
-        settings, media.chat, media.chat_id, text, message, update, params=params, attachments=[ingested.item]
+        settings,
+        media.chat,
+        media.chat_id,
+        text,
+        message,
+        update,
+        params=params,
+        attachments=[ingested.item],
+        reply_to_medium_message_id=media.reply_to_medium_message_id,
     )
 
 
 async def _reject_media(
-    settings: TelegramSettings, media: _MediaMessage, update: dict[str, object], reason: InboundRejectionReason
+    settings: TelegramSettings,
+    media: _MediaMessage,
+    update: dict[str, object],
+    reason: InboundRejectionReason,
+    *,
+    medium_message_id: str,
 ) -> Response:
     """Notify the participant a media could not be bridged, preserve any caption, and ack.
 
@@ -236,5 +265,13 @@ async def _reject_media(
         # A rejected media that was a reply to a pending ask never resolves it (the media does not
         # exist): the caption bridges as a fresh turn and the ask stays pending.
         text_params = build_inbound_media_params(door="telegram", kind=member.kind, mime_type=member.declared_mime)
-        return await _bridge(settings, media.chat_id, media.caption, update, params=text_params)
+        return await _bridge(
+            settings,
+            media.chat_id,
+            media.caption,
+            update,
+            medium_message_id=medium_message_id,
+            reply_to_medium_message_id=media.reply_to_medium_message_id,
+            params=text_params,
+        )
     return _ignored("media rejected")

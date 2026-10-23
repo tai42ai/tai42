@@ -310,7 +310,7 @@ async def test_hook_run_recorded_of_a_caller_asking_tool_records_the_ask_entries
     tools.result = SuspendedInteraction(interaction_id="c1", interaction_ids=["c1"], caller_interaction_ids=["c1"])
 
     with state_context(StateContext(door="conversation", candidates=_CANDIDATES, actor="u-1")):
-        await ops.run_recorded("alpha", {})
+        await ops.run_recorded("alpha", {}, crash_resume_eligible=False)
 
     entries = await ops.list_tool_runs("alpha")
     assert [entry["status"] for entry in entries] == ["parked"]
@@ -329,7 +329,7 @@ async def test_hook_run_recorded_of_a_user_parking_tool_records_the_suspended_se
     tools.result = SuspendedInteraction(interaction_id="u-hook")
 
     with state_context(StateContext(door="conversation", candidates=_CANDIDATES, actor="u-1")):
-        await ops.run_recorded("alpha", {})
+        await ops.run_recorded("alpha", {}, crash_resume_eligible=False)
 
     entries = await ops.list_tool_runs("alpha")
     assert [entry["status"] for entry in entries] == ["parked"]
@@ -358,7 +358,7 @@ async def test_hook_run_recorded_of_a_failed_terminal_records_the_outcome_and_re
 
     tools.run_tool = _raise
     with pytest.raises(RunTerminalFailed) as raised:
-        await ops.run_recorded("alpha", {})
+        await ops.run_recorded("alpha", {}, crash_resume_eligible=False)
     assert raised.value is failure
 
     entries = await ops.list_tool_runs("alpha")

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
+import string
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Annotated, Final, Literal
 from urllib.parse import urlsplit
 
-from pydantic import AfterValidator, ConfigDict, Field, RootModel, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 
 from tai42_contract.conversation_target import ConversationTargetKind
 from tai42_contract.conversations.overlap import OverlapPolicy
@@ -77,6 +78,81 @@ def _require_https_url(value: str) -> str:
     return value
 
 
+# The fields a route's ``pairing_code`` reply may reference: the fresh code and its expiry.
+_PAIRING_CODE_FIELDS: Final = frozenset({"pairing_code", "expires_at"})
+
+
+def _check_pairing_code_template(template: str) -> str:
+    # Parsed exactly as :meth:`str.format` renders it, so a malformed template, an auto-numbered
+    # ``{}``, a foreign field, or a field carrying a conversion or format spec is refused at the
+    # write, never rendered wrong or raised when the reply is drawn. The code itself must appear:
+    # a code reply without the code tells the end user nothing.
+    try:
+        parsed = list(string.Formatter().parse(template))
+    except ValueError as exc:
+        raise ValueError(f"reply_texts.pairing_code is not a valid template: {exc}") from exc
+    names: set[str] = set()
+    for _literal, field_name, format_spec, conversion in parsed:
+        if field_name is None:
+            continue
+        if field_name not in _PAIRING_CODE_FIELDS or conversion is not None or format_spec:
+            raise ValueError(
+                "reply_texts.pairing_code may reference only the {pairing_code} and {expires_at} fields, "
+                f"got an unsupported field {field_name!r}"
+            )
+        names.add(field_name)
+    if "pairing_code" not in names:
+        raise ValueError("reply_texts.pairing_code must contain the {pairing_code} field")
+    return template
+
+
+class ReplyTexts(BaseModel):
+    """The caller's words for the platform's fixed participant replies on one route. Frozen, strict keys.
+
+    ``error`` is sent when a turn fails and the target gave no reply; ``slow_down`` when an address
+    is over the turn cap; ``pairing_linked`` when a pair code was redeemed and the two persons
+    merged; ``pairing_unlinked`` when ``/unlink`` detached the address; ``pairing_not_linked`` when
+    ``/unlink`` came from an address linked to nothing; ``pairing_code_invalid`` when a redeem was
+    refused; ``pairing_code`` is the ``/link`` reply carrying the fresh code, a template that MUST
+    reference ``{pairing_code}`` and may reference ``{expires_at}`` (the code's ISO-8601 expiry),
+    with no conversion or format spec; ``pairing_link_unavailable`` when a redeem met a person being
+    erased (its code is consumed, so the reply asks for a new one); ``pairing_unlink_unavailable``
+    when ``/unlink`` met the sender's person being erased; ``rejected_unsupported_type`` / ``rejected_too_large`` /
+    ``rejected_could_not_receive`` are the notices for an inbound message the channel cannot
+    bridge, a file over the cap, and a file the channel could not fetch. Every member but
+    ``pairing_code`` is literal text: a ``{`` in it is drawn as written. Each is a
+    :data:`~tai42_contract.interactions.ReplyText` in the line's language; absent, the built-in
+    English reply is sent. An empty catalogue names nothing and is refused; an unknown key is
+    refused.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    error: ReplyText | None = None
+    slow_down: ReplyText | None = None
+    pairing_linked: ReplyText | None = None
+    pairing_unlinked: ReplyText | None = None
+    pairing_not_linked: ReplyText | None = None
+    pairing_code_invalid: ReplyText | None = None
+    pairing_code: ReplyText | None = None
+    pairing_link_unavailable: ReplyText | None = None
+    pairing_unlink_unavailable: ReplyText | None = None
+    rejected_unsupported_type: ReplyText | None = None
+    rejected_too_large: ReplyText | None = None
+    rejected_could_not_receive: ReplyText | None = None
+
+    @field_validator("pairing_code")
+    @classmethod
+    def _pairing_code_template(cls, value: str | None) -> str | None:
+        return None if value is None else _check_pairing_code_template(value)
+
+    @model_validator(mode="after")
+    def _at_least_one_set(self) -> ReplyTexts:
+        if all(getattr(self, name) is None for name in type(self).model_fields):
+            raise ValueError("reply_texts must set at least one member")
+        return self
+
+
 class _ConversationRouteFields(ParkableDoorMixin):
     """The client-facing create/edit body for a conversation route: the fields a caller supplies.
 
@@ -143,17 +219,28 @@ class _ConversationRouteFields(ParkableDoorMixin):
                             "a geographic point the participant shared, present only when the inbound carried one",
                         ),
                         (
+                            "reply_to",
+                            "the earlier message this one replies to, {message_id, status, text}; present only when "
+                            "the inbound quoted one",
+                        ),
+                        (
                             "messages",
                             "overlap deliver=all: the batch carried into this turn, in acceptance order, "
-                            "each {id, text, accepted_at} (+ form/form_tag/attachments/location when that message "
-                            "carried them)",
+                            "each {id, text, accepted_at} (+ form/form_tag/attachments/location/reply_to when that "
+                            "message carried them)",
                         ),
                         (
                             "superseded",
                             "overlap deliver=all: messages dropped in favour of this turn, in the same shape; "
                             "present only when non-empty",
                         ),
-                        ("turn", "the turn ids: {id, inbound: {id, kind, source}}"),
+                        (
+                            "turn",
+                            "the turn: {id, inbound: {id, kind, source}, subject: {target_kind, target_name, person, "
+                            "thread, locale}, reply_window: {state, closes_at}}; reply_window.state is open (a "
+                            "free-form reply is allowed until closes_at), closed, or none (no window on this channel "
+                            "or address)",
+                        ),
                         ("event", "an event turn's structured payload {id, kind, payload}; absent on a message turn"),
                     ],
                     returns="the JSON object dispatched as the started run's kwargs; null starts nothing",
@@ -174,9 +261,22 @@ class _ConversationRouteFields(ParkableDoorMixin):
                     variables=[
                         (
                             "turn",
-                            "the turn ids and subject this reply answers ({id, inbound, subject}); null when an "
-                            "out-of-band delivery's originating record has aged out",
-                            {"id": "m-1", "inbound": {"id": "i-1", "kind": "message", "source": "api"}},
+                            "the turn this reply answers ({id, inbound, subject, reply_window}); reply_window "
+                            "{state, closes_at} is read when the turn starts, or at delivery for a late reply: open "
+                            "until closes_at, closed, or none; null when an out-of-band delivery's originating record "
+                            "has aged out",
+                            {
+                                "id": "m-1",
+                                "inbound": {"id": "i-1", "kind": "message", "source": "chat-line"},
+                                "subject": {
+                                    "target_kind": "agent",
+                                    "target_name": "assistant",
+                                    "person": None,
+                                    "thread": "t-1",
+                                    "locale": None,
+                                },
+                                "reply_window": {"state": "open", "closes_at": "2026-01-02T09:30:00Z"},
+                            },
                         ),
                         (
                             "asks",
@@ -205,12 +305,11 @@ class _ConversationRouteFields(ParkableDoorMixin):
     # per-hour turn rate this route's per-address buckets run at, or ``None`` to run at the
     # global rate.
     turns_per_hour_override: int | None = Field(default=None, gt=0)
-    # The participant-facing reply sent when a conversational turn on this route fails and the
-    # target supplied no reply of its own; ``None`` uses the built-in English default. LITERAL
-    # text — no placeholders/templating. Non-blank when set: a whitespace-only reply would
-    # deliver an empty message where the default was intended. Bounded by the shared
-    # :data:`~tai42_contract.interactions.REPLY_TEXT_MAX_CHARS`.
-    error_reply_text: ReplyText | None = None
+    # The catalogue of the platform's fixed participant replies on this line, in the line's
+    # language; ``None`` or an unset member draws the built-in English. A member whose moment
+    # never comes on this line (a pairing member on a route whose target does not pair) is never
+    # drawn.
+    reply_texts: ReplyTexts | None = None
     # The operator-declared default locale for templated reply parts when the turn states none;
     # the last fallback under a per-turn or stored-contact locale, canonicalized through the one
     # locale seam (a malformed tag is rejected loudly, never guessed). ``None`` declares no

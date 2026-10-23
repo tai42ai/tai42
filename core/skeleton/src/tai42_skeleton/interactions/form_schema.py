@@ -25,8 +25,10 @@ lowercase weekday names that are excluded). A date RANGE is TWO ordinary date
 fields: the END field names its start field in ``rangeStart`` and carries the
 span bounds ``minDays``/``maxDays`` (inclusive day counts). Each field's answer
 stays the plain date string its type declares; the END's ordering + span is
-enforced at the single answer facet from the two submitted values. A date key on a
-non-date property, ``maxDate`` before ``minDate``, ``rangeStart`` naming an
+enforced at the single answer facet from the two submitted values. The build-time
+rules of these keys are the contract's one check
+(:func:`~tai42_contract.interactions.models.form_dates.check_form_date_rules`): a date
+key on a non-date property, ``maxDate`` before ``minDate``, ``rangeStart`` naming an
 undeclared or non-date property, ``minDays`` above ``maxDays``, or a span key on a
 field that declares no ``rangeStart`` is refused loudly.
 
@@ -90,14 +92,22 @@ from __future__ import annotations
 import datetime
 import math
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any, TypeGuard
 
 import jsonschema
-from tai42_contract.interactions.models import FormControl, FormInputMode, FormShapeKind, check_form_property_names
+from tai42_contract.channels import Channel
+from tai42_contract.interactions.models import (
+    FormControl,
+    FormInputMode,
+    FormShapeKind,
+    check_form_date_rules,
+    check_form_property_names,
+)
 from tai42_kit.interactions.form_vocabulary import (
-    DATE_CONSTRAINT_KEYS,
     FORM_WEEKDAYS,
+    FORMAT_PATTERNS,
+    TIME_OF_KEY,
     VISIBLE_WHEN_OPS,
     drawn_number_bounds,
 )
@@ -121,6 +131,8 @@ _STRING_FORMATS = ("date", "time", "date-time", "email")
 _DATE_FORMATS = ("date", "date-time")
 
 _DATE_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
+_DATE_TIME_RE = re.compile(FORMAT_PATTERNS["date-time"])
+_TIME_RE = re.compile(FORMAT_PATTERNS["time"])
 
 
 def _is_iso_date(value: Any) -> bool:
@@ -339,62 +351,6 @@ def _validate_number_bounds(name: str, prop: dict[str, Any]) -> None:
         raise ValueError(f"form schema property {name!r} has bounds no {what} can meet ({declared})")
 
 
-def _check_bound_date(name: str, key: str, value: Any) -> None:
-    if not _is_iso_date(value):
-        raise ValueError(f"form schema property {name!r} {key} must be a YYYY-MM-DD date, got {value!r}")
-
-
-def _validate_date_bounds(name: str, prop: dict[str, Any]) -> None:
-    if "minDate" in prop:
-        _check_bound_date(name, "minDate", prop["minDate"])
-    if "maxDate" in prop:
-        _check_bound_date(name, "maxDate", prop["maxDate"])
-    if "minDate" in prop and "maxDate" in prop and prop["maxDate"] < prop["minDate"]:
-        raise ValueError(
-            f"form schema property {name!r} has maxDate {prop['maxDate']!r} before minDate {prop['minDate']!r}"
-        )
-    if "unavailableDates" in prop:
-        entries = prop["unavailableDates"]
-        if not isinstance(entries, list):
-            raise ValueError(f"form schema property {name!r} unavailableDates must be a list")
-        for entry in entries:
-            if not (isinstance(entry, str) and (_is_iso_date(entry) or entry.lower() in FORM_WEEKDAYS)):
-                raise ValueError(
-                    f"form schema property {name!r} unavailableDates entries must be a YYYY-MM-DD date or a "
-                    f"weekday name ({', '.join(FORM_WEEKDAYS)}), got {entry!r}"
-                )
-
-
-def _validate_range_span(name: str, prop: dict[str, Any]) -> None:
-    has_range = "rangeStart" in prop
-    if has_range and (not isinstance(prop["rangeStart"], str) or not prop["rangeStart"].strip()):
-        raise ValueError(f"form schema property {name!r} rangeStart must name a start date property")
-    for span in ("minDays", "maxDays"):
-        if span not in prop:
-            continue
-        if not has_range:
-            raise ValueError(f"form schema property {name!r} carries {span} but declares no rangeStart")
-        value = prop[span]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"form schema property {name!r} {span} must be a non-negative integer, got {value!r}")
-    if "minDays" in prop and "maxDays" in prop and prop["minDays"] > prop["maxDays"]:
-        raise ValueError(f"form schema property {name!r} has minDays {prop['minDays']} above maxDays {prop['maxDays']}")
-
-
-def _validate_date_constraints(name: str, prop: dict[str, Any]) -> None:
-    # Shape-check the optional date-constraint keys on a property. Every key requires a
-    # date property; the values must be well-formed; a range END field carries a
-    # ``rangeStart`` and its span bounds, and a span key without ``rangeStart`` is a bug.
-    present = [key for key in DATE_CONSTRAINT_KEYS if key in prop]
-    if present and not _prop_is_date(prop):
-        raise ValueError(
-            f"form schema property {name!r} carries date constraints {present} but is not a date property "
-            f"(a 'string' with format 'date'/'date-time')"
-        )
-    _validate_date_bounds(name, prop)
-    _validate_range_span(name, prop)
-
-
 def _validate_visible_when(name: str, prop: dict[str, Any]) -> None:
     # Shape-check the optional ``visibleWhen`` predicate on a property (its referenced
     # field's existence is cross-checked once all properties are known).
@@ -454,7 +410,6 @@ def _validate_property(name: str, prop: Any) -> None:
         _validate_array_items(name, prop)
     elif ptype in _SCALAR_TYPES:
         _validate_scalar_string(name, prop, ptype)
-        _validate_date_constraints(name, prop)
     else:
         raise ValueError(
             f"form schema property {name!r} has type {ptype!r}; a channel form allows only a scalar "
@@ -465,40 +420,11 @@ def _validate_property(name: str, prop: Any) -> None:
     _validate_visible_when(name, prop)
 
 
-def _check_range_start(name: str, start: str, props: dict[str, dict], start_to_end: dict[str, str]) -> None:
-    # Resolve one ``rangeStart`` reference: it must name a declared DATE property (not itself),
-    # that property must be a plain start (not another range's END — a chain is ambiguous), and
-    # no earlier END may already name the same start (two ENDs on one start are ambiguous too).
-    if start == name:
-        raise ValueError(f"form schema property {name!r} rangeStart cannot name itself")
-    target = props.get(start)
-    if target is None:
-        raise ValueError(f"form schema property {name!r} rangeStart names undeclared property {start!r}")
-    if not _prop_is_date(target):
-        raise ValueError(f"form schema property {name!r} rangeStart names non-date property {start!r}")
-    target_start = target.get("rangeStart")
-    if isinstance(target_start, str) and target_start:
-        raise ValueError(
-            f"form schema property {name!r} rangeStart names {start!r}, which is already paired with {target_start!r}"
-        )
-    if start in start_to_end:
-        raise ValueError(
-            f"form schema property {name!r} rangeStart names {start!r}, which is already paired "
-            f"with {start_to_end[start]!r}"
-        )
-    start_to_end[start] = name
-
-
 def _check_cross_references(fields: list[tuple[str, dict, bool]]) -> None:
-    # Resolve the property references the per-property walk could not: a ``rangeStart``
-    # must name a declared, plain DATE start (:func:`_check_range_start`), and a
-    # ``visibleWhen.field`` must name another declared property.
+    # Resolve the property references the per-property walk could not: a ``visibleWhen.field``
+    # must name another declared property.
     props = {name: prop for name, prop, _ in fields}
-    start_to_end: dict[str, str] = {}
     for name, prop, _ in fields:
-        start = prop.get("rangeStart")
-        if isinstance(start, str) and start:
-            _check_range_start(name, start, props, start_to_end)
         predicate = prop.get("visibleWhen")
         if isinstance(predicate, dict):
             field = predicate.get("field")
@@ -554,10 +480,13 @@ def check_form_schema_rules(schema: dict[str, Any]) -> None:
     resolving inside the schema (no schema is fetched) and no cycle of references that never
     descends into the answer (:func:`~tai42_kit.utils.data.json_schema_util.check_schema_rules`).
     No top-level property may be named ``__proto__``, the one name a form drawn in a browser
-    cannot keep (:func:`~tai42_contract.interactions.models.forms.check_form_property_names`).
+    cannot keep (:func:`~tai42_contract.interactions.models.forms.check_form_property_names`), and
+    its date keys must make sense
+    (:func:`~tai42_contract.interactions.models.form_dates.check_form_date_rules`).
     A form schema passing here is one every answer can be judged against.
     """
     check_form_property_names(schema)
+    check_form_date_rules(schema)
     check_schema_rules(schema, jsonschema.Draft202012Validator, subject="form schema")
 
 
@@ -591,11 +520,27 @@ def validate_channel_form_schema(schema: dict) -> None:
     channel_form_fields(schema)
 
 
+def check_channel_form(channel_obj: Channel, schema: dict[str, Any], question: str) -> None:
+    """Refuse a form ``schema`` the channel ``channel_obj`` cannot draw with ``question``.
+
+    The one channel form check every door that draws a form on a channel runs: the shared
+    subset walk (:func:`validate_channel_form_schema`), then the channel's OPTIONAL
+    ``validate_form_schema(schema, question)`` hook, which enforces the medium's own limits
+    (reserved names, per-medium caps, question-text caps). The hook is not called when the walk
+    refuses. Raises the walk's or the hook's ``ValueError`` unchanged.
+    """
+    validate_channel_form_schema(schema)
+    validate_form_schema = getattr(channel_obj, "validate_form_schema", None)
+    if validate_form_schema is not None:
+        validate_form_schema(schema, question)
+
+
 def _answer_date(value: Any) -> datetime.date | None:
     """The calendar date a submitted date/date-time answer names, or ``None`` when it is not one.
 
     A ``YYYY-MM-DD`` value yields that date; an RFC 3339 ``date-time`` yields its date part
-    (compared against the ``YYYY-MM-DD`` bounds on the date part).
+    (compared against the ``YYYY-MM-DD`` bounds on the date part). The order and span of a range
+    of two ``date-time`` ends read the instants in the START's offset instead (:func:`_range_error`).
     """
     if not isinstance(value, str):
         return None
@@ -605,6 +550,37 @@ def _answer_date(value: Any) -> datetime.date | None:
         return datetime.datetime.fromisoformat(value.upper()).date()
     except ValueError:
         return None
+
+
+def _answer_instant(value: Any) -> datetime.datetime | None:
+    """The offset-aware instant a submitted RFC 3339 ``date-time`` names, or ``None`` when it is not one."""
+    if not isinstance(value, str) or not _DATE_TIME_RE.match(value):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value.upper())
+    except ValueError:
+        return None
+
+
+def _answer_time(value: Any) -> datetime.time | None:
+    """The wall-clock time a submitted ``HH:MM[:SS]`` value names, or ``None`` when it is not one."""
+    if not isinstance(value, str) or not _TIME_RE.match(value):
+        return None
+    try:
+        return datetime.time.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def paired_time(date_name: str, properties: Mapping[str, Any]) -> str | None:
+    """The name of the ``timeOf`` time paired with the date ``date_name`` among ``properties``, else ``None``.
+
+    The build rules admit at most one time per date, so the first match is the one.
+    """
+    for name, prop in properties.items():
+        if isinstance(prop, Mapping) and prop.get(TIME_OF_KEY) == date_name and str(name) != date_name:
+            return str(name)
+    return None
 
 
 #: One broken date constraint: the date field, the constraint's kind and the bound it names.
@@ -629,20 +605,8 @@ def _date_bounds_error(prop: dict[str, Any], the_date: datetime.date) -> tuple[F
     return None
 
 
-def _range_error(
-    prop: dict[str, Any], the_date: datetime.date, answer: dict[str, Any]
-) -> tuple[FormShapeKind, dict[str, Any]] | None:
-    # The kind and bound of a range END field whose end precedes its start or whose inclusive
-    # day-count falls outside ``minDays``/``maxDays``, else None (no range, or within bounds).
-    start_name = prop.get("rangeStart")
-    if not (isinstance(start_name, str) and start_name):
-        return None
-    start_date = _answer_date(answer.get(start_name))
-    if start_date is None:
-        return None
-    if the_date < start_date:
-        return FormShapeKind.RANGE_ORDER, {"rangeStart": start_name}
-    span = (the_date - start_date).days + 1
+def _span_error(prop: dict[str, Any], span: int) -> tuple[FormShapeKind, dict[str, Any]] | None:
+    # The kind and bounds of an inclusive day-count outside ``minDays``/``maxDays``, else None.
     minimum_days = prop.get("minDays")
     maximum_days = prop.get("maxDays")
     too_short = isinstance(minimum_days, int) and span < minimum_days
@@ -653,13 +617,79 @@ def _range_error(
     return FormShapeKind.RANGE_SPAN, {**bounds, "days": span}
 
 
+def _instant_range_error(
+    prop: dict[str, Any], start_name: str, start_value: Any, end_value: Any
+) -> tuple[FormShapeKind, dict[str, Any]] | None:
+    # A range of two ``date-time`` ends, judged in one frame, the START's offset: the END instant
+    # before the START instant breaks the order, and the span counts the calendar days between the
+    # two dates read in that offset (so an in-order range always spans at least one day).
+    start_at = _answer_instant(start_value)
+    end_at = _answer_instant(end_value)
+    if start_at is None or end_at is None:
+        return None
+    end_local = end_at.astimezone(start_at.tzinfo)
+    if end_at < start_at:
+        by = "date" if end_local.date() < start_at.date() else "time"
+        return FormShapeKind.RANGE_ORDER, {"rangeStart": start_name, "by": by}
+    return _span_error(prop, (end_local.date() - start_at.date()).days + 1)
+
+
+def _range_error(
+    name: str, prop: dict[str, Any], answer: dict[str, Any], properties: dict[str, Any]
+) -> DateConstraintError | None:
+    # The broken order or span of a range END field ``name``, else None (no range, or within bounds).
+    # A pair of two ``date-time`` ends is judged by instant; any other pair by each value's written
+    # date, its span counted in days. Two ``date`` ends on one date that each carry a readable
+    # ``timeOf`` time are then ordered by those times, the error keyed to the END's time.
+    start_name = prop.get("rangeStart")
+    if not (isinstance(start_name, str) and start_name):
+        return None
+    start_prop = properties.get(start_name)
+    start_format = start_prop.get("format") if isinstance(start_prop, dict) else None
+    if prop.get("format") == "date-time" and start_format == "date-time":
+        error = _instant_range_error(prop, start_name, answer.get(start_name), answer.get(name))
+        return (name, *error) if error is not None else None
+    start_date = _answer_date(answer.get(start_name))
+    end_date = _answer_date(answer.get(name))
+    if start_date is None or end_date is None:
+        return None
+    if end_date < start_date:
+        return name, FormShapeKind.RANGE_ORDER, {"rangeStart": start_name, "by": "date"}
+    if end_date == start_date:
+        time_error = _time_order_error(name, start_name, answer, properties)
+        if time_error is not None:
+            return time_error
+    error = _span_error(prop, (end_date - start_date).days + 1)
+    return (name, *error) if error is not None else None
+
+
+def _time_order_error(
+    end_name: str, start_name: str, answer: dict[str, Any], properties: dict[str, Any]
+) -> DateConstraintError | None:
+    # A same-date range whose END time is before its START time, keyed to the END's time; None when
+    # either end has no paired time, or a time is absent or not a readable ``HH:MM[:SS]`` (the
+    # dates alone decide then; the time's own ``format`` check refuses an unreadable value).
+    start_time_name = paired_time(start_name, properties)
+    end_time_name = paired_time(end_name, properties)
+    if start_time_name is None or end_time_name is None:
+        return None
+    start_time = _answer_time(answer.get(start_time_name))
+    end_time = _answer_time(answer.get(end_time_name))
+    if start_time is None or end_time is None or end_time >= start_time:
+        return None
+    return end_time_name, FormShapeKind.RANGE_ORDER, {"rangeStart": start_name, "by": "time"}
+
+
 def date_constraint_errors(schema: dict[str, Any], answer: dict[str, Any]) -> Iterator[DateConstraintError]:
     """Yield every date field of ``answer`` that breaks a platform date constraint, in schema order.
 
     For each date property present in the answer: the value must fall within its
     ``minDate``/``maxDate`` (inclusive) and off its ``unavailableDates``. For a range END
     field (one declaring ``rangeStart``) the end must be on or after its start and the
-    inclusive day-count between them within ``minDays``/``maxDays``. A value that is not a date
+    inclusive day-count between them within ``minDays``/``maxDays``. Two ``date-time`` ends are
+    ordered by instant (``by: "time"`` when they share a date in the START's offset); two ``date``
+    ends on one date are ordered by their ``timeOf`` times when both are given, and that error is
+    keyed to the END's time field (``by: "time"``). A value that is not a date
     is left to the schema's own ``format`` check. Each item is ``(field, kind, params)`` — the
     first broken constraint of that field, its :class:`FormShapeKind` and the bound it names.
     """
@@ -673,9 +703,13 @@ def date_constraint_errors(schema: dict[str, Any], answer: dict[str, Any]) -> It
         the_date = _answer_date(answer.get(key))
         if the_date is None:
             continue
-        error = _date_bounds_error(prop, the_date) or _range_error(prop, the_date, answer)
+        bounds = _date_bounds_error(prop, the_date)
+        if bounds is not None:
+            yield key, bounds[0], bounds[1]
+            continue
+        error = _range_error(key, prop, answer, properties)
         if error is not None:
-            yield key, error[0], error[1]
+            yield error
 
 
 def date_constraint_mismatch(schema: dict[str, Any], answer: dict[str, Any]) -> tuple[str, str] | None:

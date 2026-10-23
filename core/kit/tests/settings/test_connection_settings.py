@@ -8,7 +8,30 @@ import pytest
 from pydantic import SecretStr, ValidationError
 from pydantic_settings import SettingsConfigDict
 
-from tai42_kit.clients.settings import PostgresConnectionSettings, RedisConnectionSettings
+from tai42_kit.clients.settings import (
+    PostgresConnectionOptions,
+    PostgresConnectionSettings,
+    RedisConnectionOptions,
+    RedisConnectionSettings,
+    RedisConnectionSettingsBase,
+)
+
+
+class TestRedisConnectionSettingsBase:
+    def test_its_kwargs_are_the_url_pool_size_prefix_and_options(self):
+        assert RedisConnectionSettingsBase(redis_url="redis://x", retry_attempts=2).client_kwargs() == {
+            "url": "redis://x",
+            "max_connections": None,
+            "env_prefix": "",
+            "retry_attempts": 2,
+        }
+
+    def test_a_store_reads_its_decode_mode_from_its_own_prefix(self, monkeypatch):
+        class StoreSettings(RedisConnectionSettings):
+            model_config = SettingsConfigDict(env_prefix="MYSTORE_")
+
+        monkeypatch.setenv("MYSTORE_DECODE_RESPONSES", "false")
+        assert StoreSettings(redis_url="redis://x").client_kwargs()["decode_responses"] is False
 
 
 class TestRedisConnectionSettings:
@@ -62,6 +85,33 @@ class TestRedisConnectionSettings:
     def test_socket_connect_timeout_must_be_positive(self):
         with pytest.raises(ValidationError):
             RedisConnectionSettings(redis_url="redis://x", socket_connect_timeout=0)
+
+
+class TestRedisConnectionOptions:
+    def test_connection_options_carry_only_the_knobs_that_are_set(self):
+        assert RedisConnectionOptions(retry_attempts=2, retry_on_timeout=True).connection_options() == {
+            "retry_attempts": 2,
+            "retry_on_timeout": True,
+        }
+        assert RedisConnectionOptions(socket_timeout=3, socket_connect_timeout=2).connection_options() == {
+            "socket_timeout": 3,
+            "socket_connect_timeout": 2,
+        }
+
+    def test_default_options_are_empty(self):
+        assert RedisConnectionOptions().connection_options() == {}
+
+    def test_the_settings_compose_the_options(self):
+        assert issubclass(RedisConnectionSettings, RedisConnectionOptions)
+        settings = RedisConnectionSettings(redis_url="redis://x", retry_attempts=2, socket_timeout=1.5)
+        assert settings.client_kwargs() == {
+            "url": "redis://x",
+            "max_connections": None,
+            "decode_responses": True,
+            "env_prefix": "",
+            "socket_timeout": 1.5,
+            "retry_attempts": 2,
+        }
 
 
 def _pg(**overrides) -> PostgresConnectionSettings:
@@ -167,6 +217,7 @@ class TestPostgresConnectionSettings:
             "dsn": "postgresql://postgres:@localhost:5432/postgres?connect_timeout=10&options=-c%20statement_timeout%3D60000",
             "min_size": 1,
             "max_size": 4,
+            "retry_attempts": 0,
             # A passenger for the pool name, not identity; the unprefixed base carries none.
             "env_prefix": "",
         }
@@ -199,6 +250,28 @@ class TestPostgresConnectionSettings:
     def test_dsn_respects_custom_connect_timeout(self):
         dsn = _pg(pg_user="u", pg_connect_timeout=3).pg_dsn
         assert parse_qs(urlsplit(dsn).query)["connect_timeout"] == ["3"]
+
+    def test_pg_retry_attempts_defaults_to_zero(self):
+        assert PostgresConnectionSettings().pg_retry_attempts == 0
+        assert PostgresConnectionOptions().pg_retry_attempts == 0
+        assert issubclass(PostgresConnectionSettings, PostgresConnectionOptions)
+
+    def test_pg_retry_attempts_is_read_under_the_database_prefix(self, monkeypatch):
+        from tai42_kit.db import database_settings
+
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "h")
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "s3cr3t")
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_RETRY_ATTEMPTS", "3")
+        settings = database_settings("default")
+        assert settings.pg_retry_attempts == 3
+        assert settings.client_kwargs()["retry_attempts"] == 3
+
+    def test_negative_pg_retry_attempts_is_rejected(self):
+        with pytest.raises(ValidationError):
+            PostgresConnectionSettings(pg_retry_attempts=-1)
+
+    def test_client_kwargs_carry_the_retry_attempts(self):
+        assert _pg(pg_retry_attempts=4).client_kwargs()["retry_attempts"] == 4
 
     def test_non_positive_timeouts_are_rejected(self):
         with pytest.raises(ValidationError):

@@ -103,13 +103,21 @@ async def test_crash_resume_re_drive_passes_the_recorded_extras(wired, monkeypat
 
     captured: dict = {}
 
-    async def _fake_run_recorded(tool_name, arguments, *, extras=None) -> None:
-        captured.update(tool_name=tool_name, arguments=arguments, extras=extras)
+    async def _fake_run_recorded(tool_name, arguments, *, extras=None, crash_resume_eligible) -> None:
+        captured.update(
+            tool_name=tool_name, arguments=arguments, extras=extras, crash_resume_eligible=crash_resume_eligible
+        )
 
     monkeypatch.setattr(supervisor, "run_recorded", _fake_run_recorded)
     record = {"tool_name": "alpha", "arguments": json.dumps({"x": 1}), "extras": json.dumps({"warm": "y"})}
     await reconcile._crash_resume("r-x", record)
-    assert captured == {"tool_name": "alpha", "arguments": {"x": 1}, "extras": {"warm": "y"}}
+    # The re-driven record stays crash-resume eligible, so it keeps its tool's flag.
+    assert captured == {
+        "tool_name": "alpha",
+        "arguments": {"x": 1},
+        "extras": {"warm": "y"},
+        "crash_resume_eligible": True,
+    }
 
 
 async def test_crash_resume_re_drive_uses_the_original_runs_secret_capability_not_the_readers(
@@ -131,7 +139,7 @@ async def test_crash_resume_re_drive_uses_the_original_runs_secret_capability_no
 
     seen: dict = {}
 
-    async def _fake_run_recorded(tool_name, arguments, *, extras=None) -> None:
+    async def _fake_run_recorded(tool_name, arguments, *, extras=None, crash_resume_eligible) -> None:
         # The same read ``_SupervisedRunContext.capture`` makes at the top of ``run_recorded``.
         seen["secret_capable"] = caller_may_read_secrets()
 
@@ -178,7 +186,7 @@ async def test_crash_resume_fails_closed_on_the_secret_fence_when_the_key_lost_a
 
     seen: dict = {}
 
-    async def _fake_run_recorded(tool_name, arguments, *, extras=None) -> None:
+    async def _fake_run_recorded(tool_name, arguments, *, extras=None, crash_resume_eligible) -> None:
         seen["secret_capable"] = caller_may_read_secrets()
 
     monkeypatch.setattr(supervisor, "run_recorded", _fake_run_recorded)

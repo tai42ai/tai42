@@ -58,6 +58,7 @@ async def test_deliver_sends_real_force_reply(real_http, fake_redis):
         answer_format="text",
         callback_url="https://example.org/smoke",
         timeout_at=datetime.now(UTC) + timedelta(seconds=120),
+        sensitive=False,
     )
     await TelegramChannel().deliver(delivery)
     assert len(fake_redis.data) == 1
@@ -72,6 +73,7 @@ async def test_deliver_external_sends_url_button(real_http, fake_redis):
         answer_format="external",
         callback_url="https://example.org/smoke",
         timeout_at=datetime.now(UTC) + timedelta(seconds=120),
+        sensitive=False,
     )
     await TelegramChannel().deliver(delivery)
     assert fake_redis.data == {}

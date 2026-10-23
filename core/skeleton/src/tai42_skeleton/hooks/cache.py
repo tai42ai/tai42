@@ -29,9 +29,9 @@ def get_hooks_manager() -> BaseHooksManager:
     ``HOOKS_REDIS_URL`` is configured, else a ``RedisHooksManager``. The singleton
     follows the settings reset — a ``reload_config`` drops it so the next call
     rebuilds against the new ``HOOKS_*`` config. In in-memory mode that means
-    registered hooks live only until the next reload or restart (they are dropped
-    with a loud warning, see ``_reset_hooks_manager``); set ``HOOKS_REDIS_URL`` for
-    durable hooks.
+    registered hooks and kept hook runs live only until the next reload or restart
+    (they are dropped with a loud warning, see ``_reset_hooks_manager``); set
+    ``HOOKS_REDIS_URL`` for durable hooks and hook runs.
     """
     settings = HooksSettings()
     if settings.in_memory:
@@ -39,10 +39,11 @@ def get_hooks_manager() -> BaseHooksManager:
         # surface where in-memory hooks silently no-op across siblings.
         logger.warning(
             "hooks are running IN-MEMORY because HOOKS_REDIS_URL is not set: "
-            "registrations and deliveries are per-process only, so with more than "
-            "one worker (or a separate backend worker) sibling processes will not "
-            "see them; set HOOKS_REDIS_URL for shared state (in-memory is valid only "
-            "for a single worker)."
+            "registrations, deliveries and hook runs are per-process only, so with more "
+            "than one worker (or a separate backend worker) sibling processes will not "
+            "see them, and hook runs do not survive a restart or a config reload; set "
+            "HOOKS_REDIS_URL for shared, durable state (in-memory is valid only for a "
+            "single worker)."
         )
         return InMemoryHooksManager(settings)
     return RedisHooksManager(settings)
@@ -57,17 +58,23 @@ def _reset_hooks_manager() -> None:
     # in-memory sub-MCP store, which is reset-EXEMPT because its purpose is to
     # survive a reload — the asymmetry is intentional, not an inconsistency.
     #
-    # Clearing an in-memory manager drops every in-memory-registered hook. That loss
-    # must not be silent, so peek the live singleton first and warn (naming the hook
-    # count) before clearing. Redis-backed hooks live in Redis, so a Redis manager
-    # reset loses nothing and emits no warning.
+    # Clearing an in-memory manager drops every in-memory-registered hook and every
+    # kept hook run. That loss must not be silent, so peek the live singleton first and
+    # warn (naming the counts) before clearing. Redis-backed hooks and runs live in
+    # Redis, so a Redis manager reset loses nothing and emits no warning.
     with _HOOKS_MANAGER_LOCK:
         manager = _HOOKS_MANAGER_CACHE.get(_HOOKS_MANAGER_KEY)
-        if isinstance(manager, InMemoryHooksManager) and manager.hook_count:
-            logger.warning(
-                "hooks: config reload is discarding the in-memory hooks manager with %d "
-                "registered hook(s); in-memory hooks do not survive a reload or restart — "
-                "set HOOKS_REDIS_URL for durable hooks",
-                manager.hook_count,
-            )
+        if isinstance(manager, InMemoryHooksManager):
+            runs = manager.run_counts
+            if manager.hook_count or any(runs.values()):
+                logger.warning(
+                    "hooks: config reload is discarding the in-memory hooks manager with %d "
+                    "registered hook(s) and %d pending, %d running and %d failed hook run(s); "
+                    "in-memory hooks and hook runs do not survive a reload or restart — "
+                    "set HOOKS_REDIS_URL for durable hooks",
+                    manager.hook_count,
+                    runs["pending"],
+                    runs["running"],
+                    runs["failed"],
+                )
         _HOOKS_MANAGER_CACHE.clear()

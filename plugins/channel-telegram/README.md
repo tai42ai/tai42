@@ -239,6 +239,19 @@ still overflows the whole set is dropped and the turn bridges without it — a p
 is never lost to a params bound. An option with no author-set id (a `select`/suggested-reply
 ask, a plain notify option) carries no params.
 
+When a tap or a media reply **answers** a pending ask, the asker receives these entries as
+the answer's `params`, beside the unchanged answer.
+
+### Replies
+
+A message sent as a reply carries `reply_to_message.message_id`; the channel passes it to
+`conversations.accept` (and on the ladder's `InboundBridge` when the reply answers an ask) as
+`reply_to_medium_message_id`, and the platform resolves it into the turn's — or the
+asker's — typed `reply_to` (`{message_id, status, text}`). An inline-keyboard tap is a reply
+to the message holding the keyboard. A forum-topic message whose `reply_to_message` is the
+topic's own first message (`message_id == message_thread_id`) is not a reply, and
+`external_reply` (a message of another chat) is not read.
+
 ### Setup
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) (`/newbot`) and put

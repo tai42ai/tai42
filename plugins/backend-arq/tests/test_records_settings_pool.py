@@ -12,7 +12,6 @@ from typing import Any
 import orjson
 import pytest
 from arq import ArqRedis
-from arq.connections import RedisSettings
 from arq.jobs import DeserializationError, SerializationError, deserialize_result, serialize_job, serialize_result
 from pydantic import BaseModel
 from redis.asyncio import ConnectionPool
@@ -24,6 +23,7 @@ from tai42_kit.settings import registered_settings
 from tai42_backend_arq import pool, records
 from tai42_backend_arq.settings import (
     UNSERIALIZABLE_KEY,
+    ArqRedisSettings,
     ArqSettings,
     TaskFailedError,
     arq_settings,
@@ -141,18 +141,6 @@ def test_settings_key_helpers() -> None:
     assert settings.arq_schedule_pattern == "arq:schedule:*"
     assert settings.arq_schedule_lock_key("x") == "arq:lock:schedule:x"
     assert settings.arq_schedule_recovery_lock_key("x") == "arq:schedule_recovery_lock:x"
-
-
-def test_settings_redis_settings_from_url() -> None:
-    settings = ArqSettings(redis_url="redis://somehost:6390/2", redis_max_connections=7)
-    redis_settings = settings.redis_settings
-    assert redis_settings.host == "somehost"
-    assert redis_settings.port == 6390
-    assert redis_settings.database == 2
-    assert redis_settings.max_connections == 7
-    override = settings.make_redis_settings("redis://other:6400/1")
-    assert override.host == "other"
-    assert override.max_connections == 7
 
 
 def test_arq_settings_accessor_cached() -> None:
@@ -294,21 +282,26 @@ def test_malformed_failure_tag_raises_on_deserialize() -> None:
 # -- pool ---------------------------------------------------------------------------
 
 
-def test_the_enqueue_client_kwargs_map_the_connection_settings(monkeypatch) -> None:
-    """The kit client is keyed on the backend's URL (host, database, credentials, TLS) and
-    connection cap, reads bytes as arq does, and keeps arq's connect timeout."""
-    monkeypatch.setattr(
-        pool,
-        "arq_settings",
-        lambda: ArqSettings(redis_url="rediss://user:secret@cache.internal:6380/2", redis_max_connections=7),
+def test_the_enqueue_client_kwargs_are_the_connection_settings_read_as_bytes(monkeypatch) -> None:
+    """The kit client is keyed on the backend's whole connection settings (URL, cap, retry,
+    timeouts) and reads bytes, as arq does."""
+    redis = ArqRedisSettings(
+        redis_url="rediss://user:secret@cache.internal:6380/2",
+        redis_max_connections=7,
+        retry_attempts=2,
+        socket_timeout=3,
     )
+    monkeypatch.setattr(pool, "arq_settings", lambda: ArqSettings(redis=redis))
 
+    assert pool.enqueue_client_kwargs() == {**redis.client_kwargs(), "decode_responses": False}
     assert pool.enqueue_client_kwargs() == {
         "url": "rediss://user:secret@cache.internal:6380/2",
         "max_connections": 7,
         "decode_responses": False,
-        "socket_connect_timeout": RedisSettings().conn_timeout,
         "env_prefix": "ARQ_",
+        "socket_timeout": 3,
+        "socket_connect_timeout": 1,
+        "retry_attempts": 2,
     }
 
 

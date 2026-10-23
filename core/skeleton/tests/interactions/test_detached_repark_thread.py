@@ -68,6 +68,8 @@ async def _drive_detached(wired, address: DeliveryAddress) -> None:
         tool="probe_resume",
         interaction_id="i-first",
         answer="yes",
+        reply_to_medium_message_id=None,
+        params=None,
         park_context=None,
         park_asked_by=("probe_driver",),
         delivery=address,

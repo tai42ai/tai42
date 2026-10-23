@@ -19,8 +19,10 @@ import os
 from typing import Literal
 
 from tai42_contract.app import tai42_app
+from tai42_contract.conversations import ReplyTo
 from tai42_contract.tools import TOOL_META_PAUSES
 
+from tai42_e2e_fixtures.tools.ask_results import parked
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
 
@@ -88,7 +90,7 @@ async def held_route_park(marker: str) -> object:
 
     with driving_as(continuation="held_run_resume"):
         expiry_at = datetime.now(UTC) + timedelta(seconds=3600)
-        suspended = await ask(marker, to="caller", mode="async", expiry_at=expiry_at, payload={"reask": False})
+        suspended = parked(await ask(marker, to="caller", mode="async", expiry_at=expiry_at, payload={"reask": False}))
     record = json.dumps({"interaction_id": suspended.interaction_id, "subject": subject, "pid": os.getpid()})
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as probe:
         await cast(Awaitable[int], probe.rpush(f"e2e:rec:held_route_park:{marker}", record))
@@ -183,11 +185,13 @@ async def held_deeper(marker: str, expiry_seconds: float) -> object:
 
 
 @tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
-async def held_run_resume(interaction_id: str, answer: object) -> object:
+async def held_run_resume(
+    interaction_id: str, answer: object, reply_to: ReplyTo | None, params: dict[str, str] | None
+) -> object:
     """Re-drive a resumed ``held_run`` with the answer, under the restored call chain.
 
     Reads the resumed ask's stored ``payload`` for whether to re-park (and how deep), RPUSHes
-    ``{"answer", "chain", "pid"}`` onto the probe channel — ``chain`` is the restored
+    ``{"answer", "reply_to", "params", "chain", "pid"}`` onto the probe channel — ``chain`` is the restored
     ``asked_by`` this drive runs under, proving the continuation tool's own name is not in it —
     then either finalizes by returning the answer, or asks the caller a SECOND time (through
     ``held_ask`` directly, or through ``held_deeper`` one frame lower) and returns the receipt.
@@ -208,7 +212,15 @@ async def held_run_resume(interaction_id: str, answer: object) -> object:
             raise RuntimeError(f"held_run_resume: {interaction_id!r} names no stored caller ask")
         request_payload = state.request.payload or {}
     chain = list(current_call_chain())
-    record = json.dumps({"answer": answer, "chain": chain, "pid": os.getpid()})
+    record = json.dumps(
+        {
+            "answer": answer,
+            "reply_to": None if reply_to is None else reply_to.model_dump(mode="json"),
+            "params": params,
+            "chain": chain,
+            "pid": os.getpid(),
+        }
+    )
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as probe:
         await cast(Awaitable[int], probe.rpush(_held_record_key(interaction_id), record))
         if answer == _TRANSIENT_ANSWER:

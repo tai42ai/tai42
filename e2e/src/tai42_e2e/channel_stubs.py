@@ -88,15 +88,17 @@ class FakeTelegram:
 
     Serves ``sendMessage`` and ``sendPhoto`` (each minting a monotonically increasing
     ``message_id`` and returning a Message with the numeric ``chat.id`` the send
-    resolved to) and ``setWebhook`` (which the telegram plugin's ``on_startup`` hook
-    calls, so boot succeeds against the stub — both replicas fire it, one record each).
-    Any other path answers a loud 500."""
+    resolved to), ``answerCallbackQuery`` (recording the answered query id) and
+    ``setWebhook`` (which the telegram plugin's ``on_startup`` hook calls, so boot
+    succeeds against the stub — both replicas fire it, one record each). Any other
+    path answers a loud 500."""
 
     def __init__(self, host: str = "127.0.0.1") -> None:
         self.host = host
         self.port = allocate_port()
         self.sent: list[dict[str, Any]] = []
         self.webhooks: list[dict[str, Any]] = []
+        self.callback_answers: list[str] = []
         # Per-``file_id`` byte-serving behaviour for the inbound-media ingest suites, keyed by the
         # file_id ``getFile`` resolves; ``_media_served`` counts fetches per file_id so a
         # ``MediaBlob.fail_times`` can serve the transient fault before the healthy redelivery.
@@ -120,6 +122,7 @@ class FakeTelegram:
     def reset(self) -> None:
         self.sent.clear()
         self.webhooks.clear()
+        self.callback_answers.clear()
         self.media.clear()
         self._media_served.clear()
 
@@ -158,6 +161,10 @@ class FakeTelegram:
         headers = {"content-type": "application/json", "X-Telegram-Bot-Api-Secret-Token": secret}
         return SignedInbound(headers=headers, body=body)
 
+    def build_inbound_text(self, *, secret: str, chat_id: str, text: str) -> SignedInbound:
+        """A genuine plain text update from ``chat_id`` (an uncorrelated bridge message)."""
+        return self._inbound_update(secret=secret, chat_id=chat_id, message={"text": text})
+
     def build_inbound_photo(
         self,
         *,
@@ -167,17 +174,21 @@ class FakeTelegram:
         caption: str | None = None,
         file_size: int | None = None,
         update_id: int | None = None,
+        reply_to_message_id: int | None = None,
     ) -> SignedInbound:
-        """A genuine inbound PHOTO update (an uncorrelated bridge message, no reply_to): the
-        largest size carries ``file_id``/``file_size`` (Telegram sends sizes ascending, so the
-        door reads the last), with an optional ``caption``. ``update_id`` may be pinned to replay
-        the identical update (a vendor redelivery, deduped per ``update_id`` at the accept seam)."""
+        """A genuine inbound PHOTO update: the largest size carries ``file_id``/``file_size``
+        (Telegram sends sizes ascending, so the door reads the last), with an optional ``caption``.
+        ``update_id`` may be pinned to replay the identical update (a vendor redelivery, deduped per
+        ``update_id`` at the accept seam). ``reply_to_message_id`` sends the photo as a reply to
+        that message (``message.reply_to_message.message_id``); omitted, it replies to nothing."""
         largest: dict[str, Any] = {"file_id": file_id, "width": 1280, "height": 960}
         if file_size is not None:
             largest["file_size"] = file_size
         message: dict[str, Any] = {"from": {"id": int(chat_id)}, "photo": [{"file_id": f"{file_id}-thumb"}, largest]}
         if caption is not None:
             message["caption"] = caption
+        if reply_to_message_id is not None:
+            message["reply_to_message"] = {"message_id": reply_to_message_id}
         return self._inbound_update(secret=secret, chat_id=chat_id, message=message, update_id=update_id)
 
     def build_inbound_document(
@@ -202,6 +213,24 @@ class FakeTelegram:
         if caption is not None:
             message["caption"] = caption
         return self._inbound_update(secret=secret, chat_id=chat_id, message=message, update_id=update_id)
+
+    def build_callback_query(self, *, secret: str, chat_id: str, message_id: int, data: str) -> SignedInbound:
+        """A genuine inline-keyboard tap: a ``callback_query`` update whose ``message`` is the
+        message holding the keyboard (``message_id`` in chat ``chat_id``) and whose ``data`` is the
+        tapped button's ``callback_data``."""
+        body = json.dumps(
+            {
+                "update_id": next(self._ids),
+                "callback_query": {
+                    "id": f"cbq-{next(self._ids)}",
+                    "from": {"id": int(chat_id)},
+                    "data": data,
+                    "message": {"message_id": message_id, "chat": {"id": int(chat_id)}},
+                },
+            }
+        ).encode()
+        headers = {"content-type": "application/json", "X-Telegram-Bot-Api-Secret-Token": secret}
+        return SignedInbound(headers=headers, body=body)
 
     def build_inbound_poll(self, *, secret: str, chat_id: str, update_id: int | None = None) -> SignedInbound:
         """A genuine inbound POLL update — content Telegram recognises that the channel cannot
@@ -231,6 +260,7 @@ class FakeTelegram:
                     "text": payload.get("text", ""),
                     "reply_markup": payload.get("reply_markup"),
                     "message_id": message_id,
+                    "result_chat_id": chat_id,
                     "method": "sendMessage",
                 }
             )
@@ -258,6 +288,12 @@ class FakeTelegram:
             # sendPhoto returns the same Message shape as sendMessage (with a ``photo``);
             # the writer reads only ``message_id`` / ``chat.id`` from it.
             return JSONResponse({"ok": True, "result": {"message_id": message_id, "chat": {"id": chat_id}}})
+
+        @app.post("/bot{token}/answerCallbackQuery")
+        async def answer_callback_query(token: str, request: Request) -> JSONResponse:
+            payload = await request.json()
+            self.callback_answers.append(str(payload.get("callback_query_id")))
+            return JSONResponse({"ok": True, "result": True})
 
         @app.post("/bot{token}/setWebhook")
         async def set_webhook(token: str, request: Request) -> JSONResponse:
@@ -291,8 +327,9 @@ class FakeSlack:
 
     Serves ``chat.postMessage`` (minting a ``ts`` thread anchor, recording the
     Block Kit ``blocks`` alongside the text so a form message's button is
-    readable) and ``views.open`` (recording the modal ``view`` the interactivity
-    door opens for a form question). Any other path answers a loud 500. Slack has
+    readable), ``views.open`` (recording the modal ``view`` the interactivity
+    door opens for a form question) and ``views.update`` (recording each re-render
+    of an open modal). Any other path answers a loud 500. Slack has
     no boot-time API call (its Events API Request URL is configured in the
     dashboard, not per process start), so nothing is served for startup."""
 
@@ -303,6 +340,9 @@ class FakeSlack:
         # The modal views ``views.open`` opened — the form leg reads the view a
         # ``block_actions`` click drove the interactivity door to open.
         self.views: list[dict[str, Any]] = []
+        # The ``views.update`` re-renders, in order: each ``{"view_id", "hash", "view"}`` the
+        # interactivity door sent when a reacting or conditional field changed.
+        self.view_updates: list[dict[str, Any]] = []
         # Per-``url_private``-path byte-serving behaviour for the inbound-media ingest suites, keyed
         # by the path a test builds through :meth:`download_url`; the download requires the bot
         # Bearer (a missing/wrong token answers a 302, which the plugin — redirects off — treats as
@@ -332,6 +372,7 @@ class FakeSlack:
     def reset(self) -> None:
         self.posts.clear()
         self.views.clear()
+        self.view_updates.clear()
         self.media.clear()
         self._media_served.clear()
 
@@ -450,12 +491,22 @@ class FakeSlack:
                     "ts": ts,
                 }
             )
-            return JSONResponse({"ok": True, "ts": ts})
+            # A real ok response names the conversation Slack posted into (``channel``) beside the
+            # message ``ts``; the stub posts into the channel it was given.
+            return JSONResponse({"ok": True, "channel": payload.get("channel"), "ts": ts})
 
         @app.post("/api/views.open")
         async def views_open(request: Request) -> JSONResponse:
             payload = await request.json()
             self.views.append(payload.get("view"))
+            return JSONResponse({"ok": True})
+
+        @app.post("/api/views.update")
+        async def views_update(request: Request) -> JSONResponse:
+            payload = await request.json()
+            self.view_updates.append(
+                {"view_id": payload.get("view_id"), "hash": payload.get("hash"), "view": payload.get("view")}
+            )
             return JSONResponse({"ok": True})
 
         @app.get("/files/{ref:path}")
@@ -533,20 +584,35 @@ class FakeTwilio:
         return [record for record in self.messages if text in record["body"]]
 
     def build_inbound(
-        self, *, auth_token: str, public_url: str, twilio_number: str, human_number: str, text: str, valid: bool = True
+        self,
+        *,
+        auth_token: str,
+        public_url: str,
+        twilio_number: str,
+        human_number: str,
+        text: str,
+        valid: bool = True,
+        original_replied_sid: str | None = None,
     ) -> SignedInbound:
         """A genuine inbound SMS webhook: the human's reply from ``human_number``
         to the deployment ``twilio_number``, carrying a valid
         ``X-Twilio-Signature`` = base64(HMAC-SHA1(auth_token, public_url +
         concat(sorted form pairs))). ``valid=False`` signs under the WRONG token
         (the fail-closed negative). ``public_url`` MUST equal the URL the door
-        reconstructs from the request (scheme + Host + path)."""
+        reconstructs from the request (scheme + Host + path). ``original_replied_sid``
+        makes it a WhatsApp reply to that message: Twilio's ``OriginalRepliedMessageSid``
+        and ``OriginalRepliedMessageSender`` (the deployment number) ride the form."""
         pairs = [
             ("To", twilio_number),
             ("From", human_number),
             ("Body", text),
             ("MessageSid", f"SM{uuid.uuid4().hex}"),
         ]
+        if original_replied_sid is not None:
+            pairs += [
+                ("OriginalRepliedMessageSid", original_replied_sid),
+                ("OriginalRepliedMessageSender", twilio_number),
+            ]
         body = urlencode(pairs).encode("utf-8")
         key = auth_token if valid else auth_token + "-tampered"
         signed_payload = public_url + "".join(name + value for name, value in sorted(pairs))
@@ -667,6 +733,18 @@ class FlowExchange:
     iv: bytes
 
 
+def _meta_timestamp(seconds: int | None) -> str:
+    """A WhatsApp message's ``timestamp`` as Meta sends it: epoch seconds as a digit string."""
+    return str(seconds if seconds is not None else int(time.time()))
+
+
+def _set_reply_context(message: dict[str, Any], phone_number_id: str, context_id: str | None) -> None:
+    """Make ``message`` a reply to ``context_id`` the way Meta relays one: a ``context`` naming the
+    quoted wamid and the business number it came from. ``None`` leaves the message unquoting."""
+    if context_id is not None:
+        message["context"] = {"from": phone_number_id, "id": context_id}
+
+
 class FakeWhatsApp:
     """A recording stub of the Meta WhatsApp (Graph) API.
 
@@ -772,18 +850,27 @@ class FakeWhatsApp:
         wa_id: str,
         text: str,
         wamid: str | None = None,
+        timestamp: int | None = None,
         valid: bool = True,
+        context_id: str | None = None,
     ) -> SignedInbound:
         """A genuine uncorrelated inbound text message: the batched webhook value carries
         ``metadata.phone_number_id`` (the identity we are texted at) and one text message
         FROM ``wa_id``, signed X-Hub-Signature-256 over the RAW body under the app secret.
         ``valid=False`` signs under the WRONG secret (the fail-closed negative). A pinned
-        ``wamid`` lets a replay POST the identical body."""
+        ``wamid`` lets a replay POST the identical body. ``timestamp`` is the message's Meta
+        ``timestamp`` in epoch seconds (now when omitted). ``context_id`` makes it a reply to
+        that wamid (Meta's ``context.id``); omitted, it replies to nothing."""
         message_id = wamid if wamid is not None else self._mint_wamid()
-        value = {
-            "metadata": {"phone_number_id": phone_number_id},
-            "messages": [{"id": message_id, "from": wa_id, "type": "text", "text": {"body": text}}],
+        message: dict[str, Any] = {
+            "id": message_id,
+            "from": wa_id,
+            "timestamp": _meta_timestamp(timestamp),
+            "type": "text",
+            "text": {"body": text},
         }
+        _set_reply_context(message, phone_number_id, context_id)
+        value = {"metadata": {"phone_number_id": phone_number_id}, "messages": [message]}
         return self._sign_batch(value, app_secret=app_secret, valid=valid)
 
     def build_inbound_image(
@@ -811,7 +898,15 @@ class FakeWhatsApp:
             image["sha256"] = sha256
         value = {
             "metadata": {"phone_number_id": phone_number_id},
-            "messages": [{"id": message_id, "from": wa_id, "type": "image", "image": image}],
+            "messages": [
+                {
+                    "id": message_id,
+                    "from": wa_id,
+                    "timestamp": _meta_timestamp(None),
+                    "type": "image",
+                    "image": image,
+                }
+            ],
         }
         return self._sign_batch(value, app_secret=app_secret, valid=valid)
 
@@ -833,7 +928,14 @@ class FakeWhatsApp:
         message_id = wamid if wamid is not None else self._mint_wamid()
         value = {
             "metadata": {"phone_number_id": phone_number_id},
-            "messages": [{"id": message_id, "from": wa_id, "errors": [{"code": code, "title": title}]}],
+            "messages": [
+                {
+                    "id": message_id,
+                    "from": wa_id,
+                    "timestamp": _meta_timestamp(None),
+                    "errors": [{"code": code, "title": title}],
+                }
+            ],
         }
         return self._sign_batch(value, app_secret=app_secret, valid=valid)
 
@@ -862,6 +964,7 @@ class FakeWhatsApp:
                 {
                     "id": message_id,
                     "from": wa_id,
+                    "timestamp": _meta_timestamp(None),
                     "type": "interactive",
                     "interactive": {"type": reply_kind, reply_kind: {"id": reply_id, "title": title}},
                 }
@@ -878,24 +981,25 @@ class FakeWhatsApp:
         response: dict[str, Any],
         wamid: str | None = None,
         valid: bool = True,
+        context_id: str | None = None,
     ) -> SignedInbound:
         """A genuine completed-Flow reply: Meta relays the filled form as an
         ``nfm_reply`` whose ``response_json`` is the form values (Flow number inputs
         arrive as strings) as a JSON STRING, carrying the ``flow_token`` the send set
         (the pending ask's ``interaction_id``). Signed X-Hub-Signature-256 like
-        ``build_inbound``; ``valid=False`` signs under the WRONG secret."""
+        ``build_inbound``; ``valid=False`` signs under the WRONG secret. ``context_id``
+        names the Flow message the reply answers (Meta's ``context.id``); omitted, the
+        reply carries no context."""
         message_id = wamid if wamid is not None else self._mint_wamid()
-        value = {
-            "metadata": {"phone_number_id": phone_number_id},
-            "messages": [
-                {
-                    "id": message_id,
-                    "from": wa_id,
-                    "type": "interactive",
-                    "interactive": {"type": "nfm_reply", "nfm_reply": {"response_json": json.dumps(response)}},
-                }
-            ],
+        message: dict[str, Any] = {
+            "id": message_id,
+            "from": wa_id,
+            "timestamp": _meta_timestamp(None),
+            "type": "interactive",
+            "interactive": {"type": "nfm_reply", "nfm_reply": {"response_json": json.dumps(response)}},
         }
+        _set_reply_context(message, phone_number_id, context_id)
+        value = {"metadata": {"phone_number_id": phone_number_id}, "messages": [message]}
         return self._sign_batch(value, app_secret=app_secret, valid=valid)
 
     def build_status(

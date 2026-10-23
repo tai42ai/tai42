@@ -152,6 +152,8 @@ class _StubConversations:
         cap_key: str,
         text: str,
         provider_message_id: str,
+        medium_message_id: str | None,
+        reply_to_medium_message_id: str | None,
         params: dict[str, str] | None = None,
         attachments: list[Any] | None = None,
     ) -> str:
@@ -163,6 +165,8 @@ class _StubConversations:
                 "cap_key": cap_key,
                 "text": text,
                 "provider_message_id": provider_message_id,
+                "medium_message_id": medium_message_id,
+                "reply_to_medium_message_id": reply_to_medium_message_id,
                 "params": params,
                 "attachments": attachments,
             }
@@ -172,7 +176,7 @@ class _StubConversations:
         return self.accept_result
 
     async def notify_inbound_rejected(
-        self, *, channel_id: str, recipient: str, sender_identity: str | None, kind: str, reason: Any
+        self, *, channel_id: str, recipient: str, sender_identity: str, kind: str, reason: Any
     ) -> None:
         self.rejected_calls.append(
             {
@@ -184,8 +188,12 @@ class _StubConversations:
             }
         )
 
-    async def record_delivery_status(self, channel: str, provider_message_id: str, status: Any) -> None:
-        self.status_calls.append({"channel": channel, "provider_message_id": provider_message_id, "status": status})
+    async def record_delivery_status(
+        self, channel: str, provider_message_id: str, status: Any, *, errors: Any = None
+    ) -> None:
+        self.status_calls.append(
+            {"channel": channel, "provider_message_id": provider_message_id, "status": status, "errors": errors}
+        )
         if self.status_error is not None:
             raise self.status_error
         record = self.records.get(provider_message_id)
@@ -281,6 +289,8 @@ class FakeRedis:
     def __init__(self, events: list[tuple[str, str]] | None = None) -> None:
         self.store: dict[str, str] = {}
         self.ttls: dict[str, int] = {}
+        # Absolute expiry in epoch milliseconds, for a key written with ``PXAT``.
+        self.pxat: dict[str, int] = {}
         self.events = events if events is not None else []
 
     async def set(self, key: str, value: str, nx: bool = False, ex: int | None = None) -> bool | None:
@@ -297,21 +307,29 @@ class FakeRedis:
 
     async def getdel(self, key: str) -> str | None:
         self.ttls.pop(key, None)
+        self.pxat.pop(key, None)
         return self.store.pop(key, None)
 
     async def delete(self, key: str) -> int:
         self.ttls.pop(key, None)
+        self.pxat.pop(key, None)
         return 0 if self.store.pop(key, None) is None else 1
 
     async def exists(self, key: str) -> int:
         return 1 if key in self.store else 0
 
-    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
-        """Run the one Lua script the correlation store sends, in Python; refuse any other script."""
+    async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> int | str:
+        """Run the Lua scripts the correlation store sends, in Python; refuse any other script."""
         import json
 
-        from tai42_channel_twilio.correlation import _RELEASE_PENDING_FOR_LUA
+        from tai42_kit.conversations.reply_window import _ADVANCE_REPLY_WINDOW_LUA
 
+        from tai42_channel_twilio.correlation import _FIRST_RECEIVED_LUA, _RELEASE_PENDING_FOR_LUA
+
+        if script == _ADVANCE_REPLY_WINDOW_LUA:
+            return self._advance_reply_window(numkeys, *keys_and_args)
+        if script == _FIRST_RECEIVED_LUA:
+            return self._first_received(numkeys, *keys_and_args)
         if script != _RELEASE_PENDING_FOR_LUA:
             raise AssertionError(f"FakeRedis.eval was handed an unknown script: {script!r}")
         self.events.append(("redis_eval", keys_and_args[0]))
@@ -320,6 +338,30 @@ class FakeRedis:
         if raw is None or json.loads(raw).get("interaction_id") != interaction_id:
             return 0
         return await self.delete(key)
+
+    def _first_received(self, numkeys: int, *keys_and_args: Any) -> str:
+        """The store's first-receipt record: ``SET NX EX`` the receipt time, then return what is stored."""
+        self.events.append(("redis_eval", keys_and_args[0]))
+        (key,), (received_ms, ttl_seconds) = keys_and_args[:numkeys], keys_and_args[numkeys:]
+        if key not in self.store:
+            self.store[key] = received_ms
+            self.ttls[key] = int(ttl_seconds)
+        return self.store[key]
+
+    def _advance_reply_window(self, numkeys: int, *keys_and_args: Any) -> int:
+        """The kit's reply-window advance: write ``opened_at + window`` as value and ``PXAT``, never lower."""
+        self.events.append(("redis_eval", keys_and_args[0]))
+        (key,), (opened_at_ms, window_ms, now_ms) = keys_and_args[:numkeys], keys_and_args[numkeys:]
+        closes_at = int(opened_at_ms) + int(window_ms)
+        if closes_at <= int(now_ms):
+            return 0
+        stored = self.store.get(key)
+        if stored is not None and int(stored) >= closes_at:
+            return 0
+        self.store[key] = str(closes_at)
+        self.ttls.pop(key, None)
+        self.pxat[key] = closes_at
+        return 1
 
 
 @pytest.fixture
@@ -414,6 +456,7 @@ def make_delivery(**overrides: Any) -> ChannelDelivery:
         "options": None,
         "callback_url": "https://app.example/api/interactions/callback/ticket-1",
         "timeout_at": datetime.now(UTC) + timedelta(minutes=5),
+        "sensitive": False,
     }
     fields.update(overrides)
     return ChannelDelivery(**fields)

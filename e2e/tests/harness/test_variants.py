@@ -117,6 +117,7 @@ def test_arq_backend_feature_env_and_process_model() -> None:
     assert arq.feature_env(_RES) == {
         "ARQ_REDIS_URL": _RES.redis_url,
         "ARQ_QUEUE_NAME": f"{_RES.bus_namespace}:arq:queue",
+        "ARQ_RETRY_ATTEMPTS": "1",
     }
     assert STORAGES["local"].feature_env(_RES) == {"STORAGE_LOCAL_ROOT_PATH": _RES.storage_root}
     # arq's recurring scheduler is a self-rescheduling queue job in the worker, so
@@ -132,6 +133,7 @@ def test_rq_backend_feature_env_and_process_model() -> None:
     assert rq.feature_env(_RES) == {
         "RQ_REDIS_URL": _RES.redis_url,
         "RQ_QUEUE_NAME": f"{_RES.bus_namespace}:default",
+        "RQ_RETRY_ATTEMPTS": "1",
     }
     # rq-scheduler's recurring zset is only drained by a separate ``rqscheduler``
     # daemon — ``tai backend beat`` — so a schedule needs its own process.
@@ -148,6 +150,8 @@ def test_celery_feature_env_and_process_model() -> None:
         "CELERY_RESULT_BACKEND": _RES.redis_url,
         "CELERY_REDBEAT_REDIS_URL": _RES.redis_url,
         "CELERY_REDBEAT_KEY_PREFIX": f"{_RES.bus_namespace}:redbeat:",
+        "CELERY_REDBEAT_RETRY_ATTEMPTS": "1",
+        "CELERY_RESULT_BACKEND_RETRY_ATTEMPTS": "1",
     }
     # RedBeat only fires while a beat process runs; ``tai backend beat`` starts it.
     assert celery.extra_backend_processes() == [["beat", "--max-interval", "2"]]

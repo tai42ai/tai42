@@ -6,7 +6,7 @@ import asyncio
 import time
 
 import pytest
-from tai42_contract.conversations import ThreadQueueOverflowError
+from tai42_contract.conversations import ReplyTexts, ThreadQueueOverflowError
 
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import records as records_module
@@ -32,6 +32,7 @@ from .conftest import (
     _store,
     _tool_channel_route,
     _wire,
+    create_record,
 )
 from .fake_record_redis import FakeRecordRedis
 
@@ -45,12 +46,30 @@ async def test_thread_overflow_writes_no_state_so_the_provider_retry_succeeds(en
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
+    first = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "one",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await asyncio.wait_for(agent.entered.wait(), 2)
 
     # The thread's only slot is taken, so the next message is refused LOUDLY...
     with pytest.raises(ThreadQueueOverflowError):
-        await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
+        await turn_module.accept(
+            "twilio",
+            "+15550001111",
+            "+15550002222",
+            "+15550002222",
+            "two",
+            "PID2",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
+        )
     # ...with ZERO state written: the dedupe pair is unclaimed, so the refusal is
     # honestly retriable.
     assert await store.get_inbound_owner("twilio", "PID2") is None
@@ -61,7 +80,16 @@ async def test_thread_overflow_writes_no_state_so_the_provider_retry_succeeds(en
 
     # The retry after the thread drains is a genuinely fresh attempt, not a dedupe hit
     # on a message that never ran.
-    retry = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
+    retry = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "two",
+        "PID2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert retry != first
@@ -90,7 +118,14 @@ async def test_a_failed_persist_leaves_the_inbound_pair_unclaimed(env, monkeypat
     for provider_message_id in ("PID1", "PID2", "PID3"):
         with pytest.raises(RuntimeError, match="redis is down"):
             await turn_module.accept(
-                "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", provider_message_id
+                "twilio",
+                "+15550001111",
+                "+15550002222",
+                "+15550002222",
+                "hi",
+                provider_message_id,
+                medium_message_id=None,
+                reply_to_medium_message_id=None,
             )
         assert await store.get_inbound_owner("twilio", provider_message_id) is None
     # The admitted attempt also gave its FIFO reservation back rather than leaking it.
@@ -120,7 +155,16 @@ async def test_an_indeterminate_inbound_claim_is_resolved_not_left_at_intake(env
     monkeypatch.setattr(records_module.ConversationRecordStore, "create_record", _create_then_lose_the_reply)
 
     with pytest.raises(TimeoutError):
-        await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID-lost")
+        await turn_module.accept(
+            "twilio",
+            "+15550001111",
+            "+15550002222",
+            "+15550002222",
+            "hi",
+            "PID-lost",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
+        )
     await _settle()
 
     owner = await store.get_inbound_owner("twilio", "PID-lost")
@@ -155,6 +199,7 @@ async def test_a_racing_duplicate_accept_leaves_one_record_and_releases_its_slot
             client_address="+15550002222",
             text="hi",
             provider_message_id="PID1",
+            medium_message_id=None,
         )
 
     winner = await _attempt("winner")
@@ -190,7 +235,16 @@ async def test_a_settings_reload_mid_accept_does_not_leak_the_reserved_slot(env,
 
     monkeypatch.setattr(records_module.ConversationRecordStore, "create_record", _reload_then_create)
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert agent.calls == [("hi", "bridge:line:+15550002222")]
@@ -246,13 +300,13 @@ async def test_redrive_of_a_record_stranded_mid_turn_fails_it_and_never_reruns_t
     assert agent.calls == []
 
 
-async def test_a_stranded_turn_uses_the_route_error_reply_text_when_set(env, monkeypatch):
+async def test_a_stranded_turn_uses_the_route_reply_texts_error_when_set(env, monkeypatch):
     # The stranded-turn repair resolves the record's route best-effort, so the participant sees the
-    # route's own ``error_reply_text`` — the same custom reply a live failed turn would send.
+    # route's own ``reply_texts.error`` — the same custom reply a live failed turn would send.
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
     agent = EchoAgent()
     channel = FakeChannel()
-    _wire(monkeypatch, FakeManager(_channel_route(error_reply_text=spanish)), channel)
+    _wire(monkeypatch, FakeManager(_channel_route(reply_texts=ReplyTexts(error=spanish))), channel)
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
     await _create_stranded_intake(store, env, "stranded")
@@ -339,7 +393,16 @@ async def test_a_turn_task_that_dies_resolves_its_own_record_without_waiting_for
     monkeypatch.setattr(target_module, "_complete_turn", _die)
     store = _store()
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await store.get_record(message_id)
@@ -379,7 +442,7 @@ async def test_redrive_isolates_a_failing_record_and_resolves_the_rest(env, monk
     store = _store()
 
     async def _strand(message_id: str, provider_message_id: str) -> None:
-        await store.create_record(_intake_record(message_id, provider_message_id), intake_token="dead-worker")
+        await create_record(store, _intake_record(message_id, provider_message_id), intake_token="dead-worker")
         key = ConversationsSettings().record_key(message_id)
         env.seed_hash(key, (await env.hgetall(key)) | {"intake_claim": f"dead-worker:{time.time() - 1}"})
 
@@ -433,7 +496,7 @@ def _accepted_event_record(message_id: str, event_id: str = "evt-1") -> Conversa
 
 
 async def _strand_event_record(store: ConversationRecordStore, fake: FakeRecordRedis, record) -> None:
-    await store.create_record(record, intake_token="dead-worker")
+    await create_record(store, record, intake_token="dead-worker")
     key = ConversationsSettings().record_key(record.message_id)
     fields = await fake.hgetall(key)
     fake.seed_hash(key, fields | {"intake_claim": f"dead-worker:{time.time() - 1}"})

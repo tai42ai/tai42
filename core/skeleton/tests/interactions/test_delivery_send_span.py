@@ -14,13 +14,14 @@ from typing import Any, cast
 
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
+from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification, SendOutcome
 from tai42_contract.interactions import (
     SuspendedInteraction,
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
 )
 from tai42_contract.tools import tool_call_frame
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
@@ -35,19 +36,20 @@ from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
 from .._fakes.recording_monitoring import RecordingMonitoring
 
 
-class _FlakyChannel:
+class _FlakyChannel(AddressingChannel):
     """Fails the first delivery attempt with a retryable error, accepts the second."""
 
     def __init__(self) -> None:
         self.attempts = 0
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
         self.attempts += 1
         if self.attempts == 1:
             raise ChannelDeliveryError("transient 503", retryable=True)
+        return self.outcome(delivery, [])
 
-    async def notify(self, notification: ChannelNotification) -> None:  # pragma: no cover - unused here
-        return None
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:  # pragma: no cover - unused here
+        return self.outcome(notification, [])
 
 
 @pytest.fixture(autouse=True)
@@ -124,21 +126,56 @@ async def test_one_span_per_delivery_attempt(monkeypatch, fake_client_ctx, drive
     assert backend.writer.spans[0]["input"] == {"recipient": "+15550001111"}
 
 
+class _RecordingChannel(AddressingChannel):
+    """Accepts every delivery and keeps the frames it was handed."""
+
+    def __init__(self) -> None:
+        self.frames: list[ChannelDelivery] = []
+
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
+        self.frames.append(delivery)
+        return self.outcome(delivery, [])
+
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:  # pragma: no cover - unused here
+        return self.outcome(notification, [])
+
+
+@pytest.mark.parametrize("sensitive", [True, False])
+async def test_the_delivered_frame_carries_the_asks_sensitive(
+    monkeypatch, fake_client_ctx, driver, register_channel, sensitive
+):
+    settings = InteractionsSettings(public_base_url="https://host.example")
+    monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
+    channel = register_channel("recording", _RecordingChannel())
+
+    await ask(
+        "your passphrase?",
+        channel="recording",
+        recipient="+15550001111",
+        mode="async",
+        expiry_at=datetime.now(UTC) + timedelta(hours=1),
+        sensitive=sensitive,
+    )
+
+    assert [frame.sensitive for frame in channel.frames] == [sensitive]
+
+
 # -- the delivery attempt span's retryable is the seam's decision ----------------------
 
 
-class _AlwaysRetryableFailure:
+class _AlwaysRetryableFailure(AddressingChannel):
     """Fails every delivery attempt with the same typed-retryable error."""
 
     def __init__(self) -> None:
         self.attempts = 0
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
         self.attempts += 1
         raise ChannelDeliveryError("transient 503", retryable=True)
 
-    async def notify(self, notification: ChannelNotification) -> None:  # pragma: no cover - unused here
-        return None
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:  # pragma: no cover - unused here
+        return self.outcome(notification, [])
 
 
 def _window(seconds: float) -> DeadlineWindow:
@@ -157,6 +194,7 @@ def _frame(window: DeadlineWindow) -> ChannelDelivery:
         interaction_id="i-1",
         question="proceed?",
         answer_format="text",
+        sensitive=False,
         callback_url="https://h.example/api/interactions/callback/tk",
         timeout_at=window.timeout_at,
     )

@@ -24,7 +24,9 @@ from tai42_kit.interactions import RADIO_OPTION_THRESHOLD, drawn_number_bounds
 # ``state.values[<field name>][FIELD_ACTION_ID]`` reads a field's value directly, and
 # a field's ``block_actions`` dispatch is recognised by this action_id.
 FIELD_ACTION_ID = "tai42_form_field"
-_YES_NO_OPTIONS = (("Yes", "true"), ("No", "false"))
+# A ``boolean`` property's two words when the caller's field entry sets none.
+_TRUE_WORD = "Yes"
+_FALSE_WORD = "No"
 
 # Slack Block Kit caps on a choice control: exceeding one is a loud error, never a truncation.
 _MAX_OPTION_TEXT_LEN = 75
@@ -174,15 +176,33 @@ def _multi_choice_element(name: str, options: list[dict[str, Any]], choice_label
     return element
 
 
-def _radio_buttons() -> dict[str, Any]:
-    """The Yes/No radio a ``boolean`` property renders as."""
-    return {
-        "type": "radio_buttons",
-        "action_id": FIELD_ACTION_ID,
-        "options": [
-            {"text": {"type": "plain_text", "text": label}, "value": value} for label, value in _YES_NO_OPTIONS
-        ],
-    }
+def _boolean_words(entry: Any) -> tuple[str, str]:
+    """A ``boolean`` field's ``(true, false)`` words: the field entry's ``true_label`` / ``false_label``.
+
+    ``entry`` is the field's ``wording.form.fields`` entry (or ``None``); an unset side is the
+    platform's "Yes" / "No".
+    """
+    words = entry if isinstance(entry, dict) else {}
+    true_label = words.get("true_label")
+    false_label = words.get("false_label")
+    return (
+        true_label if isinstance(true_label, str) else _TRUE_WORD,
+        false_label if isinstance(false_label, str) else _FALSE_WORD,
+    )
+
+
+def _radio_buttons(name: str, words: tuple[str, str]) -> dict[str, Any]:
+    """The two-option radio a ``boolean`` property renders as, its options drawn in ``words``.
+
+    Each option text is capped at Slack's :data:`_MAX_OPTION_TEXT_LEN` characters; a longer caller
+    word is refused naming the field and the member, never truncated.
+    """
+    options: list[dict[str, Any]] = []
+    for member, text, value in (("true_label", words[0], "true"), ("false_label", words[1], "false")):
+        if len(text) > _MAX_OPTION_TEXT_LEN:
+            raise FormSchemaError(f"form field {name!r} {member} {text!r} exceeds {_MAX_OPTION_TEXT_LEN} characters")
+        options.append({"text": {"type": "plain_text", "text": text}, "value": value})
+    return {"type": "radio_buttons", "action_id": FIELD_ACTION_ID, "options": options}
 
 
 def _find_option(options: list[dict[str, Any]], value: str) -> dict[str, Any] | None:
@@ -430,6 +450,7 @@ def _element(
     spec: dict[str, Any],
     per_send_options: list[dict[str, Any]] | None,
     choice_label: str | None = None,
+    boolean_words: tuple[str, str] = (_TRUE_WORD, _FALSE_WORD),
 ) -> dict[str, Any]:
     ptype = spec.get("type")
     options = _options_from_spec(name, spec, per_send_options)
@@ -451,7 +472,7 @@ def _element(
     if ptype == "string":
         return _string_element(name, spec, options, choice_label)
     if ptype == "boolean":
-        return _radio_buttons()
+        return _radio_buttons(name, boolean_words)
     if ptype in ("integer", "number"):
         return _number_input(spec, decimal=ptype == "number")
     raise FormSchemaError(f"form schema property {name!r} has unsupported type {ptype!r}")

@@ -23,7 +23,7 @@ from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStat
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
-from .conftest import FakeManager
+from .conftest import FakeManager, create_record
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 #: The channel width the shared record env declares; the api door never chunks, so this only
@@ -144,7 +144,7 @@ async def test_a_callback_timeout_at_or_above_the_lease_is_refused(monkeypatch):
 async def test_the_callback_post_is_signed_under_the_rows_secret(monkeypatch, fake, store):
     """The whole point of the api door: a receiver recomputes the HMAC over the RAW BODY it
     received and compares it against the header the executor sent."""
-    await store.create_record(_api_record("m-api", "the answer"))
+    await create_record(store, _api_record("m-api", "the answer"))
     record = await _get(store, "m-api")
 
     async def _ok(request: httpx.Request) -> httpx.Response:
@@ -181,7 +181,7 @@ async def test_the_callback_timeout_comes_from_settings(monkeypatch, fake, store
     ``_deliver_api`` to a fixed timeout leaves the client built with 15 and reddens this."""
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_CALLBACK_TIMEOUT_SECONDS", "7")
     store = ConversationRecordStore(ConversationsSettings())
-    await store.create_record(_api_record("m-timeout", "the answer"))
+    await create_record(store, _api_record("m-timeout", "the answer"))
 
     async def _ok(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200)
@@ -203,7 +203,7 @@ async def test_a_slow_callback_is_bounded_by_the_total_deadline_not_left_in_flig
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_BACKOFF_BASE_SECONDS", "0.01")
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_BACKOFF_MAX_SECONDS", "0.01")
     store = ConversationRecordStore(ConversationsSettings())
-    await store.create_record(_api_record("m-slow", "the answer"))
+    await create_record(store, _api_record("m-slow", "the answer"))
 
     async def _slow_then_ok(request: httpx.Request) -> httpx.Response:
         if len(requests) == 1:
@@ -225,7 +225,7 @@ async def test_a_transport_failure_is_retried_rather_than_raised(monkeypatch, fa
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_BACKOFF_BASE_SECONDS", "0.01")
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_BACKOFF_MAX_SECONDS", "0.01")
     store = ConversationRecordStore(ConversationsSettings())
-    await store.create_record(_api_record("m-blip", "the answer"))
+    await create_record(store, _api_record("m-blip", "the answer"))
 
     async def _reset_then_accept(request: httpx.Request) -> httpx.Response:
         if len(requests) == 1:
@@ -247,7 +247,7 @@ async def test_the_api_retry_extends_the_lease_over_its_own_backoff(monkeypatch,
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_BACKOFF_MAX_SECONDS", "0.5")
     settings = ConversationsSettings()
     store = ConversationRecordStore(settings)
-    await store.create_record(_api_record("m-backoff", "the answer"))
+    await create_record(store, _api_record("m-backoff", "the answer"))
     observed: list[float] = []
 
     async def _refuse_then_accept(request: httpx.Request) -> httpx.Response:
@@ -271,7 +271,7 @@ async def test_the_api_retry_stops_when_it_loses_the_lease_during_backoff(monkey
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_BACKOFF_BASE_SECONDS", "0.01")
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_BACKOFF_MAX_SECONDS", "0.01")
     store = ConversationRecordStore(ConversationsSettings())
-    await store.create_record(_api_record("m-taken", "the answer"))
+    await create_record(store, _api_record("m-taken", "the answer"))
 
     async def _refuse_and_hand_over(request: httpx.Request) -> httpx.Response:
         _expire_claim(fake, "m-taken")
@@ -323,7 +323,7 @@ async def test_a_no_callback_api_record_delivers_readable_without_a_post(monkeyp
     """An api route that declares no callback serves its answer from the poll door, so
     delivery is terminal the moment the outcome is written: the record goes DELIVERED, no
     callback is POSTed, and no send attempt is spent."""
-    await store.create_record(_no_callback_api_record("m-poll", "the answer"))
+    await create_record(store, _no_callback_api_record("m-poll", "the answer"))
     posted: list = []
 
     async def _post(url, body, signature, timeout_seconds):

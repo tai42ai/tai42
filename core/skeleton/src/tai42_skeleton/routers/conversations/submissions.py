@@ -18,10 +18,12 @@ from tai42_contract.conversations import (
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.conversations.caps import AddressRateLimitedError
+from tai42_skeleton.conversations.models import PersonThreadClosedError
 from tai42_skeleton.conversations.turn import (
     ApiSubmitResult,
     ConversationRouteResolutionError,
     EventTargetNotToolError,
+    ThreadAddressUnknownError,
     ThreadNotFoundError,
 )
 from tai42_skeleton.operations.adapter import read_json_object, validate_body
@@ -35,15 +37,17 @@ from tai42_skeleton.operations.errors import BadRequestError, NotSupportedError
 _pkg = sys.modules["tai42_skeleton.routers.conversations"]
 
 # The shared exception-type -> HTTP-status table for turn-submission failures; the
-# event door extends it with the two event-only terminals.
+# event door extends it with its event-only terminals.
 _TURN_SUBMISSION_STATUS: dict[type[Exception], int] = {
     ConversationRouteResolutionError: 404,
     AddressRateLimitedError: 429,
     ThreadQueueOverflowError: 503,
+    PersonThreadClosedError: 503,
     NotSupportedError: 501,
 }
 _EVENT_SUBMISSION_STATUS: dict[type[Exception], int] = {
     ThreadNotFoundError: 404,
+    ThreadAddressUnknownError: 400,
     EventTargetNotToolError: 409,
     **_TURN_SUBMISSION_STATUS,
 }
@@ -185,6 +189,7 @@ async def send_conversation_message(request: Request) -> Response:
             location=message.location,
             locale=message.locale,
             form_tag=message.form_tag,
+            reply_to_message_id=None if message.reply_to_message_id is None else str(message.reply_to_message_id),
             client_connected=_client_connected(request),
         )
     except Exception as exc:

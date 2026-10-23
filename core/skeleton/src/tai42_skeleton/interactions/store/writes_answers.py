@@ -364,6 +364,8 @@ class _StoreAnswerWrites(_StoreWritesBase):
                 claim.run_input,
                 claim.door_id,
                 claim.chain_keys,
+                response.reply_to_medium_message_id,
+                response.params,
             )
             pipe.hset(due_key, mapping=due_mapping)
             pipe.expire(due_key, continuation_due_ttl)

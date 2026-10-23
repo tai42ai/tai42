@@ -1,6 +1,6 @@
 """Builtin ``ask`` tool: a thin shim over the interactions helper. It must
-forward every argument verbatim, return the helper's answer, and never swallow a
-timeout.
+forward every argument verbatim, return the helper's ``AskAnswer`` as JSON (an async park's
+sentinel as is), and never swallow a timeout.
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ from datetime import UTC, datetime
 import pytest
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.context import reset_request_user_id, set_request_user_id
-from tai42_contract.interactions import AnswerMismatchPolicy, InteractionResponse
+from tai42_contract.conversations import ReplyTo, ReplyToStatus
+from tai42_contract.interactions import AnswerMismatchPolicy, AskAnswer, InteractionResponse, SuspendedInteraction
 
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_identity_claims,
@@ -70,8 +71,47 @@ class _RecordingHelper:
         return self._answer
 
 
+def _answered(answer: object) -> AskAnswer:
+    """The helper's sync result for ``answer``, quoting nothing and carrying no params."""
+    return AskAnswer(answer=answer, reply_to=None, params=None)
+
+
+def _answered_json(answer: object) -> dict[str, object]:
+    """The tool's result for :func:`_answered` ``answer``: the ``AskAnswer`` JSON."""
+    return {"answer": answer, "reply_to": None, "params": None}
+
+
+async def test_a_sync_ask_returns_the_answer_with_its_quote_and_params_as_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    quote = ReplyTo(message_id="M-1", status=ReplyToStatus.FOUND, text="the earlier message")
+    helper = _RecordingHelper(answer=AskAnswer(answer={"a": 1}, reply_to=quote, params={"button_payload": "P1"}))
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
+
+    result = await builtin_interactions.ask("Which?", answer_format="free")
+
+    assert result == {
+        "answer": {"a": 1},
+        "reply_to": {"message_id": "M-1", "status": "found", "text": "the earlier message"},
+        "params": {"button_payload": "P1"},
+    }
+
+
+async def test_an_async_ask_returns_the_park_sentinel_as_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = SuspendedInteraction(interaction_id="i-1")
+    monkeypatch.setattr(builtin_interactions, "_ask", _RecordingHelper(answer=sentinel))
+
+    assert await builtin_interactions.ask("Ping?", mode="async") is sentinel
+
+
+def test_the_ask_tool_declares_the_ask_answer_object_as_its_output_schema() -> None:
+    schema = builtin_interactions._ANSWER_SCHEMA
+    assert "x-fastmcp-wrap-result" not in schema
+    assert schema["type"] == "object"
+    assert set(schema["properties"]) == {"answer", "reply_to", "params"}
+    assert set(schema["required"]) == {"answer", "reply_to", "params"}
+
+
 async def test_ask_forwards_arguments_and_returns_answer(monkeypatch: pytest.MonkeyPatch) -> None:
-    helper = _RecordingHelper(answer="blue")
+    helper = _RecordingHelper(answer=_answered("blue"))
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     result = await builtin_interactions.ask(
@@ -84,7 +124,7 @@ async def test_ask_forwards_arguments_and_returns_answer(monkeypatch: pytest.Mon
         link=None,
     )
 
-    assert result == "blue"
+    assert result == _answered_json("blue")
     assert helper.calls == [
         (
             ("Favourite colour?",),
@@ -116,12 +156,12 @@ async def test_ask_forwards_arguments_and_returns_answer(monkeypatch: pytest.Mon
 
 
 async def test_ask_defaults_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
-    helper = _RecordingHelper(answer="hi")
+    helper = _RecordingHelper(answer=_answered("hi"))
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     result = await builtin_interactions.ask("Anything?")
 
-    assert result == "hi"
+    assert result == _answered_json("hi")
     assert helper.calls == [
         (
             ("Anything?",),
@@ -153,22 +193,22 @@ async def test_ask_defaults_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_ask_forwards_channel(monkeypatch: pytest.MonkeyPatch) -> None:
-    helper = _RecordingHelper(answer="ok")
+    helper = _RecordingHelper(answer=_answered("ok"))
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     result = await builtin_interactions.ask("Ping?", channel="telegram")
 
-    assert result == "ok"
+    assert result == _answered_json("ok")
     assert helper.calls[0][1]["channel"] == "telegram"
 
 
 async def test_ask_forwards_recipient(monkeypatch: pytest.MonkeyPatch) -> None:
-    helper = _RecordingHelper(answer="ok")
+    helper = _RecordingHelper(answer=_answered("ok"))
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     result = await builtin_interactions.ask("Ping?", channel="telegram", recipient="@ops")
 
-    assert result == "ok"
+    assert result == _answered_json("ok")
     assert helper.calls[0][1]["channel"] == "telegram"
     assert helper.calls[0][1]["recipient"] == "@ops"
 
@@ -176,25 +216,25 @@ async def test_ask_forwards_recipient(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_ask_forwards_on_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
     # The tool's ``on_mismatch`` string is coerced to the contract policy enum and
     # forwarded to the helper, so a tool author can set the bridge digression policy.
-    helper = _RecordingHelper(answer="ok")
+    helper = _RecordingHelper(answer=_answered("ok"))
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     result = await builtin_interactions.ask("Ping?", channel="telegram", on_mismatch="bridge")
 
-    assert result == "ok"
+    assert result == _answered_json("ok")
     assert helper.calls[0][1]["on_mismatch"] is AnswerMismatchPolicy.BRIDGE
 
 
 async def test_ask_forwards_wording_rejected_notice(monkeypatch: pytest.MonkeyPatch) -> None:
     # The caller's refusal sentence rides the wording catalogue and is forwarded verbatim;
     # on_mismatch defaults to retry.
-    helper = _RecordingHelper(answer="ok")
+    helper = _RecordingHelper(answer=_answered("ok"))
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     wording = {"answer": {"rejected": "Please answer yes or no ({reason})."}}
     result = await builtin_interactions.ask("Ping?", channel="telegram", wording=wording)
 
-    assert result == "ok"
+    assert result == _answered_json("ok")
     assert helper.calls[0][1]["wording"] == wording
     assert helper.calls[0][1]["on_mismatch"] is AnswerMismatchPolicy.RETRY
 
@@ -215,20 +255,20 @@ def test_ask_tool_schema_advertises_the_wording_and_mismatch_fields() -> None:
 
 
 async def test_ask_forwards_media(monkeypatch: pytest.MonkeyPatch) -> None:
-    helper = _RecordingHelper(answer="ok")
+    helper = _RecordingHelper(answer=_answered("ok"))
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     media = [{"kind": "image", "url": "https://cdn.example/p.png", "caption": "A product"}]
     result = await builtin_interactions.ask("Which?", media=media)
 
-    assert result == "ok"
+    assert result == _answered_json("ok")
     assert helper.calls[0][1]["media"] == media
 
 
 async def test_ask_forwards_mode_and_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
     from datetime import UTC, datetime, timedelta
 
-    helper = _RecordingHelper(answer="ok")
+    helper = _RecordingHelper(answer=_answered("ok"))
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     expiry = datetime.now(UTC) + timedelta(hours=1)
@@ -241,7 +281,7 @@ async def test_ask_forwards_mode_and_expiry(monkeypatch: pytest.MonkeyPatch) -> 
 async def test_ask_forwards_reaction_tool_and_reactions(monkeypatch: pytest.MonkeyPatch) -> None:
     # A reacting-form ask through the TOOL door forwards both reaction halves to the ask
     # seam verbatim, so a form sent via run_tool/agent/MCP can react.
-    helper = _RecordingHelper(answer="ok")
+    helper = _RecordingHelper(answer=_answered("ok"))
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     reactions = {"field_changed": True, "submitted": True, "choices": ["city"]}
@@ -253,19 +293,19 @@ async def test_ask_forwards_reaction_tool_and_reactions(monkeypatch: pytest.Monk
         reactions=reactions,
     )
 
-    assert result == "ok"
+    assert result == _answered_json("ok")
     assert helper.calls[0][1]["reaction_tool"] == "recalc"
     assert helper.calls[0][1]["reactions"] == reactions
 
 
 async def test_ask_forwards_reaction_fields_as_none_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     # A plain ask forwards both reaction halves as None, so a static form is unchanged.
-    helper = _RecordingHelper(answer="ok")
+    helper = _RecordingHelper(answer=_answered("ok"))
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     result = await builtin_interactions.ask("Anything?")
 
-    assert result == "ok"
+    assert result == _answered_json("ok")
     assert helper.calls[0][1]["reaction_tool"] is None
     assert helper.calls[0][1]["reactions"] is None
 
@@ -273,24 +313,24 @@ async def test_ask_forwards_reaction_fields_as_none_by_default(monkeypatch: pyte
 async def test_ask_forwards_the_wording_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
     # The caller's per-send wording catalogue crosses the TOOL door verbatim, so a form/select/
     # question sent via run_tool/agent/MCP can localize every platform-drawn text.
-    helper = _RecordingHelper(answer="ok")
+    helper = _RecordingHelper(answer=_answered("ok"))
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     wording = {"form": {"open": "Rellenar", "cancel": "Cancelar", "back": "Atras", "title": "Formulario"}}
     result = await builtin_interactions.ask("Pick?", answer_format="form", wording=wording)
 
-    assert result == "ok"
+    assert result == _answered_json("ok")
     assert helper.calls[0][1]["wording"] == wording
 
 
 async def test_ask_forwards_the_wording_as_none_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     # A plain ask forwards the wording catalogue as None, so the surfaces keep their defaults.
-    helper = _RecordingHelper(answer="ok")
+    helper = _RecordingHelper(answer=_answered("ok"))
     monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     result = await builtin_interactions.ask("Anything?")
 
-    assert result == "ok"
+    assert result == _answered_json("ok")
     assert helper.calls[0][1]["wording"] is None
 
 
@@ -333,7 +373,7 @@ async def _persisted_audience(fake_redis, store: InteractionStore, *, audience: 
     answerer = asyncio.create_task(answer_when_asked())
     result = await builtin_interactions.ask("proceed?", audience=audience, timeout=5)
     await answerer
-    assert result == "ok"
+    assert result == _answered_json("ok")
     return captured["audience"]
 
 

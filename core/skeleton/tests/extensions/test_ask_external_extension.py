@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import InteractionResponse
+from tai42_contract.interactions import AskAnswer, InteractionResponse
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.render import SchemaBodyError
 
@@ -443,7 +443,7 @@ async def test_answer_schema_by_id_is_rendered_and_passed_to_ask(monkeypatch) ->
 
     async def _fake_ask(question, *, answer_format, schema, timeout, link, verifier):
         captured["schema"] = schema
-        return "answered"
+        return AskAnswer(answer="answered", reply_to=None, params=None)
 
     monkeypatch.setitem(ask_external.__globals__, "ask", _fake_ask)
 

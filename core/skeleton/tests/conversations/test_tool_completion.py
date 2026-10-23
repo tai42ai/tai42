@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 import pytest
+from tai42_contract.conversations import ReplyTexts
 from tai42_contract.interactions import PARK_COMPLETION_FAILED, PARK_COMPLETION_SUCCEEDED
 from tests.agent._memoryless import MemorylessTestAgent
 
@@ -29,6 +30,8 @@ from .conftest import (
     _tool_channel_route,
     _wire,
     _wire_tool,
+    create_record,
+    standing_person,
 )
 
 
@@ -76,7 +79,16 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
 
     _wire_tool(monkeypatch, _park)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     # The dispatch parked silently; the completion was bound naming deliver_tool_completion and
@@ -126,16 +138,16 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
 
 async def test_deliver_tool_completion_non_success_delivers_error_notice(env, monkeypatch, caplog):
     # A non-success terminal (the route carries no error mapping) delivers the uniform
-    # client-safe notice — the DELIVERY route's ``error_reply_text`` when set, never the raw
+    # client-safe notice — the DELIVERY route's ``reply_texts.error`` when set, never the raw
     # internal detail, never a silent drop. The participant-facing notice resolves through the
     # delivery route (where the record is filed and the participant is conversing), NOT the pinned
-    # originating route — so an originating route carrying a DIFFERENT error_reply_text does
+    # originating route — so an originating route carrying a DIFFERENT reply_texts.error does
     # not win here (pinning the deliberate choice at turn.py:1608).
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
     other = "This originating-route text must NOT win."
     channel = FakeChannel()
-    route = _tool_channel_route(reply_expr=".result.reply // null", error_reply_text=spanish)
-    origin = _tool_channel_route(route_name="tool-origin", reply_expr=".x", error_reply_text=other)
+    route = _tool_channel_route(reply_expr=".result.reply // null", reply_texts=ReplyTexts(error=spanish))
+    origin = _tool_channel_route(route_name="tool-origin", reply_expr=".x", reply_texts=ReplyTexts(error=other))
     _wire(monkeypatch, FakeManager(route, origin), channel)
 
     with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
@@ -166,7 +178,7 @@ async def test_deliver_tool_completion_unmappable_success_delivers_error_notice(
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
     channel = FakeChannel()
     # a non-string/non-null emit raises; the delivery route carries the custom notice.
-    route = _tool_channel_route(reply_expr=".result.reply", error_reply_text=spanish)
+    route = _tool_channel_route(reply_expr=".result.reply", reply_texts=ReplyTexts(error=spanish))
     _wire(monkeypatch, FakeManager(route), channel)
 
     out = await _fire_tool(
@@ -372,6 +384,7 @@ async def test_deliver_tool_completion_maps_via_the_pinned_originating_route(env
     route_a = _tool_channel_route(route_name="tool-a", reply_expr=".a.text")
     route_b = _tool_channel_route(route_name="tool-b", our_identity="+15550009999", reply_expr=".b.text")
     _wire(monkeypatch, FakeManager(route_a, route_b), channel)
+    env.seed_person(standing_person("PID1", "tool-a", "tool-b"))
 
     # Simulate the linked person having last written from route B: the thread reverses to B.
     async def _resolve_to_b(_thread_id):
@@ -439,7 +452,16 @@ async def test_agent_route_park_binds_the_thread_as_the_completion_context(env, 
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": ParkingAgent()})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     # The turn parked silently — no reply now; the resumed answer arrives out of band.
@@ -526,7 +548,7 @@ async def test_deliver_tool_completion_reply_reads_turn_rebuilt_from_the_intake_
         inbound_text="hi",
         delivery_status=DeliveryStatus.SILENT,
     )
-    await _store().create_record(intake)
+    await create_record(_store(), intake)
 
     out = await _fire_tool(
         thread_id="bridge:tool-line:+15550002222",

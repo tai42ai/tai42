@@ -119,6 +119,9 @@ _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
     # (retriable), and none is reload-gated, so each carries that 503 alone.
     ("DELETE", "/api/conversations/{route_name}/thread"),
     ("DELETE", "/api/conversations/persons/{person_id}"),
+    # The person-locale PUT refuses a person being erased with a retriable 503 and changes
+    # nothing; it is not reload-gated, so it carries that 503 alone.
+    ("PUT", "/api/conversations/persons/{person_id}/locale"),
     # The served-media door answers a declared 503 (a record present but the blob provider
     # gone) with the plain ``{"error": ...}`` envelope; it is not reload-gated, so both its
     # GET and HEAD carry that 503 alone.

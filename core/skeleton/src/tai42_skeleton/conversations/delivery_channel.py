@@ -1,8 +1,8 @@
 """Channel-door delivery: chunk a produced answer through a channel's ``notify``.
 
 Resumes an interrupted multi-message send from the per-chunk ledger without re-sending what a
-provider already accepted, and refuses loudly a part the channel cannot render or an over-cap
-fan-out.
+provider already accepted, and refuses loudly a part the channel cannot render or draw, or an
+over-cap fan-out.
 """
 
 from __future__ import annotations
@@ -14,13 +14,26 @@ import time
 from tai42_contract.channels import Channel, ChannelDeliveryError, ChannelInputError, ChannelNotification
 from tai42_contract.conversations import AnswerPart
 
-from tai42_skeleton.channels.capabilities import RICH_CAPABILITIES, unsupported_capability
+from tai42_skeleton.channels.capabilities import RICH_CAPABILITIES, check_channel_part, unsupported_capability
 from tai42_skeleton.conversations.ledger import ChannelSendLedger, LedgerInconsistentError, SentChunk
-from tai42_skeleton.conversations.models import ConversationRecord
+from tai42_skeleton.conversations.models import ConversationRecord, SentMessage
 from tai42_skeleton.conversations.records import ConversationRecordStore
+from tai42_skeleton.conversations.sends import notification_part, recorded_send
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
 logger = logging.getLogger(__name__)
+
+
+def _sent_messages(sent: list[SentChunk]) -> list[SentMessage]:
+    """The ledger's accepted chunks as the record keeps them: each part with its ids, in send order."""
+    return [SentMessage(part=chunk.part, chars=chunk.chars, provider_message_ids=chunk.outbound_ids) for chunk in sent]
+
+
+def _ref_identity(record: ConversationRecord) -> str:
+    """The identity a channel record's message refs are keyed by; a channel record without one is impossible."""
+    if record.our_identity is None:
+        raise RuntimeError(f"channel record {record.message_id!r} carries no our_identity to index its sent ids by")
+    return record.our_identity
 
 
 async def _notify_refusal(store: ConversationRecordStore, record: ConversationRecord, channel: Channel) -> None:
@@ -29,11 +42,13 @@ async def _notify_refusal(store: ConversationRecordStore, record: ConversationRe
     A terminal, non-transport refusal on a reachable channel (an oversized answer, an unrenderable
     part, or a permanent input refusal) has already failed the record; the participant is then sent
     the SAME uniform client-safe notice the failed park-completion path delivers, through the same
-    channel, resolved via the route's ``error_reply_text`` when it carries one (any route-lookup
-    fault falls back to the built-in text). The send is best-effort and loud: it is bounded by
-    ``delivery_send_timeout_seconds`` like every channel send, is never retried, and never touches
-    the record's state; ANY failure of it is logged at ERROR here, because the record is already
-    terminally ``failed`` and there is no second delivery machine for the notice.
+    channel, resolved via the route's ``reply_texts.error`` when it carries one (a route-lookup
+    fault falls back to the built-in text). The notice is a ``notice`` send record of its own,
+    bounded by ``delivery_send_timeout_seconds`` and never retried; it never changes the state of
+    the failed reply's record. The send is best-effort and loud: a store fault on the notice's own
+    record write stops the notice before it is sent, and that or any send failure is logged at
+    ERROR here, because the reply's record is already terminally ``failed`` and there is no second
+    delivery machine for the notice.
 
     A reply to a participant's turn earns the notice — a client turn and a park-completion resumed
     reply alike (both are answers the participant awaits). Only an operator's hand-injected send
@@ -50,9 +65,9 @@ async def _notify_refusal(store: ConversationRecordStore, record: ConversationRe
     try:
         route = await cache.get_conversations_manager().get_route(record.route_name)
     except Exception:
-        # The route only enriches the notice text (its ``error_reply_text``); a manager/store
-        # fault must not block the participant-facing notice, so it falls back to the built-in
-        # uniform text — logged loudly, never silent.
+        # The route only enriches the notice text (its ``reply_texts.error``); a manager/store
+        # fault on this lookup falls back to the built-in uniform text — logged loudly, never
+        # silent. A store fault on the notice's own record write below stops the notice.
         logger.error(
             "conversations: could not resolve route %r to enrich the could-not-deliver notice for record %s; "
             "falling back to the built-in uniform text",
@@ -61,15 +76,23 @@ async def _notify_refusal(store: ConversationRecordStore, record: ConversationRe
             exc_info=True,
         )
         route = None
+    notification = ChannelNotification(
+        message=_error_answer_text(route),
+        recipient=record.client_address,
+        sender_identity=record.our_identity,
+    )
+    channel_name = record.channel
+    if channel_name is None:
+        raise RuntimeError(f"record {record.message_id} names no channel to send its notice on")
     try:
-        async with asyncio.timeout(store.settings.delivery_send_timeout_seconds):
-            await channel.notify(
-                ChannelNotification(
-                    message=_error_answer_text(route),
-                    recipient=record.client_address,
-                    sender_identity=record.our_identity,
-                )
-            )
+        await recorded_send(
+            channel=channel_name,
+            address=channel.resolve_address(record.client_address, record.our_identity),
+            parts=[notification_part(notification)],
+            sent_by="notice",
+            send=lambda: channel.notify(notification),
+            bound=store.settings.delivery_send_timeout_seconds,
+        )
     except Exception:
         logger.error(
             "conversations: could not deliver the client-safe could-not-deliver notice for record %s on channel "
@@ -223,7 +246,9 @@ async def _channel_delivery_preconditions(
     except KeyError as exc:
         # Config error: fail the record so the sweep stops re-driving a send that could never
         # complete, then raise loudly.
-        await store.mark_failed(record.message_id, await store.bump_attempt(record.message_id), time.time(), token)
+        await store.mark_failed(
+            record.message_id, await store.bump_attempt(record.message_id), time.time(), token, sends=[]
+        )
         raise RuntimeError(
             f"channel {channel_name!r} is routed but is not registered on this deployment; load its channel "
             "plugin or remove the route"
@@ -235,7 +260,9 @@ async def _channel_delivery_preconditions(
     if max_chars is None:
         max_chars = getattr(channel, "max_message_chars", None)
     if max_chars is None:
-        await store.mark_failed(record.message_id, await store.bump_attempt(record.message_id), time.time(), token)
+        await store.mark_failed(
+            record.message_id, await store.bump_attempt(record.message_id), time.time(), token, sends=[]
+        )
         raise RuntimeError(
             f"channel {channel_name!r} declares no max_message_chars cap and none is configured; declare the "
             "channel's cap or set CONVERSATIONS_MAX_MESSAGE_CHARS"
@@ -248,6 +275,7 @@ async def _admit_channel_send(
     record: ConversationRecord,
     channel: Channel,
     parts: list[AnswerPart],
+    pending: list[tuple[int, str, bool]],
     part_texts: list[str],
     max_chars: int,
     attempts: int,
@@ -257,14 +285,28 @@ async def _admit_channel_send(
 
     Returns ``True`` when the send must stop (the record was refused), ``False`` when it may
     proceed. Refuses — before any chunk goes out — a part whose media/template/options the channel
-    cannot render, and an answer whose total chunk count is over the fan-out cap. Both are
-    ADMISSION decisions, never retroactive; a resume (called only when nothing is sent) is never
-    refused here.
+    cannot render, a template or form part the channel's own checks refuse
+    (:func:`~tai42_skeleton.channels.capabilities.check_channel_part`: the template hook, the subset
+    walk, the form hook), and an answer whose total chunk count is over the fan-out cap. Each
+    refusal fails the record and sends the uniform notice. All are ADMISSION decisions, never
+    retroactive; a resume (called only when nothing is sent) is never refused here.
+
+    ``pending`` is the send plan the send loop then runs, so a part's check reads the exact final
+    chunk its template or schema rides.
     """
     missing = _unsupported_rich_capability(channel, parts)
     if missing is not None:
         await _refuse_unrenderable_parts(store, record, channel, missing, attempts, token)
         return True
+    final_chunks = {part_index: chunk for part_index, chunk, final in pending if final}
+    for part_index, part in enumerate(parts):
+        if part.template is None and part.schema is None:
+            continue
+        try:
+            check_channel_part(channel, message=final_chunks[part_index], template=part.template, schema=part.schema)
+        except ValueError as exc:
+            await _refuse_undrawable_part(store, record, channel, part_index, exc, attempts, token)
+            return True
     # The cap counts the chunks of EVERY part (each part is chunked independently — its
     # boundaries are message boundaries), so the whole ordered answer is bounded by one knob.
     from tai42_skeleton.conversations import delivery as _pkg
@@ -310,16 +352,24 @@ def _channel_send_plan(
 
 async def _reindex_resume(
     store: ConversationRecordStore, record: ConversationRecord, channel_name: str, sent: list[SentChunk], answer: str
-) -> list[str]:
-    """The ids already accepted before a resume, in send order.
+) -> list[SentMessage]:
+    """The parts already accepted before a resume, in send order, with their ids.
 
-    On a resume they are re-indexed first — a chunk accepted just before a crash may never have
-    reached the reverse index, and a receipt naming an unindexed id resolves to nothing. Empty on
-    a fresh send.
+    On a resume their ids are re-indexed first — a chunk accepted just before a crash may never
+    have reached the reverse index, and a receipt naming an unindexed id resolves to nothing. The
+    re-index is idempotent, so a chunk already indexed is unchanged. Empty on a fresh send.
     """
-    outbound_ids = [outbound_id for chunk in sent for outbound_id in chunk.outbound_ids]
     if sent:
-        await store.index_outbound(channel_name, outbound_ids, record.message_id)
+        outbound_ids = [outbound_id for chunk in sent for outbound_id in chunk.outbound_ids]
+        indexed = await store.index_outbound(
+            channel_name, _ref_identity(record), record.client_address, outbound_ids, record.message_id
+        )
+        if indexed == -1:
+            logger.warning(
+                "conversations: record %s is gone, its thread was forgotten; the ids already sent are not indexed: %s",
+                record.message_id,
+                outbound_ids,
+            )
         chars_sent = sum(chunk.chars for chunk in sent)
         logger.info(
             "conversations: resuming channel delivery of record %s on %r at character %d/%d (%d chunk(s) already "
@@ -330,7 +380,7 @@ async def _reindex_resume(
             len(answer),
             len(sent),
         )
-    return outbound_ids
+    return _sent_messages(sent)
 
 
 async def _fail_partial_send(
@@ -343,6 +393,7 @@ async def _fail_partial_send(
     total_chunks: int,
     attempts: int,
     token: str,
+    sends: list[SentMessage],
     *,
     input_refusal: bool,
     notify: bool,
@@ -358,9 +409,10 @@ async def _fail_partial_send(
     participant's reply — sends them the uniform could-not-deliver notice, but only when THIS
     worker's write terminalised the record (a foreign takeover owns it and delivers it itself).
     A retryable (transport) delivery failure fails the record without a notice: the participant
-    could not be reached, so the admin failed-delivery listing is the signal.
+    could not be reached, so the admin failed-delivery listing is the signal. The record keeps the
+    ``sends`` of the chunks already accepted.
     """
-    failed = await store.mark_failed(record.message_id, attempts, time.time(), token)
+    failed = await store.mark_failed(record.message_id, attempts, time.time(), token, sends=sends)
     if failed == 1:
         await ledger.clear(record.message_id)
     if input_refusal:
@@ -396,15 +448,16 @@ async def _run_channel_send_loop(
     channel_name: str,
     pending: list[tuple[int, str, bool]],
     sent: list[SentChunk],
-    outbound_ids: list[str],
+    sends: list[SentMessage],
     parts: list[AnswerPart],
     attempts: int,
     token: str,
     settings: ConversationsSettings,
 ) -> bool:
-    """Execute the pending sends under a lease refreshed before each one, appending accepted ids in place.
+    """Execute the pending sends under a lease refreshed before each one, appending accepted parts in place.
 
-    Accepted ids are appended to ``outbound_ids``. Returns ``True`` when every chunk went out,
+    Each accepted chunk is appended to ``sends`` with its ids, as the ledger holds it. Returns
+    ``True`` when every chunk went out,
     ``False`` when the send stopped early: the lease was lost, the provider did not answer within
     the send timeout (the chunk is left unledgered so a re-drive re-sends it), or a delivery/input
     refusal made the record terminal ``failed``.
@@ -432,11 +485,14 @@ async def _run_channel_send_loop(
                 # A whitespace-only, non-final chunk carries neither text nor rich fields: it is
                 # ledgered so the resume arithmetic stays exact, and no provider call is made.
                 await ledger.append(record.message_id, len(chunk), [], part=part_index)
+                sends.append(SentMessage(part=part_index, chars=len(chunk), provider_message_ids=[]))
                 accepted_chunks += 1
                 continue
             try:
                 async with asyncio.timeout(settings.delivery_send_timeout_seconds):
-                    ids = await channel.notify(_part_notification(parts[part_index], chunk, record, final=final))
+                    sent_outcome = await channel.notify(
+                        _part_notification(parts[part_index], chunk, record, final=final)
+                    )
             except TimeoutError:
                 # Indeterminate: the provider may have taken the chunk. It is deliberately NOT
                 # ledgered, so a re-drive re-sends it — a duplicate is the cheaper side of a loss.
@@ -450,13 +506,21 @@ async def _run_channel_send_loop(
                     record.message_id,
                 )
                 return False
-            # ``None`` from a channel off the id-returning contract is an accepted send with no
-            # correlatable id, not a dropped one. Ledger BEFORE the reverse index: a crash between
-            # the two costs an unresolvable receipt, a crash before the ledger costs a duplicate.
-            accepted = list(ids or [])
+            # Ledger BEFORE the reverse index: a crash between the two costs an unresolvable
+            # receipt, a crash before the ledger costs a duplicate.
+            accepted = list(sent_outcome.message_ids)
             await ledger.append(record.message_id, len(chunk), accepted, part=part_index)
-            await store.index_outbound(channel_name, accepted, record.message_id)
-            outbound_ids.extend(accepted)
+            indexed = await store.index_outbound(
+                channel_name, _ref_identity(record), record.client_address, accepted, record.message_id
+            )
+            if indexed == -1:
+                logger.warning(
+                    "conversations: record %s is gone, its thread was forgotten; the ids of this chunk are not "
+                    "indexed: %s",
+                    record.message_id,
+                    accepted,
+                )
+            sends.append(SentMessage(part=part_index, chars=len(chunk), provider_message_ids=accepted))
             accepted_chunks += 1
     except ChannelDeliveryError as exc:
         # A NON-retryable delivery refusal (a vendor validation rejection, a hard 4xx, a bad
@@ -472,6 +536,7 @@ async def _run_channel_send_loop(
             total_chunks,
             attempts,
             token,
+            sends,
             input_refusal=False,
             notify=not exc.retryable,
         )
@@ -487,6 +552,7 @@ async def _run_channel_send_loop(
             total_chunks,
             attempts,
             token,
+            sends,
             input_refusal=True,
             notify=True,
         )
@@ -528,23 +594,26 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
         # A ledger that cannot describe the answer can never resume, so the record is failed here
         # before the refusal is raised. A transient store fault instead propagates, leaving the
         # record for the sweep to re-drive.
-        failed = await store.mark_failed(record.message_id, attempts, time.time(), token)
+        failed = await store.mark_failed(record.message_id, attempts, time.time(), token, sends=[])
         if failed == 1:
             await ledger.clear(record.message_id)
         raise
 
-    if not sent and await _admit_channel_send(store, record, channel, parts, part_texts, max_chars, attempts, token):
+    # One send plan, built before admission: admission checks the very chunks the loop sends.
+    pending = _channel_send_plan(parts, plan, max_chars)
+    if not sent and await _admit_channel_send(
+        store, record, channel, parts, pending, part_texts, max_chars, attempts, token
+    ):
         return
 
-    outbound_ids = await _reindex_resume(store, record, channel_name, sent, answer)
-    pending = _channel_send_plan(parts, plan, max_chars)
+    sends = await _reindex_resume(store, record, channel_name, sent, answer)
     completed = await _run_channel_send_loop(
-        store, ledger, record, channel, channel_name, pending, sent, outbound_ids, parts, attempts, token, settings
+        store, ledger, record, channel, channel_name, pending, sent, sends, parts, attempts, token, settings
     )
     if not completed:
         return
 
-    outcome = await store.mark_provisional(record.message_id, outbound_ids, attempts, time.time(), token)
+    outcome = await store.mark_provisional(record.message_id, sends, attempts, time.time(), token)
     if outcome == 1:
         await ledger.clear(record.message_id)
         # Fallback confirmation for a medium whose receipt never arrives.
@@ -595,7 +664,7 @@ async def _refuse_oversized_answer(
         settings.max_outbound_chunks,
         record.channel,
     )
-    failed = await store.mark_failed(record.message_id, attempts, time.time(), token)
+    failed = await store.mark_failed(record.message_id, attempts, time.time(), token, sends=[])
     if failed == 1:
         await _notify_refusal(store, record, channel)
 
@@ -623,6 +692,37 @@ async def _refuse_unrenderable_parts(
         missing,
         record.channel,
     )
-    failed = await store.mark_failed(record.message_id, attempts, time.time(), token)
+    failed = await store.mark_failed(record.message_id, attempts, time.time(), token, sends=[])
+    if failed == 1:
+        await _notify_refusal(store, record, channel)
+
+
+async def _refuse_undrawable_part(
+    store: ConversationRecordStore,
+    record: ConversationRecord,
+    channel: Channel,
+    part_index: int,
+    refusal: ValueError,
+    attempts: int,
+    token: str,
+) -> None:
+    """Fail a record with a template or form part the channel's own checks refuse, then notify.
+
+    The channel advertises the part's capability but cannot draw this part (a form outside the
+    channel subset or over the channel's own form limits, a template whose parameters the channel
+    cannot map). The record fails loudly and terminally so it is never re-driven, and no part of
+    the reply goes out. When THIS worker's write terminalises the record, the participant is told
+    the uniform could-not-deliver notice through the same channel; the refusal itself, naming the
+    property, parameter or limit, stays an operator signal in the log.
+    """
+    logger.error(
+        "conversations: record %s part %d cannot be drawn on channel %r: %s; failing the record before any "
+        "part of the reply is sent",
+        record.message_id,
+        part_index + 1,
+        record.channel,
+        refusal,
+    )
+    failed = await store.mark_failed(record.message_id, attempts, time.time(), token, sends=[])
     if failed == 1:
         await _notify_refusal(store, record, channel)

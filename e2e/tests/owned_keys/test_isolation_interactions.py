@@ -135,7 +135,7 @@ async def _ask(
         kwargs["audience"] = audience
     async with stack.mcp(port=stack.port_a, auth=token) as mcp:
         result = await mcp.call_tool("ask", kwargs)
-    return result.data
+    return result.data.answer
 
 
 # -- interactions ------------------------------------------------------------
@@ -295,7 +295,7 @@ async def test_stream_add_frame_omits_ticket_though_one_exists(
                 "ask",
                 {"question": question, "channel": _STUB_CHANNEL},
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask_over_channel())
     try:

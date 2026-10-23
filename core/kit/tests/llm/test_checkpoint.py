@@ -21,7 +21,7 @@ from tai42_kit.llm.checkpoint.stores import postgres as postgres_store_mod
 from tai42_kit.llm.checkpoint.stores import redis as redis_store_mod
 from tai42_kit.llm.checkpoint.stores import sqlite as sqlite_store_mod
 
-from .conftest import client_target, install_fake_named_pool, install_spy_client
+from .conftest import client_target, install_fake_named_pool, install_refusing_probe, install_spy_client, redis_retry_of
 
 
 @pytest.fixture(autouse=True)
@@ -191,6 +191,114 @@ async def test_redis_resource_setup_called(monkeypatch):
     await closer()
     # The closer tears the saver down (releasing its indexes), not a no-op.
     assert resource.handle.saver.closed is True
+
+
+def _capture_redis_saver(monkeypatch) -> list[Any]:
+    """Build the Redis checkpoint on a fake saver that records the client it is handed."""
+    clients: list[Any] = []
+
+    class _FakeSaver:
+        def __init__(self, *, redis_client, ttl=None):
+            clients.append(redis_client)
+
+        async def asetup(self):
+            pass
+
+        async def __aexit__(self, *exc):
+            pass
+
+    _use_fake_redis_saver(monkeypatch, _FakeSaver)
+    return clients
+
+
+async def test_redis_checkpoint_on_the_base_namespace_carries_its_retry_and_timeouts(monkeypatch):
+    from tai42_kit.clients.impl.redis import _LoggedAsyncRetry
+
+    monkeypatch.setenv("REDIS_URL", "redis://base:6379/0")
+    monkeypatch.setenv("RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("SOCKET_TIMEOUT", "3")
+    monkeypatch.setenv("SOCKET_CONNECT_TIMEOUT", "2")
+    clients = _capture_redis_saver(monkeypatch)
+
+    _resource, closer = await cp.create_checkpoint_resource("redis", None)
+    kwargs = clients[0].connection_pool.connection_kwargs
+    retry = redis_retry_of(clients[0])
+    assert isinstance(retry, _LoggedAsyncRetry)
+    assert retry._budget == 2
+    assert retry._label == "REDIS_URL"
+    assert kwargs["socket_timeout"] == 3
+    assert kwargs["socket_connect_timeout"] == 2
+    assert kwargs["decode_responses"] is False
+    await closer()
+
+
+async def test_redis_checkpoint_on_its_own_conn_string_reads_its_own_namespace(monkeypatch):
+    from tai42_kit.clients.impl.redis import _LoggedAsyncRetry
+
+    # The base namespace is set to other values and must not be read; no base URL is set.
+    monkeypatch.setenv("RETRY_ATTEMPTS", "5")
+    monkeypatch.setenv("REDIS_MAX_CONNECTIONS", "7")
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SOCKET_TIMEOUT", "3")
+    assert "REDIS_URL" not in os.environ
+    assert "TAI_DEFAULT_REDIS_URL" not in os.environ
+    clients = _capture_redis_saver(monkeypatch)
+
+    _resource, closer = await cp.create_checkpoint_resource("redis", "redis://own:6390/4")
+    client = clients[0]
+    retry = redis_retry_of(client)
+    assert isinstance(retry, _LoggedAsyncRetry)
+    assert retry._budget == 2
+    assert retry._label == "LLM_PROVIDER_CHECKPOINT_CONN_STRING"
+    assert client.connection_pool.connection_kwargs["socket_timeout"] == 3
+    assert client_target(client) == "own:6390/4"
+    # redis-py's own pool cap: the conn string's door sets no pool size.
+    assert client.connection_pool.max_connections == 2**31
+    await closer()
+
+
+async def test_redis_checkpoint_on_its_own_conn_string_with_no_options_has_no_retry(monkeypatch):
+    clients = _capture_redis_saver(monkeypatch)
+    _resource, closer = await cp.create_checkpoint_resource("redis", "redis://own:6390/4")
+    assert redis_retry_of(clients[0]) is None
+    await closer()
+
+
+class _FakePostgresSaver:
+    def __init__(self, conn):
+        pass
+
+    async def setup(self):
+        pass
+
+
+async def test_postgres_checkpoint_on_its_own_dsn_retries_by_its_own_namespace(monkeypatch):
+    monkeypatch.setenv("PG_RETRY_ATTEMPTS", "5")
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_PG_RETRY_ATTEMPTS", "2")
+    install_fake_named_pool(monkeypatch)
+    attempts = install_refusing_probe(monkeypatch, 2)
+    saver_mod: Any = types.ModuleType("langgraph.checkpoint.postgres.aio")
+    saver_mod.AsyncPostgresSaver = _FakePostgresSaver
+    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres.aio", saver_mod)
+
+    _resource, closer = await cp.create_checkpoint_resource("postgres", "postgresql://u:p@own/db")
+    assert attempts == ["postgresql://u:p@own/db"] * 3
+    await closer()
+
+
+async def test_postgres_checkpoint_on_its_own_dsn_tries_once_with_no_options(monkeypatch):
+    import psycopg
+
+    monkeypatch.setenv("PG_RETRY_ATTEMPTS", "5")
+    install_fake_named_pool(monkeypatch)
+    attempts = install_refusing_probe(monkeypatch, 1)
+    saver_mod: Any = types.ModuleType("langgraph.checkpoint.postgres.aio")
+    saver_mod.AsyncPostgresSaver = _FakePostgresSaver
+    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres.aio", saver_mod)
+
+    with pytest.raises(psycopg.OperationalError):
+        await cp.create_checkpoint_resource("postgres", "postgresql://u:p@own/db")
+    assert len(attempts) == 1
 
 
 async def test_a_saver_with_its_own_waiting_shares_the_stores_client(monkeypatch):

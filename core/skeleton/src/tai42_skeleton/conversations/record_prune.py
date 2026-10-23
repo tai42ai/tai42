@@ -17,7 +17,14 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_skeleton.conversations import records as _records
 from tai42_skeleton.conversations.models import TERMINAL_STATUSES
 from tai42_skeleton.conversations.record_keys import _member, _resume_at
-from tai42_skeleton.conversations.record_scripts import _DELETE_LUA, _INDEXED_STATUSES, _PRUNE_THREAD_LUA
+from tai42_skeleton.conversations.record_scripts import (
+    _DELETE_LUA,
+    _INDEXED_STATUSES,
+    _PRUNE_THREAD_LUA,
+)
+from tai42_skeleton.conversations.record_send_scripts import (
+    _FORGET_SENDING_LUA,
+)
 from tai42_skeleton.conversations.record_store_base import RecordStoreBase
 from tai42_skeleton.utils.redis_typing import awaited, eval_script
 
@@ -300,6 +307,31 @@ class RecordPruneMixin(RecordStoreBase):
                 await awaited(r.zrem(key, *members))
             await awaited(r.delete(key))
 
+    async def forget_sending(self, route_name: str, thread_id: str) -> int:
+        """Mark every send of ``route_name`` still going out as landing nowhere in ``thread_id``.
+
+        Each ``sending`` row of the route's in-flight set gets the thread named in its
+        ``forgotten_threads``, so its placement step deletes it when it lands there; a member
+        that already ended leaves the set. Removes no row. Returns how many rows it marked.
+        """
+        inflight = self.settings.route_sending_key(route_name)
+        marked = 0
+        async with _records.client_ctx(RedisClient, self.settings.redis) as r:
+            for member in await awaited(r.smembers(inflight)):
+                message_id = _member(member)
+                marked += int(
+                    await eval_script(
+                        r,
+                        _FORGET_SENDING_LUA,
+                        2,
+                        inflight,
+                        self.settings.record_key(message_id),
+                        message_id,
+                        thread_id,
+                    )
+                )
+        return marked
+
     async def drop_thread(self, route_name: str, thread_id: str) -> int:
         """Delete one thread under ``route_name`` outright.
 
@@ -313,7 +345,16 @@ class RecordPruneMixin(RecordStoreBase):
         emptied and a route member stranded without one. Neither thread index carries a TTL and
         the prune pass walks LIVE routes only, so nothing here may leave a member behind: the
         operator asked for the thread gone now, not on the records' own retention clock.
+
+        A forgotten record's message refs, keyspace-3 entries and ask entry go with it. A send
+        still going out on the route is reached FIRST, through the route's in-flight set
+        (:meth:`forget_sending`): it is forgotten when it ends, not by this call — its completion,
+        end or settle deletes it when the thread it lands in is this one, so until then (at most
+        one settle deadline) its row, in ``sending`` and in no thread index, still holds the
+        participant's address, and ``removed`` does not count it. A send whose outcome lands in a
+        thread that was not forgotten is recorded there.
         """
+        await self.forget_sending(route_name, thread_id)
         thread_key = self.settings.thread_index_key(route_name, thread_id)
         route_key = self.settings.route_threads_key(route_name)
         status_keys = [self.settings.status_index_key(status.value) for status in _INDEXED_STATUSES]

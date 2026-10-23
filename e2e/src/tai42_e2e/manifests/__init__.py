@@ -55,6 +55,7 @@ from tai42_e2e.manifests.channels import (
     SLACK_BOT_USER_ID,
     SLACK_DEFAULT_RECIPIENT,
     SLACK_UNLISTED_RECIPIENT,
+    TELEGRAM_ALLOWED_HANDLE,
     TELEGRAM_ALLOWED_RECIPIENTS,
     TELEGRAM_DEFAULT_RECIPIENT,
     TELEGRAM_UNLISTED_RECIPIENT,
@@ -99,6 +100,7 @@ from tai42_e2e.manifests.core import (
 )
 from tai42_e2e.manifests.extensions import build_extensions_stack
 from tai42_e2e.manifests.feature_env import _base_env, _llm_env, _memory_agent_state_env, _redis_feature_env
+from tai42_e2e.manifests.hook_runs import build_hook_runs_replicas_stack, build_hook_runs_stack
 from tai42_e2e.manifests.manifest_mcp import (
     MISBEHAVING_MCP_TITLE,
     POSTGRES_MCP_PROBE_ROW_NAME,
@@ -191,6 +193,7 @@ __all__ = [
     "SLACK_CLIENT_ID",
     "SLACK_DEFAULT_RECIPIENT",
     "SLACK_UNLISTED_RECIPIENT",
+    "TELEGRAM_ALLOWED_HANDLE",
     "TELEGRAM_ALLOWED_RECIPIENTS",
     "TELEGRAM_DEFAULT_RECIPIENT",
     "TELEGRAM_UNLISTED_RECIPIENT",
@@ -243,6 +246,8 @@ __all__ = [
     "build_embed_prefix_stack",
     "build_embed_stack",
     "build_extensions_stack",
+    "build_hook_runs_replicas_stack",
+    "build_hook_runs_stack",
     "build_marketplace_authz_stack",
     "build_marketplace_connectors_stack",
     "build_marketplace_prefix_stack",

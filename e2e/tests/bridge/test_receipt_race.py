@@ -176,11 +176,12 @@ async def test_receipt_before_provisional_is_parked_and_applied(
     assert final.get("pending_receipt") is None, "the parked receipt is cleared once applied"
 
     # The parked receipt corresponds to already-ledgered chunks: every chunk was sent exactly
-    # once, the outbound ids account for each, and nothing is re-sent after the record delivered.
-    sent_count = len(bridge.fake_twilio.sends_matching(marker))
-    assert sent_count == len(final["outbound_message_ids"]), (
-        f"{sent_count} sends but {len(final['outbound_message_ids'])} ledgered outbound ids"
-    )
+    # once, the recorded parts' provider ids account for each, and nothing is re-sent after the
+    # record delivered.
+    sent = bridge.fake_twilio.sends_matching(marker)
+    sent_count = len(sent)
+    ledgered = [provider_id for part in final["sends"] for provider_id in part["provider_message_ids"]]
+    assert ledgered == [send["sid"] for send in sent], f"{sent_count} sends but ledgered ids {ledgered!r}"
     stable = await wait_channel_send_count(bridge.fake_twilio, marker, sent_count, deadline=5.0)
     assert len(stable) == sent_count, "a chunk was re-sent after the record was delivered"
 

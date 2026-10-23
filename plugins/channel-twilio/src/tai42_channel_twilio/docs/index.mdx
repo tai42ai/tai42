@@ -95,6 +95,49 @@ tai conversations create chat-line \
 A `(channel, identity)` pair may be claimed by only one route; more senders are
 more rows.
 
+## Reply window
+
+WhatsApp delivers a freeform reply only inside a 24-hour window opened by the
+client's last message. For a `whatsapp:` pair the channel tracks that window and
+reports it on every bridged turn as `turn.reply_window` (`{state, closes_at}`), so
+a route's `start_expr`, `reply_expr` or flow can see it before replying:
+
+- each new inbound message on the pair opens the window for 24 hours from the
+  moment the webhook first receives it; a redelivered `MessageSid` keeps that
+  first receipt, so a retry never moves the window;
+- `state` is `open` (until `closes_at`, UTC, in whole seconds) or `closed`
+  (never opened, or expired);
+- an SMS pair has no such window and reads `none`.
+
+The window lives in the channel's Redis (`CHANNEL_TWILIO_REDIS_URL`), one key per
+pair that expires when the window closes, plus one first-receipt key per
+WhatsApp `MessageSid` that expires after 24 hours; there is no setting. The state is read
+once per turn, so a turn that runs past `closes_at` may still see `open`; Twilio's
+63016 rejection of an out-of-window send stays the final check.
+
+## Message ids and addresses
+
+The conversation bridge records every message this channel sends to a participant. These are
+the ids and addresses it records:
+
+- An inbound message passes its `MessageSid` as the medium message id. A message with several
+  media items is bridged as one record per item, and every record carries the same
+  `MessageSid`.
+- `resolve_address` returns the "From" number (the route's identity, else `CHANNEL_TWILIO_FROM`)
+  and the "To" number, both as the inbound webhook passes them, a `whatsapp:` prefix included.
+  A completed send reports the same pair and the message's `sid`.
+
+## Replies
+
+On WhatsApp, a message sent as a reply to a message from the last 7 days carries
+`OriginalRepliedMessageSid`, the `MessageSid` of the message it quotes. The channel hands that
+sid to the platform beside the message, on every media item of the message too, and the
+platform resolves it against the conversation's own records into a typed `reply_to`
+(`{message_id, status, text}`): a `tool` target reads it in its payload, an `agent` target
+through `start_expr`. When the reply answers a pending question, the asker receives the same
+`reply_to` beside the unchanged answer. An SMS has no reply field, so it quotes nothing, and
+the channel sends no tappable buttons, so no tap arrives.
+
 ## Working-on-it signal
 
 SMS and WhatsApp-over-Twilio carry no typing indicator, so this channel emits no

@@ -9,7 +9,8 @@ still matchable, and a failed send releases the reservation and raises.
 
 WhatsApp (``whatsapp:``-prefixed pair): a freeform ``Body`` is accepted only
 inside Twilio's 24-hour customer-service window, else Twilio rejects with error
-63016 as a ``ChannelDeliveryError``.
+63016 as a ``ChannelDeliveryError``. ``reply_window`` reports that window per pair
+(from each inbound's receive time); an SMS pair has none.
 
 Media (:class:`MediaItem`) rides ``deliver`` and ``notify`` as MMS/WhatsApp media,
 degraded honestly per kind to the text-first medium:
@@ -56,17 +57,27 @@ from typing import ClassVar
 
 from redis.exceptions import RedisError
 from tai42_contract.channels import (
+    ChannelAddress,
+    ChannelAddressError,
     ChannelDelivery,
     ChannelDeliveryError,
     ChannelInputError,
     ChannelNotification,
     ChannelWithdrawal,
+    ReplyWindow,
+    SendOutcome,
 )
 from tai42_contract.interactions import CALLBACK_LINK_FORMATS
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_twilio.client import send_message
-from tai42_channel_twilio.correlation import release_pending, release_pending_for, reserve_pending
+from tai42_channel_twilio.correlation import (
+    WHATSAPP_ADDRESS_PREFIX,
+    release_pending,
+    release_pending_for,
+    reserve_pending,
+)
+from tai42_channel_twilio.correlation import reply_window as pair_reply_window
 from tai42_channel_twilio.settings import TwilioSettings, require_delivery_setting, twilio_settings
 
 logger = logging.getLogger(__name__)
@@ -165,22 +176,25 @@ def _target_number(settings: TwilioSettings, requested: str | None) -> str:
     """The "To" number an address names: ``requested`` when set, else ``CHANNEL_TWILIO_DEFAULT_RECIPIENT``.
 
     The address resolution alone, with no send fence — shared by every outbound send and by a
-    withdrawal, so a withdrawal releases the very pair its delivery reserved.
+    withdrawal, so a withdrawal releases the very pair its delivery reserved. No requested number
+    and no default is a :class:`ChannelAddressError`.
     """
-    if requested is None:
-        return require_delivery_setting(settings.default_recipient, "CHANNEL_TWILIO_DEFAULT_RECIPIENT")
-    return requested
+    if requested is not None:
+        return requested
+    if not settings.default_recipient:
+        raise ChannelAddressError("Twilio channel is not configured: set CHANNEL_TWILIO_DEFAULT_RECIPIENT.")
+    return settings.default_recipient
 
 
 def _resolve_target(settings: TwilioSettings, requested: str | None) -> str:
     """The destination "To" number for an outbound send.
 
     A caller-requested recipient must be on ``CHANNEL_TWILIO_ALLOWED_RECIPIENTS``
-    or is refused loudly (fail closed); no requested recipient uses the
-    operator-set ``CHANNEL_TWILIO_DEFAULT_RECIPIENT`` (no allowlist check).
+    or is refused loudly with a :class:`ChannelAddressError` (fail closed); no requested
+    recipient uses the operator-set ``CHANNEL_TWILIO_DEFAULT_RECIPIENT`` (no allowlist check).
     """
     if requested is not None and requested not in set(settings.allowed_recipients):
-        raise ChannelDeliveryError(
+        raise ChannelAddressError(
             f"recipient {requested!r} is not on CHANNEL_TWILIO_ALLOWED_RECIPIENTS; refusing to send"
         )
     return _target_number(settings, requested)
@@ -210,16 +224,34 @@ class TwilioChannel:
     # conversation-delivery machine reads it (an operator may override it per deployment).
     max_message_chars: ClassVar[int] = 1600
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
-        """Resolve the "To" number, then push the question to it.
+    def resolve_address(self, recipient: str | None, sender_identity: str | None) -> ChannelAddress:
+        """The "From" and "To" numbers a send with these values goes from and to.
 
-        Recipient policy is ``_resolve_target``'s (fail closed on an unlisted
-        request). An ask already past its deadline is refused loudly for every
-        format before any reservation or send.
+        ``sender_identity`` set → that number, to ``recipient`` as given (the recipient
+        allowlist not consulted: a bridge reply goes to the address that initiated the
+        conversation) or ``CHANNEL_TWILIO_DEFAULT_RECIPIENT``; unset →
+        ``CHANNEL_TWILIO_FROM``, with ``_resolve_target``'s allowlist enforced. The numbers
+        are the ones the inbound webhook passes as ``To`` and ``From``, verbatim (a
+        ``whatsapp:`` prefix included). An unresolvable recipient raises
+        :class:`ChannelAddressError`; an unset ``CHANNEL_TWILIO_FROM`` raises
+        :class:`ChannelDeliveryError`.
         """
         settings = twilio_settings()
+        if sender_identity is not None:
+            return ChannelAddress(our_identity=sender_identity, address=_target_number(settings, recipient))
         from_number = require_delivery_setting(settings.from_number, "CHANNEL_TWILIO_FROM")
-        target = _resolve_target(settings, delivery.recipient)
+        return ChannelAddress(our_identity=from_number, address=_resolve_target(settings, recipient))
+
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
+        """Resolve the "From" and "To" numbers, then push the question; returns its outcome.
+
+        Recipient policy is ``resolve_address``'s (fail closed on an unlisted
+        request). An ask already past its deadline is refused loudly for every
+        format before any reservation or send. The outcome carries the question's
+        ``MessageSid``.
+        """
+        pair = self.resolve_address(delivery.recipient, None)
+        from_number, target = pair.our_identity, pair.address
 
         # Resolve MMS media up front so a data: image is refused before any reservation
         # or send (a permanent input error, never a retryable delivery failure).
@@ -227,10 +259,10 @@ class TwilioChannel:
 
         if delivery.answer_format in CALLBACK_LINK_FORMATS:
             # Tier-1: answered via the callback link, so no correlation is stored.
-            await send_message(
+            sid = await send_message(
                 to=target, from_number=from_number, body=_render_link(delivery), media_urls=media_urls or None
             )
-            return
+            return SendOutcome(our_identity=from_number, address=target, message_ids=[sid])
 
         # Reserve before send: a fast reply's webhook can beat the send response,
         # and this enforces one-pending-per-pair before any network cost.
@@ -244,13 +276,14 @@ class TwilioChannel:
             wording=delivery.wording,
         )
         try:
-            await send_message(
+            sid = await send_message(
                 to=target, from_number=from_number, body=_render_question(delivery), media_urls=media_urls or None
             )
         except Exception:
             # Send failed — free the pair instead of holding it until its TTL.
             await release_pending(twilio_number=from_number, human_number=target)
             raise
+        return SendOutcome(our_identity=from_number, address=target, message_ids=[sid])
 
     async def withdraw(self, withdrawal: ChannelWithdrawal) -> None:
         """Release what this channel kept for a delivered question the platform has taken down.
@@ -279,28 +312,36 @@ class TwilioChannel:
             "released the pair's reservation" if released else "no reservation held for it",
         )
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def reply_window(self, *, recipient: str, sender_identity: str | None = None) -> ReplyWindow:
+        """WhatsApp's 24-hour customer service window for ``recipient``; ``none`` for an SMS number.
+
+        A ``whatsapp:`` recipient reads the pair with ``sender_identity`` as the Twilio number,
+        else the configured ``CHANNEL_TWILIO_FROM`` (unset raises :class:`ChannelDeliveryError`, as
+        ``deliver`` does): ``open`` carries the close time (the latest inbound's first receipt + 24
+        hours, in whole seconds), ``closed`` means no inbound in the last 24 hours. Any other recipient is an SMS
+        number, which has no window. Twilio's 63016 rejection of a send outside the window stays
+        final.
+        """
+        if not recipient.startswith(WHATSAPP_ADDRESS_PREFIX):
+            return ReplyWindow(state="none", closes_at=None)
+        if sender_identity is not None:
+            from_number = sender_identity
+        else:
+            from_number = require_delivery_setting(twilio_settings().from_number, "CHANNEL_TWILIO_FROM")
+        return await pair_reply_window(from_number, recipient)
+
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         """Send one fire-and-forget message; raise ``ChannelDeliveryError`` on any failure.
 
-        Returns the single ``MessageSid`` Twilio assigned the send. No reply is
-        expected, so nothing touches the correlation store. Exactly
-        one send attempt (a plain return means Twilio ACCEPTED it, not that a
-        human saw it). ``sender_identity`` set → send FROM it verbatim to the
-        recipient, the recipient allowlist not consulted (a bridge reply goes to
-        the address that initiated the conversation); unset → the configured
-        ``CHANNEL_TWILIO_FROM`` with ``_resolve_target``'s allowlist enforced.
-        WhatsApp freeform sends obey the 24-hour window (error 63016 →
-        ``ChannelDeliveryError``).
+        Returns the outcome: the "From" and "To" numbers and the single ``MessageSid``
+        Twilio assigned the send. No reply is expected, so nothing touches the correlation
+        store. Exactly one send attempt (a plain return means Twilio ACCEPTED it, not that a
+        human saw it). The numbers are ``resolve_address``'s for the notification's
+        recipient and ``sender_identity``. WhatsApp freeform sends obey the 24-hour window
+        (error 63016 → ``ChannelDeliveryError``).
         """
-        settings = twilio_settings()
-        if notification.sender_identity is not None:
-            from_number = notification.sender_identity
-            target = notification.recipient or require_delivery_setting(
-                settings.default_recipient, "CHANNEL_TWILIO_DEFAULT_RECIPIENT"
-            )
-        else:
-            from_number = require_delivery_setting(settings.from_number, "CHANNEL_TWILIO_FROM")
-            target = _resolve_target(settings, notification.recipient)
+        pair = self.resolve_address(notification.recipient, notification.sender_identity)
+        from_number, target = pair.our_identity, pair.address
         # Resolve MMS media up front (a data: image is refused here); link/document media
         # rides as appended Body lines.
         media_urls = _media_urls(notification.media)
@@ -312,4 +353,4 @@ class TwilioChannel:
             # an images-only send, which goes out as a body-less MMS carrying only its MediaUrl.
             body = "\n".join(text_lines)
         sid = await send_message(to=target, from_number=from_number, body=body, media_urls=media_urls or None)
-        return [sid]
+        return SendOutcome(our_identity=from_number, address=target, message_ids=[sid])

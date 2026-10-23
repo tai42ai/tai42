@@ -6,7 +6,8 @@ enforcement and the accounts provider serves the role/user seeding the matrix
 needs) in the REPLICAS topology (a sibling port for the cross-replica fire),
 with the redis hooks backend (trigger links 501 in-memory by design), the
 webhook-verifier lifecycle modules (the verifier bind validates the verifier NAME
-against the registry), the backup router (the round-trip legs), and the
+against the registry), the backup router (the round-trip legs), the notifications
+router (the operator feed a failed hook run is reported to), and the
 ``trigger_*`` rate-limit family raised high so the whole suite firing from one
 localhost bucket never trips the default-ON limiter.
 
@@ -53,13 +54,14 @@ for _sibling in ("access_control",):
 def build_trigger_links_stack(res: StackResources, variants: Variants) -> StackConfig:
     """The accounts profile (REPLICAS, access control ON, the accounts + redis
     identity providers, redis hooks) PLUS the webhook-verifier lifecycle modules,
-    the backup router, and raised ``trigger_*`` rate-limit knobs — the dedicated
-    home of the trigger-link journey.
+    the backup and notifications routers, and raised ``trigger_*`` rate-limit knobs —
+    the dedicated home of the trigger-link journey.
 
     Only additive over ``build_accounts_stack``: the verifier modules the verifier bind
     validates against, the backup router the round-trip legs export/import through,
-    and the raised trigger family so the suite's many fires share one localhost
-    bucket without tripping the default limiter. No shared builder is mutated."""
+    the notifications router the operator feed is read through, and the raised
+    trigger family so the suite's many fires share one localhost bucket without
+    tripping the default limiter. No shared builder is mutated."""
     base = build_accounts_stack(res, variants)
     manifest = {**base.manifest}
     manifest["lifecycle_modules"] = [
@@ -67,7 +69,11 @@ def build_trigger_links_stack(res: StackResources, variants: Variants) -> StackC
         "tai42_webhook_verifier_github",
         "tai42_skeleton.webhooks.builtin.shared_secret",
     ]
-    manifest["routers_modules"] = [*base.manifest["routers_modules"], "tai42_skeleton.routers.backup"]
+    manifest["routers_modules"] = [
+        *base.manifest["routers_modules"],
+        "tai42_skeleton.routers.backup",
+        "tai42_skeleton.routers.notifications",
+    ]
     env = {**base.env}
     # The trigger family is default-ON at 60/min + 10/10s PER CLIENT IP; the whole
     # suite fires from one localhost bucket, so raise both windows well above the

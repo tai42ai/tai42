@@ -35,6 +35,8 @@ from .conftest import (
     _settle,
     _store,
     _wire,
+    create_record,
+    sent,
 )
 from .fake_record_redis import FakeRecordRedis
 
@@ -78,7 +80,14 @@ async def test_the_turn_task_runs_in_a_fresh_root_context(env, monkeypatch):
         with tool_call_frame(name="caller_run"):
             caller_run_id = get_run_delivery_id()
             message_id = await turn_module.accept(
-                "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1"
+                "twilio",
+                "+15550001111",
+                "+15550002222",
+                "+15550002222",
+                "hi",
+                "PID1",
+                medium_message_id=None,
+                reply_to_medium_message_id=None,
             )
     finally:
         _PROBE.reset(probe_token)
@@ -121,7 +130,16 @@ async def test_record_delivery_status_confirms_provisional(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": EchoAgent()})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     # Let the turn + channel send run, but not the (1h) grace confirm.
     for _ in range(50):
         record = await _store().get_record(message_id)
@@ -163,7 +181,7 @@ async def test_redrive_resumes_a_stranded_pending_record(env, monkeypatch):
         created_at=now,
         updated_at=now,
     )
-    await _store().create_record(record)
+    await create_record(_store(), record)
 
     await delivery_module.redrive_pending()
     await _settle()
@@ -206,8 +224,8 @@ async def test_redrive_confirms_a_provisional_record_whose_grace_elapsed(env, mo
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     store = _store()
-    await store.create_record(_answered_channel_record("prov-elapsed"))
-    await store.mark_provisional("prov-elapsed", ["out-1"], 1, time.time(), "tok")
+    await create_record(store, _answered_channel_record("prov-elapsed"))
+    await store.mark_provisional("prov-elapsed", sent("out-1"), 1, time.time(), "tok")
     _set_grace_deadline(env, "prov-elapsed", time.time() - 1)
 
     await delivery_module.redrive_pending()
@@ -231,8 +249,8 @@ async def test_redrive_reschedules_only_the_remaining_grace_of_a_provisional_rec
     store = _store()
     now = time.time()
     monkeypatch.setattr(delivery_module, "time", types.SimpleNamespace(time=lambda: now))
-    await store.create_record(_answered_channel_record("prov-young"))
-    await store.mark_provisional("prov-young", ["out-1"], 1, now, "tok")
+    await create_record(store, _answered_channel_record("prov-young"))
+    await store.mark_provisional("prov-young", sent("out-1"), 1, now, "tok")
     _set_grace_deadline(env, "prov-young", now + 0.05)
 
     await delivery_module.redrive_pending()
@@ -274,7 +292,7 @@ async def test_redrive_races_executor_delivers_once(env, monkeypatch):
         created_at=now,
         updated_at=now,
     )
-    await _store().create_record(record)
+    await create_record(_store(), record)
 
     # Hold BOTH workers at the claim so each reads the record before either writes a
     # lease; the loser must find a live lease and send nothing.
@@ -311,7 +329,8 @@ async def test_the_wait_paths_claim_locks_out_a_racing_callback_delivery(env, mo
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
     now = time.time()
 
-    await _store().create_record(
+    await create_record(
+        _store(),
         ConversationRecord(
             message_id="wait-race",
             route_name="chat",
@@ -326,7 +345,7 @@ async def test_the_wait_paths_claim_locks_out_a_racing_callback_delivery(env, mo
             answer="once",
             created_at=now,
             updated_at=now,
-        )
+        ),
     )
 
     claimed = asyncio.Event()
@@ -367,7 +386,16 @@ async def test_a_boot_redrive_leaves_a_live_peers_in_flight_turn_alone(env, monk
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await asyncio.wait_for(agent.entered.wait(), 2)
 
     await turn_module.redrive_accepted()
@@ -401,7 +429,16 @@ async def test_a_running_turn_refreshes_its_intake_lease_past_the_original_expir
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await asyncio.wait_for(agent.entered.wait(), 2)
     at_accept = await _intake_lease(env, message_id)
 
@@ -437,10 +474,28 @@ async def test_a_turn_queued_behind_the_caps_keeps_its_intake_lease_live(env, mo
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    running = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
+    running = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "one",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await asyncio.wait_for(agent.entered.wait(), 2)
     # Same address, so the second message queues behind the first on the thread's FIFO.
-    queued = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
+    queued = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "two",
+        "PID2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     assert agent.calls == ["one"]
 
     # Past the lease the accept wrote: only a heartbeat can still be holding it.

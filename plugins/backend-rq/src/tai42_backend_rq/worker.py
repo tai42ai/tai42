@@ -41,10 +41,11 @@ from rq.timeouts import HorseMonitorTimeoutException, TimerDeathPenalty, UnixSig
 from rq.worker import WorkerStatus
 from tai42_contract.app import tai42_app
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
+from tai42_kit.clients.impl.redis import KitSyncRedis, redis_from_url_kwargs
 from tai42_kit.fork_gate import fork_gate
 
 from tai42_backend_rq.queue import TaskBudgetQueue
-from tai42_backend_rq.settings import rq_settings
+from tai42_backend_rq.settings import rq_client_kwargs, rq_settings
 
 logger = logging.getLogger(__name__)
 
@@ -398,6 +399,19 @@ def prepare_forking_worker() -> None:
     tai42_app.monitoring.active.writer.shutdown()
 
 
+def rq_redis_connection(redis_url: str | None) -> KitSyncRedis:
+    """A dedicated sync connection on the kit seam, for a process-long RQ loop.
+
+    Built from :func:`~tai42_backend_rq.settings.rq_client_kwargs`, so the ``RQ_*``
+    connection retry and socket timeouts reach every command the loop runs, the worker's
+    pub/sub included; ``redis_url`` (a CLI override) replaces only the URL. The caller
+    closes it.
+    """
+    return KitSyncRedis.from_url(
+        **redis_from_url_kwargs({**rq_client_kwargs(), "url": redis_url or rq_settings().redis.redis_url}, sync=True)
+    )
+
+
 def _build_worker(
     redis_url: str | None,
     name: str | None,
@@ -415,7 +429,6 @@ def _build_worker(
     the ``rq-scheduler`` child, which inherits the same unusable monitoring writer and
     fork-gate state. Only prefork additionally runs :func:`prepare_forking_worker`.
     """
-    url = redis_url or rq_settings().redis_url
     install_fork_hooks()
 
     if pool == "gevent":
@@ -427,7 +440,7 @@ def _build_worker(
         worker_class = CustomRQWorker
         prepare_forking_worker()
 
-    redis_conn = Redis.from_url(url)
+    redis_conn = rq_redis_connection(redis_url)
     queue = TaskBudgetQueue(rq_settings().queue_name, connection=redis_conn)
     worker = worker_class([queue], name=name, connection=redis_conn, default_result_ttl=results_ttl)
     return worker, redis_conn

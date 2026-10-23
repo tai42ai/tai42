@@ -83,6 +83,10 @@ Settings are read from the `ARQ_` environment group (see `ArqSettings`):
 | --- | --- | --- |
 | `ARQ_REDIS_URL` | `redis://localhost:6379/0` | Redis connection for the queue and schedules |
 | `ARQ_REDIS_MAX_CONNECTIONS` | — | Optional cap on the pool's connections |
+| `ARQ_RETRY_ATTEMPTS` | `0` | Times a failed Redis connect or command is retried, each retry logged as a warning; `0` makes one attempt |
+| `ARQ_RETRY_ON_TIMEOUT` | `false` | With `ARQ_RETRY_ATTEMPTS` at `0`, retry a timed-out command once at once |
+| `ARQ_SOCKET_TIMEOUT` | — | Seconds a Redis command may wait on its socket; redis-py's default when unset |
+| `ARQ_SOCKET_CONNECT_TIMEOUT` | `1` | Seconds a Redis connect may take |
 | `ARQ_CALLBACK_TIMEOUT` | `5` | Seconds a callback job waits for its predecessor to complete |
 | `ARQ_MANIFEST_KEY` | `MANIFEST_KEY` | Name of the env var the host exports the manifest under for worker processes |
 | `ARQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the longest a job may run on the worker (the `--job-timeout` default), and how long a synchronous branch tool waits for its queued job's result |
@@ -93,8 +97,18 @@ host's backend settings defaults — both sides
 must agree on these values without sharing code, so override them only in
 lockstep with the host.
 
+`ARQ_REDIS_URL` and `ARQ_REDIS_MAX_CONNECTIONS` fall back to the shared
+`TAI_DEFAULT_REDIS_URL` / `TAI_DEFAULT_REDIS_MAX_CONNECTIONS` when unset.
+
+Every Redis connection of this backend — the enqueue side and the worker — is
+built from these settings. The worker's connect at start follows
+`ARQ_RETRY_ATTEMPTS`, so with the default `0` a worker started before Redis is
+reachable fails at once. A running worker rides a Redis outage only within that
+same retry: arq's poll loop has no reconnect of its own, so an outage longer
+than the retry ends the worker.
+
 Worker CLI options (after the `worker` subcommand): `--redis-url` (defaults to
-`ARQ_REDIS_URL`), `--burst`, `--keep-result` (default `3600`; `0` disables
+`ARQ_REDIS_URL`; the other connection settings still apply), `--burst`, `--keep-result` (default `3600`; `0` disables
 result retention), `--queue-name`, `--max-jobs` (default `10`),
 `--job-timeout` (defaults to `ARQ_TASK_TIMEOUT`), `--poll-delay` (default `0.5`),
 `--max-tries` (default `5`), `--health-check-interval` (default `60`). The worker

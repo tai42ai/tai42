@@ -10,10 +10,10 @@
  * cards ride on), with the page CSP's `img-src` as the backstop.
  */
 import type { JsonSchema } from '@tai42/studio-sdk';
-import { isFieldVisible } from '@tai42/studio-sdk';
+import { fieldDrawingOrder, isFieldVisible } from '@tai42/studio-sdk';
 import type { ReactElement } from 'react';
 
-import type { DisplayBlock } from '@/transcript-model';
+import type { DisplayBlock, FieldWording } from '@/transcript-model';
 
 /** A plain JS object, or not. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -95,30 +95,37 @@ export function DisplayBlocks({
   );
 }
 
-/** One answered value rendered for the review readback; an empty value reads as "—". */
-function formatReadbackValue(value: unknown): string {
+/** One answered value rendered for the review readback; an empty value reads as "—", a
+ * yes/no value as the field's own `trueLabel` / `falseLabel`, else "Yes" / "No". */
+function formatReadbackValue(value: unknown, words: FieldWording | undefined): string {
   if (value === undefined || value === null || value === '') return '—';
   if (Array.isArray(value)) return value.length === 0 ? '—' : value.map(toText).join(', ');
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'boolean')
+    return value ? (words?.trueLabel ?? 'Yes') : (words?.falseLabel ?? 'No');
   return toText(value);
 }
 
 /**
  * A review step's generic readback: each VISIBLE top-level field's label and the value
- * entered for it. A field hidden by its `visibleWhen` predicate is absent — it is absent
+ * entered for it, in drawing order (each `timeOf` time right after its date). A field hidden by its `visibleWhen` predicate is absent — it is absent
  * from the answer the consumer receives.
  */
 export function ReviewReadback({
   schema,
   value,
+  fieldWording,
 }: {
   readonly schema: JsonSchema;
   readonly value: Readonly<Record<string, unknown>>;
+  readonly fieldWording: Readonly<Record<string, FieldWording>>;
 }): ReactElement | null {
   const properties = isPlainObject(schema.properties) ? schema.properties : {};
-  const rows = Object.entries(properties).filter(
-    ([, prop]) => isPlainObject(prop) && isFieldVisible(prop, value),
-  );
+  const rows = fieldDrawingOrder(Object.keys(properties), properties)
+    .map((name) => [name, properties[name]] as const)
+    .filter(
+      (row): row is readonly [string, JsonSchema] =>
+        isPlainObject(row[1]) && isFieldVisible(row[1], value),
+    );
   if (rows.length === 0) return null;
   return (
     <dl className="tcw-form-review" data-testid="form-review">
@@ -127,7 +134,9 @@ export function ReviewReadback({
           <dt className="tcw-form-review-term">
             {isPlainObject(prop) && typeof prop.title === 'string' ? prop.title : name}
           </dt>
-          <dd className="tcw-form-review-value">{formatReadbackValue(value[name])}</dd>
+          <dd className="tcw-form-review-value">
+            {formatReadbackValue(value[name], fieldWording[name])}
+          </dd>
         </div>
       ))}
     </dl>

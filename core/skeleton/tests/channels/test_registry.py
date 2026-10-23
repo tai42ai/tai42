@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from tai42_contract.channels import SendOutcome
 
 from tai42_skeleton.channels.registry import ChannelRegistry
 
@@ -10,8 +11,8 @@ from .._helpers import DeliverOnlyChannel
 
 
 class _Chan(DeliverOnlyChannel):
-    async def deliver(self, delivery) -> None:
-        return None
+    async def deliver(self, delivery) -> SendOutcome:
+        return self.outcome(delivery, [])
 
 
 def test_register_get_round_trip() -> None:

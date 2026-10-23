@@ -8,15 +8,17 @@ from starlette.requests import Request
 
 from tai42_channel_web.routes.session_access import _client_bucket
 from tai42_channel_web.store.entry_gate import check_entry_code, entry_attempt_allowed, is_gate_enabled
+from tai42_channel_web.words import ENTRY_REFUSED_MESSAGE
 
 logger = logging.getLogger(__name__)
 
 # The route is gated and the navigation's code is missing, unknown, expired, revoked,
 # or the client is throttled — ONE code and ONE wording for all five, so no response
-# ever differs by code validity (no oracle). The message is shared by the page door's
-# refusal page and the rotate door's JSON refusal.
+# ever differs by code validity (no oracle). The built-in message is shared by the page
+# door's refusal page and the rotate door's JSON refusal; a route's own words replace it
+# on its page (``page.entry_refused``) and in the widget (``transport.entry_refused``).
 _ENTRY_REFUSED_CODE = "entry_refused"
-_ENTRY_REFUSED_MESSAGE = "This chat is private. Open it from the link you were given."
+_ENTRY_REFUSED_MESSAGE = ENTRY_REFUSED_MESSAGE
 
 
 async def _entry_gate_outcome(request: Request, identity: str, entry_code: str | None) -> str | None:

@@ -63,11 +63,13 @@ async def test_pending_question_resolves_before_bridge(handler, stub_app, channe
     assert _SEEN_KEY in fake_redis.store
 
 
-async def test_expired_ask_fallback_bridge_carries_message_params(handler, stub_app, channels, fake_redis: FakeRedis):
+async def test_expired_ask_fallback_bridge_carries_the_quoted_message_id(
+    handler, stub_app, channels, fake_redis: FakeRedis
+):
     # A reply that IS an answer at decode-peek, whose ask expires before the ladder's
     # own peek (NO_CORRELATION): the fallback bridge is the bridge path, so it carries
-    # the same message-level params (reply-to context here) the caller's own bridge
-    # branch would have carried.
+    # the same message-level fields (the quoted message's id here) the caller's own
+    # bridge branch would have carried.
     await _seed_pending()
     channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
 
@@ -84,7 +86,8 @@ async def test_expired_ask_fallback_bridge_carries_message_params(handler, stub_
     assert len(stub_app.conversations.accept_calls) == 1
     call = stub_app.conversations.accept_calls[0]
     assert call["text"] == "yes please"
-    assert call["params"] == {"context_message_id": "wamid.QUOTED"}
+    assert call["reply_to_medium_message_id"] == "wamid.QUOTED"
+    assert call["params"] is None
 
 
 async def test_answer_is_body_verbatim_minus_outer_whitespace(handler, channels, fake_redis: FakeRedis):
@@ -112,6 +115,8 @@ async def test_uncorrelated_routed_inbound_calls_accept_with_verbatim_args(
             "cap_key": WA_ID,
             "text": "ship it",
             "provider_message_id": _WAMID,
+            "medium_message_id": _WAMID,
+            "reply_to_medium_message_id": None,
             "params": None,
             "form": None,  # a plain text message carries no structured form
             "attachments": None,
@@ -172,6 +177,8 @@ async def test_expired_question_reply_reaches_bridge(handler, stub_app, fake_red
             "cap_key": WA_ID,
             "text": "late reply",
             "provider_message_id": _WAMID,
+            "medium_message_id": _WAMID,
+            "reply_to_medium_message_id": None,
             "params": None,
             "form": None,
             "attachments": None,
@@ -316,6 +323,8 @@ async def test_stale_tap_restores_pending_and_bridges_title(
             "cap_key": WA_ID,
             "text": "stale choice",
             "provider_message_id": _WAMID,
+            "medium_message_id": _WAMID,
+            "reply_to_medium_message_id": None,
             # The bridged (non-answer) tap now carries WHICH button was tapped.
             "params": {"reply_id": "int-1:0"},
             "form": None,

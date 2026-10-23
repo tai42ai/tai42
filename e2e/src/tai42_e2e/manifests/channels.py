@@ -24,6 +24,10 @@ TELEGRAM_DEFAULT_RECIPIENT = "910001"
 TELEGRAM_ALLOWED_RECIPIENTS = ("910002", "910003")
 
 
+# An ``@username`` recipient on the stub allowlist: Telegram resolves a send to it to a numeric chat.
+TELEGRAM_ALLOWED_HANDLE = "@e2e_handle"
+
+
 TELEGRAM_UNLISTED_RECIPIENT = "990009"
 
 
@@ -104,7 +108,7 @@ def _telegram_channel_env(res: StackResources, *, real: bool) -> dict[str, str]:
         "CHANNEL_TELEGRAM_API_BASE_URL": _require_stub(res.telegram_api_base_url, "telegram"),
         "CHANNEL_TELEGRAM_REDIS_URL": res.redis_url,
         "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT": TELEGRAM_DEFAULT_RECIPIENT,
-        "CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS": ",".join(TELEGRAM_ALLOWED_RECIPIENTS),
+        "CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS": ",".join((*TELEGRAM_ALLOWED_RECIPIENTS, TELEGRAM_ALLOWED_HANDLE)),
     }
 
 

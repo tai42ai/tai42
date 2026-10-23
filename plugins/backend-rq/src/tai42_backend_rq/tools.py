@@ -45,25 +45,25 @@ from tai42_backend_rq.schedules import (
     refuse_relative,
     scheduler_for,
 )
-from tai42_backend_rq.settings import RqSettings, rq_settings
+from tai42_backend_rq.settings import RqSettings, rq_client_kwargs, rq_settings
 from tai42_backend_rq.tasks import tool_execution
 
 
-def _async_redis(settings: RqSettings) -> AbstractAsyncContextManager[Any]:
+def _async_redis() -> AbstractAsyncContextManager[Any]:
     """The pooled async Redis client, typed ``Any``.
 
     redis-py shares one command stub between its sync and async clients, so the erasure keeps every
     ``await r...`` call sound.
     """
-    return client_ctx(RedisClient, url=settings.redis_url)
+    return client_ctx(RedisClient, **rq_client_kwargs())
 
 
-def _sync_redis(settings: RqSettings) -> AbstractAsyncContextManager[Any]:
+def _sync_redis() -> AbstractAsyncContextManager[Any]:
     """The pooled sync Redis client for the blocking scheduler/Job APIs.
 
     Typed ``Any`` for the same stub-sharing reason as :func:`_async_redis`.
     """
-    return client_ctx(SyncRedisClient, url=settings.redis_url)
+    return client_ctx(SyncRedisClient, **rq_client_kwargs())
 
 
 def _text(value: bytes | str) -> str:
@@ -131,7 +131,7 @@ async def _queue_names(r: Any, settings: RqSettings) -> list[str]:
 async def backend_ping_worker(worker_name: str | None = None) -> dict[str, Any]:
     """Ping all workers or a specific worker to check if they're alive (based on recent heartbeat)."""
     settings = rq_settings()
-    async with _async_redis(settings) as r:
+    async with _async_redis() as r:
         ping: dict[str, Any] = {}
         workers = [worker_name] if worker_name else await _worker_names(r, settings)
         for w in workers:
@@ -152,7 +152,7 @@ async def backend_list_active_workers() -> list[str]:
 async def backend_task_status(task_id: str) -> str:
     """Return the current status of a given task ID."""
     settings = rq_settings()
-    async with _async_redis(settings) as r:
+    async with _async_redis() as r:
         status_raw = await r.hget(settings.rq_job_key(task_id), "status")
         if status_raw is None:
             return "unknown"
@@ -184,7 +184,7 @@ async def backend_task_result(task_id: str, timeout: float | None = None) -> Any
     that text is what the raised error carries).
     """
     settings = rq_settings()
-    async with _async_redis(settings) as r:
+    async with _async_redis() as r:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             status_raw = await r.hget(settings.rq_job_key(task_id), "status")
@@ -223,7 +223,7 @@ async def backend_task_result(task_id: str, timeout: float | None = None) -> Any
 async def backend_cancel_task(task_id: str) -> str:
     """Cancel a running or queued task."""
     settings = rq_settings()
-    async with _sync_redis(settings) as r:
+    async with _sync_redis() as r:
         scheduler = scheduler_for(r)
 
         def _cancel() -> str:
@@ -249,7 +249,7 @@ async def backend_active_tasks(worker_name: str | None = None) -> dict[str, Any]
     (``{"id", "data"}``; RQ runs one job per worker at a time).
     """
     settings = rq_settings()
-    async with _async_redis(settings) as r:
+    async with _async_redis() as r:
         active: dict[str, Any] = {}
         workers = [worker_name] if worker_name else await _worker_names(r, settings)
         for w in workers:
@@ -274,7 +274,7 @@ async def backend_reserved_tasks() -> dict[str, Any]:
     reserves work per queue, not per worker, so the map is keyed by queue.
     """
     settings = rq_settings()
-    async with _async_redis(settings) as r:
+    async with _async_redis() as r:
         reserved: dict[str, Any] = {}
         for q in await _queue_names(r, settings):
             job_ids = await r.lrange(settings.rq_queue_key(q), 0, -1)
@@ -292,7 +292,7 @@ async def backend_scheduled_tasks() -> dict[str, Any]:
     registry — so both are read (each zset scores in epoch seconds).
     """
     settings = rq_settings()
-    async with _async_redis(settings) as r:
+    async with _async_redis() as r:
         scheduled: dict[str, Any] = {}
         items = await r.zrange(settings.rq_scheduler_zset, 0, -1, withscores=True)
         for member, score in items:
@@ -324,7 +324,7 @@ async def backend_worker_stats(worker_name: str | None = None) -> dict[str, Any]
     heartbeat, queues, counters) decoded to text.
     """
     settings = rq_settings()
-    async with _async_redis(settings) as r:
+    async with _async_redis() as r:
         stats: dict[str, Any] = {}
         workers = [worker_name] if worker_name else await _worker_names(r, settings)
         for w in workers:
@@ -337,7 +337,7 @@ async def backend_worker_stats(worker_name: str | None = None) -> dict[str, Any]
 async def backend_worker_queues(worker_name: str | None = None) -> dict[str, Any]:
     """List all queues each worker is consuming from."""
     settings = rq_settings()
-    async with _async_redis(settings) as r:
+    async with _async_redis() as r:
         queues_dict: dict[str, Any] = {}
         workers = [worker_name] if worker_name else await _worker_names(r, settings)
         for w in workers:
@@ -353,7 +353,7 @@ async def backend_worker_queues(worker_name: str | None = None) -> dict[str, Any
 async def backend_delete_schedule(name: str) -> dict[str, Any]:
     """Remove a periodic task from the scheduler."""
     settings = rq_settings()
-    async with _async_redis(settings) as r:
+    async with _async_redis() as r:
         removed = await r.zrem(settings.rq_scheduler_zset, name)
         if removed:
             await r.delete(settings.rq_job_key(name))
@@ -370,8 +370,7 @@ async def backend_list_schedules() -> list[dict[str, Any]]:
     arguments. ``enabled`` is always true — RQ has no disabled-schedule state (disabling
     deletes the job), so every listed schedule is live.
     """
-    settings = rq_settings()
-    async with _sync_redis(settings) as r:
+    async with _sync_redis() as r:
         scheduler = scheduler_for(r)
 
         def _read() -> list[dict[str, Any]]:
@@ -398,7 +397,7 @@ async def backend_list_schedules() -> list[dict[str, Any]]:
 async def backend_get_schedule(name: str) -> dict[str, Any]:
     """Get schedule details."""
     settings = rq_settings()
-    async with _sync_redis(settings) as r:
+    async with _sync_redis() as r:
         scheduler = scheduler_for(r)
 
         def _read() -> dict[str, Any]:
@@ -454,8 +453,7 @@ async def backend_run_schedule_now(name: str) -> dict[str, Any]:
     immediate execution and re-arms the recurrence itself (the next interval
     tick or the next cron time), so the schedule keeps running afterwards.
     """
-    settings = rq_settings()
-    async with _sync_redis(settings) as r:
+    async with _sync_redis() as r:
         scheduler = scheduler_for(r)
 
         def _run() -> dict[str, Any]:
@@ -472,7 +470,7 @@ async def backend_run_schedule_now(name: str) -> dict[str, Any]:
 async def backend_schedule_exists(name: str) -> bool:
     """Return True if a scheduled job with the given name exists."""
     settings = rq_settings()
-    async with _async_redis(settings) as r:
+    async with _async_redis() as r:
         return await r.zscore(settings.rq_scheduler_zset, name) is not None
 
 
@@ -494,7 +492,7 @@ async def backend_update_schedule(
     The reported next run is read back from the scheduler, not assumed.
     """
     settings = rq_settings()
-    async with _sync_redis(settings) as r:
+    async with _sync_redis() as r:
         scheduler = scheduler_for(r)
 
         def _update() -> dict[str, Any]:
@@ -583,8 +581,7 @@ async def backend_export_schedules() -> list[dict[str, Any]]:
     exported record is emitted with ``enabled`` set to True. Each record's name
     is the Job id.
     """
-    settings = rq_settings()
-    async with _sync_redis(settings) as r:
+    async with _sync_redis() as r:
         scheduler = scheduler_for(r)
 
         def _read_jobs() -> list[dict[str, Any]]:
@@ -654,7 +651,7 @@ async def backend_import_schedules(
     skipped = 0
     skipped_existing = 0
     errors: list[ScheduleImportError] = []
-    async with _sync_redis(settings) as r:
+    async with _sync_redis() as r:
         scheduler = scheduler_for(r)
         for index, entry in enumerate(schedules):
             raw_name = entry.get("name") if isinstance(entry, dict) else None

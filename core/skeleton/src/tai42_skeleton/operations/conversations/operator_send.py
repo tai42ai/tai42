@@ -84,8 +84,9 @@ async def _person_target(
     not-found). An explicit ``address`` must be one of the person's addresses (else a loud
     400), and its send route is the named route when the address wrote under it, else the
     address's own first route. With no explicit address the target is the person's NEWEST
-    record — its route and client_address — so the reply returns where they last wrote from;
-    an empty thread offers none, which is a loud 400 asking for an explicit address.
+    record that is not a send record — its route and client_address — so the reply returns
+    where they last wrote from; a thread with no such record offers none, which is a loud 400
+    asking for an explicit address.
     """
     person = await manager.persons.get_by_id(person_id)
     if (
@@ -117,7 +118,7 @@ async def _resolve_operator_target(
     """The ``(target route, client_address)`` an operator message is built and delivered against.
 
     A route-keyed thread targets its own route and embedded address; a person thread
-    targets the address's (or newest record's) route — looked up live, so a deleted route is a
+    targets the address's (or the newest non-send record's) route — looked up live, so a deleted route is a
     loud 404 rather than a send with a stale identity. ``address``, when given, is already
     canonicalized by the caller — the only place a MALFORMED address maps to a 400 —
     so a ``ValueError`` from a store read here is server-side corruption, not a client error.
@@ -192,10 +193,11 @@ async def send_conversation_thread_message(
     delete's: a route-keyed id must carry the route's ``bridge:{route_name}:`` prefix (400
     otherwise), a person thread must be on the named route (404 otherwise). ``address`` picks
     the send target on a LINKED person's aggregated thread — it must be one of the person's
-    addresses (400 otherwise); with no ``address`` the target is the thread's newest record,
-    and an empty person thread with no ``address`` is a 400. For an agent target that holds
-    thread memory the message is appended to the thread's checkpoint as an ``assistant`` reply
-    BEFORE the record is created; an append that fails is a loud 500 and no record is created.
+    addresses (400 otherwise); with no ``address`` the target is the thread's newest record
+    that is not a send record, and a person thread with no such record and no ``address`` is a
+    400. For an agent target that holds thread memory the message is appended to the thread's
+    checkpoint as an ``assistant`` reply BEFORE the record is created; an append that fails is a
+    loud 500 and no record is created.
     The send takes the thread's per-thread FIFO, so it waits behind an in-flight turn and
     never interleaves it; a full queue is a loud, retriable 503. As a live-caller sync door the
     wait to acquire the slot is bounded by ``sync_door_wait_seconds``: a wait past it — behind a

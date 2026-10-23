@@ -22,6 +22,10 @@ class QuestionRecord:
     The callback door to forward the answer to, and the transcript pair the ``chat.answered`` frame
     is appended to on success.
 
+    ``sensitive`` is the question's own flag that its answer body must not be persisted: the
+    ``chat.answered`` frame of a sensitive question records that it was answered and carries no
+    answer.
+
     ``restores`` counts how often a failed forward has already put this record back.
     It rides the record itself so the count expires exactly with the question, and it
     is what bounds a visitor looping an answer the callback door keeps refusing.
@@ -31,6 +35,7 @@ class QuestionRecord:
     identity: str
     address: str
     timeout_at: datetime
+    sensitive: bool
     restores: int = 0
 
 
@@ -45,6 +50,7 @@ def _encode_record(record: QuestionRecord) -> str:
             "identity": record.identity,
             "address": record.address,
             "timeout_at": record.timeout_at.astimezone(UTC).isoformat(),
+            "sensitive": record.sensitive,
             "restores": record.restores,
         }
     )
@@ -57,6 +63,7 @@ def _decode_record(raw: str | bytes) -> QuestionRecord:
         identity=data["identity"],
         address=data["address"],
         timeout_at=datetime.fromisoformat(data["timeout_at"]),
+        sensitive=data["sensitive"],
         restores=data["restores"],
     )
 

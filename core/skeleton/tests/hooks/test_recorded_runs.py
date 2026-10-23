@@ -4,9 +4,10 @@ does, so they are listable via ``GET /api/tool-runs`` and gettable by id.
 The firing path routes through ``operations.tool_runs.run_recorded``: with the tool-run
 store configured a fire creates a ``running`` record and writes a terminal
 (``succeeded``/``failed``) record under the fire's bound execution key; with the store OFF
-the tool still runs, unrecorded. A raising tool is recorded ``failed`` AND still surfaces
-through the fan-out's per-hook error log. The fire never reserves a ``max_concurrent_runs``
-slot — its capacity is the hooks manager's own ``max_workers`` semaphore.
+the tool still runs, unrecorded. A raising tool is recorded ``failed`` AND its hook run is
+held as failed, with the failed run's ERROR log. The fire never reserves a
+``max_concurrent_runs`` slot — its capacity is the hook-run runtime's per-process
+``max_workers`` slots.
 
 Redis is the focused in-memory fake the tool-runs tests use, yielded at the operation
 module's ``client_ctx`` seam; ``tai42_app`` is a stand-in exposing the template renderer
@@ -24,6 +25,7 @@ from types import SimpleNamespace
 import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.hooks import HookParams
+from tai42_contract.tools import TOOL_META_CRASH_RESUME
 from tai42_kit.utils.detached_util import in_detached_run
 
 from tai42_skeleton.authz.execution import bind_execution_identity
@@ -53,11 +55,13 @@ class _Tools:
         self._raise_for = raise_for or set()
         self._gate = gate
         self._registered = {"echo_tool"}
+        # The registered tools that declare crash-resume.
+        self.flagged: set[str] = set()
 
     async def get_tool(self, name):
         if name not in self._registered:
             raise UnknownToolError(name)
-        return SimpleNamespace(name=name, meta=None)
+        return SimpleNamespace(name=name, meta={TOOL_META_CRASH_RESUME: True} if name in self.flagged else None)
 
     async def run_tool(self, name, tool_input, *, offload_sync=False, extras=None):
         self.calls.append((name, tool_input, offload_sync))
@@ -77,16 +81,21 @@ class _ResourceManager:
 
 
 class _Interactions:
-    """The interactions facade the hook door drives through: a ``visit`` that runs ``start`` under the
-    ambient fire context (so the real ``run_recorded`` writes its record), an empty ``$parked``, and
+    """The interactions facade the hook door drives through: a ``visit`` that notifies ``on_act`` and
+    runs ``start`` under the ambient fire context (so the real ``run_recorded`` writes its record),
+    an empty ``$parked``, and
     the ``normalise_started`` the inline supervisor calls to shape its terminal record."""
 
     async def list_parked_for(self, context: object) -> list:
         return []
 
-    async def visit(self, *, target_name, cancel, resume, start, extras, state_binding=None, receives_outcome=True):
-        from tai42_contract.interactions import VisitOutcome
+    async def visit(
+        self, *, target_name, cancel, resume, start, extras, state_binding=None, receives_outcome=True, on_act=None
+    ):
+        from tai42_contract.interactions import VisitAct, VisitOutcome
 
+        if start is not None and on_act is not None:
+            await on_act(VisitAct(action="start", interaction_ids=(), phase="before"))
         result = await start(extras) if start is not None else None
         return VisitOutcome(
             action="started" if start is not None else "none",
@@ -151,15 +160,17 @@ def _hook(tool: str = "echo_tool") -> HookParams:
     return HookParams(name="h", topic="t", tool=tool, execution_key="k-fire", execution_key_fingerprint="fp-fire")
 
 
-async def test_hook_fire_records_run_listable_and_gettable(wired, monkeypatch):
+async def test_hook_fire_records_run_listable_and_gettable(hook_runs, wired, monkeypatch):
     # Store configured: the fire writes the full lifecycle record — listable per tool and
     # gettable by id, attributed to the fire's execution key, run through the offload seam.
     monkeypatch.setenv("TAI_TOOL_RUNS_REDIS_URL", "redis://localhost:6379/0")
     app = wired.bind()
     manager = InMemoryHooksManager(HooksSettings())
+    hook_runs.use(manager)
     await manager.register(_hook())
 
     await manager.on_event("t", {"any": 1})
+    await hook_runs.drain()
 
     assert app.tools.calls == [("echo_tool", {}, True)]
 
@@ -176,7 +187,7 @@ async def test_hook_fire_records_run_listable_and_gettable(wired, monkeypatch):
     assert view["result"] == {"ok": True}
 
 
-async def test_store_off_runs_hook_unrecorded_without_error(wired, monkeypatch, caplog):
+async def test_store_off_runs_hook_unrecorded_without_error(hook_runs, wired, monkeypatch, caplog):
     # Store OFF: the tool still runs, unrecorded — nothing is written to the store and no
     # error/warning is raised — but it thread-offloads like every other execution site; the
     # OFF branch only skips recording, not the offload.
@@ -184,10 +195,12 @@ async def test_store_off_runs_hook_unrecorded_without_error(wired, monkeypatch, 
     monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
     app = wired.bind()
     manager = InMemoryHooksManager(HooksSettings())
+    hook_runs.use(manager)
     await manager.register(_hook())
 
     with caplog.at_level(logging.WARNING):
         await manager.on_event("t", {"any": 1})
+        await hook_runs.drain()
 
     # The tool ran through the offload seam like every other execution site, so a
     # synchronous tool never blocks the loop; the OFF branch only skips recording.
@@ -199,23 +212,25 @@ async def test_store_off_runs_hook_unrecorded_without_error(wired, monkeypatch, 
     assert caplog.records == []
 
 
-async def test_hook_fire_runs_the_tool_detached_store_on(wired, monkeypatch):
+async def test_hook_fire_runs_the_tool_detached_store_on(hook_runs, wired, monkeypatch):
     # Store configured: the fire runs through ``_supervise``, which flags the run as
     # detached around the tool invocation so the turn budget is skipped. The flag
-    # is sampled INSIDE the tool call (``detached_seen``); the fan-out runs each hook in
-    # its own ``asyncio.gather`` child task, so the reset is only observable in that
-    # task's context — the reset itself is pinned by the direct-call tests below.
+    # is sampled INSIDE the tool call (``detached_seen``); each hook run's attempt is its
+    # own root task, so the reset is only observable in that task's context — the reset
+    # itself is pinned by the direct-call tests below.
     monkeypatch.setenv("TAI_TOOL_RUNS_REDIS_URL", "redis://localhost:6379/0")
     app = wired.bind()
     manager = InMemoryHooksManager(HooksSettings())
+    hook_runs.use(manager)
     await manager.register(_hook())
 
     await manager.on_event("t", {"any": 1})
+    await hook_runs.drain()
 
     assert app.tools.detached_seen == [True]
 
 
-async def test_hook_fire_runs_the_tool_detached_store_off(wired, monkeypatch):
+async def test_hook_fire_runs_the_tool_detached_store_off(hook_runs, wired, monkeypatch):
     # Store OFF: the bare (unrecorded) run path flags the run as detached exactly as
     # the store-ON path does. As above, the flag is sampled inside the tool call; the
     # reset is pinned by the direct-call tests below.
@@ -223,9 +238,11 @@ async def test_hook_fire_runs_the_tool_detached_store_off(wired, monkeypatch):
     monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
     app = wired.bind()
     manager = InMemoryHooksManager(HooksSettings())
+    hook_runs.use(manager)
     await manager.register(_hook())
 
     await manager.on_event("t", {"any": 1})
+    await hook_runs.drain()
 
     assert app.tools.detached_seen == [True]
 
@@ -241,7 +258,7 @@ async def test_run_recorded_resets_detached_flag_after_success_store_on(wired, m
 
     assert in_detached_run() is False
     async with bind_execution_identity("k-fire", bound_fingerprint="fp-fire"):
-        await wired.ops.run_recorded("echo_tool", {})
+        await wired.ops.run_recorded("echo_tool", {}, crash_resume_eligible=False)
 
     assert app.tools.detached_seen == [True]
     assert in_detached_run() is False
@@ -257,7 +274,7 @@ async def test_run_recorded_resets_detached_flag_after_success_store_off(wired, 
 
     assert in_detached_run() is False
     async with bind_execution_identity("k-fire", bound_fingerprint="fp-fire"):
-        await wired.ops.run_recorded("echo_tool", {})
+        await wired.ops.run_recorded("echo_tool", {}, crash_resume_eligible=False)
 
     assert app.tools.detached_seen == [True]
     assert in_detached_run() is False
@@ -273,7 +290,7 @@ async def test_run_recorded_resets_detached_flag_on_failure_store_on(wired, monk
 
     async with bind_execution_identity("k-fire", bound_fingerprint="fp-fire"):
         with pytest.raises(RuntimeError, match="boom"):
-            await wired.ops.run_recorded("echo_tool", {})
+            await wired.ops.run_recorded("echo_tool", {}, crash_resume_eligible=False)
 
     assert app.tools.detached_seen == [True]
     assert in_detached_run() is False
@@ -288,22 +305,24 @@ async def test_run_recorded_resets_detached_flag_on_failure_store_off(wired, mon
 
     async with bind_execution_identity("k-fire", bound_fingerprint="fp-fire"):
         with pytest.raises(RuntimeError, match="boom"):
-            await wired.ops.run_recorded("echo_tool", {})
+            await wired.ops.run_recorded("echo_tool", {}, crash_resume_eligible=False)
 
     assert app.tools.detached_seen == [True]
     assert in_detached_run() is False
 
 
-async def test_failing_hook_tool_is_recorded_failed_and_still_surfaces(wired, monkeypatch, caplog):
-    # A raising tool: the record captures the failure AND the fan-out's per-hook error log
-    # still fires (the run record's failure state is additive to the existing surfacing).
+async def test_failing_hook_tool_is_recorded_failed_and_still_surfaces(hook_runs, wired, monkeypatch, caplog):
+    # A raising tool: the record captures the failure AND the hook run is held as failed
+    # with its ERROR log (the run record's failure state is additive to that surfacing).
     monkeypatch.setenv("TAI_TOOL_RUNS_REDIS_URL", "redis://localhost:6379/0")
     wired.bind(raise_for={"echo_tool"})
     manager = InMemoryHooksManager(HooksSettings())
+    hook_runs.use(manager)
     await manager.register(_hook())
 
     with caplog.at_level(logging.ERROR):
         await manager.on_event("t", {"any": 1})
+        await hook_runs.drain()
 
     entries = await wired.ops.list_tool_runs("echo_tool")
     assert [e["status"] for e in entries] == ["failed"]
@@ -311,11 +330,12 @@ async def test_failing_hook_tool_is_recorded_failed_and_still_surfaces(wired, mo
     assert view["status"] == "failed"
     assert view["error"] == "boom"
 
-    # The hooks manager's own per-hook failure log surfaced the failing hook by name.
+    # The failed hook run's ERROR log names the failing hook and that it had started its tool.
     assert any(
-        rec.name == "tai42_skeleton.hooks.managers.base_hooks_manager"
+        rec.name == "tai42_skeleton.hooks.runs.loud"
         and rec.levelno == logging.ERROR
-        and "'h'" in rec.getMessage()
+        and "(h on t)" in rec.getMessage()
+        and "acted=start" in rec.getMessage()
         for rec in caplog.records
     )
 
@@ -333,7 +353,7 @@ async def test_hook_fired_run_in_flight_is_drained_to_failed(wired, monkeypatch)
     app = wired.bind(gate=gate)
 
     async with bind_execution_identity("k-fire", bound_fingerprint="fp-fire"):
-        run = asyncio.create_task(wired.ops.run_recorded("echo_tool", {}))
+        run = asyncio.create_task(wired.ops.run_recorded("echo_tool", {}, crash_resume_eligible=False))
     # Let the run create its record and reach the gated tool.
     while not app.tools.calls and not run.done():
         await asyncio.sleep(0)
@@ -357,3 +377,53 @@ async def test_hook_fired_run_in_flight_is_drained_to_failed(wired, monkeypatch)
     with pytest.raises(asyncio.CancelledError):
         await run
     assert set() == wired.ops._SUPERVISORS
+
+
+async def test_a_hook_fire_of_a_crash_resume_tool_stores_an_unflagged_record(hook_runs, wired, monkeypatch):
+    # The hook run replays a crash-resume tool's start itself, so its tool-run record carries no
+    # crash-resume flag: a read-path reconcile of the record's lapsed liveness re-drives nothing.
+    monkeypatch.setenv("TAI_TOOL_RUNS_REDIS_URL", "redis://localhost:6379/0")
+    gate = asyncio.Event()
+    app = wired.bind(gate=gate)
+    app.tools.flagged = {"echo_tool"}
+    spawned: list[str] = []
+    monkeypatch.setattr(wired.ops, "_spawn_crash_resume", lambda run_id, record: spawned.append(run_id))
+    manager = InMemoryHooksManager(HooksSettings())
+    hook_runs.use(manager)
+    await manager.register(_hook())
+
+    await manager.on_event("t", {"any": 1})
+    try:
+        while not app.tools.calls:
+            await asyncio.sleep(0)
+        [entry] = await wired.ops.list_tool_runs("echo_tool")
+        record = await wired.store.get_run(wired.fake, entry["run_id"])
+        assert record["status"] == "running"
+        assert "crash_resume" not in record
+
+        reconciled = await wired.ops._reconcile_lost_with_liveness(
+            wired.fake, wired.store, entry["run_id"], record, liveness_present=False, ttl=60
+        )
+        assert reconciled["status"] == "lost"
+        assert spawned == []
+    finally:
+        gate.set()
+        await hook_runs.drain()
+
+
+async def test_the_submit_seam_still_flags_a_crash_resume_tool(wired, monkeypatch):
+    monkeypatch.setenv("TAI_TOOL_RUNS_REDIS_URL", "redis://localhost:6379/0")
+    gate = asyncio.Event()
+    app = wired.bind(gate=gate)
+    app.tools.flagged = {"echo_tool"}
+
+    async with bind_execution_identity("k-fire", bound_fingerprint="fp-fire"):
+        run = asyncio.create_task(wired.ops.run_recorded("echo_tool", {}, crash_resume_eligible=True))
+    try:
+        while not app.tools.calls:
+            await asyncio.sleep(0)
+        [entry] = await wired.ops.list_tool_runs("echo_tool")
+        assert (await wired.store.get_run(wired.fake, entry["run_id"]))["crash_resume"] == "1"
+    finally:
+        gate.set()
+        await run

@@ -25,7 +25,9 @@ from typing import Any, Self
 import click
 from arq import Worker, func
 from tai42_contract.backend.runtime import CONSUMING_RUNTIME, BackendRuntime, ExecutionMode
+from tai42_kit.clients.impl.redis import async_redis_from_url, redis_from_url_kwargs
 
+from tai42_backend_arq.pool import arq_redis_over, enqueue_client_kwargs
 from tai42_backend_arq.scheduler import recover_stalled_schedules, task_scheduler
 from tai42_backend_arq.settings import arq_settings, job_deserializer, job_serializer
 from tai42_backend_arq.tasks import callback_job, tool_execution
@@ -86,7 +88,18 @@ class ArqWorkerRuntime(BackendRuntime):
             # consume target tracks the enqueue pool's default without a CLI flag; an
             # explicit flag still wins for a direct-CLI operator.
             queue_name=options["queue_name"] or settings.queue_name,
-            redis_settings=settings.make_redis_settings(options["redis_url"]),
+            # A ready pool from the kit seam, so the connect and every command carry the
+            # kit's logged connection retry (``ARQ_RETRY_ATTEMPTS``) and the socket timeouts;
+            # arq runs no connect loop of its own over it. The pool is the worker's own and
+            # ``Worker.close`` closes it.
+            redis_pool=arq_redis_over(
+                async_redis_from_url(
+                    **redis_from_url_kwargs(
+                        {**enqueue_client_kwargs(), "url": options["redis_url"] or settings.redis.redis_url}
+                    )
+                ),
+                queue_name=options["queue_name"] or settings.queue_name,
+            ),
             burst=options["burst"],
             keep_result=options["keep_result"],
             max_jobs=options["max_jobs"],

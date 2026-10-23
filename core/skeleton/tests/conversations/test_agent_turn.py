@@ -33,6 +33,7 @@ from .conftest import (
     _tool_channel_route,
     _wire,
     _wire_tool,
+    create_record,
 )
 
 
@@ -50,7 +51,16 @@ async def test_agent_turn_opens_the_push_frame_of_the_target_agent(env, monkeypa
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": _ChainAgent()})
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert seen["chain"] == ("echo",)
@@ -66,7 +76,16 @@ async def test_denied_turn_delivers_an_error_outcome(env, monkeypatch):
 
     monkeypatch.setattr(agent_turn_module, "authorize_execution_agent_run", _deny)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -97,7 +116,16 @@ async def test_agent_structured_array_final_stays_one_serialized_message(env, mo
 
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": _ArrayAgent()})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -128,7 +156,16 @@ async def test_agent_reprompt_cap_outcome_reaches_the_turn_reply(env, monkeypatc
 
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": _OutcomeAgent()})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -147,7 +184,15 @@ async def test_agent_target_ignores_params(env, monkeypatch):
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
 
     message_id = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", {"token": "abc"}
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        params={"token": "abc"},
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
     )
     await _settle()
 
@@ -167,7 +212,16 @@ async def test_a_long_answer_is_split_into_ordered_channel_sends(env, monkeypatc
     long_text = "x" * 4000
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": _fixed_answer_agent(long_text)})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID-L")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID-L",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -211,7 +265,7 @@ async def test_channel_with_no_resolvable_split_cap_is_a_loud_failure(env, monke
         created_at=now,
         updated_at=now,
     )
-    await _store().create_record(record)
+    await create_record(_store(), record)
 
     with pytest.raises(RuntimeError, match="declares no max_message_chars cap and none is configured"):
         await delivery_module.deliver("unmapped")
@@ -236,7 +290,8 @@ async def test_a_routed_channel_that_is_not_registered_is_a_loud_failure(env, mo
     _wire(monkeypatch, FakeManager())
     monkeypatch.setattr(delivery_module, "tai42_app", _AppWithoutTheChannel())
     now = time.time()
-    await _store().create_record(
+    await create_record(
+        _store(),
         ConversationRecord(
             message_id="unregistered",
             route_name="line",
@@ -251,7 +306,7 @@ async def test_a_routed_channel_that_is_not_registered_is_a_loud_failure(env, mo
             answer="hello",
             created_at=now,
             updated_at=now,
-        )
+        ),
     )
 
     with pytest.raises(RuntimeError, match="is not registered on this deployment"):
@@ -286,7 +341,17 @@ async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(
 
     _wire_tool(monkeypatch, _fn)
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", locale="he-IL")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+        locale="he-IL",
+    )
     await _settle()
 
     # Channel -> turn -> subject: the participant's locale reached both the payload subject block

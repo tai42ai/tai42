@@ -150,3 +150,32 @@ def install_fake_named_pool(monkeypatch) -> tuple[dict[str, Any], list[bool]]:
 
 # The probe checkpoint stores register at import, so every registry-wide parametrisation sees them.
 from . import probe_store  # noqa: E402,F401
+
+
+def install_refusing_probe(monkeypatch, refusals: int) -> list[str]:
+    """Make the first ``refusals`` first-connection probes fail as a down server does.
+
+    Call after :func:`install_fake_named_pool`: each probe is recorded, the first
+    ``refusals`` raise ``psycopg.OperationalError`` and the rest reach the fake probe.
+    Returns the DSN of every probe made.
+    """
+    import psycopg
+
+    from tai42_kit.clients.impl import postgres as pg
+
+    fake_connect = pg.AsyncConnection.connect
+    attempts: list[str] = []
+
+    async def _connect(conninfo):
+        attempts.append(conninfo)
+        if len(attempts) <= refusals:
+            raise psycopg.OperationalError("connection refused")
+        return await fake_connect(conninfo)
+
+    monkeypatch.setattr(pg.AsyncConnection, "connect", _connect)
+    return attempts
+
+
+def redis_retry_of(client: Any) -> Any:
+    """The retry the kit attached to an (unconnected) redis-py client's connections."""
+    return client.connection_pool.connection_kwargs.get("retry")

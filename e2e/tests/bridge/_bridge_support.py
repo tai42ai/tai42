@@ -17,9 +17,9 @@ import asyncio
 import contextlib
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio, FakeWhatsApp
 from tai42_e2e.httpapi import ApiClient
@@ -36,6 +36,7 @@ WHATSAPP_INBOUND_PATH = "/api/channels/whatsapp/inbound"
 WHATSAPP_FLOW_DATA_PATH = "/api/channels/whatsapp/flow-data"
 TELEGRAM_INBOUND_PATH = "/api/channels/telegram/inbound"
 SLACK_INBOUND_PATH = "/api/channels/slack/inbound"
+SLACK_INTERACTIVE_PATH = "/api/channels/slack/interactive"
 
 # The client-safe text a failed or denied turn delivers (mirrors the turn engine's constant);
 # a leg asserting an error outcome matches the answer against this.
@@ -219,7 +220,9 @@ class BridgeHarness:
         channel: str,
         our_identity: str,
         initial_mode: str | None = None,
+        start_expr: str | None = None,
         overlap: dict[str, Any] | None = None,
+        reply_texts: dict[str, str] | None = None,
         token: str | None = None,
         expect: int = 200,
     ) -> Any:
@@ -235,10 +238,18 @@ class BridgeHarness:
         # ``manual``-from-the-start route names it here.
         if initial_mode is not None:
             body["initial_mode"] = initial_mode
+        # Omitted leaves the agent on the default ``{user_message}`` start; a leg that builds the
+        # run kwargs from the turn names its ``start_expr`` here.
+        if start_expr is not None:
+            body["start_expr"] = {"content": start_expr}
         # Omitted leaves the route on the default (continue/one/no window) overlap policy; an
         # overlap leg names the ``{running, deliver, settle_seconds}`` knobs it drives here.
         if overlap is not None:
             body["overlap"] = overlap
+        # Omitted leaves every route reply on its built-in English; a leg that words them names
+        # the ``reply_texts`` members here.
+        if reply_texts is not None:
+            body["reply_texts"] = reply_texts
         return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
 
     async def create_tool_channel_route(
@@ -254,6 +265,7 @@ class BridgeHarness:
         resume_expr: str | None = None,
         cancel_expr: str | None = None,
         overlap: dict[str, Any] | None = None,
+        reply_texts: dict[str, str] | None = None,
         token: str | None = None,
         expect: int = 200,
     ) -> Any:
@@ -275,6 +287,8 @@ class BridgeHarness:
             body["cancel_expr"] = {"content": cancel_expr}
         if overlap is not None:
             body["overlap"] = overlap
+        if reply_texts is not None:
+            body["reply_texts"] = reply_texts
         return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
 
     async def create_api_route(
@@ -356,11 +370,19 @@ class BridgeHarness:
     # -- channel inbound synthesis --------------------------------------------
 
     def twilio_inbound(
-        self, *, our_identity: str, client: str, text: str, valid: bool = True, port: int | None = None
+        self,
+        *,
+        our_identity: str,
+        client: str,
+        text: str,
+        valid: bool = True,
+        port: int | None = None,
+        original_replied_sid: str | None = None,
     ) -> SignedInbound:
         """A genuinely-signed uncorrelated twilio inbound: From ``client`` to the
         deployment number ``our_identity``. The signed URL is the exact door URL on the
-        replica the reply is POSTed to."""
+        replica the reply is POSTed to. ``original_replied_sid`` makes it a WhatsApp reply
+        to that message sid."""
         public_url = f"{self.stack.origin(port or self.stack.port_b)}{TWILIO_INBOUND_PATH}"
         return self.fake_twilio.build_inbound(
             auth_token=self.twilio_secret,
@@ -369,6 +391,7 @@ class BridgeHarness:
             human_number=client,
             text=text,
             valid=valid,
+            original_replied_sid=original_replied_sid,
         )
 
     def twilio_status(
@@ -386,7 +409,9 @@ class BridgeHarness:
         wa_id: str,
         text: str,
         wamid: str | None = None,
+        timestamp: int | None = None,
         valid: bool = True,
+        context_id: str | None = None,
     ) -> SignedInbound:
         return self.fake_whatsapp.build_inbound(
             app_secret=self.whatsapp_secret,
@@ -394,7 +419,9 @@ class BridgeHarness:
             wa_id=wa_id,
             text=text,
             wamid=wamid,
+            timestamp=timestamp,
             valid=valid,
+            context_id=context_id,
         )
 
     def whatsapp_interactive_reply(
@@ -430,11 +457,12 @@ class BridgeHarness:
         response: dict[str, Any],
         wamid: str | None = None,
         valid: bool = True,
+        context_id: str | None = None,
     ) -> SignedInbound:
         """A genuinely-signed completed-Flow reply (``nfm_reply``) from ``wa_id`` to the
         ``phone_number_id`` the form ask was sent FROM. ``response`` is the filled form
         values (Flow inputs arrive as strings) plus the ``flow_token`` the send carried
-        (the pending ask's ``interaction_id``)."""
+        (the pending ask's ``interaction_id``). ``context_id`` names the Flow message's wamid."""
         return self.fake_whatsapp.build_nfm_reply(
             app_secret=self.whatsapp_secret,
             phone_number_id=phone_number_id,
@@ -442,6 +470,7 @@ class BridgeHarness:
             response=response,
             wamid=wamid,
             valid=valid,
+            context_id=context_id,
         )
 
     async def whatsapp_flow_exchange(self, payload: dict[str, Any], *, port: int | None = None) -> dict[str, Any]:
@@ -474,6 +503,11 @@ class BridgeHarness:
 
     # -- media inbound synthesis (media-bridge profile) -----------------------
 
+    def telegram_inbound_text(self, *, chat_id: str, text: str) -> SignedInbound:
+        """A genuinely-signed plain text update (an uncorrelated bridge message) from ``chat_id``."""
+        assert self.fake_telegram is not None, "telegram_inbound_text requires the media-bridge profile"
+        return self.fake_telegram.build_inbound_text(secret=self.telegram_secret, chat_id=chat_id, text=text)
+
     def telegram_inbound_photo(
         self,
         *,
@@ -482,9 +516,11 @@ class BridgeHarness:
         caption: str | None = None,
         file_size: int | None = None,
         update_id: int | None = None,
+        reply_to_message_id: int | None = None,
     ) -> SignedInbound:
-        """A genuinely-signed inbound photo update (an uncorrelated bridge message) from ``chat_id``.
-        ``update_id`` may be pinned to replay the identical update (a vendor redelivery)."""
+        """A genuinely-signed inbound photo update from ``chat_id``. ``update_id`` may be pinned to
+        replay the identical update (a vendor redelivery); ``reply_to_message_id`` sends the photo
+        as a reply to that message."""
         assert self.fake_telegram is not None, "telegram_inbound_photo requires the media-bridge profile"
         return self.fake_telegram.build_inbound_photo(
             secret=self.telegram_secret,
@@ -493,7 +529,35 @@ class BridgeHarness:
             caption=caption,
             file_size=file_size,
             update_id=update_id,
+            reply_to_message_id=reply_to_message_id,
         )
+
+    def telegram_inbound_reply(self, *, chat_id: str, reply_to_message_id: int, text: str) -> SignedInbound:
+        """A genuinely-signed text update from ``chat_id`` sent as a reply to ``reply_to_message_id``."""
+        assert self.fake_telegram is not None, "telegram_inbound_reply requires the media-bridge profile"
+        return self.fake_telegram.build_inbound(
+            secret=self.telegram_secret, chat_id=chat_id, reply_to_message_id=reply_to_message_id, text=text
+        )
+
+    def telegram_callback_query(self, *, chat_id: str, message_id: int, data: str) -> SignedInbound:
+        """A genuinely-signed inline-keyboard tap on message ``message_id`` in ``chat_id`` carrying
+        the tapped button's ``data``."""
+        assert self.fake_telegram is not None, "telegram_callback_query requires the media-bridge profile"
+        return self.fake_telegram.build_callback_query(
+            secret=self.telegram_secret, chat_id=chat_id, message_id=message_id, data=data
+        )
+
+    def slack_inbound_text(self, *, channel: str, thread_ts: str, text: str, event_id: str) -> SignedInbound:
+        """A genuinely-signed Events API thread reply under ``thread_ts`` on ``channel``."""
+        assert self.fake_slack is not None, "slack_inbound_text requires the media-bridge profile"
+        return self.fake_slack.build_inbound(
+            signing_secret=self.slack_secret, channel=channel, thread_ts=thread_ts, text=text, event_id=event_id
+        )
+
+    def slack_interactive(self, *, payload: dict[str, Any]) -> SignedInbound:
+        """A genuinely-signed Block Kit interactivity POST carrying ``payload``."""
+        assert self.fake_slack is not None, "slack_interactive requires the media-bridge profile"
+        return self.fake_slack.build_interactive(signing_secret=self.slack_secret, payload=payload)
 
     def slack_inbound_files(
         self, *, channel: str, files: list[dict[str, Any]], event_id: str, text: str | None = None
@@ -726,11 +790,61 @@ async def drive_status_to_failed(
         await post_status()
         failed = await bridge.list_failed()
         for item in failed["items"]:
-            if outbound_id in item.get("outbound_message_ids", []):
+            if any(outbound_id in part["provider_message_ids"] for part in item["sends"]):
                 return item
         return None
 
     return await wait_for_async(probe, deadline=deadline, message=f"outbound {outbound_id!r} never flipped to failed")
+
+
+# The conversations key families that name or hold a record's ids: the record row, the outbound
+# index (provider id -> record), the message-ref lists and the ask index.
+SEND_KEY_FAMILIES = ("record:", "outbound:", "message_ref:", "ask_send:")
+
+
+def redis_keys_naming(
+    bridge: BridgeHarness, needles: Iterable[str], *, families: Iterable[str] = SEND_KEY_FAMILIES
+) -> dict[str, list[str]]:
+    """Every key of the named conversations key families whose name or content carries a needle.
+
+    Scans the ``CONVERSATIONS_PREFIX`` keyspace with a direct client, keeps the keys that start
+    with ``{prefix}:{family}`` for one of ``families``, and reads each by type (a string's value,
+    a list's items, a set's or sorted set's members, a hash's fields and values), so a hashed key
+    that only HOLDS an id (a message-ref list) is found as surely as a key that names it. Answers
+    ``{key: [needle, ...]}``, empty when no key carries any needle."""
+    import redis
+
+    wanted = [needle for needle in needles if needle]
+    prefix = bridge.stack.config.env["CONVERSATIONS_PREFIX"]
+    starts = tuple(f"{prefix}:{family}" for family in families)
+    client = redis.Redis.from_url(bridge.stack.resources.redis_url, decode_responses=True)
+    found: dict[str, list[str]] = {}
+    try:
+        for key in client.scan_iter(match=f"{prefix}:*", count=500):
+            if not key.startswith(starts):
+                continue
+            kind = client.type(key)
+            if kind == "string":
+                content = [cast("str | None", client.get(key)) or ""]
+            elif kind == "list":
+                content = cast("list[str]", client.lrange(key, 0, -1))
+            elif kind == "set":
+                content = list(cast("set[str]", client.smembers(key)))
+            elif kind == "zset":
+                content = cast("list[str]", client.zrange(key, 0, -1))
+            elif kind == "hash":
+                content = [item for pair in cast("dict[str, str]", client.hgetall(key)).items() for item in pair]
+            elif kind == "none":
+                continue
+            else:
+                raise AssertionError(f"key {key!r} has a type the scan does not read: {kind!r}")
+            text = "\n".join([key, *content])
+            hits = [needle for needle in wanted if needle in text]
+            if hits:
+                found[key] = hits
+    finally:
+        client.close()
+    return found
 
 
 def tool_text(result: Any) -> str:
@@ -784,11 +898,18 @@ def outbound_message(text: str) -> Callable[[str, dict], bool]:
 
 
 async def open_tool_target_web_visitor(
-    bridge: BridgeHarness, uniq: Callable[[str], str], tag: str
+    bridge: BridgeHarness,
+    uniq: Callable[[str], str],
+    tag: str,
+    *,
+    reply_expr: str = ".result.answer",
+    reply_texts: dict[str, str] | None = None,
 ) -> tuple[WebChatClient, str]:
     """Create a ``target_kind=tool`` web route onto ``e2e_tool_target_park`` (message → ``marker``
-    kwarg; resumed outcome → ``.result.answer`` reply) and open its chat page as a first-time
-    visitor, returning the door client bound to the session the page minted and the route name."""
+    kwarg; resumed outcome → the ``reply_expr`` reply, ``.result.answer`` by default; the route's
+    own ``reply_texts`` when given)
+    and open its chat page as a first-time visitor, returning the door client bound to the session
+    the page minted and the route name."""
     identity = uniq(f"{tag}-site").replace("_", "-")
     route_name = uniq(f"{tag}-route").replace("_", "-")
     execution_key = uniq(f"{tag}-exec")
@@ -800,7 +921,8 @@ async def open_tool_target_web_visitor(
         channel="web",
         our_identity=identity,
         start_expr="{marker: .message}",
-        reply_expr=".result.answer",
+        reply_expr=reply_expr,
+        reply_texts=reply_texts,
     )
     base_url = bridge.stack.origin(bridge.stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)

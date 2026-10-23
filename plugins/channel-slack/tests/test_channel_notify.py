@@ -51,7 +51,7 @@ async def test_notify_sends_plain_payload_returns_ts_and_writes_nothing(http_scr
 
     result = await SlackChannel().notify(ChannelNotification(message="Deploy finished."))
 
-    assert result == ["1712345678.000100"]
+    assert result.message_ids == ["1712345678.000100"]
     (request,) = http_script.requests
     assert str(request.url) == "https://slack.com/api/chat.postMessage"
     assert request.headers["Authorization"] == f"Bearer {TEST_BOT_TOKEN}"
@@ -69,7 +69,7 @@ async def test_notify_reply_options_render_buttons_with_text_fallback(http_scrip
     options: list[Option] = [ReplyOption(text="a"), ReplyOption(text="b")]
     result = await SlackChannel().notify(ChannelNotification(message="Pick one:", options=options))
 
-    assert result == ["1.1"]
+    assert result.message_ids == ["1.1"]
     payload = json.loads(http_script.requests[0].content)
     actions = payload["blocks"][-1]
     assert actions["type"] == "actions"
@@ -239,7 +239,7 @@ async def test_notify_media_renders_image_and_link_blocks(http_script, fake_redi
     ]
     result = await SlackChannel().notify(ChannelNotification(message="See below.", media=media))
 
-    assert result == ["1.1"]
+    assert result.message_ids == ["1.1"]
     blocks = json.loads(http_script.requests[0].content)["blocks"]
     assert blocks[0] == {"type": "section", "text": {"type": "plain_text", "text": "See below."}}
     # A captionless image falls back to a generic alt text.
@@ -254,7 +254,7 @@ async def test_notify_media_only_posts_image_blocks_without_a_text_section(http_
     media = [MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/a.png", caption="a chart")]
     result = await SlackChannel().notify(ChannelNotification(message="", media=media))
 
-    assert result == ["2.2"]
+    assert result.message_ids == ["2.2"]
     payload = json.loads(http_script.requests[0].content)
     blocks = payload["blocks"]
     assert blocks == [{"type": "image", "image_url": "https://cdn.test/a.png", "alt_text": "a chart"}]
@@ -284,7 +284,7 @@ async def test_notify_matching_sender_identity_sends_and_returns_ts(http_script,
 
     result = await SlackChannel().notify(ChannelNotification(message="bridge reply", sender_identity=TEST_BOT_USER_ID))
 
-    assert result == ["9.9"]
+    assert result.message_ids == ["9.9"]
     assert len(http_script.requests) == 1
 
 
@@ -297,7 +297,7 @@ async def test_notify_matching_sender_identity_bypasses_recipient_allowlist(http
         ChannelNotification(message="bridge reply", sender_identity=TEST_BOT_USER_ID, recipient="C0UNLISTED")
     )
 
-    assert result == ["7.7"]
+    assert result.message_ids == ["7.7"]
     payload = json.loads(http_script.requests[0].content)
     assert payload["channel"] == "C0UNLISTED"
 

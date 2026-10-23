@@ -23,6 +23,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, ForbiddenError, NotFoundError
 
+from .conftest import create_record
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 #: The one route the fake routing table holds, so a read on any other name is a 404.
@@ -140,7 +141,7 @@ def _as_api_route(monkeypatch) -> None:
 
 
 async def test_api_record_readable_by_its_invoking_caller(store, monkeypatch):
-    await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
+    await create_record(store, _record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
     view = await ops.get_conversation_message("chat", "m1")
     assert view["message_id"] == "m1"
@@ -150,7 +151,7 @@ async def test_api_record_readable_by_its_invoking_caller(store, monkeypatch):
 async def test_api_record_readable_by_another_grant_holder_as_projection(store, monkeypatch):
     # Grant-gated: another authenticated non-admin grant-holder reads the record too, as the
     # caller-safe projection that withholds the route key's run detail.
-    await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
+    await create_record(store, _record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("bob", is_admin=False))
     view = await ops.get_conversation_message("chat", "m1")
     assert view["message_id"] == "m1"
@@ -158,7 +159,7 @@ async def test_api_record_readable_by_another_grant_holder_as_projection(store, 
 
 
 async def test_api_record_readable_by_admin(store, monkeypatch):
-    await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
+    await create_record(store, _record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     view = await ops.get_conversation_message("chat", "m1")
     assert view["message_id"] == "m1"
@@ -168,15 +169,15 @@ async def test_api_record_readable_by_admin(store, monkeypatch):
 
 #: The internal detail of a turn that ran as the ROUTE's execution key — a principal the
 #: invoking caller has no authority over — plus the delivery machine's own bookkeeping.
-_INTERNAL_FIELDS = ("error", "attempts", "outbound_message_ids", "callback_url", "channel", "our_identity")
+_INTERNAL_FIELDS = ("error", "attempts", "sends", "callback_url", "channel", "our_identity")
 
 
 async def test_a_non_admin_caller_never_reads_the_internal_turn_detail(store, monkeypatch):
     # A denied turn stores the raw refusal, which names the route key's grants; the
     # caller reads the outcome and nothing about that principal.
     denial = "turn denied: access denied: POST /api/agents/foo/runs is not permitted for 'metrics-svc'"
-    await store.create_record(
-        _record("m1", door="api", caller_principal="alice", status=DeliveryStatus.FAILED, error=denial)
+    await create_record(
+        store, _record("m1", door="api", caller_principal="alice", status=DeliveryStatus.FAILED, error=denial)
     )
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
     view = await ops.get_conversation_message("chat", "m1")
@@ -191,8 +192,8 @@ async def test_a_non_admin_caller_never_reads_the_internal_turn_detail(store, mo
 
 async def test_an_admin_reads_the_whole_record_including_the_internal_detail(store, monkeypatch):
     denial = "turn denied: access denied for 'metrics-svc'"
-    await store.create_record(
-        _record("m1", door="api", caller_principal="alice", status=DeliveryStatus.FAILED, error=denial)
+    await create_record(
+        store, _record("m1", door="api", caller_principal="alice", status=DeliveryStatus.FAILED, error=denial)
     )
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     view = await ops.get_conversation_message("chat", "m1")
@@ -208,7 +209,7 @@ async def test_an_admin_reads_the_whole_record_including_the_internal_detail(sto
 async def test_channel_record_readable_by_a_grant_holder_as_projection(store, monkeypatch):
     # A channel record names no caller principal; grant-gated, a non-admin grant-holder still
     # reads it as the caller-safe projection.
-    await store.create_record(_record("c1", door="channel", caller_principal=None, status=DeliveryStatus.DELIVERED))
+    await create_record(store, _record("c1", door="channel", caller_principal=None, status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
     view = await ops.get_conversation_message("chat", "c1")
     assert view["message_id"] == "c1"
@@ -216,14 +217,14 @@ async def test_channel_record_readable_by_a_grant_holder_as_projection(store, mo
 
 
 async def test_channel_record_readable_by_admin(store, monkeypatch):
-    await store.create_record(_record("c1", door="channel", caller_principal=None, status=DeliveryStatus.DELIVERED))
+    await create_record(store, _record("c1", door="channel", caller_principal=None, status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     view = await ops.get_conversation_message("chat", "c1")
     assert view["message_id"] == "c1"
 
 
 async def test_unknown_or_cross_route_record_is_404(store, monkeypatch):
-    await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
+    await create_record(store, _record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
     with pytest.raises(NotFoundError, match="conversation record not found"):
         await ops.get_conversation_message("chat", "missing")
@@ -237,7 +238,7 @@ async def test_unknown_or_cross_route_record_is_404(store, monkeypatch):
 
 
 async def test_both_projections_carry_the_inbound_text(store, monkeypatch):
-    await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
+    await create_record(store, _record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
     assert (await ops.get_conversation_message("chat", "m1"))["inbound_text"] == "ask m1"
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
@@ -248,7 +249,7 @@ async def test_both_projections_carry_the_inbound_text(store, monkeypatch):
 
 
 async def test_thread_listing_is_admin_only(store, monkeypatch):
-    await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
+    await create_record(store, _record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
     with pytest.raises(ForbiddenError, match="restricted to administrators"):
         await ops.list_conversation_threads("chat")
@@ -257,7 +258,8 @@ async def test_thread_listing_is_admin_only(store, monkeypatch):
 async def test_thread_listing_summarizes_and_pages(store, monkeypatch):
     now = time.time()
     for index in range(3):
-        await store.create_record(
+        await create_record(
+            store,
             _record(
                 f"m{index}",
                 door="channel",
@@ -265,7 +267,7 @@ async def test_thread_listing_summarizes_and_pages(store, monkeypatch):
                 status=DeliveryStatus.DELIVERED,
                 thread_id=f"bridge:chat:+1555000{index}",
                 created_at=now + index,
-            )
+            ),
         )
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 
@@ -306,7 +308,8 @@ _THREAD = "bridge:chat:alice/user-7"
 async def _seed_thread(store, *, caller_principal: str | None, door: str = "api") -> None:
     now = time.time()
     for index in range(2):
-        await store.create_record(
+        await create_record(
+            store,
             _record(
                 f"t{index}",
                 door=door,
@@ -314,7 +317,7 @@ async def _seed_thread(store, *, caller_principal: str | None, door: str = "api"
                 status=DeliveryStatus.DELIVERED,
                 thread_id=_THREAD,
                 created_at=now + index,
-            )
+            ),
         )
 
 
@@ -502,15 +505,15 @@ async def test_the_transcript_refuses_a_bad_page(store, monkeypatch):
 
 
 async def test_failed_listing_is_admin_only(store, monkeypatch):
-    await store.create_record(_record("f1", door="api", caller_principal="alice", status=DeliveryStatus.FAILED))
+    await create_record(store, _record("f1", door="api", caller_principal="alice", status=DeliveryStatus.FAILED))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
     with pytest.raises(ForbiddenError, match="restricted to administrators"):
         await ops.list_failed_conversations()
 
 
 async def test_failed_listing_returns_only_failed_records_for_admin(store, monkeypatch):
-    await store.create_record(_record("f1", door="api", caller_principal="alice", status=DeliveryStatus.FAILED))
-    await store.create_record(_record("d1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
+    await create_record(store, _record("f1", door="api", caller_principal="alice", status=DeliveryStatus.FAILED))
+    await create_record(store, _record("d1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     listed = await ops.list_failed_conversations()
     assert listed["total"] == 1

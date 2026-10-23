@@ -504,3 +504,40 @@ def test_answer_part_refuses_a_form_property_named_proto():
     schema = {"type": "object", "properties": {"__proto__": {"type": "string"}, "name": {"type": "string"}}}
     with pytest.raises(ValidationError, match=re.escape(_PROTO_REFUSAL)):
         AnswerPart(message="hi", schema=schema)
+
+
+@pytest.mark.parametrize(
+    ("prop", "message"),
+    [
+        ({"type": "string", "format": "date", "rangeStart": "ghost"}, "rangeStart names undeclared property 'ghost'"),
+        ({"type": "string", "format": "date", "minDate": "soon"}, "minDate must be a YYYY-MM-DD date, got 'soon'"),
+        ({"type": "string", "timeOf": "end"}, "carries timeOf but is not a time property"),
+    ],
+)
+def test_answer_part_and_notification_refuse_a_nonsensical_date_key(prop: dict[str, Any], message: str):
+    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.conversations import AnswerPart
+
+    schema = {"type": "object", "properties": {"end": prop}}
+    with pytest.raises(ValidationError, match=message):
+        AnswerPart(message="hi", schema=schema)
+    with pytest.raises(ValidationError, match=message):
+        ChannelNotification(message="hi", schema=schema)
+
+
+def test_answer_part_refuses_a_time_on_another_page_than_its_date():
+    from tai42_contract.conversations import AnswerPart
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+            "end_time": {"type": "string", "format": "time", "timeOf": "end"},
+        },
+    }
+    from tai42_contract.interactions.models import FormPage
+
+    pages = [FormPage(title="Dates", fields=["start", "end"]), FormPage(title="Late", fields=["end_time"])]
+    with pytest.raises(ValidationError, match="property 'end_time' is the time of 'end' and must sit on the same page"):
+        AnswerPart(message="hi", schema=schema, pages=pages)

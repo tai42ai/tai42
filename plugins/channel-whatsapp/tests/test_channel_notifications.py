@@ -27,7 +27,7 @@ async def test_notify_options_render_as_reply_buttons(fake_redis: FakeRedis, fak
     # visitor message rather than being mistaken for a pending-ask answer.
     fake_httpx.responses.append(_accepted("wamid.OPT"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         ChannelNotification(
             message="How did we do?",
             recipient=ALLOWED_A,
@@ -35,7 +35,7 @@ async def test_notify_options_render_as_reply_buttons(fake_redis: FakeRedis, fak
         )
     )
 
-    assert ids == ["wamid.OPT"]
+    assert outcome.message_ids == ["wamid.OPT"]
     payload = fake_httpx.calls[0]["json"]
     assert payload["type"] == "interactive"
     interactive = payload["interactive"]
@@ -197,7 +197,7 @@ async def test_notify_audio_header_sent_ahead_of_interactive(fake_redis: FakeRed
     fake_httpx.responses.append(_accepted("wamid.AUDIO"))
     fake_httpx.responses.append(_accepted("wamid.INT"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         ChannelNotification(
             message="Listen then choose",
             recipient=ALLOWED_A,
@@ -206,7 +206,7 @@ async def test_notify_audio_header_sent_ahead_of_interactive(fake_redis: FakeRed
         )
     )
 
-    assert ids == ["wamid.AUDIO", "wamid.INT"]
+    assert outcome.message_ids == ["wamid.AUDIO", "wamid.INT"]
     assert fake_httpx.calls[0]["json"]["type"] == "audio"
     assert "header" not in fake_httpx.calls[1]["json"]["interactive"]
 
@@ -334,7 +334,7 @@ async def test_notify_options_and_media_send_choice_then_images(fake_redis: Fake
     fake_httpx.responses.append(_accepted("wamid.OPT"))
     fake_httpx.responses.append(_accepted("wamid.IMG"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         ChannelNotification(
             message="Rate it",
             recipient=ALLOWED_A,
@@ -343,7 +343,7 @@ async def test_notify_options_and_media_send_choice_then_images(fake_redis: Fake
         )
     )
 
-    assert ids == ["wamid.OPT", "wamid.IMG"]
+    assert outcome.message_ids == ["wamid.OPT", "wamid.IMG"]
     assert fake_httpx.calls[0]["json"]["interactive"]["type"] == "button"
     assert fake_httpx.calls[1]["json"]["image"] == {"link": "https://cdn.example/a.jpg"}
 

@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import re
+import time
 from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -154,12 +155,14 @@ class _StubHttp:
 
 
 class _StubConversations:
-    """Records ``accept`` / ``record_delivery_status`` calls and replays a queued
-    result or raises a queued exception, so bridge-branch tests assert the exact
-    facet args and drive the route/overflow/unknown-id outcomes."""
+    """Records ``accept`` / ``record_delivery_status`` / ``send_recorded`` calls and replays a
+    queued result or raises a queued exception, so bridge-branch tests assert the exact
+    facet args and drive the route/overflow/unknown-id outcomes. ``send_recorded`` runs the
+    plugin's send and records the call beside the outcome it returned (or the error it raised)."""
 
     def __init__(self) -> None:
         self.accept_calls: list[dict[str, Any]] = []
+        self.send_recorded_calls: list[dict[str, Any]] = []
         self.status_calls: list[dict[str, Any]] = []
         self.rejected_calls: list[dict[str, Any]] = []
         self.accept_result: str = "msg-stub-id"
@@ -182,6 +185,8 @@ class _StubConversations:
         cap_key: str,
         text: str,
         provider_message_id: str,
+        medium_message_id: str | None,
+        reply_to_medium_message_id: str | None,
         params: dict[str, str] | None = None,
         form: dict[str, Any] | None = None,
         attachments: list[Any] | None = None,
@@ -196,6 +201,8 @@ class _StubConversations:
                 "cap_key": cap_key,
                 "text": text,
                 "provider_message_id": provider_message_id,
+                "medium_message_id": medium_message_id,
+                "reply_to_medium_message_id": reply_to_medium_message_id,
                 "params": params,
                 "form": form,
                 "attachments": attachments,
@@ -206,6 +213,29 @@ class _StubConversations:
         if self.accept_error is not None:
             raise self.accept_error
         return self.accept_result
+
+    async def send_recorded(
+        self,
+        *,
+        channel: str,
+        our_identity: str,
+        client_address: str,
+        content: Any,
+        send: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        call: dict[str, Any] = {
+            "channel": channel,
+            "our_identity": our_identity,
+            "client_address": client_address,
+            "content": content,
+        }
+        self.send_recorded_calls.append(call)
+        try:
+            call["outcome"] = await send()
+        except Exception as exc:
+            call["error"] = exc
+            raise
+        return call["outcome"]
 
     async def notify_inbound_rejected(
         self, *, channel_id: str, recipient: str, sender_identity: str | None, kind: str, reason: Any
@@ -220,8 +250,12 @@ class _StubConversations:
             }
         )
 
-    async def record_delivery_status(self, channel: str, provider_message_id: str, status: Any) -> None:
-        self.status_calls.append({"channel": channel, "provider_message_id": provider_message_id, "status": status})
+    async def record_delivery_status(
+        self, channel: str, provider_message_id: str, status: Any, *, errors: Any = None
+    ) -> None:
+        self.status_calls.append(
+            {"channel": channel, "provider_message_id": provider_message_id, "status": status, "errors": errors}
+        )
         if self.status_error is not None:
             raise self.status_error
         record = self.records.get(provider_message_id)
@@ -442,6 +476,8 @@ class FakeRedis:
     def __init__(self, events: list[tuple[str, str]] | None = None) -> None:
         self.store: dict[str, str] = {}
         self.ttls: dict[str, int] = {}
+        # Absolute expiry in epoch milliseconds, for a key written with ``PXAT``.
+        self.pxat: dict[str, int] = {}
         self.events = events if events is not None else []
         self.lock_mutexes: dict[str, asyncio.Lock] = {}
         self.locks: list[FakeRedisLock] = []
@@ -478,19 +514,25 @@ class FakeRedis:
 
     async def getdel(self, key: str) -> str | None:
         self.ttls.pop(key, None)
+        self.pxat.pop(key, None)
         return self.store.pop(key, None)
 
     async def delete(self, key: str) -> int:
         self.ttls.pop(key, None)
+        self.pxat.pop(key, None)
         return 0 if self.store.pop(key, None) is None else 1
 
     async def exists(self, key: str) -> int:
         return 1 if key in self.store else 0
 
-    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
-        """Run the one Lua script the correlation store sends, in Python; refuse any other script."""
+    async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> int:
+        """Run the Lua scripts the correlation store sends, in Python; refuse any other script."""
+        from tai42_kit.conversations.reply_window import _ADVANCE_REPLY_WINDOW_LUA
+
         from tai42_channel_whatsapp.correlation import _RELEASE_PENDING_FOR_LUA
 
+        if script == _ADVANCE_REPLY_WINDOW_LUA:
+            return self._advance_reply_window(numkeys, *keys_and_args)
         if script != _RELEASE_PENDING_FOR_LUA:
             raise AssertionError(f"FakeRedis.eval was handed an unknown script: {script!r}")
         self.events.append(("redis_eval", keys_and_args[0]))
@@ -499,6 +541,21 @@ class FakeRedis:
         if raw is None or json.loads(raw).get("interaction_id") != interaction_id:
             return 0
         return await self.delete(key)
+
+    def _advance_reply_window(self, numkeys: int, *keys_and_args: Any) -> int:
+        """The kit's reply-window advance: write ``opened_at + window`` as value and ``PXAT``, never lower."""
+        self.events.append(("redis_eval", keys_and_args[0]))
+        (key,), (opened_at_ms, window_ms, now_ms) = keys_and_args[:numkeys], keys_and_args[numkeys:]
+        closes_at = int(opened_at_ms) + int(window_ms)
+        if closes_at <= int(now_ms):
+            return 0
+        stored = self.store.get(key)
+        if stored is not None and int(stored) >= closes_at:
+            return 0
+        self.store[key] = str(closes_at)
+        self.ttls.pop(key, None)
+        self.pxat[key] = closes_at
+        return 1
 
 
 @pytest.fixture
@@ -603,6 +660,7 @@ def make_delivery(**overrides: Any) -> ChannelDelivery:
         "options": None,
         "callback_url": "https://app.example/api/interactions/callback/ticket-1",
         "timeout_at": datetime.now(UTC) + timedelta(minutes=5),
+        "sensitive": False,
     }
     fields.update(overrides)
     return ChannelDelivery(**fields)
@@ -613,6 +671,10 @@ def compute_signature(body: bytes, secret: str = APP_SECRET) -> str:
     return "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
 
 
+# ``message_payload``'s default: stamp the message with the current second.
+_NOW_TIMESTAMP: Any = object()
+
+
 def message_payload(
     *,
     wamid: str = "wamid.TESTID",
@@ -620,9 +682,18 @@ def message_payload(
     wa_id: str = WA_ID,
     text: str = "yes please",
     msg_type: str = "text",
+    timestamp: Any = _NOW_TIMESTAMP,
 ) -> dict[str, Any]:
-    """A minimal inbound-message webhook envelope (entry → changes → value)."""
+    """A minimal inbound-message webhook envelope (entry → changes → value).
+
+    ``timestamp`` is the vendor's unix-seconds string, the current second by default; ``None``
+    leaves the field out, and any other value is carried as given.
+    """
     message: dict[str, Any] = {"id": wamid, "from": wa_id, "type": msg_type}
+    if timestamp is _NOW_TIMESTAMP:
+        message["timestamp"] = str(int(time.time()))
+    elif timestamp is not None:
+        message["timestamp"] = timestamp
     if msg_type == "text":
         message["text"] = {"body": text}
     return {
@@ -756,6 +827,7 @@ _CALLBACK = "https://app.example/api/interactions/callback/ticket-1"
 _SEEN_KEY = f"channel:whatsapp:seen:{_WAMID}"
 _PENDING_KEY = f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{WA_ID}"
 _CONTACT_KEY = f"channel:whatsapp:known-contact:{PHONE_NUMBER_ID}:{WA_ID}"
+_REPLY_WINDOW_KEY = f"channel:whatsapp:reply-window:{PHONE_NUMBER_ID}:{WA_ID}"
 
 _FORM_SCHEMA = {
     "type": "object",
@@ -917,9 +989,9 @@ _MESSAGES_URL = f"https://graph.facebook.com/v23.0/{PHONE_NUMBER_ID}/messages"
 _UNLISTED = "15559999999"
 
 
-def _accepted(wamid: str = "wamid.OUT") -> httpx.Response:
-    """A Cloud-API accept carrying one message id."""
-    return response(200, json={"messages": [{"id": wamid}]})
+def _accepted(wamid: str = "wamid.OUT", wa_id: str = ALLOWED_A) -> httpx.Response:
+    """A Cloud-API accept carrying one message id and the recipient's ``wa_id``."""
+    return response(200, json={"contacts": [{"input": wa_id, "wa_id": wa_id}], "messages": [{"id": wamid}]})
 
 
 # --- WhatsApp Flow lifecycle helpers (shared across the form suites) ----------------

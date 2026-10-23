@@ -154,7 +154,7 @@ def test_the_skeleton_doors_declare_sixty_and_ten() -> None:
     ):
         assert routes[path].rate_limit_budget == rate_limit.SKELETON_DOOR_BUDGET == RateLimitBudget(limit=60, burst=10)
     assert routes["/universal_webhook/{topic}"].error_statuses == (400, 401, 405, 413, 500)
-    assert routes["/trigger/{token}"].error_statuses == (400, 403, 404, 413, 501)
+    assert routes["/trigger/{token}"].error_statuses == (400, 403, 404, 413, 500, 501)
 
 
 # -- the boot and reload audit -----------------------------------------------

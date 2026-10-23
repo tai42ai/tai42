@@ -119,6 +119,10 @@ class LifespanMixin(LifecycleState):
             await self._cancel_sandbox_reaper()
             await self._cancel_media_reaper()
             await self._cancel_monitoring_health_watch()
+            # Stop the hook-run sweep and give the running hook-run attempts their grace
+            # while credential refreshes and pooled clients are still live, before the
+            # shutdown handlers drain the tool supervisors.
+            await self._stop_hook_runs()
             # Cancel the owned credential refreshes; a refresh mid write-back finishes first.
             await refresh_owner.aclose()
             # Shutdown keeps swallow-and-log so teardown runs every handler.
@@ -338,6 +342,23 @@ class LifespanMixin(LifecycleState):
             name="tai-monitoring-health-watch",
         )
         self._monitoring_health_watch_task.add_done_callback(self._on_perpetual_task_done)
+
+    @staticmethod
+    async def _stop_hook_runs() -> None:
+        """Stop the hook-run sweep and settle every hook-run attempt of this process at shutdown.
+
+        A failure is logged with its stack trace and not re-raised: this runs inside
+        ``app_context``'s shutdown ``finally``, where re-raising would skip the remaining
+        teardown. An attempt left unsettled is reclaimed once its lease lapses.
+        """
+        from tai42_skeleton.hooks.runs.sweep import stop_hook_runs_sweep
+
+        try:
+            await stop_hook_runs_sweep()
+        except Exception:
+            logger.exception(
+                "hook runs: the shutdown stop failed; unsettled runs are reclaimed when their lease lapses"
+            )
 
     async def _cancel_monitoring_health_watch(self) -> None:
         """Cancel the monitoring health watch and await its termination at shutdown.

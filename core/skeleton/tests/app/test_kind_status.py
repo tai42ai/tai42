@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.channels import SendOutcome
 
 from tai42_skeleton.app import kind_status as ks
 from tai42_skeleton.app.instance import build_app
@@ -76,8 +77,8 @@ class _FakeBackend:
 
 
 class _Channel(DeliverOnlyChannel):
-    async def deliver(self, delivery) -> None:
-        return None
+    async def deliver(self, delivery) -> SendOutcome:
+        return self.outcome(delivery, [])
 
 
 @pytest.fixture

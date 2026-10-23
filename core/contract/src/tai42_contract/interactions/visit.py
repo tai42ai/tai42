@@ -16,6 +16,7 @@ gets back is a :class:`~tai42_contract.interactions.models.ResumeBuffered`.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
@@ -187,6 +188,54 @@ class RunNoneAnswer(BaseModel, frozen=True):
 RunAnswer = Annotated[RunResultAnswer | RunAsksAnswer | RunParkedAnswer | RunNoneAnswer, Field(discriminator="kind")]
 
 
+@dataclass(frozen=True, slots=True)
+class VisitAct:
+    """A notice that the visit is about to act, or has just committed a claim.
+
+    A door that passes ``on_act`` to :class:`Visit` is told where the visit crosses from checking to
+    acting. The visit awaits the notice:
+
+    - once before the cancels (``phase="before"``, ``interaction_ids`` the cancel ids);
+    - twice per resume or take claim: right before the claim call (``phase="before"``) and right
+      after that claim commits (``phase="committed"``), ``interaction_ids`` the one claimed id;
+    - once before the start (``phase="before"``, ``interaction_ids`` empty).
+
+    It is never awaited during the pre-check or the run-entry drain, and never when the visit does
+    nothing. A raise from the notice propagates out of the visit. A raise from a ``before`` notice
+    leaves nothing acted on by that action: no cancel, no claim, no start. After a ``committed``
+    notice the claim stands, and a resume's continuation-due record is left for the interactions
+    reaper.
+
+    A door that recorded a ``before`` claim notice and never saw its ``committed`` notice reads it
+    this way. If the visit then raised
+    :class:`~tai42_contract.interactions.ParkedEntryGoneError`, the claim lost its race and did not
+    commit. Otherwise (the claim call raised, or the process stopped) the claim may or may not have
+    committed: :class:`SettleVisitClaim` then tells only whether each entry is still open. An entry
+    still open shows the claim did not commit; an entry no longer open was resolved, by this claim or
+    by any other resolution, and the read cannot tell which.
+    """
+
+    action: Literal["cancel", "resume", "take", "start"]
+    interaction_ids: tuple[str, ...]
+    phase: Literal["before", "committed"]
+
+
+@runtime_checkable
+class SettleVisitClaim(Protocol):
+    """Tell which entries of a resume or take claim are no longer open in the interactions store."""
+
+    async def __call__(self, act: VisitAct) -> tuple[str, ...]:
+        """Return the ids of ``act.interaction_ids`` that are no longer open.
+
+        A resume entry is open while its interaction state is ``pending``; a take entry is open while
+        its outcome is still waiting. An empty result proves that no claim on these ids committed. A
+        returned id was resolved by some door (this claim, an answer, an expiry, another caller, the
+        retention sweep or a TTL), and which one is not known, so a caller must never read it as its
+        own commit. A store fault raises.
+        """
+        ...
+
+
 @runtime_checkable
 class Visit(Protocol):
     """Drive a parkable run through the one shared cancel / resume / take / start order."""
@@ -201,6 +250,7 @@ class Visit(Protocol):
         extras: Mapping[str, Any],
         state_binding: StateBinding | None = None,
         receives_outcome: bool = True,
+        on_act: Callable[[VisitAct], Awaitable[None]] | None = None,
     ) -> VisitOutcome:
         """Run the visit for one door and return its :class:`VisitOutcome`.
 
@@ -212,6 +262,8 @@ class Visit(Protocol):
         continuation. ``receives_outcome`` is whether THIS caller takes the resumed run's outcome
         inline (a route, a holder node, ``resume_parked``, a direct run) or has no receiver (a hook,
         a schedule), which decides where the platform delivers a resumed run's terminal.
+        ``on_act`` is awaited at each point where the visit acts, as :class:`VisitAct` states;
+        ``None`` (the default) asks for no notice.
         """
         ...
 
@@ -226,8 +278,10 @@ __all__ = [
     "RunNoneAnswer",
     "RunParkedAnswer",
     "RunResultAnswer",
+    "SettleVisitClaim",
     "UndeclaredExtrasKeyError",
     "Visit",
+    "VisitAct",
     "VisitOutcome",
     "VisitRequestError",
 ]

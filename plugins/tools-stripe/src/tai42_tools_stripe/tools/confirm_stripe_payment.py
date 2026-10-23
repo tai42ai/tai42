@@ -33,8 +33,10 @@ async def confirm_stripe_payment(event: dict[str, Any]) -> dict[str, Any]:
     is out of scope.
 
     A door failure PROPAGATES unchanged (a ``CallbackDoorError`` of any status, or retry
-    exhaustion) into the hook-failure log -- the bridge has one session and no batch to classify
-    into, so it never catches. ``already_answered`` from the door is a SUCCESS return: Stripe
+    exhaustion) into the hook run, which is held as failed after the hook started the tool and is
+    seen with ``tai hooks runs list --status failed``, the operator notification and the
+    ``hooks_run_failed`` event -- the bridge has one session and no batch to classify into, so it
+    never catches. ``already_answered`` from the door is a SUCCESS return: Stripe
     retries are expected duplicates.
 
     Args:

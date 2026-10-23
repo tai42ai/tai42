@@ -22,6 +22,10 @@ namespace when unset; a set `ARQ_` value always wins.
 | --- | --- | --- |
 | `ARQ_REDIS_URL` | `redis://localhost:6379/0` | Queue, results, and the schedule hashes. |
 | `ARQ_REDIS_MAX_CONNECTIONS` | unset | Caps the arq connection pool; uncapped when unset. |
+| `ARQ_RETRY_ATTEMPTS` | `0` | Times a failed Redis connect or command is retried, each retry logged as a warning; `0` makes one attempt. |
+| `ARQ_RETRY_ON_TIMEOUT` | `false` | With `ARQ_RETRY_ATTEMPTS` at `0`, retries a timed-out command once at once. |
+| `ARQ_SOCKET_TIMEOUT` | unset | Seconds a Redis command may wait on its socket; redis-py's default when unset. |
+| `ARQ_SOCKET_CONNECT_TIMEOUT` | `1` | Seconds a Redis connect may take. |
 | `ARQ_CALLBACK_TIMEOUT` | `5` | Seconds a callback job waits for its predecessor to complete. |
 | `ARQ_JOB_COMPLETION_WAIT` | `300` | Seconds a graceful SIGTERM lets in-flight jobs finish before the worker exits (the warm drain). |
 | `ARQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the longest a job may run on the worker (the `--job-timeout` default), and how long a synchronous dispatch waits for a job result. |
@@ -33,6 +37,12 @@ namespace when unset; a set `ARQ_` value always wins.
 ```bash
 tai backend worker --max-jobs 10
 ```
+
+The worker and the enqueue side both connect with these settings. The worker's
+connect at start follows `ARQ_RETRY_ATTEMPTS`: with the default `0`, a worker
+started before Redis is reachable fails at once. A running worker rides a Redis
+outage only within that same retry — arq's poll loop has no reconnect of its
+own, so a longer outage ends the worker.
 
 `--job-timeout` defaults to `ARQ_TASK_TIMEOUT`; an explicit flag wins.
 

@@ -13,6 +13,8 @@ from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksM
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.states.context import current_state_context
 
+from .._fakes.hook_runs import MarkRecorder
+
 
 def _capture_context(app) -> list[StateContext | None]:
     """Wrap the fake tool runner so each dispatch records the ambient state context seen
@@ -47,7 +49,7 @@ async def test_declared_subject_establishes_the_hook_door_context(make_app) -> N
             target_kind="tool", target_name="assistant", kind="person", key_expr=TemplatedText(content=".actor")
         )
     )
-    await InMemoryHooksManager._run_hook(hook, {"actor": "p-42"})
+    await InMemoryHooksManager._run_hook(hook, {"actor": "p-42"}, idempotency_key="run-1", mark_acted=MarkRecorder())
     assert len(seen) == 1
     ctx = seen[0]
     assert ctx is not None
@@ -64,7 +66,9 @@ async def test_declared_subject_establishes_the_hook_door_context(make_app) -> N
 async def test_no_subject_leaves_no_state_context(make_app) -> None:
     app = make_app()
     seen = _capture_context(app)
-    await InMemoryHooksManager._run_hook(_hook(None), {"actor": "p-42"})
+    await InMemoryHooksManager._run_hook(
+        _hook(None), {"actor": "p-42"}, idempotency_key="run-1", mark_acted=MarkRecorder()
+    )
     assert seen == [None]
 
 
@@ -78,7 +82,7 @@ async def test_key_expr_that_is_not_a_nonempty_string_fails_the_fire(make_app, p
         )
     )
     with pytest.raises(ValueError, match="must yield a non-empty string"):
-        await InMemoryHooksManager._run_hook(hook, payload)
+        await InMemoryHooksManager._run_hook(hook, payload, idempotency_key="run-1", mark_acted=MarkRecorder())
     # The fire failed before running the tool — never a silent skip.
     assert seen == []
 
@@ -91,7 +95,7 @@ async def test_key_expr_by_id_renders_then_resolves_the_subject_key(make_app) ->
     hook = _hook(
         HookSubject(target_kind="tool", target_name="assistant", kind="person", key_expr=TemplatedText(id="hook-key"))
     )
-    await InMemoryHooksManager._run_hook(hook, {"actor": "p-42"})
+    await InMemoryHooksManager._run_hook(hook, {"actor": "p-42"}, idempotency_key="run-1", mark_acted=MarkRecorder())
     assert len(seen) == 1
     ctx = seen[0]
     assert ctx is not None
@@ -130,7 +134,7 @@ async def test_hook_deposits_its_state_binding_on_the_ambient_invocation(make_ap
         execution_key_fingerprint="fp",
         state_binding=binding,
     )
-    await InMemoryHooksManager._run_hook(hook, {"actor": "p-42"})
+    await InMemoryHooksManager._run_hook(hook, {"actor": "p-42"}, idempotency_key="run-1", mark_acted=MarkRecorder())
     assert len(seen) == 1
     inv = seen[0]
     assert inv is not None

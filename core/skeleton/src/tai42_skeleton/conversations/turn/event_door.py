@@ -13,11 +13,13 @@ from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.caps import AddressAdmission, AddressRateLimitedError, get_turn_caps
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
+from tai42_skeleton.conversations.thread_ids import RouteThreadId, parse_thread_id
 from tai42_skeleton.conversations.turn.admission import refuse_turn_while_reloading
 from tai42_skeleton.conversations.turn.api_wait import ApiSubmitResult, _api_wait_or_callback
 from tai42_skeleton.conversations.turn.errors import (
     ConversationRouteResolutionError,
     EventTargetNotToolError,
+    ThreadAddressUnknownError,
     ThreadNotFoundError,
     UnauthenticatedApiCallerError,
 )
@@ -54,9 +56,12 @@ async def _resolve_event_thread(
 
     Returns ``(thread_id, client_address, record_caller_principal, multichannel)``.
 
-    Addressed by ``thread_id``: the id is verified live on the route's thread index and its
-    latest record supplies the delivery ``client_address`` (a person-aggregated thread has
-    no single address of its own). Addressed by ``address``: the address is composed exactly
+    Addressed by ``thread_id``: the id is verified live on the route's thread index (it has a
+    readable record, a send record included). A route-keyed thread is addressed to the address
+    its own id names. A person-aggregated thread has no single address of its own: its newest
+    record that is not a send record supplies the delivery ``client_address`` (and, on an api
+    route, the caller principal), and a person thread that holds only send records raises
+    :class:`ThreadAddressUnknownError` (400). Addressed by ``address``: the address is composed exactly
     as the TARGET route's own door composes it — a channel route by
     :func:`canonical_address`, an api route by :func:`_api_client_address` (so by ``address``
     a caller reaches only its own api threads), then :func:`_resolve_thread_id` and the same
@@ -69,19 +74,31 @@ async def _resolve_event_thread(
     """
     if submission.thread_id is not None:
         thread_id = submission.thread_id.strip()
-        latest = await store.latest_thread_record(route.route_name, thread_id)
+        latest = await store.latest_thread_record(route.route_name, thread_id, skip_sends=False)
         if latest is None:
             raise ThreadNotFoundError(f"no thread {thread_id!r} on conversation route {route.route_name!r}")
+        parsed = parse_thread_id(thread_id)
+        if isinstance(parsed, RouteThreadId):
+            client_address = parsed.client_address
+        else:
+            addressed = await store.latest_thread_record(route.route_name, thread_id, skip_sends=True)
+            if addressed is None:
+                raise ThreadAddressUnknownError(
+                    f"thread {thread_id} holds no message from the participant to address the event to; "
+                    "submit the event by address"
+                )
+            latest = addressed
+            client_address = addressed.client_address
         record_caller_principal = latest.caller_principal if route.door == "api" else None
         multichannel = await _multichannel_context(
             route,
             door=route.door,
             channel=route.channel,
             our_identity=route.our_identity,
-            address=latest.client_address,
+            address=client_address,
             accountable=caller_principal,
         )
-        return thread_id, latest.client_address, record_caller_principal, multichannel
+        return thread_id, client_address, record_caller_principal, multichannel
     address = canonical_address(submission.address or "")
     if route.door == "channel":
         composed = address
@@ -183,6 +200,7 @@ async def submit_event(
         # claim writes nothing.
         claimed_owner = await store.create_record(
             intake,
+            route=route,
             intake_token=intake_token,
             claim_key=store.settings.event_dedupe_key(route_name, event_id),
             refresh_mode=True,

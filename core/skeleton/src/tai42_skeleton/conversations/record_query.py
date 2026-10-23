@@ -48,41 +48,63 @@ class RecordQueryMixin(RecordStoreBase):
         Reads the thread's transcript index (keyspace 7, scored by ``created_at``) for members with a
         greater score, loads each row, and keeps the ones still at ``accepted`` whose ``inbound_kind``
         and ``origin`` match — the participant ``message`` records the overlap decision gathers and the
-        pending seam projects, bounded by the thread's FIFO depth (``thread_queue_depth``). An event turn
-        is excluded by ``kind``; a record that has already left ``accepted`` (a follower an earlier
-        decision merged or superseded, or one whose turn completed) is not returned. A member whose row
-        is gone or unparseable is logged and skipped by the shared loader.
+        pending seam projects, bounded by the thread's FIFO depth (``thread_queue_depth``). The bound
+        counts only records that are not send records: the index is read in batches of that depth until
+        that many non-send members were read or the index ends, so the sends the thread holds never use
+        up the bound. An event turn is excluded by ``kind``; a record that has already left ``accepted``
+        (a follower an earlier decision merged or superseded, or one whose turn completed) is not
+        returned. A member whose row is gone or unparseable is logged and skipped by the shared loader.
         """
         thread_key = self.settings.thread_index_key(route_name, thread_id)
+        depth = self.settings.thread_queue_depth
         records: list[ConversationRecord] = []
+        counted = 0
+        start = 0
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            members = await awaited(
-                r.zrangebyscore(thread_key, f"({created_at}", "+inf", start=0, num=self.settings.thread_queue_depth)
-            )
-            for member in members:
-                record = await self._load_searched_record(r, _member(member))
-                if (
-                    record is not None
-                    and record.delivery_status is DeliveryStatus.ACCEPTED
-                    and record.inbound_kind == kind
-                    and record.origin == origin
-                ):
-                    records.append(record)
+            while counted < depth:
+                members = await awaited(r.zrangebyscore(thread_key, f"({created_at}", "+inf", start=start, num=depth))
+                start += len(members)
+                for member in members:
+                    record = await self._load_searched_record(r, _member(member))
+                    if record is not None and record.origin == "send":
+                        continue
+                    counted += 1
+                    if (
+                        record is not None
+                        and record.delivery_status is DeliveryStatus.ACCEPTED
+                        and record.inbound_kind == kind
+                        and record.origin == origin
+                    ):
+                        records.append(record)
+                    if counted == depth:
+                        break
+                if len(members) < depth:
+                    break
         return records
 
-    async def latest_thread_record(self, route_name: str, thread_id: str) -> ConversationRecord | None:
+    async def latest_thread_record(
+        self, route_name: str, thread_id: str, *, skip_sends: bool
+    ) -> ConversationRecord | None:
         """The newest readable record of a thread, read through its transcript index (newest first, keyspace 7).
 
-        ``None`` when the thread has no readable record — a member whose row is gone or unparseable is
-        logged and skipped by the shared loader, never a silent empty result.
+        With ``skip_sends`` it is the newest record that is not a send record (``origin`` ``"send"``).
+        The index is read in batches of ``thread_queue_depth`` until such a record is found or the index
+        ends. ``None`` when the thread has no such readable record — a member whose row is gone or
+        unparseable is logged and skipped by the shared loader, never a silent empty result.
         """
         thread_key = self.settings.thread_index_key(route_name, thread_id)
+        depth = self.settings.thread_queue_depth
+        start = 0
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            for member in await awaited(r.zrevrange(thread_key, 0, 0)):
-                record = await self._load_searched_record(r, _member(member))
-                if record is not None:
-                    return record
-        return None
+            while True:
+                members = await awaited(r.zrevrange(thread_key, start, start + depth - 1))
+                for member in members:
+                    record = await self._load_searched_record(r, _member(member))
+                    if record is not None and not (skip_sends and record.origin == "send"):
+                        return record
+                if len(members) < depth:
+                    return None
+                start += depth
 
     async def list_route_threads(
         self,

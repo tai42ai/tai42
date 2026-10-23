@@ -74,7 +74,7 @@ async def test_pending_ask_resolves_then_uncorrelated_starts_a_turn(
         # from the deployment number — a Tier-2 pending correlation on that pair.
         async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
             result = await mcp.call_tool("ask", {"question": question, "channel": "twilio"})
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:

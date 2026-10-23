@@ -9,7 +9,7 @@ read from the ``INTERACTIONS_REDIS_*`` env; feature values from ``INTERACTIONS_*
 from typing import ClassVar
 from urllib.parse import urlparse
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_contract.interactions.models import LOCAL_HTTP_HOSTS
@@ -125,6 +125,28 @@ class InteractionsSettings(TaiBaseSettings):
     # LOUDLY as a reaction failure (the person sees the vendor's error, the server
     # logs it) — never a stale or silently dropped update. Must be positive.
     reaction_deadline_seconds: float = Field(default=10, gt=0)
+
+    # The plain-text body the public callback page answers for every GET that will
+    # not serve a page (an unknown, expired or pruned ticket, a verifier-only
+    # question, the store switched off): ONE constant per deployment, so the answer
+    # never tells those states apart. Set it in the end user's language. Must not
+    # be blank.
+    callback_gone_text: str = "Not Found"
+
+    # The plain-text body of the 500 the public callback page answers when a stored
+    # record cannot be drawn (a form schema outside the subset, or a record that
+    # fails its model): the record's own words cannot be trusted there, so the
+    # words are the deployment's. Set it in the end user's language. Must not be
+    # blank.
+    callback_fault_text: str = "Internal Server Error"
+
+    @field_validator("callback_gone_text", "callback_fault_text")
+    @classmethod
+    def _require_text(cls, value: str, info: ValidationInfo) -> str:
+        """Refuse a blank callback page text loudly at settings load."""
+        if not value.strip():
+            raise ValueError(f"INTERACTIONS_{(info.field_name or '').upper()} must not be blank")
+        return value
 
     @field_validator("public_base_url")
     @classmethod

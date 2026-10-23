@@ -26,6 +26,8 @@ from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 
+from .conftest import create_record
+
 
 @pytest.fixture(autouse=True)
 def _conversations_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -298,5 +300,5 @@ async def test_a_deleted_route_is_refused_by_the_record_create_while_a_reader_ho
         created_at=now,
         updated_at=now,
     )
-    await ConversationRecordStore(_s()).create_record(record)
+    await create_record(ConversationRecordStore(_s()), record)
     assert await lua_redis.zcard(_s().route_threads_key("line")) == 0

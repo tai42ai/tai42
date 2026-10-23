@@ -211,6 +211,8 @@ async def test_ladder_bridged_outcome_acks_and_drops_correlation(fake_redis, cha
     assert call.bridge.bridge_text == "yes, deploy it"
     assert call.bridge.client_address == TEST_DEFAULT_RECIPIENT
     assert call.bridge.provider_message_id == "Ev001"
+    # The message ts is the id a later quote of this message names.
+    assert call.bridge.medium_message_id == "1712345679.000200"
 
 
 async def test_bridged_then_redelivery_acks_duplicate_no_second_ladder_call(fake_redis, channels):
@@ -352,6 +354,7 @@ async def test_me_message_bridges_like_a_plain_message(fake_redis, stub_conversa
     assert call.text == "is on it"
     assert call.client_address == TEST_DEFAULT_RECIPIENT
     assert call.provider_message_id == "Ev001"
+    assert call.medium_message_id == "1712345679.000200"
     assert call.params is None
 
 
@@ -475,6 +478,8 @@ async def test_file_share_two_files_bridge_two_served_turns_with_per_item_ids(
     assert body_json(response) == {"status": "accepted"}
     first, second = stub_conversations.accept_calls
     assert first.provider_message_id == "Ev001-0"
+    # Both records come from the one message, so both carry its ts as the quotable id, in file order.
+    assert [call.medium_message_id for call in (first, second)] == ["1712345679.000200", "1712345679.000200"]
     assert first.text == "two files"  # the caption rides the FIRST file only
     assert first.params["media_kind"] == "document"
     assert first.params["media_id"] == doc.media_id
@@ -498,6 +503,20 @@ async def test_file_share_blank_text_uses_placeholder(fake_redis, stub_conversat
     assert body_json(response) == {"status": "accepted"}
     (call,) = stub_conversations.accept_calls
     assert call.text == "[document: notes.pdf]"  # whitespace-only caption is not a caption
+
+
+async def test_file_share_without_a_bot_user_id_raises_before_any_notice(fake_redis, stub_conversations, monkeypatch):
+    # The rejection notice is drawn from the route of the receiving identity (the bot user id);
+    # with it unset the file door is misconfigured, raised loudly as the bridge door does.
+    monkeypatch.delenv("CHANNEL_SLACK_BOT_USER_ID")
+    reset_all_settings()
+    event = _file_share_event([{"id": "F1", "filetype": "binary"}])
+
+    with pytest.raises(ValueError, match="CHANNEL_SLACK_BOT_USER_ID"):
+        await slack_inbound(_signed(_event_body(event=event)))
+
+    assert stub_conversations.rejected_calls == []
+    assert stub_conversations.accept_calls == []
 
 
 async def test_file_share_unfetchable_file_notifies_rejected_and_acks(fake_redis, stub_conversations):
@@ -572,6 +591,7 @@ async def test_file_share_all_rejected_caption_carries_first_file_kind_and_mime(
     (call,) = stub_conversations.accept_calls
     assert call.text == "see attached"
     assert call.provider_message_id == "Ev001"
+    assert call.medium_message_id == "1712345679.000200"
     assert call.params == {"media_kind": "document", "media_mime_type": "application/pdf"}
     assert call.attachments is None
 

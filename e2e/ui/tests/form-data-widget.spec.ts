@@ -205,7 +205,10 @@ test('a per-send form with data + pages renders in the widget, steps, and resolv
   const askRes = await askPromise;
   expect(askRes.status(), await askRes.text()).toBe(200);
   const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
-  expect(body.data).toEqual({ kind: 'result', result: answer });
+  expect(body.data).toEqual({
+    kind: 'result',
+    result: { answer: answer, reply_to: null, params: null },
+  });
 });
 
 test('a notify_user form with data + pages opens in the widget already filled in and stepped', async ({
@@ -364,7 +367,10 @@ test.describe('the web widget draws the per-send wording catalogue', () => {
     const askRes = await askPromise;
     expect(askRes.status(), await askRes.text()).toBe(200);
     const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
-    expect(body.data).toEqual({ kind: 'result', result: { count: 2, when: 'a' } });
+    expect(body.data).toEqual({
+      kind: 'result',
+      result: { answer: { count: 2, when: 'a' }, reply_to: null, params: null },
+    });
   });
 
   test('a stepped form draws the caller back button on a later step', async ({
@@ -422,7 +428,10 @@ test.describe('the web widget draws the per-send wording catalogue', () => {
     const askRes = await askPromise;
     expect(askRes.status(), await askRes.text()).toBe(200);
     const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
-    expect(body.data).toEqual({ kind: 'result', result: { count: 5, notes } });
+    expect(body.data).toEqual({
+      kind: 'result',
+      result: { answer: { count: 5, notes }, reply_to: null, params: null },
+    });
   });
 
   test("a form field shows the caller's sentence for an answer outside its shape", async ({
@@ -470,7 +479,79 @@ test.describe('the web widget draws the per-send wording catalogue', () => {
     const askRes = await askPromise;
     expect(askRes.status(), await askRes.text()).toBe(200);
     const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
-    expect(body.data).toEqual({ kind: 'result', result: { code: '1234' } });
+    expect(body.data).toEqual({
+      kind: 'result',
+      result: { answer: { code: '1234' }, reply_to: null, params: null },
+    });
+  });
+
+  test("a form field reads the caller's required sentence and a list reads the caller's list words", async ({
+    page,
+    request,
+    browserName,
+  }) => {
+    test.skip(browserName === 'webkit', 'Linux CI WebKit delivers fetch-streams unreliably');
+    const { identity, visitorId } = await registerVisitor(page);
+    const question = uniq('form_q');
+    const tag = uniq('tag');
+    const schema = {
+      type: 'object',
+      required: ['label'] as string[],
+      properties: {
+        label: { type: 'string', title: 'Label' },
+        tags: { type: 'array', title: 'Tags', items: { type: 'string' } },
+      },
+    };
+    // `required` replaces the widget's own missing-value message; the four list words replace the
+    // free-text list's empty line, add button, item label (`{n}` the item's number) and remove button.
+    const wording = {
+      form: {
+        fields: {
+          label: { required: 'Escribe una etiqueta' },
+          tags: {
+            add_item: 'Añadir etiqueta',
+            remove_item: 'Quitar',
+            item_label: 'Etiqueta {n}',
+            no_items: 'Sin etiquetas',
+          },
+        },
+      },
+    };
+
+    const askPromise = fireAsk(request, `${identity}:${visitorId}`, {
+      question,
+      answer_format: 'form',
+      schema,
+      wording,
+      timeout: 120,
+    });
+
+    const card = page.locator('.tcw-question-form');
+    const answer = card.getByRole('button', { name: 'Answer', exact: true });
+    await expect(card.getByText('Sin etiquetas', { exact: true })).toBeVisible();
+
+    // An empty required label keeps the card open with the caller's sentence, not '"label" is required'.
+    await answer.click();
+    await expect(card.getByText('Escribe una etiqueta', { exact: true })).toBeVisible();
+    await expect(card.getByText('"label" is required')).toHaveCount(0);
+
+    await card.getByRole('button', { name: 'Añadir etiqueta', exact: true }).click();
+    await expect(card.getByText('Sin etiquetas', { exact: true })).toHaveCount(0);
+    await expect(card.getByRole('button', { name: 'Quitar Etiqueta 1', exact: true })).toBeVisible();
+    await card.getByLabel('Etiqueta 1', { exact: true }).fill(tag);
+    await card.getByLabel('Label', { exact: true }).fill('Alpha');
+    await answer.click();
+    await expect(
+      page.locator('.tcw-question').filter({ hasText: question }).getByText('Answered', { exact: true }),
+    ).toBeVisible();
+
+    const askRes = await askPromise;
+    expect(askRes.status(), await askRes.text()).toBe(200);
+    const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
+    expect(body.data).toEqual({
+      kind: 'result',
+      result: { answer: { label: 'Alpha', tags: [tag] }, reply_to: null, params: null },
+    });
   });
 
   test('a confirm question draws the caller decline button', async ({
@@ -504,7 +585,10 @@ test.describe('the web widget draws the per-send wording catalogue', () => {
     const askRes = await askPromise;
     expect(askRes.status(), await askRes.text()).toBe(200);
     const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
-    expect(body.data).toEqual({ kind: 'result', result: true });
+    expect(body.data).toEqual({
+      kind: 'result',
+      result: { answer: true, reply_to: null, params: null },
+    });
   });
 
   test('a text question draws the caller send button and input placeholder', async ({
@@ -541,7 +625,10 @@ test.describe('the web widget draws the per-send wording catalogue', () => {
     const askRes = await askPromise;
     expect(askRes.status(), await askRes.text()).toBe(200);
     const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
-    expect(body.data).toEqual({ kind: 'result', result: answer });
+    expect(body.data).toEqual({
+      kind: 'result',
+      result: { answer: answer, reply_to: null, params: null },
+    });
   });
 
   test('a select question names its option group and draws the caller countdown + answered badge', async ({
@@ -592,7 +679,10 @@ test.describe('the web widget draws the per-send wording catalogue', () => {
     const askRes = await askPromise;
     expect(askRes.status(), await askRes.text()).toBe(200);
     const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
-    expect(body.data).toEqual({ kind: 'result', result: 'dos' });
+    expect(body.data).toEqual({
+      kind: 'result',
+      result: { answer: 'dos', reply_to: null, params: null },
+    });
   });
 
   test('a question past its deadline draws the caller expired badge', async ({
@@ -695,5 +785,108 @@ test.describe('the web widget draws the per-send wording catalogue', () => {
       // The local sent badge reads the caller's `status.sent`, not "Sent".
       await expect(page.locator('.tcw-form').getByText('Enviado', { exact: true })).toBeVisible();
     });
+  });
+});
+
+/** A range whose two `date` ends each have a `timeOf` time, the times declared after both dates. */
+const TIMED_RANGE_SCHEMA = {
+  type: 'object',
+  required: ['start', 'end'] as string[],
+  properties: {
+    start: { type: 'string', title: 'From', format: 'date' },
+    end: { type: 'string', title: 'To', format: 'date', rangeStart: 'start' },
+    start_time: { type: 'string', title: 'From time', format: 'time', timeOf: 'start' },
+    end_time: { type: 'string', title: 'To time', format: 'time', timeOf: 'end' },
+  },
+};
+
+test('a timed range draws each time after its date in the widget and stops an earlier end time', async ({
+  page,
+  request,
+  browserName,
+}) => {
+  test.skip(browserName === 'webkit', 'Linux CI WebKit delivers fetch-streams unreliably');
+
+  const identity = uniq('formtimes').replace(/_/g, '-');
+  const question = uniq('form_times_q');
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.goto(`/api/channels/web/chat/${identity}`);
+  const cookies = await page.context().cookies();
+  const token = cookies.find((c) => c.name === WEB_SESSION_COOKIE)?.value;
+  expect(token, 'the chat page minted no web-session cookie').toBeTruthy();
+  const visitorId = await resolveWebVisitorId(token as string);
+
+  const askPromise = request.post('/api/run-tool', {
+    headers: apiHeaders(),
+    timeout: 90_000,
+    data: {
+      tool_name: 'ask',
+      arguments: {
+        question,
+        channel: 'web',
+        recipient: `${identity}:${visitorId}`,
+        answer_format: 'form',
+        schema: TIMED_RANGE_SCHEMA,
+        pages: [{ title: 'When', fields: ['start', 'end', 'start_time', 'end_time'], button_label: 'Send times' }],
+        timeout: 120,
+      },
+    },
+  });
+
+  // The four controls draw with each time right after its date, whatever order the schema
+  // declares them in; the widget draws a time as a text field.
+  const card = page.locator('.tcw-question-form');
+  await expect(card.getByLabel('From', { exact: true })).toBeVisible();
+  const drawn = await card
+    .locator('input')
+    .evaluateAll((els) =>
+      (els as HTMLInputElement[]).map((el) => [el.type, el.labels?.[0]?.textContent?.trim()]),
+    );
+  expect(drawn).toEqual([
+    ['date', 'From'],
+    ['text', 'From time'],
+    ['date', 'To'],
+    ['text', 'To time'],
+  ]);
+
+  // The same date with an earlier end time is held back with the SDK's time sentence.
+  await card.getByLabel('From', { exact: true }).fill('2026-05-01');
+  await card.getByLabel('To', { exact: true }).fill('2026-05-01');
+  await card.getByLabel('From time', { exact: true }).fill('10:00');
+  await card.getByLabel('To time', { exact: true }).fill('09:00');
+  await card.getByRole('button', { name: 'Send times' }).click();
+  await expect(card.getByText('must be on or after the start time')).toBeVisible();
+
+  // Both themes, each painted from a first load (see the stepped-form test above for why).
+  await settleCardEntry(page, card);
+  await card.screenshot({ path: `${SHOTS_DIR}/form-range-times-widget-light.png` });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.reload();
+  await expect(card.getByLabel('From', { exact: true })).toBeVisible();
+  await card.getByLabel('From', { exact: true }).fill('2026-05-01');
+  await card.getByLabel('To', { exact: true }).fill('2026-05-01');
+  await card.getByLabel('From time', { exact: true }).fill('10:00');
+  await card.getByLabel('To time', { exact: true }).fill('09:00');
+  await card.getByRole('button', { name: 'Send times' }).click();
+  await expect(card.getByText('must be on or after the start time')).toBeVisible();
+  await settleCardEntry(page, card);
+  await card.screenshot({ path: `${SHOTS_DIR}/form-range-times-widget-dark.png` });
+
+  // A later end time sends, and the ask resolves with the four strings as entered.
+  await card.getByLabel('To time', { exact: true }).fill('11:30');
+  await card.getByRole('button', { name: 'Send times' }).click();
+  await expect(page.getByText('Answered')).toBeVisible();
+  const askRes = await askPromise;
+  expect(askRes.status(), await askRes.text()).toBe(200);
+  const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
+  expect(body.data).toEqual({
+    kind: 'result',
+    result: {
+      answer: { start: '2026-05-01', end: '2026-05-01', start_time: '10:00', end_time: '11:30' },
+      reply_to: null,
+      params: null,
+    },
   });
 });

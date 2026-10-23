@@ -36,6 +36,7 @@ _FIXTURE_TOOLS = frozenset(
         "run_tool",
         "e2e_resolve_connector",
         "e2e_connection_grant",
+        "e2e_sensitive_ask",
     }
 )
 

@@ -116,10 +116,12 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
 
     Drives the parked run to its next OUTCOME — exactly once — and returns it. This is the driver
     continuation the flow-blind platform invokes when an async ``ask`` is answered (or expires): it
-    carries only ``{interaction_id, answer}``. The park index reverses the id to the parked thread,
-    the super-step, and the interrupt the answers target. The answer is buffered idempotently in the
-    super-step barrier; a super-step cannot advance until every interaction in it holds a resume
-    value, so partial drives buy no progress and are skipped. When the barrier is complete, one
+    carries ``{interaction_id, answer}`` and buffers whatever value it is given; an ask's value
+    arrives already wrapped as ``AskAnswer`` JSON by ``agent_resume_tool``. The park index
+    reverses the id to the parked thread, the super-step, and the interrupt the answers target.
+    The answer is buffered idempotently in the super-step barrier; a super-step cannot advance
+    until every interaction in it holds a resume value, so partial drives buy no progress and are
+    skipped. When the barrier is complete, one
     caller wins the drive lease and feeds ALL M answers into the graph in a single resume. A
     redelivered answer is a no-op; a still-pending sibling is never re-driven. An ``answer`` equal
     to ``EXPIRY_ANSWER`` buffers the same way. Single-suspend is the M=1 degenerate case.

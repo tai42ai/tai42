@@ -84,6 +84,27 @@ async def test_form_urlencoded_body():
     assert data == {"a": "1", "b": "2"}
 
 
+def _multipart(*parts: bytes) -> bytes:
+    return b"".join(b"--xyz\r\n" + part + b"\r\n" for part in parts) + b"--xyz--\r\n"
+
+
+_FIELD_PART = b'Content-Disposition: form-data; name="note"\r\n\r\nhello'
+_FILE_PART = b'Content-Disposition: form-data; name="doc"; filename="a.txt"\r\nContent-Type: text/plain\r\n\r\nbytes'
+MULTIPART_WITH_FILE = _multipart(_FIELD_PART, _FILE_PART)
+
+
+async def test_multipart_plain_fields_are_carried():
+    data = await parse_any_payload(
+        _request(body=_multipart(_FIELD_PART), content_type="multipart/form-data; boundary=xyz")
+    )
+    assert data == {"note": "hello"}
+
+
+async def test_a_multipart_file_part_is_rejected_by_name():
+    with pytest.raises(ValueError, match="file parts are not supported: doc"):
+        await parse_any_payload(_request(body=MULTIPART_WITH_FILE, content_type="multipart/form-data; boundary=xyz"))
+
+
 async def test_malformed_form_raises():
     with pytest.raises(ValueError, match="malformed form"):
         await parse_any_payload(

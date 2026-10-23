@@ -9,15 +9,17 @@
  * page acts on programmatically) on failure.
  *
  * Every non-2xx becomes a {@link ChatApiError} carrying the status, the machine
- * `code` when the door sent one, and a message already written for a VISITOR to
- * read: a shed or overflow says the assistant is busy, an unrouted identity says
- * the chat is not available. The door's own wording is never dropped — it is
- * logged verbatim so a raw diagnostic stays reachable without ever reaching the
- * transcript.
+ * `code` when the door sent one, the door's own `reason` when it gave one, and a
+ * message already written for a VISITOR to read, drawn from the route's refusal
+ * words (`@/words`): a shed or overflow says the assistant is busy, an unrouted
+ * identity says the chat is not available. The door's own wording is never drawn —
+ * it is logged verbatim so a raw diagnostic stays reachable without ever reaching
+ * the transcript.
  */
 import { formUpdateOf } from '@/frame-parse';
 import { sseOpenToken } from '@/sse';
 import type { FormUpdate, ReactionEvent } from '@/transcript-model';
+import { fillToken, type TransportMember, transportWords } from '@/words';
 
 /**
  * This deployment's absolute mount prefix for the web channel, read at runtime from
@@ -43,16 +45,26 @@ export const SESSION_MISSING_CODE = 'session_missing';
 /** The deployment runs no transcript store, so the stream can only ever refuse. */
 export const STORE_OFF_CODE = 'web_transcript_store_off';
 
-/** A door refusal, already worded for the visitor. */
+/** The answer door refused the answer's content and the question may be answered again. */
+export const ANSWER_REFUSED_CODE = 'answer_refused';
+
+/** The answer door refused the answer's content and the question can no longer be answered. */
+export const ANSWER_RETRIES_SPENT_CODE = 'answer_retries_spent';
+
+/** A door refusal, already worded for the visitor. `reason` is the door's own reason
+ * for refusing the content (the answer and reaction doors send one), `null` when it gave
+ * none; a caller's sentence takes it through its `{reason}` token. */
 export class ChatApiError extends Error {
   readonly status: number;
   readonly code: string | null;
+  readonly reason: string | null;
 
-  constructor(message: string, status: number, code: string | null) {
+  constructor(message: string, status: number, code: string | null, reason: string | null = null) {
     super(message);
     this.name = 'ChatApiError';
     this.status = status;
     this.code = code;
+    this.reason = reason;
   }
 }
 
@@ -85,8 +97,6 @@ export function isAttachmentGone(error: unknown): boolean {
   );
 }
 
-const BUSY = "I'm getting a lot of messages right now — give me a minute and send that again.";
-
 /**
  * The longest `text` the message door accepts. Mirrored by the composer, which
  * stops the visitor at the field rather than letting the door refuse a message
@@ -98,103 +108,129 @@ export const MAX_MESSAGE_CHARS = 8000;
 
 /**
  * One door, in the two words a refusal needs from it: what was being attempted
- * (logged), and what to call the thing they were sending when the door would not
- * take it.
+ * (logged), and the `transport` member that names the thing they were sending when
+ * the door would not take it (the sentences' `{subject}`). `null` for the upload door:
+ * the attachment tray draws its own fixed sentences, never a `{subject}` one.
  */
 interface Door {
   readonly what: string;
-  readonly subject: string;
+  readonly subject: TransportMember | null;
 }
 
-const MESSAGE_DOOR: Door = { what: 'sending a message', subject: 'That message' };
-const UPLOAD_DOOR: Door = { what: 'uploading a file', subject: 'That file' };
-const QUESTION_DOOR: Door = { what: 'answering a question', subject: 'That answer' };
-const FORM_DOOR: Door = { what: 'submitting a form', subject: 'That form' };
-const REACTION_DOOR: Door = { what: 'updating a form', subject: 'That form' };
-const ROTATE_DOOR: Door = { what: 'starting a new conversation', subject: 'That request' };
-const STREAM_DOOR: Door = { what: 'opening the chat stream', subject: 'That request' };
+const MESSAGE_DOOR: Door = { what: 'sending a message', subject: 'subject_message' };
+const UPLOAD_DOOR: Door = { what: 'uploading a file', subject: null };
+const QUESTION_DOOR: Door = { what: 'answering a question', subject: 'subject_answer' };
+const FORM_DOOR: Door = { what: 'submitting a form', subject: 'subject_form' };
+const REACTION_DOOR: Door = { what: 'updating a form', subject: 'subject_form' };
+const ROTATE_DOOR: Door = { what: 'starting a new conversation', subject: 'subject_request' };
+const STREAM_DOOR: Door = { what: 'opening the chat stream', subject: 'subject_request' };
+
+/** The codes that name their own `transport` member, whatever the status. */
+const CODE_MEMBERS: ReadonlyMap<string, TransportMember> = new Map(
+  Object.entries({
+    // An attachment the door can no longer bind is refused on every re-send of the
+    // same ids: the sentence names the one thing that changes the outcome.
+    media_unbindable: 'attachment_gone',
+    media_already_bound: 'attachment_already_sent',
+    // The rotate door refuses a new conversation on a gated route without a live code.
+    entry_refused: 'entry_refused',
+    // The answer door refused the answer's content; the door's reason fills `{reason}`.
+    [ANSWER_REFUSED_CODE]: 'answer_refused',
+    [ANSWER_RETRIES_SPENT_CODE]: 'answer_retries_spent',
+  } satisfies Record<string, TransportMember>),
+);
+
+/** The `transport` member for a refusal no code names, by its status. */
+function statusMember(status: number): TransportMember {
+  if (status === 401) return 'session_ended';
+  // The only other 403 the doors this page FETCHES emit is an origin mismatch, which
+  // no reload changes: the sentence must not send the visitor after a fix that cannot
+  // work. (The mint guard's `not_a_navigation` is the chat-page door's — it answers a
+  // top-level navigation, never a fetch from this bundle, so it cannot land here.)
+  if (status === 403) return 'wrong_site';
+  if (status === 404) return 'not_listening';
+  if (status === 409) return 'already_answered';
+  if (status === 429 || status === 503) return 'busy';
+  if (status === 501) return 'not_switched_on';
+  // The body never reached the door's field rules — it was refused at the size cap
+  // — so the same bytes are refused again every time. The sentence names the one
+  // thing that changes the outcome instead of promising a retry that cannot work.
+  if (status === 413) return 'too_long';
+  // A 400 or 422 is the door's own refusal of the content, worded for whoever wrote
+  // the request ("invalid request body: text: String should have at most 8000
+  // characters"). It is logged verbatim in {@link failure}; what the visitor reads
+  // names the thing that was refused and nothing of the contract behind it.
+  if (status === 400 || status === 422) return 'not_sent';
+  return 'failed';
+}
 
 /**
- * The visitor-facing wording for one refusal. `detail` is the door's own message,
- * used only where it is already plain and specific (a rejected body); everywhere
- * else it is replaced, because a bridge lookup failure, a queue-overflow trace, or
- * a field-level validation message is not something a visitor can act on.
+ * The visitor-facing sentence for one refusal: the route's `transport` member for its
+ * code, else for its status, with `{subject}` and `{reason}` filled. The door's own
+ * `error` is never the sentence: a bridge lookup failure, a queue-overflow trace, or a
+ * field-level validation message is not something a visitor can act on.
  */
 function friendlyMessage(
   status: number,
-  detail: string | null,
   code: string | null,
+  reason: string | null,
   door: Door,
 ): string {
-  // An attachment the door can no longer bind is refused on every re-send of the
-  // same ids: the copy names the one thing that changes the outcome.
-  if (code === 'media_unbindable')
-    return 'That attachment is no longer available — attach it again to send it.';
-  if (code === 'media_already_bound')
-    return 'That attachment was already sent with another message.';
-  if (status === 401) return 'Your chat session ended — reload the page to start a new one.';
-  // The only 403 the doors this page FETCHES emit is an origin mismatch, which no
-  // reload changes: the copy must not send the visitor after a fix that cannot
-  // work. (The mint guard's `not_a_navigation` is the chat-page door's — it answers
-  // a top-level navigation, never a fetch from this bundle, so it cannot land here.)
-  if (status === 403) return 'This chat only works on the site it belongs to.';
-  if (status === 404)
-    return "This chat isn't available — there's no one listening on the other end.";
-  if (status === 409) return 'That question was already answered.';
-  if (status === 429 || status === 503) return BUSY;
-  if (status === 501) return 'Chat is not switched on for this deployment.';
-  // The body never reached the door's field rules — it was refused at the size cap
-  // — so the same bytes are refused again every time. The copy names the one thing
-  // that changes the outcome instead of promising a retry that cannot work.
-  if (status === 413) return `${door.subject} is too long to send — try again with a shorter one.`;
-  // A 422 is the door's own field-level validation, worded for whoever wrote the
-  // request ("invalid request body: text: String should have at most 8000
-  // characters"). It is logged verbatim in {@link failure}; what the visitor reads
-  // names the thing that was refused and nothing of the contract behind it.
-  if (status === 422) return `${door.subject} couldn't be sent.`;
-  if (status === 400) return detail ?? `${door.subject} couldn't be sent.`;
-  return "Something went wrong — that didn't get through. Try again.";
+  const words = transportWords();
+  const member = (code !== null ? CODE_MEMBERS.get(code) : undefined) ?? statusMember(status);
+  const subject = door.subject === null ? '' : words[door.subject];
+  const withSubject = fillToken(words[member], 'subject', subject);
+  return fillToken(withSubject, 'reason', reason ?? '').trim();
 }
 
 interface Envelope<T> {
   readonly data?: T;
   readonly error?: string;
   readonly code?: string;
+  readonly reason?: string;
 }
 
-/** The door's `error`/`code` pair, or nulls when the body is not an envelope (a
+interface Failure {
+  readonly detail: string | null;
+  readonly code: string | null;
+  readonly reason: string | null;
+}
+
+const NO_ENVELOPE: Failure = { detail: null, code: null, reason: null };
+
+/** The door's `error`/`code`/`reason`, or nulls when the body is not an envelope (a
  * proxy's HTML error page, an empty body). */
-async function readFailure(
-  response: Response,
-): Promise<{ detail: string | null; code: string | null }> {
+async function readFailure(response: Response): Promise<Failure> {
   let text: string;
   try {
     text = await response.text();
   } catch {
-    return { detail: null, code: null };
+    return NO_ENVELOPE;
   }
-  if (text === '') return { detail: null, code: null };
+  if (text === '') return NO_ENVELOPE;
   let envelope: Envelope<unknown>;
   try {
     envelope = JSON.parse(text) as Envelope<unknown>;
   } catch {
-    return { detail: null, code: null };
+    return NO_ENVELOPE;
   }
   return {
     detail: typeof envelope.error === 'string' ? envelope.error : null,
     code: typeof envelope.code === 'string' ? envelope.code : null,
+    reason: typeof envelope.reason === 'string' ? envelope.reason : null,
   };
 }
 
 async function failure(response: Response, door: Door): Promise<ChatApiError> {
-  const { detail, code } = await readFailure(response);
+  const { detail, code, reason } = await readFailure(response);
   // The door's own wording never reaches the transcript, so it is logged here —
   // a refusal stays diagnosable without a raw trace landing in a conversation.
   console.error(`${door.what} refused: HTTP ${response.status}`, detail ?? '(no error body)');
   return new ChatApiError(
-    friendlyMessage(response.status, detail, code, door),
+    friendlyMessage(response.status, code, reason, door),
     response.status,
     code,
+    reason,
   );
 }
 

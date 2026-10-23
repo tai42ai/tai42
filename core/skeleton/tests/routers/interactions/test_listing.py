@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
-from tai42_contract.interactions import InteractionResponse, MediaItem
+from tai42_contract.interactions import AskAnswer, InteractionResponse, MediaItem
 
 from tai42_skeleton.interactions import InteractionStore, ask
 from tai42_skeleton.operations import interactions as ops
@@ -199,7 +199,7 @@ async def test_ask_media_persists_and_frame_carries_it(wired):
     result = await ask("Pick a product", answer_format="text", media=media, timeout=5)
     await answerer
 
-    assert result == "chosen"  # answer unchanged by the presence of media
+    assert result == AskAnswer(answer="chosen", reply_to=None, params=None)  # answer unchanged by the presence of media
     assert captured["frame"]["media"] == _EXPECTED_MEDIA_FRAME
 
 

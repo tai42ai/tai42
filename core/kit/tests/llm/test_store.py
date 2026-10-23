@@ -16,7 +16,7 @@ pytest.importorskip("langgraph")
 from tai42_kit.llm.store import store as st
 from tai42_kit.llm.store.store_registry import StoreRegistry
 
-from .conftest import client_target, install_fake_named_pool, install_spy_client
+from .conftest import client_target, install_fake_named_pool, install_refusing_probe, install_spy_client, redis_retry_of
 
 
 # --------------------------------------------------------------------------- #
@@ -103,6 +103,43 @@ async def test_redis_none_conn_string_resolves_from_tai_default(monkeypatch):
     assert client_target(resource.redis_client) == "shared:6379/0"
     assert setups == ["shared:6379/0"]
     await closer()
+
+
+class _FakePostgresStore:
+    def __init__(self, conn, **kwargs):
+        pass
+
+    async def setup(self):
+        pass
+
+
+async def test_postgres_store_on_its_own_dsn_retries_by_its_own_namespace(monkeypatch):
+    monkeypatch.setenv("PG_RETRY_ATTEMPTS", "5")
+    monkeypatch.setenv("LLM_PROVIDER_STORE_PG_RETRY_ATTEMPTS", "2")
+    install_fake_named_pool(monkeypatch)
+    attempts = install_refusing_probe(monkeypatch, 2)
+    store_mod: Any = types.ModuleType("langgraph.store.postgres")
+    store_mod.AsyncPostgresStore = _FakePostgresStore
+    monkeypatch.setitem(sys.modules, "langgraph.store.postgres", store_mod)
+
+    _resource, closer = await st.create_store_resource("postgres", "postgresql://u:p@own/db")
+    assert attempts == ["postgresql://u:p@own/db"] * 3
+    await closer()
+
+
+async def test_postgres_store_on_its_own_dsn_tries_once_with_no_options(monkeypatch):
+    import psycopg
+
+    monkeypatch.setenv("PG_RETRY_ATTEMPTS", "5")
+    install_fake_named_pool(monkeypatch)
+    attempts = install_refusing_probe(monkeypatch, 1)
+    store_mod: Any = types.ModuleType("langgraph.store.postgres")
+    store_mod.AsyncPostgresStore = _FakePostgresStore
+    monkeypatch.setitem(sys.modules, "langgraph.store.postgres", store_mod)
+
+    with pytest.raises(psycopg.OperationalError):
+        await st.create_store_resource("postgres", "postgresql://u:p@own/db")
+    assert len(attempts) == 1
 
 
 async def test_postgres_none_conn_string_resolves_from_base_pg_settings(monkeypatch):
@@ -204,6 +241,81 @@ async def test_redis_setup_reraises_other_errors(monkeypatch):
 # --------------------------------------------------------------------------- #
 # redis client injection + ownership
 # --------------------------------------------------------------------------- #
+def _capture_redis_store(monkeypatch) -> dict[str, Any]:
+    """Build the Redis store on a fake that records the client it is handed."""
+    captured: dict[str, Any] = {}
+
+    class _FakeStore:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def setup(self):
+            pass
+
+        async def __aexit__(self, *exc):
+            pass
+
+    fake_mod: Any = types.ModuleType("langgraph.store.redis")
+    fake_mod.AsyncRedisStore = _FakeStore
+    monkeypatch.setitem(sys.modules, "langgraph.store.redis", fake_mod)
+    return captured
+
+
+async def test_redis_store_on_the_base_namespace_carries_its_retry_and_timeouts(monkeypatch):
+    from tai42_kit.clients.impl.redis import _LoggedAsyncRetry
+
+    monkeypatch.setenv("REDIS_URL", "redis://base:6379/0")
+    monkeypatch.setenv("RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("SOCKET_TIMEOUT", "3")
+    monkeypatch.setenv("SOCKET_CONNECT_TIMEOUT", "2")
+    captured = _capture_redis_store(monkeypatch)
+
+    _resource, closer = await st.create_store_resource("redis", None)
+    client = captured["redis_client"]
+    kwargs = client.connection_pool.connection_kwargs
+    retry = redis_retry_of(client)
+    assert isinstance(retry, _LoggedAsyncRetry)
+    assert retry._budget == 2
+    assert retry._label == "REDIS_URL"
+    assert kwargs["socket_timeout"] == 3
+    assert kwargs["socket_connect_timeout"] == 2
+    assert kwargs["decode_responses"] is False
+    await closer()
+
+
+async def test_redis_store_on_its_own_conn_string_reads_its_own_namespace(monkeypatch):
+    from tai42_kit.clients.impl.redis import _LoggedAsyncRetry
+
+    # The base namespace is set to other values and must not be read; no base URL is set.
+    monkeypatch.setenv("RETRY_ATTEMPTS", "5")
+    monkeypatch.setenv("REDIS_MAX_CONNECTIONS", "7")
+    monkeypatch.setenv("LLM_PROVIDER_STORE_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("LLM_PROVIDER_STORE_SOCKET_TIMEOUT", "3")
+    assert "REDIS_URL" not in os.environ
+    assert "TAI_DEFAULT_REDIS_URL" not in os.environ
+    captured = _capture_redis_store(monkeypatch)
+
+    _resource, closer = await st.create_store_resource("redis", "redis://own:6390/4")
+    client = captured["redis_client"]
+    kwargs = client.connection_pool.connection_kwargs
+    retry = redis_retry_of(client)
+    assert isinstance(retry, _LoggedAsyncRetry)
+    assert retry._budget == 2
+    assert retry._label == "LLM_PROVIDER_STORE_CONN_STRING"
+    assert kwargs["socket_timeout"] == 3
+    assert client_target(client) == "own:6390/4"
+    # redis-py's own pool cap: the conn string's door sets no pool size.
+    assert client.connection_pool.max_connections == 2**31
+    await closer()
+
+
+async def test_redis_store_on_its_own_conn_string_with_no_options_has_no_retry(monkeypatch):
+    captured = _capture_redis_store(monkeypatch)
+    _resource, closer = await st.create_store_resource("redis", "redis://own:6390/4")
+    assert redis_retry_of(captured["redis_client"]) is None
+    await closer()
+
+
 async def test_redis_store_is_handed_a_client_built_from_the_resolved_url(monkeypatch):
     # The kit resolves the URL and injects the CLIENT. Nothing downstream is left
     # to re-resolve a connection from the bare ``REDIS_URL`` env var, which is

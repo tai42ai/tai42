@@ -57,7 +57,12 @@ class PlatformBridgeContext(Context):
         response_title: str | None = None,
         response_description: str | None = None,
     ) -> Any:
-        """Route an elicitation through the platform's ``ask`` channel."""
+        """Route an elicitation through the platform's ``ask`` channel.
+
+        The accepted result's ``meta`` (``_meta`` on the wire) carries the message the answering
+        reply quoted under :data:`~tai42_contract.interactions.ELICIT_META_REPLY_TO`, or ``None``;
+        the elicitation is answered in the inbox and not on a channel, so it reads ``None``.
+        """
         return await resolve_elicit(
             message,
             response_type,

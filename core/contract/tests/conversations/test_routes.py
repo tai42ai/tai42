@@ -18,6 +18,7 @@ from tai42_contract.conversations import (
     ChannelConversationRouteCreate,
     ConversationRouteBody,
     ConversationRouteCreateBody,
+    ReplyTexts,
 )
 from tai42_contract.conversations.routes import _require_https_url  # pyright: ignore[reportPrivateUsage]
 
@@ -38,7 +39,7 @@ def _route_kwargs(**overrides: Any) -> dict[str, Any]:
 
 def _api_kwargs(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
-        "route_name": "api-desk",
+        "route_name": "api-assistant",
         "door": "api",
         "target_kind": "agent",
         "target_name": "assistant",
@@ -197,6 +198,17 @@ def test_start_expr_catalogue_documents_the_route_key():
     assert route_entry["gloss"] == "the name of the conversation route the turn entered through"
 
 
+def test_start_expr_catalogue_documents_the_reply_to_key():
+    from tai42_contract.template import EXPRESSION_ANNOTATION_KEY
+
+    prop = ChannelConversationRouteCreate.model_json_schema()["properties"]["start_expr"]
+    entries = {entry["name"]: entry["gloss"] for entry in prop[EXPRESSION_ANNOTATION_KEY]["keys"]}
+    assert entries["reply_to"] == (
+        "the earlier message this one replies to, {message_id, status, text}; present only when the inbound quoted one"
+    )
+    assert "reply_to" in entries["messages"]
+
+
 def test_route_expr_annotation_keeps_the_none_default_additive():
     # CRITICAL api-gate trap: the annotation must ride ``Annotated`` so the attribute default
     # stays the ``None`` literal — a ``Field(default=None, ...)`` redeclaration is flagged as a
@@ -231,25 +243,88 @@ def test_turns_per_hour_override_defaults_to_none_and_must_be_positive():
             _create(_route_kwargs(turns_per_hour_override=bad))
 
 
-def test_error_reply_text_defaults_to_none_and_must_be_non_blank_and_bounded():
+_REPLY_MEMBERS = (
+    "error",
+    "slow_down",
+    "pairing_linked",
+    "pairing_unlinked",
+    "pairing_not_linked",
+    "pairing_code_invalid",
+    "pairing_code",
+    "pairing_link_unavailable",
+    "pairing_unlink_unavailable",
+    "rejected_unsupported_type",
+    "rejected_too_large",
+    "rejected_could_not_receive",
+)
 
-    # Absent by default: a failed turn falls back to the built-in default reply.
-    assert _create(_route_kwargs()).error_reply_text is None
-    # A non-blank custom reply is accepted and preserved verbatim.
-    text = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
-    assert _create(_route_kwargs(error_reply_text=text)).error_reply_text == text
-    # An empty reply is refused by the min-length bound.
+
+def test_reply_texts_names_every_fixed_reply_member():
+    assert tuple(ReplyTexts.model_fields) == _REPLY_MEMBERS
+
+
+@pytest.mark.parametrize("member", _REPLY_MEMBERS)
+def test_reply_texts_admits_each_member_alone(member: str):
+    text = "Tu código es {pairing_code}" if member == "pairing_code" else "Lo sentimos, algo salió mal."
+    texts = ReplyTexts.model_validate({member: text})
+    assert getattr(texts, member) == text
+    assert all(getattr(texts, other) is None for other in _REPLY_MEMBERS if other != member)
+
+
+@pytest.mark.parametrize("member", _REPLY_MEMBERS)
+@pytest.mark.parametrize("bad", ["", "   ", "x" * 2001, 5])
+def test_reply_texts_refuses_a_blank_over_long_or_non_string_member(member: str, bad: object):
     with pytest.raises(ValidationError):
-        _create(_route_kwargs(error_reply_text=""))
-    # A whitespace-only reply is refused as blank by the non-blank validator.
-    with pytest.raises(ValidationError) as caught:
-        _create(_route_kwargs(error_reply_text="   "))
-    assert _errors(caught) == [("string_pattern_mismatch", ("channel", "error_reply_text"))]
-    # The reply is length-bounded so a single participant-facing message cannot be unbounded.
-    # Exactly at the 2000-char bound is accepted; one past it is refused.
-    assert _create(_route_kwargs(error_reply_text="x" * 2000)).error_reply_text == "x" * 2000
+        ReplyTexts.model_validate({member: bad})
+
+
+def test_reply_texts_admits_a_member_at_the_bound():
+    assert ReplyTexts(error="x" * 2000).error == "x" * 2000
+
+
+def test_reply_texts_refuses_an_unknown_key_and_an_empty_catalogue():
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ReplyTexts.model_validate({"bogus": "hello"})
+    with pytest.raises(ValidationError, match="reply_texts must set at least one member"):
+        ReplyTexts.model_validate({})
+
+
+def test_reply_texts_draws_a_brace_in_a_literal_member_as_written():
+    assert ReplyTexts(error="Oops {not a token}").error == "Oops {not a token}"
+
+
+@pytest.mark.parametrize(
+    "template",
+    ["Code: {pairing_code}", "Code {pairing_code}, valid until {expires_at}", "{{literal}} {pairing_code}"],
+)
+def test_reply_texts_pairing_code_admits_its_two_fields(template: str):
+    assert ReplyTexts(pairing_code=template).pairing_code == template
+
+
+@pytest.mark.parametrize(
+    ("template", "message"),
+    [
+        ("Valid until {expires_at}", "reply_texts.pairing_code must contain the {pairing_code} field"),
+        ("Code {pairing_code} {who}", "reply_texts.pairing_code may reference only"),
+        ("Code {pairing_code!r}", "reply_texts.pairing_code may reference only"),
+        ("Code {pairing_code:>10}", "reply_texts.pairing_code may reference only"),
+        ("Code {} {pairing_code}", "reply_texts.pairing_code may reference only"),
+        ("Code {pairing_code", "reply_texts.pairing_code is not a valid template"),
+    ],
+)
+def test_reply_texts_pairing_code_refuses_a_bad_template(template: str, message: str):
+    with pytest.raises(ValidationError, match=re.escape(message)):
+        ReplyTexts(pairing_code=template)
+
+
+def test_a_route_carries_no_reply_texts_by_default_and_round_trips_a_catalogue():
+    assert _create(_route_kwargs()).reply_texts is None
+    for kwargs in (_route_kwargs, _api_kwargs):
+        route = _create(kwargs(reply_texts={"error": "Lo sentimos.", "slow_down": "Más despacio."}))
+        assert route.reply_texts == ReplyTexts(error="Lo sentimos.", slow_down="Más despacio.")
+        assert _create(route.model_dump()).reply_texts == route.reply_texts
     with pytest.raises(ValidationError):
-        _create(_route_kwargs(error_reply_text="x" * 2001))
+        _create(_route_kwargs(reply_texts={}))
 
 
 def test_route_locale_defaults_to_none_round_trips_and_canonicalizes():
@@ -319,7 +394,7 @@ _STORED_API_ROW = (
     '{"cancel_expr":null,"resume_expr":null,"start_expr":null,"extras_expr":null,"route_name":"relay-api",'
     '"door":"api","target_kind":"tool","target_name":"echo","reply_expr":null,"initial_mode":"agent",'
     '"execution_key":"svc","channel":null,"our_identity":null,"callback_url":"https://host.example/hook",'
-    '"turns_per_hour_override":5,"error_reply_text":null,"locale":"fr","overlap":{"running":"continue",'
+    '"turns_per_hour_override":5,"reply_texts":null,"locale":"fr","overlap":{"running":"continue",'
     '"deliver":"one","settle_seconds":0},"callback_secret":"s3cret","execution_key_fingerprint":"fp-1"}'
 )
 _STORED_CHANNEL_ROW = (
@@ -327,7 +402,11 @@ _STORED_CHANNEL_ROW = (
     '"route_name":"relay-sms","door":"channel","target_kind":"agent","target_name":"assistant",'
     '"reply_expr":null,"initial_mode":"agent","execution_key":"svc","channel":"twilio",'
     '"our_identity":"+15550001111","callback_url":null,"turns_per_hour_override":null,'
-    '"error_reply_text":"sorry","locale":null,"overlap":{"running":"continue","deliver":"one",'
+    '"reply_texts":{"error":"sorry","slow_down":null,"pairing_linked":null,"pairing_unlinked":null,'
+    '"pairing_not_linked":null,"pairing_code_invalid":null,"pairing_code":null,'
+    '"pairing_link_unavailable":null,"pairing_unlink_unavailable":null,'
+    '"rejected_unsupported_type":null,"rejected_too_large":null,"rejected_could_not_receive":null},'
+    '"locale":null,"overlap":{"running":"continue","deliver":"one",'
     '"settle_seconds":0},"callback_secret":null,"execution_key_fingerprint":"fp-2"}'
 )
 
@@ -371,8 +450,9 @@ def test_each_variant_publishes_its_door_rules():
     api, channel = defs["ApiConversationRouteCreate"], defs["ChannelConversationRouteCreate"]
     for variant in (api, channel):
         assert variant["properties"]["route_name"]["pattern"] == "^[a-z0-9-]+$"
-        error_text = variant["properties"]["error_reply_text"]["anyOf"][0]
-        assert error_text == {"maxLength": 2000, "minLength": 1, "pattern": "\\S", "type": "string"}
+        assert variant["properties"]["reply_texts"]["anyOf"][0] == {"$ref": "#/$defs/ReplyTexts"}
+    error_text = defs["ReplyTexts"]["properties"]["error"]["anyOf"][0]
+    assert error_text == {"maxLength": 2000, "minLength": 1, "pattern": "\\S", "type": "string"}
     assert api["properties"]["door"]["const"] == "api"
     assert channel["properties"]["door"]["const"] == "channel"
     assert api["properties"]["channel"]["type"] == "null"

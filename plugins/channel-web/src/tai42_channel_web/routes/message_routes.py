@@ -179,6 +179,8 @@ async def _bridge_inbound_message(
     client_message_id: str | None,
     params: dict[str, str] | None,
     blank_message: str,
+    *,
+    reply_to_medium_message_id: str | None,
     attachment_ids: list[str] | None = None,
     form: dict[str, Any] | None = None,
     form_tag: str | None = None,
@@ -195,6 +197,9 @@ async def _bridge_inbound_message(
     the SAME id and the page's id-keyed replay still shows one message. The gate spans
     ``accept`` and the append so a shed message's slow-down reply cannot land ahead of
     the message that caused it.
+
+    ``reply_to_medium_message_id`` is the id of the message this one quotes, handed to ``accept``
+    as is.
 
     ``attachment_ids`` are the served-media ids the message references (the messages
     door only — the form door carries no attachments). The provider message id is
@@ -226,6 +231,9 @@ async def _bridge_inbound_message(
                 cap_key=cap_key,
                 text=turn_text,
                 provider_message_id=pmid,
+                # The web door's own id for this message: the medium has no other.
+                medium_message_id=pmid,
+                reply_to_medium_message_id=reply_to_medium_message_id,
                 params=params,
                 attachments=[item.item for item in bound] or None,
                 locale=_inbound_locale(request),
@@ -326,6 +334,8 @@ async def web_messages(request: Request) -> Response:
         body.client_message_id,
         params,
         "message text is blank",
+        # The widget has no reply action: a message quotes no earlier one.
+        reply_to_medium_message_id=None,
         attachment_ids=body.attachment_ids,
     )
 
@@ -401,6 +411,8 @@ async def web_form_submit(request: Request) -> Response:
         body.client_message_id,
         registration.params or None,
         "form values render to a blank message",
+        # A form submission answers its form; it names no earlier message.
+        reply_to_medium_message_id=None,
         form=body.values,
         # The caller-set opaque per-send tag rides the SERVER-side record, never the client
         # body — a client-supplied form_tag is not a FormSubmissionBody field and is ignored.

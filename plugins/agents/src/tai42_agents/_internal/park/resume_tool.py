@@ -2,7 +2,9 @@
 
 ``register_agent_resume_tool()`` binds the ``agent_resume`` driver continuation a flow-blind
 platform fires when an async ``ask`` a park-capable run parked on is answered (or expires): it
-carries only the generic ``{interaction_id, answer}``. The agents plugin's own durable park index
+carries the generic ``{interaction_id, answer, reply_to, params}``, and hands the parked run
+``AskAnswer(answer, reply_to, params)`` as JSON, the value a sync ``ask`` returns. The agents
+plugin's own durable park index
 reverses the interaction id to its parked run and drives auto-pilot to its next outcome, which the
 face returns to the platform in CONTRACT types. The face fires NO door completion — the platform
 captures, binds and delivers the resumed run's outcome to the run's own address.
@@ -25,7 +27,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import RunFailed
+from tai42_contract.conversations import ReplyTo
+from tai42_contract.interactions import AskAnswer, RunFailed
 from tai42_contract.tools import TOOL_META_HIDDEN, TOOL_META_PAUSES, ToolAlreadyRegisteredError
 from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome, register_park_giveup_handler
 from tai42_kit.interactions.park_index import DriveInProgressError, ResolutionMissingError
@@ -45,11 +48,15 @@ from tai42_agents._internal.park.resume import (
 logger = logging.getLogger(__name__)
 
 
-async def agent_resume_tool(interaction_id: str, answer: Any) -> Any:
+async def agent_resume_tool(
+    interaction_id: str, answer: Any, reply_to: ReplyTo | None, params: dict[str, str] | None
+) -> Any:
     """Resume an async-parked agent run from an answered ``ask`` interaction, in CONTRACT types.
 
     This is the driver continuation the platform invokes when an async ``ask`` is answered or
-    expires; it carries only the generic ``{interaction_id, answer}``. AUTHORISATION: the tool is
+    expires; it carries the generic ``{interaction_id, answer, reply_to, params}``. The parked run
+    is handed ``AskAnswer(answer=answer, reply_to=reply_to, params=params)`` as JSON, so its
+    waiting ``ask`` reads what a sync ``ask`` returns. AUTHORISATION: the tool is
     hidden but dispatchable by name at the run-tool door and the MCP edge, so it asserts
     ``assert_resume_authorized(interaction_id)`` FIRST, before reading any park state — a caller
     with no matching resume context (an external run-tool / MCP caller) is refused loudly with
@@ -68,9 +75,12 @@ async def agent_resume_tool(interaction_id: str, answer: Any) -> Any:
         interaction_id: The parked interaction to resume.
         answer: The answer value (or the expiry marker) the parked run resumes with; each agent hands
             it to its paused turn its own way.
+        reply_to: The message the answering reply quoted, or ``None`` (always ``None`` on expiry).
+        params: The answer's channel params, or ``None`` (always ``None`` on expiry).
     """
     await tai42_app.interactions.assert_resume_authorized(interaction_id)
-    return to_contract_outcome(await agent_resume(interaction_id, answer), raise_failed=True)
+    answered = AskAnswer(answer=answer, reply_to=reply_to, params=params).model_dump(mode="json")
+    return to_contract_outcome(await agent_resume(interaction_id, answered), raise_failed=True)
 
 
 def register_agent_resume_tool() -> None:

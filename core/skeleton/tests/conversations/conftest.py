@@ -10,17 +10,28 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import cached_property
 from typing import Any, ClassVar
 
 import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
-from tai42_contract.conversations import ApiConversationRoute, ChannelConversationRoute, ConversationRoute
+from tai42_contract.channels import ChannelDeliveryError, ReplyWindow
+from tai42_contract.conversations import (
+    ApiConversationRoute,
+    ChannelConversationRoute,
+    ConversationRoute,
+    Person,
+    PersonAddress,
+    ReplyTexts,
+)
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils import render as door_contract_module
+from tests._helpers import AddressingChannel
 from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.app.conversations_facet import ConversationsFacet
@@ -30,6 +41,7 @@ from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import ledger as ledger_module
 from tai42_skeleton.conversations import mode as mode_module
+from tai42_skeleton.conversations import persons as persons_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations import target_config as target_config_module
 from tai42_skeleton.conversations import thread_lease as thread_lease_module
@@ -38,13 +50,14 @@ from tai42_skeleton.conversations.managers.base_conversations_manager import (
     DoorFlipRefusedError,
 )
 from tai42_skeleton.conversations.managers.redis_conversations_manager import RedisConversationsManager
-from tai42_skeleton.conversations.models import DeliveryStatus
+from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus, SentMessage
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings, conversations_settings
 from tai42_skeleton.conversations.target_validators import TargetBindValidatorRegistry
 from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
 from tai42_skeleton.conversations.turn import overlap as overlap_module
+from tai42_skeleton.conversations.turn import reply_window as reply_window_module
 from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 from tai42_skeleton.operations import conversations as ops
@@ -369,12 +382,13 @@ class _OpsFakeApp:
 
 @pytest.fixture
 def record_redis(monkeypatch) -> FakeRecordRedis:
-    """The answer/record store's redis, behind the ops that reach the thread indexes."""
+    """The answer/record store's redis, behind the ops that reach the thread indexes and the person rows."""
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     fake = FakeRecordRedis()
     ctx = make_record_client_ctx(fake)
     monkeypatch.setattr(records_module, "client_ctx", ctx)
     monkeypatch.setattr(thread_lease_module, "client_ctx", ctx)
+    monkeypatch.setattr(persons_module, "client_ctx", ctx)
     return fake
 
 
@@ -499,6 +513,10 @@ async def _assert_park_cancelled(store, fake, *, interaction_id: str, thread_id:
 
 _TURN_LOGGER = "tai42_skeleton.conversations.turn"
 
+# The reply window a turn carries when its channel reports none: what a test driving a turn seam
+# directly hands it.
+NO_REPLY_WINDOW = ReplyWindow(state="none", closes_at=None)
+
 
 class _EchoInput(BaseModel):
     user_message: str = ""
@@ -543,7 +561,7 @@ class FakeManager(BaseConversationsManager):
         return self._routes.get(name)
 
 
-class FakeChannel:
+class FakeChannel(AddressingChannel):
     # A neutral fixture channel declares its OWN outbound split cap through the generic
     # ``max_message_chars`` seam (no skeleton per-channel table) — the conversation-delivery machine
     # reads it off the channel when no operator override is set. ``int | None`` so a subclass can
@@ -555,19 +573,19 @@ class FakeChannel:
 
     async def notify(self, notification):
         self.sends.append(notification)
-        return [f"out-{len(self.sends)}"]
+        return self.outcome(notification, [f"out-{len(self.sends)}"])
 
 
 class _FakeChannels:
-    def __init__(self, channel: FakeChannel) -> None:
+    def __init__(self, channel: AddressingChannel) -> None:
         self._channel = channel
 
-    def get(self, name: str) -> FakeChannel:
+    def get(self, name: str) -> AddressingChannel:
         return self._channel
 
 
 class _FakeApp:
-    def __init__(self, channel: FakeChannel) -> None:
+    def __init__(self, channel: AddressingChannel) -> None:
         self.channels = _FakeChannels(channel)
 
 
@@ -604,7 +622,7 @@ def _channel_route(
     our_identity: str = "+15550001111",
     *,
     turns_per_hour_override: int | None = None,
-    error_reply_text: str | None = None,
+    reply_texts: ReplyTexts | None = None,
 ) -> ConversationRoute:
     return ChannelConversationRoute(
         route_name=route_name,
@@ -616,7 +634,7 @@ def _channel_route(
         our_identity=our_identity,
         execution_key_fingerprint="fp-1",
         turns_per_hour_override=turns_per_hour_override,
-        error_reply_text=error_reply_text,
+        reply_texts=reply_texts,
     )
 
 
@@ -624,7 +642,7 @@ def _api_route(
     route_name: str = "chat",
     *,
     turns_per_hour_override: int | None = None,
-    error_reply_text: str | None = None,
+    reply_texts: ReplyTexts | None = None,
 ) -> ConversationRoute:
     return ApiConversationRoute(
         route_name=route_name,
@@ -636,7 +654,7 @@ def _api_route(
         callback_secret="sec-1",
         execution_key_fingerprint="fp-1",
         turns_per_hour_override=turns_per_hour_override,
-        error_reply_text=error_reply_text,
+        reply_texts=reply_texts,
     )
 
 
@@ -655,6 +673,72 @@ def _api_route_no_callback(route_name: str = "chat") -> ConversationRoute:
     )
 
 
+def standing_person(person_id: str, *routes: str, target_name: str = "relay") -> Person:
+    """A person of agent ``target_name`` linked by one channel address that wrote under ``routes``."""
+    return Person(
+        person_id=person_id,
+        target_kind="agent",
+        target_name=target_name,
+        created_at=datetime.now(UTC),
+        addresses=[
+            PersonAddress(
+                door="channel",
+                routes=list(routes),
+                channel="twilio",
+                our_identity="+15550001111",
+                address=f"+{person_id}",
+                linked_at=datetime.now(UTC),
+            )
+        ],
+    )
+
+
+def sent(*provider_message_ids: str) -> list[SentMessage]:
+    """One sent message of a plain-text answer carrying ``provider_message_ids``."""
+    return [SentMessage(part=0, chars=0, provider_message_ids=list(provider_message_ids))]
+
+
+def sent_ids(record: ConversationRecord) -> list[str]:
+    """Every provider id ``record``'s sent messages carry, in send order."""
+    return [pid for sent in record.sends for pid in sent.provider_message_ids]
+
+
+def route_of(record: ConversationRecord) -> ConversationRoute:
+    """The route a writer holds for ``record``: its route name, door, channel and identity."""
+    if record.door == "channel":
+        return ChannelConversationRoute(
+            route_name=record.route_name,
+            door="channel",
+            target_kind="agent",
+            target_name="echo",
+            execution_key="svc",
+            channel=record.channel or "twilio",
+            our_identity=record.our_identity or "+15550001111",
+            execution_key_fingerprint="fp-1",
+        )
+    return ApiConversationRoute(
+        route_name=record.route_name,
+        door="api",
+        target_kind="agent",
+        target_name="echo",
+        execution_key="svc",
+        callback_url=None,
+        callback_secret=None,
+        execution_key_fingerprint="fp-1",
+    )
+
+
+async def create_record(
+    store: Any,
+    record: ConversationRecord,
+    *,
+    route: ConversationRoute | None = None,
+    **kwargs: Any,
+) -> str:
+    """Create ``record`` through ``store`` as a door does: under its route."""
+    return await store.create_record(record, route=route if route is not None else route_of(record), **kwargs)
+
+
 def _expr(text: str | None) -> TemplatedText | None:
     """A route jq slot as an inline templated text, or ``None`` when omitted."""
     return TemplatedText(content=text) if text is not None else None
@@ -667,7 +751,7 @@ def _tool_channel_route(
     target_name: str = "echo-tool",
     start_expr: str | None = None,
     reply_expr: str | None = None,
-    error_reply_text: str | None = None,
+    reply_texts: ReplyTexts | None = None,
 ) -> ConversationRoute:
     return ChannelConversationRoute(
         route_name=route_name,
@@ -680,7 +764,7 @@ def _tool_channel_route(
         channel="twilio",
         our_identity=our_identity,
         execution_key_fingerprint="fp-1",
-        error_reply_text=error_reply_text,
+        reply_texts=reply_texts,
     )
 
 
@@ -690,7 +774,7 @@ def _tool_api_route(
     target_name: str = "echo-tool",
     start_expr: str | None = None,
     reply_expr: str | None = None,
-    error_reply_text: str | None = None,
+    reply_texts: ReplyTexts | None = None,
 ) -> ConversationRoute:
     return ApiConversationRoute(
         route_name=route_name,
@@ -703,7 +787,7 @@ def _tool_api_route(
         callback_url="https://cb.example/x",
         callback_secret="sec-1",
         execution_key_fingerprint="fp-1",
-        error_reply_text=error_reply_text,
+        reply_texts=reply_texts,
     )
 
 
@@ -734,6 +818,218 @@ async def _fake_bind(execution_key, *, bound_fingerprint):
     yield CallerIdentity(user_id=execution_key)
 
 
+@dataclass
+class LuaEnv:
+    """The conversations stores over one Lua-executing fake Redis, behind the real durable manager."""
+
+    redis: Any
+    manager: RedisConversationsManager
+
+    @property
+    def store(self) -> ConversationRecordStore:
+        return self.manager.records
+
+    async def seed_person(self, person: Person) -> None:
+        """Plant ``person``'s row and its address→person index mappings the way the person store writes them."""
+        from tai42_skeleton.conversations.persons import _address_key_of
+
+        settings = self.store.settings
+        await self.redis.set(settings.person_key(person.person_id), person.model_dump_json())
+        index_key = settings.person_index_key(person.target_kind, person.target_name)
+        for address in person.addresses:
+            await self.redis.hset(index_key, _address_key_of(address), person.person_id)
+
+
+async def sending_ids(lua_env: LuaEnv) -> list[tuple[str, float]]:
+    """The ``sending`` index members with their settle-deadline scores."""
+    key = lua_env.store.settings.status_index_key(DeliveryStatus.SENDING.value)
+    return await lua_env.redis.zrange(key, 0, -1, withscores=True)
+
+
+async def send_records(lua_env: LuaEnv) -> list[ConversationRecord]:
+    """Every send record standing in the store."""
+    records = []
+    for key in await lua_env.redis.keys(f"{lua_env.store.settings.prefix}:record:*"):
+        record = await lua_env.store.get_record(key.rsplit(":", 1)[1])
+        if record is not None and record.origin == "send":
+            records.append(record)
+    return records
+
+
+async def past_deadline(lua_env: LuaEnv, message_id: str) -> None:
+    """Move a ``sending`` row's settle deadline into the past."""
+    key = lua_env.store.settings.status_index_key(DeliveryStatus.SENDING.value)
+    await lua_env.redis.zadd(key, {message_id: time.time() - 1})
+
+
+async def keys_naming(lua_env: LuaEnv, message_id: str) -> set[str]:
+    """Every message-ref, keyspace-3, ask and in-flight key whose value names ``message_id``, by a prefix scan."""
+    settings = lua_env.store.settings
+    prefixes = (
+        settings.message_ref_key_prefix,
+        settings.outbound_index_key_prefix,
+        settings.ask_send_key_prefix,
+        f"{settings.prefix}:route_sending:",
+    )
+    found: set[str] = set()
+    for prefix in prefixes:
+        async for key in lua_env.redis.scan_iter(match=f"{prefix}*"):
+            kind = await lua_env.redis.type(key)
+            if kind == "list":
+                hit = message_id in await lua_env.redis.lrange(key, 0, -1)
+            elif kind == "set":
+                hit = bool(await lua_env.redis.sismember(key, message_id))
+            else:
+                hit = await lua_env.redis.get(key) == message_id
+            if hit:
+                found.add(key)
+    return found
+
+
+async def owned_keys(lua_env: LuaEnv, message_id: str) -> list[str]:
+    """The key names on the record row's ``owned_keys`` field."""
+    raw = await lua_env.redis.hget(lua_env.store.settings.record_key(message_id), "owned_keys")
+    return json.loads(raw) if raw else []
+
+
+class GatedChannel(FakeChannel):
+    """A channel whose ``notify`` waits on ``release`` and runs ``during`` while it waits."""
+
+    async def deliver(self, delivery):
+        raise NotImplementedError
+
+    def __init__(self, during=None) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.during = during
+        self.seen = None
+
+    async def notify(self, notification):
+        self.entered.set()
+        if self.during is not None:
+            self.seen = await self.during()
+        await self.release.wait()
+        return await super().notify(notification)
+
+
+class RaisingGatedChannel(GatedChannel):
+    """A gated channel whose released send is refused by the medium."""
+
+    async def notify(self, notification):
+        self.entered.set()
+        await self.release.wait()
+        raise ChannelDeliveryError("the medium refused the send", retryable=False)
+
+
+class Pause:
+    """A point an awaited call stops at: ``reached`` is set there and the call waits on ``go``."""
+
+    def __init__(self) -> None:
+        self.reached = asyncio.Event()
+        self.go = asyncio.Event()
+
+    async def hold(self) -> None:
+        self.reached.set()
+        await self.go.wait()
+
+
+def pause_call(monkeypatch, owner: Any, name: str, *, after: bool = False, when=None) -> Pause:
+    """Stop the next call of ``owner.name`` matching ``when`` before it runs, or ``after`` it returned.
+
+    Only the first matching call stops; every other call runs straight through.
+    """
+    pause = Pause()
+    original = getattr(owner, name)
+
+    async def _paused(*args, **kwargs):
+        stops = not pause.reached.is_set() and (when is None or when(*args, **kwargs))
+        if stops and not after:
+            await pause.hold()
+        result = await original(*args, **kwargs)
+        if stops and after:
+            await pause.hold()
+        return result
+
+    monkeypatch.setattr(owner, name, _paused)
+    return pause
+
+
+class RecordingSaver:
+    """A checkpoint saver that records every thread ``adelete_thread`` was asked to forget."""
+
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        self.deleted.append(thread_id)
+
+
+@pytest.fixture
+def checkpoint_saver(monkeypatch) -> RecordingSaver:
+    """The checkpoint provider answered by one :class:`RecordingSaver`."""
+    import tai42_kit.llm.checkpoint.checkpoint_registry as registry_mod
+    import tai42_kit.llm.settings as settings_mod
+
+    class _Registry:
+        async def get_checkpointer(self, provider: str, conn_string: str | None) -> RecordingSaver:
+            return saver
+
+    class _ProviderSettings:
+        checkpoint = "memory"
+        checkpoint_conn_string = None
+
+    saver = RecordingSaver()
+    monkeypatch.setattr(registry_mod, "checkpoint_registry", lambda: _Registry())
+    monkeypatch.setattr(settings_mod, "llm_provider_settings", lambda: _ProviderSettings())
+    return saver
+
+
+@pytest.fixture
+async def lua_env(monkeypatch) -> AsyncIterator[LuaEnv]:
+    """Every conversations store and the real durable manager on ``fakeredis[lua]``, so each
+    write runs the REAL script text: the records, persons, routing rows, modes, leases and the
+    send-receipt index all share the one client."""
+    from fakeredis import aioredis
+
+    from tai42_skeleton.channels import send_receipts as send_receipts_module
+    from tai42_skeleton.conversations import pair_codes as pair_codes_module
+    from tai42_skeleton.conversations import redeem_throttle as throttle_module
+    from tai42_skeleton.conversations.managers import redis_conversations_manager as manager_module
+
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
+    caps_module._CAPS_CACHE.clear()
+    client = aioredis.FakeRedis(decode_responses=True)
+
+    @asynccontextmanager
+    async def _ctx(client_cls, settings=None, **kwargs):
+        yield client
+
+    for module in (
+        records_module,
+        persons_module,
+        ledger_module,
+        mode_module,
+        pair_codes_module,
+        target_config_module,
+        throttle_module,
+        thread_lease_module,
+        overlap_module,
+        manager_module,
+        send_receipts_module,
+    ):
+        monkeypatch.setattr(module, "client_ctx", _ctx)
+    manager = RedisConversationsManager(conversations_settings())
+    # The process singleton itself, so every module that bound ``get_conversations_manager`` at
+    # import answers this manager too.
+    cache_module._CONVERSATIONS_MANAGER_CACHE[cache_module._CONVERSATIONS_MANAGER_KEY] = manager
+    try:
+        yield LuaEnv(redis=client, manager=manager)
+    finally:
+        cache_module._CONVERSATIONS_MANAGER_CACHE.clear()
+        await client.aclose()
+
+
 @pytest.fixture
 def env(monkeypatch):
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
@@ -745,6 +1041,7 @@ def env(monkeypatch):
     monkeypatch.setattr(target_config_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(mode_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(thread_lease_module, "client_ctx", make_record_client_ctx(fake))
+    monkeypatch.setattr(persons_module, "client_ctx", make_record_client_ctx(fake))
     # The overlap-cancel marker read/write shares the record redis (its own client_ctx seam).
     monkeypatch.setattr(overlap_module, "client_ctx", make_record_client_ctx(fake))
     # Stub the execution-identity authorization seam so the bridge is tested in isolation.
@@ -813,7 +1110,9 @@ def _wire(
     monkeypatch.setattr(tool_turn_module, "tai42_app", fake_template_app)
     monkeypatch.setattr(door_contract_module, "tai42_app", fake_template_app)
     if channel is not None:
+        # The reply's send and the turn's reply-window read resolve the SAME registered channel.
         monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
+        monkeypatch.setattr(reply_window_module, "tai42_app", _FakeApp(channel))
 
 
 def _accepting_callback():
@@ -911,7 +1210,7 @@ def _intake_record(message_id: str, provider_message_id: str):
 async def _create_stranded_intake(store: ConversationRecordStore, fake: FakeRecordRedis, message_id: str) -> None:
     """Persist an intake record whose intake lease has LAPSED — what a worker that died
     mid-turn leaves behind, and the only shape the re-drive may adopt."""
-    await store.create_record(_intake_record(message_id, "PID1"), intake_token="dead-worker")
+    await create_record(store, _intake_record(message_id, "PID1"), intake_token="dead-worker")
     key = ConversationsSettings().record_key(message_id)
     fields = await fake.hgetall(key)
     fake.seed_hash(key, fields | {"intake_claim": f"dead-worker:{time.time() - 1}"})
@@ -937,3 +1236,33 @@ DOOR_RULE_REFUSALS = [
     ),
     ({"door": "email"}, "door"),
 ]
+
+
+class _UntouchedManager:
+    """A conversations manager that notes each use in ``uses`` and fails it."""
+
+    def __init__(self, uses: list[str]) -> None:
+        self._uses = uses
+
+    def __getattr__(self, name: str):
+        self._uses.append(name)
+        raise AssertionError(f"the conversations manager was used ({name}) with no conversations store")
+
+
+@pytest.fixture
+def no_store(monkeypatch) -> Iterator[list[str]]:
+    """No conversations store configured. Yields the list of uses of the manager singleton or the
+    record store, each of which also fails where it happens, so a door that still reaches for
+    either is caught even where its caller swallows the failure."""
+    monkeypatch.delenv("CONVERSATIONS_REDIS_URL", raising=False)
+    assert conversations_settings().in_memory
+    uses: list[str] = []
+
+    def _refused(self, *args, **kwargs):
+        uses.append("ConversationRecordStore")
+        raise AssertionError("a ConversationRecordStore was built with no conversations store")
+
+    monkeypatch.setattr(records_module.ConversationRecordStore, "__init__", _refused)
+    cache_module._CONVERSATIONS_MANAGER_CACHE[cache_module._CONVERSATIONS_MANAGER_KEY] = _UntouchedManager(uses)
+    yield uses
+    cache_module._CONVERSATIONS_MANAGER_CACHE.clear()

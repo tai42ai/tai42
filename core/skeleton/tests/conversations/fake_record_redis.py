@@ -15,20 +15,30 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
-from tai42_contract.conversations import TargetConversationConfig
+from tai42_contract.conversations import Person, TargetConversationConfig
 
+from tai42_skeleton.conversations.models import DeliveryStatus
+from tai42_skeleton.conversations.persons import _address_key_of
+from tai42_skeleton.conversations.record_scripts import _INDEXED_STATUSES
 from tai42_skeleton.conversations.settings import ConversationsSettings
+
+#: The count of status indexes in the shared record key layout.
+_N = len(_INDEXED_STATUSES)
 
 
 class FakeRecordPubSub:
-    """A subscriber of :class:`FakeRecordRedis`: confirmations and published messages, in order."""
+    """A subscriber of :class:`FakeRecordRedis`: confirmations and published messages, in order.
 
-    def __init__(self, fake: FakeRecordRedis) -> None:
+    Its connection never drops, so ``on_reconnect`` is kept and never run.
+    """
+
+    def __init__(self, fake: FakeRecordRedis, on_reconnect: Callable[[], None] | None = None) -> None:
         self._fake = fake
+        self.on_reconnect = on_reconnect
         self._messages: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._channels: set[str] = set()
 
@@ -60,6 +70,55 @@ class FakeRecordPubSub:
         for channel in self._channels:
             self._fake._subscribers.get(channel, set()).discard(self)
         self._channels.clear()
+
+
+def _compact(value: Any) -> str:
+    """``value`` as the compact JSON a script's ``cjson.encode`` writes."""
+    return json.dumps(value, separators=(",", ":"))
+
+
+class _Writers:
+    """The writer-stamp helpers the scripts share, over the fake's maps.
+
+    Built from a script's decoded writer prefixes; each method is the helper of the same name in
+    the scripts' writer library.
+    """
+
+    def __init__(self, fake: FakeRecordRedis, prefixes: str) -> None:
+        self._fake = fake
+        decoded = json.loads(prefixes)
+        self.index: str = decoded["index"]
+        self.threads: str = decoded["threads"]
+        self.records: str = decoded["records"]
+        self.thread_index: str = decoded["thread_index"]
+        self.route_thread: str = decoded["route_thread"]
+
+    def holder(self, door: str) -> str:
+        kind, name, door_address_key = json.loads(door)
+        return self._fake._hashes.get(f"{self.index}{kind}:{name}", {}).get(door_address_key) or door
+
+    def stamp(self, thread: str, door: str, record_key: str) -> None:
+        who = self.holder(door)
+        self._fake._sadd(self.threads + who, thread)
+        self._fake._hset(record_key, "writer", who)
+        self._fake._hset(record_key, "writer_door", door)
+
+    def thread_records(self, thread: str) -> list[str]:
+        rest = thread.removeprefix(self.route_thread)
+        if rest == thread or ":" not in rest:
+            raise RuntimeError(f"conversations: a writer threads entry is not route-keyed: {thread}")
+        route = rest.split(":", 1)[0]
+        return [self.records + message_id for message_id in self._fake._ordered(f"{self.thread_index}{route}:{thread}")]
+
+    def adopt(self, door: str, person_id: str) -> None:
+        held = self.threads + door
+        for thread in sorted(self._fake._sets.get(held, set())):
+            self._fake._sadd(self.threads + person_id, thread)
+            for record_key in self.thread_records(thread):
+                row = self._fake._hashes.get(record_key)
+                if row is not None and row.get("writer") == door:
+                    row["writer"] = person_id
+        self._fake._drop(held)
 
 
 class FakeRecordRedis:
@@ -97,6 +156,15 @@ class FakeRecordRedis:
         one landing after the route's delete and index nothing."""
         self._strings[ConversationsSettings().route_key(route_name)] = "{}"
 
+    def seed_person(self, person: Person) -> None:
+        """Plant ``person``'s row and its address→person index mappings the way the person store
+        writes them, so a person-thread record create finds its person standing."""
+        settings = ConversationsSettings()
+        self._strings[settings.person_key(person.person_id)] = person.model_dump_json()
+        index_key = settings.person_index_key(person.target_kind, person.target_name)
+        for address in person.addresses:
+            self._hashes.setdefault(index_key, {})[_address_key_of(address)] = person.person_id
+
     def seed_target_config(self, config: TargetConversationConfig) -> None:
         """Plant a per-target config row the way the config store's upsert writes it: the
         row, its name-index member and a fresh write token for the map (the fake carries no
@@ -110,9 +178,108 @@ class FakeRecordRedis:
         """Remove the routing row, so a create lands as one racing the route's delete."""
         self._strings.pop(ConversationsSettings().route_key(route_name), None)
 
+    # -- the server-side primitives the faked scripts write through ---------
+    def _stores(self) -> tuple[dict, ...]:
+        return (self._strings, self._hashes, self._lists, self._zsets, self._sets)
+
+    def _exists(self, key: str) -> bool:
+        return any(key in store for store in self._stores())
+
+    def _drop(self, key: str) -> int:
+        self.ttl_ms.pop(key, None)
+        held = [store.pop(key, None) for store in self._stores()]
+        return 1 if any(value is not None for value in held) else 0
+
+    def _hset(self, key: str, field: str, value: str) -> None:
+        self._hashes.setdefault(key, {})[field] = value
+
+    def _hdel(self, key: str, field: str) -> None:
+        # Redis drops a hash that holds no field, so neither does the fake.
+        target = self._hashes.get(key)
+        if target is None:
+            return
+        target.pop(field, None)
+        if not target:
+            self._drop(key)
+
+    def _hincrby(self, key: str, field: str, amount: int) -> int:
+        target = self._hashes.setdefault(key, {})
+        new = int(target.get(field, "0")) + amount
+        target[field] = str(new)
+        return new
+
+    def _sadd(self, key: str, member: str) -> None:
+        self._sets.setdefault(key, set()).add(member)
+
+    def _srem(self, key: str, member: str) -> None:
+        target = self._sets.get(key)
+        if target is None:
+            return
+        target.discard(member)
+        if not target:
+            self._drop(key)
+
+    def _pexpire(self, key: str, ttl_ms: str | int) -> None:
+        if self._exists(key):
+            self.ttl_ms[key] = int(ttl_ms)
+
+    # The ``owned_keys`` helpers the record scripts share: every key outside a row that names the
+    # record is named on the row's ``owned_keys`` JSON list by the write that makes it.
+    def _owned_names(self, record_key: str) -> list[str]:
+        raw = self._hashes.get(record_key, {}).get("owned_keys")
+        return json.loads(raw) if raw else []
+
+    def _own(self, record_key: str, name: str) -> bool:
+        names = self._owned_names(record_key)
+        if name in names:
+            return False
+        names.append(name)
+        self._hset(record_key, "owned_keys", _compact(names))
+        return True
+
+    def _own_ref(self, record_key: str, ref: str, message_id: str, ttl_ms: str) -> None:
+        if self._own(record_key, ref):
+            self._lists.setdefault(ref, []).append(message_id)
+        self._pexpire(ref, ttl_ms)
+
+    def _own_value(self, record_key: str, key: str, message_id: str, ttl_ms: str) -> None:
+        self._strings[key] = message_id
+        self.ttl_ms[key] = int(ttl_ms)
+        self._own(record_key, key)
+
+    def _own_member(self, record_key: str, set_key: str, message_id: str) -> None:
+        self._sadd(set_key, message_id)
+        self._own(record_key, set_key)
+
+    def _refresh_refs(self, record_key: str, ttl_ms: str) -> None:
+        for name in self._owned_names(record_key):
+            if name in self._lists:
+                self.ttl_ms[name] = int(ttl_ms)
+
+    def _forget_owned(self, record_key: str, message_id: str) -> None:
+        for name in self._owned_names(record_key):
+            if name in self._lists:
+                kept = [held for held in self._lists[name] if held != message_id]
+                if kept:
+                    self._lists[name] = kept
+                else:
+                    self._drop(name)
+            elif name in self._sets:
+                self._srem(name, message_id)
+            elif self._strings.get(name) == message_id:
+                self._drop(name)
+
+    def _delete_row(self, keys: list[str], record_key: str, message_id: str) -> int:
+        """A row's delete with everything that names it, the scripts' shared ``delete_row``."""
+        self._forget_owned(record_key, message_id)
+        removed = self._drop(record_key)
+        for index_key in keys[1 : _N + 1]:
+            self._zsets.get(index_key, {}).pop(message_id, None)
+        return removed
+
     # -- sorted-set commands (the status / thread record indexes) ------------
-    def pubsub(self) -> FakeRecordPubSub:
-        return FakeRecordPubSub(self)
+    def pubsub(self, *, on_reconnect: Callable[[], None] | None = None) -> FakeRecordPubSub:
+        return FakeRecordPubSub(self, on_reconnect)
 
     async def publish(self, channel: str, message: str) -> int:
         receivers = list(self._subscribers.get(channel, ()))
@@ -187,7 +354,7 @@ class FakeRecordRedis:
         return self._zsets.get(key, {}).get(member)
 
     async def exists(self, key: str) -> int:
-        return 1 if any(key in store for store in (self._strings, self._hashes, self._lists, self._zsets)) else 0
+        return 1 if self._exists(key) else 0
 
     async def zremrangebyscore(self, key: str, minimum: str | float, maximum: str | float) -> int:
         low, high = float(minimum), float(maximum)
@@ -211,15 +378,13 @@ class FakeRecordRedis:
     async def expire(self, key: str, seconds: int) -> bool:
         # As redis EXPIRE: a TTL only lands on a key that EXISTS, and a missing key is left
         # absent (never recreated), so the command reports whether it applied.
-        if not any(key in store for store in (self._strings, self._hashes, self._lists, self._zsets)):
+        if not self._exists(key):
             return False
         self.ttl_ms[key] = seconds * 1000
         return True
 
     async def delete(self, key: str) -> int:
-        self.ttl_ms.pop(key, None)
-        held = [store.pop(key, None) for store in (self._strings, self._hashes, self._lists, self._zsets)]
-        return 1 if any(value is not None for value in held) else 0
+        return self._drop(key)
 
     # -- set commands (the config name index) -------------------------------
     async def smembers(self, key: str) -> set[str]:
@@ -314,15 +479,443 @@ class FakeRecordRedis:
             self._zsets.get(index_key, {}).pop(member, None)
         self._zsets.setdefault(index_keys[-1], {})[member] = float(score)
 
+    # -- the record and person scripts that stamp and read a route-keyed thread's writers -----
+    def _create_script(self, keys: list[str], argv: list[str]) -> list:
+        # The shared layout with the routing row, then the optional dedupe key, mode key, person
+        # group and inbound ref key, each announced by its ARGV flag.
+        record_key, message_id, thread_id = keys[0], argv[7], argv[9]
+        thread_key, route_threads_key, route_row_key = keys[_N + 2], keys[_N + 3], keys[_N + 4]
+        slot = _N + 5
+        claim_key = mode_key = person_row = person_mark = person_routes = ref_key = None
+        if argv[11] != "":
+            claim_key, slot = keys[slot], slot + 1
+        if argv[12] != "":
+            mode_key, slot = keys[slot], slot + 1
+        if argv[13] != "":
+            person_row, person_mark, person_routes = keys[slot : slot + 3]
+            slot += 3
+        if argv[15] != "":
+            ref_key = keys[slot]
+        claimed = self._strings.get(claim_key) if claim_key is not None else None
+        if claimed is not None and claimed != message_id:
+            return [-1, claimed]
+        if person_row is not None and (not self._exists(person_row) or self._exists(person_mark or "")):
+            return [-2, ""]
+        self._hashes.setdefault(record_key, {}).update(
+            data=argv[0],
+            delivery_status=argv[1],
+            sends=argv[2],
+            attempts=argv[3],
+            claim="",
+            grace_deadline="",
+            updated_at=argv[4],
+            intake_claim=argv[6],
+        )
+        if argv[5]:
+            self.ttl_ms[record_key] = int(argv[5])
+        self._reindex(keys[1 : _N + 2], message_id, argv[8])
+        # Written only while the route still routes: the indexes of a route whose row is gone
+        # are reclaimed already, so re-creating them would strand the pair. The record is marked
+        # so the operator read carries the honest marker, not only a log line.
+        indexed = 1
+        if not self._exists(route_row_key):
+            self._hset(record_key, "route_missing", "1")
+            indexed = 0
+        else:
+            self._zsets.setdefault(thread_key, {})[message_id] = float(argv[10])
+            self._zsets.setdefault(route_threads_key, {})[thread_id] = float(argv[10])
+            if person_routes is not None:
+                self._sadd(person_routes, argv[14])
+        if ref_key is not None:
+            self._own_ref(record_key, ref_key, message_id, argv[15])
+        if claim_key is not None and claimed is None:
+            self._strings[claim_key] = message_id
+        # As the script's EXPIRE: lands only on a live key, never recreates a missing one.
+        if mode_key is not None and mode_key in self._strings:
+            self.ttl_ms[mode_key] = int(argv[12]) * 1000
+        if argv[16] != "":
+            _Writers(self, argv[17]).stamp(thread_id, argv[16], record_key)
+        return [indexed, message_id]
+
+    def _delete_script(self, keys: list[str], argv: list[str]) -> int:
+        removed = self._delete_row(keys, keys[0], argv[0])
+        thread_key, route_threads_key = keys[_N + 1], keys[_N + 2]
+        self._zsets.get(thread_key, {}).pop(argv[0], None)
+        if not self._zsets.get(thread_key):
+            self._zsets.get(route_threads_key, {}).pop(argv[1], None)
+        return removed
+
+    def _begin_send_script(self, keys: list[str], argv: list[str]) -> int:
+        record_key, message_id, placed_thread, placed_door = keys[0], argv[3], argv[5], argv[7]
+        if self._exists(record_key):
+            return 0
+        self._hashes[record_key] = {
+            "data": argv[0],
+            "delivery_status": DeliveryStatus.SENDING.value,
+            "sends": "[]",
+            "attempts": argv[1],
+            "claim": "",
+            "grace_deadline": "",
+            "updated_at": argv[2],
+            "intake_claim": "",
+            "placed_thread": placed_thread,
+        }
+        if placed_door != "":
+            _Writers(self, argv[8]).stamp(placed_thread, placed_door, record_key)
+        self._reindex(keys[1 : _N + 2], message_id, argv[4])
+        self._own_member(record_key, keys[_N + 2], message_id)
+        if argv[6] != "":
+            self._own_value(record_key, keys[_N + 3], message_id, argv[6])
+        return 1
+
+    def _send_placement(
+        self,
+        keys: list[str],
+        *,
+        message_id: str,
+        place_thread: str,
+        created: str,
+        route_name: str,
+        person_flag: str,
+        landing_door: str,
+        prefixes: str,
+        write,
+    ) -> list:
+        """A send script's placement: the checks, then ``write`` (the row's new state), then the placement writes."""
+        record_key = keys[0]
+        person_row = person_mark = person_routes = None
+        after = _N + 6
+        if person_flag != "":
+            person_row, person_mark, person_routes = keys[after : after + 3]
+            after += 3
+        if not self._exists(record_key):
+            return [-1, "gone"]
+        row = self._hashes.get(record_key, {})
+        status = row.get("delivery_status")
+        if status != DeliveryStatus.SENDING.value:
+            return [-2, status or ""]
+        forgotten = row.get("forgotten_threads")
+        if forgotten and place_thread in json.loads(forgotten):
+            self._delete_row(keys, record_key, message_id)
+            return [-1, "forgotten"]
+        if person_row is not None and (not self._exists(person_row) or self._exists(person_mark or "")):
+            self._delete_row(keys, record_key, message_id)
+            return [-1, "person_closed"]
+        final = write(after)
+        self._srem(keys[_N + 5], message_id)
+        if landing_door != "":
+            _Writers(self, prefixes).stamp(place_thread, landing_door, record_key)
+        placed = 1
+        if not self._exists(keys[_N + 4]):
+            self._hset(record_key, "route_missing", "1")
+            placed = 0
+        else:
+            self._zsets.setdefault(keys[_N + 2], {})[message_id] = float(created)
+            self._zsets.setdefault(keys[_N + 3], {})[place_thread] = float(created)
+            if person_routes is not None:
+                self._sadd(person_routes, route_name)
+        return [placed, final]
+
+    def _complete_send_script(self, keys: list[str], argv: list[str]) -> list:
+        record_key, message_id = keys[0], argv[4]
+        delivered_index = keys[1 + _INDEXED_STATUSES.index(DeliveryStatus.DELIVERED)]
+
+        def write(after: int) -> str:
+            row = self._hashes[record_key]
+            final = "delivered" if row.get("ask_reply") else "provisional"
+            for index_key in keys[1 : _N + 1]:
+                self._zsets.get(index_key, {}).pop(message_id, None)
+            row.update(data=argv[0], delivery_status=final, sends=argv[1], attempts=argv[2], updated_at=argv[3])
+            if final == "delivered":
+                row["grace_deadline"] = ""
+                self._zsets.setdefault(delivered_index, {})[message_id] = float(argv[6])
+                self.ttl_ms[record_key] = int(argv[8])
+            else:
+                row["grace_deadline"] = argv[7]
+                self._zsets.setdefault(keys[_N + 1], {})[message_id] = float(argv[5])
+            n_k3 = int(argv[13])
+            for key in keys[after : after + n_k3]:
+                self._own_value(record_key, key, message_id, argv[8])
+            for key in keys[after + n_k3 :]:
+                self._own_ref(record_key, key, message_id, argv[8])
+            if final == "delivered":
+                self._refresh_refs(record_key, argv[8])
+            return final
+
+        return self._send_placement(
+            keys,
+            message_id=message_id,
+            place_thread=argv[9],
+            created=argv[10],
+            route_name=argv[11],
+            person_flag=argv[12],
+            landing_door=argv[14],
+            prefixes=argv[15],
+            write=write,
+        )
+
+    def _end_send_script(self, keys: list[str], argv: list[str]) -> list:
+        record_key, message_id = keys[0], argv[4]
+        delivered_index = keys[1 + _INDEXED_STATUSES.index(DeliveryStatus.DELIVERED)]
+
+        def write(after: int) -> str:
+            row = self._hashes[record_key]
+            final, content = argv[2], argv[0]
+            if row.get("ask_reply"):
+                final, content = "delivered", argv[1]
+            row.update(data=content, delivery_status=final, updated_at=argv[3], claim="", grace_deadline="")
+            for index_key in keys[1 : _N + 1]:
+                self._zsets.get(index_key, {}).pop(message_id, None)
+            target = delivered_index if final == "delivered" else keys[_N + 1]
+            self._zsets.setdefault(target, {})[message_id] = float(argv[5])
+            self.ttl_ms[record_key] = int(argv[6])
+            self._refresh_refs(record_key, argv[6])
+            return final
+
+        return self._send_placement(
+            keys,
+            message_id=message_id,
+            place_thread=argv[7],
+            created=argv[8],
+            route_name=argv[9],
+            person_flag=argv[10],
+            landing_door=self._hashes.get(record_key, {}).get("writer_door") or "",
+            prefixes=argv[11],
+            write=write,
+        )
+
+    def _ask_reply_script(self, keys: list[str], argv: list[str]) -> int:
+        record_key, message_id = keys[0], argv[1]
+        if not self._exists(record_key):
+            return -1
+        row = self._hashes.get(record_key, {})
+        status = row.get("delivery_status")
+        if status != argv[5]:
+            return -3
+        row.update(ask_reply=argv[0], updated_at=argv[2])
+        settles = status in ("provisional", "failed", "outcome_unknown")
+        if settles:
+            if argv[6] != "":
+                row["data"] = argv[6]
+            row.update(delivery_status="delivered", claim="", grace_deadline="")
+            self._reindex(keys[1 : _N + 2], message_id, argv[4])
+            self.ttl_ms[record_key] = int(argv[3])
+        if argv[7] != "":
+            self._own_ref(record_key, keys[_N + 2], message_id, argv[3])
+        if settles:
+            self._refresh_refs(record_key, argv[3])
+        return 1
+
+    def _forget_sending_script(self, keys: list[str], argv: list[str]) -> int:
+        inflight, record_key = keys[0], keys[1]
+        row = self._hashes.get(record_key)
+        if row is None or row.get("delivery_status") != DeliveryStatus.SENDING.value:
+            self._srem(inflight, argv[0])
+            return 0
+        threads = json.loads(row["forgotten_threads"]) if row.get("forgotten_threads") else []
+        if argv[1] in threads:
+            return 1
+        threads.append(argv[1])
+        row["forgotten_threads"] = _compact(threads)
+        return 1
+
+    def _index_outbound_script(self, keys: list[str], argv: list[str]) -> int:
+        record_key = keys[0]
+        if not self._exists(record_key):
+            return -1
+        n_k3 = int(argv[2])
+        for key in keys[1 : 1 + n_k3]:
+            self._own_value(record_key, key, argv[0], argv[1])
+        for key in keys[1 + n_k3 :]:
+            self._own_ref(record_key, key, argv[0], argv[1])
+        return 1
+
+    def _merge_script(self, keys: list[str], argv: list[str]) -> list:
+        key_a, key_b, mark_a, mark_b, record_a, record_b = keys[:6]
+        raw_a = self._strings.get(key_a)
+        if raw_a is None:
+            return ["unknown", key_a]
+        a = json.loads(raw_a)
+        if self._exists(mark_a):
+            return ["erasing", a["person_id"]]
+        if key_a == key_b:
+            return ["ok", raw_a]
+        raw_b = self._strings.get(key_b)
+        if raw_b is None:
+            return ["unknown", key_b]
+        b = json.loads(raw_b)
+        if self._exists(mark_b):
+            return ["erasing", b["person_id"]]
+        if a["target_kind"] != b["target_kind"] or a["target_name"] != b["target_name"]:
+            return ["cross_target"]
+        if a["created_at"] != b["created_at"]:
+            survivor_is_a = a["created_at"] < b["created_at"]
+        else:
+            survivor_is_a = a["person_id"] < b["person_id"]
+        if survivor_is_a:
+            survivor, absorbed, survivor_key, absorbed_key = a, b, key_a, key_b
+            survivor_record, absorbed_record = record_a, record_b
+        else:
+            survivor, absorbed, survivor_key, absorbed_key = b, a, key_b, key_a
+            survivor_record, absorbed_record = record_b, record_a
+        for addr in absorbed["addresses"]:
+            for have in survivor["addresses"]:
+                dup = have["door"] == addr["door"] and have["address"] == addr["address"]
+                if dup and addr["door"] == "channel":
+                    dup = have["channel"] == addr["channel"] and have["our_identity"] == addr["our_identity"]
+                if dup:
+                    return ["duplicate_address", addr["address"]]
+            survivor["addresses"].append(addr)
+        index_key = argv[0] + survivor["target_kind"] + ":" + survivor["target_name"]
+        absorbed_id, survivor_id = absorbed["person_id"], survivor["person_id"]
+        for field, held in list(self._hashes.get(index_key, {}).items()):
+            if held == absorbed_id:
+                self._hset(index_key, field, survivor_id)
+        encoded = json.dumps(survivor)
+        self._strings[survivor_key] = encoded
+        for held_id in [*sorted(self._sets.get(absorbed_record, set())), absorbed_id]:
+            self._sadd(survivor_record, held_id)
+            self._strings[argv[1] + held_id] = survivor_id
+        self._drop(absorbed_record)
+        self._drop(absorbed_key)
+        return ["ok", encoded]
+
+    def _erase_script(self, keys: list[str], argv: list[str]) -> list:
+        row_key, index_key, mark_key, absorbed_record, routes_key = keys[:5]
+        person_id, routes_prefix, into_prefix = argv[0], argv[1], argv[2]
+        writers = _Writers(self, argv[3])
+        visited = set(json.loads(argv[4]))
+        prefixes = (argv[5], argv[6], into_prefix)
+        absorbed_ids = argv[7:]
+        erased = {person_id, *absorbed_ids}
+        for held_id in [person_id, *absorbed_ids]:
+            unvisited = sorted(self._sets.get(writers.threads + held_id, set()) - visited)
+            if unvisited:
+                return ["unvisited", unvisited[0], held_id]
+        handed: list[tuple[str, str]] = []
+        for thread in json.loads(argv[4]):
+            if self._kept(writers, thread, erased, prefixes):
+                continue
+            for record_key in writers.thread_records(thread):
+                row = self._hashes.get(record_key, {})
+                if row.get("writer") in erased:
+                    door = row.get("writer_door")
+                    if door is None:
+                        raise RuntimeError(
+                            f"conversations: a record of the route-keyed thread {thread} carries no writer_door: "
+                            f"{record_key}"
+                        )
+                    handed.append((door, thread))
+        for door, thread in handed:
+            self._sadd(writers.threads + door, thread)
+        for absorbed_id in absorbed_ids:
+            self._drop(routes_prefix + absorbed_id)
+            self._drop(into_prefix + absorbed_id)
+        self._drop(absorbed_record)
+        self._drop(routes_key)
+        removed_fields = 0
+        for field, held in list(self._hashes.get(index_key, {}).items()):
+            if held == person_id:
+                self._hdel(index_key, field)
+                removed_fields += 1
+        for held_id in [person_id, *absorbed_ids]:
+            self._drop(writers.threads + held_id)
+        self._drop(mark_key)
+        removed_row = self._drop(row_key)
+        return ["ok", removed_row, removed_fields]
+
+    def _kept(self, writers: _Writers, thread: str, erased: set[str], prefixes: tuple[str, str, str]) -> str:
+        """The scripts' outside-writer decision: the first writer of ``thread`` that keeps it standing, else ''."""
+        person_prefix, erasing_prefix, into_prefix = prefixes
+
+        def keeps(who: str, door: str | None) -> bool:
+            if who in erased:
+                return False
+            if who == door:
+                return True
+            if self._exists(person_prefix + who):
+                return not self._exists(erasing_prefix + who)
+            survivor = self._strings.get(into_prefix + who)
+            if survivor is None or survivor in erased:
+                return False
+            if not self._exists(person_prefix + survivor):
+                raise RuntimeError(
+                    f"conversations: the writer {who} points at the survivor {survivor}, whose row is gone"
+                )
+            return not self._exists(erasing_prefix + survivor)
+
+        judged: dict[str, bool] = {}
+        for record_key in writers.thread_records(thread):
+            row = self._hashes.get(record_key)
+            if row is None:
+                continue
+            who = row.get("writer")
+            if who is None:
+                raise RuntimeError(
+                    f"conversations: a record of the route-keyed thread {thread} carries no writer: {record_key}"
+                )
+            if who not in judged:
+                judged[who] = keeps(who, row.get("writer_door"))
+                if judged[who]:
+                    return who
+        return ""
+
+    def _outside_writer_script(self, _keys: list[str], argv: list[str]) -> str:
+        return self._kept(_Writers(self, argv[1]), argv[0], set(argv[5:]), (argv[2], argv[3], argv[4]))
+
+    def _read_for_erase_script(self, keys: list[str], argv: list[str]) -> list:
+        row_key, absorbed_record, routes_key, pointer_key = keys[:4]
+        routes_prefix, person_prefix, threads_prefix, person_id = argv[:4]
+        pointer = self._strings.get(pointer_key) or ""
+        survivor_stands = int(self._exists(person_prefix + pointer)) if pointer else 0
+        threads = set(self._sets.get(threads_prefix + person_id, set()))
+        absorbed = []
+        for absorbed_id in sorted(self._sets.get(absorbed_record, set())):
+            absorbed.append([absorbed_id, sorted(self._sets.get(routes_prefix + absorbed_id, set()))])
+            threads |= self._sets.get(threads_prefix + absorbed_id, set())
+        return [
+            self._strings.get(row_key) or "",
+            pointer,
+            survivor_stands,
+            sorted(self._sets.get(routes_key, set())),
+            absorbed,
+            list(threads),
+        ]
+
     async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> Any:
         keys = [str(k) for k in keys_and_args[:numkeys]]
+        argv = [str(a) for a in keys_and_args[numkeys:]]
+        marker_line = next(line for line in script.splitlines() if line.startswith("-- conversations:"))
+        marker = marker_line.removeprefix("-- ")
+        scripted = {
+            "conversations:record:create": self._create_script,
+            "conversations:record:delete": self._delete_script,
+            "conversations:record:begin_send": self._begin_send_script,
+            "conversations:record:complete_send": self._complete_send_script,
+            "conversations:record:end_send": self._end_send_script,
+            "conversations:record:ask_reply": self._ask_reply_script,
+            "conversations:record:forget_sending": self._forget_sending_script,
+            "conversations:record:index_outbound": self._index_outbound_script,
+            "conversations:person:merge": self._merge_script,
+            "conversations:person:erase": self._erase_script,
+            "conversations:person:read_for_erase": self._read_for_erase_script,
+            "conversations:thread:outside_writer": self._outside_writer_script,
+        }
+        if marker in scripted:
+            return scripted[marker](keys, argv)
+        if marker == "conversations:person:mark_erasing":
+            if not self._exists(keys[0]):
+                return 0
+            self._strings[keys[1]] = "1"
+            return 1
+        if marker == "conversations:person:get_by_id":
+            return [self._strings.get(keys[0]) or "", int(self._exists(keys[1]))]
         key = keys[0]
         indexes = keys[1:]
         # A script that touches the thread indexes carries them as the LAST two keys, after
         # the status layout the reindex step reads; the others never look at these. The
         # create carries the routing row one slot further out again.
         threaded, thread_keys = keys[1:-2], keys[-2:]
-        argv = [str(a) for a in keys_and_args[numkeys:]]
         if "conversations:dedupe:claim" in script:
             existing = self._strings.get(key)
             if existing is not None:
@@ -333,6 +926,8 @@ class FakeRecordRedis:
             person_id = self._hashes.get(key, {}).get(argv[0])
             if person_id is None:
                 return ["miss"]
+            if self._exists(argv[2] + person_id):
+                return ["erasing"]
             raw = self._strings.get(argv[1] + person_id)
             if raw is None:
                 return ["torn", person_id]
@@ -342,11 +937,15 @@ class FakeRecordRedis:
             dak, prefix, new_id, new_json = argv[0], argv[1], argv[2], argv[3]
             door, channel, our_identity, address = argv[4], argv[5], argv[6], argv[7]
             routes = json.loads(argv[8])
+            writers = _Writers(self, argv[11])
             existing = self._hashes.get(index_key, {}).get(dak)
             if existing is None:
                 self._hashes.setdefault(index_key, {})[dak] = new_id
                 self._strings[prefix + new_id] = new_json
+                writers.adopt(argv[10], new_id)
                 return ["created", new_json]
+            if self._exists(argv[9] + existing):
+                return ["erasing", existing]
             row_key = prefix + existing
             raw = self._strings.get(row_key)
             if raw is None:
@@ -372,46 +971,8 @@ class FakeRecordRedis:
                         raw = json.dumps(person)
                         self._strings[row_key] = raw
                     break
+            writers.adopt(argv[10], existing)
             return ["existing", raw]
-        if "conversations:person:merge" in script:
-            key_a, key_b = keys[0], keys[1]
-            raw_a = self._strings.get(key_a)
-            if raw_a is None:
-                return ["unknown", key_a]
-            if key_a == key_b:
-                return ["ok", raw_a]
-            raw_b = self._strings.get(key_b)
-            if raw_b is None:
-                return ["unknown", key_b]
-            a, b = json.loads(raw_a), json.loads(raw_b)
-            if a["target_kind"] != b["target_kind"] or a["target_name"] != b["target_name"]:
-                return ["cross_target"]
-            if a["created_at"] < b["created_at"]:
-                survivor_is_a = True
-            elif b["created_at"] < a["created_at"]:
-                survivor_is_a = False
-            else:
-                survivor_is_a = a["person_id"] < b["person_id"]
-            survivor, absorbed, survivor_key, absorbed_key = (
-                (a, b, key_a, key_b) if survivor_is_a else (b, a, key_b, key_a)
-            )
-            for addr in absorbed["addresses"]:
-                for have in survivor["addresses"]:
-                    dup = have["door"] == addr["door"] and have["address"] == addr["address"]
-                    if dup and addr["door"] == "channel":
-                        dup = have["channel"] == addr["channel"] and have["our_identity"] == addr["our_identity"]
-                    if dup:
-                        return ["duplicate_address", addr["address"]]
-                survivor["addresses"].append(addr)
-            index_key = argv[0] + survivor["target_kind"] + ":" + survivor["target_name"]
-            index = self._hashes.get(index_key, {})
-            for field, val in list(index.items()):
-                if val == absorbed["person_id"]:
-                    index[field] = survivor["person_id"]
-            encoded = json.dumps(survivor)
-            self._strings[survivor_key] = encoded
-            self._strings.pop(absorbed_key, None)
-            return ["ok", encoded]
         if "conversations:person:detach" in script:
             row_key, new_row_key = keys[0], keys[1]
             index_prefix, dak, new_id, new_created_at = argv[0], argv[1], argv[2], argv[3]
@@ -419,6 +980,8 @@ class FakeRecordRedis:
             raw = self._strings.get(row_key)
             if raw is None:
                 return ["unknown", row_key]
+            if self._exists(keys[2]):
+                return ["erasing"]
             person = json.loads(raw)
             if len(person["addresses"]) <= 1:
                 return ["not_linked"]
@@ -455,23 +1018,14 @@ class FakeRecordRedis:
             index_key = index_prefix + person["target_kind"] + ":" + person["target_name"]
             self._hashes.setdefault(index_key, {})[dak] = new_id
             return ["ok", fresh_json]
-        if "conversations:person:erase" in script:
-            row_key, index_key = keys[0], keys[1]
-            person_id = argv[0]
-            removed_row = await self.delete(row_key)
-            index = self._hashes.get(index_key, {})
-            removed_fields = 0
-            for field, val in list(index.items()):
-                if val == person_id:
-                    del index[field]
-                    removed_fields += 1
-            return [removed_row, removed_fields]
         if "conversations:person:set_locale" in script:
             row_key = keys[0]
             mode, locale = argv[0], argv[1]
             raw = self._strings.get(row_key)
             if raw is None:
                 return ["missing"]
+            if self._exists(keys[1]):
+                return ["erasing"]
             person = json.loads(raw)
             if mode == "clear":
                 person.pop("locale", None)
@@ -517,49 +1071,6 @@ class FakeRecordRedis:
             return 0
         h = self._hashes.get(key)
         status = h.get("delivery_status") if h else None
-        if "conversations:record:create" in script:
-            # The create carries the ROUTING ROW behind its two thread index keys, then the
-            # optional dedupe key and mode key its two trailing ARGV flags announce.
-            claim_ttl, mode_ttl = argv[11], argv[12]
-            optional = keys[len(keys) - (claim_ttl != "") - (mode_ttl != "") :]
-            base = keys[: len(keys) - len(optional)]
-            claim_key = optional[0] if claim_ttl != "" else None
-            mode_key = optional[-1] if mode_ttl != "" else None
-            message_id = argv[7]
-            owner = self._strings.get(claim_key) if claim_key is not None else None
-            if owner is not None and owner != message_id:
-                return [-1, owner]
-            created_threaded, created_thread_keys, route_row_key = base[1:-3], base[-3:-1], base[-1]
-            self._hashes[key] = {
-                "data": argv[0],
-                "delivery_status": argv[1],
-                "outbound_ids": argv[2],
-                "attempts": argv[3],
-                "claim": "",
-                "grace_deadline": "",
-                "updated_at": argv[4],
-                "intake_claim": argv[6],
-            }
-            if argv[5]:
-                self.ttl_ms[key] = int(argv[5])
-            self._reindex(created_threaded, message_id, argv[8])
-            # Written only while the route still routes, as the script's guard does: the
-            # indexes of a route whose row is gone are reclaimed already and nothing walks
-            # the name again, so re-creating them would strand the pair. The record is marked
-            # so the operator read carries the honest marker, not only a log line.
-            indexed = 1
-            if await self.exists(route_row_key) == 0:
-                self._hashes[key]["route_missing"] = "1"
-                indexed = 0
-            else:
-                self._zsets.setdefault(created_thread_keys[0], {})[message_id] = float(argv[10])
-                self._zsets.setdefault(created_thread_keys[1], {})[argv[9]] = float(argv[10])
-            if claim_key is not None and owner is None:
-                self._strings[claim_key] = message_id
-            # As the script's EXPIRE: lands only on a live key, never recreates a missing one.
-            if mode_key is not None and mode_key in self._strings:
-                self.ttl_ms[mode_key] = int(mode_ttl) * 1000
-            return [indexed, message_id]
         if "conversations:record:complete_turn" in script:
             if status is None:
                 return -1
@@ -582,6 +1093,7 @@ class FakeRecordRedis:
                 data=argv[0], delivery_status="silent", updated_at=argv[1], intake_claim="", claim=""
             )
             self.ttl_ms[key] = int(argv[2])
+            self._refresh_refs(key, argv[2])
             self._reindex(threaded, argv[3], argv[4])
             if self._zsets.get(thread_keys[0]):
                 self._zsets.setdefault(thread_keys[1], {})[argv[5]] = float(argv[1])
@@ -599,6 +1111,7 @@ class FakeRecordRedis:
                 data=argv[0], delivery_status=terminal, updated_at=argv[1], intake_claim="", claim=""
             )
             self.ttl_ms[key] = int(argv[2])
+            self._refresh_refs(key, argv[2])
             self._reindex(threaded, argv[3], argv[4])
             if self._zsets.get(thread_keys[0]):
                 self._zsets.setdefault(thread_keys[1], {})[argv[5]] = float(argv[1])
@@ -644,7 +1157,7 @@ class FakeRecordRedis:
                 # straight to the parked terminal, skipping ``provisional``.
                 h.update(  # type: ignore[union-attr]
                     delivery_status=parked,
-                    outbound_ids=argv[0],
+                    sends=argv[0],
                     attempts=argv[1],
                     updated_at=argv[3],
                     claim="",
@@ -652,6 +1165,7 @@ class FakeRecordRedis:
                     pending_receipt="",
                 )
                 self.ttl_ms[key] = int(argv[7])
+                self._refresh_refs(key, argv[7])
                 member = argv[5]
                 for index_key in indexes[:-1]:
                     self._zsets.get(index_key, {}).pop(member, None)
@@ -660,7 +1174,7 @@ class FakeRecordRedis:
                 return 2 if parked == "delivered" else 3
             h.update(  # type: ignore[union-attr]
                 delivery_status="provisional",
-                outbound_ids=argv[0],
+                sends=argv[0],
                 attempts=argv[1],
                 grace_deadline=argv[2],
                 updated_at=argv[3],
@@ -679,13 +1193,14 @@ class FakeRecordRedis:
                 return -3
             h.update(  # type: ignore[union-attr]
                 delivery_status="delivered",
-                outbound_ids=argv[0],
+                sends=argv[0],
                 attempts=argv[1],
                 updated_at=argv[2],
                 claim="",
                 grace_deadline="",
             )
             self.ttl_ms[key] = int(argv[3])
+            self._refresh_refs(key, argv[3])
             self._reindex(indexes, argv[5], argv[6])
             return 1
         if "conversations:record:failed" in script:
@@ -701,12 +1216,14 @@ class FakeRecordRedis:
             h.update(  # type: ignore[union-attr]
                 delivery_status="failed",
                 attempts=argv[0],
+                sends=argv[6],
                 updated_at=argv[1],
                 claim="",
                 grace_deadline="",
                 pending_receipt="",
             )
             self.ttl_ms[key] = int(argv[2])
+            self._refresh_refs(key, argv[2])
             self._reindex(indexes, argv[4], argv[5])
             return 2 if parked else 1
         if "conversations:record:unreadable" in script:
@@ -723,6 +1240,7 @@ class FakeRecordRedis:
             parked = h.get("pending_receipt", "") if h else ""
             h.update(delivery_status="failed", claim="", grace_deadline="", updated_at=argv[0], pending_receipt="")
             self.ttl_ms[key] = int(argv[1])
+            self._refresh_refs(key, argv[1])
             self._reindex(indexes, argv[2], argv[3])
             return 2 if parked else 1
         if "conversations:record:receipt" in script:
@@ -747,15 +1265,9 @@ class FakeRecordRedis:
                 return -3
             h.update(delivery_status=target, updated_at=argv[1], claim="", grace_deadline="")  # type: ignore[union-attr]
             self.ttl_ms[key] = int(argv[2])
+            self._refresh_refs(key, argv[2])
             self._reindex(indexes, argv[3], argv[4])
             return 1
-        if "conversations:record:delete" in script:
-            removed = await self.delete(key)
-            for index_key in (*threaded, thread_keys[0]):
-                self._zsets.get(index_key, {}).pop(argv[0], None)
-            if not self._zsets.get(thread_keys[0]):
-                self._zsets.get(thread_keys[1], {}).pop(argv[1], None)
-            return removed
         if "conversations:record:unindex" in script:
             return sum(1 for index_key in indexes if self._zsets.get(index_key, {}).pop(argv[0], None) is not None)
         if "conversations:thread:prune" in script:

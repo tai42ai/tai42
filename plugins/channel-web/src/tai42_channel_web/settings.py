@@ -11,7 +11,7 @@ per-field to the shared ``TAI_DEFAULT_*`` namespace).
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.settings import TaiBaseSettings, settings_cache
@@ -79,6 +79,11 @@ class WebSettings(TaiBaseSettings):
     max_streams_total: int = Field(default=500, gt=0)
     # The chat page's ``<title>`` — the visitor-facing name of the conversation.
     page_title: str = "Chat"
+    # The heading and sentence of the page the chat door answers when no store is
+    # configured. With no store there are no per-route words to read, so this one
+    # page's words are the deployment's.
+    store_off_title: str = "Chat is unavailable"
+    store_off_text: str = "This chat is not switched on. Please contact the site owner."
     # Entry-code guesses one client bucket may make against a gated route per window,
     # and the window's length. A gate refuses uniformly (no oracle), so throttling the
     # guess rate is what bounds a brute force over the code space.
@@ -90,6 +95,13 @@ class WebSettings(TaiBaseSettings):
     # pending-upload TTL are the ingestion seam's ``MEDIA_INGEST_*`` settings, not this
     # channel's.
     max_attachments_per_message: int = Field(default=10, gt=0)
+
+    @field_validator("store_off_title", "store_off_text")
+    @classmethod
+    def _non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be a non-blank text: it is the page a visitor reads")
+        return value
 
 
 @settings_cache

@@ -64,6 +64,25 @@ def test_message_door_validates_a_well_shaped_call_and_refuses_a_mis_shaped_one(
     _run(run())
 
 
+def test_message_door_admits_a_uuid4_reply_to_message_id_and_refuses_any_other() -> None:
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate(_DOORS_MANIFEST)):
+            base = {"route_name": "chat", "external_user_id": "u-7", "text": "hi"}
+            # A version-4 UUID string passes validation and reaches the door's refusal of the
+            # unauthenticated run.
+            with pytest.raises(UnauthenticatedApiCallerError):
+                await app.tools.run_tool(
+                    "send_conversation_message",
+                    {**base, "reply_to_message_id": "3f2b8c1e-5a4d-4e6f-9b7a-1c2d3e4f5a6b"},
+                )
+            # A malformed id and a UUID of another version are refused by the validator itself.
+            for refused in ("not-a-uuid", "3f2b8c1e-5a4d-1e6f-9b7a-1c2d3e4f5a6b"):
+                with pytest.raises(ValidationError):
+                    await app.tools.run_tool("send_conversation_message", {**base, "reply_to_message_id": refused})
+
+    _run(run())
+
+
 def test_event_door_validates_a_well_shaped_call_and_refuses_a_mis_shaped_one() -> None:
     async def run() -> None:
         async with app.app_context(Manifest.model_validate(_DOORS_MANIFEST)):

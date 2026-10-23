@@ -16,6 +16,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from tai42_skeleton.states.store.base import _StoreBase
+from tai42_skeleton.states.store.person_gate import PersonAdmission, lock_person_gates_shared
 
 from .models import OutboxCall, OutboxItem, OutboxRow, OutboxSubject
 
@@ -75,14 +76,19 @@ class _OutboxStore(_StoreBase):
         records: Sequence[OutboxItem],
         subjects: Sequence[OutboxSubject],
         calls: Sequence[OutboxCall],
+        admit_persons_in_txn: PersonAdmission,
     ) -> int:
         """Insert one row in its own small transaction and return its id.
 
-        A row with records starts ``pending``; a calls-only row starts in ``calls`` with its
+        Every ``person`` subject the row stages (each staged subject, its canonical and its aliases)
+        has its person gate taken shared and is passed to ``admit_persons_in_txn`` before the
+        insert. A row with records starts ``pending``; a calls-only row starts in ``calls`` with its
         (empty) record part marked applied.
         """
         status_sql = "'pending', NULL" if records else "'calls', clock_timestamp()"
+        staged = [s for item in subjects for s in (item.subject, item.canonical, *item.aliases)]
         async with self._write_cursor(None) as cur:
+            await admit_persons_in_txn(await lock_person_gates_shared(cur, staged))
             await cur.execute(
                 "INSERT INTO state_outbox (status, records_applied_at, record_keys, subject_keys, targets, states, "  # noqa: S608 constant column list and status predicates, no input
                 f"run_id, trace_id, records, subjects, calls) VALUES ({status_sql}, "

@@ -227,6 +227,8 @@ class _StubConversations:
         cap_key: str,
         text: str,
         provider_message_id: str,
+        medium_message_id: str | None,
+        reply_to_medium_message_id: str | None,
         params: dict[str, str] | None = None,
         attachments: list[MediaItem] | None = None,
     ) -> str:
@@ -238,6 +240,8 @@ class _StubConversations:
                 cap_key=cap_key,
                 text=text,
                 provider_message_id=provider_message_id,
+                medium_message_id=medium_message_id,
+                reply_to_medium_message_id=reply_to_medium_message_id,
                 params=params,
                 attachments=attachments,
             )
@@ -536,6 +540,7 @@ def make_delivery(
         media=media,
         callback_url=callback_url,
         timeout_at=timeout_at or (datetime.now(UTC) + timedelta(minutes=10)),
+        sensitive=False,
         **extras,
     )
 
@@ -585,10 +590,13 @@ def signed_headers(body: bytes, secret: str, timestamp: int | None = None) -> di
     }
 
 
-def _ok_response(ts: str | None = "1712345678.000100") -> httpx.Response:
+def _ok_response(ts: str | None = "1712345678.000100", channel: str | None = TEST_DEFAULT_RECIPIENT) -> httpx.Response:
+    """A ``chat.postMessage`` success body: the posted ``ts`` and the conversation id it landed in."""
     body: dict[str, object] = {"ok": True}
     if ts is not None:
         body["ts"] = ts
+    if channel is not None:
+        body["channel"] = channel
     return httpx.Response(200, json=body)
 
 

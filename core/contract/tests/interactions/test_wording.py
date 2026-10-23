@@ -75,6 +75,47 @@ def test_form_wording_non_blank_at_least_one_and_strict():
     assert FormWording(fields={"colour": FieldWording(choice_label="Pick")}).fields["colour"].choice_label == "Pick"
 
 
+@pytest.mark.parametrize("member", ["error_line", "update_failed", "step_progress"])
+def test_form_wording_line_members_non_blank_and_count_alone(member: str):
+    value = "Step {step} of {steps}" if member == "step_progress" else "Please check the form"
+    assert getattr(FormWording.model_validate({member: value}), member) == value
+    with pytest.raises(ValueError, match=rf"wording.form.{member} must be non-blank when set"):
+        FormWording.model_validate({member: "  "})
+
+
+def test_form_wording_update_failed_takes_an_optional_reason():
+    assert FormWording(update_failed="No pudimos actualizar: {reason}").update_failed is not None
+    assert FormWording(update_failed="No pudimos actualizar").update_failed == "No pudimos actualizar"
+
+
+def test_form_wording_step_progress_requires_both_tokens():
+    assert FormWording(step_progress="Paso {step} de {steps}").step_progress == "Paso {step} de {steps}"
+    with pytest.raises(ValueError, match=re.escape("wording.form.step_progress must contain the {step} token")):
+        FormWording(step_progress="Paso de {steps}")
+    with pytest.raises(ValueError, match=re.escape("wording.form.step_progress must contain the {steps} token")):
+        FormWording(step_progress="Paso {step}")
+
+
+@pytest.mark.parametrize(
+    "member",
+    ["true_label", "false_label", "length_hint", "required", "add_item", "remove_item", "item_label", "no_items"],
+)
+def test_field_wording_new_members_non_blank_and_count_alone(member: str):
+    value = {"length_hint": "hasta {max}", "item_label": "Elemento {n}"}.get(member, "Palabra")
+    assert getattr(FieldWording.model_validate({member: value}), member) == value
+    with pytest.raises(ValueError, match=rf"wording.form.fields entry.{member} must be non-blank when set"):
+        FieldWording.model_validate({member: "  "})
+
+
+def test_field_wording_token_members():
+    with pytest.raises(
+        ValueError, match=re.escape("wording.form.fields entry.length_hint must contain the {max} token")
+    ):
+        FieldWording(length_hint="hasta diez")
+    with pytest.raises(ValueError, match=re.escape("wording.form.fields entry.item_label must contain the {n} token")):
+        FieldWording(item_label="Elemento")
+
+
 def test_choice_wording_non_blank_at_least_one_and_strict():
     choice = ChoiceWording(label="Open the list", reply_hint="Reply with one", group_label="Options")
     assert choice.group_label == "Options"
@@ -127,9 +168,7 @@ def test_line_wording_tokens_non_blank_at_least_one_and_strict():
 
 
 def test_form_page_wording_non_blank_at_least_one_and_strict():
-    page = FormPageWording(
-        failed="Did not send", network_error="No connection", update_failed="Could not refresh {reason}"
-    )
+    page = FormPageWording(failed="Did not send", network_error="No connection")
     assert page.failed == "Did not send"
     with pytest.raises(ValueError, match=r"wording.answer_page.form.choose_one must be non-blank when set"):
         FormPageWording(choose_one="  ")
@@ -137,6 +176,12 @@ def test_form_page_wording_non_blank_at_least_one_and_strict():
         FormPageWording()
     with pytest.raises(ValueError, match=r"Extra inputs are not permitted"):
         FormPageWording.model_validate({"nope": "x"})
+
+
+def test_form_page_wording_refuses_update_failed():
+    # The could-not-update sentence is a form word (``form.update_failed``), drawn on every form surface.
+    with pytest.raises(ValueError, match=r"Extra inputs are not permitted"):
+        FormPageWording.model_validate({"update_failed": "Could not refresh {reason}"})
 
 
 def test_answer_page_wording_at_least_one_and_strict():
@@ -185,6 +230,9 @@ _MEMBER_VALUE: dict[str, Any] = {
     "form.back": "Back",
     "form.submit": "Submit",
     "form.review_empty": "Nothing yet",
+    "form.error_line": "Please check the form",
+    "form.update_failed": "Could not refresh {reason}",
+    "form.step_progress": "Step {step} of {steps}",
     "form.fields": {"colour": {"choice_label": "Pick"}},
     "choice.label": "Open the list",
     "choice.reply_hint": "Reply with one",
@@ -365,3 +413,57 @@ def test_form_wording_fields_checks_each_member_by_its_own_rule():
     schema = _schema({"code": {"type": "string", "pattern": "^[0-9]+$"}})
     with pytest.raises(ValueError, match=r"wording.form.fields names 'code', which draws no choice list"):
         check_form_wording_fields(schema, None, {"code": FieldWording(choice_label="Pick", invalid="Digits only")})
+
+
+# === the new per-field members' cross-check =================================
+
+
+def test_form_wording_fields_admits_each_new_member_where_it_draws():
+    schema = {
+        "type": "object",
+        "required": ["agree"],
+        "properties": {
+            "agree": {"type": "boolean"},
+            "note": {"type": "string", "maxLength": 40},
+            "contact": {"type": "object", "required": ["email"], "properties": {"email": {"type": "string"}}},
+            "lines": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    fields = {
+        "agree": FieldWording(true_label="Agreed", false_label="Not agreed", required="Tick to go on"),
+        "note": FieldWording(length_hint="at most {max}"),
+        "contact": FieldWording(required="Give an email"),
+        "lines": FieldWording(add_item="More", remove_item="Drop", item_label="Line {n}", no_items="Empty"),
+    }
+    check_form_wording_fields(schema, None, fields)
+
+
+@pytest.mark.parametrize(
+    ("prop", "wording", "reason"),
+    [
+        ({"type": "string"}, {"true_label": "Yes please"}, "which is not a boolean field"),
+        ({"type": "string"}, {"false_label": "No thanks"}, "which is not a boolean field"),
+        ({"type": "string"}, {"length_hint": "up to {max}"}, "which declares no maxLength"),
+        ({"type": "integer", "maxLength": 3}, {"length_hint": "up to {max}"}, "which declares no maxLength"),
+        ({"type": "string"}, {"required": "Fill this in"}, "which is never required"),
+        ({"type": "string"}, {"add_item": "More"}, "which draws no free list"),
+        (
+            {"type": "array", "items": {"type": "string", "enum": ["a"]}},
+            {"no_items": "None"},
+            "which draws no free list",
+        ),
+    ],
+)
+def test_form_wording_fields_refuses_a_new_member_with_nothing_to_draw(
+    prop: dict[str, Any], wording: dict[str, str], reason: str
+):
+    with pytest.raises(ValueError, match=rf"wording.form.fields names 'field', {reason}"):
+        check_form_wording_fields(_schema({"field": prop}), None, {"field": FieldWording.model_validate(wording)})
+
+
+def test_form_wording_fields_refuses_list_words_on_an_options_list():
+    # A per-send option list turns a free-string array into a choice list, which has no add/remove words.
+    schema = _schema({"picks": {"type": "array", "items": {"type": "string"}}})
+    data = FormData.model_validate({"options": {"picks": [{"value": "x"}]}})
+    with pytest.raises(ValueError, match=r"wording.form.fields names 'picks', which draws no free list"):
+        check_form_wording_fields(schema, data, {"picks": FieldWording(add_item="More")})

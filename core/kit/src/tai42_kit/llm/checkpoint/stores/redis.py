@@ -23,7 +23,7 @@ from tai42_kit.llm.checkpoint.providers import (
 )
 from tai42_kit.llm.checkpoint.store_format import generation_marker
 from tai42_kit.llm.checkpoint.value_store import StoredBlob
-from tai42_kit.llm.settings import llm_provider_settings
+from tai42_kit.llm.settings import llm_checkpoint_connection_options, llm_provider_settings
 from tai42_kit.settings import not_configured_message
 
 if TYPE_CHECKING:
@@ -256,17 +256,30 @@ class RedisCheckpointProvider(CheckpointProvider):
     async def open(self, conn_string: str | None) -> tuple[CheckpointResource, Callable[[], Awaitable[None]]]:
         """Build the client, the saver stamping the platform's waiting retention, and set up its indexes.
 
-        ``None`` opens the base Redis namespace; with none configured it raises
-        :data:`REDIS_CHECKPOINT_NOT_CONFIGURED_MESSAGE`.
+        ``None`` opens the base Redis namespace (its retry and timeouts included); with none
+        configured it raises :data:`REDIS_CHECKPOINT_NOT_CONFIGURED_MESSAGE`. A set conn string is
+        the whole identity, with the retry and timeouts of ``LLM_PROVIDER_CHECKPOINT_*``.
         """
         from tai42_kit.clients.settings import RedisConnectionSettings
 
+        kwargs: dict[str, Any]
+        label: str | None
         if conn_string is None:
-            conn_string = RedisConnectionSettings().redis_url
-        if conn_string is None:
+            # The base Redis namespace, its retry and timeouts included.
+            kwargs = {**RedisConnectionSettings().client_kwargs(), "decode_responses": False}
+            label = None
+        else:
+            # The conn string is the whole identity; the behaviour is the checkpointer's own namespace.
+            kwargs = {
+                "url": conn_string,
+                "decode_responses": False,
+                **llm_checkpoint_connection_options().connection_options(),
+            }
+            label = "LLM_PROVIDER_CHECKPOINT_CONN_STRING"
+        if kwargs["url"] is None:
             raise ValueError(REDIS_CHECKPOINT_NOT_CONFIGURED_MESSAGE)
 
-        from tai42_kit.clients.impl.redis import async_redis_from_url
+        from tai42_kit.clients.impl.redis import async_redis_from_url, redis_from_url_kwargs
         from tai42_kit.llm.checkpoint import codec
         from tai42_kit.llm.checkpoint.checkpoint import CheckpointResource
 
@@ -277,7 +290,7 @@ class RedisCheckpointProvider(CheckpointProvider):
         # ``REDIS_URL`` environment variable, blind to the URL resolved above. Injecting the client
         # keeps the saver a non-owner, so that fallback is unreachable. ``connection_args`` is not
         # passed: the saver consults it only while building a client of its own.
-        client = async_redis_from_url(conn_string)
+        client = async_redis_from_url(**redis_from_url_kwargs(kwargs, label=label))
         saver = codec.GuardedAsyncRedisSaver(redis_client=client, ttl=_ttl_config(waiting))
 
         async def close() -> None:

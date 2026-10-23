@@ -13,8 +13,10 @@
  *
  * The `@docs` test also writes the page's docs screenshot, `form-field-error.png`, into
  * `SHOTS_OUT` (a gitignored local default when unset): the form with a broken email
- * address and the platform's sentence under the field. The page has no colour theme, so
- * the shot is one image, cropped to the form.
+ * address and the platform's sentence under the field. The timed-range test writes
+ * `callback-page-range-times-error.png` there too: the range group with each time under
+ * its date and the time sentence in the group's row. The page has no colour theme, so each
+ * shot is one image, cropped to what it shows.
  */
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,7 +29,7 @@ import { needs, test } from './needs';
 
 needs('kind:channels:web', 'kind:interactions', 'store:redis');
 
-/** Where the `@docs` shot lands: `SHOTS_OUT` when set, else a gitignored dir beside the tests. */
+/** Where the page shots land: `SHOTS_OUT` when set, else a gitignored dir beside the tests. */
 const SHOTS_OUT = process.env.SHOTS_OUT ?? fileURLToPath(new URL('../docs-shots-output', import.meta.url));
 
 /** A 1x1 PNG: the bytes the routed remote image answers with. */
@@ -152,7 +154,10 @@ test('the callback form page draws a display-block image from a remote https sou
   // The page still answers: submitting resolves the parked ask with the entered value.
   await page.locator('[data-field="notes"]').fill(notes);
   await page.getByRole('button', { name: 'Submit' }).click();
-  expect(await askResult(answered)).toEqual({ kind: 'result', result: { notes } });
+  expect(await askResult(answered)).toEqual({
+    kind: 'result',
+    result: { answer: { notes }, reply_to: null, params: null },
+  });
 });
 
 /** A form whose fields carry the shapes the page catches itself, and one only the door refuses. */
@@ -216,9 +221,60 @@ test('the callback form page stops a broken shape under its field and pins the d
   await submit.click();
   expect(await askResult(answered)).toEqual({
     kind: 'result',
-    result: { email: 'alice@example.org', code: '1234', even: 4 },
+    result: { answer: { email: 'alice@example.org', code: '1234', even: 4 }, reply_to: null, params: null },
   });
 });
+
+/** Two steps: a required label first, then a free note. */
+const REQUIRED_STEP_SCHEMA = {
+  type: 'object',
+  required: ['label'] as string[],
+  properties: { label: { type: 'string', title: 'Label' }, note: { type: 'string', title: 'Note' } },
+};
+const REQUIRED_STEP_PAGES = [
+  { title: 'Label', fields: ['label'] },
+  { title: 'Note', fields: ['note'] },
+];
+
+for (const own of [true, false]) {
+  test(`the callback form page holds a step on an empty required field ${
+    own ? "with the caller's sentence pinned under it" : "with the browser's own check"
+  }`, async ({ page, request }) => {
+    const { ticket, answered } = await openCallbackForm(page, request, own ? 'formreqown' : 'formreq', {
+      schema: REQUIRED_STEP_SCHEMA,
+      pages: REQUIRED_STEP_PAGES,
+      ...(own ? { wording: { form: { fields: { label: { required: 'Write a label first' } } } } } : {}),
+    });
+    await gotoCallbackPage(page, ticket);
+
+    const labelStep = page.locator('section.step[data-page-title="Label"]');
+    const noteStep = page.locator('section.step[data-page-title="Note"]');
+    const labelError = page.locator('[data-field-row="label"] .field-error');
+    await page.getByRole('button', { name: 'Next' }).click();
+
+    // The empty required label holds the step either way.
+    await expect(labelStep).toBeVisible();
+    await expect(noteStep).toBeHidden();
+    if (own) {
+      await expect(labelError).toHaveText('Write a label first');
+    } else {
+      // No caller sentence: the browser's own required check holds the step and nothing is pinned.
+      await expect(labelError).toHaveCount(0);
+      expect(
+        await page.locator('[data-field="label"]').evaluate((el) => (el as HTMLInputElement).validity.valueMissing),
+      ).toBe(true);
+    }
+
+    await page.locator('[data-field="label"]').fill('Alpha');
+    await page.getByRole('button', { name: 'Next' }).click();
+    await expect(noteStep).toBeVisible();
+    await page.getByRole('button', { name: 'Submit' }).click();
+    expect(await askResult(answered)).toEqual({
+      kind: 'result',
+      result: { answer: { label: 'Alpha' }, reply_to: null, params: null },
+    });
+  });
+}
 
 /** The docs shot's form: one required email address, no caller wording. */
 const EMAIL_SCHEMA = {
@@ -246,5 +302,172 @@ test('the callback form page shows the platform sentence under a broken email ad
   // A full address resolves the parked ask.
   await page.locator('[data-field="email"]').fill('alice@example.org');
   await page.getByRole('button', { name: 'Submit' }).click();
-  expect(await askResult(answered)).toEqual({ kind: 'result', result: { email: 'alice@example.org' } });
+  expect(await askResult(answered)).toEqual({
+    kind: 'result',
+    result: { answer: { email: 'alice@example.org' }, reply_to: null, params: null },
+  });
+});
+
+/** A range whose two `date` ends each have a `timeOf` time, the times declared after both dates. */
+const TIMED_RANGE_SCHEMA = {
+  type: 'object',
+  required: ['start', 'end'] as string[],
+  properties: {
+    start: { type: 'string', format: 'date', title: 'From' },
+    end: { type: 'string', format: 'date', title: 'To', rangeStart: 'start' },
+    start_time: { type: 'string', format: 'time', title: 'From time', timeOf: 'start' },
+    end_time: { type: 'string', format: 'time', title: 'To time', timeOf: 'end' },
+  },
+};
+
+/** Record every answer the page posts for `ticket`, so a test can tell the page kept one back. */
+function countAnswers(page: Page, ticket: string): number[] {
+  const answers: number[] = [];
+  page.on('request', (req) => {
+    if (req.method() === 'POST' && req.url().includes(`/api/interactions/callback/${ticket}`)) {
+      answers.push(1);
+    }
+  });
+  return answers;
+}
+
+test('the callback form page draws each time under its date and stops an earlier end time', async ({
+  page,
+  request,
+}) => {
+  const { ticket, answered } = await openCallbackForm(page, request, 'formtimed', { schema: TIMED_RANGE_SCHEMA });
+  await gotoCallbackPage(page, ticket);
+  const answers = countAnswers(page, ticket);
+
+  // One range group; each end's time sits under its own date, whatever order the schema declares.
+  const group = page.locator('fieldset.daterange');
+  await expect(group).toHaveCount(1);
+  const drawn = await group
+    .locator('[data-field]')
+    .evaluateAll((els) => els.map((el) => el.getAttribute('data-field')));
+  expect(drawn).toEqual(['start', 'start_time', 'end', 'end_time']);
+  await expect(group.locator('.range-end').nth(1).locator('[data-field]')).toHaveCount(2);
+
+  // The same date with an earlier end time: the page keeps the answer, shows the time sentence in
+  // the group's row and sends nothing.
+  await page.locator('[data-field="start"]').fill('2026-05-01');
+  await page.locator('[data-field="end"]').fill('2026-05-01');
+  await page.locator('[data-field="start_time"]').fill('10:00');
+  await page.locator('[data-field="end_time"]').fill('09:00');
+  const submit = page.getByRole('button', { name: 'Submit' });
+  await submit.click();
+  const rangeRow = page.locator('[data-field-row="start"]');
+  await expect(rangeRow.locator('.field-error')).toHaveText('The end time must be on or after the start time');
+  expect(answers).toEqual([]);
+  mkdirSync(SHOTS_OUT, { recursive: true });
+  await rangeRow.screenshot({ path: join(SHOTS_OUT, 'callback-page-range-times-error.png') });
+
+  // A later end time resolves the parked ask with the four strings as entered.
+  await page.locator('[data-field="end_time"]').fill('11:30');
+  await submit.click();
+  expect(await askResult(answered)).toEqual({
+    kind: 'result',
+    result: {
+      answer: { start: '2026-05-01', end: '2026-05-01', start_time: '10:00', end_time: '11:30' },
+      reply_to: null,
+      params: null,
+    },
+  });
+});
+
+test('the callback form page orders a date start against a date-time end by written date', async ({
+  page,
+  request,
+}) => {
+  const { ticket, answered } = await openCallbackForm(page, request, 'formmixed', {
+    schema: {
+      type: 'object',
+      required: ['start', 'end'] as string[],
+      properties: {
+        start: { type: 'string', format: 'date', title: 'From' },
+        end: { type: 'string', format: 'date-time', title: 'To', rangeStart: 'start' },
+      },
+    },
+  });
+  await gotoCallbackPage(page, ticket);
+  const answers = countAnswers(page, ticket);
+  const submit = page.getByRole('button', { name: 'Submit' });
+
+  // An end written on an earlier date is out of order on the page itself.
+  await page.locator('[data-field="start"]').fill('2026-05-03');
+  await page.locator('[data-field="end"]').fill('2026-05-02T23:00:00Z');
+  await submit.click();
+  await expect(page.locator('[data-field-row="end"] .field-error')).toHaveText(
+    'The end date must be on or after the start date',
+  );
+  expect(answers).toEqual([]);
+
+  // The same written date is in order, whatever the time of day.
+  await page.locator('[data-field="end"]').fill('2026-05-03T00:30:00Z');
+  await submit.click();
+  expect(await askResult(answered)).toEqual({
+    kind: 'result',
+    result: { answer: { start: '2026-05-03', end: '2026-05-03T00:30:00Z' }, reply_to: null, params: null },
+  });
+});
+
+test('the callback form page sends a date-time start with a date end on the same written date', async ({
+  page,
+  request,
+}) => {
+  const { ticket, answered } = await openCallbackForm(page, request, 'formmixedrev', {
+    schema: {
+      type: 'object',
+      required: ['start', 'end'] as string[],
+      properties: {
+        start: { type: 'string', format: 'date-time', title: 'From' },
+        end: { type: 'string', format: 'date', title: 'To', rangeStart: 'start' },
+      },
+    },
+  });
+  await gotoCallbackPage(page, ticket);
+
+  await page.locator('[data-field="start"]').fill('2026-05-03T18:00:00+02:00');
+  await page.locator('[data-field="end"]').fill('2026-05-03');
+  await page.getByRole('button', { name: 'Submit' }).click();
+  expect(await askResult(answered)).toEqual({
+    kind: 'result',
+    result: { answer: { start: '2026-05-03T18:00:00+02:00', end: '2026-05-03' }, reply_to: null, params: null },
+  });
+});
+
+test('the callback form page leaves two date-time ends to the door and pins its time refusal', async ({
+  page,
+  request,
+}) => {
+  const { ticket, answered } = await openCallbackForm(page, request, 'forminstant', {
+    schema: {
+      type: 'object',
+      required: ['start', 'end'] as string[],
+      properties: {
+        start: { type: 'string', format: 'date-time', title: 'From' },
+        end: { type: 'string', format: 'date-time', title: 'To', rangeStart: 'start' },
+      },
+    },
+  });
+  await gotoCallbackPage(page, ticket);
+  const answers = countAnswers(page, ticket);
+  const submit = page.getByRole('button', { name: 'Submit' });
+
+  // An end an hour before the start on the same day: the page sends it, and the door's refusal is
+  // pinned under the end with the time sentence; the ask stays answerable.
+  await page.locator('[data-field="start"]').fill('2026-05-03T10:00:00Z');
+  await page.locator('[data-field="end"]').fill('2026-05-03T09:00:00Z');
+  await submit.click();
+  await expect(page.locator('[data-field-row="end"] .field-error')).toHaveText(
+    'The end time must be on or after the start time',
+  );
+  expect(answers).toEqual([1]);
+
+  await page.locator('[data-field="end"]').fill('2026-05-03T11:00:00Z');
+  await submit.click();
+  expect(await askResult(answered)).toEqual({
+    kind: 'result',
+    result: { answer: { start: '2026-05-03T10:00:00Z', end: '2026-05-03T11:00:00Z' }, reply_to: null, params: null },
+  });
 });

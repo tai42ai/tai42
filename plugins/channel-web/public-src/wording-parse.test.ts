@@ -32,7 +32,21 @@ describe('wordingOf', () => {
       form: {
         submit: 'File it',
         back: 'Previous',
-        fields: { kind: { choiceLabel: 'Pick a kind', invalid: null } },
+        updateFailed: null,
+        stepProgress: null,
+        fields: {
+          kind: {
+            choiceLabel: 'Pick a kind',
+            invalid: null,
+            trueLabel: null,
+            falseLabel: null,
+            required: null,
+            addItem: null,
+            removeItem: null,
+            itemLabel: null,
+            noItems: null,
+          },
+        },
       },
       choice: null,
       answer: null,
@@ -54,9 +68,31 @@ describe('wordingOf', () => {
       form: {
         submit: null,
         back: null,
+        updateFailed: null,
+        stepProgress: null,
         fields: {
-          email: { choiceLabel: null, invalid: 'Use your work address' },
-          kind: { choiceLabel: 'Pick a kind', invalid: 'Pick one of the kinds' },
+          email: {
+            choiceLabel: null,
+            invalid: 'Use your work address',
+            trueLabel: null,
+            falseLabel: null,
+            required: null,
+            addItem: null,
+            removeItem: null,
+            itemLabel: null,
+            noItems: null,
+          },
+          kind: {
+            choiceLabel: 'Pick a kind',
+            invalid: 'Pick one of the kinds',
+            trueLabel: null,
+            falseLabel: null,
+            required: null,
+            addItem: null,
+            removeItem: null,
+            itemLabel: null,
+            noItems: null,
+          },
         },
       },
       choice: null,
@@ -65,9 +101,73 @@ describe('wordingOf', () => {
     });
   });
 
+  it('parses the form lines and every per-field member the widget reads', () => {
+    expect(
+      wordingOf({
+        form: {
+          error_line: 'Fix the fields below',
+          update_failed: 'Could not update: {reason}',
+          step_progress: 'Page {step}/{steps}',
+          fields: {
+            agree: { true_label: 'Agreed', false_label: 'Declined', length_hint: 'unused' },
+            items: {
+              required: 'Add at least one',
+              add_item: 'Add line',
+              remove_item: 'Drop line',
+              item_label: 'Line',
+              no_items: 'No lines yet',
+            },
+          },
+        },
+      }),
+    ).toEqual({
+      form: {
+        submit: null,
+        back: null,
+        updateFailed: 'Could not update: {reason}',
+        stepProgress: 'Page {step}/{steps}',
+        fields: {
+          agree: {
+            choiceLabel: null,
+            invalid: null,
+            trueLabel: 'Agreed',
+            falseLabel: 'Declined',
+            required: null,
+            addItem: null,
+            removeItem: null,
+            itemLabel: null,
+            noItems: null,
+          },
+          items: {
+            choiceLabel: null,
+            invalid: null,
+            trueLabel: null,
+            falseLabel: null,
+            required: 'Add at least one',
+            addItem: 'Add line',
+            removeItem: 'Drop line',
+            itemLabel: 'Line',
+            noItems: 'No lines yet',
+          },
+        },
+      },
+      choice: null,
+      answer: null,
+      status: null,
+    });
+  });
+
+  it('rejects a blank form line or per-field member', () => {
+    expect(wordingOf({ form: { error_line: ' ' } })).toBeUndefined();
+    expect(wordingOf({ form: { update_failed: '' } })).toBeUndefined();
+    expect(wordingOf({ form: { step_progress: '  ' } })).toBeUndefined();
+    expect(wordingOf({ form: { fields: { a: { length_hint: ' ' } } } })).toBeUndefined();
+    expect(wordingOf({ form: { fields: { a: { no_items: '' } } } })).toBeUndefined();
+  });
+
   it('defaults absent form members to null and an absent field map to empty', () => {
     expect(wordingOf({ form: { submit: 'Go' } })).toEqual({
-      form: { submit: 'Go', back: null, fields: {} },
+      form: { submit: 'Go', back: null, updateFailed: null, stepProgress: null, fields: {} },
       choice: null,
       answer: null,
       status: null,
@@ -98,7 +198,7 @@ describe('wordingOf', () => {
     expect(wordingOf({ choice: { group_label: ' ' } })).toBeUndefined();
   });
 
-  it('parses the answer chapter, dropping only rejected_final', () => {
+  it('parses the answer chapter, closing sentence included', () => {
     expect(
       wordingOf({
         answer: {
@@ -121,6 +221,7 @@ describe('wordingOf', () => {
         submit: 'Send',
         replyHint: 'Type',
         rejected: 'Nope: {reason}',
+        rejectedFinal: 'Closed',
       },
       status: null,
     });

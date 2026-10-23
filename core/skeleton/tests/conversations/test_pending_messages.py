@@ -12,6 +12,7 @@ from tai42_skeleton.conversations.pending import pending_messages
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
+from .conftest import create_record
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 _THREAD = "bridge:line:t"
@@ -50,9 +51,9 @@ def _accepted(message_id: str, created_at: float, text: str) -> ConversationReco
 
 async def test_pending_messages_projects_the_later_accepted_messages(store):
     now = time.time()
-    await store.create_record(_accepted("lead", now, "first"), intake_token="w")
-    await store.create_record(_accepted("f1", now + 1, "second"), intake_token="w")
-    await store.create_record(_accepted("f2", now + 2, "third"), intake_token="w")
+    await create_record(store, _accepted("lead", now, "first"), intake_token="w")
+    await create_record(store, _accepted("f1", now + 1, "second"), intake_token="w")
+    await create_record(store, _accepted("f2", now + 2, "third"), intake_token="w")
 
     pending = await pending_messages(_THREAD, after="lead")
     assert [(m.message_id, m.text, m.accepted_at) for m in pending] == [
@@ -63,7 +64,7 @@ async def test_pending_messages_projects_the_later_accepted_messages(store):
 
 async def test_pending_messages_of_an_unknown_after_is_empty(store):
     now = time.time()
-    await store.create_record(_accepted("lead", now, "first"), intake_token="w")
+    await create_record(store, _accepted("lead", now, "first"), intake_token="w")
     # An ``after`` that names no record — an unknown lead — reads as nothing pending.
     assert await pending_messages(_THREAD, after="ghost") == []
 

@@ -7,7 +7,7 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from tai42_contract.conversations import BlankInboundTextError, ConversationRoute
+from tai42_contract.conversations import BlankInboundTextError, ConversationRoute, ReplyTo
 from tai42_contract.interactions import LocationElement, MediaItem
 from tai42_contract.locale import normalize_optional_locale
 
@@ -17,6 +17,7 @@ from tai42_skeleton.conversations.caps import AddressAdmission, get_turn_caps
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
+from tai42_skeleton.conversations.reply_to import resolve_reply_to
 from tai42_skeleton.conversations.turn.admission import refuse_turn_while_reloading
 from tai42_skeleton.conversations.turn.inbound_checks import (
     _checked_attachments,
@@ -26,7 +27,7 @@ from tai42_skeleton.conversations.turn.inbound_checks import (
     _checked_params,
 )
 from tai42_skeleton.conversations.turn.keys import _channel_bucket_key
-from tai42_skeleton.conversations.turn.outcome import _text_part
+from tai42_skeleton.conversations.turn.outcome import _text_part, reply_text
 from tai42_skeleton.conversations.turn.record import _new_record, _with_outcome
 from tai42_skeleton.conversations.turn.redrive import _resolve_stranded_intake
 from tai42_skeleton.conversations.turn.routing import (
@@ -50,6 +51,8 @@ async def accept(
     cap_key: str,
     text: str,
     provider_message_id: str,
+    medium_message_id: str | None,
+    reply_to_medium_message_id: str | None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
     attachments: list[MediaItem] | None = None,
@@ -65,7 +68,13 @@ async def accept(
     :class:`~tai42_contract.errors.ServerReloadingError` (retriable), before any lookup or write.
 
     Idempotent on ``(channel, provider_message_id)``: a redelivery returns the existing
-    ``message_id`` and starts no second turn. Every gate that can refuse runs before any
+    ``message_id`` and starts no second turn. ``medium_message_id`` is stored as the record's
+    ``inbound_message_id`` with its message ref, so a later quote of the message finds it; it is
+    not the dedupe key. ``reply_to_medium_message_id`` is the medium's id of the message this one
+    quotes (``None`` when it quotes none): it is resolved against this thread's records into the
+    record's ``inbound_reply_to`` (shed records included) and a tool target's payload ``reply_to``.
+    A redelivery resolves nothing, and a store error while resolving propagates with nothing
+    written. Every gate that can refuse runs before any
     state is written, so a refusal leaves the pair unclaimed. The turn runs in the
     background; the caller gets the id immediately.
 
@@ -132,6 +141,18 @@ async def accept(
     if owner is not None:
         # Redelivery of a message already accepted: return the prior turn's id.
         return owner
+    inbound_reply_to = (
+        None
+        if reply_to_medium_message_id is None
+        else await resolve_reply_to(
+            store,
+            channel=channel,
+            our_identity=channel_identity,
+            client_address=address,
+            thread_id=thread_id,
+            medium_message_id=reply_to_medium_message_id,
+        )
+    )
 
     message_id = str(uuid4())
     admission = get_turn_caps().admit_address(
@@ -147,10 +168,12 @@ async def accept(
             client_address=address,
             text=text,
             provider_message_id=provider_message_id,
+            medium_message_id=medium_message_id,
             form=checked_form,
             form_tag=checked_form_tag,
             attachments=checked_attachments,
             location=checked_location,
+            inbound_reply_to=inbound_reply_to,
         )
     if admission is AddressAdmission.SHED_SILENT:
         return await _shed_silently(
@@ -162,10 +185,12 @@ async def accept(
             client_address=address,
             text=text,
             provider_message_id=provider_message_id,
+            medium_message_id=medium_message_id,
             form=checked_form,
             form_tag=checked_form_tag,
             attachments=checked_attachments,
             location=checked_location,
+            inbound_reply_to=inbound_reply_to,
         )
 
     return await _accept_for_turn(
@@ -177,6 +202,7 @@ async def accept(
         client_address=address,
         text=text,
         provider_message_id=provider_message_id,
+        medium_message_id=medium_message_id,
         multichannel=multichannel,
         params=checked_params,
         form=checked_form,
@@ -184,6 +210,7 @@ async def accept(
         attachments=checked_attachments,
         location=checked_location,
         locale=checked_locale,
+        inbound_reply_to=inbound_reply_to,
     )
 
 
@@ -197,6 +224,7 @@ async def _accept_for_turn(
     client_address: str,
     text: str,
     provider_message_id: str,
+    medium_message_id: str | None,
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
@@ -204,6 +232,7 @@ async def _accept_for_turn(
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
     locale: str | None = None,
+    inbound_reply_to: ReplyTo | None = None,
 ) -> str:
     """Commit an admitted channel message to a turn in the one order that keeps the inbound claim sound.
 
@@ -223,17 +252,20 @@ async def _accept_for_turn(
         client_address=client_address,
         caller_principal=None,
         provider_message_id=provider_message_id,
+        inbound_message_id=medium_message_id,
         inbound_text=text,
         inbound_form=form,
         inbound_form_tag=form_tag,
         inbound_attachments=attachments,
         inbound_location=location,
+        inbound_reply_to=inbound_reply_to,
         inbound_locale=locale,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
         owner = await store.create_record(
             intake,
+            route=route,
             intake_token=intake_token,
             claim_key=store.settings.dedupe_key(channel, provider_message_id),
             refresh_mode=True,
@@ -281,10 +313,12 @@ async def _shed_with_reply(
     client_address: str,
     text: str,
     provider_message_id: str,
+    medium_message_id: str | None,
     form: dict[str, Any] | None = None,
     form_tag: str | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
+    inbound_reply_to: ReplyTo | None = None,
 ) -> str:
     """Answer an over-limit address with its one paid slow-down reply, in the turn path's order.
 
@@ -301,16 +335,21 @@ async def _shed_with_reply(
         client_address=client_address,
         caller_principal=None,
         provider_message_id=provider_message_id,
+        inbound_message_id=medium_message_id,
         inbound_text=text,
         inbound_form=form,
         inbound_form_tag=form_tag,
         inbound_attachments=attachments,
         inbound_location=location,
+        inbound_reply_to=inbound_reply_to,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
         owner = await store.create_record(
-            intake, intake_token=intake_token, claim_key=store.settings.dedupe_key(channel, provider_message_id)
+            intake,
+            route=route,
+            intake_token=intake_token,
+            claim_key=store.settings.dedupe_key(channel, provider_message_id),
         )
     except asyncio.CancelledError:
         _spawn_intake_resolution(message_id)
@@ -322,7 +361,7 @@ async def _shed_with_reply(
         raise
     if owner != message_id:
         return owner
-    completed = _with_outcome(intake, "answered", [_text_part(_SLOW_DOWN_TEXT)], None)
+    completed = _with_outcome(intake, "answered", [_text_part(reply_text(route, "slow_down", _SLOW_DOWN_TEXT))], None)
     outcome = await store.complete_turn(completed)
     if outcome != 1:
         raise RuntimeError(
@@ -343,10 +382,12 @@ async def _shed_silently(
     client_address: str,
     text: str,
     provider_message_id: str,
+    medium_message_id: str | None,
     form: dict[str, Any] | None = None,
     form_tag: str | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
+    inbound_reply_to: ReplyTo | None = None,
 ) -> str:
     """Drop a message from an address already given its slow-down reply this window.
 
@@ -360,15 +401,21 @@ async def _shed_silently(
         client_address=client_address,
         caller_principal=None,
         provider_message_id=provider_message_id,
+        inbound_message_id=medium_message_id,
         inbound_text=text,
         inbound_form=form,
         inbound_form_tag=form_tag,
         inbound_attachments=attachments,
         inbound_location=location,
+        inbound_reply_to=inbound_reply_to,
         delivery_status=DeliveryStatus.SHED,
         error=f"address {client_address!r} was over its rate cap after a prior slow-down reply",
     )
-    owner = await store.create_record(record, claim_key=store.settings.dedupe_key(channel, provider_message_id))
+    owner = await store.create_record(
+        record,
+        route=route,
+        claim_key=store.settings.dedupe_key(channel, provider_message_id),
+    )
     if owner != message_id:
         return owner
     logger.warning(

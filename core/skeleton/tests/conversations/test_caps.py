@@ -576,3 +576,105 @@ def test_effective_rate_is_the_route_override_else_the_global_rate() -> None:
     caps = TurnCaps(lambda: ConversationsSettings(per_address_turns_per_hour=40))
     assert caps.effective_rate(None) == 40
     assert caps.effective_rate(7) == 7
+
+
+# -- hold_thread ----------------------------------------------------------------------------------
+
+
+async def test_hold_thread_takes_no_gate_slot(small_settings):
+    caps = TurnCaps(lambda: small_settings)  # max_concurrent_turns == 1
+    caps.reserve_thread_slot("a")
+    async with caps.run_reserved("a"), caps.hold_thread("b", acquire_timeout_seconds=0.5):
+        assert caps._thread_waiters["b"] == 1
+    assert caps._thread_waiters.get("b", 0) == 0
+
+
+async def test_hold_thread_holds_the_threads_fifo_lock(small_settings):
+    caps = TurnCaps(lambda: small_settings)
+    async with caps.hold_thread("t", acquire_timeout_seconds=0.5):
+        caps.reserve_thread_slot("t")
+        with pytest.raises(ThreadBusyError, match="busy with an in-flight turn"):
+            async with caps.run_reserved("t", acquire_timeout_seconds=0.05):
+                pass
+    caps.reserve_thread_slot("t")
+    async with caps.run_reserved("t", acquire_timeout_seconds=0.05):
+        pass
+
+
+async def test_hold_thread_holds_the_threads_cross_worker_lease(fake_lease):
+    fake, settings = fake_lease
+    key = settings.thread_lease_key("T")
+    caps = TurnCaps(lambda: settings)
+
+    async with caps.hold_thread("T", acquire_timeout_seconds=0.5):
+        assert fake._strings.get(key)
+
+    assert key not in fake._strings
+
+
+async def test_hold_thread_waits_out_a_foreign_lease_only_to_its_bound(fake_lease):
+    fake, settings = fake_lease
+    key = settings.thread_lease_key("T")
+    await fake.set(key, "foreign-token", px=120_000, nx=True)
+    caps = TurnCaps(lambda: settings)
+
+    with pytest.raises(ThreadBusyError, match="busy with an in-flight turn"):
+        async with caps.hold_thread("T", acquire_timeout_seconds=0.1):
+            pass
+
+    assert fake._strings.get(key) == "foreign-token"
+    assert caps._thread_waiters.get("T", 0) == 0
+
+
+async def test_hold_thread_on_a_full_queue_is_loud(small_settings):
+    caps = TurnCaps(lambda: small_settings)
+    caps.reserve_thread_slot("t")
+    caps.reserve_thread_slot("t")  # depth == 2, the thread is full
+
+    with pytest.raises(ThreadQueueOverflowError):
+        async with caps.hold_thread("t", acquire_timeout_seconds=0.5):
+            pass
+
+    assert caps._thread_waiters["t"] == 2
+
+
+async def test_hold_thread_behind_a_held_lock_refuses_at_its_bound_and_gives_its_place_back(small_settings):
+    caps = TurnCaps(lambda: small_settings)
+    held = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder() -> None:
+        caps.reserve_thread_slot("t")
+        async with caps.run_reserved("t"):
+            held.set()
+            await release.wait()
+
+    holder_task = asyncio.create_task(holder())
+    await held.wait()
+
+    with pytest.raises(ThreadBusyError, match="busy with an in-flight turn"):
+        async with caps.hold_thread("t", acquire_timeout_seconds=0.05):
+            pass
+
+    assert caps._thread_waiters["t"] == 1
+    release.set()
+    await holder_task
+    assert caps._thread_waiters.get("t", 0) == 0
+
+
+async def test_hold_thread_gives_its_place_back_when_its_body_raises(small_settings):
+    caps = TurnCaps(lambda: small_settings)
+
+    held: list[int] = []
+
+    async def body_that_fails() -> None:
+        async with caps.hold_thread("t", acquire_timeout_seconds=0.5):
+            held.append(caps._thread_waiters["t"])
+            raise ValueError("the body failed")
+
+    with pytest.raises(ValueError, match="the body failed"):
+        await body_that_fails()
+
+    assert held == [1]
+    assert caps._thread_waiters.get("t", 0) == 0
+    assert "t" not in caps._thread_locks

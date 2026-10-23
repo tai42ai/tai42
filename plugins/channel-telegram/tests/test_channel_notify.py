@@ -101,7 +101,7 @@ async def test_notify_failure_response_raises_token_free(http_recorder, fake_red
 async def test_notify_returns_sent_message_id(http_recorder, fake_redis):
     # The default responder mints message_id 42; notify returns it as [str].
     result = await TelegramChannel().notify(ChannelNotification(message="Deploy finished."))
-    assert result == ["42"]
+    assert result.message_ids == ["42"]
 
 
 async def test_notify_ok_without_message_id_raises(http_recorder, fake_redis):
@@ -117,7 +117,7 @@ async def test_notify_sender_identity_matches_sends_verbatim_and_returns_id(http
     result = await TelegramChannel().notify(
         ChannelNotification(message="reply", recipient="555", sender_identity="123456")
     )
-    assert result == ["42"]
+    assert result.message_ids == ["42"]
     assert json.loads(http_recorder.requests[0].content) == {"chat_id": "555", "text": "reply"}
 
 
@@ -168,7 +168,7 @@ async def test_notify_sends_body_then_photos_returning_every_id(http_recorder, f
     }
     # A captionless image sends no caption key.
     assert json.loads(http_recorder.requests[2].content) == {"chat_id": "777", "photo": "https://cdn.test/b.png"}
-    assert result == ["42", "42", "42"]
+    assert result.message_ids == ["42", "42", "42"]
     # Fire-and-forget: no correlation is stored (no options here).
     assert fake_redis.data == {}
 
@@ -184,7 +184,7 @@ async def test_notify_media_only_images_skip_the_sendmessage(http_recorder, fake
 
     methods = [str(r.url).rsplit("/", 1)[-1] for r in http_recorder.requests]
     assert methods == ["sendPhoto", "sendPhoto"]  # no sendMessage
-    assert result == ["42", "42"]
+    assert result.message_ids == ["42", "42"]
 
 
 async def test_notify_media_only_with_a_link_renders_the_link_as_the_body(http_recorder, fake_redis):
@@ -200,7 +200,7 @@ async def test_notify_media_only_with_a_link_renders_the_link_as_the_body(http_r
     assert methods == ["sendMessage", "sendPhoto"]
     body = json.loads(http_recorder.requests[0].content)
     assert body["text"] == "doc: https://docs.test/x"
-    assert result == ["42", "42"]
+    assert result.message_ids == ["42", "42"]
 
 
 async def test_notify_options_render_keyboard_and_store_side_record(http_recorder, fake_redis):
@@ -218,7 +218,7 @@ async def test_notify_options_render_keyboard_and_store_side_record(http_recorde
             [{"text": "c", "callback_data": "2"}],
         ]
     }
-    assert result == ["42"]
+    assert result.message_ids == ["42"]
     # No author-set ids: the wire token is the index, id/description null.
     assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == _records(
         ("0", "a", None, None), ("1", "b", None, None), ("2", "c", None, None)
@@ -334,7 +334,7 @@ async def test_notify_header_media_carries_body_as_caption_with_keyboard(http_re
         "caption": "Look:",
         "reply_markup": {"inline_keyboard": [[{"text": "Go", "callback_data": "go"}]]},
     }
-    assert result == ["42"]
+    assert result.message_ids == ["42"]
     # The keyboard-carrying (caption) message anchors the option side record.
     assert json.loads(fake_redis.data["channel:telegram:opts:777:42"]) == _records(("go", "Go", "go", None))
 
@@ -380,7 +380,7 @@ async def test_notify_header_media_degrades_to_separate_message_when_body_too_lo
     text_body = json.loads(http_recorder.requests[1].content)
     assert text_body["text"] == long_message
     assert text_body["reply_markup"] == {"inline_keyboard": [[{"text": "Go", "callback_data": "go"}]]}
-    assert result == ["42", "42"]
+    assert result.message_ids == ["42", "42"]
 
 
 async def test_notify_document_video_audio_send_by_kind(http_recorder, fake_redis):
@@ -406,7 +406,7 @@ async def test_notify_document_video_audio_send_by_kind(http_recorder, fake_redi
         "audio": "https://cdn.test/c.mp3",
         "caption": "a clip",
     }
-    assert result == ["42", "42", "42", "42"]
+    assert result.message_ids == ["42", "42", "42", "42"]
 
 
 async def test_notify_location_sends_send_location(http_recorder, fake_redis):
@@ -417,7 +417,7 @@ async def test_notify_location_sends_send_location(http_recorder, fake_redis):
     methods = [str(r.url).rsplit("/", 1)[-1] for r in http_recorder.requests]
     assert methods == ["sendMessage", "sendLocation"]
     assert json.loads(http_recorder.requests[1].content) == {"chat_id": "777", "latitude": 51.5, "longitude": -0.12}
-    assert result == ["42", "42"]
+    assert result.message_ids == ["42", "42"]
 
 
 async def test_notify_location_with_name_and_address_sends_venue(http_recorder, fake_redis):
@@ -452,7 +452,7 @@ async def test_notify_photo_failure_after_body_names_delivered_ids(http_recorder
     def responder(request: httpx.Request) -> httpx.Response:
         if str(request.url).endswith("/sendPhoto"):
             return httpx.Response(200, json={"ok": False, "error_code": 400, "description": "bad photo"})
-        return httpx.Response(200, json={"ok": True, "result": {"message_id": 42}})
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 42, "chat": {"id": 777}}})
 
     http_recorder.responder = responder
     media = [MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/a.png", caption=None)]

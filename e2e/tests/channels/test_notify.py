@@ -55,7 +55,7 @@ async def test_notify_external_is_plain_and_stateless(channel_case: ChannelCase,
     async def ask_probe() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
             result = await mcp.call_tool("ask", {"question": probe_q, "channel": case.name})
-        return result.data
+        return result.data.answer
 
     probe_task = asyncio.create_task(ask_probe())
     try:

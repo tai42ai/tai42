@@ -11,6 +11,8 @@ from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
 
+from .._fakes.hook_runs import MarkRecorder
+
 
 def _hook(**exprs) -> HookParams:
     return HookParams(
@@ -27,7 +29,7 @@ async def test_start_expr_reads_parked_and_reaches_the_tool(make_app) -> None:
     app = make_app()
     app.interactions.parked = [ParkedEntry(id="i-1", status="asking"), ParkedEntry(id="i-2", status="asking")]
     hook = _hook(start_expr=TemplatedText(content="{waiting: ($parked | length)}"))
-    await InMemoryHooksManager._run_hook(hook, {"event": 1})
+    await InMemoryHooksManager._run_hook(hook, {"event": 1}, idempotency_key="run-1", mark_acted=MarkRecorder())
     # The start_expr's $parked-derived kwargs reached the fired tool.
     assert app.tools.runs == [("noop", {"waiting": 2})]
     assert app.interactions.visit_calls[0].receives_outcome is False
@@ -41,7 +43,7 @@ async def test_parked_is_bound_with_no_null_keys(make_app) -> None:
     hook = _hook(
         start_expr=TemplatedText(content="{nulls: [$parked[0] | to_entries[] | select(.value == null) | .key]}")
     )
-    await InMemoryHooksManager._run_hook(hook, {"event": 1})
+    await InMemoryHooksManager._run_hook(hook, {"event": 1}, idempotency_key="run-1", mark_acted=MarkRecorder())
     assert app.tools.runs == [("noop", {"nulls": []})]
 
 
@@ -52,7 +54,7 @@ async def test_cancel_and_resume_reach_visit_receiver_less(make_app) -> None:
         cancel_expr=TemplatedText(content="[$parked[].id]"),
         resume_expr=TemplatedText(content="$parked[0].id"),
     )
-    await InMemoryHooksManager._run_hook(hook, {"event": 1})
+    await InMemoryHooksManager._run_hook(hook, {"event": 1}, idempotency_key="run-1", mark_acted=MarkRecorder())
     call = app.interactions.visit_calls[0]
     assert call.cancel == ["i-1"]
     assert call.resume == [TakeItem(id="i-1")]
@@ -63,7 +65,7 @@ async def test_cancel_and_resume_reach_visit_receiver_less(make_app) -> None:
 async def test_extras_expr_reaches_visit(make_app) -> None:
     app = make_app()
     hook = _hook(extras_expr=TemplatedText(content="{warm: .seed}"))
-    await InMemoryHooksManager._run_hook(hook, {"seed": "hi"})
+    await InMemoryHooksManager._run_hook(hook, {"seed": "hi"}, idempotency_key="run-1", mark_acted=MarkRecorder())
     assert app.interactions.visit_calls[0].extras == {"warm": "hi"}
 
 
@@ -71,7 +73,7 @@ async def test_null_start_expr_starts_nothing(make_app) -> None:
     app = make_app()
     app.interactions.parked = [ParkedEntry(id="i-1", status="asking", to="caller")]
     hook = _hook(start_expr=TemplatedText(content="null"), cancel_expr=TemplatedText(content="$parked[0].id"))
-    await InMemoryHooksManager._run_hook(hook, {"event": 1})
+    await InMemoryHooksManager._run_hook(hook, {"event": 1}, idempotency_key="run-1", mark_acted=MarkRecorder())
     # start_expr null → nothing started, but the cancel still reaches visit.
     assert app.tools.runs == []
     call = app.interactions.visit_calls[0]

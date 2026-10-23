@@ -19,14 +19,14 @@ from __future__ import annotations
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery
+from tai42_contract.channels import ChannelDelivery, SendOutcome
 
 from ..._helpers import DeliverOnlyChannel
 
 
 class _FixtureChannel(DeliverOnlyChannel):
-    async def deliver(self, delivery: ChannelDelivery) -> None:
-        return None
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
+        return self.outcome(delivery, [])
 
 
 @tai42_app.http.custom_route(

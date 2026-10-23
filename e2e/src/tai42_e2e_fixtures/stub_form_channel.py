@@ -15,8 +15,10 @@ import json
 
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery, ChannelNotification
+from tai42_contract.channels import ChannelDelivery, ChannelNotification, SendOutcome
 from tai42_kit.clients import RedisConnectionSettings
+
+from tai42_e2e_fixtures.stub_addressing import StubAddressing
 
 STUB_FORM_CHANNEL_NAME = "stub_form"
 
@@ -29,15 +31,15 @@ class _ProbeRedisSettings(RedisConnectionSettings):
     model_config = SettingsConfigDict(env_prefix="E2E_PROBE_")
 
 
-class _StubFormChannel:
+class _StubFormChannel(StubAddressing):
     """Satisfies the ``Channel`` protocol and captures a delivered form notification."""
 
     supports_form_notifications = True
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
-        return None
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
+        return self._outcome(delivery, [])
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         from collections.abc import Awaitable
         from typing import cast
 
@@ -64,7 +66,7 @@ class _StubFormChannel:
         key = f"e2e:rec:notify_form:{notification.recipient}"
         async with client_ctx(RedisClient, _ProbeRedisSettings()) as client:
             await cast(Awaitable[int], client.rpush(key, record))
-        return ["stub-form-msg-1"]
+        return self._outcome(notification, ["stub-form-msg-1"])
 
 
 tai42_app.channels.register(STUB_FORM_CHANNEL_NAME, _StubFormChannel())

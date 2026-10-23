@@ -108,7 +108,7 @@ the screen, with the field's sentence under it, before the submit leaves the for
 
 | Shape (schema) | Checked by |
 |---|---|
-| `required` | The control itself, on every control (a date is a calendar picker, which takes `required`) |
+| `required` | The control itself on the current screen, on every control (a date is a calendar picker, which takes `required`); the data endpoint for a value carried from an earlier screen, where the field shows the sender's `wording.form.fields[<name>].required` |
 | `pattern` | The control itself on a text or numeric keyboard (drawn as Meta's `pattern`, with the field's second line — else its sentence — as the helper text Meta then requires); the data endpoint on the email or phone keyboard and on a text area |
 | `integer` | The control itself (a whole-number pattern on the numeric keypad) |
 | `format: time` / `date-time` | The control itself (the platform's regex as its pattern) and the data endpoint (a real calendar value) |
@@ -118,6 +118,7 @@ the screen, with the field's sentence under it, before the submit leaves the for
 | `minItems` / `maxItems` | The checkbox group's or chip grid's selection limits |
 | `minDate` / `maxDate` / `unavailableDates` | The calendar picker's bounds and excluded days |
 | a date range's order and `minDays` / `maxDays` | The range calendar picker when the pair draws as one control; else the data endpoint |
+| a range end's time order (`timeOf`: an end time before the start time on the same day) | The data endpoint |
 | any other keyword | The data endpoint |
 
 A form carrying any shape only the data endpoint checks, or a field drawn per case, is
@@ -125,14 +126,19 @@ published **endpoint-driven** (as a reacting form is): every footer calls this p
 endpoint, which runs the platform's one form-shape check on the screen's values (on a
 step) or on the whole answer (on submit). A broken shape keeps the person on the screen:
 the failing field shows its sentence under the control (Meta's `error-message`) and the
-screen shows a *Label: sentence* error line; a clean step moves on, a clean submit
-completes the form. The field's sentence is `wording.form.fields[<name>].invalid` (the
-sender's words, in the end user's language) when set, else this channel's own word for
-the broken shape; the error line carries the sentence or the platform's own sentence
-naming the bound (*Quantity: Enter a number of at least 1*). The sentence is refused at
-deliver past Meta's `error-message` cap — 30 characters on a text field or text area, 80
-on a calendar or choice control — naming the field. A shape the control checks itself
-shows Meta's own message on the control.
+screen shows an error line; a clean step moves on, a clean submit completes the form.
+The field's sentence is the sender's `wording.form.fields[<name>].required` for a missing
+value and `wording.form.fields[<name>].invalid` for any other broken shape (the sender's
+words, in the end user's language) when set, else this channel's own word for the
+broken shape. The error line is the sender's `wording.form.error_line` when set, else a
+*Label: sentence* list carrying each field's sentence or the platform's own sentence
+naming the bound (*Quantity: Enter a number of at least 1*). Each field sentence is
+refused at deliver past Meta's `error-message` cap — 30 characters on a text field or
+text area, 80 on a calendar or choice control — naming the field and the member. Meta
+documents no cap on the error line. A shape the control checks itself shows Meta's own
+message on the control. When a reaction cannot update the form, the screen shows the
+sender's `wording.form.update_failed` (its `{reason}` token filled with the reaction
+door's reason, empty when there is none) else this channel's own failure notice.
 
 A `control: chips` choice draws a chip grid (single-pick for a string `enum`,
 multi-pick for an array of strings) for Meta's 2–20 choices, else it degrades to the
@@ -146,7 +152,14 @@ text area). A declared date range (a `rangeStart` pairing) draws as one range
 CalendarPicker when both ends sit on the same page with the same visibility, no
 other field depends on either end, and the form has no review page, else as two date
 fields (a review page reads each field's value back as text, which a range object
-cannot render); either way the answer is the two date strings.
+cannot render); either way the answer is the two date strings. A time paired with a
+range end (a `format: time` field whose `timeOf` names that end) draws as a text field
+right after its date — after the range picker, the start's time and then the end's time,
+when the pair draws as one control — wherever the schema declares it. WhatsApp Flows
+have no time-of-day component and no time input type, so the time is typed as `HH:MM`. A review page reads each
+time back right after its date too, and a yes/no field as the sender's
+`wording.form.fields[<name>].true_label` / `false_label`, else *Yes* / *No*. Those
+words are part of the published Flow, so a send with other words publishes its own Flow.
 
 A field may carry a **second line** of text (its schema `description`): it draws as
 the control's helper text on a text, text-area or date field, and as a caption right
@@ -172,8 +185,11 @@ text of one option.*). A non-form `confirm`/`external` ask is a text link whose 
 reads `wording.lines.answer_link` (its `{url}` token filled with the callback link,
 else *Answer here: {url}*); WhatsApp draws no `wording.answer` button. When the callback
 door rejects a form answer, the re-sent Flow's body reads `wording.answer.rejected`
-(its `{reason}` token filled with the door's reason, else a generic lead), capped at
-deliver so the reason always fits Meta's message body.
+with its `{reason}` token filled with the line: the sender's `wording.form.error_line`
+when set, else the door's reason led by the field label. The token is empty when there is
+neither. Without `wording.answer.rejected` the body reads a generic lead and the line.
+The template is capped at deliver so the line always fits Meta's message body, and an
+`error_line` longer than 500 characters is refused at deliver too.
 
 A form that **reacts while open** (its ask declares reaction triggers), carries a
 shape only the data endpoint checks, or draws a field per case (a `visibleWhen` shown for
@@ -194,18 +210,22 @@ identifier-safe component name for the Flow it publishes, and maps the submitted
 back to the original property names before returning the answer — so the answer keys are
 always the schema's own property names, whatever characters they use.
 
-The confirmation summary WhatsApp shows the participant after they submit lists each
-field by its human-readable label (its schema `title`, else the property name), so the
-summary reads in words rather than in the identifier-safe names; the channel maps those
-labels back to the schema keys when it decodes the reply.
+The submitted answer the Flow sends back is keyed by each field's human-readable label
+(its schema `title`, else the property name), the same label its control shows, rather
+than by the identifier-safe names; the channel maps those labels back to the schema keys
+when it decodes the reply. The channel sends the labels in drawing order, each paired
+time right after its date.
 
 If the platform rejects a submitted answer (a value fails the answer schema at the
 door — a case no in-form check could see), the **same form is re-sent** — same steps,
 same prefill, with the door's reason shown above it as *Label: sentence* (*Your last
 answer could not be accepted: Email address: Enter a valid email address*) — so the
 participant can correct and resubmit. This repeats
-up to a fixed retry cap; past the cap the participant is told once that the form
-could not be processed and the ask times out.
+up to a fixed retry cap; past the cap the participant reads the sender's
+`wording.answer.rejected_final` once (its `{reason}` filled with the same line), else
+this plugin's own *the form could not be processed* line, and the ask times out. A
+`rejected_final` that could pass Meta's 4096-character text cap with the line filled
+in is refused at deliver.
 
 One question is open per participant at a time: a second ask to the same participant
 is refused while the first is pending. When the platform withdraws the open question
@@ -226,7 +246,6 @@ keys it understands:
   not an answer carries its question-bound wire id.
 - `button_payload` — a **template quick-reply** tap (`button` message) carries the
   developer payload behind the visible button text.
-- `context_message_id` — a message that quotes another carries the quoted `wamid`.
 - `referral_source_url` / `referral_source_id` / `referral_source_type` /
   `referral_ctwa_clid` / `referral_headline` / `referral_body` — a click-to-WhatsApp
   or QR entry (`referral`) forwards its fields.
@@ -234,6 +253,8 @@ keys it understands:
   `media_filename` / `media_voice` / `sticker_animated` — an inbound **media**
   message (image/document/audio/video/sticker) bridges with its caption as the
   turn text and its ingested identity in these params (see **Inbound media** below).
+- `reaction_emoji` / `reaction_message_id` — an inbound emoji **reaction**.
+- `contacts_count` / `contacts` — shared **contact** card(s).
 
 Entry params are bounded at the door (at most 16 keys, each value at most 512 characters,
 the whole set at most 2048 bytes). Because Meta redelivers a failed webhook, this door
@@ -241,12 +262,25 @@ the whole set at most 2048 bytes). Because Meta redelivers a failed webhook, thi
 dropped whole, and the participant's message still bridges. Every drop is logged at
 `WARNING` (naming the door and the bound, never a value) and counted on
 `tai_entry_params_dropped_total{door="whatsapp"}`.
-- `reaction_emoji` / `reaction_message_id` — an inbound emoji **reaction**.
-- `contacts_count` / `contacts` — shared **contact** card(s).
 
 Participant **media**, **location**, **contacts**, and **reactions** all bridge as
 turns. An inbound **location** additionally lands as a typed `LocationElement` on
 the turn (not a param).
+
+## Replies
+
+A message sent as a reply to an earlier one carries Meta's `context.id`, the `wamid` of
+the message it quotes. The channel hands that id to the platform beside the message (never
+as an entry parameter), and the platform resolves it against the conversation's own records
+into a typed `reply_to` (`{message_id, status, text}`): a `tool` target reads it in its
+payload, an `agent` target through `start_expr`. An interactive tap (a reply button or a
+list row), a template quick-reply and a completed Flow carry the `context.id` of the message
+that held the buttons or the Flow, so each is a reply to that message.
+
+When the reply answers a pending question, the asker receives the same `reply_to` beside
+the unchanged answer. WhatsApp sends no entry parameters with an answer, so the asker's
+`params` is `null`. A reaction is not a reply: `reaction_message_id` names the message the
+emoji was applied to.
 
 ## Inbound media
 
@@ -295,6 +329,26 @@ ends `failed` rather than silently vanishing. Read failures with:
 tai conversations failed
 ```
 
+The channel tracks that window per pair (`phone_number_id`, `wa_id`) and reports
+it on every bridged turn as `turn.reply_window` (`{state, closes_at}`), so a
+route's `start_expr`, `reply_expr` or flow can choose a template before Meta
+refuses a freeform reply:
+
+- every client message (text, media, reaction, an interactive tap, a Flow reply,
+  an unsupported type) moves the window to its own Meta `timestamp` plus 24 hours,
+  never backwards, so a redelivered or out-of-order webhook cannot shorten it; a
+  timestamp ahead of the replica's clock counts as now;
+- a platform notice (`system`, `request_welcome`) does not open it;
+- a message whose `timestamp` is missing or unreadable opens nothing and logs a
+  warning naming the message;
+- `state` is `open` (until `closes_at`, UTC) or `closed` (never opened, or
+  expired).
+
+The window lives in the channel's Redis (`CHANNEL_WHATSAPP_REDIS_URL`), one key
+per pair that expires when the window closes. There is no setting: the 24 hours
+are Meta's rule. The state is read once per turn, so a turn that runs past
+`closes_at` may still see `open`; Meta's 131047 rejection stays the final check.
+
 A **pre-approved template** is the one message delivered outside the window. Send
 one with `notify_user`'s `template` input: a `name`, a `language`, an optional
 `header_media` (image/video/document), positional `body_parameters` (body-text
@@ -305,6 +359,17 @@ channel fences who may receive one: the recipient must be on
 inbound webhook received a message from within
 `CHANNEL_WHATSAPP_TEMPLATE_CONTACT_WINDOW_DAYS`. A template send to a cold,
 unlisted number is refused loudly.
+
+## Message ids and addresses
+
+The conversation bridge records every message this channel sends to a participant. These are
+the ids and addresses it records:
+
+- An inbound message, and a reply to a question, passes its `wamid` as the medium message id.
+- `resolve_address` returns the sending phone number id and the recipient as the caller names
+  it. A completed send reports Meta's `contacts[0].wa_id` for the recipient, the id an inbound
+  message from them carries as `from`; it can differ in form from the number the send named.
+  A send that went out as several messages reports every `wamid`, in send order.
 
 ## Working-on-it signal
 

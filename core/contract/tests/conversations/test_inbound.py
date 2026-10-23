@@ -30,6 +30,25 @@ def test_conversation_message_rejects_blank_fields(blank: str):
         ConversationMessage(external_user_id="u-1", text=blank)
 
 
+def test_conversation_message_reply_to_message_id_takes_a_uuid4():
+    from uuid import UUID, uuid4
+
+    from tai42_contract.conversations import ConversationMessage
+
+    assert ConversationMessage(external_user_id="u-1", text="hi").reply_to_message_id is None
+    quoted = str(uuid4())
+    msg = ConversationMessage.model_validate({"external_user_id": "u-1", "text": "hi", "reply_to_message_id": quoted})
+    assert msg.reply_to_message_id == UUID(quoted)
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "not-a-uuid", "6ba7b810-9dad-11d1-80b4-00c04fd430c8", 42])
+def test_conversation_message_refuses_a_malformed_reply_to_message_id(bad: object):
+    from tai42_contract.conversations import ConversationMessage
+
+    with pytest.raises(ValidationError, match="reply_to_message_id"):
+        ConversationMessage.model_validate({"external_user_id": "u-1", "text": "hi", "reply_to_message_id": bad})
+
+
 def test_conversation_message_accepts_none_and_valid_params():
     from tai42_contract.conversations import ConversationMessage
 

@@ -26,6 +26,7 @@ from collections.abc import Callable
 
 import httpx
 import pytest
+import redis as redis_lib
 from fastmcp.client.client import CallToolResult
 
 from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio
@@ -137,7 +138,7 @@ async def test_form_over_telegram_web_app_button_and_the_callback_form_page(
                 "ask",
                 {"question": question, "channel": "telegram", "answer_format": "form", "schema": _FORM_SCHEMA},
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -209,7 +210,7 @@ async def test_form_over_telegram_web_app_button_reads_the_caller_open_label(
                     "wording": {"form": {"open": "Open the form"}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -246,7 +247,7 @@ async def test_confirm_over_telegram_tier1_url_button_reads_the_caller_open_labe
                     "wording": {"answer": {"open": "Review and sign"}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -282,7 +283,7 @@ async def test_text_over_telegram_force_reply_reads_the_caller_reply_hint(
                     "wording": {"answer": {"reply_hint": "Type your reply"}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -318,7 +319,7 @@ async def test_text_over_telegram_draws_the_caller_deadline_line(
                     "wording": {"lines": {"deadline": "Respond by {deadline} please."}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -359,21 +360,27 @@ async def test_form_over_telegram_callback_page_draws_the_caller_chrome_and_sent
                             "label": {"type": "string"},
                             "size": {"type": "string", "enum": ["xs", "s", "m", "l", "xl", "xxl"]},
                         },
+                        "required": ["label"],
                     },
                     "wording": {
                         "form": {
                             "title": "Tom & Jerry <sign>",
                             "submit": "Send answers",
                             "back": "Go back",
-                            "fields": {"size": {"choice_label": "Choose a size"}},
+                            "error_line": "Please check the form",
+                            "update_failed": "Could not refresh: {reason}",
+                            "fields": {
+                                "label": {"required": "Write a label"},
+                                "size": {"choice_label": "Choose a size"},
+                            },
                         },
                         "answer": {"rejected": "We could not accept that: {reason}"},
+                        "status": {"unavailable": "This form is closed."},
                         "answer_page": {
                             "submitted": {"heading": "All set", "text": "Thanks for answering."},
                             "form": {
                                 "failed": "That did not send.",
                                 "network_error": "No connection — try again.",
-                                "update_failed": "Could not refresh: {reason}",
                                 "choose_one": "Pick at least one.",
                                 "date_unavailable": "That date is taken.",
                             },
@@ -381,7 +388,7 @@ async def test_form_over_telegram_callback_page_draws_the_caller_chrome_and_sent
                     },
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -398,6 +405,9 @@ async def test_form_over_telegram_callback_page_draws_the_caller_chrome_and_sent
         # escaped data-* attributes the submit script reads; each is present only when set.
         # The long-enum field renders a <select> whose empty-state prompt is the caller's choice_label.
         assert '<option value="">Choose a size</option>' in page.text
+        # The required field's control carries the caller's sentence, which the page pins under it
+        # when the step is sent empty.
+        assert 'data-required="Write a label"' in page.text
         assert 'data-text-rejected="We could not accept that: {reason}"' in page.text
         assert 'data-text-failed="That did not send."' in page.text
         assert 'data-text-network_error="No connection — try again."' in page.text
@@ -431,7 +441,7 @@ async def test_form_over_slack_opens_a_modal_and_a_view_submission_answers(
                 "ask",
                 {"question": question, "channel": "slack", "answer_format": "form", "schema": _FORM_SCHEMA},
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -526,7 +536,7 @@ async def test_form_over_slack_renders_native_date_and_time_pickers(
                 "ask",
                 {"question": question, "channel": "slack", "answer_format": "form", "schema": _SLACK_DATE_TIME_SCHEMA},
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -607,7 +617,7 @@ async def test_form_over_slack_draws_the_caller_chrome_labels(
                     "wording": {"form": {"open": "Open it", "cancel": "Dismiss", "title": "Please fill this in"}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -671,7 +681,7 @@ async def test_form_over_slack_page_less_submit_and_select_placeholder(
                     "wording": {"form": {"submit": "Send it", "fields": {"pick": {"choice_label": "Pick one"}}}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -734,7 +744,7 @@ async def test_form_over_slack_review_page_draws_the_caller_empty_line(
                     "wording": {"form": {"review_empty": "Nothing filled in yet."}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -787,7 +797,7 @@ async def test_form_over_slack_rejected_submission_shows_the_caller_inline_error
                     "wording": {"answer": {"rejected": "Rejected: {reason}"}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -848,6 +858,89 @@ async def test_form_over_slack_rejected_submission_shows_the_caller_inline_error
     "setting:CHANNEL_SLACK_SIGNING_SECRET",
     "setting:INTERACTIONS_PUBLIC_BASE_URL",
 )
+async def test_form_over_slack_submit_after_the_record_is_gone_shows_the_caller_unavailable_line(
+    channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]
+) -> None:
+    stack = channel_stack
+    question = uniq("slack_gone_q")
+    signing_secret = stack.config.env["CHANNEL_SLACK_SIGNING_SECRET"]
+    unavailable = "This form is closed now."
+
+    async def ask() -> object:
+        async with stack.mcp(port=stack.port_a) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "slack",
+                    "answer_format": "form",
+                    "schema": _FORM_SCHEMA,
+                    "wording": {"status": {"unavailable": unavailable}},
+                },
+            )
+        return result.data.answer
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        post = await _wait_one_send(fake_slack, question)
+        interaction_id = _form_open_value(post["blocks"])
+        opened = await post_inbound(
+            stack,
+            "/api/channels/slack/interactive",
+            fake_slack.build_interactive(
+                signing_secret=signing_secret,
+                payload={
+                    "type": "block_actions",
+                    "trigger_id": uniq("slack_gone_trigger"),
+                    "actions": [{"action_id": _SLACK_FORM_OPEN_ACTION, "value": interaction_id}],
+                },
+            ),
+        )
+        assert opened.status_code == 200, opened.text
+        view = fake_slack.views[-1]
+
+        # The form record lapses while the modal is open: the submit can no longer reach the
+        # form, and the modal reads the caller's status.unavailable line, which the open view
+        # carries itself, pinned under its first field.
+        store = redis_lib.Redis.from_url(stack.resources.redis_url)
+        try:
+            assert store.delete(f"channel:slack:form:{interaction_id}") == 1
+        finally:
+            store.close()
+        submit_payload = {
+            "type": "view_submission",
+            "view": {
+                "callback_id": _SLACK_FORM_SUBMIT_CALLBACK,
+                "id": view.get("id") or interaction_id,
+                "private_metadata": view["private_metadata"],
+                "state": {
+                    "values": {
+                        "label": {_SLACK_FIELD_ACTION: {"type": "plain_text_input", "value": uniq("l")}},
+                        "amount": {_SLACK_FIELD_ACTION: {"type": "number_input", "value": "5"}},
+                        "contact": {_SLACK_FIELD_ACTION: {"type": "email_text_input", "value": "alice@example.com"}},
+                        "code": {_SLACK_FIELD_ACTION: {"type": "plain_text_input", "value": "007"}},
+                    }
+                },
+            },
+        }
+        gone = await post_inbound(
+            stack,
+            "/api/channels/slack/interactive",
+            fake_slack.build_interactive(signing_secret=signing_secret, payload=submit_payload),
+        )
+        assert gone.status_code == 200, gone.text
+        assert gone.json() == {"response_action": "errors", "errors": {"label": unavailable}}
+    finally:
+        await cancel_and_join(ask_task)
+
+
+@pytest.mark.needs(
+    "kind:channels:slack",
+    "topology:replicas",
+    "helper:channel-fake:slack",
+    "setting:CHANNEL_SLACK_SIGNING_SECRET",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+)
 async def test_form_over_slack_degrades_the_new_controls(
     channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]
 ) -> None:
@@ -866,7 +959,7 @@ async def test_form_over_slack_degrades_the_new_controls(
                     "schema": _CONTROLS_SCHEMA,
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:

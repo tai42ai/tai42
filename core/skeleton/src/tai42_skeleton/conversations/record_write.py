@@ -10,19 +10,27 @@ import json
 import logging
 import time
 
+from tai42_contract.conversations import ConversationRoute
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.conversations import records as _records
-from tai42_skeleton.conversations.models import TERMINAL_STATUSES, ConversationRecord, DeliveryStatus
+from tai42_skeleton.conversations.models import (
+    TERMINAL_STATUSES,
+    ConversationRecord,
+    DeliveryStatus,
+    PersonThreadClosedError,
+)
+from tai42_skeleton.conversations.persons import thread_door
 from tai42_skeleton.conversations.record_scripts import (
     _CLAIM_INTAKE_LUA,
     _COMPLETE_SILENT_LUA,
     _COMPLETE_TURN_LUA,
     _CREATE_LUA,
     _DELETE_LUA,
+    _F_ASK_REPLY,
     _F_ATTEMPTS,
     _F_DATA,
-    _F_OUTBOUND,
+    _F_SENDS,
     _F_STATUS,
     _F_UPDATED,
     _INDEXED_STATUSES,
@@ -31,6 +39,7 @@ from tai42_skeleton.conversations.record_scripts import (
     _SUPERSEDE_RECORD_LUA,
 )
 from tai42_skeleton.conversations.record_store_base import RecordStoreBase
+from tai42_skeleton.conversations.thread_ids import person_id_of
 from tai42_skeleton.utils.redis_typing import awaited, eval_script
 
 logger = logging.getLogger(__name__)
@@ -93,7 +102,8 @@ class RecordWriteMixin(RecordStoreBase):
         content = record.model_dump(mode="json")
         for control in (
             "delivery_status",
-            "outbound_message_ids",
+            "sends",
+            "ask_reply",
             "attempts",
             "updated_at",
             "route_missing",
@@ -102,10 +112,35 @@ class RecordWriteMixin(RecordStoreBase):
             content.pop(control, None)
         return json.dumps(content, allow_nan=False)
 
+    def _person_thread_keys(self, thread_id: str) -> list[str]:
+        """A person thread's person row, erase-mark and recorded-routes keys; empty for any other thread."""
+        person_id = person_id_of(thread_id)
+        if person_id is None:
+            return []
+        return [
+            self.settings.person_key(person_id),
+            self.settings.person_erasing_key(person_id),
+            self.settings.person_thread_routes_key(person_id),
+        ]
+
+    def _inbound_ref_key(self, record: ConversationRecord) -> str | None:
+        """The message-ref key of the record's inbound medium id, or ``None`` when it carries none."""
+        if record.inbound_message_id is None:
+            return None
+        if record.channel is None or record.our_identity is None:
+            raise ValueError(
+                f"record {record.message_id!r} carries inbound_message_id {record.inbound_message_id!r} "
+                "but no channel and our_identity to key its message ref by"
+            )
+        return self.settings.message_ref_key(
+            record.channel, record.our_identity, record.client_address, record.inbound_message_id
+        )
+
     async def create_record(
         self,
         record: ConversationRecord,
         *,
+        route: ConversationRoute,
         intake_token: str | None = None,
         claim_key: str | None = None,
         refresh_mode: bool = False,
@@ -130,7 +165,20 @@ class RecordWriteMixin(RecordStoreBase):
         window has already reclaimed both indexes. The record still stands (its delivery is
         the sender's to finish), but no transcript names it — logged loudly, because a
         message answered against a route that vanished mid-turn is an operator's business.
+
+        A person thread takes the record only while its person row stands and carries no erase mark;
+        otherwise nothing is written and :class:`PersonThreadClosedError` is raised. Written into it,
+        the record's route joins the person's recorded routes in the same step. The record's inbound
+        medium id, when it carries one, is written to its message ref in the same step.
+
+        A record in a route-keyed thread stamps its writer on the thread in the same step, route
+        gone or not: the person the target's index names for its door (:func:`persons.thread_door`
+        of ``route``, the route the writer holds), or the door itself while nobody holds it.
         """
+        if route.route_name != record.route_name:
+            raise ValueError(
+                f"record {record.message_id} names route {record.route_name!r}, written under {route.route_name!r}"
+            )
         if (record.delivery_status is DeliveryStatus.ACCEPTED) is not (intake_token is not None):
             raise ValueError(
                 "an accepted record is created holding an intake lease and any other state without one; got "
@@ -145,6 +193,11 @@ class RecordWriteMixin(RecordStoreBase):
             keys.append(claim_key)
         if refresh_mode:
             keys.append(self.settings.mode_key(record.thread_id))
+        person_keys = self._person_thread_keys(record.thread_id)
+        keys.extend(person_keys)
+        ref_key = self._inbound_ref_key(record)
+        if ref_key is not None:
+            keys.append(ref_key)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             reply = await eval_script(
                 r,
@@ -153,7 +206,7 @@ class RecordWriteMixin(RecordStoreBase):
                 *keys,
                 self._content_blob(record),
                 record.delivery_status.value,
-                json.dumps(record.outbound_message_ids),
+                json.dumps([sent.model_dump(mode="json") for sent in record.sends]),
                 record.attempts,
                 record.updated_at,
                 ttl_ms,
@@ -164,9 +217,16 @@ class RecordWriteMixin(RecordStoreBase):
                 record.created_at,
                 self.settings.inbound_dedupe_ttl_seconds if claim_key is not None else "",
                 self.settings.answer_retention_ttl_seconds if refresh_mode else "",
+                "1" if person_keys else "",
+                record.route_name,
+                self.settings.answer_retention_ttl_seconds * 1000 if ref_key is not None else "",
+                thread_door(route, record.thread_id) or "",
+                self.settings.writer_prefixes(),
             )
         indexed, owner = int(reply[0]), reply[1]
         owner = owner.decode() if isinstance(owner, bytes) else str(owner)
+        if indexed == -2:
+            raise PersonThreadClosedError(record.thread_id)
         if indexed < 0:
             return owner
         if not indexed:
@@ -309,7 +369,16 @@ class RecordWriteMixin(RecordStoreBase):
         """
         keys = self._record_keys(record.message_id, thread=record)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            return bool(await eval_script(r, _DELETE_LUA, len(keys), *keys, record.message_id, record.thread_id))
+            return bool(
+                await eval_script(
+                    r,
+                    _DELETE_LUA,
+                    len(keys),
+                    *keys,
+                    record.message_id,
+                    record.thread_id,
+                )
+            )
 
     async def get_record(self, message_id: str) -> ConversationRecord | None:
         """The record for ``message_id``, or ``None`` when no such record exists."""
@@ -322,7 +391,9 @@ class RecordWriteMixin(RecordStoreBase):
     def _from_hash(self, hashed: dict[str, str]) -> ConversationRecord:
         data = json.loads(hashed[_F_DATA])
         data[_F_STATUS] = hashed[_F_STATUS]
-        data["outbound_message_ids"] = json.loads(hashed[_F_OUTBOUND])
+        data[_F_SENDS] = json.loads(hashed[_F_SENDS])
+        reply = hashed.get(_F_ASK_REPLY)
+        data[_F_ASK_REPLY] = json.loads(reply) if reply else None
         data[_F_ATTEMPTS] = int(hashed[_F_ATTEMPTS])
         data[_F_UPDATED] = float(hashed[_F_UPDATED])
         data["route_missing"] = hashed.get("route_missing") == "1"

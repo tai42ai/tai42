@@ -483,9 +483,9 @@ async def test_text_ask_answer_reply_hint_is_not_drawn_on_whatsapp(fake_redis: F
 async def test_notify_sends_plain_body_without_correlation(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     fake_httpx.responses.append(_accepted("wamid.N"))
 
-    ids = await WhatsAppChannel().notify(ChannelNotification(message="Deploy finished.", recipient=ALLOWED_A))
+    outcome = await WhatsAppChannel().notify(ChannelNotification(message="Deploy finished.", recipient=ALLOWED_A))
 
-    assert ids == ["wamid.N"]
+    assert outcome.message_ids == ["wamid.N"]
     call = fake_httpx.calls[0]
     assert call["url"] == _MESSAGES_URL
     assert call["json"] == {
@@ -502,9 +502,9 @@ async def test_notify_sends_plain_body_without_correlation(fake_redis: FakeRedis
 async def test_notify_returns_wamid(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     fake_httpx.responses.append(_accepted("wamid.RET"))
 
-    ids = await WhatsAppChannel().notify(ChannelNotification(message="Done.", recipient=ALLOWED_A))
+    outcome = await WhatsAppChannel().notify(ChannelNotification(message="Done.", recipient=ALLOWED_A))
 
-    assert ids == ["wamid.RET"]
+    assert outcome.message_ids == ["wamid.RET"]
 
 
 async def test_notify_freeform_unlisted_recipient_sends(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
@@ -512,9 +512,9 @@ async def test_notify_freeform_unlisted_recipient_sends(fake_redis: FakeRedis, f
     # an unlisted recipient sends.
     fake_httpx.responses.append(_accepted("wamid.FREE"))
 
-    ids = await WhatsAppChannel().notify(ChannelNotification(message="Heads up.", recipient=_UNLISTED))
+    outcome = await WhatsAppChannel().notify(ChannelNotification(message="Heads up.", recipient=_UNLISTED))
 
-    assert ids == ["wamid.FREE"]
+    assert outcome.message_ids == ["wamid.FREE"]
     assert fake_httpx.calls[0]["json"]["to"] == _UNLISTED
     assert not fake_redis.store  # notify never touches the correlation store
 
@@ -563,11 +563,11 @@ async def test_notify_sender_identity_sends_from_it_and_bypasses_allowlist(
     # VERBATIM, the recipient allowlist NOT consulted (recipient is off-allowlist).
     fake_httpx.responses.append(_accepted("wamid.BRIDGE"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         ChannelNotification(message="Reply.", recipient="15559999999", sender_identity="20000000000009")
     )
 
-    assert ids == ["wamid.BRIDGE"]
+    assert outcome.message_ids == ["wamid.BRIDGE"]
     call = fake_httpx.calls[0]
     assert call["url"] == "https://graph.facebook.com/v23.0/20000000000009/messages"  # sent from the routed identity
     assert call["json"]["to"] == "15559999999"  # delivered to the initiator despite not being allowlisted
@@ -578,14 +578,14 @@ async def test_notify_no_sender_identity_uses_default_freeform_unfenced(fake_red
     # sender_identity absent: the configured default phone_number_id sends, and a
     # FREEFORM notify to an unlisted recipient is not fenced by the allowlist.
     fake_httpx.responses.append(_accepted("wamid.UNL"))
-    ids = await WhatsAppChannel().notify(ChannelNotification(message="Reply.", recipient=_UNLISTED))
-    assert ids == ["wamid.UNL"]
+    outcome = await WhatsAppChannel().notify(ChannelNotification(message="Reply.", recipient=_UNLISTED))
+    assert outcome.message_ids == ["wamid.UNL"]
     assert fake_httpx.calls[0]["url"] == _MESSAGES_URL  # the default phone_number_id
     assert fake_httpx.calls[0]["json"]["to"] == _UNLISTED
 
     fake_httpx.responses.append(_accepted("wamid.DEF"))
-    ids = await WhatsAppChannel().notify(ChannelNotification(message="Reply.", recipient=ALLOWED_A))
-    assert ids == ["wamid.DEF"]
+    outcome = await WhatsAppChannel().notify(ChannelNotification(message="Reply.", recipient=ALLOWED_A))
+    assert outcome.message_ids == ["wamid.DEF"]
     assert fake_httpx.calls[1]["json"]["to"] == ALLOWED_A
 
 

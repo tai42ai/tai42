@@ -111,14 +111,101 @@ def create_route(
             help="Per-route override (positive) of the global per-address turns/hour cap; unset uses the global rate.",
         ),
     ] = None,
-    error_reply_text: Annotated[
+    reply_error: Annotated[
         str | None,
         typer.Option(
-            "--error-reply-text",
+            "--reply-error",
             help=(
-                "Participant-facing reply sent when a turn on this route fails and the target supplied no "
-                "reply of its own; unset uses the built-in default."
+                "Reply sent when a turn fails and the target gave no reply of its own. "
+                "Unset sends the built-in English text."
             ),
+        ),
+    ] = None,
+    reply_slow_down: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-slow-down",
+            help="Reply sent when an address is over the turn cap. Unset sends the built-in English text.",
+        ),
+    ] = None,
+    reply_pairing_linked: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-pairing-linked",
+            help=(
+                "Reply sent when a pair code was redeemed and the two persons merged. "
+                "Unset sends the built-in English text."
+            ),
+        ),
+    ] = None,
+    reply_pairing_unlinked: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-pairing-unlinked",
+            help="Reply sent when /unlink detached the address. Unset sends the built-in English text.",
+        ),
+    ] = None,
+    reply_pairing_not_linked: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-pairing-not-linked",
+            help=(
+                "Reply sent when /unlink came from an address linked to nothing. Unset sends the built-in English text."
+            ),
+        ),
+    ] = None,
+    reply_pairing_code_invalid: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-pairing-code-invalid",
+            help="Reply sent when a pair-code redeem was refused. Unset sends the built-in English text.",
+        ),
+    ] = None,
+    reply_pairing_code: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-pairing-code",
+            help=(
+                "The /link reply template; must contain {pairing_code} and may contain {expires_at}. "
+                "Unset sends the built-in English text."
+            ),
+        ),
+    ] = None,
+    reply_pairing_link_unavailable: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-pairing-link-unavailable",
+            help=(
+                "Reply sent when a pair-code redeem met a person being deleted. Unset sends the built-in English text."
+            ),
+        ),
+    ] = None,
+    reply_pairing_unlink_unavailable: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-pairing-unlink-unavailable",
+            help="Reply sent when /unlink met a person being deleted. Unset sends the built-in English text.",
+        ),
+    ] = None,
+    reply_rejected_unsupported_type: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-rejected-unsupported-type",
+            help="Notice for an inbound message the channel cannot bridge. Unset sends the built-in English text.",
+        ),
+    ] = None,
+    reply_rejected_too_large: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-rejected-too-large",
+            help="Notice for an inbound file over the size cap. Unset sends the built-in English text.",
+        ),
+    ] = None,
+    reply_rejected_could_not_receive: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-rejected-could-not-receive",
+            help="Notice for an inbound file the channel could not fetch. Unset sends the built-in English text.",
         ),
     ] = None,
     locale: Annotated[
@@ -201,8 +288,6 @@ def create_route(
         body["callback_url"] = callback_url
     if turns_per_hour_override is not None:
         body["turns_per_hour_override"] = turns_per_hour_override
-    if error_reply_text is not None:
-        body["error_reply_text"] = error_reply_text
     if locale is not None:
         body["locale"] = locale
     # Pack only the overlap keys the operator gave, so the server applies its own policy default
@@ -212,6 +297,26 @@ def create_route(
     )
     if overlap:
         body["overlap"] = overlap
+    # Pack only the reply texts the operator gave, so every unset line keeps its built-in text;
+    # omit the catalogue entirely when none is given. The server validates each text.
+    reply_texts = compact(
+        {
+            "error": reply_error,
+            "slow_down": reply_slow_down,
+            "pairing_linked": reply_pairing_linked,
+            "pairing_unlinked": reply_pairing_unlinked,
+            "pairing_not_linked": reply_pairing_not_linked,
+            "pairing_code_invalid": reply_pairing_code_invalid,
+            "pairing_code": reply_pairing_code,
+            "pairing_link_unavailable": reply_pairing_link_unavailable,
+            "pairing_unlink_unavailable": reply_pairing_unlink_unavailable,
+            "rejected_unsupported_type": reply_rejected_unsupported_type,
+            "rejected_too_large": reply_rejected_too_large,
+            "rejected_could_not_receive": reply_rejected_could_not_receive,
+        }
+    )
+    if reply_texts:
+        body["reply_texts"] = reply_texts
     with ctx_obj.client() as client:
         data = client.post(f"/api/conversations/{seg(route_name)}", json=body)
     emit_result(ctx_obj, data)
@@ -268,11 +373,18 @@ def delete_person(
 
     The aggregated ``bridge:@person:<id>`` thread carries the agent checkpoint, answer records,
     thread indexes and mode override across every route it spans; the person row and every
-    address→person index mapping are dropped too.
+    address→person index mapping are dropped too. Every person it absorbed by a link is cleared
+    with it: that person's aggregated thread, and every thread on any route that only this person
+    and the persons it absorbed wrote in. A thread another person also wrote in is left to them.
+    The answer's ``absorbed_person_ids`` lists the absorbed ids it cleared, so their run traces
+    can be deleted.
     Idempotent: erasing an already-gone person is not an error (``erased: false``), and its
-    aggregated checkpoint is forgotten regardless. A turn in flight on the aggregated thread is
-    refused (409, retry once it drains). The same write grant that forgets a thread erases a
-    person.
+    aggregated checkpoint is forgotten regardless. An id a link absorbed into another person is
+    refused (409, naming that person in ``absorbed_into_person_id``: erase that one). A turn in
+    flight on a thread the erase clears is refused (409, retry once it drains), and so is a write
+    by the person that lands in a thread the erase had not reached, in its last moment (409: the
+    erase stays marked, and a retry finishes it and clears that thread too). The same write grant
+    that forgets a thread erases a person.
 
     Example: ``tai conversations delete-person 4f1c0e2a-...``
     """

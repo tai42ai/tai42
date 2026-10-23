@@ -32,7 +32,7 @@ _ORIGIN = CompletedOrigin(
 )
 
 
-async def _admit(subject_kinds):
+async def _admit(subject_kinds, canonical):
     """A permissive in-txn subject check — these SQL tests isolate the store, not admission."""
     return None
 
@@ -72,7 +72,7 @@ async def test_replace_admits_the_subject_under_the_locked_declaration(
     pg.seed_declaration("alerts", subject_kinds=["case"], default_subject_kind="case")
     seen: list[list[str]] = []
 
-    async def refuse(subject_kinds: list[str]) -> None:
+    async def refuse(subject_kinds: list[str], canonical: StateSubject) -> None:
         seen.append(subject_kinds)
         raise RuntimeError("subject refused")
 
@@ -553,7 +553,9 @@ async def test_fold_switch_lands_old_key_on_survivor(
     s1, s2 = _subj(key="old"), _subj(key="new")
     await store.replace("alerts", s2, {"n": 2}, origin=_ORIGIN, catalog=catalog, validate_subject_in_txn=_admit)
     await store.replace("alerts", s1, {"n": 1}, origin=_ORIGIN, catalog=catalog, validate_subject_in_txn=_admit)
-    report = await store.fold_subject("alerts", s1, s2, "switch", origin=_ORIGIN, catalog=catalog)
+    report = await store.fold_subject(
+        "alerts", s1, s2, "switch", origin=_ORIGIN, catalog=catalog, validate_subjects_in_txn=_admit
+    )
     assert report["already"] is False
     assert (await store.read_record("alerts", s1))[0] == {"n": 2}  # old key resolves to survivor
     assert ("alerts", "agent", "a", "thread", "old") in pg.aliases
@@ -577,7 +579,9 @@ async def test_fold_merge_moves_absent_members(
     await store.replace(
         "alerts", s2, {"y": "new-wins"}, origin=_ORIGIN, catalog=catalog, validate_subject_in_txn=_admit
     )
-    report = await store.fold_subject("alerts", s1, s2, "merge", origin=_ORIGIN, catalog=catalog)
+    report = await store.fold_subject(
+        "alerts", s1, s2, "merge", origin=_ORIGIN, catalog=catalog, validate_subjects_in_txn=_admit
+    )
     assert report["merged_members"] == ["x"]
     assert (await store.read_record("alerts", s2))[0] == {"x": "from-old", "y": "new-wins"}
 
@@ -588,7 +592,9 @@ async def test_fold_merge_without_source_record(
     pg.seed_declaration("alerts")
     s1, s2 = _subj(key="old"), _subj(key="new")
     await store.replace("alerts", s2, {"n": 2}, origin=_ORIGIN, catalog=catalog, validate_subject_in_txn=_admit)
-    report = await store.fold_subject("alerts", s1, s2, "merge", origin=_ORIGIN, catalog=catalog)
+    report = await store.fold_subject(
+        "alerts", s1, s2, "merge", origin=_ORIGIN, catalog=catalog, validate_subjects_in_txn=_admit
+    )
     assert report["merged_members"] == []
     assert ("alerts", "agent", "a", "thread", "old") in pg.aliases
 
@@ -600,8 +606,12 @@ async def test_fold_already_folded_is_noop(
     s1, s2 = _subj(key="old"), _subj(key="new")
     await store.replace("alerts", s2, {"n": 2}, origin=_ORIGIN, catalog=catalog, validate_subject_in_txn=_admit)
     await store.replace("alerts", s1, {"n": 1}, origin=_ORIGIN, catalog=catalog, validate_subject_in_txn=_admit)
-    await store.fold_subject("alerts", s1, s2, "switch", origin=_ORIGIN, catalog=catalog)
-    again = await store.fold_subject("alerts", s1, s2, "switch", origin=_ORIGIN, catalog=catalog)
+    await store.fold_subject(
+        "alerts", s1, s2, "switch", origin=_ORIGIN, catalog=catalog, validate_subjects_in_txn=_admit
+    )
+    again = await store.fold_subject(
+        "alerts", s1, s2, "switch", origin=_ORIGIN, catalog=catalog, validate_subjects_in_txn=_admit
+    )
     assert again["already"] is True
 
 
@@ -612,15 +622,27 @@ async def test_fold_into_conflicting_canonical_forks_identity(
     s1, s2, s3 = _subj(key="old"), _subj(key="new"), _subj(key="other")
     await store.replace("alerts", s2, {"n": 2}, origin=_ORIGIN, catalog=catalog, validate_subject_in_txn=_admit)
     await store.replace("alerts", s1, {"n": 1}, origin=_ORIGIN, catalog=catalog, validate_subject_in_txn=_admit)
-    await store.fold_subject("alerts", s1, s2, "switch", origin=_ORIGIN, catalog=catalog)
+    await store.fold_subject(
+        "alerts", s1, s2, "switch", origin=_ORIGIN, catalog=catalog, validate_subjects_in_txn=_admit
+    )
     with pytest.raises(SubjectFoldError, match="would fork its identity"):
-        await store.fold_subject("alerts", s1, s3, "switch", origin=_ORIGIN, catalog=catalog)
+        await store.fold_subject(
+            "alerts", s1, s3, "switch", origin=_ORIGIN, catalog=catalog, validate_subjects_in_txn=_admit
+        )
 
 
 async def test_fold_into_self_refused(pg: FakeStatesPg, store: PostgresStatesStore, catalog: CatalogSnapshot) -> None:
     pg.seed_declaration("alerts")
     with pytest.raises(SubjectFoldError, match="into itself"):
-        await store.fold_subject("alerts", _subj(key="x"), _subj(key="x"), "switch", origin=_ORIGIN, catalog=catalog)
+        await store.fold_subject(
+            "alerts",
+            _subj(key="x"),
+            _subj(key="x"),
+            "switch",
+            origin=_ORIGIN,
+            catalog=catalog,
+            validate_subjects_in_txn=_admit,
+        )
 
 
 async def test_fold_across_targets_refused(
@@ -628,12 +650,28 @@ async def test_fold_across_targets_refused(
 ) -> None:
     pg.seed_declaration("alerts")
     with pytest.raises(SubjectFoldError, match="cannot fold across targets"):
-        await store.fold_subject("alerts", _subj(tn="a"), _subj(tn="b"), "switch", origin=_ORIGIN, catalog=catalog)
+        await store.fold_subject(
+            "alerts",
+            _subj(tn="a"),
+            _subj(tn="b"),
+            "switch",
+            origin=_ORIGIN,
+            catalog=catalog,
+            validate_subjects_in_txn=_admit,
+        )
 
 
 async def test_fold_undeclared_raises(pg: FakeStatesPg, store: PostgresStatesStore, catalog: CatalogSnapshot) -> None:
     with pytest.raises(StateNotFoundError):
-        await store.fold_subject("nope", _subj(key="a"), _subj(key="b"), "switch", origin=_ORIGIN, catalog=catalog)
+        await store.fold_subject(
+            "nope",
+            _subj(key="a"),
+            _subj(key="b"),
+            "switch",
+            origin=_ORIGIN,
+            catalog=catalog,
+            validate_subjects_in_txn=_admit,
+        )
 
 
 async def test_fold_merge_invalid_document_refused(
@@ -648,4 +686,6 @@ async def test_fold_merge_invalid_document_refused(
     pg.seed_record("alerts", "agent", "a", "thread", "old", {"bad": "member"})
     pg.seed_record("alerts", "agent", "a", "thread", "new", {"x": "ok"})
     with pytest.raises(SubjectFoldError, match="would leave an invalid document"):
-        await store.fold_subject("alerts", s1, s2, "merge", origin=_ORIGIN, catalog=catalog)
+        await store.fold_subject(
+            "alerts", s1, s2, "merge", origin=_ORIGIN, catalog=catalog, validate_subjects_in_txn=_admit
+        )

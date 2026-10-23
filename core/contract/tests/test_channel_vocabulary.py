@@ -413,12 +413,21 @@ def test_inbound_bridge_params_roundtrip_and_validation():
         provider_message_id="p",
         bridge_text="hi",
         params={"reply_id": "wamid.X", "referral": "ad-42"},
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
     )
     assert bridge.params == {"reply_id": "wamid.X", "referral": "ad-42"}
     # Absent params = today's behavior.
     assert (
         InboundBridge(
-            channel_id="c", our_identity="o", client_address="a", cap_key="k", provider_message_id="p", bridge_text="hi"
+            channel_id="c",
+            our_identity="o",
+            client_address="a",
+            cap_key="k",
+            provider_message_id="p",
+            bridge_text="hi",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
         ).params
         is None
     )
@@ -431,6 +440,8 @@ def test_inbound_bridge_params_roundtrip_and_validation():
             provider_message_id="p",
             bridge_text="hi",
             params={"bad key": "x"},
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
         )
 
 
@@ -487,6 +498,7 @@ def test_channel_delivery_carries_on_mismatch():
         "answer_format": "text",
         "callback_url": "https://x/cb",
         "timeout_at": now,
+        "sensitive": False,
     }
     assert ChannelDelivery(**base).on_mismatch is AnswerMismatchPolicy.RETRY
     assert ChannelDelivery(**base, on_mismatch=AnswerMismatchPolicy.BRIDGE).on_mismatch is AnswerMismatchPolicy.BRIDGE
@@ -528,6 +540,7 @@ def test_rejection_wording_defaults_bounds_and_rides_the_shapes():
         callback_url="https://x/cb",
         timeout_at=now,
         wording=Wording.model_validate({"answer": {"rejected": "Try again: {reason}"}}),
+        sensitive=False,
     )
     assert delivery.wording is not None
     assert delivery.wording.answer is not None
@@ -546,7 +559,12 @@ def test_rejection_wording_defaults_bounds_and_rides_the_shapes():
     # ask REQUEST enforces, so the delivery frame is bounded exactly as the ask that produced it.
     assert (
         ChannelDelivery(
-            interaction_id="i", question="pick", answer_format="text", callback_url="https://x/cb", timeout_at=now
+            interaction_id="i",
+            question="pick",
+            answer_format="text",
+            callback_url="https://x/cb",
+            timeout_at=now,
+            sensitive=False,
         ).wording
         is None
     )
@@ -558,6 +576,7 @@ def test_rejection_wording_defaults_bounds_and_rides_the_shapes():
             callback_url="https://x/cb",
             timeout_at=now,
             wording=Wording.model_validate({"answer": {"rejected": "   "}}),
+            sensitive=False,
         )
     with pytest.raises(ValidationError, match=f"at most {REJECTION_NOTICE_MAX_CHARS}"):
         ChannelDelivery(
@@ -567,6 +586,7 @@ def test_rejection_wording_defaults_bounds_and_rides_the_shapes():
             callback_url="https://x/cb",
             timeout_at=now,
             wording=Wording.model_validate({"answer": {"rejected": "x" * (REJECTION_NOTICE_MAX_CHARS + 1)}}),
+            sensitive=False,
         )
 
 
@@ -592,3 +612,16 @@ def test_interaction_response_params_roundtrip_and_validation():
             answered_at=datetime.now(UTC),
             params={"k": "x" * 600},
         )
+
+
+def test_interaction_response_medium_message_id_roundtrip():
+    resp = InteractionResponse(
+        interaction_id="i", answer="yes", answered_by="ext", answered_at=datetime.now(UTC), medium_message_id="77"
+    )
+    assert InteractionResponse.model_validate(resp.model_dump()).medium_message_id == "77"
+    assert (
+        InteractionResponse(
+            interaction_id="i", answer="yes", answered_by="ext", answered_at=datetime.now(UTC)
+        ).medium_message_id
+        is None
+    )

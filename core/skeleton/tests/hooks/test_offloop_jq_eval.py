@@ -15,7 +15,7 @@ from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksM
 from tai42_skeleton.hooks.settings import HooksSettings
 
 
-async def test_condition_and_expr_evaluate_through_off_loop_helper(make_app, monkeypatch):
+async def test_condition_and_expr_evaluate_through_off_loop_helper(hook_runs, make_app, monkeypatch):
     calls: list[tuple[str, dict]] = []
     real = bhm.run_jq_first
 
@@ -27,6 +27,7 @@ async def test_condition_and_expr_evaluate_through_off_loop_helper(make_app, mon
 
     app = make_app()
     manager = InMemoryHooksManager(HooksSettings())
+    hook_runs.use(manager)
     await manager.register(
         HookParams(
             name="c",
@@ -40,6 +41,7 @@ async def test_condition_and_expr_evaluate_through_off_loop_helper(make_app, mon
     )
 
     await manager.on_event("t", {"id": 3, "status": "ready"})
+    await hook_runs.drain()
 
     # The condition runs through the off-loop ``run_jq_first`` helper; the ``start_expr`` runs
     # through the door-contract evaluator, and its transformed result reaching the tool proves it.
@@ -47,9 +49,10 @@ async def test_condition_and_expr_evaluate_through_off_loop_helper(make_app, mon
     assert ('.status == "ready"', {"id": 3, "status": "ready"}) in calls
 
 
-async def test_fire_time_jq_error_is_not_swallowed(make_app, caplog):
+async def test_fire_time_jq_error_is_not_swallowed(hook_runs, make_app, caplog):
     app = make_app()
     manager = InMemoryHooksManager(HooksSettings())
+    hook_runs.use(manager)
     await manager.register(
         # Compiles at register time, raises at evaluation (string -> number).
         HookParams(
@@ -64,6 +67,7 @@ async def test_fire_time_jq_error_is_not_swallowed(make_app, caplog):
 
     with caplog.at_level(logging.ERROR):
         await manager.on_event("t", {"x": "abc"})
+        await hook_runs.drain()
 
     # The condition's evaluation error is the hook's own failure: surfaced loudly in the
     # log (never swallowed as a cleanly-false skip) and the hook does not fire.

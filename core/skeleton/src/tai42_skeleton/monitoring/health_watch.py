@@ -301,10 +301,10 @@ class MonitoringHealthWatch:
 
 async def _emit(payload: dict[str, int]) -> None:
     from tai42_skeleton.hooks.cache import get_hooks_manager
-    from tai42_skeleton.monitoring.registry import get_monitoring
 
-    with get_monitoring().writer.disable():
-        await get_hooks_manager().on_event(topic=MONITORING_EXPORT_FAILED_EVENT_TOPIC, payload=dict(payload))
+    await get_hooks_manager().on_event(
+        topic=MONITORING_EXPORT_FAILED_EVENT_TOPIC, payload=dict(payload), monitoring_disabled=True
+    )
 
 
 async def run_monitoring_health_watch() -> None:

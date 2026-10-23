@@ -17,6 +17,8 @@ from tai42_skeleton.conversations.turn.context import (
     _turn_block,
 )
 
+from .conftest import NO_REPLY_WINDOW
+
 
 def _route(locale: str | None = None) -> ConversationRoute:
     return ChannelConversationRoute(
@@ -87,14 +89,14 @@ def test_resolved_locale_prefers_person_over_channel_over_route_over_none() -> N
 def test_route_default_fills_a_channel_turn_with_no_per_turn_locale() -> None:
     # A channel turn that supplies no per-turn locale (WhatsApp/Twilio/Slack) and no stored
     # contact override renders templated parts in the route's declared language, not English.
-    block = _turn_block(_record(None), _route("fr"), person=_person(None), thread_id="th")
+    block = _turn_block(_record(None), _route("fr"), person=_person(None), thread_id="th", reply_window=NO_REPLY_WINDOW)
     subject = block["subject"]
     assert isinstance(subject, dict)
     assert subject["locale"] == "fr"
 
 
 def test_turn_block_subject_carries_locale() -> None:
-    block = _turn_block(_record("he"), _route(), person=_person(None), thread_id="th")
+    block = _turn_block(_record("he"), _route(), person=_person(None), thread_id="th", reply_window=NO_REPLY_WINDOW)
     subject = block["subject"]
     assert isinstance(subject, dict)
     assert subject["locale"] == "he"

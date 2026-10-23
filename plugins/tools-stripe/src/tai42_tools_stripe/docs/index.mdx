@@ -71,9 +71,9 @@ returns a signing secret post-creation.
 
 ## reconcile_stripe_payments
 
-Re-answers paid Stripe checkout sessions the single-delivery webhook path may have
-lost, by listing recent sessions from Stripe and answering each through the same
-pinned bridge path. Run it on a schedule as the recovery layer for payments.
+Re-answers any paid Stripe checkout session whose webhook never arrived, or whose
+hook run is held as failed, by listing recent sessions from Stripe and answering each
+through the same pinned bridge path. Run it on a schedule as the recovery layer for payments.
 
 ## See also
 

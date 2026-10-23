@@ -129,12 +129,30 @@ async def _gather_superseded(store, lead: ConversationRecord, member_ids: set[st
 
     A record dropped by the cancel watcher names its successor; when that successor is a member
     of this batch (the turn that took its place), it rides the payload's ``superseded`` so its
-    text is not lost. Read from the thread's own index, bounded by the FIFO depth.
+    text is not lost. Read from the thread's own index, newest first, bounded by the FIFO depth.
+    The bound counts only records that are not send records (an unreadable member counts): the
+    index is read in batches of that depth until that many were read or the index ends, so the
+    sends the thread holds never use up the bound.
     """
-    page, _ = await store.list_thread_records(
-        lead.route_name, lead.thread_id, offset=0, limit=store.settings.thread_queue_depth, newest_first=True
-    )
-    carried = [r for r in page.records if _is_superseded(r) and r.successor_id in member_ids]
+    depth = store.settings.thread_queue_depth
+    read: list[ConversationRecord] = []
+    counted = 0
+    offset = 0
+    while counted < depth:
+        page, unreadable = await store.list_thread_records(
+            lead.route_name, lead.thread_id, offset=offset, limit=depth, newest_first=True
+        )
+        counted += unreadable
+        for record in page.records:
+            if counted == depth:
+                break
+            if record.origin != "send":
+                read.append(record)
+                counted += 1
+        offset += depth
+        if offset >= page.total:
+            break
+    carried = [r for r in read if _is_superseded(r) and r.successor_id in member_ids]
     carried.sort(key=lambda r: (r.created_at, r.message_id))
     return carried
 

@@ -202,6 +202,22 @@ describe('applyFrame: chat.question', () => {
     expect(model.answeredIds.has('int-1')).toBe(true);
   });
 
+  it('settles a sensitive question from an answered frame that carries no answer', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      question,
+      frame('chat.answered', {
+        id: 'a1',
+        interaction_id: 'int-1',
+        ts: '2026-01-01T00:00:00Z',
+        sensitive: true,
+      }),
+    );
+
+    expect(model.items).toHaveLength(1);
+    expect(model.answeredIds.has('int-1')).toBe(true);
+  });
+
   it('settles a question whose answered frame arrived first', () => {
     const model = fold(
       EMPTY_MODEL,

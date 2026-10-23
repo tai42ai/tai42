@@ -14,6 +14,7 @@ from tai42_contract.agent.events import (
     SuspendedFinal,
     final_event_for_value,
 )
+from tai42_contract.channels import ReplyWindow
 from tai42_contract.conversations import ConversationRoute, Person
 from tai42_contract.interactions import (
     LocationElement,
@@ -199,6 +200,7 @@ async def _run_agent_turn(
     form_tag: str | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
+    reply_window: ReplyWindow,
 ) -> _ToolOutcome:
     """Run one agent turn as the route's execution key, through the shared visit, and return its outcome.
 
@@ -238,6 +240,7 @@ async def _run_agent_turn(
         form_tag=form_tag,
         attachments=attachments,
         location=location,
+        reply_window=reply_window,
     )
     parked = parked_entries_for_jq(await list_parked())
     try:

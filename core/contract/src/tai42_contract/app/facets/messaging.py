@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from tai42_contract.channels import Channel, CorrelationStore, InboundAnswerResult, InboundBridge
+from tai42_contract.channels import Channel, CorrelationStore, InboundAnswerResult, InboundBridge, SendOutcome
 from tai42_contract.conversations import (
+    AnswerPart,
     ConversationTargetKind,
     DeliveryReceipt,
     InboundRejectionReason,
@@ -18,7 +19,7 @@ from tai42_contract.conversations import (
 from tai42_contract.interactions.answer_check import QuestionFormat
 from tai42_contract.interactions.asker import Ask
 from tai42_contract.interactions.models import FormReactionEvent, FormShapeError, LocationElement, MediaItem
-from tai42_contract.interactions.visit import ParkedEntry, RunAnswer, Visit, VisitOutcome
+from tai42_contract.interactions.visit import ParkedEntry, RunAnswer, SettleVisitClaim, Visit, VisitOutcome
 from tai42_contract.states import StateContext
 from tai42_contract.webhooks import WebhookVerifier
 
@@ -98,6 +99,8 @@ class AppInteractions(Protocol):
         ``options`` for option-bearing fields, ``display`` for declared slots), and returns it.
         STATELESS: it never records an answer, resolves the interaction, or rewrites the request.
         A handler that raises or misses the deadline surfaces LOUDLY, never a stale/silent value.
+        Raises a :class:`~tai42_contract.interactions.FormReactionError` on a closed interaction, a
+        malformed request, or a handler failure; its ``reason`` is the door's sentence.
         """
         ...
 
@@ -160,6 +163,17 @@ class AppInteractions(Protocol):
         :class:`~tai42_contract.interactions.VisitOutcome`. A door resolves its own jqs to plain
         values and hands them in; the generic ``list_parked`` / ``resume_parked`` / ``cancel_parked``
         below are thin wrappers over this same seam.
+        """
+        ...
+
+    @property
+    def settle_visit_claim(self) -> SettleVisitClaim:
+        """The bound :class:`~tai42_contract.interactions.SettleVisitClaim` read of a visit's claim.
+
+        Given the :class:`~tai42_contract.interactions.VisitAct` of a resume or take claim whose
+        ``committed`` notice a door never saw, it returns the ids no longer open in the interactions
+        store. An empty result proves the claim did not commit; a returned id was resolved by some
+        door, and the read does not say which.
         """
         ...
 
@@ -262,8 +276,8 @@ class AppInteractions(Protocol):
         An in-process plugin asks a human without importing the skeleton:
         ``await tai42_app.interactions.ask(question, ..., mode="async",
         expiry_at=...)``. The return shape is the ``Ask`` contract's:
-        ``mode="sync"`` returns the typed answer, ``mode="async"`` returns a
-        ``SuspendedInteraction``. Its full call signature is the ``Ask``
+        ``mode="sync"`` returns an :class:`~tai42_contract.interactions.AskAnswer`,
+        ``mode="async"`` returns a ``SuspendedInteraction``. Its full call signature is the ``Ask``
         Protocol's, including the per-ask ``on_mismatch`` digression policy and
         the ``wording`` catalogue a channel-delivered ask carries. A facade
         EXPOSURE of the skeleton helper through the already-typed Protocol — no new
@@ -355,7 +369,14 @@ class AppChannels(Protocol):
         params}`` (params present only when set), landing on
         :attr:`~tai42_contract.interactions.models.InteractionResponse.params` for the asking flow
         to read beside ``answer``; and on the BRIDGE arm the same ``params`` are passed to
-        ``accept`` as its entry ``params``. The ladder:
+        ``accept`` as its entry ``params``. ``bridge.medium_message_id`` rides both arms the same
+        way: in the callback body as ``medium_message_id`` (landing on
+        :attr:`~tai42_contract.interactions.models.InteractionResponse.medium_message_id`) and to
+        ``accept`` on the bridge arm. ``bridge.reply_to_medium_message_id``, the id of the message
+        the reply quotes, rides both arms likewise: in the callback body as
+        ``reply_to_medium_message_id`` (present only when set, landing on
+        :attr:`~tai42_contract.interactions.models.InteractionResponse.reply_to_medium_message_id`)
+        and to ``accept`` on the bridge arm. The ladder:
 
         * No pending ask on the key -> :attr:`InboundAnswerOutcome.NO_CORRELATION`
           with NO side effect: the CALLER bridges the reply as a normal turn (the
@@ -433,6 +454,8 @@ class AppConversations(Protocol):
         cap_key: str,
         text: str,
         provider_message_id: str,
+        medium_message_id: str | None,
+        reply_to_medium_message_id: str | None,
         params: dict[str, str] | None = None,
         form: dict[str, Any] | None = None,
         attachments: list[MediaItem] | None = None,
@@ -446,6 +469,13 @@ class AppConversations(Protocol):
         turn runs as that route's execution key and answers back over the same channel.
         Idempotent on ``(channel, provider_message_id)`` — a redelivery returns the
         existing ``message_id`` and starts no second turn. Raises when no route matches.
+        ``medium_message_id`` is the id the medium gives the message itself, the one a later
+        quote names (``None`` only when the medium has no such id); it is not the dedupe key.
+        One medium message bridged as several records passes the same ``medium_message_id``
+        on each. ``reply_to_medium_message_id`` is the medium's id of the message this one
+        quotes (``None`` when it quotes none); required, ``None`` included. A reply's quoted
+        message is a typed field: the platform resolves its text from the conversation record
+        and hands it to the target as ``reply_to`` (:class:`~tai42_contract.conversations.ReplyTo`).
 
         ``client_address`` is the conversation identity (its thread and transcript).
         ``cap_key`` is the party the per-address turn cap holds accountable, which the
@@ -460,8 +490,8 @@ class AppConversations(Protocol):
         :func:`~tai42_contract.conversations.validate_entry_params` before accept.
         ``params`` is ALSO the opaque-enrichment seam for the channel-specific inbound
         context that has no shared shape — a tapped reply/list id, a template button
-        payload, a referral, the reply-to context of the message the participant quoted, a
-        contact card or a reaction — which a channel adapter encodes as string entries a
+        payload, a referral, a contact card or a reaction — which a channel adapter encodes as
+        string entries a
         route reads deliberately; the platform adds no typed field for those.
 
         ``form`` is an optional structured participant submission (an ask-less form's answers)
@@ -498,13 +528,37 @@ class AppConversations(Protocol):
         """
         ...
 
-    async def record_delivery_status(self, channel: str, provider_message_id: str, status: DeliveryReceipt) -> None:
+    async def record_delivery_status(
+        self, channel: str, provider_message_id: str, status: DeliveryReceipt, *, errors: Any = None
+    ) -> None:
         """Ingest a channel's out-of-band delivery receipt for an outbound message.
 
-        ``provider_message_id`` is one of the ids a prior ``notify`` returned, resolved
-        to the answer record through the outbound-id reverse index. ``FAILED`` marks the
-        record failed; ``DELIVERED`` confirms a ``provisional`` record. Raises when the
-        id resolves to no record.
+        ``provider_message_id`` is one of the ids a prior ``notify`` or ``deliver`` returned,
+        resolved to its record through the outbound-id reverse index. ``FAILED`` marks the
+        record failed; ``DELIVERED`` confirms a ``provisional`` record. ``errors`` is the
+        provider's error detail, carried onto the trace receipt event of a recorded
+        ``notify_user`` send. Raises when the id resolves to no record.
+        """
+        ...
+
+    async def send_recorded(
+        self,
+        *,
+        channel: str,
+        our_identity: str,
+        client_address: str,
+        content: AnswerPart,
+        send: Callable[[], Awaitable[SendOutcome]],
+    ) -> SendOutcome:
+        """Record a send a channel plugin makes itself, record first, and return its outcome.
+
+        The platform writes the send's record before ``send`` runs, runs it, then completes
+        the record from the returned :class:`SendOutcome` (its identity, address and message
+        ids place the record). ``our_identity`` and ``client_address`` are the plugin's
+        pre-send address, used only to place a send that never reported an outcome.
+        ``content`` is what the send carries, recorded as the record's one part. A send
+        that raises leaves a failed record and its error propagates; a send with no
+        matching conversation route is sent unrecorded.
         """
         ...
 
@@ -513,7 +567,7 @@ class AppConversations(Protocol):
         *,
         channel_id: str,
         recipient: str,
-        sender_identity: str | None,
+        sender_identity: str,
         kind: str,
         reason: InboundRejectionReason,
     ) -> None:
@@ -522,13 +576,14 @@ class AppConversations(Protocol):
         The ONE shared chokepoint a channel adapter calls instead of silently ack-and-ignoring a
         vendor content it recognises but cannot represent as a turn — an unmappable media kind, a
         file over the platform cap, a byte source it could not fetch, or an unsupported content
-        type. Sends a single generic participant notice back over ``channel_id`` to ``recipient``
-        (from ``sender_identity`` when the channel fronts several identities, else the channel
-        default), and records a platform event naming the generic ``kind`` refused and the
-        ``reason``, so the drop is operator-visible. ``kind`` is a generic, domain-neutral label
+        type. Sends a single participant notice back over ``channel_id`` to ``recipient`` from
+        ``sender_identity`` (the receiving identity, the conversation route's key), and records a
+        platform event naming the generic ``kind`` refused and the ``reason``, so the drop is
+        operator-visible. The notice is the route's ``reply_texts`` member for ``reason``
+        (``rejected_<reason>``), else the built-in notice. ``kind`` is a generic, domain-neutral label
         (e.g. an :class:`~tai42_contract.conversations.InboundMediaKind` value or a channel's neutral
         content word); it names WHAT was refused, never a participant value. ``reason`` selects the
-        generic notice the platform sends. A blank or unroutable message is a different fault and
+        notice the platform sends. A blank or unroutable message is a different fault and
         stays its own handling — this seam is for content the channel recognises but cannot bridge.
         """
         ...

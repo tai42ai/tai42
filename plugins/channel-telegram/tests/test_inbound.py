@@ -97,6 +97,7 @@ async def test_valid_reply_invokes_shared_ladder_and_acks_forwarded(http_recorde
     assert call.bridge.client_address == "777"
     assert call.bridge.cap_key == "777"
     assert call.bridge.provider_message_id == "5"  # the update id
+    assert call.bridge.medium_message_id == "1001"  # the reply's own message id
     assert call.bridge.bridge_text == "the blue one"
     # The plugin does not forward itself; the ladder owns that.
     assert http_recorder.requests == []
@@ -267,6 +268,7 @@ async def test_uncorrelated_routed_message_reaches_bridge_with_verbatim_args(htt
     assert call.client_address == "777"
     assert call.text == "hello bridge"
     assert call.provider_message_id == "7"
+    assert call.medium_message_id == "1001"  # the message id a quote names
     assert call.locale is None  # no sender language_code on this update
 
 
@@ -336,6 +338,7 @@ async def test_expired_force_reply_falls_through_to_bridge(http_recorder, fake_r
     assert call.client_address == "777"
     assert call.text == "the blue one"
     assert call.provider_message_id == "5"
+    assert call.medium_message_id == "1001"
 
 
 async def test_bridge_client_address_is_numeric_chat_id_even_with_username(http_recorder, fake_redis, conversations):
@@ -384,6 +387,19 @@ async def test_bridge_message_without_update_id_is_rejected(http_recorder, fake_
     response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
     assert response.status_code == 400
     assert _body(response) == {"error": "update carries no integer update_id"}
+    assert conversations.accept_calls == []
+
+
+@pytest.mark.parametrize("message_id", [None, "1001"], ids=["absent", "not-an-integer"])
+async def test_message_without_integer_message_id_is_rejected(http_recorder, fake_redis, conversations, message_id):
+    # The message id is the id a quote names; a message lacking it is malformed (400),
+    # never bridged without one.
+    message: dict[str, Any] = {"chat": {"id": 777}, "text": "hi"}
+    if message_id is not None:
+        message["message_id"] = message_id
+    response = await inbound(make_inbound_request({"update_id": 5, "message": message}, headers=_VALID_HEADERS))
+    assert response.status_code == 400
+    assert _body(response) == {"error": "message carries no integer message_id"}
     assert conversations.accept_calls == []
 
 
@@ -460,6 +476,7 @@ async def test_ladder_reads_the_delivered_on_mismatch_and_wording_off_the_store(
             on_mismatch=AnswerMismatchPolicy.BRIDGE,
             callback_url=_CALLBACK,
             timeout_at=datetime.now(UTC) + timedelta(seconds=600),
+            sensitive=False,
         )
     )
 
@@ -536,6 +553,7 @@ async def test_select_tap_maps_index_to_text_and_resolves_via_ladder(http_record
     assert call.correlation_key == "777:42"  # the anchor scoped by its chat
     assert call.answer == "blue"  # options[1]
     assert call.bridge.provider_message_id == "9"  # the update id
+    assert call.bridge.medium_message_id is None  # a tap is no message of the end user's
     assert len(_answered_callbacks(http_recorder)) == 1
 
 
@@ -552,6 +570,7 @@ async def test_notify_option_tap_bridges_on_correlation_miss(http_recorder, fake
     assert len(conversations.accept_calls) == 1
     assert conversations.accept_calls[0].text == "c"  # options[2]
     assert conversations.accept_calls[0].client_address == "777"
+    assert conversations.accept_calls[0].medium_message_id is None
 
 
 async def test_authored_id_tap_bridges_with_reply_id_and_description_params(
@@ -977,6 +996,7 @@ async def test_media_bridge_dedupe_key_is_the_update_id(
     update = _media_update(photo=[{"file_id": "big", "file_size": 900}], update_id=4242)
     await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
     assert conversations.accept_calls[0].provider_message_id == "4242"
+    assert conversations.accept_calls[0].medium_message_id == "1001"
     assert media.ingest_calls[0].origin.message_id == "4242"
 
 
@@ -1098,6 +1118,7 @@ async def test_disallowed_media_type_rejects_unsupported_type_and_bridges_captio
     assert len(conversations.accept_calls) == 1
     call = conversations.accept_calls[0]
     assert call.text == "have a look"
+    assert call.medium_message_id == "1001"
     assert call.attachments is None
     assert "media_id" not in call.params
     assert call.params["media_kind"] == "document"
@@ -1396,10 +1417,191 @@ async def test_an_over_bound_params_set_bridges_without_params_and_is_counted(fa
     before = _dropped("set")
     over_bound = {f"k{i}": "v" for i in range(17)}
     with caplog.at_level("WARNING"):
-        await _bridge(telegram_settings(), 777, "hello", {"update_id": 9001}, params=over_bound)
+        await _bridge(
+            telegram_settings(),
+            777,
+            "hello",
+            {"update_id": 9001},
+            medium_message_id="1",
+            reply_to_medium_message_id=None,
+            params=over_bound,
+        )
 
     (call,) = conversations.accept_calls
     assert call.params is None
     assert call.text == "hello"
     assert _dropped("set") == before + 1
     assert [r for r in caplog.records if "telegram entry params dropped" in r.getMessage()]
+
+
+# --- the quoted message's id ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("outcome", [InboundAnswerOutcome.FORWARDED, InboundAnswerOutcome.BRIDGED])
+async def test_a_reply_hands_the_ladder_bridge_the_replied_message_id(http_recorder, fake_redis, channels, outcome):
+    channels.inbound_outcome = outcome
+    await inbound(make_inbound_request(_reply_update(replied_message_id=7), headers=_VALID_HEADERS))
+
+    (call,) = channels.inbound_calls
+    assert call.bridge.reply_to_medium_message_id == "7"
+
+
+async def test_a_reply_whose_ask_is_gone_bridges_with_the_replied_message_id(
+    http_recorder, fake_redis, conversations, channels
+):
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    await inbound(make_inbound_request(_reply_update(replied_message_id=7), headers=_VALID_HEADERS))
+
+    (call,) = conversations.accept_calls
+    assert call.reply_to_medium_message_id == "7"
+
+
+async def test_a_reply_from_a_chat_outside_the_ask_list_bridges_with_the_replied_message_id(
+    http_recorder, fake_redis, conversations, channels
+):
+    await inbound(make_inbound_request(_reply_update(chat_id=555, replied_message_id=7), headers=_VALID_HEADERS))
+
+    assert channels.inbound_calls == []
+    (call,) = conversations.accept_calls
+    assert call.reply_to_medium_message_id == "7"
+
+
+async def test_a_message_replying_to_nothing_bridges_with_no_replied_message_id(
+    http_recorder, fake_redis, conversations
+):
+    await inbound(make_inbound_request(_text_update(), headers=_VALID_HEADERS))
+
+    (call,) = conversations.accept_calls
+    assert call.reply_to_medium_message_id is None
+
+
+def _topic_update(*, thread_id: int, replied_message_id: int) -> dict[str, Any]:
+    """A message posted in forum topic ``thread_id`` whose ``reply_to_message`` is ``replied_message_id``."""
+    update = _text_update()
+    update["message"]["is_topic_message"] = True
+    update["message"]["message_thread_id"] = thread_id
+    update["message"]["reply_to_message"] = {"message_id": replied_message_id}
+    return update
+
+
+async def test_a_topic_message_whose_reply_is_the_topic_start_replies_to_nothing(
+    http_recorder, fake_redis, conversations, channels
+):
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    await inbound(make_inbound_request(_topic_update(thread_id=50, replied_message_id=50), headers=_VALID_HEADERS))
+
+    (call,) = conversations.accept_calls
+    assert call.reply_to_medium_message_id is None
+
+
+async def test_a_reply_inside_a_topic_names_the_replied_message(http_recorder, fake_redis, conversations, channels):
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    await inbound(make_inbound_request(_topic_update(thread_id=50, replied_message_id=61), headers=_VALID_HEADERS))
+
+    (call,) = conversations.accept_calls
+    assert call.reply_to_medium_message_id == "61"
+
+
+async def test_an_external_reply_only_replies_to_nothing(http_recorder, fake_redis, conversations):
+    # ``external_reply`` names a message of another chat: its id is not this chat's.
+    update = _text_update()
+    update["message"]["external_reply"] = {"origin": {"type": "user"}, "message_id": 7}
+    await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+
+    (call,) = conversations.accept_calls
+    assert call.reply_to_medium_message_id is None
+
+
+@pytest.mark.parametrize("replied_message_id", ["7", True, None])
+async def test_a_reply_without_an_integer_replied_id_replies_to_nothing(
+    http_recorder, fake_redis, conversations, replied_message_id
+):
+    update = _text_update()
+    update["message"]["reply_to_message"] = {"message_id": replied_message_id}
+    await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+
+    (call,) = conversations.accept_calls
+    assert call.reply_to_medium_message_id is None
+
+
+@pytest.mark.parametrize("outcome", [InboundAnswerOutcome.FORWARDED, InboundAnswerOutcome.BRIDGED])
+async def test_a_keyboard_tap_hands_the_ladder_bridge_the_keyboard_message_id(
+    http_recorder, fake_redis, channels, outcome
+):
+    channels.inbound_outcome = outcome
+    _seed_options(fake_redis, ["red", "blue"], message_id=9)
+    await inbound(make_inbound_request(_callback_update(message_id=9, data="1"), headers=_VALID_HEADERS))
+
+    (call,) = channels.inbound_calls
+    assert call.bridge.reply_to_medium_message_id == "9"
+
+
+async def test_a_keyboard_tap_bridged_on_a_miss_carries_the_keyboard_message_id(
+    http_recorder, fake_redis, channels, conversations
+):
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    _seed_options(fake_redis, ["red", "blue"], message_id=9)
+    await inbound(make_inbound_request(_callback_update(message_id=9, data="1"), headers=_VALID_HEADERS))
+
+    (call,) = conversations.accept_calls
+    assert call.reply_to_medium_message_id == "9"
+
+
+async def test_a_keyboard_tap_from_a_chat_outside_the_ask_list_carries_the_keyboard_message_id(
+    http_recorder, fake_redis, channels, conversations
+):
+    _seed_options(fake_redis, ["red", "blue"], message_id=9, chat_id=555)
+    await inbound(make_inbound_request(_callback_update(chat_id=555, message_id=9, data="1"), headers=_VALID_HEADERS))
+
+    assert channels.inbound_calls == []
+    (call,) = conversations.accept_calls
+    assert call.reply_to_medium_message_id == "9"
+
+
+@pytest.mark.parametrize("outcome", [InboundAnswerOutcome.FORWARDED, InboundAnswerOutcome.BRIDGED])
+async def test_a_media_reply_answering_an_ask_hands_the_ladder_bridge_the_replied_message_id(
+    http_recorder, fake_redis, channels, media, monkeypatch: pytest.MonkeyPatch, outcome
+):
+    channels.inbound_outcome = outcome
+    http_recorder.responder = _getfile_responder()
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(content_type="image/png"))
+    media.ingest_result = _ingested(MediaKind.IMAGE)
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}], caption="this", reply_to_message_id=42)
+    await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+
+    (call,) = channels.inbound_calls
+    assert call.bridge.reply_to_medium_message_id == "42"
+
+
+async def test_a_media_reply_to_an_unknown_message_bridges_with_the_replied_message_id(
+    http_recorder, fake_redis, conversations, channels, media, monkeypatch: pytest.MonkeyPatch
+):
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    http_recorder.responder = _getfile_responder()
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(content_type="image/png"))
+    media.ingest_result = _ingested(MediaKind.IMAGE)
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}], caption="look", reply_to_message_id=99)
+    await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+
+    (call,) = conversations.accept_calls
+    assert call.reply_to_medium_message_id == "99"
+
+
+@pytest.mark.parametrize("fault", ["getfile", "ingest"])
+async def test_a_refused_media_reply_bridges_its_caption_with_the_replied_message_id(
+    http_recorder, fake_redis, conversations, channels, media, monkeypatch: pytest.MonkeyPatch, fault
+):
+    # Both refusals (a permanent getFile failure and a refused ingest) bridge the caption quoting the same message.
+    if fault == "getfile":
+        http_recorder.responder = _getfile_responder(ok=False)
+    else:
+        http_recorder.responder = _getfile_responder()
+        media.ingest_error = MediaTooLargeError("over cap")
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream())
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}], caption="please", reply_to_message_id=42)
+    await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+
+    assert channels.inbound_calls == []
+    (call,) = conversations.accept_calls
+    assert call.text == "please"
+    assert call.reply_to_medium_message_id == "42"

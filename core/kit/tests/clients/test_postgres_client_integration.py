@@ -273,3 +273,13 @@ async def test_a_connection_broken_inside_read_connection_is_replaced(
         async with read_connection(pool) as conn:
             assert await _fetch_one(conn, "SELECT pg_backend_pid()") != pid
     await drain_epoch(advance_client_epoch(), 5.0)
+
+
+async def test_a_pool_with_a_retry_budget_connects_to_a_live_server_with_no_retry_warning(
+    real_pg_settings: PostgresConnectionSettings, caplog: pytest.LogCaptureFixture
+) -> None:
+    kwargs = {**real_pg_settings.client_kwargs(), "retry_attempts": 1}
+    with caplog.at_level("WARNING", logger=pg.__name__):
+        async with client_ctx(PostgresClient, fresh=True, **kwargs) as pool:
+            assert await _scalar(pool, "SELECT 1") == 1
+    assert [r for r in caplog.records if r.name == pg.__name__] == []

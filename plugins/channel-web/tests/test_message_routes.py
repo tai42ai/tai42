@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 from starlette.responses import StreamingResponse
+from tai42_contract.channels import SendOutcome
 from tai42_contract.conversations import BlankInboundTextError, ThreadQueueOverflowError
 from tai42_contract.interactions import MediaAlreadyBoundError, MediaKind, MediaNotFoundError
 from tai42_kit.conversations.inbound_media import inbound_media_placeholder
@@ -451,7 +452,7 @@ async def test_a_shed_reply_can_never_precede_the_message_that_caused_it(
     # A rate-shed message's slow-down reply is spawned INSIDE accept, so without the
     # conversation's write-order gate it XADDs before the visitor's own frame and the
     # page replays the agent answering a message that is not there yet.
-    spawned: list[asyncio.Task[list[str]]] = []
+    spawned: list[asyncio.Task[SendOutcome]] = []
 
     class _SheddingConversations:
         def __init__(self) -> None:

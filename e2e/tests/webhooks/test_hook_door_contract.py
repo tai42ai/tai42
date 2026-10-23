@@ -22,6 +22,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from tai42_contract.tools import TOOL_EXTRA_IDEMPOTENCY_KEY
 
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
@@ -93,9 +94,12 @@ async def test_hook_start_and_extras_expr_drive_the_fire(replicas_stack: TaiStac
         return json.loads(records[0]) if records else None
 
     record = await wait_for_async(_record, deadline=20.0, message=f"the hook fire never ran the probe for {marker!r}")
-    # start_expr mapped the event payload to the tool's kwargs, and extras_expr reached the run.
+    # start_expr mapped the event payload to the tool's kwargs, and extras_expr reached the run
+    # beside the platform's idempotency key, which every hook start carries.
     assert record["marker"] == marker, record
-    assert record["extras"] == {"tag": tag}, record
+    extras = dict(record["extras"])
+    assert extras.pop(TOOL_EXTRA_IDEMPOTENCY_KEY), record
+    assert extras == {"tag": tag}, record
 
 
 @pytest.mark.needs("kind:interactions", "setting:ACCESS_CONTROL_ENABLE=false")

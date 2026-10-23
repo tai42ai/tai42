@@ -8,25 +8,33 @@ twofold: the transcript reads back the uniform 404 and the listing empties (the 
 indexes are gone), and a THIRD turn on the same address no longer carries the fact (the
 agent checkpoint is gone, so memory restarts from empty).
 
+Forgetting a thread forgets every message the platform sent into it too: a thread holding a
+participant's message and its reply, a ``notify_user`` made during that turn, and an ask with the
+participant's reply is forgotten through the same door, and afterwards no record, outbound id,
+message-ref or ask key in the stack's Redis names any of those messages.
+
 The thread id rides the delete door's ``?thread_id=`` query, the same as the transcript read
 door, so it round-trips whatever it holds.
 """
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 from collections.abc import Callable
 from urllib.parse import urlencode
 
 import pytest
 
-from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT
+from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT, BRIDGE_TWILIO_FROM
 from tai42_e2e.settings import HarnessSettings
 
 from ._bridge_support import (
     TWILIO_INBOUND_PATH,
     BridgeHarness,
+    cancel_and_join,
     post_inbound,
+    redis_keys_naming,
     request_mentions,
     script_reply,
     wait_twilio_send,
@@ -117,3 +125,70 @@ async def test_deleting_a_thread_forgets_its_memory_and_its_transcript(
     assert not request_mentions(bridge.llm_stub, 2, fact), (
         "the deleted thread's memory survived into a new turn; the checkpoint was not forgotten"
     )
+
+
+@pytest.mark.needs("probe-tools", "setting:router:notifications", "setting:tool:ask", "setting:tool:notify_user")
+async def test_deleting_a_thread_forgets_every_key_that_names_its_sends(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    port = bridge.stack.port_b
+    route_name = uniq("l23-sends-route").replace("_", "-")
+    execution_key = uniq("l23-sends-exec")
+    await bridge.mint_key(user_id=execution_key, scopes=["e2e-all"])
+    notice = uniq("l23-notice")
+    reply = uniq("l23-reply")
+    # The route sits on the deployment's own number, the identity an ask goes from, so the ask
+    # lands in the same thread as the turn; a tool turn makes the mid-turn ``notify_user``.
+    await bridge.create_tool_channel_route(
+        route_name=route_name,
+        tool="notify_user",
+        execution_key=execution_key,
+        channel="twilio",
+        our_identity=BRIDGE_TWILIO_FROM,
+        start_expr=f'{{message: "{notice}", channel: "twilio", recipient: .sender}}',
+        reply_expr=f'"{reply}"',
+    )
+    try:
+
+        async def twilio_message(text: str) -> None:
+            inbound = bridge.twilio_inbound(
+                our_identity=BRIDGE_TWILIO_FROM, client=BRIDGE_TWILIO_CLIENT, text=text, port=port
+            )
+            assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, inbound, port=port)).status_code == 204
+
+        await twilio_message("hello")
+        sids = [(await wait_twilio_send(bridge.fake_twilio, text))["sid"] for text in (notice, reply)]
+
+        question = uniq("l23-question")
+        answer = uniq("l23-answer")
+
+        async def ask() -> object:
+            async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+                return (await mcp.call_tool("ask", {"question": question, "channel": "twilio"})).data.answer
+
+        task = asyncio.create_task(ask())
+        try:
+            sids.append((await wait_twilio_send(bridge.fake_twilio, question))["sid"])
+            await twilio_message(answer)
+            assert await asyncio.wait_for(task, timeout=15.0) == answer
+        finally:
+            await cancel_and_join(task)
+
+        thread_id = f"bridge:{route_name}:{BRIDGE_TWILIO_CLIENT}"
+        items = (await bridge.api().get(_transcript_path(route_name, thread_id)))["items"]
+        assert sorted((item["origin"], item["sent_by"]) for item in items) == [
+            ("client", None),
+            ("send", "ask"),
+            ("send", "notify"),
+        ]
+        (asked,) = [item for item in items if item["sent_by"] == "ask"]
+        needles = [*(item["message_id"] for item in items), *sids, asked["ask"]["interaction_id"]]
+        assert redis_keys_naming(bridge, needles), "the scan found no key naming the thread's messages"
+
+        removed = await bridge.api().delete(_thread_delete_path(route_name, thread_id))
+        assert removed["removed"] == 3
+
+        await bridge.api().get(_transcript_path(route_name, thread_id), expect=404)
+        assert redis_keys_naming(bridge, needles) == {}
+    finally:
+        await bridge.api().delete(f"/api/conversations/{route_name}")

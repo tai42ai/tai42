@@ -198,7 +198,10 @@ class WorkerBusSubscribeMixin:
         unrenewed claim would lapse mid-resync); presence is written ``resyncing`` before
         the resync and ``ready`` after, both under the renew-gated heartbeat path. The
         channel is subscribed before the resync, so an op broadcast during it is
-        buffered and applied by the message loop. Presence is
+        buffered and applied by the message loop. A reconnect the connection retry
+        hides (the pub/sub reconnects and re-subscribes inside a read, raising nothing)
+        is WARNING-logged and runs the same resync, as an op broadcast while the
+        connection was down is never delivered. Presence is
         NOT force-deleted on a reconnect (its TTL carries the identity across a blip);
         only a deliberate stop deletes it, and only after the claim release succeeds.
         A lost slot is routed through a DEDICATED reconnect branch (never the
@@ -256,11 +259,20 @@ class WorkerBusSubscribeMixin:
         # reconnects → its ``on_ready`` fires a resync reload_config → which retires and
         # force-closes the NEXT lease → an unbounded reload cascade. The bus URL is
         # Tier-1 refused (never changes across a profile apply), so this connection is
-        # invariant across epochs and has no reason to be epoch-scoped. A REAL bus outage
-        # still raises a transport error here and drives the reconnect+resync self-heal.
+        # invariant across epochs and has no reason to be epoch-scoped. A bus outage the
+        # connection retry outlasts raises a transport error here and drives the
+        # reconnect+resync self-heal; a reconnect the retry hides (the pub/sub reconnects
+        # and re-subscribes inside a read) sets ``reconnected`` and the loop runs the
+        # same resync, since an op published while it was disconnected is never delivered.
         async with _pkg.client_ctx(RedisClient, self._settings.redis, fresh=True) as conn:
             r: Any = conn
-            pubsub = r.pubsub()
+            reconnected = False
+
+            def _mark_reconnected() -> None:
+                nonlocal reconnected
+                reconnected = True
+
+            pubsub = r.pubsub(on_reconnect=_mark_reconnected)
             await pubsub.subscribe(self._settings.channel)
             exit_kind = "transport"
             presence_key: str | None = None
@@ -291,13 +303,17 @@ class WorkerBusSubscribeMixin:
                 # resync converges, so a mid-resync row is visible-but-excluded by the
                 # freshness/state gate, not hidden. The channel is already subscribed, so
                 # an op broadcast during the resync is buffered and applied below.
-                await self._write_presence(r, presence_key, self._presence)
-                if on_ready is not None:
-                    await on_ready()
-                self._presence.state = WorkerState.ready
-                await self._write_presence(r, presence_key, self._presence)
+                await self._resync(r, presence_key, self._presence, on_ready)
                 logger.info("worker bus: subscription live as %s", identity.name)
                 while True:
+                    if reconnected:
+                        reconnected = False
+                        logger.warning(
+                            "worker bus: subscription for %s reconnected; resyncing, as an op sent while "
+                            "it was disconnected is not delivered",
+                            identity.name,
+                        )
+                        await self._resync(r, presence_key, self._presence, on_ready)
                     if heartbeat.done.done():
                         # The heartbeat ended on its own — a presence refresh raised on
                         # its own connection while this held pub/sub connection stayed
@@ -324,6 +340,21 @@ class WorkerBusSubscribeMixin:
                 # beat can re-extend a released claim.
                 await self._stop_heartbeat()
                 await self._teardown(r, pubsub, presence_key, exit_kind)
+
+    async def _resync(
+        self,
+        r: Any,
+        presence_key: str,
+        presence: _PresenceValue,
+        on_ready: Callable[[], Awaitable[None]] | None,
+    ) -> None:
+        """Write ``presence`` as ``resyncing``, run ``on_ready``, then write it as ``ready``."""
+        presence.state = WorkerState.resyncing
+        await self._write_presence(r, presence_key, presence)
+        if on_ready is not None:
+            await on_ready()
+        presence.state = WorkerState.ready
+        await self._write_presence(r, presence_key, presence)
 
     async def _establish_identity(self, r: Any) -> None:
         """(Re)establish this process's claimed slot identity on a (re)connect.

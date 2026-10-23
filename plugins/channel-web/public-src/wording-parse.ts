@@ -50,6 +50,9 @@ const FORM_WORDING_KEYS: ReadonlySet<string> = new Set([
   'back',
   'submit',
   'review_empty',
+  'error_line',
+  'update_failed',
+  'step_progress',
   'fields',
 ]);
 const FORM_WORDING_STRING_KEYS: readonly string[] = [
@@ -59,17 +62,42 @@ const FORM_WORDING_STRING_KEYS: readonly string[] = [
   'back',
   'submit',
   'review_empty',
+  'error_line',
+  'update_failed',
+  'step_progress',
 ];
 
-const FIELD_WORDING_KEYS: ReadonlySet<string> = new Set(['choice_label', 'invalid']);
+const FIELD_WORDING_STRING_KEYS: readonly string[] = [
+  'choice_label',
+  'invalid',
+  'true_label',
+  'false_label',
+  'length_hint',
+  'required',
+  'add_item',
+  'remove_item',
+  'item_label',
+  'no_items',
+];
+const FIELD_WORDING_KEYS: ReadonlySet<string> = new Set(FIELD_WORDING_STRING_KEYS);
 
-/** One form field's wording: a non-blank `choice_label` and/or `invalid`, and no other key. */
+/** One form field's wording: every member a non-blank string, and no other key. The
+ * widget draws no length hint, so `length_hint` is validated and not carried. */
 function fieldWordingOf(raw: unknown): FieldWording | undefined {
   if (!isRecord(raw) || !onlyKnownKeys(raw, FIELD_WORDING_KEYS)) return undefined;
-  const choiceLabel = wordingMemberOf(raw, 'choice_label');
-  const invalid = wordingMemberOf(raw, 'invalid');
-  if (choiceLabel === undefined || invalid === undefined) return undefined;
-  return { choiceLabel, invalid };
+  if (!stringMembersValid(raw, FIELD_WORDING_STRING_KEYS)) return undefined;
+  const member = (key: string): string | null => wordingMemberOf(raw, key) as string | null;
+  return {
+    choiceLabel: member('choice_label'),
+    invalid: member('invalid'),
+    trueLabel: member('true_label'),
+    falseLabel: member('false_label'),
+    required: member('required'),
+    addItem: member('add_item'),
+    removeItem: member('remove_item'),
+    itemLabel: member('item_label'),
+    noItems: member('no_items'),
+  };
 }
 
 /** The per-field wording map: absent → `{}`; an object whose every value is a valid
@@ -87,8 +115,9 @@ function fieldsWordingOf(raw: unknown): Readonly<Record<string, FieldWording>> |
 }
 
 /** The `form` chapter: every string member validated (non-blank), the per-field map
- * parsed; the web draws `submit`, `back` and the field placeholders, so only those are
- * carried (the inline web form draws no `title`/`open`/`cancel`/`review_empty`). */
+ * parsed; the web draws `submit`, `back`, `update_failed`, `step_progress` and the field
+ * words, so only those are carried (the inline web form draws no `title`/`open`/`cancel`/
+ * `review_empty`, and no `error_line` summary: each field's sentence shows under it). */
 function formWordingOf(raw: unknown): FormWording | undefined {
   if (!isRecord(raw) || !onlyKnownKeys(raw, FORM_WORDING_KEYS)) return undefined;
   if (!stringMembersValid(raw, FORM_WORDING_STRING_KEYS)) return undefined;
@@ -97,6 +126,8 @@ function formWordingOf(raw: unknown): FormWording | undefined {
   return {
     submit: wordingMemberOf(raw, 'submit') as string | null,
     back: wordingMemberOf(raw, 'back') as string | null,
+    updateFailed: wordingMemberOf(raw, 'update_failed') as string | null,
+    stepProgress: wordingMemberOf(raw, 'step_progress') as string | null,
     fields,
   };
 }
@@ -121,20 +152,12 @@ const ANSWER_WORDING_KEYS: ReadonlySet<string> = new Set([
   'rejected',
   'rejected_final',
 ]);
-const ANSWER_DRAWN_KEYS: readonly string[] = [
-  'open',
-  'confirm',
-  'decline',
-  'submit',
-  'reply_hint',
-  'rejected',
-];
+const ANSWER_STRING_KEYS: readonly string[] = [...ANSWER_WORDING_KEYS];
 
-/** The `answer` chapter: every string member validated; the web draws them all except
- * `rejected_final` (a closed-ask notice the web card has no surface for). */
+/** The `answer` chapter: every string member validated, and every one drawn. */
 function answerWordingOf(raw: unknown): AnswerWording | undefined {
   if (!isRecord(raw) || !onlyKnownKeys(raw, ANSWER_WORDING_KEYS)) return undefined;
-  if (!stringMembersValid(raw, [...ANSWER_DRAWN_KEYS, 'rejected_final'])) return undefined;
+  if (!stringMembersValid(raw, ANSWER_STRING_KEYS)) return undefined;
   return {
     open: wordingMemberOf(raw, 'open') as string | null,
     confirm: wordingMemberOf(raw, 'confirm') as string | null,
@@ -142,6 +165,7 @@ function answerWordingOf(raw: unknown): AnswerWording | undefined {
     submit: wordingMemberOf(raw, 'submit') as string | null,
     replyHint: wordingMemberOf(raw, 'reply_hint') as string | null,
     rejected: wordingMemberOf(raw, 'rejected') as string | null,
+    rejectedFinal: wordingMemberOf(raw, 'rejected_final') as string | null,
   };
 }
 

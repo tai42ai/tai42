@@ -8,6 +8,7 @@ from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 
 from tai42_kit.clients.settings import PostgresConnectionSettings, RedisConnectionSettings
+from tai42_kit.llm.settings import llm_store_connection_options
 from tai42_kit.settings import not_configured_message
 
 if TYPE_CHECKING:
@@ -64,10 +65,19 @@ async def _create_postgres_store(conn_string: str | None, store_kwargs: dict[str
 
     # An unset conn string means the base Postgres namespace: its DSN builder raises a named
     # error if that identity is also unset, and its deployment sizes size this pool.
-    target: PostgresConnectionSettings | str = PostgresConnectionSettings() if conn_string is None else conn_string
-    pool = await open_dedicated_pool(
-        target, role="langgraph-store", connection_kwargs=dict(LANGGRAPH_CONNECTION_KWARGS)
-    )
+    # A set conn string is the whole identity; its retry is the store's own namespace.
+    connection_kwargs = dict(LANGGRAPH_CONNECTION_KWARGS)
+    if conn_string is None:
+        pool = await open_dedicated_pool(
+            PostgresConnectionSettings(), role="langgraph-store", connection_kwargs=connection_kwargs
+        )
+    else:
+        pool = await open_dedicated_pool(
+            conn_string,
+            role="langgraph-store",
+            connection_kwargs=connection_kwargs,
+            options=llm_store_connection_options(),
+        )
     try:
         # Temp connection for setup. The pool's per-connection kwargs set
         # row_factory=dict_row, so every checkout yields dict rows; the shared pool
@@ -88,15 +98,22 @@ async def _create_postgres_store(conn_string: str | None, store_kwargs: dict[str
 
 
 async def _create_redis_store(conn_string: str | None, store_kwargs: dict[str, Any]) -> tuple[Resource, CleanupFn]:
+    kwargs: dict[str, Any]
+    label: str | None
     if conn_string is None:
-        # An unset conn string means the base Redis namespace.
-        conn_string = RedisConnectionSettings().redis_url
-    if conn_string is None:
+        # An unset conn string means the base Redis namespace, its retry and timeouts included.
+        kwargs = {**RedisConnectionSettings().client_kwargs(), "decode_responses": False}
+        label = None
+    else:
+        # The conn string is the whole identity; the behaviour is the store's own namespace.
+        kwargs = {"url": conn_string, "decode_responses": False, **llm_store_connection_options().connection_options()}
+        label = "LLM_PROVIDER_STORE_CONN_STRING"
+    if kwargs["url"] is None:
         raise ValueError(not_configured_message("the Redis store", "REDIS_URL", "TAI_DEFAULT_REDIS_URL"))
 
     from langgraph.store.redis import AsyncRedisStore
 
-    from tai42_kit.clients.impl.redis import async_redis_from_url
+    from tai42_kit.clients.impl.redis import async_redis_from_url, redis_from_url_kwargs
 
     # The client is injected, never left to the store: the kit resolved the
     # URL, so the kit owns the connection. The checkpoint saver needs that
@@ -107,7 +124,7 @@ async def _create_redis_store(conn_string: str | None, store_kwargs: dict[str, A
     # langgraph-redis backends (and insurance against an open-ended version
     # floor), not a live defect. ``connection_args`` is deliberately not
     # passed: the store consults it only while building a client of its own.
-    client = async_redis_from_url(conn_string)
+    client = async_redis_from_url(**redis_from_url_kwargs(kwargs, label=label))
     store = AsyncRedisStore(redis_client=client, **store_kwargs)
 
     async def close_redis():

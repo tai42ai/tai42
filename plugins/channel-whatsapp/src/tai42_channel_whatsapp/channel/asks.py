@@ -5,7 +5,7 @@ from __future__ import annotations
 from tai42_contract.channels import ChannelDelivery
 
 from tai42_channel_whatsapp.channel.interactive import _choice_of, _send_choice
-from tai42_channel_whatsapp.client import send_message
+from tai42_channel_whatsapp.client import SentMessage, send_message
 
 # The DEFAULT line carrying the tappable answer link; the caller's own ``wording.lines.answer_link``
 # overrides it per send. Its ``{url}`` token is filled with the callback link by a plain substitution.
@@ -34,12 +34,11 @@ def _interaction_ids(delivery: ChannelDelivery) -> list[tuple[str, str]]:
     return [(f"{delivery.interaction_id}:{index}", option) for index, option in enumerate(delivery.options or [])]
 
 
-async def _send_question(phone_number_id: str, target: str, delivery: ChannelDelivery) -> None:
-    """Push a Tier-2 question to the target in its native shape."""
+async def _send_question(phone_number_id: str, target: str, delivery: ChannelDelivery) -> list[SentMessage]:
+    """Push a Tier-2 question to the target in its native shape; return the message sent."""
     if delivery.answer_format != "select":
-        await send_message(phone_number_id=phone_number_id, to=target, body=delivery.question)
-        return
-    await _send_choice(
+        return [await send_message(phone_number_id=phone_number_id, to=target, body=delivery.question)]
+    return await _send_choice(
         phone_number_id,
         target,
         delivery.question,

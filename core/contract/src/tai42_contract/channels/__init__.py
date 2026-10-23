@@ -5,25 +5,36 @@ medium (Telegram, Slack, SMS, ...) and bridges the human's reply back into the
 interactions store by forwarding it to the delivery's public ``callback_url``.
 Channels are registered on the app handle (``tai42_app.channels``) by channel
 plugins and looked up by name when ``ask`` is called with ``channel=...``.
-Delivery either returns ``None`` (success) or raises
+Delivery either returns a :class:`SendOutcome` (success) or raises
 :class:`ChannelDeliveryError` (any failure) — never a bool.
 
 A channel also sends fire-and-forget notifications: ``notify`` pushes one
 :class:`ChannelNotification` to a human with no interaction, no ticket, and no
-reply path, under the same loud-failure rule; it returns the per-message ids the
+reply path, under the same loud-failure rule; it returns a :class:`SendOutcome`
+naming the identity and address it sent from and to and the per-message ids the
 medium assigned the send (empty when the medium exposes none), never a bool.
+Before either send, ``resolve_address`` gives the :class:`ChannelAddress` the
+channel would send to, or raises :class:`ChannelAddressError`.
 
 When the platform takes a delivered question down by a path that is not the channel's own
 forwarded reply, it hands the channel a :class:`ChannelWithdrawal` through the channel's
 optional ``withdraw`` member, so the channel releases what it kept for that question.
+
+A channel whose medium limits free-form replies to a window after the client's last message
+reports that window as a :class:`ReplyWindow` through its optional ``reply_window`` member.
 """
 
 from __future__ import annotations
 
 from tai42_contract.channels.composition import check_interactive_composition
 from tai42_contract.channels.correlation import Correlation, CorrelationStore
-from tai42_contract.channels.delivery import ChannelDelivery
-from tai42_contract.channels.errors import AnswerForwardError, ChannelDeliveryError, ChannelInputError
+from tai42_contract.channels.delivery import ChannelAddress, ChannelDelivery, SendOutcome
+from tai42_contract.channels.errors import (
+    AnswerForwardError,
+    ChannelAddressError,
+    ChannelDeliveryError,
+    ChannelInputError,
+)
 from tai42_contract.channels.inbound import InboundAnswerOutcome, InboundAnswerResult, InboundBridge
 
 # Message/address caps and per-option caps are part of the channels attribute surface
@@ -48,6 +59,7 @@ from tai42_contract.channels.options import (
 from tai42_contract.channels.options import NOTIFICATION_OPTION_MAX_CHARS as NOTIFICATION_OPTION_MAX_CHARS
 from tai42_contract.channels.options import NOTIFICATION_OPTIONS_MAX as NOTIFICATION_OPTIONS_MAX
 from tai42_contract.channels.protocol import Channel
+from tai42_contract.channels.reply_window import ReplyWindow
 from tai42_contract.channels.templates import ChannelTemplate
 from tai42_contract.channels.withdrawal import ChannelWithdrawal
 
@@ -57,6 +69,8 @@ __all__ = [
     "OPTION_ID_MAX_CHARS",
     "AnswerForwardError",
     "Channel",
+    "ChannelAddress",
+    "ChannelAddressError",
     "ChannelDelivery",
     "ChannelDeliveryError",
     "ChannelInputError",
@@ -72,6 +86,8 @@ __all__ = [
     "Option",
     "OptionSection",
     "ReplyOption",
+    "ReplyWindow",
+    "SendOutcome",
     "check_footer",
     "check_header",
     "check_interactive_composition",

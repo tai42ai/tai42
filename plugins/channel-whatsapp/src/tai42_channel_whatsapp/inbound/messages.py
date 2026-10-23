@@ -1,8 +1,9 @@
 """Per-message-type router: dispatch one inbound message to its handler.
 
 The type→handler dispatch table keeps ``_handle_message`` a flat pipeline
-(validate id → mark known contact → mark read → extract context params →
-dispatch), with the media types sharing one handler via a bound ``message_type``.
+(validate id → mark known contact and advance the reply window → mark read →
+extract the message context → dispatch), with the media types sharing one handler via a
+bound ``message_type``.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import functools
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from tai42_contract.app import tai42_app
@@ -17,8 +19,8 @@ from tai42_contract.channels import ChannelDeliveryError
 from tai42_contract.conversations import InboundRejectionReason
 
 from tai42_channel_whatsapp.client import mark_read
-from tai42_channel_whatsapp.correlation import already_seen, mark_known_contact, mark_seen
-from tai42_channel_whatsapp.inbound.params import _message_context_params
+from tai42_channel_whatsapp.correlation import already_seen, mark_known_contact, mark_reply_window, mark_seen
+from tai42_channel_whatsapp.inbound.params import _message_context, _MessageContext
 from tai42_channel_whatsapp.inbound.replies import _handle_button, _handle_interactive, _handle_text
 from tai42_channel_whatsapp.inbound.rich_content import (
     _handle_contacts,
@@ -45,9 +47,9 @@ _NON_CONTENT_NOTICE_TYPES = frozenset({"system", "request_welcome"})
 # type") — the one error notice that names participant content the channel cannot receive.
 _UNSUPPORTED_MESSAGE_TYPE_CODE = 131051
 
-_MessageHandler = Callable[[dict[str, Any], str, str, str, dict[str, str]], Awaitable[None]]
+_MessageHandler = Callable[[dict[str, Any], str, str, str, _MessageContext], Awaitable[None]]
 
-# message type → handler with the uniform ``(message, phone_number_id, wa_id, wamid, params)``
+# message type → handler with the uniform ``(message, phone_number_id, wa_id, wamid, context)``
 # signature. Each media type binds its ``message_type`` onto the shared media handler.
 _HANDLERS: dict[str, _MessageHandler] = {
     "text": _handle_text,
@@ -97,6 +99,42 @@ async def _notify_unsupported(phone_number_id: str, wa_id: str, wamid: str, *, k
     await mark_seen(wamid)
 
 
+def _message_sent_at(message: dict[str, Any], wamid: str) -> datetime | None:
+    """The message's vendor ``timestamp`` (unix seconds, a digit string) as an aware UTC datetime.
+
+    A missing or unreadable value logs a WARNING naming the message and the field and gives
+    ``None``: the reply window is then not advanced, so it can only read as closed early, never
+    open too long.
+    """
+    raw = message.get("timestamp")
+    sent_at: datetime | None = None
+    if isinstance(raw, str) and raw.isascii() and raw.isdigit():
+        try:
+            sent_at = datetime.fromtimestamp(int(raw), UTC)
+        except (OverflowError, OSError, ValueError):
+            sent_at = None  # out of the platform's datetime range: unreadable, warned below
+    if sent_at is None:
+        logger.warning(
+            "whatsapp message %s has no readable timestamp field (%r); its reply window is not advanced", wamid, raw
+        )
+    return sent_at
+
+
+async def _advance_reply_window(
+    message: dict[str, Any], message_type: Any, phone_number_id: str, wa_id: str, wamid: str
+) -> None:
+    """Advance the pair's reply window from a participant message's own timestamp.
+
+    A platform notice (``_NON_CONTENT_NOTICE_TYPES``) is not the participant writing and leaves
+    the window as it is; a message without a readable timestamp is warned about and leaves it too.
+    """
+    if message_type in _NON_CONTENT_NOTICE_TYPES:
+        return
+    sent_at = _message_sent_at(message, wamid)
+    if sent_at is not None:
+        await mark_reply_window(phone_number_id, wa_id, sent_at)
+
+
 async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> None:
     """Resolve one inbound message's pending question, or route it to the bridge.
 
@@ -111,10 +149,14 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
     phone_number_id = metadata.get("phone_number_id", "") if isinstance(metadata, dict) else ""
     wa_id = message.get("from", "")
 
-    # Record the known-contact marker for EVERY authenticated inbound BEFORE the
-    # message-type drop: a participant who sent only a photo still opened Meta's window.
+    message_type: Any = message.get("type")
+
+    # Record the known-contact marker and advance the reply window for EVERY authenticated
+    # inbound BEFORE the message-type drop: a participant who sent only a photo still opened
+    # Meta's window.
     if phone_number_id and wa_id:
         await mark_known_contact(phone_number_id, wa_id)
+        await _advance_reply_window(message, message_type, phone_number_id, wa_id, wamid)
 
     # Mark the inbound read the moment it lands — the read receipt for every inbound,
     # sent BEFORE the type branches so it covers text, interactive, media, and
@@ -128,14 +170,13 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
         except ChannelDeliveryError as exc:
             logger.warning("whatsapp read receipt for %s failed: %s", wamid, exc)
 
-    # Referral (ctwa/QR entry) and reply-to context are message-level and ride on
-    # WHATEVER turn this message bridges, regardless of its type. Extract once, thread down.
-    context_params = _message_context_params(message)
+    # Referral (ctwa/QR entry) and the quoted message are message-level and ride on
+    # WHATEVER turn or answer this message becomes, regardless of its type. Extract once, thread down.
+    context = _message_context(message)
 
-    message_type: Any = message.get("type")
     handler = _HANDLERS.get(message_type)
     if handler is not None:
-        await handler(message, phone_number_id, wa_id, wamid, context_params)
+        await handler(message, phone_number_id, wa_id, wamid, context)
     elif message.get("errors"):
         # A Meta inbound error notice: always surfaced loudly for the operator, never bridged.
         # An unsupported-message-type notice (``code == 131051``) names participant content the

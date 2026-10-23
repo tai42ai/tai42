@@ -2,6 +2,7 @@
 
 ``InteractionRequest`` is the durable question written to a per-group stream;
 ``InteractionResponse`` is the validated answer pushed onto the reply channel;
+``AskAnswer`` is the one value a synchronous asker receives;
 ``InteractionState`` is the mutable record the answer endpoint reads to guard
 against a duplicate answer and to validate the submitted value;
 ``SuspendedInteraction`` is the sentinel an ``async`` ask returns in place of an
@@ -11,6 +12,12 @@ location models, and the per-send form models sit beside them.
 
 from __future__ import annotations
 
+from tai42_contract.interactions.models.form_dates import (
+    DATE_CONSTRAINT_KEYS,
+    FORM_WEEKDAYS,
+    TIME_OF_KEY,
+    check_form_date_rules,
+)
 from tai42_contract.interactions.models.formats import CALLBACK_LINK_FORMATS, AnswerFormat, AnswerMismatchPolicy
 from tai42_contract.interactions.models.forms import (
     FORM_TAG_MAX_CHARS,
@@ -69,6 +76,8 @@ from tai42_contract.interactions.models.request import (
     check_format_payload,
 )
 from tai42_contract.interactions.models.response import (
+    ELICIT_META_REPLY_TO,
+    AskAnswer,
     InteractionResponse,
     InteractionState,
     ResumeBuffered,
@@ -94,9 +103,12 @@ from tai42_contract.interactions.models.wording import (
 
 __all__ = [
     "CALLBACK_LINK_FORMATS",
+    "DATE_CONSTRAINT_KEYS",
+    "ELICIT_META_REPLY_TO",
     "FILE_MEDIA_KINDS",
     "FORM_TAG_MAX_CHARS",
     "FORM_TAG_RE",
+    "FORM_WEEKDAYS",
     "LOCAL_HTTP_HOSTS",
     "LOCATION_ADDRESS_MAX_CHARS",
     "LOCATION_NAME_MAX_CHARS",
@@ -111,10 +123,12 @@ __all__ = [
     "QUESTION_MAX_CHARS",
     "REJECTION_NOTICE_MAX_CHARS",
     "SHAPE_KEYWORDS",
+    "TIME_OF_KEY",
     "AnswerFormat",
     "AnswerMismatchPolicy",
     "AnswerPageWording",
     "AnswerWording",
+    "AskAnswer",
     "ChoiceWording",
     "CountdownWording",
     "DisplayBlock",
@@ -152,6 +166,7 @@ __all__ = [
     "Wording",
     "check_addressing",
     "check_form_data",
+    "check_form_date_rules",
     "check_form_pages",
     "check_form_property_names",
     "check_form_reactions",

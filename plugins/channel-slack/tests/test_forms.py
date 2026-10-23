@@ -3,6 +3,7 @@ answer extraction, and every loud unmappable/cap failure."""
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -53,7 +54,13 @@ def test_modal_view_leads_with_the_question_and_carries_metadata():
     assert view["type"] == "modal"
     assert view["callback_id"] == FORM_SUBMIT_CALLBACK_ID
     # private_metadata carries the interaction id (plus any accumulated reaction state) as JSON.
-    assert decode_private_metadata(view["private_metadata"]) == ("int-42", {}, {})
+    metadata = decode_private_metadata(view["private_metadata"])
+    assert (metadata.interaction_id, metadata.options, metadata.display, metadata.unavailable) == (
+        "int-42",
+        {},
+        {},
+        None,
+    )
     assert view["title"] == {"type": "plain_text", "text": "Please respond"}
     assert view["submit"] == {"type": "plain_text", "text": "Submit"}
     assert view["close"] == {"type": "plain_text", "text": "Cancel"}
@@ -1025,7 +1032,39 @@ def test_private_metadata_round_trips_the_accumulated_reaction_state():
         metadata_options={"plan": [{"value": "pro"}]},
         metadata_display={"total": "42"},
     )
-    assert decode_private_metadata(view["private_metadata"]) == ("i1", {"plan": [{"value": "pro"}]}, {"total": "42"})
+    metadata = decode_private_metadata(view["private_metadata"])
+    assert metadata.interaction_id == "i1"
+    assert metadata.options == {"plan": [{"value": "pro"}]}
+    assert metadata.display == {"total": "42"}
+    assert metadata.unavailable is None
+
+
+def test_private_metadata_round_trips_the_caller_unavailable_line():
+    # The caller's ``status.unavailable`` rides the view's own carrier, so the submit door can draw
+    # it after the form record is gone.
+    schema = {"type": "object", "properties": {"qty": {"type": "integer"}}}
+    view = build_modal_view("i1", "q", schema, status_unavailable="This form is closed now.")
+    metadata = decode_private_metadata(view["private_metadata"])
+    assert metadata.interaction_id == "i1"
+    assert metadata.unavailable == "This form is closed now."
+
+
+def test_private_metadata_without_an_unavailable_line_writes_no_key():
+    schema = {"type": "object", "properties": {"qty": {"type": "integer"}}}
+    view = build_modal_view("i1", "q", schema)
+    assert "unavailable" not in json.loads(view["private_metadata"])
+
+
+def test_private_metadata_unavailable_line_over_the_cap_is_a_loud_error():
+    schema = {"type": "object", "properties": {"qty": {"type": "integer"}}}
+    with pytest.raises(FormSchemaError, match="private_metadata exceeds"):
+        build_modal_view("i1", "q", schema, status_unavailable="x" * 3000)
+
+
+@pytest.mark.parametrize("raw", ['{"id": "i1", "unavailable": 5}', '{"id": "i1", "unavailable": "  "}'])
+def test_decode_private_metadata_rejects_a_malformed_unavailable_line(raw):
+    with pytest.raises(ValueError, match="unavailable"):
+        decode_private_metadata(raw)
 
 
 def test_private_metadata_over_cap_is_a_loud_error():
@@ -1095,6 +1134,52 @@ def test_review_readback_renders_a_boolean_as_yes_no():
     ]
     blocks = build_modal_blocks(schema, {"ok": True}, None, pages)
     assert blocks[-1]["text"]["text"] == "*OK*: Yes"
+
+
+def test_review_readback_renders_a_boolean_in_the_caller_words():
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean", "title": "OK"}, "late": {"type": "boolean", "title": "Late"}},
+    }
+    pages = [
+        {"title": "Fill", "fields": ["ok", "late"], "display": []},
+        {"title": "Review", "fields": [], "kind": "review", "display": []},
+    ]
+    view = build_modal_view(
+        "i1",
+        "q",
+        schema,
+        {"ok": True, "late": False},
+        None,
+        pages,
+        form_wording={"fields": {"ok": {"true_label": "Agreed"}, "late": {"false_label": "On time"}}},
+    )
+    assert view["blocks"][-1]["text"]["text"] == "*OK*: Agreed\n*Late*: On time"
+
+
+def test_boolean_radio_draws_the_caller_true_and_false_labels():
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+    (block,) = build_modal_blocks(schema, field_wording={"ok": {"true_label": "Agreed", "false_label": "Declined"}})
+    assert block["element"]["type"] == "radio_buttons"
+    assert [(o["text"]["text"], o["value"]) for o in block["element"]["options"]] == [
+        ("Agreed", "true"),
+        ("Declined", "false"),
+    ]
+
+
+def test_boolean_radio_fills_an_unset_side_with_the_default_word():
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+    (block,) = build_modal_blocks(schema, field_wording={"ok": {"false_label": "Declined"}})
+    assert [o["text"]["text"] for o in block["element"]["options"]] == ["Yes", "Declined"]
+
+
+@pytest.mark.parametrize("member", ["true_label", "false_label"])
+def test_boolean_radio_label_over_75_is_a_loud_cap_error(member):
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+    with pytest.raises(FormSchemaError, match=rf"'ok'.*{member}.*75"):
+        build_modal_blocks(schema, field_wording={"ok": {member: "x" * 76}})
+    (block,) = build_modal_blocks(schema, field_wording={"ok": {member: "x" * 75}})
+    assert "x" * 75 in [o["text"]["text"] for o in block["element"]["options"]]
 
 
 def test_over_long_review_readback_is_a_loud_cap_error():
@@ -1296,3 +1381,55 @@ def test_a_number_fields_bounds_read_as_plain_decimals():
 def test_email_format_renders_an_email_text_input():
     schema = {"type": "object", "properties": {"contact": {"type": "string", "format": "email"}}}
     assert build_modal_blocks(schema)[0]["element"] == {"type": "email_text_input", "action_id": FIELD_ACTION_ID}
+
+
+# -- a range with a time on each end: each time draws and reads back right after its date ---------
+
+# The times are declared LAST in the schema.
+_TIMED_RANGE: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "start": {"type": "string", "format": "date", "title": "Start"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start", "title": "End"},
+        "note": {"type": "string", "title": "Note"},
+        "start_time": {"type": "string", "format": "time", "title": "Start time", "timeOf": "start"},
+        "end_time": {"type": "string", "format": "time", "title": "End time", "timeOf": "end"},
+    },
+}
+
+
+def _drawn(blocks: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    return [(block["block_id"], block["element"]["type"]) for block in blocks if block["type"] == "input"]
+
+
+_TIMED_DRAWN = [
+    ("start", "datepicker"),
+    ("start_time", "timepicker"),
+    ("end", "datepicker"),
+    ("end_time", "timepicker"),
+]
+
+
+def test_a_page_less_form_draws_each_timepicker_right_after_its_datepicker():
+    assert _drawn(build_modal_blocks(_TIMED_RANGE)) == [*_TIMED_DRAWN, ("note", "plain_text_input")]
+
+
+def test_a_page_draws_each_timepicker_right_after_its_datepicker():
+    pages = [{"title": "When", "fields": ["start", "end", "start_time", "end_time"]}]
+    assert _drawn(build_modal_blocks(_TIMED_RANGE, {}, None, pages)) == _TIMED_DRAWN
+
+
+def test_a_review_readback_lists_each_time_right_after_its_date():
+    pages = [
+        {"title": "When", "fields": ["start", "end", "start_time", "end_time", "note"], "display": []},
+        {"title": "Review", "fields": [], "kind": "review", "display": []},
+    ]
+    values = {"start": "2026-05-01", "end": "2026-05-02", "note": "hi", "start_time": "09:00", "end_time": "10:00"}
+    blocks = build_modal_blocks(_TIMED_RANGE, values, None, pages)
+    assert blocks[-1]["text"]["text"].split("\n") == [
+        "*Start*: 2026-05-01",
+        "*Start time*: 09:00",
+        "*End*: 2026-05-02",
+        "*End time*: 10:00",
+        "*Note*: hi",
+    ]

@@ -140,15 +140,25 @@ All links: https://docs.slack.dev
    coerces the state to the schema's JSON types and forwards `{"answer": {...}}` to
    the stored callback URL. A door `2xx` closes the modal and drops the record; a
    `400` shows the door's message on the form (record kept); a `404` shows an
-   expired notice (record dropped).
+   expired notice, the caller's `wording.status.unavailable` when set (record dropped).
 5. The human replies in the thread. The Slack Events API POSTs the event to
    `POST /api/channels/slack/inbound`, which reads a bounded body, verifies
    the `X-Slack-Signature` v0 HMAC over the raw bytes (constant-time,
    ±300 s replay window, fail-closed), dedupes on `event_id`, matches the
    reply's `thread_ts` against the correlation store, and forwards
-   `{"answer": "<typed text>"}` to the stored callback URL.
+   `{"answer": "<typed text>"}` to the stored callback URL. A thread reply that
+   matches no pending question bridges into the conversation instead.
 6. The public callback door validates the answer against the question's stored
    format and records it; the blocked `ask` returns it.
+
+### Replies
+
+A thread reply's `thread_ts` (when it differs from its own `ts`) is the `ts` of the message it
+quotes; the channel passes it to `conversations.accept` (and on the ladder's `InboundBridge`
+when the reply answers an ask) as `reply_to_medium_message_id`, and the platform resolves it
+into the turn's — or the asker's — typed `reply_to` (`{message_id, status, text}`). An
+option-button tap is a reply to the message holding the buttons; a form modal submission
+quotes nothing. A tap's `reply_id` entry parameter reaches the asker as `params`.
 
 ## Form capabilities
 
@@ -163,7 +173,7 @@ per-send `options` list) → a **radio group** of five choices or fewer, a
 date-time picker returns a Unix timestamp, not an RFC 3339 string); an **array of
 strings** → a **checkbox group** of five choices or fewer, a **multi-select** above
 that, or a multiline text box (one entry per line) when the array declares no
-choices; `boolean` → a Yes/No radio; `integer`/`number` → a number input. A
+choices; `boolean` → a Yes/No radio (the caller's `true_label`/`false_label` when set); `integer`/`number` → a number input. A
 `string` may also carry an `inputMode` naming the kind of text it collects: `email`
 → an **email text input**, `url` → a **url text input** (both Slack text elements
 that carry their own built-in check); `numeric`, `decimal` and `tel` keep a plain
@@ -233,8 +243,16 @@ computed total shows as a `section`). The accumulated reaction state rides the v
 handler on `view_submission` as the consumer's final check: its per-field errors keep
 the modal open as inline errors; a clean check lets the answer through. A handler
 failure surfaces loudly — a notice to the person plus a logged error — never a stale
-or silent value. A `page_advanced` trigger has no Slack event (the single-surface
+or silent value. The notice reads `wording.form.update_failed` when set (its optional
+`{reason}` token takes the reason a reaction raised as `FormReactionError`, empty for any
+other failure or for an update the modal cannot draw), else the platform's line. A reaction
+reason is at most 500 characters, so the line with each token filled at that bound must fit
+Slack's 3000-character section-text limit; a longer line is refused at send. A
+`page_advanced` trigger has no Slack event (the single-surface
 modal has no page-advance step), so only `field_changed` and `submitted` fire here.
+
+**Field errors.** The modal shows errors per field and draws no `wording.form.error_line`;
+a missing required value is the Slack client's own check.
 
 **Form buttons and title.** The modal's chrome carries the sender's own words, the
 platform's as the default, all read from the per-send `wording` catalogue. The **open**
@@ -257,7 +275,10 @@ buttons (no list opener) and a Tier-1 ask is a text link (no button) with no inp
 placeholder limit and refused loudly over it; a radio or checkbox group has no
 placeholder slot and draws none, and an absent label leaves Slack's own default prompt.
 The review step's empty readback reads `wording.form.review_empty` (else *No answers to
-review yet.*), within Slack's 3000-character section-text limit.
+review yet.*), within Slack's 3000-character section-text limit. A boolean field's two
+radio options read `wording.form.fields[name].true_label` / `false_label` (else *Yes* /
+*No*), each capped at Slack's **75**-character option-text limit and refused loudly at
+send over it; the review readback shows the same words.
 
 **Message lines and the refusal sentence.** A Tier-1 (`confirm`/`external`) ask's link
 and deadline lines read `wording.lines.answer_link` (`{url}` → the callback URL) and
@@ -266,9 +287,15 @@ ask composes `wording.lines.reply` and the deadline line and lists its choices t
 `wording.lines.options` (`{options}` → the joined list). Each is a plain substitution,
 the platform's own line when absent. When the door rejects a modal submission in place,
 the modal's inline error reads `wording.answer.rejected` (its optional `{reason}` token
-→ the door's reason), else the door's reason, else a generic line; the thread-reply
+→ the door's reason, empty when the door gave none), else the door's reason, else a
+generic line; the thread-reply
 rejection notice draws the same caller sentence through the shared answer ladder, which
 also honours the ask's `on_mismatch` digression policy carried on the correlation record.
+When the form's question is gone (its record expired before the submit, or the door
+reports the ask gone), the modal's error reads `wording.status.unavailable`, else the
+platform's expired line; the line rides the modal's own `private_metadata`, so it reaches
+the person after the record is gone, and a line that pushes `private_metadata` past
+Slack's 3000-character limit is refused at send.
 
 Operational notes: answers must be typed in-thread; non-answer traffic (edits,
 bot echoes, other channels, top-level messages, threads with no pending

@@ -6,14 +6,17 @@ form renderer use as the ONE definition of the subset.
 from __future__ import annotations
 
 import re
+from typing import cast
 
 import jsonschema
 import pytest
 from pydantic import BaseModel
+from tai42_contract.channels import Channel
 from tai42_contract.interactions import FormShapeKind
 
 from tai42_skeleton.interactions.form_schema import (
     channel_form_fields,
+    check_channel_form,
     date_constraint_errors,
     date_constraint_mismatch,
     effective_answer_schema,
@@ -744,7 +747,7 @@ def test_date_constraint_errors_range_order_and_span():
     schema = _range_schema(minDays=2, maxDays=3)
     assert _date_errors(schema, {"start": "2024-01-01", "end": "2024-01-02"}) == []  # 2 inclusive days
     assert _date_errors(schema, {"start": "2024-01-05", "end": "2024-01-01"}) == [
-        ("end", FormShapeKind.RANGE_ORDER, {"rangeStart": "start"})
+        ("end", FormShapeKind.RANGE_ORDER, {"rangeStart": "start", "by": "date"})
     ]
     span = {"minDays": 2, "maxDays": 3}
     assert _date_errors(schema, {"start": "2024-01-01", "end": "2024-01-01"}) == [
@@ -774,3 +777,265 @@ def test_channel_form_subset_refuses_a_property_named_proto():
         validate_channel_form_schema(schema)
     with pytest.raises(ValueError, match=re.escape("form schema property '__proto__' is not an allowed name")):
         validate_form_answer_schema(schema)
+
+
+# === range order and span across date-time and mixed ends ===================
+
+
+def _instant_range(start_format: str = "date-time", end_format: str = "date-time", **end_extra):
+    return {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": start_format},
+            "end": {"type": "string", "format": end_format, "rangeStart": "start", **end_extra},
+        },
+    }
+
+
+def test_date_time_range_orders_by_instant_on_the_same_date():
+    schema = _instant_range()
+    assert _date_errors(schema, {"start": "2026-03-01T10:00:00Z", "end": "2026-03-01T09:00:00Z"}) == [
+        ("end", FormShapeKind.RANGE_ORDER, {"rangeStart": "start", "by": "time"})
+    ]
+
+
+def test_date_time_range_order_on_an_earlier_date_reads_by_date():
+    schema = _instant_range()
+    assert _date_errors(schema, {"start": "2026-03-02T10:00:00Z", "end": "2026-03-01T11:00:00Z"}) == [
+        ("end", FormShapeKind.RANGE_ORDER, {"rangeStart": "start", "by": "date"})
+    ]
+
+
+def test_date_time_range_accepts_equal_instants_in_different_offsets():
+    schema = _instant_range()
+    assert _date_errors(schema, {"start": "2026-03-01T10:00:00Z", "end": "2026-03-01T12:00:00+02:00"}) == []
+
+
+def test_date_time_range_span_is_counted_in_the_start_offset():
+    # In order by instant (22:00Z then 23:00Z); in the START's offset the end is 2026-03-02T02:00+03:00.
+    schema = _instant_range(minDays=1)
+    assert _date_errors(schema, {"start": "2026-03-02T01:00:00+03:00", "end": "2026-03-01T23:00:00Z"}) == []
+
+
+def test_date_time_range_span_reads_one_day_for_one_instant_in_two_offsets():
+    schema = _instant_range(maxDays=1)
+    assert _date_errors(schema, {"start": "2026-03-01T23:30:00+00:00", "end": "2026-03-02T00:30:00+01:00"}) == []
+
+
+def test_mixed_range_with_a_date_time_end_orders_by_written_date():
+    schema = _instant_range(start_format="date")
+    assert _date_errors(schema, {"start": "2026-03-02", "end": "2026-03-01T23:00:00Z"}) == [
+        ("end", FormShapeKind.RANGE_ORDER, {"rangeStart": "start", "by": "date"})
+    ]
+    assert _date_errors(schema, {"start": "2026-03-02", "end": "2026-03-02T09:00:00Z"}) == []
+
+
+def test_mixed_range_with_a_date_time_start_orders_by_written_date():
+    schema = _instant_range(end_format="date")
+    assert _date_errors(schema, {"start": "2026-03-02T00:30:00+01:00", "end": "2026-03-01"}) == [
+        ("end", FormShapeKind.RANGE_ORDER, {"rangeStart": "start", "by": "date"})
+    ]
+    assert _date_errors(schema, {"start": "2026-03-02T00:30:00+01:00", "end": "2026-03-02"}) == []
+
+
+def test_mixed_range_span_counts_the_written_dates():
+    schema = _instant_range(start_format="date", maxDays=1)
+    assert _date_errors(schema, {"start": "2026-03-01", "end": "2026-03-02T00:30:00+01:00"}) == [
+        ("end", FormShapeKind.RANGE_SPAN, {"maxDays": 1, "days": 2})
+    ]
+
+
+# -- the one channel form check -------------------------------------------------
+
+
+class _FormHookChannel:
+    def __init__(self) -> None:
+        self.calls: list[tuple[dict, str]] = []
+
+    def validate_form_schema(self, schema: dict, question: str) -> None:
+        self.calls.append((schema, question))
+        if len(question) > 10:
+            raise ValueError("form question exceeds 10 characters")
+
+
+class _NoHookChannel:
+    pass
+
+
+_CITY_FORM = {"type": "object", "properties": {"city": {"type": "string"}}}
+
+
+def test_check_channel_form_runs_the_walk_then_the_hook_with_the_question():
+    channel = _FormHookChannel()
+
+    check_channel_form(cast("Channel", channel), _CITY_FORM, "city?")
+
+    assert channel.calls == [(_CITY_FORM, "city?")]
+
+
+def test_check_channel_form_raises_the_hook_refusal():
+    with pytest.raises(ValueError, match="exceeds 10 characters"):
+        check_channel_form(cast("Channel", _FormHookChannel()), _CITY_FORM, "which city do you live in?")
+
+
+def test_check_channel_form_without_the_hook_runs_the_walk_only():
+    check_channel_form(cast("Channel", _NoHookChannel()), _CITY_FORM, "which city do you live in?")
+    with pytest.raises(ValueError, match="'address'"):
+        check_channel_form(
+            cast("Channel", _NoHookChannel()), {"type": "object", "properties": {"address": {"type": "object"}}}, "x"
+        )
+
+
+def test_check_channel_form_does_not_call_the_hook_when_the_walk_refuses():
+    channel = _FormHookChannel()
+
+    with pytest.raises(ValueError, match="'address'"):
+        check_channel_form(
+            cast("Channel", channel), {"type": "object", "properties": {"address": {"type": "object"}}}, "x"
+        )
+
+    assert channel.calls == []
+
+
+# === a time paired with each end of a date range (timeOf) =====================
+
+
+def _timed_range(**extra_props):
+    properties = {
+        "start": {"type": "string", "format": "date"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start"},
+        "start_time": {"type": "string", "format": "time", "timeOf": "start"},
+        "end_time": {"type": "string", "format": "time", "timeOf": "end"},
+    }
+    for name, prop in extra_props.items():
+        if prop is None:
+            properties.pop(name)
+        else:
+            properties[name] = prop
+    return {"type": "object", "properties": properties}
+
+
+def test_channel_walk_admits_a_timed_range():
+    validate_channel_form_schema(_timed_range())
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (
+            {"end_time": {"type": "string", "timeOf": "end"}},
+            "property 'end_time' carries timeOf but is not a time property",
+        ),
+        (
+            {"end_time": {"type": "string", "format": "time", "timeOf": "ghost"}},
+            "property 'end_time' timeOf names undeclared property 'ghost'",
+        ),
+        (
+            {
+                "lone": {"type": "string", "format": "date"},
+                "end_time": {"type": "string", "format": "time", "timeOf": "lone"},
+            },
+            "property 'end_time' timeOf names 'lone', which is not an end of a date range",
+        ),
+        (
+            {
+                "start": {"type": "string", "format": "date-time"},
+                "start_time": {"type": "string", "format": "time", "timeOf": "start"},
+            },
+            "property 'start_time' timeOf names 'start', a 'date-time' property",
+        ),
+        (
+            {"start": {"type": "string", "format": "date-time"}, "start_time": None},
+            "property 'end_time' timeOf names 'end', whose range's other end 'start' is a 'date-time' property",
+        ),
+        (
+            {"end": {"type": "string", "format": "date-time", "rangeStart": "start"}, "end_time": None},
+            "property 'start_time' timeOf names 'start', whose range's other end 'end' is a 'date-time' property",
+        ),
+        (
+            {"late_time": {"type": "string", "format": "time", "timeOf": "end"}},
+            "property 'late_time' timeOf names 'end', which already has the time 'end_time'",
+        ),
+        (
+            {
+                "mode": {"type": "string", "enum": ["a", "b"]},
+                "end_time": {
+                    "type": "string",
+                    "format": "time",
+                    "timeOf": "end",
+                    "visibleWhen": {"field": "mode", "equals": "a"},
+                },
+            },
+            "property 'end_time' must carry the same visibleWhen as its date 'end'",
+        ),
+    ],
+)
+def test_channel_walk_refuses_a_broken_time_of_by_name(extra, message):
+    with pytest.raises(ValueError, match=re.escape(message)):
+        validate_channel_form_schema(_timed_range(**extra))
+
+
+_DAY = {"start": "2026-03-01", "end": "2026-03-01"}
+
+
+def test_timed_range_on_one_date_with_an_earlier_end_time_is_keyed_to_the_end_time():
+    answer = {**_DAY, "start_time": "10:00", "end_time": "09:30"}
+    assert _date_errors(_timed_range(), answer) == [
+        ("end_time", FormShapeKind.RANGE_ORDER, {"rangeStart": "start", "by": "time"})
+    ]
+
+
+def test_timed_range_compares_seconds_when_given():
+    answer = {**_DAY, "start_time": "10:00:30", "end_time": "10:00"}
+    assert _date_errors(_timed_range(), answer) == [
+        ("end_time", FormShapeKind.RANGE_ORDER, {"rangeStart": "start", "by": "time"})
+    ]
+
+
+def test_timed_range_on_one_date_with_equal_times_holds():
+    assert _date_errors(_timed_range(), {**_DAY, "start_time": "10:00", "end_time": "10:00:00"}) == []
+    assert _date_errors(_timed_range(), {**_DAY, "start_time": "10:00", "end_time": "18:00"}) == []
+
+
+def test_timed_range_on_an_earlier_date_is_keyed_to_the_end_date_whatever_the_times():
+    answer = {"start": "2026-03-02", "end": "2026-03-01", "start_time": "08:00", "end_time": "20:00"}
+    assert _date_errors(_timed_range(), answer) == [
+        ("end", FormShapeKind.RANGE_ORDER, {"rangeStart": "start", "by": "date"})
+    ]
+
+
+@pytest.mark.parametrize(
+    "times",
+    [
+        {"start_time": "10:00"},
+        {"end_time": "09:00"},
+        {"start_time": "10:00", "end_time": ""},
+        {"start_time": "10:00", "end_time": "9am"},
+        {"start_time": "10:00", "end_time": "25:00"},
+    ],
+)
+def test_timed_range_with_a_missing_or_unreadable_time_is_decided_by_dates(times):
+    assert _date_errors(_timed_range(), {**_DAY, **times}) == []
+
+
+def test_timed_range_with_a_time_on_one_end_only_is_decided_by_dates():
+    schema = _timed_range(start_time=None)
+    assert _date_errors(schema, {**_DAY, "end_time": "09:00"}) == []
+
+
+def test_timed_range_span_counts_the_dates():
+    schema = _timed_range(end={"type": "string", "format": "date", "rangeStart": "start", "maxDays": 1})
+    answer = {"start": "2026-03-01", "end": "2026-03-02", "start_time": "23:00", "end_time": "01:00"}
+    assert _date_errors(schema, answer) == [("end", FormShapeKind.RANGE_SPAN, {"maxDays": 1, "days": 2})]
+    schema = _timed_range(end={"type": "string", "format": "date", "rangeStart": "start", "minDays": 2})
+    assert _date_errors(schema, {**_DAY, "start_time": "08:00", "end_time": "09:00"}) == [
+        ("end", FormShapeKind.RANGE_SPAN, {"minDays": 2, "days": 1})
+    ]
+
+
+def test_date_constraint_mismatch_names_the_end_time_with_the_time_sentence():
+    answer = {**_DAY, "start_time": "10:00", "end_time": "09:30"}
+    assert date_constraint_mismatch(_timed_range(), answer) == (
+        "The end time must be on or after the start time",
+        "end_time",
+    )

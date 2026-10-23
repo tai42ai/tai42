@@ -345,7 +345,14 @@ describe("QuestionCard draws the send's status wording", () => {
     const user = userEvent.setup();
     const onAnswer = vi
       .fn()
-      .mockRejectedValue(new ChatApiError('answer must be a boolean', 400, null));
+      .mockRejectedValue(
+        new ChatApiError(
+          'That answer was not accepted.',
+          400,
+          'answer_refused',
+          'answer must be a boolean',
+        ),
+      );
     render(
       <QuestionCard
         question={question('confirm', {
@@ -360,6 +367,7 @@ describe("QuestionCard draws the send's status wording", () => {
               submit: null,
               replyHint: null,
               rejected: 'No good: {reason}',
+              rejectedFinal: null,
             },
           },
         })}
@@ -394,6 +402,7 @@ describe("QuestionCard draws the send's status wording", () => {
               submit: null,
               replyHint: null,
               rejected: 'No good: {reason}',
+              rejectedFinal: null,
             },
           },
         })}
@@ -409,5 +418,109 @@ describe("QuestionCard draws the send's status wording", () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'That question was already answered.',
     );
+  });
+  /** A confirm question whose send set the two refusal sentences given. */
+  function refusalQuestion(rejected: string | null, rejectedFinal: string | null) {
+    return question('confirm', {
+      wording: {
+        form: null,
+        choice: null,
+        status: null,
+        answer: {
+          open: null,
+          confirm: null,
+          decline: null,
+          submit: null,
+          replyHint: null,
+          rejected,
+          rejectedFinal,
+        },
+      },
+    });
+  }
+
+  it("draws the caller's closing sentence once the retries are spent", async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi
+      .fn()
+      .mockRejectedValue(
+        new ChatApiError('built-in line', 400, 'answer_retries_spent', 'too late'),
+      );
+    render(
+      <QuestionCard
+        question={refusalQuestion('No good: {reason}', 'Closed: {reason}')}
+        answered={false}
+        onAnswer={onAnswer}
+        onAnswered={vi.fn()}
+        locked={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Yes' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Closed: too late');
+  });
+
+  it('fills {reason} with nothing when the door gave no reason', async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi
+      .fn()
+      .mockRejectedValue(new ChatApiError('built-in line', 400, 'answer_refused', null));
+    render(
+      <QuestionCard
+        question={refusalQuestion('No good.{reason}', null)}
+        answered={false}
+        onAnswer={onAnswer}
+        onAnswered={vi.fn()}
+        locked={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Yes' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/^No good\.$/);
+  });
+
+  it("draws the route's words when the send set no sentence for the refusal", async () => {
+    const user = userEvent.setup();
+    // The answer door's refusal already carries the route's transport sentence for its code.
+    const onAnswer = vi
+      .fn()
+      .mockRejectedValue(
+        new ChatApiError('Closed now: too late', 400, 'answer_retries_spent', 'too late'),
+      );
+    render(
+      <QuestionCard
+        question={refusalQuestion('No good: {reason}', null)}
+        answered={false}
+        onAnswer={onAnswer}
+        onAnswered={vi.fn()}
+        locked={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Yes' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Closed now: too late');
+  });
+
+  it("keeps the route's sentence for a body the route refused itself, even with a sentence set", async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi
+      .fn()
+      .mockRejectedValue(new ChatApiError("That answer couldn't be sent.", 400, null, null));
+    render(
+      <QuestionCard
+        question={refusalQuestion('No good: {reason}', 'Closed: {reason}')}
+        answered={false}
+        onAnswer={onAnswer}
+        onAnswered={vi.fn()}
+        locked={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Yes' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent("That answer couldn't be sent.");
   });
 });

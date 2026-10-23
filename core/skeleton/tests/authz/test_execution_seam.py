@@ -460,17 +460,21 @@ def test_a_tool_an_agent_resolves_mid_turn_is_governed_by_the_seam(ac) -> None:
 # -- the whole fire path, end to end ------------------------------------------
 
 
-def test_a_hook_firing_a_fenced_operation_is_denied_under_a_non_admin_key(ac, caplog) -> None:
-    # End to end through the real ``on_event`` fan-out. The denial surfaces as a per-hook
-    # error outcome, so one refused hook never takes its topic's siblings down with it.
+def test_a_hook_firing_a_fenced_operation_is_denied_under_a_non_admin_key(ac, caplog, monkeypatch) -> None:
+    # End to end through the real ``on_event`` fan-out and its hook runs. The denial fails that
+    # hook's own run, so one refused hook never takes its topic's siblings down with it.
+    from tests._fakes.hook_runs import HookRunsHarness
+
     from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
     from tai42_skeleton.hooks.settings import HooksSettings
 
+    hook_runs = HookRunsHarness(monkeypatch)
+
     async def run() -> list[tuple[str, str]]:
+        manager = hook_runs.use(InMemoryHooksManager(HooksSettings()))
         async with app.app_context(_manifest()):
             from tests.authz._fixtures import execution_probe
 
-            manager = InMemoryHooksManager(HooksSettings())
             await manager.register(
                 HookParams(
                     name="escalate",
@@ -494,14 +498,15 @@ def test_a_hook_firing_a_fenced_operation_is_denied_under_a_non_admin_key(ac, ca
 
             with caplog.at_level(logging.ERROR):
                 await manager.on_event("t", {})
+                await hook_runs.close()
             return list(execution_probe.calls)
 
     ran = asyncio.run(run())
 
     assert ran == [("fenced", "operator")]
     denials = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
-    assert any("escalate" in message for message in denials)
-    assert not any("operator" in message for message in denials)
+    assert any("(escalate on t) failed" in message and "PermissionDeniedError" in message for message in denials)
+    assert not any("(operator on t)" in message for message in denials)
 
 
 # -- the load-bearing regression: no identity bound => strict no-op ------------

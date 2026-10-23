@@ -12,6 +12,9 @@ imported by the operations directly; this module holds the models local to group
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, RootModel
 from tai42_contract.app.responses import FanoutSummary
 from tai42_contract.backend import ScheduleListRow
@@ -229,6 +232,57 @@ class TriggerLinkListView(BaseModel):
 
     items: list[TriggerLinkView]
     total: int
+
+
+class HookRunClaimIntentView(BaseModel):
+    """A resume or take claim a hook run's hook announced and did not confirm."""
+
+    action: Literal["resume", "take"]
+    ids: list[str]
+
+
+class HookRunView(BaseModel):
+    """One kept hook run, without its event payload or its start spec (either may carry secrets of the sender).
+
+    ``status`` is ``pending`` (due at ``next_attempt_at``), ``running`` (an attempt holds its lease) or
+    ``failed`` (held until an operator retries or discards it). ``acted`` says whether and how the
+    hook acted on its parked entries: ``""`` not at all, ``start`` started its tool, ``cancel``,
+    ``resume`` or ``take`` on ``acted_ids``. ``claim_intent`` is set while a claim is still to be
+    settled, and on a failed run whose claim could not be told.
+    """
+
+    id: str
+    topic: str
+    hook: str
+    status: Literal["pending", "running", "failed"]
+    attempts: int
+    next_attempt_at: datetime
+    acted: Literal["", "start", "cancel", "resume", "take"]
+    acted_ids: list[str]
+    claim_intent: HookRunClaimIntentView | None
+    last_error: str | None
+    last_error_kind: str | None
+    created_at: datetime
+    failed_at: datetime | None
+
+
+class HookRunsPage(BaseModel):
+    """One page of hook runs with the totals of every outstanding and every failed run.
+
+    Outstanding runs come first, the soonest due first; failed runs follow, the most recently
+    failed first. ``next_cursor`` is the cursor the next page reads from, ``null`` on the last page.
+    """
+
+    items: list[HookRunView]
+    next_cursor: str | None
+    outstanding: int
+    failed: int
+
+
+class HookRunDiscarded(BaseModel):
+    """A discarded failed hook run's id."""
+
+    discarded: str
 
 
 class StringListResponse(RootModel[list[str]]):

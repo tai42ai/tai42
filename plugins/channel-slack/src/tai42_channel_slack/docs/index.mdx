@@ -86,6 +86,32 @@ tai conversations create slack-chat \
   --channel slack --identity U0XXXXXXX
 ```
 
+## Message ids and addresses
+
+The conversation bridge records every message this channel sends to a participant. These are
+the ids and addresses it records:
+
+- An inbound message passes its `ts` as the medium message id. A message with several files is
+  bridged as one record per file, and every record carries the same `ts`.
+- `resolve_address` returns `CHANNEL_SLACK_BOT_USER_ID` and the recipient as the caller names
+  it. For a user id that is not the direct-message conversation the message lands in: a
+  completed send reports the `channel` from the `chat.postMessage` response, the conversation
+  id the events door passes for that participant, and the message `ts`.
+
+## Replies
+
+A reply in a thread carries `thread_ts`, the `ts` of the thread's parent message; a message
+whose `thread_ts` is its own `ts` starts the thread and quotes nothing. The channel hands the
+parent's `ts` to the platform beside the reply, on every file turn of a threaded file share
+too, and the platform resolves it against the conversation's own records into a typed
+`reply_to` (`{message_id, status, text}`): a `tool` target reads it in its payload, an `agent`
+target through `start_expr`. An option-button tap is a reply to the message holding the
+buttons. A form modal submission names no message, so it quotes none.
+
+When the reply answers a pending question, the asker receives the same `reply_to` beside the
+unchanged answer, and a tap's `reply_id` entry parameter as its `params`. A thread reply or a
+tap that finds no pending question bridges into the conversation with the same quoted id.
+
 ## Working-on-it signal
 
 Slack shows no bot typing indicator: the Web API exposes none for a bot user (only
@@ -97,7 +123,8 @@ no working-on-it signal while a turn runs. The answer posts back when it is read
 An `ask` with `answer_format: form` posts a **Fill form** button that opens a Block
 Kit modal. Schema properties map to controls — a short `enum` to a radio group and a
 longer one to a select, an array of strings to a checkbox group or multi-select, a
-date to a date picker, a boolean to Yes/No, a number to a number input — and the
+date to a date picker, a boolean to a two-option radio (Yes/No, or the caller's words), a
+number to a number input — and the
 per-send layout drives display blocks, a review step, conditional fields and mid-form
 reactions. A string field may name an `inputMode` for the kind of text it collects:
 `email` draws an email text input and `url` a url text input; a `format: email` field
@@ -126,6 +153,11 @@ Slack-specific behaviour (the documented degrades):
   dates and no range control — so a date bound, an unavailable-days rule or a range
   (two date fields) is **enforced on submit** and shown as an inline error on the
   field, not prevented in the picker.
+- **Range times.** A time paired with a range end (a `format: time` field whose `timeOf`
+  names that end) draws as Slack's time picker (`HH:mm`, 24-hour, no seconds) right after
+  its date picker, wherever the schema declares it, and a review page reads it back right
+  after its date. An end time before the start time on the same day is enforced on submit
+  and pinned under the end time's picker.
 - **Input kinds.** Slack has no numeric or phone keyboard hint on a text element, so a
   string field whose `inputMode` is `numeric`, `decimal` or `tel` renders as a plain
   text input; only `email` and `url` draw a distinct Slack text element. `inputMode`
@@ -153,6 +185,10 @@ Slack-specific behaviour (the documented degrades):
   at Slack's 150-character placeholder limit and refused loudly over it; a radio or checkbox
   group has no placeholder slot, so it draws none. Absent, the select shows Slack's own
   default prompt.
+- **Yes/no words.** A boolean field's two radio options read
+  `wording.form.fields[name].true_label` and `false_label` (else *Yes* / *No*), each capped
+  at Slack's 75-character option-text limit and refused loudly at send over it; the review
+  readback shows the same words.
 - **Review line.** The review step's empty readback (before anything is filled) reads
   `wording.form.review_empty` (else *No answers to review yet.*), capped at Slack's
   3000-character section-text limit.
@@ -163,8 +199,15 @@ Slack-specific behaviour (the documented degrades):
   a plain substitution; absent, the platform's own line is used.
 - **Refusal sentence.** When the door rejects a modal submission in place, the modal's inline
   error reads `wording.answer.rejected` (its optional `{reason}` token filled with the door's
-  reason), else the door's reason, else a generic correction line. The thread-reply rejection
-  notice draws the same caller sentence through the shared answer ladder.
+  reason, and left empty when the door gave none), else the door's reason, else a generic
+  correction line. The thread-reply rejection notice draws the same caller sentence through
+  the shared answer ladder.
+- **Form no longer available.** When the form's question is gone — its record expired before
+  the submit, or the door reports the ask gone — the modal's error reads
+  `wording.status.unavailable`, else *This question is no longer available; it has expired.*
+  The line rides the modal's own `private_metadata`, so it reaches the person even after the
+  record is gone; a line that pushes `private_metadata` past Slack's 3000-character limit is
+  refused at send.
 - **Display and review.** A page's heading/body/image blocks render as
   `header`/`section`/`image`; a review page is a final titled readback group in the
   single modal (Slack has no native multi-step, so no pushed confirmation view).
@@ -173,7 +216,16 @@ Slack-specific behaviour (the documented degrades):
   to the form's consumer; the predicate is also enforced on submit.
 - **Reacting forms** route a reacting field's change (and the submit check) through
   the platform's reaction seam and apply the result with `views.update`. A
-  page-advance trigger has no event on Slack's single-surface modal.
+  page-advance trigger has no event on Slack's single-surface modal. When a reaction
+  fails, or returns an update the modal cannot draw, the person reads
+  `wording.form.update_failed` (as a banner on the re-rendered modal, or as the submit's
+  inline error), else *Sorry, this form could not be updated right now. Please try again.*
+  Its optional `{reason}` token takes the reason a reaction raised as `FormReactionError`,
+  and is left empty for any other failure. A reaction reason is at most 500 characters, so
+  the line with each token filled at that bound must fit Slack's 3000-character section-text
+  limit; a longer line is refused at send.
+- **Field errors.** The modal shows errors per field and draws no `wording.form.error_line`;
+  a missing required value is the Slack client's own check.
 
 ## See also
 

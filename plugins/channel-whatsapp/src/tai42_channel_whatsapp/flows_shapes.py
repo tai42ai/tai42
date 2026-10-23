@@ -12,8 +12,9 @@ data endpoint, so a form carrying one is published endpoint-driven (:func:`field
 A control that can show an error carries Meta's ``error-message`` bound to the screen-data key
 ``<name>__err``; a ``rangeStart`` pair drawn as one range control binds its START's ``__err``,
 the object ``{start-date, end-date}`` carrying each end's text. The endpoint fills each text with
-the caller's ``wording.form.fields[<name>].invalid``, else this channel's own word for the broken
-shape (:func:`channel_word`, each within Meta's tightest ``error-message`` cap). A shape drawn as
+the caller's ``wording.form.fields[<name>].required`` for a missing value or ``invalid`` for any
+other shape, else this channel's own word for the broken shape (:func:`channel_word`, each within
+Meta's tightest ``error-message`` cap). A shape drawn as
 a native ``pattern`` carries the helper text Meta requires: the field's description, else the
 caller's ``invalid`` sentence, else :func:`helper_word`, which names the expected form with an
 example where the shape has one.
@@ -25,7 +26,7 @@ from collections.abc import Mapping
 from typing import Any, NamedTuple, assert_never
 
 from tai42_contract.interactions import FormShapeKind
-from tai42_kit.interactions import FORMAT_PATTERNS
+from tai42_kit.interactions import FORMAT_PATTERNS, TIME_OF_KEY
 
 #: The Flow controls Meta lets carry an ``error-message`` (outside a ``Form`` wrapper, as here).
 ERROR_MESSAGE_TYPES = frozenset(
@@ -102,7 +103,8 @@ class NativePattern(NamedTuple):
 def channel_word(kind: FormShapeKind, params: Mapping[str, Any]) -> str:  # noqa: C901, PLR0912 one exhaustive match over the kinds is the channel's one table of words
     """This channel's own word for a broken shape of ``kind`` — within Meta's 30-character text-control cap.
 
-    Shown in a control's ``error-message`` when the caller set no ``wording.form.fields[<name>].invalid``.
+    Shown in a control's ``error-message`` when the caller set no ``wording.form.fields[<name>].required``
+    (for a missing value) or ``invalid`` (for any other shape).
     ``params`` is the broken shape's bound as the form-shape check reports it: a ``format`` word names
     the form the value must take and a ``type`` word the kind of value. Exhaustive over :class:`FormShapeKind`.
     """
@@ -136,7 +138,7 @@ def channel_word(kind: FormShapeKind, params: Mapping[str, Any]) -> str:  # noqa
         case FormShapeKind.DATE_UNAVAILABLE:
             return "That date is unavailable"
         case FormShapeKind.RANGE_ORDER:
-            return "End is before start"
+            return "End time is before start" if params.get("by") == "time" else "End is before start"
         case FormShapeKind.RANGE_SPAN:
             return "Range length not allowed"
         case FormShapeKind.OTHER:
@@ -180,9 +182,16 @@ def native_pattern(prop: dict[str, Any], component: dict[str, Any]) -> NativePat
     return None
 
 
-def _keyword_is_native(keyword: str, prop: dict[str, Any], component: dict[str, Any], merged: bool) -> bool:
-    # Whether Meta's control checks ``keyword`` of ``prop`` itself.
+def _keyword_is_native(
+    keyword: str, prop: dict[str, Any], component: dict[str, Any], merged: bool, properties: Mapping[str, Any]
+) -> bool:
+    # Whether Meta's control checks ``keyword`` of ``prop`` itself. A ``timeOf`` naming a range START
+    # only places the time; on the END's time it orders that time after the START's, which no Meta
+    # control compares.
     ctype = component.get("type")
+    if keyword == TIME_OF_KEY:
+        date_prop = properties.get(prop[TIME_OF_KEY]) if isinstance(prop[TIME_OF_KEY], str) else None
+        return not (isinstance(date_prop, Mapping) and "rangeStart" in date_prop)
     if keyword in ("enum", "items"):
         items = prop.get("items")
         extra_item_keys = set(items) - {"type", "enum"} if isinstance(items, dict) else set()
@@ -204,16 +213,21 @@ def _keyword_is_native(keyword: str, prop: dict[str, Any], component: dict[str, 
     return False
 
 
-def field_needs_endpoint(prop: dict[str, Any], component: dict[str, Any], merged: bool) -> bool:
+def field_needs_endpoint(
+    prop: dict[str, Any], component: dict[str, Any], merged: bool, properties: Mapping[str, Any]
+) -> bool:
     """Whether a field carries a shape its drawn Meta control does not check natively.
 
-    ``component`` is the field's bare Flow control and ``merged`` whether the field is one end of a
-    ``rangeStart`` pair drawn as ONE range control (whose span and order Meta checks). Every keyword
+    ``component`` is the field's bare Flow control, ``merged`` whether the field is one end of a
+    ``rangeStart`` pair drawn as ONE range control (whose span and order Meta checks) and
+    ``properties`` the form's properties (a ``timeOf`` time reads its date there). Every keyword
     that only describes or draws the field is ignored; any other keyword is native only when the
     control checks it (see the module docstring).
     """
     return any(
-        not _keyword_is_native(keyword, prop, component, merged) for keyword in prop if keyword not in _DRAWING_KEYWORDS
+        not _keyword_is_native(keyword, prop, component, merged, properties)
+        for keyword in prop
+        if keyword not in _DRAWING_KEYWORDS
     )
 
 

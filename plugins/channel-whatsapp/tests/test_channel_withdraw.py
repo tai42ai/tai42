@@ -119,7 +119,9 @@ async def test_withdraw_without_a_recipient_touches_nothing(fake_redis: FakeRedi
 async def test_withdraw_drops_the_endpoint_form_sidecar(fake_redis: FakeRedis):
     delivery = make_delivery(interaction_id="int-A")
     await _reserve("int-A")
-    form = EndpointForm(schema={"type": "object"}, pages=None, reactions=None, option_fields=[], invalid={})
+    form = EndpointForm(
+        schema={"type": "object"}, pages=None, reactions=None, option_fields=[], invalid={}, required={}, lines={}
+    )
     await cache_endpoint_form("int-A", form, delivery.timeout_at)
     assert await get_endpoint_form("int-A") is not None
 

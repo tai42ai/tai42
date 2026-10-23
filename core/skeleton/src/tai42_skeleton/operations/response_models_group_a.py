@@ -30,7 +30,7 @@ from tai42_contract.versioning.models import DocumentVersion
 from tai42_skeleton.access_control.projection import PrincipalRef
 from tai42_skeleton.app.route_registry import RouteAction
 from tai42_skeleton.conversations.mode import ModeSource
-from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
+from tai42_skeleton.conversations.models import AskReplyView, AskSendView, ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.record_pages import TranscriptOrder
 from tai42_skeleton.marketplace.compat import CompatState, UpgradeOutcome
 
@@ -256,13 +256,14 @@ class ConversationRecordView(ConversationRecord):
 
     An admin read carries every
     field; the caller-scoped read withholds the route-key's internal detail — ``channel``,
-    ``our_identity``, ``provider_message_id``, ``callback_url``, ``error``,
-    ``outbound_message_ids`` and ``attempts`` are present only for an admin caller and are
-    absent from the caller_view subset.
+    ``our_identity``, ``provider_message_id``, ``callback_url``, ``error``, ``attempts``, the
+    per-part ``sends`` and all of ``ask`` but ``sensitive`` and of ``ask_reply`` but ``answer``
+    are present only for an admin caller and are absent from the caller_view subset.
     """
 
-    outbound_message_ids: list[str] | None = None
     attempts: int | None = None
+    ask: AskSendView | None = None
+    ask_reply: AskReplyView | None = None
 
 
 class ThreadSummaryRow(BaseModel):
@@ -369,15 +370,23 @@ class ThreadDeleteResult(BaseModel):
 class PersonDeleteResult(BaseModel):
     """A person erase.
 
-    ``removed`` counts the answer records deleted across the person's routes; ``erased`` says whether THIS
-    call removed the person row. ``states_erased`` counts the declared-state records this call forgot — the
-    person's own (``person``-subject) and its aggregated thread's (``thread``-subject) memory.
+    ``removed`` counts the answer records deleted across the person's routes: in its aggregated thread, in
+    the aggregated thread of every person it absorbed by a link, and in every route thread the erase
+    cleared (one only the person and the persons it absorbed wrote in); ``erased`` says whether THIS call
+    removed the person row. ``states_erased`` counts
+    the declared-state records this call forgot — the person's own (``person``-subject) and its aggregated
+    thread's (``thread``-subject) memory, the same for every absorbed person, and the ``thread``-subject
+    memory of each route thread the erase cleared. ``absorbed_person_ids`` lists, sorted, the ids of the
+    persons it absorbed that this call cleared (``[]`` when it absorbed none, or when its row was already
+    gone): run traces keyed by those ids are the operator's to delete, and nothing else names them once the
+    erase has finished.
     """
 
     person_id: str
     removed: int
     erased: bool
     states_erased: int
+    absorbed_person_ids: list[str]
 
 
 class ThreadMessageAck(BaseModel):
