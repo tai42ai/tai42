@@ -198,10 +198,12 @@ async def test_redis_retry_is_logged_then_fails_loudly(
     resp = await api.request_raw("POST", "/api/tool-runs", json=body)
     assert resp.status_code >= 500, f"expected a loud 5xx once the retries ran out, got {resp.status_code}"
 
-    # Two retries: one WARNING per retried failure, then the error.
-    warnings = _lines_with(
-        _log_after(stack, "serve", offset), "Redis connection TAI_TOOL_RUNS_REDIS_URL failed (attempt"
-    )
+    # Two retries: one WARNING per retried failure, then the error. The response can
+    # arrive before the serve process has written its log lines, so the count is read
+    # once the second retry's WARNING is on disk.
+    retry_marker = "Redis connection TAI_TOOL_RUNS_REDIS_URL failed (attempt"
+    await _wait_for_log(stack, "serve", offset, retry_marker, "attempt 2 of 3")
+    warnings = _lines_with(_log_after(stack, "serve", offset), retry_marker)
     _assert_two_retry_warnings(warnings)
 
     redis_relay.restore()
@@ -246,9 +248,8 @@ async def _sever_and_evict_the_postgres_pool(stack: TaiStack, pg_relay: TcpRelay
     offset = _log_size(stack, "serve")
     resp = await api.request_raw("GET", "/api/presets")
     assert resp.status_code >= 500, f"expected a loud 5xx on the severed pool, got {resp.status_code}"
-    assert _lines_with(_log_after(stack, "serve", offset), "disconnected and was removed from the cache"), (
-        "the failed request did not evict the postgres pool"
-    )
+    # The response can arrive before the serve process has written its log lines.
+    await _wait_for_log(stack, "serve", offset, "disconnected and was removed from the cache")
 
 
 @pytest.mark.needs("store:postgres", "topology:workers=1")
@@ -289,6 +290,9 @@ async def test_postgres_connect_retry_exhausted_fails_loudly(
     resp = await stack.api().request_raw("GET", "/api/presets")
     assert resp.status_code >= 500, f"expected a loud 5xx once the retries ran out, got {resp.status_code}"
 
+    # The response can arrive before the serve process has written its log lines, so
+    # the log is read once the final error's attempt note is on disk.
+    await _wait_for_log(stack, "serve", offset, "Postgres connection ", "failed after 3 attempt(s)")
     logged = _log_after(stack, "serve", offset)
     warnings = _lines_with(logged, *_POSTGRES_RETRY_WARNING)
     _assert_two_retry_warnings(warnings)
