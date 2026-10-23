@@ -134,9 +134,10 @@ preset over the composed tool, never the tool itself.
 a mismatch loudly. Never point a test-mode webhook endpoint at a production payments topic: a
 test-mode session is free to mint for any amount and satisfies a const pin exactly as a live one.
 
-**Recovery is the reconciliation schedule.** A single webhook delivery is not a fulfillment
-guarantee (the ingress ACKs before the hook runs), so `reconcile_stripe_payments` re-derives paid
-sessions from Stripe's own list and re-answers anything the hook lost. Its default 26-hour
+**Recovery is the reconciliation schedule.** A webhook delivery is not a fulfillment guarantee,
+because an event can never arrive and a hook run can be held as failed for an operator, so
+`reconcile_stripe_payments` re-derives paid sessions from Stripe's own list and re-answers any whose
+webhook never arrived or whose hook run is held as failed. Its default 26-hour
 `lookback_hours` covers a Checkout link's full ~24h lifetime plus slack, and answers are paced by
 `STRIPE_RECONCILE_ANSWER_INTERVAL_SECONDS` (default 1.2s) so a batch does not burst the callback
 door. **Cadence and lookback are a coupled pair — state and tune them together**, never one

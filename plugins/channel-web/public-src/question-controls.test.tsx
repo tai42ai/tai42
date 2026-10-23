@@ -36,12 +36,20 @@ function answerWording(partial: Partial<AnswerWording>): AnswerWording {
     submit: null,
     replyHint: null,
     rejected: null,
+    rejectedFinal: null,
     ...partial,
   };
 }
 
 function formWording(partial: Partial<FormWording>): FormWording {
-  return { submit: null, back: null, fields: {}, ...partial };
+  return {
+    submit: null,
+    back: null,
+    updateFailed: null,
+    stepProgress: null,
+    fields: {},
+    ...partial,
+  };
 }
 
 function choiceWording(partial: Partial<ChoiceWording>): ChoiceWording {
@@ -188,7 +196,19 @@ describe("QuestionControls draw the send's wording", () => {
       wording({
         form: formWording({
           submit: 'File it',
-          fields: { kind: { choiceLabel: 'Pick a kind', invalid: null } },
+          fields: {
+            kind: {
+              choiceLabel: 'Pick a kind',
+              invalid: null,
+              trueLabel: null,
+              falseLabel: null,
+              required: null,
+              addItem: null,
+              removeItem: null,
+              itemLabel: null,
+              noItems: null,
+            },
+          },
         }),
       }),
     );
@@ -208,5 +228,27 @@ describe("QuestionControls draw the send's wording", () => {
     await user.type(screen.getByRole('textbox'), 'go');
     await user.click(screen.getByRole('button', { name: 'Answer' }));
     expect(await screen.findByRole('status', { name: 'On its way' })).toBeInTheDocument();
+  });
+});
+
+describe('QuestionControls — a date range with a time on each end', () => {
+  it('draws each time as its own field right after its date', () => {
+    const item = formQuestion(
+      {
+        type: 'object',
+        properties: {
+          from: { type: 'string', format: 'date', title: 'From' },
+          to: { type: 'string', format: 'date', title: 'To', rangeStart: 'from' },
+          from_time: { type: 'string', format: 'time', title: 'From time', timeOf: 'from' },
+          to_time: { type: 'string', format: 'time', title: 'To time', timeOf: 'to' },
+        },
+      },
+      null,
+      null,
+    );
+    renderCard(item);
+    expect(
+      Array.from(document.querySelectorAll('input')).map((input) => input.labels?.[0]?.textContent),
+    ).toEqual(['From', 'From time', 'To', 'To time']);
   });
 });

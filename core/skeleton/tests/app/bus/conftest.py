@@ -31,6 +31,8 @@ from tai42_skeleton.app.bus import WorkerBus, WorkerIdentity, WorkerKind, Worker
 from tai42_skeleton.app.bus.subscribe import OpApplier
 from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings
 
+from ..._fakes.kit_redis import KitFakeRedis
+
 
 @pytest.fixture
 def server() -> fakeredis.FakeServer:
@@ -42,8 +44,8 @@ def wire_bus_client(monkeypatch: pytest.MonkeyPatch, server: fakeredis.FakeServe
     """Route the bus's ``client_ctx`` to a fresh fake handle on the shared server."""
 
     @asynccontextmanager
-    async def fake_ctx(client_cls, settings=None, *, fresh=False, **kwargs) -> AsyncIterator[aioredis.FakeRedis]:
-        client = aioredis.FakeRedis(server=server, decode_responses=True)
+    async def fake_ctx(client_cls, settings=None, *, fresh=False, **kwargs) -> AsyncIterator[KitFakeRedis]:
+        client = KitFakeRedis(server=server, decode_responses=True)
         try:
             yield client
         finally:
@@ -63,8 +65,8 @@ def wire_pooled_bus_client(monkeypatch: pytest.MonkeyPatch, server: fakeredis.Fa
     """
 
     @asynccontextmanager
-    async def fake_ctx(client_cls, settings=None, *, fresh=False, **kwargs) -> AsyncIterator[aioredis.FakeRedis]:
-        client = aioredis.FakeRedis(server=server, decode_responses=True)
+    async def fake_ctx(client_cls, settings=None, *, fresh=False, **kwargs) -> AsyncIterator[KitFakeRedis]:
+        client = KitFakeRedis(server=server, decode_responses=True)
         try:
             yield client
         except RedisConnectionError as exc:
@@ -172,7 +174,7 @@ async def _register_bare_presence(
 async def _drop_presence(server: fakeredis.FakeServer, settings: BusSettings, name: str) -> None:
     """Delete a presence key out from under the census — the TTL fading (or a deliberate
     stop) during the publisher's local apply, as publish's own census would see it."""
-    client = aioredis.FakeRedis(server=server, decode_responses=True)
+    client = KitFakeRedis(server=server, decode_responses=True)
     await client.delete(settings.presence_key(name))
     await client.aclose()
 
@@ -263,7 +265,7 @@ def recording_bus_client(monkeypatch: pytest.MonkeyPatch, server: fakeredis.Fake
 
     @asynccontextmanager
     async def fake_ctx(client_cls, settings=None, *, fresh=False, **kwargs) -> AsyncIterator[_RecordingRedis]:
-        inner = aioredis.FakeRedis(server=server, decode_responses=True)
+        inner = KitFakeRedis(server=server, decode_responses=True)
         rec = _RecordingRedis(inner)
         clients.append(rec)
         try:

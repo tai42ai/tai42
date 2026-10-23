@@ -50,11 +50,15 @@ async def _resolve_answer(
     answer: str | dict[str, Any],
     pending: PendingQuestion,
     params: dict[str, str] | None = None,
+    *,
+    reply_to_medium_message_id: str | None,
 ) -> None:
     """Resolve a correlated reply against its pending ask via the ONE shared ladder.
 
     ``answer`` is already final: a typed reply's stripped body, the option text an
-    interactive tap resolved to, or the coerced dict of a completed form (Flow). The
+    interactive tap resolved to, or the coerced dict of a completed form (Flow).
+    ``reply_to_medium_message_id`` is the ``wamid`` the reply quotes (its ``context.id``),
+    carried on both the forwarded answer and a bridged turn. The
     ladder forwards it, interprets the door's outcome over the plugin's
     :class:`CorrelationStore`, and returns the outcome the channel maps:
 
@@ -88,6 +92,9 @@ async def _resolve_answer(
             # and the party the turn cap holds accountable.
             cap_key=wa_id,
             provider_message_id=wamid,
+            # The wamid is also the id a quoting reply's ``context.id`` names.
+            medium_message_id=wamid,
+            reply_to_medium_message_id=reply_to_medium_message_id,
             bridge_text=bridge_text,
             # A form ask's correction surface is a re-opened Flow the channel renders
             # off RETRY_KEPT; a text/select ask is re-answered in place, so core owns
@@ -99,7 +106,14 @@ async def _resolve_answer(
     if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
         # The fallback IS the bridge path, so it carries the same params the caller's
         # own bridge branch would have carried (the correlated forward takes none).
-        await _bridge_inbound(phone_number_id, wa_id, bridge_text, wamid, params=params)
+        await _bridge_inbound(
+            phone_number_id,
+            wa_id,
+            bridge_text,
+            wamid,
+            params=params,
+            reply_to_medium_message_id=reply_to_medium_message_id,
+        )
         return
     if result.outcome is InboundAnswerOutcome.RETRY_KEPT and is_form:
         await _recover_form_rejection(phone_number_id, wa_id, wamid, pending, result.retry_reason, result.retry_field)
@@ -117,6 +131,8 @@ async def _bridge_inbound(
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
     form_tag: str | None = None,
+    *,
+    reply_to_medium_message_id: str | None,
 ) -> None:
     """Route an uncorrelated inbound message into the conversation bridge.
 
@@ -125,8 +141,10 @@ async def _bridge_inbound(
     rendered ``text``; ``form_tag`` is the caller-set opaque per-send tag the notify-form
     token carried back, handed to the bridge beside ``form`` (the platform bounds it,
     never interprets it); ``params`` are the channel's opaque entry-params (reply ids,
-    referral, reply-to context, media identity — see the ``params`` vocabulary block)
-    forwarded verbatim to the tool target's payload. ``attachments`` (typed participant media) and
+    referral, media identity — see the ``params`` vocabulary block) forwarded verbatim to
+    the tool target's payload; ``reply_to_medium_message_id`` is the ``wamid`` the message
+    quotes (``None`` when it quotes none), which the platform resolves into the quoted text.
+    ``attachments`` (typed participant media) and
     ``location`` (a shared geographic point) are the structured inbound content that lands on
     a tool target's payload under the stable ``attachments``/``location`` keys; inbound media
     passes the served :class:`MediaItem` it was ingested to (see the INBOUND MEDIA note in
@@ -151,6 +169,8 @@ async def _bridge_inbound(
             cap_key=wa_id,
             text=text,
             provider_message_id=wamid,
+            medium_message_id=wamid,
+            reply_to_medium_message_id=reply_to_medium_message_id,
             params=params,
             form=form,
             attachments=attachments,

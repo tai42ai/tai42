@@ -16,6 +16,7 @@ from starlette.responses import Response
 from tai42_contract.interactions import (
     AnswerFormat,
     FieldChangedEvent,
+    FormReactionHandlerError,
     FormShapeError,
     FormShapeKind,
     PageAdvancedEvent,
@@ -27,7 +28,7 @@ import tai42_channel_whatsapp.inbound  # noqa: F401  (registers the /flow-data r
 from tai42_channel_whatsapp.correlation import EndpointForm, cache_endpoint_form, cache_flow_form
 from tai42_channel_whatsapp.flows import build_form_flow
 from tai42_channel_whatsapp.flows_shapes import channel_word
-from tai42_channel_whatsapp.inbound.flow_data import _partial_values
+from tai42_channel_whatsapp.inbound.flow_data import _partial_values, _screen_fields
 
 from .conftest import (
     APP_SECRET,
@@ -139,7 +140,9 @@ def _reacting_form(schema: dict[str, Any], pages: list[dict[str, Any]] | None) -
         "submitted": True,
         "choices": [],
     }
-    return EndpointForm(schema=schema, pages=pages, reactions=reactions, option_fields=[], invalid={})
+    return EndpointForm(
+        schema=schema, pages=pages, reactions=reactions, option_fields=[], invalid={}, required={}, lines={}
+    )
 
 
 async def _seed(fake_redis: FakeRedis, *, pages: list[dict[str, Any]] | None = None) -> None:
@@ -783,7 +786,13 @@ def _shape_error(field: str, kind: FormShapeKind, message: str, **params: Any) -
 
 async def _seed_shaped(*, reactions: dict[str, Any] | None = None, invalid: dict[str, str] | None = None) -> None:
     form = EndpointForm(
-        schema=_SHAPE_SCHEMA, pages=_SHAPE_PAGES, reactions=reactions, option_fields=[], invalid=invalid or {}
+        schema=_SHAPE_SCHEMA,
+        pages=_SHAPE_PAGES,
+        reactions=reactions,
+        option_fields=[],
+        invalid=invalid or {},
+        required={},
+        lines={},
     )
     await cache_endpoint_form(_SHAPE_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
 
@@ -995,7 +1004,9 @@ async def test_a_picker_fed_per_send_is_never_refused_for_membership(
     flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
 ):
     schema = {"type": "object", "properties": {"slot": {"type": "string", "enum": ["9am"]}, "on": {"type": "string"}}}
-    form = EndpointForm(schema=schema, pages=None, reactions=None, option_fields=["slot"], invalid={})
+    form = EndpointForm(
+        schema=schema, pages=None, reactions=None, option_fields=["slot"], invalid={}, required={}, lines={}
+    )
     await cache_endpoint_form(_SHAPE_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
     # The per-send list the picker drew replaced the schema enum; the door judges membership.
     stub_app.interactions.shape_errors = [_shape_error("slot", FormShapeKind.ENUM, "Choose one of the offered options")]
@@ -1075,7 +1086,15 @@ _DATES_ADVANCE = {
 async def _seed_range(
     pages: list[dict[str, Any]], *, reactions: dict[str, Any] | None = None, invalid: dict[str, str] | None = None
 ) -> None:
-    form = EndpointForm(schema=_RANGE_SCHEMA, pages=pages, reactions=reactions, option_fields=[], invalid=invalid or {})
+    form = EndpointForm(
+        schema=_RANGE_SCHEMA,
+        pages=pages,
+        reactions=reactions,
+        option_fields=[],
+        invalid=invalid or {},
+        required={},
+        lines={},
+    )
     await cache_endpoint_form(_RANGE_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
 
 
@@ -1215,7 +1234,7 @@ async def _seed_multi(
     pages: list[dict[str, Any]] | None, schema: dict[str, Any] = _MULTI_SCHEMA
 ) -> list[dict[str, Any]]:
     """Cache the multi-value form and return its rendered screens."""
-    form = EndpointForm(schema=schema, pages=pages, reactions=None, option_fields=[], invalid={})
+    form = EndpointForm(schema=schema, pages=pages, reactions=None, option_fields=[], invalid={}, required={}, lines={})
     await cache_endpoint_form(_MULTI_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
     return build_form_flow(schema, pages)[0]["screens"]
 
@@ -1400,7 +1419,9 @@ async def test_a_field_change_on_a_split_field_hands_the_shown_cases_value_to_th
         },
     }
     reactions = {"field_changed": ["size"], "page_advanced": [], "submitted": False}
-    form = EndpointForm(schema=schema, pages=None, reactions=reactions, option_fields=[], invalid={})
+    form = EndpointForm(
+        schema=schema, pages=None, reactions=reactions, option_fields=[], invalid={}, required={}, lines={}
+    )
     await cache_endpoint_form(_MULTI_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
     screen = build_form_flow(schema, None, reactions=reactions)[0]["screens"][0]
     case_b = next(
@@ -1413,3 +1434,368 @@ async def test_a_field_change_on_a_split_field_hands_the_shown_cases_value_to_th
     request, _, _ = _request(_shape_exchange(data, token=_MULTI_TOKEN))
     await flow_handler(request)
     assert stub_app.interactions.react_calls[-1]["partial_values"] == {"kind": "b", "size": "m"}
+
+
+# --- a range with a time on each end: drawn, refused and summarised in drawing order -----------
+
+_TIMED_TOKEN = "int-timed-1"
+# The times are declared LAST in the schema; each draws right after its date.
+_TIMED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "start": {"type": "string", "format": "date", "title": "From"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start", "title": "To"},
+        "note": {"type": "string", "title": "Note"},
+        "start_time": {"type": "string", "format": "time", "title": "From time", "timeOf": "start"},
+        "end_time": {"type": "string", "format": "time", "title": "To time", "timeOf": "end"},
+    },
+}
+_TIMED_PAGES = [
+    {"title": "Dates", "fields": ["start", "end", "start_time", "end_time"], "kind": "input", "display": []},
+    {"title": "Notes", "fields": ["note"], "kind": "input", "display": []},
+]
+
+
+def _timed_form(pages: list[dict[str, Any]] | None) -> EndpointForm:
+    return EndpointForm(
+        schema=_TIMED_SCHEMA, pages=pages, reactions=None, option_fields=[], invalid={}, required={}, lines={}
+    )
+
+
+async def _seed_timed(pages: list[dict[str, Any]] | None) -> None:
+    await cache_endpoint_form(_TIMED_TOKEN, _timed_form(pages), datetime.now(UTC) + timedelta(minutes=5))
+
+
+def test_screen_fields_lists_each_time_right_after_its_date():
+    fields_by_screen, current = _screen_fields(_timed_form(_TIMED_PAGES), "SCREEN_A")
+    assert current == 0
+    assert fields_by_screen == [["start", "start_time", "end", "end_time"], ["note"]]
+    page_less, _ = _screen_fields(_timed_form(None), "SCREEN_A")
+    assert page_less == [["start", "start_time", "end", "end_time", "note"]]
+
+
+# A field declared BETWEEN the two range ends: the merged END and its time still follow the START's time.
+_SPLIT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "start": {"type": "string", "format": "date", "title": "From"},
+        "note": {"type": "string", "title": "Note"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start", "title": "To"},
+        "start_time": {"type": "string", "format": "time", "title": "From time", "timeOf": "start"},
+        "end_time": {"type": "string", "format": "time", "title": "To time", "timeOf": "end"},
+    },
+}
+
+
+def test_screen_fields_put_a_merged_end_and_its_time_after_the_start_time():
+    form = EndpointForm(
+        schema=_SPLIT_SCHEMA, pages=None, reactions=None, option_fields=[], invalid={}, required={}, lines={}
+    )
+    fields_by_screen, _ = _screen_fields(form, "SCREEN_A")
+    assert fields_by_screen == [["start", "start_time", "end", "end_time", "note"]]
+
+
+async def test_a_clean_submit_lists_a_merged_end_time_label_after_the_start_time_label(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    form = EndpointForm(
+        schema=_SPLIT_SCHEMA, pages=None, reactions=None, option_fields=[], invalid={}, required={}, lines={}
+    )
+    await cache_endpoint_form(_TIMED_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
+    data = {
+        "tai42_event": "submitted",
+        "start": {"start-date": "2026-05-01", "end-date": "2026-05-02"},
+        "note": "hello",
+        "start_time": "09:00",
+        "end_time": "10:00",
+    }
+    request, aes_key, iv = _request(_shape_exchange(data, token=_TIMED_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SUCCESS"
+    params = out["data"]["extension_message_response"]["params"]
+    assert list(params) == ["flow_token", "From", "From time", "To", "To time", "Note"]
+
+
+async def test_a_same_day_earlier_end_time_at_a_step_is_refused_on_the_end_time_control(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_timed(_TIMED_PAGES)
+    stub_app.interactions.shape_errors = [
+        _shape_error(
+            "end_time",
+            FormShapeKind.RANGE_ORDER,
+            "The end time must be on or after the start time",
+            rangeStart="start",
+            by="time",
+        )
+    ]
+    data = {
+        "tai42_event": "page_advanced",
+        "tai42_page": "Dates",
+        "start": {"start-date": "2026-05-01", "end-date": "2026-05-01"},
+        "start_time": "10:00",
+        "end_time": "09:00",
+        "start__init": _NO_RANGE_ERROR,
+        "start__err": _NO_RANGE_ERROR,
+        "start_time__init": "",
+        "start_time__err": "",
+        "end_time__init": "",
+        "end_time__err": "",
+        "note__init": "",
+        "note__err": "",
+    }
+    request, aes_key, iv = _request(_shape_exchange(data, token=_TIMED_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert stub_app.interactions.shape_calls[0]["fields"] == ["start", "start_time", "end", "end_time"]
+    assert out["data"]["end_time__err"] == "End time is before start"
+    assert out["data"]["start_time__err"] == ""
+    assert out["data"]["start__err"] == _NO_RANGE_ERROR
+    assert out["data"]["error_message"] == "To time: The end time must be on or after the start time"
+
+
+async def test_a_clean_submit_of_a_timed_range_completes_with_the_labels_in_drawing_order(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_timed(None)
+    data = {
+        "tai42_event": "submitted",
+        "start": {"start-date": "2026-05-01", "end-date": "2026-05-02"},
+        "start_time": "09:00",
+        "end_time": "10:00",
+        "note": "hello",
+    }
+    request, aes_key, iv = _request(_shape_exchange(data, token=_TIMED_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SUCCESS"
+    params = out["data"]["extension_message_response"]["params"]
+    assert list(params) == ["flow_token", "From", "From time", "To", "To time", "Note"]
+    assert params["From"] == "2026-05-01"
+    assert params["To"] == "2026-05-02"
+
+
+# --- the caller's form lines: the pop-up summary, the could-not-update line, the required sentence ---
+
+_LINE_TOKEN = "int-lines-1"
+_LINE_DEFAULT_NOTICE = "Sorry, this form could not be updated right now. Please try again."
+
+
+async def _seed_lines(
+    *,
+    lines: dict[str, str] | None = None,
+    required: dict[str, str] | None = None,
+    reactions: dict[str, Any] | None = None,
+) -> None:
+    form = EndpointForm(
+        schema=_SHAPE_SCHEMA,
+        pages=_SHAPE_PAGES,
+        reactions=reactions,
+        option_fields=[],
+        invalid={},
+        required=required or {},
+        lines=lines or {},
+    )
+    await cache_endpoint_form(_LINE_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
+
+
+def _all_triggers() -> dict[str, Any]:
+    return {
+        "field_changed": list(_SHAPE_SCHEMA["properties"]),
+        "page_advanced": [page["title"] for page in _SHAPE_PAGES],
+        "submitted": True,
+        "choices": [],
+    }
+
+
+async def test_an_ask_shape_refusal_shows_the_callers_error_line(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_lines(lines={"error_line": "Please check the form"})
+    stub_app.interactions.shape_errors = [_shape_error("email", FormShapeKind.FORMAT, "Enter a valid email address")]
+    request, aes_key, iv = _request(_shape_exchange(_SHAPE_ADVANCE, token=_LINE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["error_message"] == "Please check the form"
+    # The field's own sentence does not change: only the pop-up summary takes the caller's line.
+    assert out["data"]["email__err"] == channel_word(FormShapeKind.FORMAT, {})
+
+
+async def test_an_ask_less_shape_refusal_shows_the_carried_error_line(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, monkeypatch
+):
+    monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "waba-1")
+    reset_all_settings()
+    names = {"Name": "name", "Email address": "email", "Quantity": "qty", "note": "note"}
+    await cache_flow_form("waba-1", "hash1", _SHAPE_SCHEMA, names, _SHAPE_PAGES, [])
+    token = "tai42-nf:hash1:nonce1"
+    stub_app.interactions.shape_errors = [_shape_error("email", FormShapeKind.FORMAT, "Enter a valid email address")]
+    data = {**_SHAPE_ADVANCE, "tai42_error_line": "Please check the form"}
+    request, aes_key, iv = _request(_shape_exchange(data, token=token))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["error_message"] == "Please check the form"
+    # The carrier survives the echo, so the screen keeps the line for the next exchange.
+    assert out["data"]["tai42_error_line"] == "Please check the form"
+    data = {**_SHAPE_ADVANCE, "tai42_error_line": ""}
+    request, aes_key, iv = _request(_shape_exchange(data, token=token))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["error_message"] == "Email address: Enter a valid email address"
+
+
+async def test_a_field_changed_reaction_error_shows_the_callers_error_line(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_lines(lines={"error_line": "Please check the form"}, reactions=_all_triggers())
+    stub_app.interactions.react_result = {"errors": {"email": "already taken"}}
+    data = {"tai42_event": "field_changed", "tai42_field": "email", "email": "a@b.co", **_CONTACT_DATA}
+    request, aes_key, iv = _request(_shape_exchange(data, token=_LINE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["error_message"] == "Please check the form"
+
+
+async def test_a_page_advanced_reaction_error_shows_the_callers_error_line(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_lines(lines={"error_line": "Please check the form"}, reactions=_all_triggers())
+    stub_app.interactions.react_result = {"errors": {"email": "already taken"}}
+    data = {**_SHAPE_ADVANCE, "email": "alice@example.org"}
+    request, aes_key, iv = _request(_shape_exchange(data, token=_LINE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["error_message"] == "Please check the form"
+
+
+async def test_a_reaction_error_without_a_line_keeps_the_label_list(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_lines(reactions=_all_triggers())
+    stub_app.interactions.react_result = {"errors": {"email": "already taken", "name": "too short"}}
+    data = {**_SHAPE_ADVANCE, "email": "alice@example.org"}
+    request, aes_key, iv = _request(_shape_exchange(data, token=_LINE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["error_message"] == "Email address: already taken; Name: too short"
+
+
+_FAILED_TEMPLATE = "We could not refresh the form ({reason})."
+
+
+async def test_a_reaction_door_error_fills_the_callers_update_failed_with_its_reason(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_lines(lines={"update_failed": _FAILED_TEMPLATE}, reactions=_all_triggers())
+    stub_app.interactions.react_error = FormReactionHandlerError("the lookup timed out")
+    data = {"tai42_event": "field_changed", "tai42_field": "email", "email": "a@b.co", **_CONTACT_DATA}
+    request, aes_key, iv = _request(_shape_exchange(data, token=_LINE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["error_message"] == "We could not refresh the form (the lookup timed out)."
+
+
+async def test_a_reaction_door_error_without_a_line_keeps_the_default_notice(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_lines(reactions=_all_triggers())
+    stub_app.interactions.react_error = FormReactionHandlerError("the lookup timed out")
+    data = {"tai42_event": "field_changed", "tai42_field": "email", "email": "a@b.co", **_CONTACT_DATA}
+    request, aes_key, iv = _request(_shape_exchange(data, token=_LINE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["error_message"] == _LINE_DEFAULT_NOTICE
+
+
+@pytest.mark.parametrize(
+    ("case", "react_error"),
+    [
+        ("undeclared trigger", None),
+        ("no event marker", None),
+        ("unrenderable update", None),
+        ("any other failure", RuntimeError("handler blew up")),
+    ],
+)
+async def test_every_other_failure_door_draws_the_callers_update_failed_with_no_reason(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, case: str, react_error: BaseException | None
+):
+    reactions = _all_triggers()
+    if case == "undeclared trigger":
+        reactions["field_changed"] = ["name"]
+    await _seed_lines(lines={"update_failed": _FAILED_TEMPLATE}, reactions=reactions)
+    stub_app.interactions.react_error = react_error
+    if case == "unrenderable update":
+        # A replaced option whose second line is past Meta's 300-character cap cannot be rendered.
+        stub_app.interactions.react_result = {
+            "options": {"name": [{"value": "a", "label": "A", "description": "d" * 301}]}
+        }
+    data: dict[str, Any] = {"tai42_event": "field_changed", "tai42_field": "email", "email": "a@b.co", **_CONTACT_DATA}
+    if case == "no event marker":
+        data = {"email": "a@b.co", **_CONTACT_DATA}
+    request, aes_key, iv = _request(_shape_exchange(data, token=_LINE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["error_message"] == "We could not refresh the form ()."
+
+
+async def test_an_ask_less_failure_draws_the_carried_update_failed(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, monkeypatch
+):
+    monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "waba-1")
+    reset_all_settings()
+    names = {"Name": "name", "Email address": "email", "Quantity": "qty", "note": "note"}
+    await cache_flow_form("waba-1", "hash1", _SHAPE_SCHEMA, names, _SHAPE_PAGES, [])
+    data = {"email": "a@b.co", "tai42_update_failed": "Not refreshed: {reason}", **_CONTACT_DATA}
+    request, aes_key, iv = _request(_shape_exchange(data, token="tai42-nf:hash1:nonce1"))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["error_message"] == "Not refreshed: "
+    data = {"email": "a@b.co", "tai42_update_failed": "", **_CONTACT_DATA}
+    request, aes_key, iv = _request(_shape_exchange(data, token="tai42-nf:hash1:nonce1"))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["error_message"] == _LINE_DEFAULT_NOTICE
+
+
+async def test_a_missing_value_shows_the_callers_required_sentence(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_lines(required={"email": "We need your email"})
+    stub_app.interactions.shape_errors = [_shape_error("email", FormShapeKind.REQUIRED, "This field is required")]
+    request, aes_key, iv = _request(_shape_exchange(_SHAPE_ADVANCE, token=_LINE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["email__err"] == "We need your email"
+    assert out["data"]["error_message"] == "Email address: We need your email"
+
+
+async def test_a_missing_value_without_a_required_sentence_keeps_the_channel_word(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # A caller ``invalid`` sentence words a broken shape, never a missing value.
+    await _seed_lines()
+    stub_app.interactions.shape_errors = [_shape_error("email", FormShapeKind.REQUIRED, "This field is required")]
+    request, aes_key, iv = _request(_shape_exchange(_SHAPE_ADVANCE, token=_LINE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["email__err"] == channel_word(FormShapeKind.REQUIRED, {})
+    assert out["data"]["error_message"] == "Email address: This field is required"
+
+
+async def test_an_ask_less_missing_value_shows_the_carried_required_sentence(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, monkeypatch
+):
+    monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "waba-1")
+    reset_all_settings()
+    names = {"Name": "name", "Email address": "email", "Quantity": "qty", "note": "note"}
+    await cache_flow_form("waba-1", "hash1", _SHAPE_SCHEMA, names, _SHAPE_PAGES, [])
+    stub_app.interactions.shape_errors = [_shape_error("email", FormShapeKind.REQUIRED, "This field is required")]
+    data = {**_SHAPE_ADVANCE, "email__required": "We need your email", "email__invalid": "Not this one"}
+    request, aes_key, iv = _request(_shape_exchange(data, token="tai42-nf:hash1:nonce1"))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["email__err"] == "We need your email"
+
+
+async def test_a_clean_advance_forwards_the_form_lines_and_required_carriers(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed_lines()
+    carried = {
+        "tai42_error_line": "Please check the form",
+        "tai42_update_failed": "Not refreshed: {reason}",
+        "name__required": "We need your name",
+        "email__required": "",
+    }
+    data = {**_SHAPE_ADVANCE, "email": "alice@example.org", **carried}
+    request, aes_key, iv = _request(_shape_exchange(data, token=_LINE_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    for key, value in carried.items():
+        assert out["data"][key] == value

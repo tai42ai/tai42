@@ -207,6 +207,7 @@ class FakeStatesPg:
         self.locked: list[list[str]] = []
         self.lock_timeouts: list[str] = []
         self.advisory_locks: list[str] = []
+        self.shared_advisory_locks: list[str] = []
         self.attachment_joins = 0
         self.savepoints = 0
         self.transactions = 0
@@ -1360,6 +1361,11 @@ def _set_lock_timeout(cur, pg, norm, params):
 @_exact("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))")
 def _advisory_lock(cur, pg, norm, params):
     pg.advisory_locks.append(params[0])
+
+
+@_exact("SELECT pg_advisory_xact_lock_shared(hashtextextended(%s, 0))")
+def _shared_advisory_lock(cur, pg, norm, params):
+    pg.shared_advisory_locks.append(params[0])
 
 
 @_exact(

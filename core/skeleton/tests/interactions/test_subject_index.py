@@ -350,6 +350,26 @@ async def test_claim_outcome_takes_once_then_gone(fake_redis):
     assert await fake_redis.zcard(store.open_caller_key) == 0
 
 
+async def test_outcome_waiting_is_true_until_the_outcome_is_taken_or_deleted(fake_redis):
+    store = InteractionStore("t:")
+    assert await store.outcome_waiting(fake_redis, "cid") is False
+    for cid in ("cid", "swept"):
+        await store.add_outcome(
+            fake_redis,
+            completion_id=cid,
+            interaction_id="i1",
+            status="finished",
+            result=1,
+            candidates=_candidates(person="pA"),
+            retention_ttl=3600,
+        )
+        assert await store.outcome_waiting(fake_redis, cid) is True
+    await store.claim_outcome(fake_redis, "cid")
+    await store.delete_outcome(fake_redis, "swept")
+    assert await store.outcome_waiting(fake_redis, "cid") is False
+    assert await store.outcome_waiting(fake_redis, "swept") is False
+
+
 async def test_delete_outcome_clears_index_and_is_a_noop_when_gone(fake_redis):
     store = InteractionStore("t:")
     cands = _candidates(person="pA")

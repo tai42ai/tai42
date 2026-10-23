@@ -42,7 +42,7 @@ async def _handle_status(status: dict[str, Any]) -> None:
     if receipt is DeliveryReceipt.FAILED:
         logger.warning("whatsapp reported delivery failure for %s: %r", wamid, status.get("errors"))
     try:
-        await tai42_app.conversations.record_delivery_status("whatsapp", wamid, receipt)
+        await tai42_app.conversations.record_delivery_status("whatsapp", wamid, receipt, errors=status.get("errors"))
     except LookupError as exc:
         # Not a bridge outbound: it may be a ``notify_user`` send with no conversation
         # record. Post the receipt onto the originating trace via the send-outcome index;

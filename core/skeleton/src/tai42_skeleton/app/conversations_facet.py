@@ -3,7 +3,7 @@
 Forwards to the bridge in :mod:`tai42_skeleton.conversations`. ``accept`` turns a received
 message into an agent turn and returns the new message's id; ``record_delivery_status`` is the
 out-of-band sink an adapter calls when a provider later reports an outbound message's terminal
-fate.
+fate; ``send_recorded`` records a send the adapter makes itself.
 """
 
 from __future__ import annotations
@@ -13,8 +13,11 @@ from typing import TYPE_CHECKING, Any
 from tai42_contract.conversations import ConversationTargetKind, DeliveryReceipt, TargetBindValidator
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from tai42_contract.app import PendingMessage
-    from tai42_contract.conversations import InboundRejectionReason
+    from tai42_contract.channels import SendOutcome
+    from tai42_contract.conversations import AnswerPart, InboundRejectionReason
     from tai42_contract.interactions.models import LocationElement, MediaItem
 
     from tai42_skeleton.app.server import TaiMCP
@@ -37,6 +40,8 @@ class ConversationsFacet:
         cap_key: str,
         text: str,
         provider_message_id: str,
+        medium_message_id: str | None,
+        reply_to_medium_message_id: str | None,
         params: dict[str, str] | None = None,
         form: dict[str, Any] | None = None,
         attachments: list[MediaItem] | None = None,
@@ -52,6 +57,8 @@ class ConversationsFacet:
             cap_key,
             text,
             provider_message_id,
+            medium_message_id,
+            reply_to_medium_message_id,
             params=params,
             form=form,
             attachments=attachments,
@@ -60,16 +67,36 @@ class ConversationsFacet:
             form_tag=form_tag,
         )
 
-    async def record_delivery_status(self, channel: str, provider_message_id: str, status: DeliveryReceipt) -> None:
+    async def record_delivery_status(
+        self, channel: str, provider_message_id: str, status: DeliveryReceipt, *, errors: Any = None
+    ) -> None:
         """Record a provider's terminal delivery status for an outbound message."""
-        await self._app._conversation_record_delivery_status(channel, provider_message_id, status)
+        await self._app._conversation_record_delivery_status(channel, provider_message_id, status, errors=errors)
+
+    async def send_recorded(
+        self,
+        *,
+        channel: str,
+        our_identity: str,
+        client_address: str,
+        content: AnswerPart,
+        send: Callable[[], Awaitable[SendOutcome]],
+    ) -> SendOutcome:
+        """Record a send a channel plugin makes itself, record first, and return its outcome."""
+        return await self._app._conversation_send_recorded(
+            channel=channel,
+            our_identity=our_identity,
+            client_address=client_address,
+            content=content,
+            send=send,
+        )
 
     async def notify_inbound_rejected(
         self,
         *,
         channel_id: str,
         recipient: str,
-        sender_identity: str | None,
+        sender_identity: str,
         kind: str,
         reason: InboundRejectionReason,
     ) -> None:

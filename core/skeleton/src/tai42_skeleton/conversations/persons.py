@@ -3,11 +3,20 @@
 The runtime state that folds several channel addresses into ONE identity for a single
 ``(target_kind, target_name)`` target.
 
-Two Redis keyspaces, both built ONLY by the :class:`ConversationsSettings` helpers:
+Its Redis keyspaces, all built ONLY by the :class:`ConversationsSettings` helpers:
 
 - a PERSON-ROW key (``conversations:person:<person_id>``) → the :class:`Person` JSON.
 - a per-target PERSON INDEX — a HASH ``conversations:person_index:<target_kind>:<target_name>``
   mapping a ``door_address_key`` → the ``person_id`` that owns that address.
+- beside the row: the person's ERASE MARK (set while its erase runs; every person write refuses a
+  marked person and every person read treats it as gone), its ABSORBED SET (every id a ``/link``
+  merged into it, chains flattened), its thread's RECORDED ROUTES, and an absorbed id's
+  ABSORBED-INTO pointer naming its survivor.
+- per writer, its WRITER THREADS: the append-only visit list of the route-keyed threads it wrote
+  in. Each record of a route-keyed thread keeps its writer, stamped in the record's own write (the
+  person the target's index names for the record's door, else the door itself), so an erase can
+  tell a thread only its person and the persons it absorbed wrote in from one another writer also
+  wrote in, by reading the thread's records.
 
 The ``door_address_key`` is a deterministic JSON array, the SINGLE canonical encoding of one
 address, produced ONLY by :func:`_door_address_key`:
@@ -21,10 +30,11 @@ encoder rather than build its own, and no public store operation accepts a pre-b
 takes structured fields (``door, channel, our_identity, address`` or a :class:`PersonAddress`)
 and derives the key internally, so no caller can ever encode divergently.
 
-Every multi-key mutation is ONE Lua script (marker-commented), so racing writers produce one
-outcome. The scripts build the person-row and person-index keys from a prefix IN-SCRIPT (a
-survivor id or a target read off a row is not known to the caller), which assumes a single-node
-Redis (not Cluster) exactly as the record store and the trigger-link store do. cjson round-trips
+Every multi-key mutation is ONE Lua script (marker-commented, in
+:mod:`tai42_skeleton.conversations.person_scripts`), so racing writers produce one outcome. The
+scripts build the person-row and person-index keys from a prefix IN-SCRIPT (a survivor id or a
+target read off a row is not known to the caller), which assumes a single-node Redis (not Cluster)
+exactly as the record store and the trigger-link store do. cjson round-trips
 a person row through pydantic on every read, so a Lua-re-encoded row stays valid.
 
 Durability is the deployment's Redis persistence, exactly as for conversation records. Persons
@@ -43,17 +53,32 @@ from uuid import uuid4
 
 from tai42_contract.conversations import (
     ConversationDoor,
+    ConversationRoute,
     ConversationTargetKind,
     CrossTargetMergeError,
     NotLinkedError,
     Person,
     PersonAddress,
 )
+from tai42_contract.errors import UnavailableError
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
+from tai42_skeleton.conversations.person_scripts import (
+    _DETACH_LUA,
+    _ENSURE_LUA,
+    _ERASE_LUA,
+    _GET_BY_ID_LUA,
+    _LOOKUP_LUA,
+    _MARK_ERASING_LUA,
+    _MERGE_LUA,
+    _OUTSIDE_WRITER_LUA,
+    _READ_FOR_ERASE_LUA,
+    _SET_LOCALE_LUA,
+)
 from tai42_skeleton.conversations.settings import ConversationsSettings
-from tai42_skeleton.operations.errors import NotSupportedError
+from tai42_skeleton.conversations.thread_ids import RouteThreadId, parse_thread_id
+from tai42_skeleton.operations.errors import ConflictError, NotSupportedError
 from tai42_skeleton.utils.redis_typing import awaited, eval_script
 
 _NO_BACKEND = "conversation persons require the redis conversations backend"
@@ -82,6 +107,23 @@ def _door_address_key(*, door: ConversationDoor, channel: str | None, our_identi
     return json.dumps(["api", address], separators=(",", ":"))
 
 
+def thread_door(route: ConversationRoute, thread_id: str) -> str | None:
+    """The door a write into ``thread_id`` under ``route`` is stamped for, or ``None`` for a person thread.
+
+    The JSON ``[target_kind, target_name, door_address_key]`` of the route's target and the address
+    the route-keyed thread id carries, on the route's door, channel and identity: the address the
+    doors pass to this store. The write's writer is the person the target's index names for that
+    door address key, or the door itself while the index names nobody.
+    """
+    parsed = parse_thread_id(thread_id)
+    if not isinstance(parsed, RouteThreadId):
+        return None
+    door_address_key = _door_address_key(
+        door=route.door, channel=route.channel, our_identity=route.our_identity, address=parsed.client_address
+    )
+    return json.dumps([route.target_kind, route.target_name, door_address_key], separators=(",", ":"))
+
+
 def _address_key_of(address: PersonAddress) -> str:
     return _door_address_key(
         door=address.door, channel=address.channel, our_identity=address.our_identity, address=address.address
@@ -93,241 +135,35 @@ def _as_str(value: Any) -> str:
     return value.decode() if isinstance(value, bytes) else value
 
 
-# One atomic index lookup. KEYS[1]=person index HASH. ARGV = door_address_key,
-# person_key_prefix. HGET the owner, then GET its row in the SAME step, so a concurrent merge
-# (which rewrites the index and deletes the absorbed row atomically) is never observed torn.
-_LOOKUP_LUA = """
--- conversations:person:lookup
-local person_id = redis.call('HGET', KEYS[1], ARGV[1])
-if not person_id then
-  return {'miss'}
-end
-local raw = redis.call('GET', ARGV[2] .. person_id)
-if not raw then
-  return {'torn', person_id}
-end
-return {'hit', raw}
-"""
+class PersonErasingError(UnavailableError):
+    """A person write refused because the person's erase is running (503): nothing was changed."""
 
-# One atomic get-or-create. KEYS[1]=person index HASH. ARGV = door_address_key,
-# person_key_prefix, new_person_id, new_person_json, door, channel, our_identity, address,
-# routes_json. Absent index field ⇒ HSET it and SET the new single-address row (created).
-# Present ⇒ read the owning row, union the call's routes into the matching address, and
-# re-persist only if that changed anything (existing). Never a double-create race.
-_ENSURE_LUA = """
--- conversations:person:ensure
-local index_key = KEYS[1]
-local dak, prefix, new_id, new_json = ARGV[1], ARGV[2], ARGV[3], ARGV[4]
-local door, channel, our_identity, address = ARGV[5], ARGV[6], ARGV[7], ARGV[8]
-local routes = cjson.decode(ARGV[9])
-local existing = redis.call('HGET', index_key, dak)
-if not existing then
-  redis.call('HSET', index_key, dak, new_id)
-  redis.call('SET', prefix .. new_id, new_json)
-  return {'created', new_json}
-end
-local row_key = prefix .. existing
-local raw = redis.call('GET', row_key)
-if not raw then
-  return {'torn', existing}
-end
-local person = cjson.decode(raw)
-for _, addr in ipairs(person.addresses) do
-  local match = (addr.door == door)
-  if match and door == 'channel' then
-    match = addr.channel == channel and addr.our_identity == our_identity and addr.address == address
-  elseif match then
-    match = addr.address == address
-  end
-  if match then
-    local changed = false
-    for _, want in ipairs(routes) do
-      local present = false
-      for _, have in ipairs(addr.routes) do
-        if have == want then present = true break end
-      end
-      if not present then
-        table.insert(addr.routes, want)
-        changed = true
-      end
-    end
-    if changed then
-      raw = cjson.encode(person)
-      redis.call('SET', row_key, raw)
-    end
-    break
-  end
-end
-return {'existing', raw}
-"""
-
-# One atomic, order-independent merge. KEYS[1]/KEYS[2]=the two person-row keys.
-# ARGV[1]=person_index_key_prefix. The survivor is the row with the earlier created_at (tie:
-# lexically smaller person_id) — chosen IN-SCRIPT so no caller can decide it. The absorbed
-# addresses union into the survivor, every index field pointing at the absorbed id is
-# repointed at the survivor (the index itself is authoritative for which addresses belong,
-# so no address key is re-derived here), and the absorbed row is deleted. Same-key ids are a
-# no-op; differing targets refuse.
-_MERGE_LUA = """
--- conversations:person:merge
-local key_a, key_b = KEYS[1], KEYS[2]
-local raw_a = redis.call('GET', key_a)
-if not raw_a then
-  return {'unknown', key_a}
-end
-if key_a == key_b then
-  return {'ok', raw_a}
-end
-local raw_b = redis.call('GET', key_b)
-if not raw_b then
-  return {'unknown', key_b}
-end
-local a = cjson.decode(raw_a)
-local b = cjson.decode(raw_b)
-if a.target_kind ~= b.target_kind or a.target_name ~= b.target_name then
-  return {'cross_target'}
-end
-local survivor_is_a
-if a.created_at < b.created_at then
-  survivor_is_a = true
-elseif b.created_at < a.created_at then
-  survivor_is_a = false
-else
-  survivor_is_a = a.person_id < b.person_id
-end
-local survivor, absorbed, survivor_key, absorbed_key
-if survivor_is_a then
-  survivor, absorbed, survivor_key, absorbed_key = a, b, key_a, key_b
-else
-  survivor, absorbed, survivor_key, absorbed_key = b, a, key_b, key_a
-end
-for _, addr in ipairs(absorbed.addresses) do
-  for _, have in ipairs(survivor.addresses) do
-    -- Compare the SAME fields _door_address_key consumes (door + address, plus the channel
-    -- identity for a channel door) rather than re-encoding the key in Lua. A match means one
-    -- address is owned by two persons on one target — the per-target index's single-ownership
-    -- invariant is already broken, so surface it loudly instead of forging a duplicate row.
-    local dup = (have.door == addr.door and have.address == addr.address)
-    if dup and addr.door == 'channel' then
-      dup = have.channel == addr.channel and have.our_identity == addr.our_identity
-    end
-    if dup then
-      return {'duplicate_address', addr.address}
-    end
-  end
-  table.insert(survivor.addresses, addr)
-end
-local index_key = ARGV[1] .. survivor.target_kind .. ':' .. survivor.target_name
-local fields = redis.call('HGETALL', index_key)
-for i = 1, #fields, 2 do
-  if fields[i + 1] == absorbed.person_id then
-    redis.call('HSET', index_key, fields[i], survivor.person_id)
-  end
-end
-local encoded = cjson.encode(survivor)
-redis.call('SET', survivor_key, encoded)
-redis.call('DEL', absorbed_key)
-return {'ok', encoded}
-"""
-
-# One atomic detach. KEYS[1]=person row key, KEYS[2]=the detached address's fresh
-# provisional row key. ARGV = person_index_key_prefix, door_address_key, new_person_id,
-# new_created_at_iso, door, channel, our_identity, address. Refuses the person's only address
-# (not_linked). Removes the matching address, writes it back as a fresh single-address person
-# (so its next inbound is NOT a row creation — no re-greeting), and repoints its index field.
-_DETACH_LUA = """
--- conversations:person:detach
-local row_key, new_row_key = KEYS[1], KEYS[2]
-local index_prefix, dak, new_id, new_created_at = ARGV[1], ARGV[2], ARGV[3], ARGV[4]
-local door, channel, our_identity, address = ARGV[5], ARGV[6], ARGV[7], ARGV[8]
-local raw = redis.call('GET', row_key)
-if not raw then
-  return {'unknown', row_key}
-end
-local person = cjson.decode(raw)
-if #person.addresses <= 1 then
-  return {'not_linked'}
-end
-local found
-for i, addr in ipairs(person.addresses) do
-  local match = (addr.door == door)
-  if match and door == 'channel' then
-    match = addr.channel == channel and addr.our_identity == our_identity and addr.address == address
-  elseif match then
-    match = addr.address == address
-  end
-  if match then
-    found = i
-    break
-  end
-end
-if not found then
-  -- The row has >1 address (the single-address case returned 'not_linked' above), yet the
-  -- asked-for address is not one of them: a caller/id mismatch, NOT the legitimate
-  -- nothing-to-unlink case. Surface it distinctly instead of masking it as 'not_linked'.
-  return {'not_member'}
-end
-local removed = table.remove(person.addresses, found)
-redis.call('SET', row_key, cjson.encode(person))
-local fresh = {
-  person_id = new_id,
-  target_kind = person.target_kind,
-  target_name = person.target_name,
-  created_at = new_created_at,
-  addresses = {removed},
-  -- Carry the stored locale onto the split-off person (nil assignment is a no-op), so the
-  -- detached conversation still renders in the participant's resolved language.
-  locale = person.locale,
-}
-local fresh_json = cjson.encode(fresh)
-redis.call('SET', new_row_key, fresh_json)
-local index_key = index_prefix .. person.target_kind .. ':' .. person.target_name
-redis.call('HSET', index_key, dak, new_id)
-return {'ok', fresh_json}
-"""
+    def __init__(self, person_id: str, what: str) -> None:
+        """Name the person being erased and ``what`` was refused."""
+        super().__init__(
+            f"conversation person {person_id!r} is being erased: {what} was refused and nothing was changed; "
+            "retry once the erase has finished"
+        )
+        self.person_id = person_id
 
 
-# One atomic person erase. KEYS[1]=person row key, KEYS[2]=the person's per-target index HASH.
-# ARGV[1]=person_id. Deletes the row and every index field pointing at this person — the index
-# is authoritative for which addresses belong, so removing by VALUE erases exactly this person's
-# mappings even if the row and index momentarily disagree. Same-key idempotent: a re-run on an
-# already-erased person removes nothing. Returns {row removed, index fields removed}.
-_ERASE_LUA = """
--- conversations:person:erase
-local removed_row = redis.call('DEL', KEYS[1])
-local fields = redis.call('HGETALL', KEYS[2])
-local removed_fields = 0
-for i = 1, #fields, 2 do
-  if fields[i + 1] == ARGV[1] then
-    redis.call('HDEL', KEYS[2], fields[i])
-    removed_fields = removed_fields + 1
-  end
-end
-return {removed_row, removed_fields}
-"""
+@dataclass(frozen=True)
+class PersonEraseRead:
+    """A person, what it absorbed, where it points and the route threads they wrote in, read in one step.
 
+    ``person`` is ``None`` when the row is gone. ``absorbed_ids`` are the sorted ids the person
+    absorbed by a link; ``absorbed_into`` is the id of the person that absorbed it, when one did.
+    ``thread_routes`` maps the person and each absorbed id to the sorted routes its person thread is
+    cleared across: the person's addresses' routes and its recorded routes, and for an absorbed id
+    its own recorded routes with the person's addresses' routes (``[]`` for the person with no row).
+    ``route_threads`` are the sorted route-keyed threads the person or an absorbed id is a writer of.
+    """
 
-# Set (or clear) a person's stored locale in place. KEYS[1]=person row key. ARGV[1]=mode
-# ("set"/"clear"), ARGV[2]=the canonical locale when mode is "set". Read-modify-write of the
-# one JSON row in a single script so a concurrent read never sees a half-written row; a "clear"
-# removes the field so the row reads back as an explicit absent locale. Returns {"missing"} when
-# no such person row exists, else {"ok", updated_json}.
-_SET_LOCALE_LUA = """
--- conversations:person:set_locale
-local raw = redis.call('GET', KEYS[1])
-if not raw then
-  return {'missing'}
-end
-local person = cjson.decode(raw)
-if ARGV[1] == 'clear' then
-  person.locale = nil
-else
-  person.locale = ARGV[2]
-end
-local encoded = cjson.encode(person)
-redis.call('SET', KEYS[1], encoded)
-return {'ok', encoded}
-"""
+    person: Person | None
+    absorbed_ids: list[str]
+    absorbed_into: str | None
+    thread_routes: dict[str, list[str]]
+    route_threads: list[str]
 
 
 class ConversationPersonStore:
@@ -355,30 +191,154 @@ class ConversationPersonStore:
         """The person owning ``address`` on ``target``, or ``None`` when the address has never been seen there.
 
         The index field and its row are read in one atomic step; an index field naming a missing
-        row is corruption and raises.
+        row is corruption and raises. An owner whose erase is running also answers ``None``: its
+        addresses are attributed as unlinked.
         """
         dak = _door_address_key(door=door, channel=channel, our_identity=our_identity, address=address)
         index_key = self.settings.person_index_key(target.target_kind, target.target_name)
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            result = await eval_script(r, _LOOKUP_LUA, 1, index_key, dak, self.settings.person_key_prefix)
+            result = await eval_script(
+                r,
+                _LOOKUP_LUA,
+                1,
+                index_key,
+                dak,
+                self.settings.person_key_prefix,
+                self.settings.person_erasing_key_prefix,
+            )
         status = _as_str(result[0])
-        if status == "miss":
+        if status in ("miss", "erasing"):
             return None
         if status == "hit":
             return Person.model_validate_json(_as_str(result[1]))
         raise RuntimeError(f"conversations: person index names a missing row: {_as_str(result[1])!r}")
 
-    async def get_by_id(self, person_id: str) -> Person | None:
+    async def get_by_id(self, person_id: str, *, include_erasing: bool = False) -> Person | None:
         """The person row named by ``person_id``, or ``None`` when no such row exists.
 
         The aggregated person-thread read door resolves the ``bridge:@person:{person_id}`` key
-        this way — against the store, never by parsing addresses out of the thread id.
+        this way — against the store, never by parsing addresses out of the thread id. A person
+        whose erase is running answers ``None`` too, unless ``include_erasing`` asks for its row.
+        The row and the mark are read in one step.
         """
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            raw = await awaited(r.get(self.settings.person_key(person_id)))
-        if raw is None:
+            result = await eval_script(
+                r,
+                _GET_BY_ID_LUA,
+                2,
+                self.settings.person_key(person_id),
+                self.settings.person_erasing_key(person_id),
+            )
+        raw = _as_str(result[0])
+        if not raw or (int(result[1]) == 1 and not include_erasing):
             return None
-        return Person.model_validate_json(_as_str(raw))
+        return Person.model_validate_json(raw)
+
+    async def mark_erasing(self, person_id: str) -> bool:
+        """Set ``person_id``'s erase mark while its row stands; ``False`` (nothing set) when the row is gone.
+
+        From the mark on, every person write refuses the person with :class:`PersonErasingError`,
+        its addresses are attributed as unlinked and its thread takes no new record.
+        """
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            result = await eval_script(
+                r,
+                _MARK_ERASING_LUA,
+                2,
+                self.settings.person_key(person_id),
+                self.settings.person_erasing_key(person_id),
+            )
+        return int(result) == 1
+
+    async def clear_erasing(self, person_id: str) -> None:
+        """Remove ``person_id``'s erase mark (an erase refused before its teardown gives the person back)."""
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            await awaited(r.delete(self.settings.person_erasing_key(person_id)))
+
+    async def is_erasing(self, person_id: str) -> bool:
+        """Whether ``person_id``'s erase mark stands."""
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            return int(await awaited(r.exists(self.settings.person_erasing_key(person_id)))) == 1
+
+    async def thread_routes(self, person_id: str) -> set[str]:
+        """The route names ``person_id``'s aggregated thread is indexed under, as its writes recorded them."""
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            members = await awaited(r.smembers(self.settings.person_thread_routes_key(person_id)))
+        return {_as_str(member) for member in members}
+
+    async def read_for_erase(self, person_id: str) -> PersonEraseRead:
+        """Read ``person_id``'s row, absorbed ids, recorded routes, pointer and writer threads in one step.
+
+        Raises ``RuntimeError`` when the pointer names a survivor with no row, and ``ValueError`` when
+        the row is unreadable.
+        """
+        settings = self.settings
+        async with client_ctx(RedisClient, settings.redis) as r:
+            result = await eval_script(
+                r,
+                _READ_FOR_ERASE_LUA,
+                4,
+                settings.person_key(person_id),
+                settings.person_absorbed_key(person_id),
+                settings.person_thread_routes_key(person_id),
+                settings.person_absorbed_into_key(person_id),
+                settings.person_thread_routes_key_prefix,
+                settings.person_key_prefix,
+                settings.writer_threads_key_prefix,
+                person_id,
+            )
+        raw_row, pointer, survivor_stands, recorded, absorbed_rows, route_threads = result
+        row = _as_str(raw_row)
+        survivor = _as_str(pointer) or None
+        if survivor is not None and int(survivor_stands) != 1:
+            raise RuntimeError(
+                f"conversations: person {person_id!r} points at an absorbing person with no row: {survivor!r}"
+            )
+        person = Person.model_validate_json(row) if row else None
+        address_routes: set[str] = set()
+        thread_routes: dict[str, list[str]] = {person_id: []}
+        if person is not None:
+            address_routes = {route for address in person.addresses for route in address.routes}
+            thread_routes[person_id] = sorted(address_routes | {_as_str(route) for route in recorded})
+        for absorbed_id_raw, absorbed_routes in absorbed_rows:
+            absorbed_id = _as_str(absorbed_id_raw)
+            thread_routes[absorbed_id] = sorted(address_routes | {_as_str(route) for route in absorbed_routes})
+        return PersonEraseRead(
+            person=person,
+            absorbed_ids=sorted(_as_str(row_id) for row_id, _ in absorbed_rows),
+            absorbed_into=survivor,
+            thread_routes=thread_routes,
+            route_threads=sorted(_as_str(thread) for thread in route_threads),
+        )
+
+    async def outside_writer(self, thread_id: str, erased: set[str]) -> str | None:
+        """The first writer outside ``erased`` that keeps route-keyed ``thread_id`` standing, read in one step.
+
+        Reads the ``writer`` of every record the thread holds, judged against the person rows, the
+        erase marks and the absorbed-into pointers as they stand now: an id of ``erased`` is going;
+        a door nobody held when it wrote keeps the thread; a person whose row stands keeps it unless
+        its erase mark stands; a person a link absorbed is judged by its survivor (an id of
+        ``erased`` or a marked survivor is going); a person with neither row nor pointer was erased.
+        Answers ``None`` when nothing keeps the thread standing. Raises ``TypeError`` for a thread
+        that is not route-keyed, and a Redis error naming the record or the person when a record
+        carries no writer or a pointer names a survivor with no row.
+        """
+        if not isinstance(parse_thread_id(thread_id), RouteThreadId):
+            raise TypeError(f"conversations: {thread_id!r} is not a route-keyed thread")
+        settings = self.settings
+        async with client_ctx(RedisClient, settings.redis) as r:
+            outside = await eval_script(
+                r,
+                _OUTSIDE_WRITER_LUA,
+                0,
+                thread_id,
+                settings.writer_prefixes(),
+                settings.person_key_prefix,
+                settings.person_erasing_key_prefix,
+                settings.person_absorbed_into_key_prefix,
+                *sorted(erased),
+            )
+        return _as_str(outside) or None
 
     async def ensure_provisional(
         self, target: PairingTarget, address_row: PersonAddress, *, locale: str | None = None
@@ -390,7 +350,11 @@ class ConversationPersonStore:
         turn never clobbers an operator override). Returns ``(person, created)`` — ``created``
         is True ONLY when this call wrote the row, the first-contact signal a greeting keys
         off. ``locale`` seeds a NEWLY created person's stored locale (the channel's
-        first-contact hint); it is ignored when the person already exists.
+        first-contact hint); it is ignored when the person already exists. An existing person whose
+        erase is running raises :class:`PersonErasingError` with nothing written. Otherwise the person
+        adopts what the address's door wrote while nobody held it: every record the door wrote in a
+        route-keyed thread names the person as its writer instead, and the door's visit list becomes
+        the person's.
         """
         new_id = str(uuid4())
         person = Person(
@@ -418,43 +382,87 @@ class ConversationPersonStore:
                 address_row.our_identity or "",
                 address_row.address,
                 json.dumps(address_row.routes, separators=(",", ":")),
+                self.settings.person_erasing_key_prefix,
+                json.dumps([target.target_kind, target.target_name, dak], separators=(",", ":")),
+                self.settings.writer_prefixes(),
             )
         status = _as_str(result[0])
         if status == "created":
             return Person.model_validate_json(_as_str(result[1])), True
         if status == "existing":
             return Person.model_validate_json(_as_str(result[1])), False
+        if status == "erasing":
+            raise PersonErasingError(_as_str(result[1]), f"a new message from {address_row.address!r}")
         raise RuntimeError(f"conversations: person index names a missing row: {_as_str(result[1])!r}")
 
-    async def erase(self, person: Person) -> tuple[bool, int]:
+    async def erase(self, person: Person, absorbed_ids: list[str], visited: list[str]) -> tuple[bool, int]:
         """Erase ``person`` from the registry ENTIRELY.
 
-        Removes its person row and every ``door_address_key → person_id`` field of its per-target index
-        (removed by value, so exactly this person's addresses go, whatever the row currently lists). One
-        atomic unit, so a concurrent lookup never sees the row gone with an index still naming it.
-        Idempotent: a re-run on an already-erased person removes nothing. Returns ``(row_removed,
-        index_fields_removed)``.
+        Removes its person row, its erase mark, its absorbed SET, its recorded routes, the recorded
+        routes and absorbed-into pointer of each of ``absorbed_ids`` (the persons it absorbed), every
+        ``door_address_key → person_id`` field of its per-target index (removed by value, so exactly
+        this person's addresses go, whatever the row currently lists), and the visit lists
+        (``writer_threads``) of the person and of each absorbed id. ``visited`` lists the route-keyed
+        threads the erase visited: a thread one of those visit lists names outside it (a write that
+        landed while the erase ran) raises :class:`ConflictError` (409) with nothing removed, so the
+        mark stands and a retry visits it. Each visited thread that no writer outside them keeps
+        standing and that still holds a record written by the person or an absorbed id (a write
+        that landed after the erase cleared the thread) is added to the visit list of that record's
+        door, so the next person to hold the door adopts it and that person's erase reaches it. A
+        thread a writer outside keeps standing is reached by that writer's erase. A record keeps the
+        writer it was written with. One atomic unit, so a concurrent lookup never sees the row gone
+        with an index still naming it. Idempotent: a re-run on an already-erased person removes
+        nothing. Returns ``(row_removed, index_fields_removed)``.
         """
-        row_key = self.settings.person_key(person.person_id)
-        index_key = self.settings.person_index_key(person.target_kind, person.target_name)
-        async with client_ctx(RedisClient, self.settings.redis) as r:
-            result = await eval_script(r, _ERASE_LUA, 2, row_key, index_key, person.person_id)
-        return bool(int(result[0])), int(result[1])
+        settings = self.settings
+        async with client_ctx(RedisClient, settings.redis) as r:
+            result = await eval_script(
+                r,
+                _ERASE_LUA,
+                5,
+                settings.person_key(person.person_id),
+                settings.person_index_key(person.target_kind, person.target_name),
+                settings.person_erasing_key(person.person_id),
+                settings.person_absorbed_key(person.person_id),
+                settings.person_thread_routes_key(person.person_id),
+                person.person_id,
+                settings.person_thread_routes_key_prefix,
+                settings.person_absorbed_into_key_prefix,
+                settings.writer_prefixes(),
+                json.dumps(sorted(visited), separators=(",", ":")),
+                settings.person_key_prefix,
+                settings.person_erasing_key_prefix,
+                *absorbed_ids,
+            )
+        status = _as_str(result[0])
+        if status == "unvisited":
+            raise ConflictError(
+                f"a write by {_as_str(result[2])!r} in the thread {_as_str(result[1])!r} landed while the erase of "
+                f"{person.person_id!r} ran; retry the erase, which clears that thread too"
+            )
+        if status != "ok":
+            raise RuntimeError(f"conversations: erase returned an unexpected status {status!r}")
+        return bool(int(result[1])), int(result[2])
 
     async def set_locale(self, person_id: str, locale: str | None) -> Person | None:
         """Set ``person_id``'s stored locale to ``locale`` (canonical BCP 47) or clear it with ``None``.
 
         Updated in place on the person row; returns the updated person, or ``None`` when no such
         person exists. The one WRITE door an operator drives to override the channel-seeded locale;
-        a later turn's ``ensure_provisional`` never clobbers it.
+        a later turn's ``ensure_provisional`` never clobbers it. A person whose erase is running
+        raises :class:`PersonErasingError` with nothing written.
         """
         row_key = self.settings.person_key(person_id)
         mode = "clear" if locale is None else "set"
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            result = await eval_script(r, _SET_LOCALE_LUA, 1, row_key, mode, locale or "")
+            result = await eval_script(
+                r, _SET_LOCALE_LUA, 2, row_key, self.settings.person_erasing_key(person_id), mode, locale or ""
+            )
         status = _as_str(result[0])
         if status == "missing":
             return None
+        if status == "erasing":
+            raise PersonErasingError(person_id, "the locale change")
         if status == "ok":
             return Person.model_validate_json(_as_str(result[1]))
         raise RuntimeError(f"conversations: set_locale returned an unexpected status {status!r}")
@@ -464,17 +472,33 @@ class ConversationPersonStore:
 
         The store picks the survivor (earlier ``created_at``; ties by lexically smaller ``person_id``),
         unions the absorbed addresses, repoints the absorbed index entries, and deletes the
-        absorbed row — one atomic unit, so callers never decide the survivor. ``merge(P, P)``
-        (both ids the same live person) is a no-op returning P. A cross-target merge raises
-        :class:`CrossTargetMergeError`.
+        absorbed row — one atomic unit, so callers never decide the survivor. The same step adds the
+        absorbed person and every id it had absorbed to the survivor's absorbed SET and points each of
+        them at the survivor; the threads' writer stamps are left as they are. ``merge(P, P)`` (both
+        ids the same live person) is a no-op returning P. A cross-target merge raises
+        :class:`CrossTargetMergeError`; a person whose erase is running raises
+        :class:`PersonErasingError`, with nothing written.
         """
-        key_a = self.settings.person_key(person_id_a)
-        key_b = self.settings.person_key(person_id_b)
-        async with client_ctx(RedisClient, self.settings.redis) as r:
-            result = await eval_script(r, _MERGE_LUA, 2, key_a, key_b, self.settings.person_index_key_prefix)
+        settings = self.settings
+        async with client_ctx(RedisClient, settings.redis) as r:
+            result = await eval_script(
+                r,
+                _MERGE_LUA,
+                6,
+                settings.person_key(person_id_a),
+                settings.person_key(person_id_b),
+                settings.person_erasing_key(person_id_a),
+                settings.person_erasing_key(person_id_b),
+                settings.person_absorbed_key(person_id_a),
+                settings.person_absorbed_key(person_id_b),
+                settings.person_index_key_prefix,
+                settings.person_absorbed_into_key_prefix,
+            )
         status = _as_str(result[0])
         if status == "ok":
             return Person.model_validate_json(_as_str(result[1]))
+        if status == "erasing":
+            raise PersonErasingError(_as_str(result[1]), "the merge")
         if status == "cross_target":
             raise CrossTargetMergeError(f"cannot merge persons across targets ({person_id_a!r}, {person_id_b!r})")
         if status == "duplicate_address":
@@ -498,7 +522,8 @@ class ConversationPersonStore:
         The rest of the original stays linked. Refuses with :class:`NotLinkedError` when the address
         is the person's only one — it is already provisional, so there is nothing to unlink. The
         detached address's fresh row carries its accumulated routes, and being a fresh row means its
-        next inbound is not a first-contact creation, so no greeting re-fires.
+        next inbound is not a first-contact creation, so no greeting re-fires. A person whose erase
+        is running raises :class:`PersonErasingError` with nothing written.
         """
         new_id = str(uuid4())
         dak = _door_address_key(door=door, channel=channel, our_identity=our_identity, address=address)
@@ -506,9 +531,10 @@ class ConversationPersonStore:
             result = await eval_script(
                 r,
                 _DETACH_LUA,
-                2,
+                3,
                 self.settings.person_key(person_id),
                 self.settings.person_key(new_id),
+                self.settings.person_erasing_key(person_id),
                 self.settings.person_index_key_prefix,
                 dak,
                 new_id,
@@ -521,6 +547,8 @@ class ConversationPersonStore:
         status = _as_str(result[0])
         if status == "ok":
             return Person.model_validate_json(_as_str(result[1]))
+        if status == "erasing":
+            raise PersonErasingError(person_id, "the detach")
         if status == "not_linked":
             raise NotLinkedError(f"address is not part of a multi-address person: {person_id!r}")
         if status == "not_member":

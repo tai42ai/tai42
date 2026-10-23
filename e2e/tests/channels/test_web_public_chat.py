@@ -90,7 +90,7 @@ def _ask_over_web(case: WebChannelCase, question: str, **extra: object) -> async
                 "ask",
                 {"question": question, "channel": case.name, "recipient": case.default_recipient, **extra},
             )
-        return result.data
+        return result.data.answer
 
     return asyncio.create_task(ask())
 

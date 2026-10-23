@@ -76,6 +76,7 @@ class _Recorder:
         location=None,
         locale=None,
         form_tag=None,
+        reply_to_message_id=None,
         *,
         client_connected,
     ):

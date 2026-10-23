@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import weakref
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -71,6 +72,26 @@ logger = logging.getLogger(__name__)
 # that generation's in-flight runs and never a run admitted on the fresh epoch.
 _SUPERVISORS: set[asyncio.Task[None]] = set()
 _SUPERVISOR_EPOCH: dict[asyncio.Task[None], int] = {}
+
+# Every supervisor task a drain cancelled, with the drain's reason. Written right before the
+# drain's cancel, so a ``run_recorded`` awaiting a marked supervisor knows a drain (not the
+# tool's own ``CancelledError``) ended it. The weak keys drop an entry once its task is gone.
+_DRAINED: weakref.WeakKeyDictionary[asyncio.Task[Any], str] = weakref.WeakKeyDictionary()
+
+
+class ToolRunDrainedError(asyncio.CancelledError):
+    """A drain (process shutdown or an epoch retire) cancelled the supervisor of the awaited run.
+
+    Raised by :func:`run_recorded` in place of the plain ``CancelledError`` when the supervisor it
+    awaited was marked by :func:`drain_supervisors`. It is a ``CancelledError``, so every awaiter
+    that does not key on it behaves as for any cancel. ``reason`` is the drain's own reason.
+    """
+
+    def __init__(self, reason: str) -> None:
+        """Carry the drain's ``reason``."""
+        super().__init__(reason)
+        self.reason = reason
+
 
 # The enrolled supervisor whose run the current code belongs to. Set in the supervisor
 # task's own context at enrollment, so every task the run spawns (an agent's tool node
@@ -480,8 +501,19 @@ async def _supervise(
                     await refresher
 
 
-async def run_recorded(tool_name: str, arguments: dict[str, Any], *, extras: Mapping[str, Any] | None = None) -> None:
+async def run_recorded(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    extras: Mapping[str, Any] | None = None,
+    crash_resume_eligible: bool,
+) -> None:
     """Execute ``tool_name`` under the CURRENTLY bound execution identity, writing the full run-record lifecycle.
+
+    ``crash_resume_eligible`` is whether the record may carry the tool's crash-resume flag, so a
+    read-path reconcile re-drives it when it is found lost. A caller that redelivers the run itself
+    (a hook run, which replays its own start) passes ``False``, so the record is never re-driven;
+    the read-path re-drive passes ``True``.
 
     ``extras`` is the door start ``extras`` mapping the fired run reads through ``app.tools.extras()``;
     a hook door threads its ``extras_expr`` result here. It is stored beside ``arguments`` on a
@@ -503,9 +535,12 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any], *, extras: Map
     OFF semantics as the rest of the tool-run surface, no error and no warning.
 
     Reserves NO ``max_concurrent_runs`` slot and detaches no supervisor task: the run is
-    awaited inline and its capacity is the CALLER's to bound (the hooks manager's
-    ``max_workers`` semaphore), never the submit door's per-worker slot pool. A failure
+    awaited inline and its capacity is the CALLER's to bound (the hook-run runtime's
+    per-process ``max_workers`` slots), never the submit door's per-worker slot pool. A failure
     creating the record propagates loudly to the caller.
+
+    A drain that cancels the run's supervisor surfaces as :class:`ToolRunDrainedError` carrying
+    the drain's reason; any other cancel re-raises the caught ``CancelledError``.
     """
     from . import reconcile
 
@@ -540,15 +575,16 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any], *, extras: Map
             arguments=arguments,
             extras=extras,
             state_context=current_state_context(),
+            crash_resume_eligible=crash_resume_eligible,
         )
     # Run under a supervisor task ENROLLED in the drain registry exactly like a submitted
     # run — so a drain (process shutdown or an epoch retire) cancels-and-awaits it and its
     # terminal write lands BEFORE the pooled clients close, never leaving a completed run
     # stuck ``running`` to reconcile to ``lost``. The task reserves NO ``max_concurrent_runs``
-    # slot (its capacity is the hooks manager's ``max_workers`` semaphore), so its
+    # slot (its capacity is the hook-run runtime's per-process ``max_workers`` slots), so its
     # done-callback only clears the registry, never the submit door's ``_ACTIVE_RUNS`` count.
     # The run is still awaited INLINE, so ``propagate_failure`` re-raises a tool failure to
-    # the fan-out's per-hook error log exactly as a direct await would.
+    # the caller exactly as a direct await would.
     task = asyncio.create_task(
         _supervise(
             run_id,
@@ -563,16 +599,21 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any], *, extras: Map
     task.add_done_callback(_discard_supervisor)
     try:
         await task
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancel:
         # A drain cancelled the enrolled run task directly: its terminal ``failed`` write
-        # already landed and the task is done — surface the cancellation. If instead THIS
-        # awaiting context was cancelled (e.g. the request drain severs the firing request)
-        # the run task is still live: propagate the cancel so it writes its terminal record,
-        # then await it — never orphaning the enrolled task nor double-cancelling a done one.
+        # already landed and the task is done — surface the cancellation, typed as a drain
+        # when the drain marked the task. If instead THIS awaiting context was cancelled (e.g.
+        # the request drain severs the firing request) the run task is still live: propagate
+        # the cancel so it writes its terminal record, then await it — never orphaning the
+        # enrolled task nor double-cancelling a done one.
         if not task.done():
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            raise
+        drained_reason = _DRAINED.get(task)
+        if drained_reason is not None:
+            raise ToolRunDrainedError(drained_reason) from cancel
         raise
 
 
@@ -609,6 +650,7 @@ async def drain_supervisors(
         return
     budget = deadline if deadline is not None else _pkg.tool_runs_settings().shutdown_drain_seconds
     for t in tasks:
+        _DRAINED[t] = reason
         t.cancel(reason)
     _done, pending = await asyncio.wait(tasks, timeout=budget)
     if pending:

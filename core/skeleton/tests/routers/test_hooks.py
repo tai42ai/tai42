@@ -12,22 +12,16 @@ from typing import cast
 import pytest
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
 from tai42_contract.hooks import HookParams, TopicVerifierBinding
+from tests.hooks.test_payload_parser import MULTIPART_WITH_FILE
 
-from tai42_skeleton.access_control import policy as policy_module
-from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz import execution as execution_module
-from tai42_skeleton.authz.execution_identity import get_execution_identity
+from tai42_skeleton.hooks.runs.models import AcceptResult, DispatchKey, ReplayClaim
 from tai42_skeleton.hooks.trigger_links import ResolvedTrigger
 from tai42_skeleton.operations import _authority as authority
 from tai42_skeleton.operations import hooks as hooks_ops
 from tai42_skeleton.routers import hooks
-
-from ..access_control.conftest import FakeAccessControlPg, make_pg_ctx
-from ..access_control.conftest import FakeRedis as AcFakeRedis
-from ..access_control.conftest import make_client_ctx as make_ac_client_ctx
 
 
 @pytest.fixture(autouse=True)
@@ -82,24 +76,32 @@ class _FakeManager:
     def __init__(self, verifier_binding: dict | None = None) -> None:
         self.events: list[tuple[str, dict]] = []
         self._binding = verifier_binding
-        # An in-memory seen-set so a SeenSetClaim delivery is deduped exactly as the
-        # real managers do: the first claim of a (topic, key) passes, a repeat is a replay.
+        # An in-memory seen-set so a replay claim is answered exactly as the real managers
+        # do: the first accept of a (topic, key) keeps its runs, a repeat is already seen.
         self._seen: set[tuple[str, str]] = set()
         self.claims: list[tuple[str, str, int]] = []
 
-    async def on_event(self, topic: str, payload: dict) -> None:
+    async def on_event(
+        self,
+        topic: str,
+        payload: dict,
+        *,
+        tool_kwargs_override: dict | None = None,
+        dispatch_key: DispatchKey | None = None,
+        replay_claim: ReplayClaim | None = None,
+        monitoring_disabled: bool = False,
+    ) -> AcceptResult:
+        if replay_claim is not None:
+            self.claims.append((topic, replay_claim.key, replay_claim.ttl_seconds))
+            pair = (topic, replay_claim.key)
+            if pair in self._seen:
+                return AcceptResult(status="already_seen", run_ids=())
+            self._seen.add(pair)
         self.events.append((topic, payload))
+        return AcceptResult(status="accepted", run_ids=("run-1",))
 
     async def get_topic_verifier(self, topic: str) -> TopicVerifierBinding | None:
         return None if self._binding is None else TopicVerifierBinding.model_validate(self._binding)
-
-    async def claim_webhook_delivery(self, topic: str, replay_key: str, ttl_seconds: int) -> bool:
-        self.claims.append((topic, replay_key, ttl_seconds))
-        pair = (topic, replay_key)
-        if pair in self._seen:
-            return False
-        self._seen.add(pair)
-        return True
 
 
 def _body(response: Response) -> dict:
@@ -123,9 +125,7 @@ async def test_accepts_parsed_payload_and_schedules_event(monkeypatch: pytest.Mo
     assert response.status_code == 200
     assert _body(response) == {"status": "accepted", "topic": "events"}
 
-    # The manager is invoked via the response's background task.
-    assert response.background is not None
-    await response.background()
+    # The runs are kept before the door answers.
     assert manager.events == [("events", {"hello": "world"})]
 
 
@@ -147,7 +147,6 @@ async def test_rejects_unparseable_payload_with_400(monkeypatch: pytest.MonkeyPa
     assert body["topic"] == "events"
     assert "bad body" in body["error"]
     # A parse rejection dispatches nothing — no background task, no event fired.
-    assert response.background is None
     assert manager.events == []
 
 
@@ -532,9 +531,9 @@ async def test_bound_topic_verify_failure_401_nothing_dispatched(monkeypatch: py
     resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
     assert resp.status_code == 401
     assert _body(resp)["error"] == "webhook verification failed"
-    # Nothing parsed, nothing dispatched (no background task).
+    # Nothing parsed, nothing kept.
+    assert manager.events == []
     assert parsed["called"] is False
-    assert resp.background is None
 
 
 async def test_bound_post_only_verifier_strips_query_from_payload(monkeypatch: pytest.MonkeyPatch, registry) -> None:
@@ -614,7 +613,6 @@ async def test_bound_unresolvable_verifier_fails_closed_500(monkeypatch: pytest.
     resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
     assert resp.status_code == 500
     assert parsed["called"] is False
-    assert resp.background is None
 
 
 async def test_seen_set_claim_first_delivery_dispatches_replay_refused(
@@ -637,16 +635,13 @@ async def test_seen_set_claim_first_delivery_dispatches_replay_refused(
     first = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
     assert first.status_code == 200
     assert _body(first) == {"status": "accepted", "topic": "events"}
-    assert first.background is not None
-    await first.background()
 
     second = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
     assert second.status_code == 200
     assert _body(second) == {"status": "already_seen", "topic": "events"}
-    # The replay dispatches nothing — no background task, and only the first event fired.
-    assert second.background is None
+    # The replay keeps nothing: only the first delivery's runs were kept.
     assert manager.events == [("events", {"hello": "world"})]
-    # Both deliveries claimed under the same (topic, key) with the declared TTL.
+    # Both accepts carried the same (topic, key) claim with the declared TTL.
     assert manager.claims == [("events", "d-1", 300), ("events", "d-1", 300)]
 
 
@@ -672,36 +667,95 @@ async def test_distinct_delivery_ids_are_not_dropped(monkeypatch: pytest.MonkeyP
     for _ in range(2):
         resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"same")))
         assert _body(resp)["status"] == "accepted"
-        assert resp.background is not None
-        await resp.background()
 
     assert manager.events == [("events", {"same": "body"}), ("events", {"same": "body"})]
 
 
 async def test_seen_set_store_error_fails_closed_500(monkeypatch: pytest.MonkeyPatch, registry) -> None:
-    # The seen-set store is unreachable during the claim: refuse to dispatch undefended
-    # — a loud 500, nothing parsed or dispatched.
+    # The store is unreachable during the accept that takes the delivery's claim: nothing
+    # is kept and no id is claimed, so the door answers a loud 500 and the sender's
+    # redelivery is processed fresh.
     from tai42_contract.webhooks import SeenSetClaim
 
     registry.register("prov", _FakeVerifier(replay=SeenSetClaim(key="d-1", ttl_seconds=300)))
 
     class _BrokenManager(_FakeManager):
-        async def claim_webhook_delivery(self, topic, replay_key, ttl_seconds):
+        async def on_event(self, topic, payload, **kwargs):
             raise RuntimeError("redis down")
 
     manager = _BrokenManager(verifier_binding={"verifier": "prov", "config": {}})
-    parsed = {"called": False}
 
     async def fake_parse(request, include_query=True):
-        parsed["called"] = True
         return {}
 
     monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
     resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
     assert resp.status_code == 500
-    assert parsed["called"] is False
-    assert resp.background is None
+    assert _body(resp)["error"] == "webhook verification error"
+
+
+async def test_a_real_store_keeps_the_runs_a_200_answers_and_no_claim_on_a_500(
+    monkeypatch: pytest.MonkeyPatch, registry
+) -> None:
+    # Over the real in-memory store: a 200 means the delivery's runs are kept; a store fault
+    # while keeping them answers a 500 and takes no claim, so the redelivery is kept afresh.
+    from tai42_contract.webhooks import SeenSetClaim
+
+    from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
+    from tai42_skeleton.hooks.runs import runtime
+    from tai42_skeleton.hooks.settings import HooksSettings
+
+    registry.register("prov", _FakeVerifier(replay=SeenSetClaim(key="d-1", ttl_seconds=300)))
+    manager = InMemoryHooksManager(HooksSettings())
+    await manager.register(
+        HookParams(name="h", topic="events", tool="t", execution_key="k", execution_key_fingerprint="fp")
+    )
+    await manager.set_topic_verifier("events", {"verifier": "prov", "config": {}})
+    monkeypatch.setattr(runtime, "on_serving_loop", lambda: False)
+    monkeypatch.setattr(runtime, "manager", lambda: manager)
+
+    async def fake_parse(request, include_query=True):
+        return {"n": 1}
+
+    monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
+    monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
+
+    def _refuse(run_id, score):
+        raise OSError("the run store refused the write")
+
+    with monkeypatch.context() as broken:
+        broken.setattr(manager, "_index_due", _refuse)
+        failed = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
+    assert failed.status_code == 500
+    assert manager.settings.webhook_seen_key("events", "d-1") not in manager._webhook_seen
+
+    accepted = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
+    assert accepted.status_code == 200
+    assert _body(accepted) == {"status": "accepted", "topic": "events"}
+    kept = (await manager.list_hook_runs(None, 50, None)).items
+    assert [(run.hook, run.payload, run.status) for run in kept] == [("h", {"n": 1}, "pending")]
+
+
+async def test_unbound_topic_store_error_fails_loud_500(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    # A store fault while keeping the runs of an unverified topic is a loud, logged 500:
+    # the door never answers accepted for runs it did not keep.
+    class _BrokenManager(_FakeManager):
+        async def on_event(self, topic, payload, **kwargs):
+            raise RuntimeError("redis down")
+
+    manager = _BrokenManager()
+
+    async def fake_parse(request, include_query=True):
+        return {}
+
+    monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
+    monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
+    with caplog.at_level(logging.ERROR):
+        resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
+    assert resp.status_code == 500
+    assert _body(resp)["error"] == "accept failed"
+    assert any("webhook accept failed for topic events" in r.getMessage() for r in caplog.records)
 
 
 async def test_replay_id_header_missing_fails_closed_401(monkeypatch: pytest.MonkeyPatch, registry) -> None:
@@ -726,12 +780,11 @@ async def test_replay_id_header_missing_fails_closed_401(monkeypatch: pytest.Mon
     assert resp.status_code == 401
     assert _body(resp)["error"] == "webhook verification failed"
     assert parsed["called"] is False
-    assert resp.background is None
 
 
 async def test_freshness_window_verifier_does_no_seen_set_claim(monkeypatch: pytest.MonkeyPatch, registry) -> None:
-    # A FreshnessWindow verifier defends replay in verify itself, so the ingress takes
-    # no seen-set claim and dispatches normally.
+    # A FreshnessWindow verifier defends replay in verify itself, so the accept carries
+    # no seen-set claim and keeps the runs normally.
     registry.register("prov", _FakeVerifier())  # default replay == FreshnessWindow
     manager = _FakeManager(verifier_binding={"verifier": "prov", "config": {}})
 
@@ -771,7 +824,6 @@ async def test_unrecognized_replay_defense_fails_closed_500(monkeypatch: pytest.
     resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
     assert resp.status_code == 500
     assert parsed["called"] is False
-    assert resp.background is None
     assert manager.claims == []
 
 
@@ -797,7 +849,6 @@ async def test_replay_defense_non_verification_error_fails_closed_500(
     resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
     assert resp.status_code == 500
     assert parsed["called"] is False
-    assert resp.background is None
     assert manager.claims == []
 
 
@@ -821,13 +872,25 @@ async def test_over_cap_query_413(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _ResolverManager:
-    """A hooks manager spied at ``on_event``, recording the override too."""
+    """A hooks manager spied at ``on_event``, recording the override and the link's key too."""
 
     def __init__(self) -> None:
         self.events: list[tuple[str, dict, dict | None]] = []
+        self.dispatch_keys: list[DispatchKey | None] = []
 
-    async def on_event(self, topic: str, payload: dict, *, tool_kwargs_override: dict | None = None) -> None:
+    async def on_event(
+        self,
+        topic: str,
+        payload: dict,
+        *,
+        tool_kwargs_override: dict | None = None,
+        dispatch_key: DispatchKey | None = None,
+        replay_claim: ReplayClaim | None = None,
+        monitoring_disabled: bool = False,
+    ) -> AcceptResult:
         self.events.append((topic, payload, tool_kwargs_override))
+        self.dispatch_keys.append(dispatch_key)
+        return AcceptResult(status="accepted", run_ids=("run-1",))
 
 
 def _trig_req(token: str = "tok", **kw) -> _FakeRequest:
@@ -872,8 +935,6 @@ async def test_trigger_get_dispatches_payload_and_override(monkeypatch: pytest.M
     body = _body(resp)
     assert body == {"status": "accepted"}  # NO topic echoed
     assert resp.headers["Cache-Control"] == "no-store"
-    assert resp.background is not None
-    await resp.background()
     assert manager.events == [("events", {"x": "1"}, {"a": 1})]
 
 
@@ -886,8 +947,7 @@ async def test_trigger_none_override_for_paramless_link(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
     resp = await hooks.trigger_link(cast(Request, _trig_req("tok", method="GET")))
-    assert resp.background is not None
-    await resp.background()
+    assert resp.status_code == 200
     assert manager.events == [("t", {}, None)]
 
 
@@ -901,8 +961,6 @@ async def test_trigger_post_json_honored(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
     resp = await hooks.trigger_link(cast(Request, _trig_req("tok", body=b'{"from":"body"}')))
     assert resp.status_code == 200
-    assert resp.background is not None
-    await resp.background()
     assert manager.events[0][1] == {"from": "body"}
 
 
@@ -970,7 +1028,6 @@ async def test_api_key_link_403s_an_unauthenticated_token_holder(monkeypatch: py
     assert _body(resp)["error"] == hooks._API_KEY_REQUIRED
     # The uniform-404 doctrine is intact for everyone else: this branch is reachable
     # only by a token holder, and it dispatched nothing.
-    assert resp.background is None
     assert manager.events == []
     # The control firing leaves its own server-side record, naming the cause — the
     # resolver's preceding line reports only that the token resolved.
@@ -992,8 +1049,6 @@ async def test_api_key_link_fires_for_an_authenticated_caller(monkeypatch: pytes
     resp = await hooks.trigger_link(cast(Request, _trig_req("tok", method="GET", authenticated=True)))
 
     assert resp.status_code == 200
-    assert resp.background is not None
-    await resp.background()
     assert manager.events == [("events", {"x": 1}, None)]
 
 
@@ -1010,8 +1065,6 @@ async def test_token_only_link_needs_no_credential(monkeypatch: pytest.MonkeyPat
     resp = await hooks.trigger_link(cast(Request, _trig_req("tok", method="GET", authenticated=False)))
 
     assert resp.status_code == 200
-    assert resp.background is not None
-    await resp.background()
     assert manager.events == [("events", {}, None)]
 
 
@@ -1087,93 +1140,38 @@ async def test_api_key_link_fires_on_a_gate_off_deployment(monkeypatch: pytest.M
     resp = await hooks.trigger_link(cast(Request, _trig_req("tok", method="GET", authenticated=None)))
 
     assert resp.status_code == 200
-    assert resp.background is not None
-    await resp.background()
     assert manager.events == [("events", {}, None)]
 
 
-# -- the LINK-level execution binding (access control ON) ---------------------
-#
-# The door binds the link's ``execution_key`` around the whole fan-out, which makes the
-# key the link's live revocation handle. Access control is OFF elsewhere in this module,
-# where the bind short-circuits; these drive it as a gate.
+# -- the link's key rides on the kept runs ------------------------------------
 
 
-class _BindingManager:
-    """Records ``(topic, execution key bound at that moment)`` per fan-out."""
-
-    def __init__(self) -> None:
-        self.events: list[tuple[str, str | None]] = []
-
-    async def on_event(self, topic: str, payload: dict, *, tool_kwargs_override: dict | None = None) -> None:
-        identity = get_execution_identity()
-        self.events.append((topic, identity.user_id if identity is not None else None))
-
-
-def _wire_access_control(monkeypatch: pytest.MonkeyPatch, pg: FakeAccessControlPg) -> None:
-    """Access control ON for the link-level bind over ``pg``, overriding this module's
-    autouse off-switch for the binder alone."""
-    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
-    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
-    monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(policy_module, "client_ctx", make_ac_client_ctx(AcFakeRedis()))
-    monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=True))
-
-
-async def test_a_live_link_key_is_bound_around_the_whole_fan_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    pg = FakeAccessControlPg()
-    pg.add_policy("k-fire", scopes=["hooks"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-fire"})
-    _wire_access_control(monkeypatch, pg)
-    manager = _BindingManager()
+async def test_the_link_key_is_kept_on_the_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The door keeps the runs with the link's key as their dispatch key; every attempt
+    # binds it, so killing the key is checked on each attempt.
+    manager = _ResolverManager()
     _wire_resolver(monkeypatch, manager, topic="events")
     monkeypatch.setattr(hooks, "parse_any_payload", _parse_empty)
 
     resp = await hooks.trigger_link(cast(Request, _trig_req("tok", method="GET")))
     assert resp.status_code == 200
-    assert resp.background is not None
-    await resp.background()
-
-    # The fan-out ran AS the link's key, and the binding is released with the task.
-    assert manager.events == [("events", "k-fire")]
-    assert get_execution_identity() is None
+    assert manager.dispatch_keys == [DispatchKey("k-fire", "fp-fire")]
 
 
-@pytest.mark.parametrize(
-    ("policy_fields", "reason"),
-    [
-        (None, "has no policy"),
-        ({"scopes": ["hooks"], "policy_data": {"disabled": True}}, "is disabled"),
-    ],
-    ids=["deleted", "disabled"],
-)
-async def test_a_killed_link_key_refuses_the_dispatch_before_any_hook_runs(
-    monkeypatch: pytest.MonkeyPatch, caplog, policy_fields, reason
-) -> None:
-    # Killing the key is how a minted link is killed (no cascade, record untouched), so
-    # the dispatch must refuse before a single hook of the topic fans out.
-    pg = FakeAccessControlPg()
-    if policy_fields is not None:
-        pg.add_policy("k-fire", **policy_fields)
-    _wire_access_control(monkeypatch, pg)
-    manager = _BindingManager()
-    _wire_resolver(monkeypatch, manager, topic="events")
+async def test_trigger_store_error_fails_loud_500_without_topic(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    # A store fault while keeping the runs is a loud, logged 500; the body still hides the topic.
+    class _BrokenManager(_ResolverManager):
+        async def on_event(self, topic, payload, **kwargs):
+            raise RuntimeError("redis down")
+
+    _wire_resolver(monkeypatch, _BrokenManager(), topic="secret-topic")
     monkeypatch.setattr(hooks, "parse_any_payload", _parse_empty)
-
-    resp = await hooks.trigger_link(cast(Request, _trig_req("tok", method="GET")))
-    assert resp.status_code == 200
-
-    assert resp.background is not None
     with caplog.at_level(logging.ERROR):
-        await resp.background()
-
-    # Nothing fanned out, and the refusal is logged with link/topic/key rather than
-    # escaping as an unhandled background-task exception.
-    assert manager.events == []
-    assert get_execution_identity() is None
-    assert any(
-        "events" in message and "k-fire" in message and reason in message
-        for message in (record.getMessage() for record in caplog.records if record.levelno == logging.ERROR)
-    )
+        resp = await hooks.trigger_link(cast(Request, _trig_req("tok", method="GET")))
+    assert resp.status_code == 500
+    assert _body(resp) == {"error": "accept failed"}
+    assert resp.headers["Cache-Control"] == "no-store"
+    assert any("trigger accept failed for topic 'secret-topic'" in r.getMessage() for r in caplog.records)
 
 
 async def test_trigger_disallowed_method_405_no_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1291,3 +1289,41 @@ async def test_topic_with_newline_does_not_break_log(monkeypatch: pytest.MonkeyP
     logged = "".join(rec.getMessage() for rec in caplog.records)
     assert "eventsinjected" in logged
     assert "\n" not in logged.split("INCOMING EVENT ON TOPIC:")[-1].split("---")[0]
+
+
+_MULTIPART_TYPE = {"content-type": "multipart/form-data; boundary=xyz"}
+
+
+async def test_a_webhook_file_part_is_rejected_400_and_nothing_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = _FakeManager()
+    monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
+    request = _FakeRequest("events", body=MULTIPART_WITH_FILE, headers=_MULTIPART_TYPE)
+    resp = await hooks.universal_webhook(cast(Request, request))
+    assert resp.status_code == 400
+    assert _body(resp) == {"status": "rejected", "topic": "events", "error": "file parts are not supported: doc"}
+    assert manager.events == []
+
+
+async def test_a_verified_webhook_file_part_is_rejected_400_and_claims_no_delivery_id(
+    monkeypatch: pytest.MonkeyPatch, registry
+) -> None:
+    from tai42_contract.webhooks import SeenSetClaim
+
+    registry.register("prov", _FakeVerifier(replay=SeenSetClaim(key="d-1", ttl_seconds=300)))
+    manager = _FakeManager(verifier_binding={"verifier": "prov", "config": {}})
+    monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
+    request = _FakeRequest("events", body=MULTIPART_WITH_FILE, headers=_MULTIPART_TYPE)
+    resp = await hooks.universal_webhook(cast(Request, request))
+    assert resp.status_code == 400
+    assert _body(resp)["error"] == "file parts are not supported: doc"
+    assert manager.events == []
+    assert manager.claims == []
+
+
+async def test_a_trigger_file_part_is_rejected_400_and_nothing_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = _ResolverManager()
+    _wire_resolver(monkeypatch, manager)
+    resp = await hooks.trigger_link(cast(Request, _trig_req("tok", body=MULTIPART_WITH_FILE, headers=_MULTIPART_TYPE)))
+    assert resp.status_code == 400
+    assert _body(resp) == {"status": "rejected", "error": "file parts are not supported: doc"}
+    assert manager.events == []

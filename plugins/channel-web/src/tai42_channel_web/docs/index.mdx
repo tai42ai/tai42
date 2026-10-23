@@ -31,6 +31,8 @@ stream, and entry-gate caps are the tunables.
 | --- | --- | --- |
 | `CHANNEL_WEB_REDIS_URL` | unset | Connection for the session, transcript, and pending-question store. |
 | `CHANNEL_WEB_PAGE_TITLE` | `Chat` | The chat page's `<title>`. |
+| `CHANNEL_WEB_STORE_OFF_TITLE` | `Chat is unavailable` | The heading of the page served while the deployment runs no chat store. |
+| `CHANNEL_WEB_STORE_OFF_TEXT` | `This chat is not switched on. Please contact the site owner.` | The sentence of that page. |
 | `CHANNEL_WEB_HTTP_TIMEOUT_SECONDS` | `30` | Timeout for the loopback answer forward to the interactions callback door. |
 | `CHANNEL_WEB_SESSION_COOKIE_SECURE` | `true` | `Secure` on the session cookie. Set `false` only where the page is served over plain http (dev/e2e). |
 | `CHANNEL_WEB_SESSION_TTL_SECONDS` | `2592000` | Lifetime of the session cookie and the server-side registration, refreshed on every resolving door. |
@@ -53,19 +55,19 @@ A web route binds an **identity** — an arbitrary name you choose — to the tu
 that answers it.
 
 ```bash
-tai conversations create web-desk \
+tai conversations create web-chat \
   --door channel --target-name chat --execution-key chat-bot \
-  --channel web --identity desk
+  --channel web --identity assistant
 ```
 
 The route's turn runs as the `--execution-key` you bind here; mint a
-least-privilege key scoped to just what the desk needs, the same way a phone
+least-privilege key scoped to just what the route needs, the same way a phone
 channel does in [WhatsApp to an agent](/guides/whatsapp-to-agent).
 
 Send visitors to the chat page for that identity:
 
 ```
-https://<your deployment>/api/channels/web/chat/desk
+https://<your deployment>/api/channels/web/chat/assistant
 ```
 
 ## Agent-sent cards and lists
@@ -156,6 +158,28 @@ Submitted values are **transport, never validated**: the platform bounds their s
 and nesting but does not check them against the schema — treat them exactly as you
 treat typed participant text.
 
+### Form words
+
+A form question or an ask-less form card draws the caller's `wording` where it is set,
+and the widget's own English where it is not:
+
+- `form.update_failed` replaces the line shown when a form reaction is refused; its
+  `{reason}` is the reaction door's own reason, and is empty when the door gave none.
+- `form.step_progress` replaces a stepped form's "Step 1 of 2" line; it fills `{step}`
+  and `{steps}`.
+- For each field under `form.fields`: `required` is the line shown when a required value
+  is missing, `invalid` the line for a value of the wrong shape, `true_label` and
+  `false_label` the words a yes/no value reads back as on a review page, and
+  `add_item`, `remove_item`, `item_label` (with `{n}`, the item's number) and `no_items`
+  the words of a list field.
+- `answer.rejected` replaces the line shown when an answer is refused and may be given
+  again, and `answer.rejected_final` the line shown when the question can no longer be
+  answered; each fills `{reason}` with the interactions door's own reason, empty when it
+  gave none.
+
+The widget draws no `form.error_line` and no `length_hint`: it shows each field's own
+error next to the field.
+
 ## Unavailable messages
 
 If a stored transcript entry cannot be rendered — a corrupt record in the replay
@@ -177,6 +201,16 @@ base, is refused: an `ERROR` log names the interaction, the reason and the host 
 the URL, which carries the ticket), the claimed question is not restored, nothing is
 sent, and the door answers `500`.
 
+When the interactions door refuses a forwarded answer (`400`), the web door answers
+`400` with `code` `answer_refused` while the question may be answered again, or
+`answer_retries_spent` once it has been refused as often as it may be and is gone. When
+the interactions door refuses a forwarded reaction, the web door answers the same
+status. Either body carries `reason`, the interactions door's own error, when that door
+gave one; the widget fills it into the caller's sentence as `{reason}`.
+
+For a question asked as sensitive, the `chat.answered` frame records that the question
+was answered and carries no answer.
+
 ## Link parameters
 
 Query parameters on the chat page URL are **captured with the visitor's session**
@@ -185,7 +219,7 @@ its payload under a `params` key — string values, reachable from `start_expr`
 as `.params.<name>`:
 
 ```
-https://<your deployment>/api/channels/web/chat/desk?topic=news&ref=abc
+https://<your deployment>/api/channels/web/chat/assistant?topic=news&ref=abc
 ```
 
 Bounds are enforced at the door — **at most 16** parameters, each key matching
@@ -197,6 +231,9 @@ names `tai_pair` and `tai_entry` are reserved and stripped before storage. A lat
 navigation carrying parameters replaces the stored set; starting a new
 conversation clears it. Parameter values are never logged, and `params` is
 present on the payload only when the entry carried parameters.
+
+When the visitor answers a pending question, the same parameters reach the asker as `params`
+beside the answer.
 
 <Warning>
 A link parameter is **transport, nothing more** — no signature, no expiry, no
@@ -241,7 +278,7 @@ call them with a platform API key.
 <Steps>
   <Step title="Enable the gate">
     ```bash
-    curl -sS -X PUT "$TAI_BASE_URL/api/channels/web/gates/desk" \
+    curl -sS -X PUT "$TAI_BASE_URL/api/channels/web/gates/assistant" \
       -H "X-Api-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
       -d '{"enabled": true}'
     ```
@@ -250,7 +287,7 @@ call them with a platform API key.
     The raw `code` is returned **once**; only its hash (`code_id`) is stored.
 
     ```bash
-    curl -sS -X POST "$TAI_BASE_URL/api/channels/web/gates/desk/codes" \
+    curl -sS -X POST "$TAI_BASE_URL/api/channels/web/gates/assistant/codes" \
       -H "X-Api-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
       -d '{"label": "spring-cohort", "expires_at": "2026-12-31T00:00:00Z"}'
     ```
@@ -260,18 +297,79 @@ call them with a platform API key.
   </Step>
   <Step title="List codes">
     ```bash
-    curl -sS "$TAI_BASE_URL/api/channels/web/gates/desk" -H "X-Api-Key: $ADMIN_KEY"
+    curl -sS "$TAI_BASE_URL/api/channels/web/gates/assistant" -H "X-Api-Key: $ADMIN_KEY"
     ```
 
     Codes are listed by hash — a raw code is never re-readable.
   </Step>
   <Step title="Expire or revoke">
     ```bash
-    curl -sS -X DELETE "$TAI_BASE_URL/api/channels/web/gates/desk/codes/<code_id>" \
+    curl -sS -X DELETE "$TAI_BASE_URL/api/channels/web/gates/assistant/codes/<code_id>" \
       -H "X-Api-Key: $ADMIN_KEY"
     ```
   </Step>
 </Steps>
+
+## Words
+
+A web route can set its own words, keyed by its identity like the entry gate. Every
+member is optional; a member left unset draws the built-in English.
+
+- `page` holds the chat page's refusal pages, each a `heading` (the page title) and a
+  `text`: `not_a_navigation` (the chat URL was loaded by something other than a
+  top-level navigation), `link_invalid` (the link's parameters break a bound),
+  `entry_refused` (a gated route and no live entry code) and `page_unavailable` (the
+  page bundle cannot be served).
+- `transport` holds the sentences the widget draws when one of its requests is refused:
+  `session_ended`, `wrong_site`, `not_listening`, `already_answered`, `busy`,
+  `not_switched_on`, `too_long` and `not_sent` (each with `{subject}`), `failed`,
+  `attachment_gone`, `attachment_already_sent`, `entry_refused`, and `answer_refused`
+  and `answer_retries_spent` (each with `{reason}`, used when the question set no
+  `answer.rejected` / `answer.rejected_final`). The `subject_message`,
+  `subject_answer`, `subject_form` and `subject_request` members are the words
+  `{subject}` is filled with. The attachment tray's upload sentences are fixed and are
+  not route words.
+
+A server's error string is never drawn as one of these sentences: it reaches the end
+user only as `{reason}`. The page's other words and its `<title>` are not per-route
+words; the title is `CHANNEL_WEB_PAGE_TITLE`.
+
+In the Studio, the same drill-in carries the **Words** panel beside the entry gate: one
+input per member, a save, and a clear. The same words run through three authed doors:
+
+```bash
+# Read (404 when none are set)
+curl -sS "$TAI_BASE_URL/api/channels/web/words/assistant" -H "X-Api-Key: $ADMIN_KEY"
+
+# Replace the whole words object
+curl -sS -X PUT "$TAI_BASE_URL/api/channels/web/words/assistant" \
+  -H "X-Api-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
+  -d '{"page": {"entry_refused": {"heading": "Private chat"}}, "transport": {"busy": "Please wait a moment."}}'
+
+# Clear (404 when none are set)
+curl -sS -X DELETE "$TAI_BASE_URL/api/channels/web/words/assistant" -H "X-Api-Key: $ADMIN_KEY"
+```
+
+A refused body answers `422` naming the first refused member
+(`invalid request body: <member>: <reason>`). A body that sets nothing is refused the
+same way: an empty object, an empty `page` or `transport` object, or a refusal page with
+neither `heading` nor `text`. To go back to the built-in English, clear the words. The words are part of the platform backup
+as the `channel_web_words` section: an import validates the whole section before it
+writes anything, then replaces each listed route's words.
+
+## Message ids and addresses
+
+The conversation bridge records every message this channel sends to a visitor. These are the
+ids and addresses it records:
+
+- A message POST passes the id it is deduplicated by as the medium message id; the answer door
+  passes the id of the `chat.answered` entry it writes.
+- `resolve_address` returns the web route identity and the visitor id, from either addressing:
+  the composite `"<identity>:<visitor-id>"` recipient, or the route identity beside a bare
+  visitor id. A completed send reports the same pair, the one the message door passes for that
+  visitor, and the id of the transcript entry it appended.
+- The widget has no reply action, so a visitor message never quotes an earlier message: it
+  carries no `reply_to`.
 
 ## Working-on-it signal
 

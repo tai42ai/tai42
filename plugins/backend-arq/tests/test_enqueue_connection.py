@@ -14,12 +14,10 @@ import contextvars
 import gc
 import importlib
 import sys
-import threading
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 
 import pytest
-from fakeredis import TcpFakeServer
 from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.settings import cache_registry
 
@@ -38,25 +36,6 @@ if sys.platform != "win32":
 
 class _Marker:
     """An object only the enqueuing request's context holds."""
-
-
-@pytest.fixture
-def redis_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    """Serve an in-process fake Redis over TCP and point the backend's settings at it."""
-    server = TcpFakeServer(("127.0.0.1", 0), server_type="redis")
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    host, port = server.server_address[:2]
-    url = f"redis://{host}:{port}/0"
-    monkeypatch.setenv("ARQ_REDIS_URL", url)
-    settings_module.arq_settings.cache_clear()
-    try:
-        yield url
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
-        settings_module.arq_settings.cache_clear()
 
 
 async def _marker_alive_after_an_enqueue() -> bool:

@@ -14,6 +14,7 @@ from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.caps import AddressAdmission, AddressRateLimitedError, get_turn_caps
 from tai42_skeleton.conversations.models import DeliveryStatus
+from tai42_skeleton.conversations.reply_to import resolve_api_reply_to
 from tai42_skeleton.conversations.turn.admission import refuse_turn_while_reloading
 from tai42_skeleton.conversations.turn.api_wait import ApiSubmitResult, _api_wait_or_callback
 from tai42_skeleton.conversations.turn.errors import ConversationRouteResolutionError, UnauthenticatedApiCallerError
@@ -42,6 +43,7 @@ async def submit_api_message(
     location: LocationElement | None = None,
     locale: str | None = None,
     form_tag: str | None = None,
+    reply_to_message_id: str | None = None,
     *,
     client_connected: Callable[[], Awaitable[bool]],
 ) -> ApiSubmitResult:
@@ -84,6 +86,12 @@ async def submit_api_message(
     back WITH a form submission under the SAME posture: bounded and refused without a ``form``
     here (``_checked_form_tag``), stored on the record's ``inbound_form_tag``, and surfaced to a
     tool target's payload under the stable ``form_tag`` key only when present.
+
+    ``reply_to_message_id`` (``ConversationMessage.reply_to_message_id``) is the platform
+    ``message_id`` of a message this conversation delivered that this one replies to. It is
+    resolved against this thread's record into the record's ``inbound_reply_to`` and a tool
+    target's payload ``reply_to``: the text delivered under that id, ``not_found`` for a record
+    of another thread. A store error while resolving propagates with nothing written.
     """
     refuse_turn_while_reloading()
     checked_params = _checked_params(params)
@@ -104,6 +112,12 @@ async def submit_api_message(
         route, door="api", channel=None, our_identity=None, address=client_address, accountable=caller_principal
     )
     thread_id = await _resolve_thread_id(route, multichannel, client_address)
+    store = cache.get_conversations_manager().records
+    inbound_reply_to = (
+        None
+        if reply_to_message_id is None
+        else await resolve_api_reply_to(store, thread_id=thread_id, message_id=reply_to_message_id)
+    )
     message_id = str(uuid4())
 
     caps = get_turn_caps()
@@ -130,13 +144,12 @@ async def submit_api_message(
         inbound_form_tag=checked_form_tag,
         inbound_attachments=checked_attachments,
         inbound_location=checked_location,
+        inbound_reply_to=inbound_reply_to,
         inbound_locale=checked_locale,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
-        await cache.get_conversations_manager().records.create_record(
-            intake, intake_token=intake_token, refresh_mode=True
-        )
+        await store.create_record(intake, route=route, intake_token=intake_token, refresh_mode=True)
     except BaseException:
         caps.release_thread_slot(thread_id)
         raise

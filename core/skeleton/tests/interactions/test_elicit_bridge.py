@@ -1,6 +1,7 @@
 """Elicitation bridge: a tool's ``ctx.elicit()`` from an
 in-process caller resolves through the interactions ``ask`` channel, with
-schema fidelity, accept-or-raise, and no silent dead-end."""
+schema fidelity, accept-or-raise, and no silent dead-end. The accepted result carries the
+message the answering reply quoted under the ``_meta`` key ``tai42/reply_to``."""
 
 from __future__ import annotations
 
@@ -10,8 +11,11 @@ import pytest
 from fastmcp.server.context import Context, set_context
 from fastmcp.server.elicitation import AcceptedElicitation
 from pydantic import BaseModel
+from tai42_contract.conversations import ReplyTo, ReplyToStatus
+from tai42_contract.interactions import ELICIT_META_REPLY_TO, AskAnswer
 
 from tai42_skeleton.app.instance import app
+from tai42_skeleton.interactions.elicit_bridge import BridgedAcceptedElicitation
 from tai42_skeleton.interactions.helper import InteractionTimeoutError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools import context_bridge
@@ -21,15 +25,15 @@ def _bridge_ctx() -> context_bridge.PlatformBridgeContext:
     return context_bridge.PlatformBridgeContext(fastmcp=app.fastmcp)
 
 
-def _patch_ask(monkeypatch, answer=None, *, raises=None):
-    """Record the ask call and return ``answer`` (or raise ``raises``)."""
+def _patch_ask(monkeypatch, answer=None, *, raises=None, reply_to=None, params=None):
+    """Record the ask call and answer ``answer`` with ``reply_to`` and ``params`` (or raise ``raises``)."""
     calls: list[dict] = []
 
     async def fake_ask(question, *, answer_format, schema=None, **kwargs):
         calls.append({"question": question, "answer_format": answer_format, "schema": schema})
         if raises is not None:
             raise raises
-        return answer
+        return AskAnswer(answer=answer, reply_to=reply_to, params=params)
 
     monkeypatch.setattr("tai42_skeleton.interactions.helper.ask", fake_ask)
     return calls
@@ -76,6 +80,42 @@ def test_seam_a_timeout_raises_no_decline_round_trip(monkeypatch):
 
     with pytest.raises(InteractionTimeoutError):
         asyncio.run(ctx.elicit("Pick a number", int))
+
+
+_QUOTE = ReplyTo(message_id="M-1", status=ReplyToStatus.FOUND, text="the earlier message")
+
+
+def test_an_elicit_answered_by_a_quoting_reply_carries_the_quote_in_meta(monkeypatch):
+    _patch_ask(monkeypatch, answer={"value": 7}, reply_to=_QUOTE, params={"reply_id": "r-1"})
+
+    result = asyncio.run(_bridge_ctx().elicit("Pick a number", int))
+
+    assert isinstance(result, BridgedAcceptedElicitation)
+    assert result.action == "accept"
+    assert result.data == 7
+    assert result.meta == {ELICIT_META_REPLY_TO: _QUOTE.model_dump(mode="json")}
+
+
+def test_an_elicit_answered_quoting_nothing_carries_a_null_quote(monkeypatch):
+    _patch_ask(monkeypatch, answer={"value": 7})
+
+    result = asyncio.run(_bridge_ctx().elicit("Pick a number", int))
+
+    assert isinstance(result, BridgedAcceptedElicitation)
+    assert result.data == 7
+    assert result.meta == {ELICIT_META_REPLY_TO: None}
+
+
+def test_the_bridged_result_dumps_its_meta_under_the_mcp_meta_key(monkeypatch):
+    _patch_ask(monkeypatch, answer={"value": 7}, reply_to=_QUOTE)
+
+    dumped = asyncio.run(_bridge_ctx().elicit("Pick a number", int)).model_dump(mode="json", by_alias=True)
+
+    assert dumped == {
+        "action": "accept",
+        "data": 7,
+        "_meta": {ELICIT_META_REPLY_TO: {"message_id": "M-1", "status": "found", "text": "the earlier message"}},
+    }
 
 
 # -- elicit_bridge_context: an active client context wins --------------------

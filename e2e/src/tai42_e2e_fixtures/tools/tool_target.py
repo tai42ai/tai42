@@ -9,8 +9,10 @@ import os
 from typing import Any
 
 from tai42_contract.app import tai42_app
+from tai42_contract.conversations import ReplyTo
 from tai42_contract.tools import TOOL_META_PAUSES
 
+from tai42_e2e_fixtures.tools.ask_results import parked
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
 from tai42_e2e_fixtures.tools.park import _on_expiry_policy
@@ -90,15 +92,17 @@ async def e2e_tool_target_park(
 
     with driving_as(continuation="e2e_tool_target_deliver"):
         expiry_at = datetime.now(UTC) + timedelta(seconds=_TOOL_TARGET_PARK_EXPIRY_SECONDS)
-        suspended = await ask(
-            marker,
-            mode="async",
-            expiry_at=expiry_at,
-            channel=channel,
-            recipient=recipient,
-            answer_format=answer_format,
-            schema=schema,
-            on_expiry=_on_expiry_policy(on_expiry),
+        suspended = parked(
+            await ask(
+                marker,
+                mode="async",
+                expiry_at=expiry_at,
+                channel=channel,
+                recipient=recipient,
+                answer_format=answer_format,
+                schema=schema,
+                on_expiry=_on_expiry_policy(on_expiry),
+            )
         )
 
     park_record = json.dumps({"interaction_id": suspended.interaction_id, "pid": os.getpid()})
@@ -108,11 +112,13 @@ async def e2e_tool_target_park(
 
 
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_tool_target_deliver(interaction_id: str, answer: object) -> dict:
+async def e2e_tool_target_deliver(
+    interaction_id: str, answer: object, reply_to: ReplyTo | None, params: dict[str, str] | None
+) -> dict:
     """The stored resume continuation the tool-target park fires ONCE out of band.
 
-    The platform's continuation seam fires it with ``{interaction_id, answer}`` under the park's
-    stored (route execution-key) identity, on whichever worker resolves the park. It RETURNS the
+    The platform's continuation seam fires it with ``{interaction_id, answer, reply_to, params}``
+    under the park's stored (route execution-key) identity, on whichever worker resolves the park. It RETURNS the
     resumed run's TERMINAL; the platform's delivery ladder then fires the door's bound
     ``deliver_tool_completion`` under its own delivery-fire context and maps the terminal through
     the ORIGINATING route's ``reply_expr`` — an address tool delivers ONLY inside that fire, never
@@ -127,8 +133,9 @@ async def e2e_tool_target_deliver(interaction_id: str, answer: object) -> dict:
       participant-facing ``reply``, so the ladder delivers ``failed`` and that reply is sent in
       place of the route's notice.
 
-    RPUSHes ``{status, pid}`` onto ``e2e:rec:tool_target_deliver:{interaction_id}`` so a spec reads
-    that the resume fired and through which terminal; the platform keys delivery on the run's
+    RPUSHes ``{status, answer, reply_to, params, pid}`` onto
+    ``e2e:rec:tool_target_deliver:{interaction_id}`` so a spec reads that the resume fired, through
+    which terminal, and what the answer, its quoted message and its params were; the platform keys delivery on the run's
     completion id, so a redelivery of the same terminal lands once."""
     from collections.abc import Awaitable
     from typing import cast
@@ -144,7 +151,15 @@ async def e2e_tool_target_deliver(interaction_id: str, answer: object) -> dict:
 
     non_success = answer in (EXPIRY_ANSWER, _TOOL_TARGET_ABORT_ANSWER, _TOOL_TARGET_ABORT_REPLY_ANSWER)
     status = PARK_COMPLETION_FAILED if non_success else PARK_COMPLETION_SUCCEEDED
-    record = json.dumps({"status": status, "pid": os.getpid()})
+    record = json.dumps(
+        {
+            "status": status,
+            "answer": answer,
+            "reply_to": None if reply_to is None else reply_to.model_dump(mode="json"),
+            "params": params,
+            "pid": os.getpid(),
+        }
+    )
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
         await cast(Awaitable[int], client.rpush(f"e2e:rec:tool_target_deliver:{interaction_id}", record))
 

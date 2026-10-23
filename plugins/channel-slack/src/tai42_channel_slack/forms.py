@@ -61,14 +61,16 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from typing import Any, NamedTuple
 
-from tai42_kit.interactions import RADIO_OPTION_THRESHOLD, hidden_fields
+from tai42_contract.interactions import FORM_REACTION_REASON_MAX_CHARS
+from tai42_kit.interactions import RADIO_OPTION_THRESHOLD, drawing_order, hidden_fields
 
 from tai42_channel_slack.form_blocks import (
     FIELD_ACTION_ID,
     FormSchemaError,
     _apply_initial,
+    _boolean_words,
     _element,
 )
 
@@ -78,9 +80,11 @@ __all__ = [
     "FORM_SUBMIT_CALLBACK_ID",
     "RADIO_OPTION_THRESHOLD",
     "FormSchemaError",
+    "ModalMetadata",
     "build_message_blocks",
     "build_modal_blocks",
     "build_modal_view",
+    "check_update_failed_line",
     "decode_private_metadata",
     "extract_answer",
     "first_field_name",
@@ -166,13 +170,14 @@ def _input_block(
     *,
     dispatch: bool = False,
     choice_label: str | None = None,
+    boolean_words: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(spec, dict):
         raise FormSchemaError(f"form schema property {name!r} must be an object")
     label = str(spec.get("title") or name)
     if len(label) > _MAX_LABEL_LEN:
         raise FormSchemaError(f"form schema property {name!r} label exceeds {_MAX_LABEL_LEN} characters")
-    element = _element(name, spec, per_send_options, choice_label)
+    element = _element(name, spec, per_send_options, choice_label, boolean_words or _boolean_words(None))
     if value is not None:
         _apply_initial(name, element, value)
     if dispatch and element["type"] in ("plain_text_input", "number_input", "email_text_input", "url_text_input"):
@@ -236,29 +241,38 @@ def _trigger_fields(properties: dict[str, Any], reactions: dict[str, Any] | None
     return triggers
 
 
-def _readback_value(value: Any) -> str:
-    # One review-line rendering of a submitted value: Yes/No for a bool, comma-joined for a
-    # list, the string otherwise.
+def _readback_value(value: Any, words: tuple[str, str]) -> str:
+    # One review-line rendering of a submitted value: the field's true/false word for a bool,
+    # comma-joined for a list, the string otherwise.
     if isinstance(value, bool):
-        return "Yes" if value else "No"
+        return words[0] if value else words[1]
     if isinstance(value, list):
         return ", ".join(str(item) for item in value)
     return str(value)
 
 
 def _readback_section(
-    properties: dict[str, Any], values: dict[str, Any], hidden: set[str], review_empty: str | None = None
+    properties: dict[str, Any],
+    values: dict[str, Any],
+    hidden: set[str],
+    review_empty: str | None = None,
+    field_wording: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # A review page's generic readback of the values entered so far: one ``*label*: value``
     # line per visible, filled field. A field hidden by its predicate is omitted (it is not
     # part of the answer); when nothing is filled yet the empty line is shown — the caller's
-    # ``review_empty`` when set, else the platform default.
+    # ``review_empty`` when set, else the platform default. A boolean reads in its field entry's
+    # ``true_label`` / ``false_label``, else "Yes" / "No". The lines come in drawing order, each
+    # ``timeOf`` time right after its date.
+    field_wording = field_wording or {}
     lines: list[str] = []
-    for name, spec in properties.items():
+    for name in drawing_order(list(properties), properties):
+        spec = properties[name]
         if name in hidden or name not in values:
             continue
         label = str((spec.get("title") if isinstance(spec, dict) else None) or name)
-        lines.append(f"*{label}*: {_readback_value(values[name])}")
+        words = _boolean_words(field_wording.get(name))
+        lines.append(f"*{label}*: {_readback_value(values[name], words)}")
     text = "\n".join(lines) if lines else (review_empty or _REVIEW_EMPTY_TEXT)
     if len(text) > _MAX_SECTION_TEXT_LEN:
         raise FormSchemaError(f"form review readback exceeds {_MAX_SECTION_TEXT_LEN} characters")
@@ -333,6 +347,7 @@ def _field_group(
         options.get(name),
         dispatch=name in triggers,
         choice_label=choice_label,
+        boolean_words=_boolean_words(entry),
     )
     group = [block]
     if name in field_errors:
@@ -354,20 +369,19 @@ def _page_blocks(
     field_wording: dict[str, Any],
 ) -> list[dict[str, Any]]:
     # One page: its title header, its ordered display blocks, then either a review readback
-    # (a review page) or its input fields (an input page).
+    # (a review page) or its input fields (an input page) in drawing order, each ``timeOf`` time
+    # right after its date.
     blocks: list[dict[str, Any]] = [_page_header(str(page["title"]))]
     for display in page.get("display") or []:
         rendered = _display_block(display, display_values)
         if rendered is not None:
             blocks.append(rendered)
     if page.get("kind") == "review":
-        blocks.append(_readback_section(properties, values or {}, hidden, review_empty))
+        blocks.append(_readback_section(properties, values or {}, hidden, review_empty, field_wording))
         return blocks
-    for field in page["fields"]:
+    for field in drawing_order([str(field) for field in page["fields"]], properties):
         blocks.extend(
-            _field_group(
-                str(field), properties, required, values, options, hidden, triggers, field_errors, field_wording
-            )
+            _field_group(field, properties, required, values, options, hidden, triggers, field_errors, field_wording)
         )
     return blocks
 
@@ -390,13 +404,15 @@ def build_modal_blocks(
     list). With ``pages`` the blocks are grouped under a ``header`` per page, interleaved with
     the page's ordered ``display`` blocks, and a ``review`` page shows a generic readback of
     the entered values; without ``pages`` the properties render in schema order (no display).
+    Either way the fields draw in drawing order: each ``timeOf`` time right after its date.
     A property's ``visibleWhen`` predicate, evaluated here against ``values`` (``None`` =
     evaluate against nothing, so every field shows — the cap upper bound and the show-all
     base), hides a field; a reaction/conditional trigger field carries ``dispatch_action``; a
     reaction's ``display_values`` fill display slots and its ``field_errors`` render as context
     lines. ``review_empty`` is the caller's line a review page shows before anything is filled;
-    ``field_wording`` carries per-field words (``{name: {"choice_label": ...}}``), the select
-    placeholder of each named field. Raises :class:`FormSchemaError` on any property this mapping
+    ``field_wording`` carries per-field words (``{name: {"choice_label": ..., "true_label": ...,
+    "false_label": ...}}``): the select placeholder of each named field and a boolean's two words
+    on its radio options and its review line. Raises :class:`FormSchemaError` on any property this mapping
     cannot express or any per-send extra it cannot map.
     """
     options = options or {}
@@ -429,11 +445,9 @@ def build_modal_blocks(
             )
         return blocks
     blocks = []
-    for name in properties:
+    for name in drawing_order([str(name) for name in properties], properties):
         blocks.extend(
-            _field_group(
-                str(name), properties, required, values, options, hidden, triggers, field_errors, field_wording
-            )
+            _field_group(name, properties, required, values, options, hidden, triggers, field_errors, field_wording)
         )
     return blocks
 
@@ -442,31 +456,50 @@ def _encode_private_metadata(
     interaction_id: str,
     metadata_options: dict[str, list[dict[str, Any]]] | None = None,
     metadata_display: dict[str, Any] | None = None,
+    unavailable: str | None = None,
 ) -> str:
     """The view's ``private_metadata`` string: the interaction id plus the accumulated reaction state.
 
     The interaction id is the correlation key every ``view_submission``/``block_actions``
     carries back; the reaction-supplied option lists and display slot values ride alongside it
-    so they survive a re-render (Slack echoes only entered VALUES in the view state). Raises
-    :class:`FormSchemaError` when the encoded state exceeds Slack's ``private_metadata`` cap —
-    never a silent truncation.
+    so they survive a re-render (Slack echoes only entered VALUES in the view state).
+    ``unavailable`` is the caller's ``status.unavailable`` line, written as an ``unavailable`` key
+    only when set, so a submit that finds the form record gone still draws the caller's words.
+    Raises :class:`FormSchemaError` when the encoded state exceeds Slack's ``private_metadata``
+    cap — never a silent truncation.
     """
     payload: dict[str, Any] = {"id": interaction_id}
     if metadata_options:
         payload["options"] = metadata_options
     if metadata_display:
         payload["display"] = metadata_display
+    if unavailable is not None:
+        payload["unavailable"] = unavailable
     encoded = json.dumps(payload, separators=(",", ":"))
     if len(encoded) > _MAX_PRIVATE_METADATA_LEN:
         raise FormSchemaError(f"form modal private_metadata exceeds {_MAX_PRIVATE_METADATA_LEN} characters")
     return encoded
 
 
-def decode_private_metadata(raw: Any) -> tuple[str, dict[str, Any], dict[str, Any]]:
-    """The ``(interaction_id, reaction_options, reaction_display)`` a view's ``private_metadata`` carries.
+class ModalMetadata(NamedTuple):
+    """What a view's ``private_metadata`` carries back on the next interaction.
 
-    Raises :class:`ValueError` when the metadata is missing or malformed — a view the plugin
-    did not stamp is a loud bug, never a silent default.
+    ``interaction_id`` is the correlation key; ``options`` / ``display`` are the accumulated
+    reaction state; ``unavailable`` is the caller's ``status.unavailable`` line, or ``None``.
+    """
+
+    interaction_id: str
+    options: dict[str, Any]
+    display: dict[str, Any]
+    unavailable: str | None
+
+
+def decode_private_metadata(raw: Any) -> ModalMetadata:
+    """The :class:`ModalMetadata` a view's ``private_metadata`` carries.
+
+    Raises :class:`ValueError` when the metadata is missing or malformed (a present
+    ``unavailable`` that is not a non-blank string included) — a view the plugin did not stamp is
+    a loud bug, never a silent default.
     """
     if not isinstance(raw, str) or not raw:
         raise ValueError("form view carried no private_metadata")
@@ -483,7 +516,10 @@ def decode_private_metadata(raw: Any) -> tuple[str, dict[str, Any], dict[str, An
     raw_display = data.get("display")
     options: dict[str, Any] = raw_options if isinstance(raw_options, dict) else {}
     display: dict[str, Any] = raw_display if isinstance(raw_display, dict) else {}
-    return interaction_id, options, display
+    unavailable = data.get("unavailable")
+    if unavailable is not None and (not isinstance(unavailable, str) or not unavailable.strip()):
+        raise ValueError("form view private_metadata unavailable must be a non-blank string")
+    return ModalMetadata(interaction_id, options, display, unavailable)
 
 
 def _modal_text(role: str, label: str | None, default: str) -> dict[str, Any]:
@@ -527,6 +563,7 @@ def build_modal_view(
     metadata_options: dict[str, list[dict[str, Any]]] | None = None,
     metadata_display: dict[str, Any] | None = None,
     form_wording: dict[str, Any] | None = None,
+    status_unavailable: str | None = None,
 ) -> dict[str, Any]:
     """The ``views.open``/``views.update`` modal: the question as a section, then the blocks.
 
@@ -539,7 +576,10 @@ def build_modal_view(
     ``form_wording["submit"]``, else "Submit"; ``close`` is ``form_wording["cancel"]`` else
     "Cancel". Each is capped at Slack's 24-character modal-text limit, refused loudly over it
     (:class:`FormSchemaError`). ``form_wording["review_empty"]`` is the review step's empty line
-    and ``form_wording["fields"]`` the per-field select placeholders, threaded into the blocks.
+    and ``form_wording["fields"]`` the per-field words (the select placeholders and a boolean's
+    ``true_label`` / ``false_label``), threaded into the blocks. ``status_unavailable`` (the
+    caller's ``status.unavailable``) rides ``private_metadata``, so the submit door draws it even
+    when the form record is gone.
     """
     form_wording = form_wording or {}
     blocks = [
@@ -561,12 +601,35 @@ def build_modal_view(
     return {
         "type": "modal",
         "callback_id": FORM_SUBMIT_CALLBACK_ID,
-        "private_metadata": _encode_private_metadata(interaction_id, metadata_options, metadata_display),
+        "private_metadata": _encode_private_metadata(
+            interaction_id, metadata_options, metadata_display, status_unavailable
+        ),
         "title": _modal_text("title", form_wording.get("title"), _MODAL_TITLE),
         "submit": _modal_text("submit", _submit_label(pages) or form_wording.get("submit"), _SUBMIT_LABEL),
         "close": _modal_text("close", form_wording.get("cancel"), _CLOSE_LABEL),
         "blocks": blocks,
     }
+
+
+def check_update_failed_line(template: str | None) -> None:
+    """Refuse a caller ``form.update_failed`` line the re-render banner cannot draw.
+
+    The banner is a ``section`` mrkdwn text, capped at :data:`_MAX_SECTION_TEXT_LEN` characters.
+    Each ``{reason}`` token takes the reaction door's reason, bounded at
+    :data:`~tai42_contract.interactions.FORM_REACTION_REASON_MAX_CHARS`, so the line's worst case
+    (its fixed text plus every token filled at the bound) is checked; over the cap is a loud
+    :class:`FormSchemaError`, never a truncation.
+    """
+    if template is None:
+        return
+    reason_count = template.count("{reason}")
+    worst_case = len(template.replace("{reason}", "")) + reason_count * FORM_REACTION_REASON_MAX_CHARS
+    if worst_case > _MAX_SECTION_TEXT_LEN:
+        raise FormSchemaError(
+            f"wording.form.update_failed expands to up to {worst_case} characters once each of its "
+            f"{reason_count} {{reason}} token(s) is filled (up to {FORM_REACTION_REASON_MAX_CHARS} characters "
+            f"each); the form update banner is a section text Slack caps at {_MAX_SECTION_TEXT_LEN} characters"
+        )
 
 
 def validate_form_schema(schema: dict[str, Any], question: str) -> None:

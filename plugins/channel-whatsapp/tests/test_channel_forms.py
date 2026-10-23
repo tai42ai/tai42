@@ -720,7 +720,7 @@ async def test_notify_form_sends_media_prelude_then_flow_last_no_reservation(
     fake_httpx.responses.append(_accepted("wamid.IMG"))
     fake_httpx.responses.append(_accepted("wamid.FLOW"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         _form_notification(
             media=[
                 MediaItem(kind=MediaKind.LINK, url="https://docs.example/p/1", caption="Details page"),
@@ -729,7 +729,7 @@ async def test_notify_form_sends_media_prelude_then_flow_last_no_reservation(
         )
     )
 
-    assert ids == ["wamid.LINKS", "wamid.IMG", "wamid.FLOW"]  # every wamid, in send order
+    assert outcome.message_ids == ["wamid.LINKS", "wamid.IMG", "wamid.FLOW"]  # every wamid, in send order
     # Media rides ahead: the link line-block, then each image — the Flow message LAST,
     # so the actionable prompt sits at the foot of the chat.
     assert fake_httpx.calls[0]["json"]["type"] == "text"
@@ -769,9 +769,9 @@ async def test_notify_form_cache_miss_creates_publishes_then_sends(
     fake_httpx.responses.append(response(200, json={"success": True}))
     fake_httpx.responses.append(_accepted("wamid.FLOW"))
 
-    ids = await WhatsAppChannel().notify(_form_notification())
+    outcome = await WhatsAppChannel().notify(_form_notification())
 
-    assert ids == ["wamid.FLOW"]
+    assert outcome.message_ids == ["wamid.FLOW"]
     assert _http_order(fake_httpx) == [
         ("get", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
         ("post", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
@@ -790,9 +790,9 @@ async def test_notify_form_tag_rides_the_token_as_the_fourth_segment(
     fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
     fake_httpx.responses.append(_accepted("wamid.FLOW"))
 
-    ids = await WhatsAppChannel().notify(_form_notification(form_tag="ref-42"))
+    outcome = await WhatsAppChannel().notify(_form_notification(form_tag="ref-42"))
 
-    assert ids == ["wamid.FLOW"]
+    assert outcome.message_ids == ["wamid.FLOW"]
     token = fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]["flow_token"]
     segments = token.split(":")
     assert len(segments) == 4  # prefix, hash, nonce, tag
@@ -873,9 +873,9 @@ async def test_notify_form_prefill_and_pages_reach_send_flow(waba_env, fake_redi
     fake_redis.store[_flow_cache_key(schema_hash)] = "flow-nf-prefill"
     fake_httpx.responses.append(_accepted("wamid.FLOW"))
 
-    ids = await WhatsAppChannel().notify(_form_notification(schema=schema, data=data, pages=pages))
+    outcome = await WhatsAppChannel().notify(_form_notification(schema=schema, data=data, pages=pages))
 
-    assert ids == ["wamid.FLOW"]
+    assert outcome.message_ids == ["wamid.FLOW"]
     params = fake_httpx.calls[0]["json"]["interactive"]["action"]["parameters"]
     assert params["flow_id"] == "flow-nf-prefill"
     assert params["flow_token"].startswith(f"{_NF_PREFIX}{schema_hash}:")
@@ -1046,7 +1046,233 @@ async def test_a_shape_checked_ask_publishes_endpoint_driven_and_caches_its_side
         "reactions": None,
         "option_fields": [],
         "invalid": {"email": "Use your work address"},
+        "required": {},
+        "lines": {},
     }
+
+
+async def test_a_shape_checked_ask_caches_the_callers_required_sentences_and_form_lines(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    from tai42_contract.interactions.models import FieldWording, FormWording, Wording
+
+    wording = Wording(
+        form=FormWording(
+            error_line="Please check the form",
+            update_failed="Not refreshed: {reason}",
+            fields={"email": FieldWording(invalid="Use your work address", required="We need your email")},
+        )
+    )
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-shaped"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.S"))
+
+    await WhatsAppChannel().deliver(_shaped_delivery(wording=wording))
+
+    sidecar = json.loads(fake_redis.store["channel:whatsapp:endpoint-form:int-1"])
+    assert sidecar["required"] == {"email": "We need your email"}
+    assert sidecar["lines"] == {"error_line": "Please check the form", "update_failed": "Not refreshed: {reason}"}
+
+
+async def test_an_ask_error_line_too_long_for_the_resent_body_is_refused_before_any_reservation(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.interactions.models import FormWording, Wording
+
+    # The error line also fills the re-sent Flow's body in place of the door's reason, which is
+    # bounded at 500 characters.
+    wording = Wording(form=FormWording(error_line="x" * 501))
+    with pytest.raises(ChannelInputError, match=r"wording\.form\.error_line is 501 characters"):
+        await WhatsAppChannel().deliver(_shaped_delivery(wording=wording))
+    assert fake_httpx.calls == []
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+
+
+async def test_an_ask_error_line_at_the_resent_body_bound_is_accepted(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.interactions.models import FormWording, Wording
+
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-shaped"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.S"))
+    await WhatsAppChannel().deliver(_shaped_delivery(wording=Wording(form=FormWording(error_line="x" * 500))))
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" in fake_redis.store
+
+
+async def test_a_rejected_final_template_too_long_for_a_text_message_is_refused_at_deliver(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The closing sentence rides a text message (Meta caps a text body at 4096) with the door's line
+    # (up to 500 characters) in each ``{reason}``: 1597 + 5 * 500 = 4097 is one over.
+    over = "x" * 1597 + "{reason}" * 5
+    with pytest.raises(ChannelInputError, match=r"wording\.answer\.rejected_final"):
+        await WhatsAppChannel().deliver(_form_delivery(wording=Wording(answer=AnswerWording(rejected_final=over))))
+    assert fake_httpx.calls == []
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+
+
+async def test_a_rejected_final_template_at_the_text_cap_is_accepted(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+    at_cap = "x" * 1596 + "{reason}" * 5
+    await WhatsAppChannel().deliver(_form_delivery(wording=Wording(answer=AnswerWording(rejected_final=at_cap))))
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" in fake_redis.store
+
+
+async def test_a_shape_checked_notify_form_carries_its_lines_and_required_sentences(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    from tai42_contract.interactions.models import FieldWording, FormWording, Wording
+
+    wording = Wording(
+        form=FormWording(
+            error_line="Please check the form",
+            fields={"email": FieldWording(required="We need your email")},
+        )
+    )
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-nf"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.NF"))
+
+    await WhatsAppChannel().notify(_form_notification(schema=_SHAPED_SCHEMA, wording=wording))
+
+    flow = json.loads(fake_httpx.calls[0]["json"]["flow_json"])
+    declared = flow["screens"][0]["data"]
+    for key in ("tai42_error_line", "tai42_update_failed", "email__required"):
+        assert declared[key]["type"] == "string"
+    # Only a field the shape check can report missing carries a required sentence.
+    assert "on__required" not in declared
+    send = next(call["json"] for call in fake_httpx.calls if (call.get("json") or {}).get("type") == "interactive")
+    data = send["interactive"]["action"]["parameters"]["flow_action_payload"]["data"]
+    assert data["tai42_error_line"] == "Please check the form"
+    assert data["tai42_update_failed"] == ""
+    assert data["email__required"] == "We need your email"
+
+
+async def test_an_ask_less_error_line_is_not_bound_by_the_resent_body(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.interactions.models import FormWording, Wording
+
+    # An ask-less form is never re-sent, so its error line takes no body bound.
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-nf"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.NF"))
+    wording = Wording(form=FormWording(error_line="x" * 600))
+    outcome = await WhatsAppChannel().notify(_form_notification(schema=_SHAPED_SCHEMA, wording=wording))
+    assert outcome.message_ids == ["wamid.NF"]
+
+
+@pytest.mark.parametrize("send", ["ask", "notify"])
+async def test_a_required_sentence_over_its_controls_error_cap_is_refused_before_any_send(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, send: str
+):
+    from tai42_contract.interactions.models import FieldWording, FormWording, Wording
+
+    wording = Wording(form=FormWording(fields={"email": FieldWording(required="x" * 31)}))
+    channel = WhatsAppChannel()
+    sending = (
+        channel.deliver(_shaped_delivery(wording=wording))
+        if send == "ask"
+        else channel.notify(_form_notification(schema=_SHAPED_SCHEMA, wording=wording))
+    )
+    with pytest.raises(ChannelInputError, match=r"wording\.form\.fields\['email'\]\.required is 31 characters"):
+        await sending
+    assert fake_httpx.calls == []
+
+
+_BOOLEAN_SCHEMA = {
+    "type": "object",
+    "properties": {"agree": {"type": "boolean", "title": "Agree"}, "note": {"type": "string"}},
+}
+_BOOLEAN_PAGES = [
+    {"title": "Ask", "fields": ["agree", "note"], "kind": "input", "display": []},
+    {"title": "Check", "fields": [], "kind": "review", "display": []},
+]
+
+
+def _boolean_wording(true_label: str, false_label: str) -> Wording:
+    from tai42_contract.interactions.models import FieldWording
+
+    return Wording(form=FormWording(fields={"agree": FieldWording(true_label=true_label, false_label=false_label)}))
+
+
+async def test_two_asks_that_differ_only_in_the_boolean_words_publish_two_flows(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    for flow_id in ("flow-si", "flow-oui"):
+        fake_httpx.get_responses.append(flow_list_page())
+        fake_httpx.responses.append(_flow_created(flow_id))
+        fake_httpx.responses.append(_published())
+        fake_httpx.responses.append(_accepted(f"wamid.{flow_id}"))
+    await WhatsAppChannel().deliver(
+        _form_delivery(schema=_BOOLEAN_SCHEMA, pages=_BOOLEAN_PAGES, wording=_boolean_wording("Si", "No"))
+    )
+    await WhatsAppChannel().deliver(
+        _form_delivery(
+            schema=_BOOLEAN_SCHEMA,
+            pages=_BOOLEAN_PAGES,
+            wording=_boolean_wording("Oui", "Non"),
+            interaction_id="int-2",
+            recipient=ALLOWED_B,
+        )
+    )
+    creates = [call["json"] for call in fake_httpx.calls if (call.get("json") or {}).get("flow_json")]
+    assert len(creates) == 2
+    assert creates[0]["name"] != creates[1]["name"]
+    assert "Agree: Si" in creates[0]["flow_json"]
+    assert "Agree: Oui" in creates[1]["flow_json"]
+    assert json.loads(creates[1]["flow_json"])["version"] == "7.0"
+
+
+async def test_two_asks_with_the_same_boolean_words_reuse_one_flow(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-si"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.1"))
+    fake_httpx.responses.append(_accepted("wamid.2"))
+    await WhatsAppChannel().deliver(
+        _form_delivery(schema=_BOOLEAN_SCHEMA, pages=_BOOLEAN_PAGES, wording=_boolean_wording("Si", "No"))
+    )
+    await WhatsAppChannel().deliver(
+        _form_delivery(
+            schema=_BOOLEAN_SCHEMA,
+            pages=_BOOLEAN_PAGES,
+            wording=_boolean_wording("Si", "No"),
+            interaction_id="int-2",
+            recipient=ALLOWED_B,
+        )
+    )
+    creates = [call for call in fake_httpx.calls if (call.get("json") or {}).get("flow_json")]
+    assert len(creates) == 1
+
+
+async def test_a_bad_word_property_name_collides_with_a_form_line_carrier(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    schema = {
+        **_SHAPED_SCHEMA,
+        "properties": {**_SHAPED_SCHEMA["properties"], "tai42_update_failed": {"type": "string"}},
+    }
+    with pytest.raises(ChannelInputError, match="tai42_update_failed"):
+        await WhatsAppChannel().deliver(_shaped_delivery(schema=schema))
+    assert fake_httpx.calls == []
 
 
 async def test_a_failed_sidecar_write_frees_the_pair_and_raises_the_store_error(
@@ -1554,9 +1780,9 @@ async def test_a_shape_checked_notify_form_publishes_endpoint_driven_and_carries
     fake_httpx.responses.append(_published())
     fake_httpx.responses.append(_accepted("wamid.NF"))
 
-    ids = await WhatsAppChannel().notify(_form_notification(schema=_SHAPED_SCHEMA, wording=wording))
+    outcome = await WhatsAppChannel().notify(_form_notification(schema=_SHAPED_SCHEMA, wording=wording))
 
-    assert ids == ["wamid.NF"]
+    assert outcome.message_ids == ["wamid.NF"]
     create = fake_httpx.calls[0]["json"]
     assert create["endpoint_uri"] == "https://app.example/api/channels/whatsapp/flow-data"
     flow = json.loads(create["flow_json"])

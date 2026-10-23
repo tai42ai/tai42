@@ -83,11 +83,23 @@ Importing the package registers, as an import side-effect on the global
   (the app's worker-bus subscription lives on it, delivering fleet ops);
   SIGTERM/SIGINT request a warm shutdown (finish the current job), a repeated
   signal escalates to RQ's cold shutdown.
-- `beat [rqscheduler options]` — runs the recurring-job scheduler
-  (`rq-scheduler`), with `--queue-class tai42_backend_rq.queue.TaskBudgetQueue`
-  so a job it moves onto the queue is stored with `RQ_TASK_TIMEOUT`; the worker runs
-  every job under its own current `RQ_TASK_TIMEOUT`.
-- `dashboard [rq-dashboard options]` — runs the RQ web dashboard.
+  A waiting worker that loses Redis keeps reconnecting through RQ's own loop,
+  logged at ERROR, outside `RQ_RETRY_ATTEMPTS`; `--redis-url` replaces only the
+  URL, the other `RQ_` connection settings still apply.
+- `beat [-b/--burst] [-i/--interval SECONDS] [-v/--verbose] [--quiet] [--path PATH] [--pid FILE] [-j/--job-class CLASS] [-u/--url URL]`
+  — runs the recurring-job scheduler (`rq-scheduler`'s `Scheduler`, with its
+  option names, defaults and meanings), on the same connection settings as the
+  worker: the URL comes from `RQ_REDIS_URL` (falling back to
+  `TAI_DEFAULT_REDIS_URL`) unless `-u/--url` overrides it. The scheduler loop
+  has no reconnect of its own, so the beat rides a Redis outage only within
+  `RQ_RETRY_ATTEMPTS`; a longer one ends it. An unknown option is refused
+  before anything connects. Every job it moves onto the queue lands on
+  `tai42_backend_rq.queue.TaskBudgetQueue`, so it is stored with
+  `RQ_TASK_TIMEOUT`; the worker runs every job under its own current
+  `RQ_TASK_TIMEOUT`.
+- `dashboard [rq-dashboard options]` — runs the RQ web dashboard. It opens its
+  own Redis connection from its `--redis-url` option, outside the backend's
+  connection settings, so the `RQ_` retry and timeouts do not apply to it.
 
 ## Fleet control
 
@@ -152,11 +164,21 @@ Not supported on RQ (raise `NotImplementedError`): `backend_registered_tasks`,
 
 ## Configuration
 
-Env group `RQ_` (a `tai42_kit` settings class, cached and reset on live reload):
+Env group `RQ_` (a `tai42_kit` settings class, cached and reset on live reload).
+`RQ_REDIS_URL` and `RQ_REDIS_MAX_CONNECTIONS` fall back to the shared
+`TAI_DEFAULT_REDIS_URL` / `TAI_DEFAULT_REDIS_MAX_CONNECTIONS` when unset; the
+retry and socket settings are read from `RQ_` alone. Every Redis connection of
+the backend — the tools, the enqueue path, the worker and the beat — is built
+from them.
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
 | `RQ_REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL (broker and results). |
+| `RQ_REDIS_MAX_CONNECTIONS` | — | Optional cap on the pool's connections. |
+| `RQ_RETRY_ATTEMPTS` | `0` | Times a failed Redis connect or command is retried, each retry logged as a warning; `0` makes one attempt. |
+| `RQ_RETRY_ON_TIMEOUT` | `false` | With `RQ_RETRY_ATTEMPTS` at `0`, retry a timed-out command once at once. |
+| `RQ_SOCKET_TIMEOUT` | — | Seconds a Redis command may wait on its socket; redis-py's default when unset. |
+| `RQ_SOCKET_CONNECT_TIMEOUT` | — | Seconds a Redis connect may take; redis-py's default when unset. |
 | `RQ_RQ_PREFIX` | `rq:` | Key prefix RQ uses for its Redis structures. |
 | `RQ_MANIFEST_KEY` | `MANIFEST_KEY` | Env key the worker CLI stores the manifest JSON under (inherited by forked work-horses). |
 | `RQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the timeout the worker runs every job under (enqueued or scheduler-fired, whatever timeout the job was stored with), and how long a `sync_task` dispatch waits for its job's result. |

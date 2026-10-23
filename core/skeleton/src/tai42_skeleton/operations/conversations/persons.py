@@ -10,6 +10,7 @@ import sys
 from typing import Any
 
 from tai42_contract.conversations import Person
+from tai42_contract.errors import UnavailableError
 from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
 
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
@@ -50,7 +51,7 @@ async def get_conversation_person(person_id: str) -> dict[str, Any]:
 @operation(
     summary="Set a conversation person's locale",
     tags=["conversations"],
-    errors=[BadRequestError, NotFoundError, NotSupportedError],
+    errors=[BadRequestError, NotFoundError, NotSupportedError, UnavailableError],
     response_model=Person,
 )
 async def set_conversation_person_locale(person_id: str, locale: str | None) -> dict[str, Any]:
@@ -59,8 +60,8 @@ async def set_conversation_person_locale(person_id: str, locale: str | None) -> 
     The operator override the rendering layer resolves text against, winning over the
     channel-seeded value on every later turn. ``locale`` is a BCP 47 tag (canonicalized here —
     ``he-il`` stores as ``he-IL``); ``null`` clears it back to no-locale-known. A blank
-    ``person_id`` or a malformed ``locale`` is a 400; an unknown person a 404; no backend a loud
-    501. Returns the updated person.
+    ``person_id`` or a malformed ``locale`` is a 400; an unknown person a 404; a person being
+    erased a 503 with nothing changed; no backend a loud 501. Returns the updated person.
     """
     if not person_id.strip():
         raise BadRequestError("person_id must be a non-blank person identifier")

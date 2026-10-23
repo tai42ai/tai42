@@ -9,6 +9,7 @@ from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.hooks.managers import redis_hooks_manager as redis_module
 from tai42_skeleton.hooks.managers.redis_hooks_manager import RedisHooksManager
+from tai42_skeleton.hooks.runs.models import ReplayClaim
 from tai42_skeleton.hooks.settings import HooksSettings
 
 from .conftest import make_client_ctx
@@ -95,12 +96,12 @@ async def test_unregister_unknown_returns_false(monkeypatch, fake_redis):
     assert await manager.unregister("nope") is False
 
 
-async def test_reregister_under_new_topic_moves_hook(monkeypatch, fake_redis, make_app):
+async def test_reregister_under_new_topic_moves_hook(hook_runs, lua_redis, make_app):
     # Re-registering the same name under a new topic must drop the old topic's
     # entry: the old topic fires nothing, the new topic fires the hook, and
     # unregister still works afterwards.
     app = make_app()
-    manager = _manager(monkeypatch, fake_redis)
+    manager = hook_runs.use(RedisHooksManager(HooksSettings()))
     await manager.register(
         HookParams(
             name="mv", topic="topic-a", tool="mv_tool", execution_key="k-fire", execution_key_fingerprint="fp-fire"
@@ -113,9 +114,11 @@ async def test_reregister_under_new_topic_moves_hook(monkeypatch, fake_redis, ma
     )
 
     await manager.on_event("topic-a", {})
+    await hook_runs.drain()
     assert app.tools.runs == []
 
     await manager.on_event("topic-b", {})
+    await hook_runs.drain()
     assert app.tools.runs == [("mv_tool", {})]
 
     assert await manager.unregister("mv") is True
@@ -175,36 +178,44 @@ async def test_register_funnels_through_single_eval_leaving_one_topic_entry(monk
     assert fake_redis._hashes["hooks:name_trigger_map"]["mv"] == topics_holding_mv[0]
 
 
-async def test_claim_webhook_delivery_first_true_replay_false(monkeypatch, fake_redis):
-    # First claim of a (topic, key) wins; a replay of the same pair is refused.
-    manager = _manager(monkeypatch, fake_redis)
-    assert await manager.claim_webhook_delivery("events", "github:d-1", 300) is True
-    assert await manager.claim_webhook_delivery("events", "github:d-1", 300) is False
+async def _accept(manager: RedisHooksManager, topic: str, key: str, ttl: int) -> str:
+    result = await manager.on_event(topic, {}, replay_claim=ReplayClaim(key, ttl))
+    return result.status
+
+
+async def test_replay_claim_accepts_first_and_answers_a_replay_already_seen(lua_redis):
+    # First accept of a (topic, key) wins; a replay of the same pair keeps nothing.
+    manager = RedisHooksManager(HooksSettings())
+    assert await _accept(manager, "events", "github:d-1", 300) == "accepted"
+    assert await _accept(manager, "events", "github:d-1", 300) == "already_seen"
     # A different id (same topic) is a distinct delivery — never dropped.
-    assert await manager.claim_webhook_delivery("events", "github:d-2", 300) is True
+    assert await _accept(manager, "events", "github:d-2", 300) == "accepted"
     # Same id, different topic — distinct door, distinct delivery.
-    assert await manager.claim_webhook_delivery("other", "github:d-1", 300) is True
+    assert await _accept(manager, "other", "github:d-1", 300) == "accepted"
 
 
-async def test_claim_webhook_delivery_sets_ttl_atomically(monkeypatch, fake_redis):
-    # The claim writes its key WITH an expiry in one op: after the TTL lapses the key is
-    # gone (never a permanent key), so the same id claims fresh again.
-    manager = _manager(monkeypatch, fake_redis)
-    assert await manager.claim_webhook_delivery("events", "github:d-1", 300) is True
+async def test_an_already_seen_delivery_keeps_no_runs(lua_redis):
+    manager = RedisHooksManager(HooksSettings())
+    await manager.register(
+        HookParams(name="a", topic="events", tool="x", execution_key="k-fire", execution_key_fingerprint="fp-fire")
+    )
+    first = await manager.on_event("events", {}, replay_claim=ReplayClaim("d-1", 300))
+    replay = await manager.on_event("events", {}, replay_claim=ReplayClaim("d-1", 300))
+    assert first.status == "accepted"
+    assert len(first.run_ids) == 1
+    assert replay.status == "already_seen"
+    assert replay.run_ids == ()
+    page = await manager.list_hook_runs(None, 50, None)
+    assert [run.id for run in page.items] == list(first.run_ids)
+
+
+async def test_replay_claim_sets_its_ttl_in_the_accept_step(lua_redis):
+    # The accept writes the seen key WITH its expiry: never a permanent key.
+    manager = RedisHooksManager(HooksSettings())
+    assert await _accept(manager, "events", "github:d-1", 300) == "accepted"
     key = manager.settings.webhook_seen_key("events", "github:d-1")
-    # The key carries a bounded expiry, not an unbounded (None) one.
-    assert fake_redis._strings[key][1] is not None
-    fake_redis.advance(301)
-    assert await manager.claim_webhook_delivery("events", "github:d-1", 300) is True
-
-
-async def test_claim_webhook_delivery_non_positive_ttl_raises(monkeypatch, fake_redis):
-    import pytest
-
-    manager = _manager(monkeypatch, fake_redis)
-    # Never a claim without a positive bounded TTL.
-    with pytest.raises(ValueError, match="positive ttl_seconds"):
-        await manager.claim_webhook_delivery("events", "d", 0)
+    ttl = await lua_redis.ttl(key)
+    assert 0 < ttl <= 300
 
 
 async def test_list_hooks_skips_orphaned_map_entry(monkeypatch, fake_redis):

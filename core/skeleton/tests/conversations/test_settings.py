@@ -160,3 +160,39 @@ def test_a_non_positive_split_cap_is_refused_at_startup(monkeypatch):
     monkeypatch.setenv("CONVERSATIONS_MAX_MESSAGE_CHARS", '{"twilio": 0}')
     with pytest.raises(ValidationError, match="must be positive"):
         ConversationsSettings()
+
+
+def test_the_send_record_keyspaces():
+    import hashlib
+    import json
+
+    import pytest
+
+    s = ConversationsSettings()
+    # A message ref folds (channel, our identity, participant address, medium id) into ONE opaque
+    # sha256 terminal segment: an address or a medium id may carry ``:`` and so is never a raw
+    # non-terminal segment.
+    ref = s.message_ref_key("slack", "T1", "U:2", "1700.1")
+    digest = hashlib.sha256(json.dumps(["slack", "T1", "U:2", "1700.1"], separators=(",", ":")).encode())
+    assert ref == f"conversations:message_ref:{digest.hexdigest()}"
+    assert s.message_ref_key("slack", "T1", "U", "2:1700.1") != s.message_ref_key("slack", "T1", "U:2", "1700.1")
+    assert s.message_ref_key_prefix == "conversations:message_ref:"
+    assert s.ask_send_key("i-1") == "conversations:ask_send:i-1"
+    assert s.ask_send_key_prefix == "conversations:ask_send:"
+    assert s.route_sending_key("chat-line") == "conversations:route_sending:chat-line"
+    assert s.outbound_index_key_prefix == "conversations:outbound:"
+    for blank in ("", "  "):
+        with pytest.raises(ValueError, match="medium_message_id must be a non-blank string"):
+            s.message_ref_key("slack", "T1", "U2", blank)
+        with pytest.raises(ValueError, match="client_address must be a non-blank string"):
+            s.message_ref_key("slack", "T1", blank, "1")
+        with pytest.raises(ValueError, match="our_identity must be a non-blank string"):
+            s.message_ref_key("slack", blank, "U2", "1")
+        with pytest.raises(ValueError, match="channel must be a non-blank string"):
+            s.message_ref_key(blank, "T1", "U2", "1")
+        with pytest.raises(ValueError, match="interaction_id must be a non-blank string"):
+            s.ask_send_key(blank)
+        with pytest.raises(ValueError, match="route_name must be a non-blank string"):
+            s.route_sending_key(blank)
+    with pytest.raises(ValueError, match="route_name must not contain ':'"):
+        s.route_sending_key("a:b")

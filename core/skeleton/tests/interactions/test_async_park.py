@@ -337,6 +337,8 @@ async def test_both_to_values_store_the_same_run_delivery_pair(monkeypatch, fake
             caller_park = await ask("c?", to="caller", mode="async", expiry_at=expiry)
     finally:
         reset()
+    assert isinstance(user_park, SuspendedInteraction)
+    assert isinstance(caller_park, SuspendedInteraction)
     us = await store.get_state(fake_redis, user_park.interaction_id)
     cs = await store.get_state(fake_redis, caller_park.interaction_id)
     assert us is not None
@@ -365,6 +367,8 @@ async def test_persisted_caller_ask_is_hidden_from_the_read_filter(monkeypatch, 
             caller_park = await ask("c?", to="caller", mode="async", expiry_at=expiry)
     finally:
         reset()
+    assert isinstance(user_park, SuspendedInteraction)
+    assert isinstance(caller_park, SuspendedInteraction)
     pending_ids = [req.interaction_id for req in await store.pending(fake_redis)]
     assert user_park.interaction_id in pending_ids
     assert caller_park.interaction_id not in pending_ids
@@ -379,6 +383,7 @@ async def test_receiverless_run_stores_no_address_but_an_identity(monkeypatch, f
             result = await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
     finally:
         reset()
+    assert isinstance(result, SuspendedInteraction)
     state = await store.get_state(fake_redis, result.interaction_id)
     assert state is not None
     assert state.request.delivery is None

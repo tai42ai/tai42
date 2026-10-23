@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from tai42_contract.channels import ChannelInputError
+from tai42_kit.interactions import TIME_OF_KEY, drawing_order
 
 from tai42_channel_whatsapp.flows_components import _sanitize_name, range_pairs
 
@@ -27,14 +28,16 @@ def _resolve_pages(
     form_title: str | None = None,
     form_submit: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[list[str]]]:
-    """The resolved page list and each page's field names.
+    """The resolved page list and each page's field names, in drawing order.
 
     Defaults to one screen carrying every property in schema order, its top-bar ``title`` the
     caller's ``form_title`` when set (else the generic :data:`_SCREEN_TITLE`) and its terminal
     ``button_label`` the caller's ``form_submit`` when set (else the footer's generic default). A
     form WITH ``pages`` shows each step's own page ``title`` and ``button_label``, so ``form_title``
-    and ``form_submit`` apply only to the page-less default. Raises ``ChannelInputError`` for a page
-    that names a property the schema does not declare.
+    and ``form_submit`` apply only to the page-less default. Each page's names are in
+    :func:`form_drawing_order`, the one order the screens, the per-send data, the footers and the
+    data endpoint read. Raises ``ChannelInputError`` for a page that names a property the schema
+    does not declare.
     """
     resolved_pages = pages or [
         {
@@ -49,8 +52,46 @@ def _resolve_pages(
         for field in page_fields:
             if field not in properties:
                 raise ChannelInputError(f"form page names unknown property {field!r}")
-        fields_by_screen.append(page_fields)
-    return resolved_pages, fields_by_screen
+        fields_by_screen.append(drawing_order(page_fields, properties))
+    merges = _form_range_merges(properties, resolved_pages, fields_by_screen)
+    return resolved_pages, [_place_merged_ends(fields, properties, merges) for fields in fields_by_screen]
+
+
+def form_drawing_order(names: list[str], properties: dict[str, Any], merges: dict[str, str]) -> list[str]:
+    """``names`` in the order a Flow draws them, given the form's ``END -> START`` merge map.
+
+    :func:`~tai42_kit.interactions.drawing_order` (each ``timeOf`` time right after its date), then
+    each merged range END, with the times right after it, moved to right after its START and the
+    START's own times: the pair draws as one picker at the START, so the END's time follows the
+    START's time instead of sitting where the END was declared.
+    """
+    return _place_merged_ends(drawing_order(names, properties), properties, merges)
+
+
+def _place_merged_ends(ordered: list[str], properties: dict[str, Any], merges: dict[str, str]) -> list[str]:
+    # Move each merged END listed in ``ordered`` (with its ``timeOf`` times right after it) to
+    # right after its START's block (the START and its ``timeOf`` times right after it).
+    def is_time_of(name: str, date_name: str) -> bool:
+        prop = properties.get(name)
+        return isinstance(prop, dict) and prop.get(TIME_OF_KEY) == date_name
+
+    def block(names: list[str], head: str) -> list[str]:
+        index = names.index(head)
+        end = index + 1
+        while end < len(names) and is_time_of(names[end], head):
+            end += 1
+        return names[index:end]
+
+    result = list(ordered)
+    for end_name, start_name in merges.items():
+        if end_name not in result or start_name not in result:
+            continue
+        moving = block(result, end_name)
+        result = [name for name in result if name not in moving]
+        start_block = block(result, start_name)
+        at = result.index(start_name) + len(start_block)
+        result[at:at] = moving
+    return result
 
 
 def _form_range_merges(

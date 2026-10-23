@@ -26,6 +26,9 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_WITHDRAWN,
     AnswerFormat,
     AnswerMismatchError,
+    FormReactionClosedError,
+    FormReactionHandlerError,
+    FormReactionRequestError,
     InteractionRequest,
     InteractionResponse,
     InteractionState,
@@ -40,9 +43,6 @@ from tai42_skeleton.interactions.caller_ask import CALLER_ASK_RESOLUTION_REFUSED
 from tai42_skeleton.interactions.continuation import continuation_due_timing, fire_continuation_after_claim
 from tai42_skeleton.interactions.kill import kill_park
 from tai42_skeleton.interactions.reaction import (
-    FormReactionClosedError,
-    FormReactionHandlerError,
-    FormReactionRequestError,
     SubmittedCheckRejectedError,
     enforce_submitted_check,
     react,
@@ -253,11 +253,11 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
                 interaction_id, state.request.answer_format, state.request.format_payload, answer
             )
         except SubmittedCheckRejectedError as exc:
-            raise BadRequestError(str(exc)) from exc
+            raise BadRequestError(exc.reason) from exc
         except FormReactionClosedError as exc:
-            raise ConflictError(str(exc)) from exc
+            raise ConflictError(exc.reason) from exc
         except FormReactionHandlerError as exc:
-            raise UpstreamError(str(exc)) from exc
+            raise UpstreamError(exc.reason) from exc
         response = InteractionResponse(
             interaction_id=interaction_id,
             answer=answer,
@@ -288,7 +288,7 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
         # This door claimed the answer: if the question is an async park, fire its
         # stored continuation ONCE (the shared post-claim seam both answer doors run,
         # so the fire happens exactly once regardless of which door claimed).
-        await fire_continuation_after_claim(r, store, state.request, answer)
+        await fire_continuation_after_claim(r, store, state.request, response)
 
     return {"interaction_id": interaction_id, "status": "answered"}
 
@@ -329,11 +329,11 @@ async def react_interaction(interaction_id: str, event: dict, values: dict) -> d
     try:
         update = await react(interaction_id, event, values)
     except FormReactionClosedError as exc:
-        raise ConflictError(str(exc)) from exc
+        raise ConflictError(exc.reason) from exc
     except FormReactionRequestError as exc:
-        raise BadRequestError(str(exc)) from exc
+        raise BadRequestError(exc.reason) from exc
     except FormReactionHandlerError as exc:
-        raise UpstreamError(str(exc)) from exc
+        raise UpstreamError(exc.reason) from exc
     return {"interaction_id": interaction_id, "update": update}
 
 

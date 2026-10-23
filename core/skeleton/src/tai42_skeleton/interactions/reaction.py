@@ -45,7 +45,11 @@ from tai42_contract.interactions import (
     AnswerFormat,
     FieldChangedEvent,
     FormOption,
+    FormReactionClosedError,
+    FormReactionError,
     FormReactionEvent,
+    FormReactionHandlerError,
+    FormReactionRequestError,
     FormReactions,
     PageAdvancedEvent,
     SubmittedEvent,
@@ -61,22 +65,6 @@ from tai42_skeleton.states.context import state_context
 logger = logging.getLogger(__name__)
 
 _EVENT_ADAPTER: TypeAdapter[FormReactionEvent] = TypeAdapter(FormReactionEvent)
-
-
-class FormReactionError(Exception):
-    """Base for a mid-form reaction that could not complete."""
-
-
-class FormReactionClosedError(FormReactionError):
-    """The interaction is not an OPEN reacting form (missing, answered, or not reacting)."""
-
-
-class FormReactionRequestError(FormReactionError):
-    """The caller's reaction request is malformed (an undeclared event trigger, bad partial values)."""
-
-
-class FormReactionHandlerError(FormReactionError):
-    """The reaction handler raised, missed its deadline, or returned an invalid form update."""
 
 
 class SubmittedCheckRejectedError(FormReactionError):

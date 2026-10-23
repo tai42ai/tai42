@@ -287,7 +287,7 @@ class FakeStatesStore:
         decl, _entry = await self._entry(catalog, state)
         # The real store validates the subject inside the write txn from the locked declaration's
         # subject_kinds; mirror that so the service's admission refusals still fire end to end.
-        await validate_subject_in_txn(list(decl["subject_kinds"]))
+        await validate_subject_in_txn(list(decl["subject_kinds"]), subject)
         self.applied_origins.append(origin)
         # Mirror the store's chokepoint so the service-level provenance test is end to
         # end: compose the state's traced paths from its attachments + templates and stamp
@@ -308,7 +308,7 @@ class FakeStatesStore:
         self.records[(state, subject.target_kind, subject.target_name, subject.kind, subject.key)] = doc
         return (True, doc, 1.0, [])
 
-    async def restore_records(self, state, rows, *, origin, catalog):
+    async def restore_records(self, state, rows, *, origin, catalog, admit_persons_in_txn):
         _decl, entry = await self._entry(catalog, state)
         self.applied_origins.append(origin)
         for row in rows:
@@ -316,7 +316,7 @@ class FakeStatesStore:
             key = (state, row["target_kind"], row["target_name"], row["subject_kind"], row["subject_key"])
             self.records[key] = row["data"]
 
-    async def restore_aliases(self, state, rows):
+    async def restore_aliases(self, state, rows, *, admit_persons_in_txn):
         self.restored_aliases = list(rows)
 
     async def replace(
@@ -333,7 +333,7 @@ class FakeStatesStore:
         check_outbox=True,
     ):
         decl, entry = await self._entry(catalog, state)
-        await validate_subject_in_txn(list(decl["subject_kinds"]))
+        await validate_subject_in_txn(list(decl["subject_kinds"]), subject)
         if validate:
             _validate_document(entry.validator, data)
         self.applied_origins.append(origin)
@@ -355,7 +355,7 @@ class FakeStatesStore:
             del self.records[key]
         return len(victims)
 
-    async def fold_subject(self, state, subject, into, mode, *, origin, catalog):
+    async def fold_subject(self, state, subject, into, mode, *, origin, catalog, validate_subjects_in_txn):
         self.applied_origins.append(origin)
         return {
             "mode": mode,

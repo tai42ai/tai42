@@ -26,6 +26,7 @@ never a flow or engine.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 import pytest
@@ -60,7 +61,11 @@ pytestmark = pytest.mark.needs(
 async def test_tool_target_park_delivers_its_resumed_reply_back_to_the_conversation(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
-    web, _route_name = await open_tool_target_web_visitor(bridge, uniq, "ttdeliver")
+    # The reply carries the late turn's ``$turn.reply_window`` beside the answer: the web channel
+    # has no reply window, so the late reply reads ``none``.
+    web, _route_name = await open_tool_target_web_visitor(
+        bridge, uniq, "ttdeliver", reply_expr="{answer: .result.answer, reply_window: $turn.reply_window} | tojson"
+    )
     marker = uniq("ttdeliver-msg")
     interaction_id = await park_tool_target_message(bridge, web, marker)
 
@@ -80,12 +85,17 @@ async def test_tool_target_park_delivers_its_resumed_reply_back_to_the_conversat
     delivered = await web.frames(until=outbound_message(answer), deadline=40.0)
     out_texts = [data["text"] for event, data in delivered if event == "chat.message" and data["direction"] == "out"]
     assert any(answer in text for text in out_texts), f"the resumed reply was not delivered, saw {out_texts!r}"
+    (late_reply,) = [json.loads(text) for text in out_texts if answer in text]
+    assert late_reply == {"answer": answer, "reply_window": {"state": "none", "closes_at": None}}
 
     # A resumer call OUTSIDE the platform's delivery ladder produces the terminal but delivers
     # NOTHING: an address tool fires only inside the ladder's delivery-fire context. Re-firing the
     # continuation directly returns the same terminal and posts no second reply.
     async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
-        again = await mcp.call_tool("e2e_tool_target_deliver", {"interaction_id": interaction_id, "answer": answer})
+        again = await mcp.call_tool(
+            "e2e_tool_target_deliver",
+            {"interaction_id": interaction_id, "answer": answer, "reply_to": None, "params": None},
+        )
     assert again.data["result"]["answer"] == answer
 
     replay = await web.frames()
@@ -122,3 +132,26 @@ async def test_tool_target_park_non_success_resume_delivers_the_error_notice(
     assert not any(_ABORT_ANSWER in text for text in out_texts), (
         f"the abort terminal leaked a mapped reply: {out_texts!r}"
     )
+
+
+async def test_tool_target_park_non_success_resume_delivers_the_routes_own_error_reply(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    error_reply = "The assistant could not finish that one."
+    web, _route_name = await open_tool_target_web_visitor(bridge, uniq, "tterrtext", reply_texts={"error": error_reply})
+    marker = uniq("tterrtext-msg")
+    interaction_id = await park_tool_target_message(bridge, web, marker)
+
+    # A NON-SUCCESS terminal on a route that words its error reply delivers the route's sentence
+    # in place of the built-in notice.
+    answered = await bridge.api(port=bridge.stack.port_a).post(
+        f"/api/interactions/{interaction_id}/answer", json={"answer": _ABORT_ANSWER}
+    )
+    assert answered["status"] == "answered"
+    fired = await wait_probe_record(bridge, f"tool_target_deliver:{interaction_id}", deadline=20.0)
+    assert fired[0]["status"] == "failed"
+
+    delivered = await web.frames(until=outbound_message(error_reply), deadline=40.0)
+    out_texts = [data["text"] for event, data in delivered if event == "chat.message" and data["direction"] == "out"]
+    assert error_reply in out_texts, f"the route's error reply was not delivered, saw {out_texts!r}"
+    assert not any(ERROR_ANSWER_TEXT in text for text in out_texts), out_texts

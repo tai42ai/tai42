@@ -118,7 +118,7 @@ async def default_mode(route: ConversationRoute, thread_id: str) -> Conversation
     decision covers them all: it defaults to ``manual`` when ANY route the person's
     addresses span defaults to ``manual``, so a linked person is never silently
     agent-served on a channel an operator meant to hold by hand, else ``agent``. A person
-    row that has vanished falls back to the named route's default.
+    row that has vanished, or whose erase has begun, falls back to the named route's default.
     """
     person_id = person_id_of(thread_id)
     if person_id is None:

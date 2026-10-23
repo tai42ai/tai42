@@ -8,10 +8,12 @@ import json
 from tai42_contract.conversations import ConversationAnswer, ThreadQueueOverflowError
 
 from tai42_skeleton.conversations.caps import AddressRateLimitedError
+from tai42_skeleton.conversations.models import PersonThreadClosedError
 from tai42_skeleton.conversations.turn import (
     ApiSubmitResult,
     ConversationRouteResolutionError,
     EventTargetNotToolError,
+    ThreadAddressUnknownError,
     ThreadNotFoundError,
 )
 from tai42_skeleton.operations.errors import NotSupportedError
@@ -32,14 +34,16 @@ def test_turn_status_table_maps_each_failure_to_its_status():
         ConversationRouteResolutionError: 404,
         AddressRateLimitedError: 429,
         ThreadQueueOverflowError: 503,
+        PersonThreadClosedError: 503,
         NotSupportedError: 501,
     } == _TURN_SUBMISSION_STATUS
 
 
-def test_event_status_table_adds_the_two_event_only_terminals():
-    # The event door extends the base table with its own two terminals; every base
-    # mapping is preserved.
+def test_event_status_table_adds_the_event_only_terminals():
+    # The event door extends the base table with its own terminals; every base mapping
+    # is preserved.
     assert _EVENT_SUBMISSION_STATUS[ThreadNotFoundError] == 404
+    assert _EVENT_SUBMISSION_STATUS[ThreadAddressUnknownError] == 400
     assert _EVENT_SUBMISSION_STATUS[EventTargetNotToolError] == 409
     for exc_type, status in _TURN_SUBMISSION_STATUS.items():
         assert _EVENT_SUBMISSION_STATUS[exc_type] == status

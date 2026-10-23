@@ -20,6 +20,7 @@ describe('applyFrame carries a send wording onto the entry', () => {
           submit: null,
           replyHint: null,
           rejected: null,
+          rejectedFinal: null,
         },
       },
     });

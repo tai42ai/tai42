@@ -52,6 +52,8 @@ def captured(monkeypatch):
         caller_ask_landing=None,
         chain_keys=(),
         *,
+        reply_to_medium_message_id,
+        params,
         mark_detached=True,
     ):
         calls.append({"identity": identity, "fingerprint": fingerprint, "answer": answer})

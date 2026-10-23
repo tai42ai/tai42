@@ -14,9 +14,16 @@ import logging
 import time
 
 import pytest
-from tai42_contract.channels import ChannelDeliveryError, ChannelInputError
-from tai42_contract.conversations import AnswerPart, ChannelConversationRoute, ConversationRoute, DeliveryReceipt
+from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelTemplate, SendOutcome
+from tai42_contract.conversations import (
+    AnswerPart,
+    ChannelConversationRoute,
+    ConversationRoute,
+    DeliveryReceipt,
+    ReplyTexts,
+)
 from tai42_contract.interactions.models import MediaItem, MediaKind
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations import delivery as delivery_module
@@ -29,7 +36,7 @@ from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.turn import outcome as outcome_module
 
-from .conftest import FakeManager
+from .conftest import FakeManager, create_record, sent, sent_ids
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 #: Every answer in this module is chunked at this width, so a handful of characters makes
@@ -42,7 +49,7 @@ class WorkerDiedError(RuntimeError):
     ``ChannelDeliveryError``, so the executor does not turn it into a ``failed`` record."""
 
 
-class FakeChannel:
+class FakeChannel(AddressingChannel):
     """Records every chunk it is asked to send. ``crash_on`` abandons the send on the nth
     chunk (a dead worker), ``fail_on`` refuses it the way a provider does with a NON-retryable
     ``ChannelDeliveryError`` (a vendor validation rejection / hard 4xx), ``retryable_fail_on``
@@ -70,7 +77,7 @@ class FakeChannel:
         self._hang_on = hang_on
         self._watch = watch
 
-    async def notify(self, notification) -> list[str]:
+    async def notify(self, notification) -> SendOutcome:
         self.sends.append(notification.message)
         if self._watch is not None:
             watched = self._watch()
@@ -86,7 +93,7 @@ class FakeChannel:
             raise ChannelInputError("the provider cannot render the chunk")
         if self._hang_on is not None and len(self.sends) == self._hang_on:
             await asyncio.Event().wait()
-        return [f"{self._prefix}-{len(self.sends)}"]
+        return self.outcome(notification, [f"{self._prefix}-{len(self.sends)}"])
 
 
 class _FakeChannels:
@@ -185,7 +192,7 @@ def _parts_record(message_id: str, parts: list[AnswerPart]) -> ConversationRecor
     )
 
 
-class MediaFakeChannel:
+class MediaFakeChannel(AddressingChannel):
     """Records the FULL notification of every send (so a test can assert the media it carried)
     and ADVERTISES media support, so the executor's capability guard lets a media part through.
     ``crash_on`` abandons the send on the nth notification (a dead worker), matching
@@ -198,18 +205,18 @@ class MediaFakeChannel:
         self._prefix = prefix
         self._crash_on = crash_on
 
-    async def notify(self, notification) -> list[str]:
+    async def notify(self, notification) -> SendOutcome:
         self.notifications.append(notification)
         if self._crash_on is not None and len(self.notifications) == self._crash_on:
             raise WorkerDiedError("the worker died mid-send")
-        return [f"{self._prefix}-{len(self.notifications)}"]
+        return self.outcome(notification, [f"{self._prefix}-{len(self.notifications)}"])
 
 
 def _wire_channel(monkeypatch, channel) -> None:
     monkeypatch.setattr(delivery_module, "tai42_app", _FakeDeliveryApp(channel))
 
 
-def _channel_route(error_reply_text: str | None = None) -> ConversationRoute:
+def _channel_route(reply_texts: ReplyTexts | None = None) -> ConversationRoute:
     return ChannelConversationRoute(
         route_name="line",
         door="channel",
@@ -219,13 +226,13 @@ def _channel_route(error_reply_text: str | None = None) -> ConversationRoute:
         channel="twilio",
         our_identity="+15550001111",
         execution_key_fingerprint="fp-1",
-        error_reply_text=error_reply_text,
+        reply_texts=reply_texts,
     )
 
 
 class _FakeRouteManager(FakeManager):
     """Resolves the one route the refusal notice looks up; ``route`` is swapped by a test that
-    exercises a route-carried ``error_reply_text``."""
+    exercises a route-carried ``reply_texts.error``."""
 
     def __init__(self, route: ConversationRoute | None) -> None:
         super().__init__()
@@ -238,7 +245,7 @@ class _FakeRouteManager(FakeManager):
 @pytest.fixture(autouse=True)
 def route_manager(monkeypatch, _conversations_env) -> _FakeRouteManager:
     """Wire the could-not-deliver notice's route lookup to a hermetic in-memory route (no
-    ``error_reply_text``, so the notice is the built-in uniform text by default)."""
+    ``reply_texts.error``, so the notice is the built-in uniform text by default)."""
     manager = _FakeRouteManager(_channel_route())
     monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
     return manager
@@ -281,7 +288,7 @@ async def test_a_partial_send_resumes_at_the_first_unsent_chunk(monkeypatch, fak
     chunks. The re-drive must send chunks three and four ONLY — a human must never be
     texted chunk one or two a second time."""
     answer = "aaaaaaaaaabbbbbbbbbbccccccccccdddddddddd"
-    await store.create_record(_record("m-part", answer))
+    await create_record(store, _record("m-part", answer))
 
     dying = FakeChannel("w1", crash_on=3)
     _wire_channel(monkeypatch, dying)
@@ -302,14 +309,14 @@ async def test_a_partial_send_resumes_at_the_first_unsent_chunk(monkeypatch, fak
     record = await _get(store, "m-part")
     assert record.delivery_status is DeliveryStatus.PROVISIONAL
     # The record names every id both workers produced, in send order.
-    assert record.outbound_message_ids == ["w1-1", "w1-2", "w2-1", "w2-2"]
+    assert sent_ids(record) == ["w1-1", "w1-2", "w2-1", "w2-2"]
 
 
 async def test_a_resumed_send_reindexes_what_the_ledger_already_knows(monkeypatch, fake, store):
     """A receipt naming a chunk accepted just before the crash must still resolve to its
     record, even if the crash landed between the ledger append and the reverse index."""
     answer = "aaaaaaaaaabbbbbbbbbb"
-    await store.create_record(_record("m-index", answer))
+    await create_record(store, _record("m-index", answer))
     await ChannelSendLedger(ConversationsSettings()).append("m-index", _CHUNK_CHARS, ["w1-1"])
     assert await store.resolve_outbound("twilio", "w1-1") is None
 
@@ -323,7 +330,7 @@ async def test_a_send_interrupted_after_its_last_chunk_re_sends_nothing(monkeypa
     """The whole answer was already out and only the record write was lost. The re-drive
     sends nothing at all and just closes the record."""
     answer = "aaaaaaaaaabbbbbbbbbb"
-    await store.create_record(_record("m-tail", answer))
+    await create_record(store, _record("m-tail", answer))
     ledger = ChannelSendLedger(ConversationsSettings())
     await ledger.append("m-tail", _CHUNK_CHARS, ["w1-1"])
     await ledger.append("m-tail", _CHUNK_CHARS, ["w1-2"])
@@ -335,11 +342,11 @@ async def test_a_send_interrupted_after_its_last_chunk_re_sends_nothing(monkeypa
     assert channel.sends == []
     record = await _get(store, "m-tail")
     assert record.delivery_status is DeliveryStatus.PROVISIONAL
-    assert record.outbound_message_ids == ["w1-1", "w1-2"]
+    assert sent_ids(record) == ["w1-1", "w1-2"]
 
 
 async def test_a_completed_send_leaves_no_ledger_behind(monkeypatch, fake, store):
-    await store.create_record(_record("m-clean", "aaaaaaaaaabbbbbbbbbb"))
+    await create_record(store, _record("m-clean", "aaaaaaaaaabbbbbbbbbb"))
     _wire_channel(monkeypatch, FakeChannel())
     await delivery_channel_module._deliver_channel(store, await _get(store, "m-clean"), "worker-1")
 
@@ -353,7 +360,7 @@ async def test_a_non_retryable_provider_refusal_is_terminal_and_notifies(monkeyp
     refusing a reachable participant's reply, so the participant IS told the could-not-deliver
     notice after the record is failed."""
     channel = FakeChannel("w1", fail_on=2)
-    await store.create_record(_record("m-refused", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
+    await create_record(store, _record("m-refused", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
     _wire_channel(monkeypatch, channel)
     await delivery_channel_module._deliver_channel(store, await _get(store, "m-refused"), "worker-1")
 
@@ -370,7 +377,7 @@ async def test_a_retryable_provider_refusal_is_terminal_with_no_notice(monkeypat
     boundary the retryable flag draws, matching the transport-exhaustion path. The record is failed
     at once, so the transient fault never spends the whole attempt budget on a re-send."""
     channel = FakeChannel("w1", retryable_fail_on=2)
-    await store.create_record(_record("m-transient", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
+    await create_record(store, _record("m-transient", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
     _wire_channel(monkeypatch, channel)
     await delivery_channel_module._deliver_channel(store, await _get(store, "m-transient"), "worker-1")
 
@@ -388,7 +395,7 @@ async def test_a_permanent_input_refusal_is_terminal_and_notifies_the_participan
     refused the reply, so the participant is told the uniform could-not-deliver notice AFTER the
     record is failed, and the ledger is cleared."""
     channel = FakeChannel("w1", input_fail_on=2)
-    await store.create_record(_record("m-input", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
+    await create_record(store, _record("m-input", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
     _wire_channel(monkeypatch, channel)
     await delivery_channel_module._deliver_channel(store, await _get(store, "m-input"), "worker-1")
 
@@ -399,17 +406,17 @@ async def test_a_permanent_input_refusal_is_terminal_and_notifies_the_participan
     assert channel.sends == ["aaaaaaaaaa", "bbbbbbbbbb", outcome_module._ERROR_ANSWER_TEXT]
 
 
-async def test_a_refusal_notice_uses_the_route_error_reply_text_when_set(monkeypatch, fake, store, route_manager):
-    """The could-not-deliver notice resolves the route's own ``error_reply_text`` when it carries
+async def test_a_refusal_notice_uses_the_route_reply_texts_error_when_set(monkeypatch, fake, store, route_manager):
+    """The could-not-deliver notice resolves the route's own ``reply_texts.error`` when it carries
     one — the SAME uniform text the failed park-completion path delivers — not the built-in
     default."""
     spanish = "Lo sentimos, no pudimos entregar la respuesta."
-    route_manager.route = _channel_route(error_reply_text=spanish)
+    route_manager.route = _channel_route(reply_texts=ReplyTexts(error=spanish))
     monkeypatch.setenv("CONVERSATIONS_MAX_OUTBOUND_CHUNKS", "3")
     store = ConversationRecordStore(ConversationsSettings())
     channel = FakeChannel()
     _wire_channel(monkeypatch, channel)
-    await store.create_record(_record("m-huge-es", "x" * (10 * _CHUNK_CHARS)))
+    await create_record(store, _record("m-huge-es", "x" * (10 * _CHUNK_CHARS)))
 
     await delivery_channel_module._deliver_channel(store, await _get(store, "m-huge-es"), "worker-1")
 
@@ -426,7 +433,7 @@ async def test_a_refusal_notice_that_fails_is_logged_and_leaves_the_record_faile
     # The very first (and only) send — the notice — is refused by the channel.
     channel = FakeChannel(fail_on=1)
     _wire_channel(monkeypatch, channel)
-    await store.create_record(_record("m-huge-noticefail", "x" * (10 * _CHUNK_CHARS)))
+    await create_record(store, _record("m-huge-noticefail", "x" * (10 * _CHUNK_CHARS)))
 
     with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.delivery_channel"):
         await delivery_channel_module._deliver_channel(store, await _get(store, "m-huge-noticefail"), "worker-1")
@@ -470,7 +477,7 @@ async def test_an_operator_hand_send_refusal_sends_no_participant_notice(monkeyp
     turn, so a refusal fails the record loudly with NO could-not-deliver notice — the admin
     failed-delivery listing is the signal, exactly as for a transport exhaustion. The uniform
     notice speaks of "your message", which no operator hand-send answers."""
-    await store.create_record(_unrenderable_record("m-oper", operator_send=True, caller_principal="op-1"))
+    await create_record(store, _unrenderable_record("m-oper", operator_send=True, caller_principal="op-1"))
     channel = FakeChannel("w1")  # text-only: no supports_media_notifications
     _wire_channel(monkeypatch, channel)
 
@@ -484,8 +491,8 @@ async def test_a_completion_delivered_reply_refusal_notifies_the_participant(mon
     """A park-completion resumed reply rides ``origin="operator"`` but IS the participant's own
     turn's deferred answer (``operator_send`` is False, the completion principal authorised it), so
     a reachable-channel refusal notifies the participant just as a live turn reply's does."""
-    await store.create_record(
-        _unrenderable_record("m-cmpl", operator_send=False, caller_principal="system:agent-resume")
+    await create_record(
+        store, _unrenderable_record("m-cmpl", operator_send=False, caller_principal="system:agent-resume")
     )
     channel = FakeChannel("w1")  # text-only: no supports_media_notifications
     _wire_channel(monkeypatch, channel)
@@ -510,7 +517,7 @@ async def test_a_refusal_notice_falls_back_and_logs_when_the_route_lookup_faults
     store = ConversationRecordStore(ConversationsSettings())
     channel = FakeChannel("w1")
     _wire_channel(monkeypatch, channel)
-    await store.create_record(_record("m-routefault", "x" * (10 * _CHUNK_CHARS)))
+    await create_record(store, _record("m-routefault", "x" * (10 * _CHUNK_CHARS)))
 
     with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.delivery_channel"):
         await delivery_channel_module._deliver_channel(store, await _get(store, "m-routefault"), "worker-1")
@@ -523,7 +530,7 @@ async def test_a_refusal_notice_falls_back_and_logs_when_the_route_lookup_faults
 async def test_a_ledger_claiming_more_than_the_answer_refuses_loudly(monkeypatch, fake, store):
     """A ledger that cannot describe this answer is corrupt state, not a resume point —
     resuming from it would send the wrong text."""
-    await store.create_record(_record("m-bad", "short"))
+    await create_record(store, _record("m-bad", "short"))
     await ChannelSendLedger(ConversationsSettings()).append("m-bad", 99, ["w1-1"])
     _wire_channel(monkeypatch, FakeChannel())
 
@@ -538,7 +545,7 @@ async def test_a_multi_part_answer_delivers_each_part_as_its_own_message(monkeyp
     """An ordered multi-message answer sends each part as its own message, in order, and the
     ledger records the part index of each chunk so a resume tells one part's chunks apart."""
     parts = [AnswerPart(message="first"), AnswerPart(message="second"), AnswerPart(message="third")]
-    await store.create_record(_parts_record("m-multi", parts))
+    await create_record(store, _parts_record("m-multi", parts))
     channel = FakeChannel("w1")
     _wire_channel(monkeypatch, channel)
 
@@ -547,14 +554,14 @@ async def test_a_multi_part_answer_delivers_each_part_as_its_own_message(monkeyp
     assert channel.sends == ["first", "second", "third"]
     record = await _get(store, "m-multi")
     assert record.delivery_status is DeliveryStatus.PROVISIONAL
-    assert record.outbound_message_ids == ["w1-1", "w1-2", "w1-3"]
+    assert sent_ids(record) == ["w1-1", "w1-2", "w1-3"]
 
 
 async def test_a_multi_part_send_refreshes_the_lease_before_every_part(monkeypatch, fake, store):
     """Every part's send — like every chunk's — goes out under a freshly refreshed lease, so a
     racing sweep can never reclaim the record mid-sequence and double-send a part."""
     parts = [AnswerPart(message="first"), AnswerPart(message="second"), AnswerPart(message="third")]
-    await store.create_record(_parts_record("m-lease", parts))
+    await create_record(store, _parts_record("m-lease", parts))
     assert await store.claim_delivery("m-lease", time.time() - 300, "worker-1", 120) == 1
 
     observed: list[float] = []
@@ -572,7 +579,7 @@ async def test_a_multi_part_send_stops_and_fails_mid_sequence_on_a_refusal(monke
     loudly, the id of the part that DID land is kept, and the participant is told the uniform
     could-not-deliver notice after the record is failed."""
     parts = [AnswerPart(message="first"), AnswerPart(message="second"), AnswerPart(message="third")]
-    await store.create_record(_parts_record("m-stopfail", parts))
+    await create_record(store, _parts_record("m-stopfail", parts))
     channel = FakeChannel("w1", fail_on=2)
     _wire_channel(monkeypatch, channel)
 
@@ -588,7 +595,7 @@ async def test_a_multi_part_send_resumes_at_the_unsent_part(monkeypatch, fake, s
     """A worker died after part one. The re-drive resumes at part two using the per-part ledger,
     re-sending neither part one nor a partial of it — a human is never texted part one twice."""
     parts = [AnswerPart(message="first"), AnswerPart(message="second"), AnswerPart(message="third")]
-    await store.create_record(_parts_record("m-presume", parts))
+    await create_record(store, _parts_record("m-presume", parts))
 
     # The worker dies on the SECOND send (part 1), after part 0 was ledgered but before part 1
     # is: part 1's chunk is left unledgered so the re-drive re-sends it (a duplicate is the
@@ -612,14 +619,14 @@ async def test_a_multi_part_send_resumes_at_the_unsent_part(monkeypatch, fake, s
     record = await _get(store, "m-presume")
     assert record.delivery_status is DeliveryStatus.PROVISIONAL
     # part 0's id (re-indexed from the ledger) then the resumed parts, in order.
-    assert record.outbound_message_ids == ["w1-1", "w2-1", "w2-2"]
+    assert sent_ids(record) == ["w1-1", "w2-1", "w2-2"]
 
 
 async def test_a_single_plain_text_answer_is_one_chunked_part(monkeypatch, fake, store):
     """A plain single-message answer (answer_parts=None) is sent as:
     one part, chunked by width, its chunks ledgered as part 0 (proven by a mid-send crash below,
     since a completed send clears the ledger)."""
-    await store.create_record(_record("m-single", "aaaaaaaaaabbbbbbbbbb"))  # 20 chars, 2 chunks at width 10
+    await create_record(store, _record("m-single", "aaaaaaaaaabbbbbbbbbb"))  # 20 chars, 2 chunks at width 10
     channel = FakeChannel("w1", crash_on=2)  # crash after the first chunk is ledgered
     _wire_channel(monkeypatch, channel)
     with pytest.raises(WorkerDiedError):
@@ -644,7 +651,7 @@ async def test_a_media_part_is_delivered_with_its_media(monkeypatch, fake, store
     # A short message so this module's width-10 chunking does not split it — the media rides
     # the part's one (final, non-blank) chunk.
     part = AnswerPart(message="look", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")])
-    await store.create_record(_parts_record("m-media", [part]))
+    await create_record(store, _parts_record("m-media", [part]))
     channel = MediaFakeChannel("w1")
     _wire_channel(monkeypatch, channel)
 
@@ -661,7 +668,7 @@ async def test_a_media_part_to_a_text_only_channel_is_refused_terminally(monkeyp
     so the record fails loudly and terminally with the answer NEVER sent — never re-driven forever.
     The channel is reachable, so the participant is told the uniform could-not-deliver notice."""
     part = AnswerPart(message="pic", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")])
-    await store.create_record(_parts_record("m-nocap", [part]))
+    await create_record(store, _parts_record("m-nocap", [part]))
     channel = FakeChannel("w1")  # a text-only channel: no supports_media_notifications
     _wire_channel(monkeypatch, channel)
 
@@ -677,7 +684,7 @@ async def test_a_media_only_part_is_delivered_as_one_text_less_send(monkeypatch,
     message and the media — a caption-less image — and a ledger entry (chars=0) is still written
     so a resume knows it went out. A completed send clears the ledger."""
     part = AnswerPart(media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")])
-    await store.create_record(_parts_record("m-mediaonly", [part]))
+    await create_record(store, _parts_record("m-mediaonly", [part]))
     channel = MediaFakeChannel("w1")
     _wire_channel(monkeypatch, channel)
 
@@ -689,7 +696,7 @@ async def test_a_media_only_part_is_delivered_as_one_text_less_send(monkeypatch,
     record = await _get(store, "m-mediaonly")
     assert record.delivery_status is DeliveryStatus.PROVISIONAL
     assert record.answer == ""  # an all-media answer joins to the empty string
-    assert record.outbound_message_ids == ["w1-1"]
+    assert sent_ids(record) == ["w1-1"]
     assert await ChannelSendLedger(ConversationsSettings()).sent_chunks("m-mediaonly") == []
 
 
@@ -702,7 +709,7 @@ async def test_an_ordered_text_media_text_answer_delivers_three_sends_in_order(m
         AnswerPart(media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")]),
         AnswerPart(message="three"),
     ]
-    await store.create_record(_parts_record("m-tmt", parts))
+    await create_record(store, _parts_record("m-tmt", parts))
     channel = MediaFakeChannel("w1")
     _wire_channel(monkeypatch, channel)
 
@@ -716,7 +723,7 @@ async def test_an_ordered_text_media_text_answer_delivers_three_sends_in_order(m
     record = await _get(store, "m-tmt")
     assert record.delivery_status is DeliveryStatus.PROVISIONAL
     assert record.answer == "one\n\nthree"  # media-only part contributes nothing to the joined text
-    assert record.outbound_message_ids == ["w1-1", "w1-2", "w1-3"]
+    assert sent_ids(record) == ["w1-1", "w1-2", "w1-3"]
 
 
 async def test_a_media_only_part_is_not_re_sent_on_resume(monkeypatch, fake, store):
@@ -728,7 +735,7 @@ async def test_a_media_only_part_is_not_re_sent_on_resume(monkeypatch, fake, sto
         AnswerPart(media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")]),
         AnswerPart(message="three"),
     ]
-    await store.create_record(_parts_record("m-mresume", parts))
+    await create_record(store, _parts_record("m-mresume", parts))
 
     # Crash on the THIRD send (part 2), after part 0 and the media-only part 1 are ledgered.
     dying = MediaFakeChannel("w1", crash_on=3)
@@ -747,7 +754,7 @@ async def test_a_media_only_part_is_not_re_sent_on_resume(monkeypatch, fake, sto
     assert [n.message for n in resuming.notifications] == ["three"]  # part 0 and the media-only not re-sent
     record = await _get(store, "m-mresume")
     assert record.delivery_status is DeliveryStatus.PROVISIONAL
-    assert record.outbound_message_ids == ["w1-1", "w1-2", "w2-1"]
+    assert sent_ids(record) == ["w1-1", "w1-2", "w2-1"]
 
 
 async def test_a_whitespace_tail_resume_of_a_text_part_sends_nothing(monkeypatch, fake, store):
@@ -757,7 +764,7 @@ async def test_a_whitespace_tail_resume_of_a_text_part_sends_nothing(monkeypatch
     NOTHING — never a blank ``ChannelNotification("   ")``, which the contract rejects
     (message-non-blank), an uncaught ValidationError that would wedge the record permanently."""
     part = AnswerPart(message="aaaaaaaaaa   ")  # 10 content chars + 3 trailing spaces
-    await store.create_record(_parts_record("m-wtail", [part]))
+    await create_record(store, _parts_record("m-wtail", [part]))
     # The content chunk already went out and was ledgered (part 0, chars=10) pre-crash; the
     # whitespace tail's ledger-skip never happened (the crash beat it).
     await ChannelSendLedger(ConversationsSettings()).append("m-wtail", 10, ["w1-1"], part=0)
@@ -769,7 +776,7 @@ async def test_a_whitespace_tail_resume_of_a_text_part_sends_nothing(monkeypatch
     assert channel.sends == []  # the whitespace tail is ledger-skip, never a blank send
     record = await _get(store, "m-wtail")
     assert record.delivery_status is DeliveryStatus.PROVISIONAL  # completes cleanly, not wedged
-    assert record.outbound_message_ids == ["w1-1"]
+    assert sent_ids(record) == ["w1-1"]
 
 
 async def test_a_whitespace_tail_resume_of_a_media_part_does_not_re_send_media(monkeypatch, fake, store):
@@ -781,7 +788,7 @@ async def test_a_whitespace_tail_resume_of_a_media_part_does_not_re_send_media(m
         message="aaaaaaaaaa   ",
         media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")],
     )
-    await store.create_record(_parts_record("m-wmedia", [part]))
+    await create_record(store, _parts_record("m-wmedia", [part]))
     # The content chunk (carrying the media, final=True) already went out and was ledgered.
     await ChannelSendLedger(ConversationsSettings()).append("m-wmedia", 10, ["w1-1"], part=0)
 
@@ -792,14 +799,14 @@ async def test_a_whitespace_tail_resume_of_a_media_part_does_not_re_send_media(m
     assert channel.notifications == []  # the media is never re-sent on the whitespace tail
     record = await _get(store, "m-wmedia")
     assert record.delivery_status is DeliveryStatus.PROVISIONAL
-    assert record.outbound_message_ids == ["w1-1"]
+    assert sent_ids(record) == ["w1-1"]
 
 
 async def test_a_ledger_entry_without_a_part_reads_as_part_zero(monkeypatch, fake, store):
     """A ledger entry written before the ``part`` field existed names a single-part answer,
     so it reads as part 0 — a single-part answer whose first chunk was ledgered pre-upgrade
     resumes cleanly at its remainder, never re-sending the pre-upgrade chunk."""
-    await store.create_record(_record("m-f5", "aaaaaaaaaabbbbbbbbbb"))  # 20 chars, 2 chunks at width 10
+    await create_record(store, _record("m-f5", "aaaaaaaaaabbbbbbbbbb"))  # 20 chars, 2 chunks at width 10
     # A legacy entry: no "part" key at all.
     key = ConversationsSettings().chunk_ledger_key("m-f5")
     fake._lists[key] = [json.dumps({"chars": 10, "outbound_ids": ["w1-1"]})]
@@ -820,7 +827,7 @@ async def test_every_chunk_goes_out_under_a_live_lease(monkeypatch, fake, store)
     """EVERY chunk — the first one included — must be in flight under a lease this worker
     holds, or the sweep can reclaim the record while a chunk is still going out and both
     workers send it."""
-    await store.create_record(_record("m-long", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
+    await create_record(store, _record("m-long", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
     # The sender's own lease, taken long enough ago that it has ALREADY lapsed: only the
     # per-chunk refresh can carry it through the send.
     assert await store.claim_delivery("m-long", time.time() - 300, "worker-1", 120) == 1
@@ -841,7 +848,7 @@ async def test_a_chunk_the_provider_never_answers_is_left_unledgered(monkeypatch
     the cheap side) instead of skipping text that may never have gone out."""
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_SEND_TIMEOUT_SECONDS", "0.05")
     store = ConversationRecordStore(ConversationsSettings())
-    await store.create_record(_record("m-hang", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
+    await create_record(store, _record("m-hang", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
 
     channel = FakeChannel("w1", hang_on=2)
     _wire_channel(monkeypatch, channel)
@@ -867,7 +874,7 @@ async def test_a_send_timeout_at_or_above_the_lease_is_refused(monkeypatch):
 async def test_a_send_in_flight_holds_the_record_against_a_racing_sweep(monkeypatch, fake, store):
     """The refreshed lease is what the sweep actually respects: a sweep pass over a record
     somebody is mid-send on claims nothing and sends nothing."""
-    await store.create_record(_record("m-race", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
+    await create_record(store, _record("m-race", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
     assert await store.claim_delivery("m-race", time.time() - 300, "worker-1", 120) == 1
 
     hanging = FakeChannel("w1", hang_on=3)
@@ -897,7 +904,7 @@ async def test_a_send_in_flight_holds_the_record_against_a_racing_sweep(monkeypa
 async def test_a_send_stops_when_it_loses_the_lease_mid_flight(monkeypatch, fake, store):
     """Another worker takes the record over while chunk one is in flight. The sender must
     stop there rather than keep texting a human under an authority it no longer holds."""
-    await store.create_record(_record("m-lost", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
+    await create_record(store, _record("m-lost", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
     assert await store.claim_delivery("m-lost", time.time(), "worker-1", 120) == 1
 
     async def _taken_over() -> None:
@@ -920,7 +927,7 @@ async def test_a_worker_that_lost_its_lease_cannot_terminalise_the_record(monkey
     """The stale-terminal clobber: a worker whose lease lapsed and was taken over raises a
     provider refusal LATE. Its ``failed`` write must not overwrite the holder's record, and
     it must not clear the ledger the holder is resuming from."""
-    await store.create_record(_record("m-stale", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
+    await create_record(store, _record("m-stale", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
     assert await store.claim_delivery("m-stale", time.time(), "worker-1", 120) == 1
 
     async def _taken_over() -> None:
@@ -943,7 +950,7 @@ async def test_a_mid_send_receipt_is_parked_and_applied_when_the_send_completes(
     going out — a sub-second window Twilio routinely hits. The receipt is PARKED on the
     in-flight record (the door acks, no raise) and applied by the completing send, never
     truncating the rest of the answer."""
-    await store.create_record(_record("m-early", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
+    await create_record(store, _record("m-early", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
     assert await store.claim_delivery("m-early", time.time(), "worker-1", 120) == 1
 
     async def _receipt_arrives() -> None:
@@ -971,12 +978,12 @@ async def test_a_mid_send_receipt_is_parked_and_applied_when_the_send_completes(
 async def test_a_stale_failed_write_cannot_undo_a_completed_send(monkeypatch, fake, store):
     """The other half of the clobber: the answer is fully out and ``provisional``, so a
     late ``failed`` write from a worker that no longer owns the record is refused."""
-    await store.create_record(_record("m-done", "aaaaaaaaaabbbbbbbbbb"))
+    await create_record(store, _record("m-done", "aaaaaaaaaabbbbbbbbbb"))
     _wire_channel(monkeypatch, FakeChannel("w2"))
     await delivery_channel_module._deliver_channel(store, await _get(store, "m-done"), "worker-2")
     assert (await _get(store, "m-done")).delivery_status is DeliveryStatus.PROVISIONAL
 
-    assert await store.mark_failed("m-done", 1, time.time(), "worker-1") == -2
+    assert await store.mark_failed("m-done", 1, time.time(), "worker-1", sends=[]) == -2
     assert (await _get(store, "m-done")).delivery_status is DeliveryStatus.PROVISIONAL
 
 
@@ -986,7 +993,7 @@ async def test_a_stale_failed_write_cannot_undo_a_completed_send(monkeypatch, fa
 async def test_a_corrupt_ledger_drives_the_record_terminal(monkeypatch, fake, store):
     """A ledger that cannot describe the answer can never resume, so the record must reach
     a terminal state: left pending_delivery it is re-driven every lease expiry forever."""
-    await store.create_record(_record("m-bad", "short"))
+    await create_record(store, _record("m-bad", "short"))
     await ChannelSendLedger(ConversationsSettings()).append("m-bad", 99, ["w1-1"])
     _wire_channel(monkeypatch, FakeChannel())
 
@@ -1006,7 +1013,7 @@ async def test_a_provisional_record_is_not_re_sent_by_a_second_deliver(monkeypat
     whole answer to a human a second time."""
     channel = FakeChannel("w1")
     _wire_channel(monkeypatch, channel)
-    await store.create_record(_record("m-prov2", "aaaaaaaaaabbbbbbbbbb"))
+    await create_record(store, _record("m-prov2", "aaaaaaaaaabbbbbbbbbb"))
     await delivery_channel_module._deliver_channel(store, await _get(store, "m-prov2"), "worker-1")
     assert channel.sends == ["aaaaaaaaaa", "bbbbbbbbbb"]
     assert (await _get(store, "m-prov2")).delivery_status is DeliveryStatus.PROVISIONAL
@@ -1024,8 +1031,8 @@ async def test_deliver_refuses_a_record_that_is_not_pending_after_the_claim(monk
     pending_delivery, deliver() refuses loudly rather than re-sending a fully sent answer."""
     channel = FakeChannel()
     _wire_channel(monkeypatch, channel)
-    await store.create_record(_record("m-guard", "the answer"))
-    await store.mark_provisional("m-guard", ["out-1"], 1, time.time(), "tok")
+    await create_record(store, _record("m-guard", "the answer"))
+    await store.mark_provisional("m-guard", sent("out-1"), 1, time.time(), "tok")
 
     async def _admit(self, message_id, now, token, lease):
         return 1
@@ -1042,7 +1049,7 @@ async def test_a_transient_ledger_read_error_leaves_the_record_deliverable(monke
     sweep re-drives, never terminal-fail a deliverable answer at attempt one."""
     import redis.exceptions
 
-    await store.create_record(_record("m-blip", "aaaaaaaaaabbbbbbbbbb"))
+    await create_record(store, _record("m-blip", "aaaaaaaaaabbbbbbbbbb"))
     _wire_channel(monkeypatch, FakeChannel())
 
     async def _boom(self, message_id):
@@ -1061,7 +1068,7 @@ async def test_a_transient_ledger_read_error_leaves_the_record_deliverable(monke
 async def test_an_unparseable_ledger_entry_drives_the_record_terminal(monkeypatch, fake, store):
     """A stored entry that cannot be decoded is a record-shaped fault, not a transient one:
     the record reaches a terminal ``failed`` rather than being re-driven forever."""
-    await store.create_record(_record("m-garbled", "aaaaaaaaaabbbbbbbbbb"))
+    await create_record(store, _record("m-garbled", "aaaaaaaaaabbbbbbbbbb"))
     fake._lists[ConversationsSettings().chunk_ledger_key("m-garbled")] = ["{not valid json"]
     _wire_channel(monkeypatch, FakeChannel())
 
@@ -1075,7 +1082,7 @@ async def test_an_unparseable_ledger_entry_drives_the_record_terminal(monkeypatc
 async def test_a_corrupt_ledger_fault_under_a_foreign_lease_spares_the_ledger(monkeypatch, fake, store):
     """The corrupt-ledger fail path honors the foreign-lease guard: a worker whose lease was
     taken over may not clear the ledger the new holder is resuming from."""
-    await store.create_record(_record("m-race2", "short"))
+    await create_record(store, _record("m-race2", "short"))
     ledger = ChannelSendLedger(ConversationsSettings())
     await ledger.append("m-race2", 99, ["w1-1"])
     # A different worker holds the live lease now.
@@ -1094,12 +1101,12 @@ async def test_a_chunk_is_ledgered_before_it_is_reverse_indexed(monkeypatch, fak
     """The load-bearing write order: a crash between the ledger append and the reverse index
     must leave the chunk LEDGERED, so a re-drive resumes after it and never re-sends it.
     Swapping the two calls leaves the sent chunk unledgered and this test goes red."""
-    await store.create_record(_record("m-order", "aaaaaaaaaabbbbbbbbbb"))
+    await create_record(store, _record("m-order", "aaaaaaaaaabbbbbbbbbb"))
     channel = FakeChannel("w1")
     _wire_channel(monkeypatch, channel)
     index_outbound = ConversationRecordStore.index_outbound
 
-    async def _raise_first_time(self, channel_name, outbound_ids, message_id):
+    async def _raise_first_time(self, channel_name, our_identity, client_address, outbound_ids, message_id):
         raise RuntimeError("crash between the ledger and the reverse index")
 
     monkeypatch.setattr(ConversationRecordStore, "index_outbound", _raise_first_time)
@@ -1116,7 +1123,7 @@ async def test_a_chunk_is_ledgered_before_it_is_reverse_indexed(monkeypatch, fak
 async def test_a_whitespace_only_chunk_is_ledgered_and_never_sent(monkeypatch, fake, store):
     """A hard cut can leave a chunk of pure whitespace, which the channel contract refuses.
     It is accounted in the ledger and skipped, so the send still completes."""
-    await store.create_record(_record("m-ws", "A" * _CHUNK_CHARS + "\n"))
+    await create_record(store, _record("m-ws", "A" * _CHUNK_CHARS + "\n"))
     channel = FakeChannel("w1")
     _wire_channel(monkeypatch, channel)
 
@@ -1135,7 +1142,7 @@ async def test_an_answer_over_the_fan_out_cap_is_refused_as_an_error_outcome(mon
     channel = FakeChannel()
     _wire_channel(monkeypatch, channel)
     # 100 unbreakable characters at width 10 split into 10 chunks, over the cap of 3.
-    await store.create_record(_record("m-huge", "x" * (10 * _CHUNK_CHARS)))
+    await create_record(store, _record("m-huge", "x" * (10 * _CHUNK_CHARS)))
 
     await delivery_channel_module._deliver_channel(store, await _get(store, "m-huge"), "worker-1")
 
@@ -1156,7 +1163,7 @@ async def test_a_partial_send_is_not_refused_when_the_cap_is_lowered_mid_flight(
     store = ConversationRecordStore(ConversationsSettings())
     # 4 chunks at width 10, over the newly-lowered cap of 3.
     answer = "aaaaaaaaaabbbbbbbbbbccccccccccdddddddddd"
-    await store.create_record(_record("m-resume", answer))
+    await create_record(store, _record("m-resume", answer))
     ledger = ChannelSendLedger(ConversationsSettings())
     await ledger.append("m-resume", _CHUNK_CHARS, ["w1-1"])
     await ledger.append("m-resume", _CHUNK_CHARS, ["w1-2"])
@@ -1169,4 +1176,202 @@ async def test_a_partial_send_is_not_refused_when_the_cap_is_lowered_mid_flight(
     assert resuming.sends == ["cccccccccc", "dddddddddd"]
     record = await _get(store, "m-resume")
     assert record.delivery_status is DeliveryStatus.PROVISIONAL
-    assert record.outbound_message_ids == ["w1-1", "w1-2", "w2-1", "w2-2"]
+    assert sent_ids(record) == ["w1-1", "w1-2", "w2-1", "w2-2"]
+
+
+# -- every template or form part is held to the channel's own checks before the first chunk ----
+
+
+class FormFakeChannel(AddressingChannel):
+    """Advertises form and template notifications and records the FULL notification of every
+    send. ``form_hook`` / ``template_hook``, when set, become the channel's ``validate_form_schema``
+    / ``validate_template``; every call to either is recorded in ``hook_calls``."""
+
+    supports_form_notifications = True
+    supports_template_notifications = True
+
+    def __init__(self, *, form_hook=None, template_hook=None) -> None:
+        self.notifications: list = []
+        self.hook_calls: list[tuple] = []
+        if form_hook is not None:
+
+            def validate_form_schema(schema, question):
+                self.hook_calls.append(("form", schema, question))
+                form_hook(schema, question)
+
+            self.validate_form_schema = validate_form_schema
+        if template_hook is not None:
+
+            def validate_template(template):
+                self.hook_calls.append(("template", template))
+                template_hook(template)
+
+            self.validate_template = validate_template
+
+    @property
+    def sends(self) -> list[str]:
+        return [notification.message for notification in self.notifications]
+
+    async def notify(self, notification) -> SendOutcome:
+        self.notifications.append(notification)
+        return self.outcome(notification, [f"out-{len(self.notifications)}"])
+
+
+_UNDRAWABLE_FORM = {"type": "object", "properties": {"address": {"type": "object"}}}
+_DRAWABLE_FORM = {"type": "object", "properties": {"city": {"type": "string"}}}
+
+
+def _question_limit(limit: int):
+    def hook(schema, question):
+        if len(question) > limit:
+            raise ValueError(f"form question exceeds {limit} characters")
+
+    return hook
+
+
+def _refuse_reject_parameter(template):
+    if template.parameters and "reject" in template.parameters:
+        raise ValueError("template parameter 'reject' has no slot on this channel")
+
+
+async def _assert_refused_before_any_send(store, channel, message_id: str, caplog, *needles: str) -> None:
+    assert channel.sends == [outcome_module._ERROR_ANSWER_TEXT]
+    assert (await _get(store, message_id)).delivery_status is DeliveryStatus.FAILED
+    assert await ChannelSendLedger(ConversationsSettings()).sent_chunks(message_id) == []
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any(all(needle in line for needle in needles) for line in errors), errors
+
+
+async def test_a_form_part_outside_the_channel_subset_is_refused_before_any_send(monkeypatch, fake, store, caplog):
+    """A form part the channel cannot draw fails the whole reply before its first chunk: the text
+    part before it is never sent, only the uniform notice is, and the log names the property."""
+    parts = [AnswerPart(message="hello"), AnswerPart(message="fill this in", schema=_UNDRAWABLE_FORM)]
+    await create_record(store, _parts_record("m-undrawable", parts))
+    channel = FormFakeChannel()
+    _wire_channel(monkeypatch, channel)
+
+    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.delivery_channel"):
+        await delivery_channel_module._deliver_channel(store, await _get(store, "m-undrawable"), "worker-1")
+
+    await _assert_refused_before_any_send(store, channel, "m-undrawable", caplog, "part 2", "'address'")
+
+
+async def test_a_form_part_over_the_channel_hook_limit_is_refused_before_any_send(monkeypatch, fake, caplog):
+    """The channel's own ``validate_form_schema`` limit holds on a conversation part: a question
+    over it fails the reply before any chunk, with the hook's message in the log."""
+    monkeypatch.setenv("CONVERSATIONS_MAX_MESSAGE_CHARS", '{"twilio": 100}')
+    store = ConversationRecordStore(ConversationsSettings())
+    parts = [AnswerPart(message="hello"), AnswerPart(message="fill this in", schema=_DRAWABLE_FORM)]
+    await create_record(store, _parts_record("m-hooklimit", parts))
+    channel = FormFakeChannel(form_hook=_question_limit(10))
+    _wire_channel(monkeypatch, channel)
+
+    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.delivery_channel"):
+        await delivery_channel_module._deliver_channel(store, await _get(store, "m-hooklimit"), "worker-1")
+
+    await _assert_refused_before_any_send(
+        store, channel, "m-hooklimit", caplog, "part 2", "form question exceeds 10 characters"
+    )
+
+
+async def test_the_form_hook_judges_the_final_chunk_that_carries_the_form(monkeypatch, fake, store):
+    """The hook's question is the exact message the schema rides: the part's FINAL chunk at the
+    channel's width, so the checked text and the sent text are the same."""
+    parts = [AnswerPart(message="fill this in", schema=_DRAWABLE_FORM)]
+    await create_record(store, _parts_record("m-finalchunk", parts))
+    channel = FormFakeChannel(form_hook=lambda schema, question: None)
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_channel_module._deliver_channel(store, await _get(store, "m-finalchunk"), "worker-1")
+
+    assert channel.hook_calls == [("form", _DRAWABLE_FORM, " in")]
+    assert channel.sends == ["fill this", " in"]
+    assert channel.notifications[-1].schema == _DRAWABLE_FORM
+
+
+async def test_an_undrawable_part_notice_is_the_route_reply_texts_error(monkeypatch, fake, store, route_manager):
+    """The notice for an undrawable part is the route's ``reply_texts.error`` when it sets one."""
+    spanish = "Lo sentimos, no pudimos entregar la respuesta."
+    route_manager.route = _channel_route(reply_texts=ReplyTexts(error=spanish))
+    parts = [AnswerPart(message="hello"), AnswerPart(message="fill this in", schema=_UNDRAWABLE_FORM)]
+    await create_record(store, _parts_record("m-undrawable-es", parts))
+    channel = FormFakeChannel()
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_channel_module._deliver_channel(store, await _get(store, "m-undrawable-es"), "worker-1")
+
+    assert channel.sends == [spanish]
+    assert (await _get(store, "m-undrawable-es")).delivery_status is DeliveryStatus.FAILED
+
+
+async def test_a_drawable_form_part_is_sent_unchanged(monkeypatch, fake, store):
+    """A form part inside the subset and the hook's limits goes out as before, the schema on its
+    final chunk."""
+    parts = [AnswerPart(message="hello"), AnswerPart(message="city?", schema=_DRAWABLE_FORM)]
+    await create_record(store, _parts_record("m-drawable", parts))
+    channel = FormFakeChannel(form_hook=_question_limit(10))
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_channel_module._deliver_channel(store, await _get(store, "m-drawable"), "worker-1")
+
+    assert channel.sends == ["hello", "city?"]
+    assert channel.notifications[0].schema is None
+    assert channel.notifications[1].schema == _DRAWABLE_FORM
+    assert (await _get(store, "m-drawable")).delivery_status is DeliveryStatus.PROVISIONAL
+
+
+async def test_a_hook_fault_that_is_not_a_refusal_propagates_and_leaves_the_record_deliverable(
+    monkeypatch, fake, store
+):
+    """Only a hook's ``ValueError`` is a refusal. Any other exception propagates like every other
+    fault of the send, counted against ``delivery_max_attempts``, and the record is not failed."""
+
+    def broken_hook(schema, question):
+        raise RuntimeError("the channel's hook is broken")
+
+    parts = [AnswerPart(message="hello"), AnswerPart(message="city?", schema=_DRAWABLE_FORM)]
+    await create_record(store, _parts_record("m-hookfault", parts))
+    channel = FormFakeChannel(form_hook=broken_hook)
+    _wire_channel(monkeypatch, channel)
+
+    with pytest.raises(RuntimeError, match="hook is broken"):
+        await delivery_channel_module._deliver_channel(store, await _get(store, "m-hookfault"), "worker-1")
+
+    record = await _get(store, "m-hookfault")
+    assert record.delivery_status is DeliveryStatus.PENDING_DELIVERY
+    assert record.attempts == 1
+    assert channel.sends == []
+
+
+async def test_a_template_part_the_channel_cannot_map_is_refused_before_any_send(monkeypatch, fake, store, caplog):
+    """A template part whose parameters the channel's ``validate_template`` refuses fails the
+    reply before its first chunk, with the hook's message in the log."""
+    template = ChannelTemplate(name="status_update", language="en_US", parameters={"reject": True})
+    parts = [AnswerPart(message="hello"), AnswerPart(message="your update is ready", template=template)]
+    await create_record(store, _parts_record("m-badtemplate", parts))
+    channel = FormFakeChannel(template_hook=_refuse_reject_parameter)
+    _wire_channel(monkeypatch, channel)
+
+    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.delivery_channel"):
+        await delivery_channel_module._deliver_channel(store, await _get(store, "m-badtemplate"), "worker-1")
+
+    await _assert_refused_before_any_send(
+        store, channel, "m-badtemplate", caplog, "part 2", "template parameter 'reject' has no slot"
+    )
+
+
+async def test_a_template_part_the_hook_accepts_is_sent_unchanged(monkeypatch, fake, store):
+    """A template part the hook accepts goes out with the template on its final chunk, the hook
+    called once with that template."""
+    template = ChannelTemplate(name="status_update", language="en_US", parameters={"ref": "A-42"})
+    parts = [AnswerPart(message="ready", template=template)]
+    await create_record(store, _parts_record("m-goodtemplate", parts))
+    channel = FormFakeChannel(template_hook=_refuse_reject_parameter)
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_channel_module._deliver_channel(store, await _get(store, "m-goodtemplate"), "worker-1")
+
+    assert channel.hook_calls == [("template", template)]
+    assert channel.sends == ["ready"]
+    assert channel.notifications[0].template == template
+    assert (await _get(store, "m-goodtemplate")).delivery_status is DeliveryStatus.PROVISIONAL

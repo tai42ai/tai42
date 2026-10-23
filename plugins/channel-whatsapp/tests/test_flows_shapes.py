@@ -12,7 +12,13 @@ from tai42_contract.interactions import FormShapeKind
 from tai42_kit.interactions import FORMAT_PATTERNS
 
 from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow, form_needs_endpoint
-from tai42_channel_whatsapp.flows_shapes import ERROR_MESSAGE_MAX_CHARS, channel_word, helper_word
+from tai42_channel_whatsapp.flows_shapes import (
+    ERROR_MESSAGE_MAX_CHARS,
+    _keyword_is_native,
+    channel_word,
+    field_needs_endpoint,
+    helper_word,
+)
 
 
 def _schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -323,6 +329,35 @@ def test_a_range_merged_into_one_control_is_native_and_a_split_one_is_not():
     assert form_needs_endpoint(_schema(pair), split) is True
 
 
+_TIMED_PAIR: dict[str, Any] = {
+    "start": {"type": "string", "format": "date"},
+    "end": {"type": "string", "format": "date", "rangeStart": "start"},
+    "start_time": {"type": "string", "format": "time", "timeOf": "start"},
+    "end_time": {"type": "string", "format": "time", "timeOf": "end"},
+}
+
+_TIME_CONTROL: dict[str, Any] = {"type": "TextInput", "input-type": "text"}
+
+
+def test_time_of_on_the_end_time_is_a_shape_meta_does_not_check():
+    # No Meta control compares two fields, so the END time's order against the START time is the endpoint's.
+    end_time = _TIMED_PAIR["end_time"]
+    assert _keyword_is_native("timeOf", end_time, _TIME_CONTROL, False, _TIMED_PAIR) is False
+
+
+def test_time_of_on_the_start_time_only_draws_the_field():
+    start_time = _TIMED_PAIR["start_time"]
+    assert _keyword_is_native("timeOf", start_time, _TIME_CONTROL, False, _TIMED_PAIR) is True
+    # The START time still needs the endpoint, through its ``format: time``.
+    assert field_needs_endpoint(start_time, _TIME_CONTROL, False, _TIMED_PAIR) is True
+    assert field_needs_endpoint({"type": "string", "title": "T"}, _TIME_CONTROL, False, _TIMED_PAIR) is False
+
+
+def test_a_form_whose_only_paired_time_is_the_starts_is_endpoint_driven():
+    schema = _schema({name: prop for name, prop in _TIMED_PAIR.items() if name != "end_time"})
+    assert form_needs_endpoint(schema) is True
+
+
 def test_a_reacting_form_is_endpoint_driven():
     schema = _schema({"size": {"type": "string", "enum": ["s", "m"]}})
     assert form_needs_endpoint(schema, reactions={"field_changed": ["size"]}) is True
@@ -506,6 +541,14 @@ def test_every_kind_has_a_helper_word_within_the_helper_text_cap(kind: FormShape
 )
 def test_a_format_word_names_the_expected_form(fmt: str, word: str):
     assert channel_word(FormShapeKind.FORMAT, {"format": fmt}) == word
+
+
+def test_the_range_order_word_reads_the_order_by_date_or_by_time():
+    assert channel_word(FormShapeKind.RANGE_ORDER, {"by": "date"}) == "End is before start"
+    assert channel_word(FormShapeKind.RANGE_ORDER, {}) == "End is before start"
+    word = channel_word(FormShapeKind.RANGE_ORDER, {"by": "time"})
+    assert word == "End time is before start"
+    assert len(word) <= ERROR_MESSAGE_MAX_CHARS["TextInput"]
 
 
 @pytest.mark.parametrize(("json_type", "word"), [("integer", "Enter a whole number"), ("number", "Enter a number")])

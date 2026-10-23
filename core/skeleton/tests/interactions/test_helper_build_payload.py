@@ -132,6 +132,7 @@ def test_delivery_frame_carries_reactions():
     frame = build_delivery_frame(
         interaction_id="i1",
         recipient=None,
+        sensitive=False,
         question="?",
         fmt=AnswerFormat.FORM,
         options=None,
@@ -273,3 +274,17 @@ async def test_ask_refuses_a_nested_pattern_properties_key_naming_its_property(e
         ValueError, match=re.escape("answer schema property 'rows' breaks the JSON Schema rules: '[' is not a 'regex'")
     ):
         await ask("q", schema=schema, **extra)
+
+
+@pytest.mark.parametrize(
+    ("prop", "message"),
+    [
+        ({"type": "string", "format": "date", "rangeStart": "ghost"}, "rangeStart names undeclared property 'ghost'"),
+        ({"type": "string", "format": "date", "minDate": "soon"}, "minDate must be a YYYY-MM-DD date, got 'soon'"),
+        ({"type": "string", "timeOf": "end"}, "carries timeOf but is not a time property"),
+    ],
+)
+async def test_ask_refuses_an_inbox_form_with_a_nonsensical_date_key(prop, message):
+    # The inbox ask is held to the same build-time date rules as a form asked over a channel.
+    with pytest.raises(ValueError, match=re.escape(f"form schema property 'end' {message}")):
+        await ask("q", answer_format="form", schema={"type": "object", "properties": {"end": prop}})

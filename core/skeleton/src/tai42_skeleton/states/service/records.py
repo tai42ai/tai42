@@ -24,6 +24,7 @@ from tai42_contract.states.errors import (
 )
 from tai42_contract.states.models import (
     MAX_RETENTION_DAYS,
+    PERSON_KIND,
     ApplyResult,
     CompletedOrigin,
     StateBatchWrite,
@@ -134,15 +135,19 @@ class _RecordMixin(_StatesServiceBase):
         origin: CompletedOrigin,
         conn: AsyncConnection[Any] | None = None,
         validate: bool = True,
+        admit_erasing: bool = False,
     ) -> StateRecord:
         """The store replace under an already-completed origin; ``validate=False`` leaves the check to the caller.
 
         The subject is admitted inside the write transaction from the locked declaration's kinds, so a
         replay after the state was re-declared is refused by the declaration it would land under.
+        ``admit_erasing`` is the outbox replay's: a person under its erase mark is admitted.
         """
 
-        async def _validate_subject_in_txn(subject_kinds: list[str]) -> None:
-            await self._validate_subject_admitted(subject_kinds, state, subject)
+        async def _validate_subject_in_txn(subject_kinds: list[str], canonical: StateSubject) -> None:
+            await self._validate_written_subject_admitted(
+                subject_kinds, state, subject, canonical, admit_erasing=admit_erasing
+            )
 
         await self._store.replace(
             state,
@@ -234,16 +239,22 @@ class _RecordMixin(_StatesServiceBase):
         origin: CompletedOrigin,
         conn: AsyncConnection[Any] | None = None,
         validate: bool = True,
+        admit_erasing: bool = False,
     ) -> ApplyResult:
-        """The store apply under an already-completed origin; ``validate=False`` leaves the check to the caller."""
+        """The store apply under an already-completed origin; ``validate=False`` leaves the check to the caller.
+
+        ``admit_erasing`` is the outbox replay's: a person under its erase mark is admitted.
+        """
         if not ops:
             return ApplyResult(applied=False, data=None, seq=None, skipped=[])
         for i, op in enumerate(ops):
             validate_op(op, where=f"ops[{i}]")
 
-        async def _validate_subject_in_txn(subject_kinds: list[str]) -> None:
+        async def _validate_subject_in_txn(subject_kinds: list[str], canonical: StateSubject) -> None:
             """Refuse the subject under the declaration lock, from the row read in the write txn."""
-            await self._validate_subject_admitted(subject_kinds, state, subject)
+            await self._validate_written_subject_admitted(
+                subject_kinds, state, subject, canonical, admit_erasing=admit_erasing
+            )
 
         applied, data, seq, skipped = await self._store.apply_ops(
             state,
@@ -316,13 +327,25 @@ class _RecordMixin(_StatesServiceBase):
         self._ensure_available()
         if mode not in FOLD_MODES:
             raise SubjectFoldError(f"unknown fold mode {mode!r} (supported: merge, switch)")
-        _version, subject_kinds, _default = await self._admit_subject(state, subject)
-        await self._validate_subject_admitted(subject_kinds, state, into)
         completed = self._complete_origin(origin)
         # A fold rewrites the subjects' identity: both subjects' pending saves land first, and a
         # held one refuses the fold. The fold re-checks under its declaration lock.
         await drain_records(self, [record_key(state, subject), record_key(state, into)], _deadline())
-        return await self._store.fold_subject(state, subject, into, mode, origin=completed, catalog=self._catalog)
+
+        async def _validate_subjects_in_txn(subject_kinds: list[str], canonical_into: StateSubject) -> None:
+            """Admit both subjects and ``into``'s canonical, under the declaration lock and their person gates."""
+            await self._validate_subject_admitted(subject_kinds, state, subject)
+            await self._validate_written_subject_admitted(subject_kinds, state, into, canonical_into)
+
+        return await self._store.fold_subject(
+            state,
+            subject,
+            into,
+            mode,
+            origin=completed,
+            catalog=self._catalog,
+            validate_subjects_in_txn=_validate_subjects_in_txn,
+        )
 
     async def list_subjects(
         self,
@@ -558,7 +581,9 @@ class _RecordMixin(_StatesServiceBase):
         completed = self._complete_origin(origin)
         # A restore must not interleave with a held save it would overwrite.
         await drain_state(self, state, _deadline(), held="raise", scan="restore")
-        await self._store.restore_records(state, row_list, origin=completed, catalog=self._catalog)
+        await self._store.restore_records(
+            state, row_list, origin=completed, catalog=self._catalog, admit_persons_in_txn=self._admit_persons
+        )
 
     async def drain_pending_saves(self, state: str, *, held: HeldMode, scan: str) -> list[HeldPendingSave]:
         """Apply ``state``'s pending saves; meet each save held by a failed one per ``held`` (raise/skip/count)."""
@@ -573,7 +598,22 @@ class _RecordMixin(_StatesServiceBase):
     async def restore_aliases(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
         """Restore subject-alias rows for ``state`` verbatim (identity, not a write).
 
-        The backup section's restore path, off the ``AppStates`` protocol.
+        The backup section's restore path, off the ``AppStates`` protocol. A row whose alias or
+        canonical subject is a person being erased refuses the whole restore with
+        :class:`PersonErasingError`, nothing written; nothing else is checked.
         """
         self._ensure_available()
-        await self._store.restore_aliases(state, list(rows))
+        await self._store.restore_aliases(state, list(rows), admit_persons_in_txn=self._refuse_erasing_persons)
+
+    async def settle_person_writes(self, target_kind: str, target_name: str, person_id: str) -> None:
+        """Wait out every write on the ``person`` subject ``person_id`` that took its person gate before this call.
+
+        The erase calls it after its erase mark: every such write has then landed or is a pending
+        save, and every later one is refused by the mark. A wait past the outbox drain bound raises
+        :class:`UnavailableError`, retriable.
+        """
+        self._ensure_available()
+        subject = StateSubject.model_validate(
+            {"target_kind": target_kind, "target_name": target_name, "kind": PERSON_KIND, "key": person_id}
+        )
+        await self._store.settle_person_writes(subject, timeout_seconds=states_settings().outbox_drain_timeout_seconds)

@@ -15,7 +15,9 @@ from typing import Any
 
 import pytest
 from fakeredis import aioredis
+from tai42_contract.conversations import ReplyTo, ReplyToStatus
 from tai42_contract.interactions import (
+    EXPIRY_ANSWER,
     ParkResumeUnauthorizedError,
     ResumeBuffered,
     RunFailed,
@@ -145,7 +147,7 @@ def test_agent_resume_tool_refuses_an_unauthorised_caller(fake_park_redis: Any, 
         await _seed_finalized("t", step, ["i1"], resolution="terminal", value="secret")
         app_interactions.resume_authorized = False
         with pytest.raises(ParkResumeUnauthorizedError):
-            await agent_resume_tool("i1", "x")
+            await agent_resume_tool("i1", "x", None, None)
         assert app_interactions.resume_auth_calls == ["i1"]
 
     asyncio.run(go())
@@ -164,11 +166,57 @@ def test_deliver_chained_park_refuses_an_unauthorised_caller(fake_park_redis: An
 def test_agent_resume_tool_authorised_returns_a_contract_typed_outcome(fake_park_redis: Any) -> None:
     async def go() -> None:
         await _write_park(["iA", "iB"])
-        out = await agent_resume_tool("iA", "answer-a")
+        out = await agent_resume_tool("iA", "answer-a", None, None)
         assert isinstance(out, ResumeBuffered)
         assert out.remaining_ids == ["iB"]
 
     asyncio.run(go())
+
+
+def test_agent_resume_tool_hands_the_parked_run_the_answer_with_its_quote_and_params(
+    monkeypatch: pytest.MonkeyPatch, fake_park_redis: Any
+) -> None:
+    from tai42_agents._internal.park import resume_tool as resume_tool_module
+
+    handed: list[tuple[str, Any]] = []
+
+    async def _agent_resume(interaction_id: str, answer: Any) -> Any:
+        handed.append((interaction_id, answer))
+        return ResumeBuffered(remaining_ids=["iB"])
+
+    monkeypatch.setattr(resume_tool_module, "agent_resume", _agent_resume)
+    quote = ReplyTo(message_id="M-1", status=ReplyToStatus.FOUND, text="the earlier message")
+
+    asyncio.run(agent_resume_tool("iA", "yes", quote, {"button_payload": "P1"}))
+
+    assert handed == [
+        (
+            "iA",
+            {
+                "answer": "yes",
+                "reply_to": {"message_id": "M-1", "status": "found", "text": "the earlier message"},
+                "params": {"button_payload": "P1"},
+            },
+        )
+    ]
+
+
+def test_an_expired_park_hands_the_parked_run_the_marker_with_no_quote_and_no_params(
+    monkeypatch: pytest.MonkeyPatch, fake_park_redis: Any
+) -> None:
+    from tai42_agents._internal.park import resume_tool as resume_tool_module
+
+    handed: list[Any] = []
+
+    async def _agent_resume(interaction_id: str, answer: Any) -> Any:
+        handed.append(answer)
+        return ResumeBuffered(remaining_ids=["iB"])
+
+    monkeypatch.setattr(resume_tool_module, "agent_resume", _agent_resume)
+
+    asyncio.run(agent_resume_tool("iA", EXPIRY_ANSWER, None, None))
+
+    assert handed == [{"answer": EXPIRY_ANSWER, "reply_to": None, "params": None}]
 
 
 # ---- the whole-run kill: the driver ends the super-step the node belongs to ----------------
@@ -314,7 +362,7 @@ def test_a_resume_in_flight_at_the_kill_lands_on_the_aborted_record(fake_park_re
         # A resume of the sibling already in flight replays the aborted outcome: the platform then
         # finds no ticket and delivers nothing.
         with pytest.raises(RunTerminalFailed) as exc:
-            await agent_resume_tool("b1", "late")
+            await agent_resume_tool("b1", "late", None, None)
         assert exc.value.outcome == {"status": "aborted", "reason": "cancelled"}
 
     asyncio.run(go())
@@ -339,7 +387,7 @@ def test_kill_handler_aborted_tombstone_replays_as_run_terminal_failed(fake_park
         # The replay is the driver's answer to a resume already in flight when the kill landed; the
         # platform delivers nothing for it (the kill revoked the resume's ticket).
         with pytest.raises(RunTerminalFailed) as exc:
-            await agent_resume_tool("i1", "late")
+            await agent_resume_tool("i1", "late", None, None)
         assert exc.value.outcome == {"status": "aborted", "reason": "cancelled"}
 
     asyncio.run(go())
@@ -475,7 +523,7 @@ def test_drive_whose_lease_a_kill_reclaimed_leaves_the_kills_resolution_for_the_
         assert await agents_park_index().read_resolution("t", step) == ResolutionRecord("aborted", killed)
         assert await agent_resume("i1", "the answer") == killed
         with pytest.raises(RunTerminalFailed) as exc:
-            await agent_resume_tool("i1", "the answer")
+            await agent_resume_tool("i1", "the answer", None, None)
         assert exc.value.outcome == {"status": "aborted", "reason": "thread deleted"}
 
     try:

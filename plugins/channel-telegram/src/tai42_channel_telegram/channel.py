@@ -77,10 +77,13 @@ from typing import Any, ClassVar
 
 from pydantic import SecretStr
 from tai42_contract.channels import (
+    ChannelAddress,
+    ChannelAddressError,
     ChannelDelivery,
     ChannelDeliveryError,
     ChannelNotification,
     Correlation,
+    SendOutcome,
 )
 from tai42_contract.interactions import CALLBACK_LINK_FORMATS
 from tai42_contract.interactions.models import MediaItem
@@ -112,17 +115,6 @@ from tai42_channel_telegram.correlation import (
 from tai42_channel_telegram.settings import bot_numeric_id, telegram_settings
 
 
-def _require_delivery[T](value: T | None, env_name: str) -> T:
-    """The configured value, or raise :class:`ChannelDeliveryError` naming the missing env var.
-
-    Retypes :func:`require` for the deliver/notify path.
-    """
-    try:
-        return require(value, "the telegram channel", env_name)
-    except ValueError as exc:
-        raise ChannelDeliveryError(str(exc)) from exc
-
-
 def _require_delivery_secret(value: SecretStr | None, env_name: str) -> str:
     """The secret's plaintext, or raise :class:`ChannelDeliveryError` on unset/EMPTY.
 
@@ -151,16 +143,26 @@ def _resolve_target(recipient: str | None) -> str:
     A caller-supplied ``recipient`` must be on
     ``CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS`` or the send is refused; ``None`` uses
     ``CHANNEL_TELEGRAM_DEFAULT_RECIPIENT`` (must be set). The allowlist gates only
-    caller-supplied values.
+    caller-supplied values. Either refusal is a :class:`ChannelAddressError`.
     """
     settings = telegram_settings()
     if recipient is None:
-        return _require_delivery(settings.default_recipient, "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT")
+        return _default_target()
     if recipient not in set(settings.allowed_recipients):
-        raise ChannelDeliveryError(
+        raise ChannelAddressError(
             f"recipient {recipient!r} is not on CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS; refusing to send"
         )
     return recipient
+
+
+def _default_target() -> str:
+    """``CHANNEL_TELEGRAM_DEFAULT_RECIPIENT``, or raise :class:`ChannelAddressError` naming it when unset."""
+    try:
+        return require(
+            telegram_settings().default_recipient, "the telegram channel", "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT"
+        )
+    except ValueError as exc:
+        raise ChannelAddressError(str(exc)) from exc
 
 
 def _result_message_id(data: dict[str, Any], context: str) -> int:
@@ -195,6 +197,31 @@ def _result_chat_id(data: dict[str, Any], context: str) -> int:
     if not isinstance(chat_id, int):
         raise ChannelDeliveryError(f"telegram send ok response for {context} carried no result.chat.id")
     return chat_id
+
+
+class _SentMessages:
+    """The messages one send produced, in send order, and the chat Telegram delivered them to.
+
+    ``add`` records each ``ok: true`` response's ``message_id``; the first response also gives
+    the chat (``_result_chat_id``), the numeric id the inbound door passes as ``client_address``
+    for a message from that chat, which an ``@username`` target never is.
+    """
+
+    def __init__(self) -> None:
+        self.message_ids: list[str] = []
+        self._chat_id: int | None = None
+
+    def add(self, data: dict[str, Any], context: str) -> None:
+        message_id = _result_message_id(data, context)
+        if self._chat_id is None:
+            self._chat_id = _result_chat_id(data, context)
+        self.message_ids.append(str(message_id))
+
+    def outcome(self, our_identity: str) -> SendOutcome:
+        """The :class:`SendOutcome` of the recorded messages; raises when the send produced none."""
+        if self._chat_id is None:
+            raise ChannelDeliveryError("telegram send produced no message")
+        return SendOutcome(our_identity=our_identity, address=str(self._chat_id), message_ids=list(self.message_ids))
 
 
 class TelegramChannel:
@@ -233,10 +260,37 @@ class TelegramChannel:
     # form notification has no callback sink for an in-chat webview to POST to. notify_user
     # refuses the matching send up front rather than the channel silently dropping it.
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
-        """Deliver an ask ticket over Telegram: the question with its options keyboard, or a form web_app button."""
+    def resolve_address(self, recipient: str | None, sender_identity: str | None) -> ChannelAddress:
+        """This bot's numeric id and the chat a send with these values targets, before sending.
+
+        The bot token must be set and well formed (else :class:`ChannelDeliveryError`). With
+        ``sender_identity`` set it must equal this bot's numeric id (else a
+        :class:`ChannelDeliveryError` refusal) and the recipient is taken verbatim, allowlist
+        bypassed, else ``CHANNEL_TELEGRAM_DEFAULT_RECIPIENT``; unset applies the allowlist
+        (``_resolve_target``). The address is the target as the caller names it, which may be
+        an ``@username``: the numeric chat id is known only from the send's response, which the
+        :class:`SendOutcome` reports. An unresolvable target raises :class:`ChannelAddressError`.
+        """
         token = _require_delivery_secret(telegram_settings().bot_token, "CHANNEL_TELEGRAM_BOT_TOKEN")
-        target = _resolve_target(delivery.recipient)
+        our_identity = _bot_identity(token)
+        if sender_identity is None:
+            return ChannelAddress(our_identity=our_identity, address=_resolve_target(recipient))
+        if sender_identity != our_identity:
+            raise ChannelDeliveryError(
+                f"sender_identity {sender_identity!r} is not this bot's identity; refusing to send"
+            )
+        target = recipient if recipient is not None else _default_target()
+        return ChannelAddress(our_identity=our_identity, address=target)
+
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
+        """Deliver an ask ticket over Telegram: the question with its options keyboard, or a form web_app button.
+
+        Returns the :class:`SendOutcome` of every message sent (any file media, then the
+        question), addressed to the numeric chat Telegram resolved the send to.
+        """
+        token = _require_delivery_secret(telegram_settings().bot_token, "CHANNEL_TELEGRAM_BOT_TOKEN")
+        address = self.resolve_address(delivery.recipient, None)
+        target = address.address
 
         # Refuse an unrenderable media item BEFORE any send so a multi-part delivery
         # never lands its media-or-text and then fails on an unsendable one.
@@ -252,17 +306,20 @@ class TelegramChannel:
 
         # File media rides ahead of the question as its own message(s) (photo/document/
         # video/audio by kind); link media is appended to the question text (_question_text).
+        sent = _SentMessages()
         for item in _file_media(delivery.media):
             method, payload = _media_send(target, item)
-            await call_method(token, method, payload, context=f"interaction {delivery.interaction_id} media")
+            media_context = f"interaction {delivery.interaction_id} media"
+            sent.add(await call_method(token, method, payload, context=media_context), media_context)
 
         payload: dict[str, Any] = {"chat_id": target, "text": _question_text(delivery)}
         payload["reply_markup"], records = _ask_reply_markup(delivery, reply_hint)
 
         data = await call_method(token, "sendMessage", payload, context=f"interaction {delivery.interaction_id}")
+        sent.add(data, f"interaction {delivery.interaction_id}")
 
         if delivery.answer_format == "form" or delivery.answer_format in CALLBACK_LINK_FORMATS:
-            return
+            return sent.outcome(address.our_identity)
 
         message_id = _result_message_id(data, f"interaction {delivery.interaction_id}")
         # The chat Telegram actually resolved the send to — the writer scopes its anchor
@@ -311,11 +368,13 @@ class TelegramChannel:
                     f"question {delivery.interaction_id} was sent (message_id={message_id}) but its "
                     f"option list could not be stored; button taps cannot be routed"
                 ) from exc
+        return sent.outcome(address.our_identity)
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         """Send a fire-and-forget message; raise ``ChannelDeliveryError`` on any failure.
 
-        Returns every ``message_id`` Telegram assigned, in send order.
+        Returns the :class:`SendOutcome`: this bot's id, the numeric chat Telegram resolved the
+        send to, and every ``message_id`` Telegram assigned, in send order.
 
         No reply is expected, so nothing touches the correlation store. The interactive
         surface (flat ``options`` or a sectioned list, with any ``header``/``footer``) is
@@ -329,49 +388,46 @@ class TelegramChannel:
         ``CHANNEL_TELEGRAM_OPTION_TAP_TTL_SECONDS``) for the inbound door to resolve. With
         ``sender_identity`` set it must equal this bot's numeric id (else a typed refusal) and
         the message goes to ``recipient`` verbatim, allowlist bypassed; unset applies the
-        allowlist. Exactly one send attempt per part.
+        allowlist (``resolve_address``). Exactly one send attempt per part.
         """
         token = _require_delivery_secret(telegram_settings().bot_token, "CHANNEL_TELEGRAM_BOT_TOKEN")
-        if notification.sender_identity is not None:
-            our_identity = _bot_identity(token)
-            if notification.sender_identity != our_identity:
-                raise ChannelDeliveryError(
-                    f"sender_identity {notification.sender_identity!r} is not this bot's identity; refusing to send"
-                )
-            target = notification.recipient if notification.recipient is not None else _resolve_target(None)
-        else:
-            target = _resolve_target(notification.recipient)
+        address = self.resolve_address(notification.recipient, notification.sender_identity)
+        target = address.address
 
         # Refuse an unrenderable media item BEFORE any send (see deliver).
         _reject_unrenderable_media(notification.media)
 
-        sent: list[str] = []
+        sent = _SentMessages()
         if notification.options is not None or notification.sections is not None:
-            sent.extend(await self._send_interactive(token, target, notification))
+            await self._send_interactive(token, target, notification, sent)
         else:
             body = self._plain_body(notification)
             if body.strip():
                 data = await call_method(
                     token, "sendMessage", {"chat_id": target, "text": body}, context="notification"
                 )
-                sent.append(str(_result_message_id(data, "notification")))
+                sent.add(data, "notification")
 
         for item in _file_media(notification.media):
             method, payload = _media_send(target, item)
             try:
                 media_data = await call_method(token, method, payload, context="notification media")
             except ChannelDeliveryError as exc:
-                raise ChannelDeliveryError(f"telegram multi-part send failed after delivering {sent}: {exc}") from exc
-            sent.append(str(_result_message_id(media_data, "notification media")))
+                raise ChannelDeliveryError(
+                    f"telegram multi-part send failed after delivering {sent.message_ids}: {exc}"
+                ) from exc
+            sent.add(media_data, "notification media")
 
         if notification.location is not None:
             method, payload = _location_send(target, notification.location)
             try:
                 location_data = await call_method(token, method, payload, context="notification location")
             except ChannelDeliveryError as exc:
-                raise ChannelDeliveryError(f"telegram multi-part send failed after delivering {sent}: {exc}") from exc
-            sent.append(str(_result_message_id(location_data, "notification location")))
-        return sent
+                raise ChannelDeliveryError(
+                    f"telegram multi-part send failed after delivering {sent.message_ids}: {exc}"
+                ) from exc
+            sent.add(location_data, "notification location")
+        return sent.outcome(address.our_identity)
 
     async def signal_working(
         self,
@@ -405,10 +461,12 @@ class TelegramChannel:
             return "\n".join([notification.message, *link_lines])
         return "\n".join(link_lines)
 
-    async def _send_interactive(self, token: str, target: str, notification: ChannelNotification) -> list[str]:
+    async def _send_interactive(
+        self, token: str, target: str, notification: ChannelNotification, sent: _SentMessages
+    ) -> None:
         """Send one interactive notification (flat ``options`` or a sectioned list) and store its option side record.
 
-        Returns the ``message_id``(s) the send produced, in order.
+        Records each message the send produced in ``sent``, in order.
 
         The keyboard carries the reply/link buttons; the body carries the prompt, any
         section titles, link-media lines and an italic footer. A media ``header`` rides the
@@ -429,7 +487,6 @@ class TelegramChannel:
             notification.message, _link_lines(notification.media), section_titles, notification.footer
         )
 
-        sent: list[str] = []
         anchor = await self._send_interactive_message(
             token, target, notification.header, body_text, parse_mode, keyboard, sent
         )
@@ -449,7 +506,6 @@ class TelegramChannel:
                     f"notification was sent (message_id={message_id}) but its option list could not be "
                     f"stored; button taps cannot be routed"
                 ) from exc
-        return sent
 
     @staticmethod
     async def _send_interactive_message(
@@ -459,11 +515,11 @@ class TelegramChannel:
         body_text: str,
         parse_mode: str | None,
         keyboard: dict[str, Any],
-        sent: list[str],
+        sent: _SentMessages,
     ) -> dict[str, Any]:
         """Send the message that CARRIES the inline keyboard.
 
-        Appends each send's id to ``sent`` and returns the response of the
+        Records each send in ``sent`` and returns the response of the
         keyboard-carrying (anchor) message.
 
         With no header it is one ``sendMessage``. With a media header it rides the standard
@@ -476,7 +532,7 @@ class TelegramChannel:
             if parse_mode is not None:
                 payload["parse_mode"] = parse_mode
             data = await call_method(token, "sendMessage", payload, context="notification")
-            sent.append(str(_result_message_id(data, "notification")))
+            sent.add(data, "notification")
             return data
 
         method, source_key = _MEDIA_SEND[header.kind]
@@ -485,7 +541,7 @@ class TelegramChannel:
             if parse_mode is not None:
                 payload["parse_mode"] = parse_mode
             data = await call_method(token, method, payload, context="notification header")
-            sent.append(str(_result_message_id(data, "notification header")))
+            sent.add(data, "notification header")
             return data
 
         # Body too long for a caption: send the header media alone, then the text-plus-keyboard
@@ -493,10 +549,10 @@ class TelegramChannel:
         header_data = await call_method(
             token, method, {"chat_id": target, source_key: header.url}, context="notification header"
         )
-        sent.append(str(_result_message_id(header_data, "notification header")))
+        sent.add(header_data, "notification header")
         payload = {"chat_id": target, "text": body_text, "reply_markup": keyboard}
         if parse_mode is not None:
             payload["parse_mode"] = parse_mode
         data = await call_method(token, "sendMessage", payload, context="notification")
-        sent.append(str(_result_message_id(data, "notification")))
+        sent.add(data, "notification")
         return data

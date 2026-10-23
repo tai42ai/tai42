@@ -2,7 +2,7 @@
 
 A target that fails with ``RunTerminalFailed(outcome, reply=...)`` (or returns ``RunFailed(reply=...)``
 from a resume) has its ``reply`` shown to the participant in place of the door's fixed failure text;
-with no reply the door falls back to the route's ``error_reply_text``, else the built-in line. The
+with no reply the door falls back to the route's ``reply_texts.error``, else the built-in line. The
 internal detail of the opaque ``outcome`` stays in the record's ``error`` field. Every platform-owned
 failure keeps the fixed text.
 """
@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 from pydantic import ValidationError
+from tai42_contract.conversations import ReplyTexts
 from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
@@ -55,7 +56,16 @@ _INVALID_REPLIES = [
 
 
 async def _accept_turn() -> str:
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     return message_id
 
@@ -71,8 +81,14 @@ def _raising(failure: RunTerminalFailed):
 
 
 def test_the_failure_text_is_the_reply_else_the_route_text_else_the_built_in_line():
-    assert outcome_module._failure_answer_text(_tool_channel_route(error_reply_text=_ROUTE_TEXT), _REPLY) == _REPLY
-    assert outcome_module._failure_answer_text(_tool_channel_route(error_reply_text=_ROUTE_TEXT), None) == _ROUTE_TEXT
+    assert (
+        outcome_module._failure_answer_text(_tool_channel_route(reply_texts=ReplyTexts(error=_ROUTE_TEXT)), _REPLY)
+        == _REPLY
+    )
+    assert (
+        outcome_module._failure_answer_text(_tool_channel_route(reply_texts=ReplyTexts(error=_ROUTE_TEXT)), None)
+        == _ROUTE_TEXT
+    )
     assert outcome_module._failure_answer_text(_tool_channel_route(), None) == outcome_module._ERROR_ANSWER_TEXT
     assert outcome_module._failure_answer_text(None, None) == outcome_module._ERROR_ANSWER_TEXT
     assert outcome_module._failure_answer_text(None, _REPLY) == _REPLY
@@ -90,7 +106,7 @@ def test_a_terminal_failure_resolves_to_its_reply_and_records_the_detail():
 
 async def test_a_tool_turn_failing_with_a_reply_answers_with_the_reply(env, monkeypatch):
     channel = FakeChannel()
-    _wire(monkeypatch, FakeManager(_tool_channel_route(error_reply_text=_ROUTE_TEXT)), channel)
+    _wire(monkeypatch, FakeManager(_tool_channel_route(reply_texts=ReplyTexts(error=_ROUTE_TEXT))), channel)
     _wire_tool(monkeypatch, _raising(RunTerminalFailed(_OUTCOME, reply=_REPLY)))
 
     message_id = await _accept_turn()
@@ -98,7 +114,7 @@ async def test_a_tool_turn_failing_with_a_reply_answers_with_the_reply(env, monk
     record = await _store().get_record(message_id)
     assert record is not None
     assert record.answer_status == "error"
-    # The target's reply wins over the route's error_reply_text...
+    # The target's reply wins over the route's reply_texts.error...
     assert record.answer == _REPLY
     assert [n.message for n in channel.sends] == [_REPLY]
     # ...and the internal detail stays in the record's error field, never in the answer.
@@ -108,7 +124,7 @@ async def test_a_tool_turn_failing_with_a_reply_answers_with_the_reply(env, monk
 
 async def test_a_tool_turn_failing_without_a_reply_answers_with_the_route_text(env, monkeypatch):
     channel = FakeChannel()
-    _wire(monkeypatch, FakeManager(_tool_channel_route(error_reply_text=_ROUTE_TEXT)), channel)
+    _wire(monkeypatch, FakeManager(_tool_channel_route(reply_texts=ReplyTexts(error=_ROUTE_TEXT))), channel)
     _wire_tool(monkeypatch, _raising(RunTerminalFailed(_OUTCOME)))
 
     message_id = await _accept_turn()
@@ -137,7 +153,7 @@ class _FailingAgent(MemorylessTestAgent):
 )
 async def test_an_agent_turn_failing_answers_with_its_reply_else_the_route_text(env, monkeypatch, reply, expected):
     channel = FakeChannel()
-    _wire(monkeypatch, FakeManager(_channel_route(error_reply_text=_ROUTE_TEXT)), channel)
+    _wire(monkeypatch, FakeManager(_channel_route(reply_texts=ReplyTexts(error=_ROUTE_TEXT))), channel)
     agent = _FailingAgent(RunTerminalFailed(_OUTCOME, reply=reply))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
 
@@ -168,7 +184,7 @@ _COMPLETION_TOOLS = [
 @pytest.mark.parametrize(("tool", "make_route", "thread_id"), _COMPLETION_TOOLS)
 async def test_a_failed_completion_carrying_a_reply_delivers_the_reply(env, monkeypatch, tool, make_route, thread_id):
     channel = FakeChannel()
-    _wire(monkeypatch, FakeManager(make_route(error_reply_text=_ROUTE_TEXT)), channel)
+    _wire(monkeypatch, FakeManager(make_route(reply_texts=ReplyTexts(error=_ROUTE_TEXT))), channel)
 
     out = await _fire(
         tool, thread_id=thread_id, completion_id="c-1", result=_OUTCOME, status=PARK_COMPLETION_FAILED, reply=_REPLY
@@ -185,7 +201,7 @@ async def test_a_failed_completion_carrying_a_reply_delivers_the_reply(env, monk
 @pytest.mark.parametrize(("tool", "make_route", "thread_id"), _COMPLETION_TOOLS)
 async def test_a_failed_completion_without_a_reply_keeps_the_route_text(env, monkeypatch, tool, make_route, thread_id):
     channel = FakeChannel()
-    _wire(monkeypatch, FakeManager(make_route(error_reply_text=_ROUTE_TEXT)), channel)
+    _wire(monkeypatch, FakeManager(make_route(reply_texts=ReplyTexts(error=_ROUTE_TEXT))), channel)
 
     await _fire(tool, thread_id=thread_id, completion_id="c-1", result=_OUTCOME, status=PARK_COMPLETION_FAILED)
     await _settle()
@@ -260,7 +276,11 @@ def _tool_raises(_kw):
 )
 async def test_a_platform_owned_tool_turn_failure_keeps_the_route_text(env, monkeypatch, reply_expr, tool_fn, patch):
     channel = FakeChannel()
-    _wire(monkeypatch, FakeManager(_tool_channel_route(reply_expr=reply_expr, error_reply_text=_ROUTE_TEXT)), channel)
+    _wire(
+        monkeypatch,
+        FakeManager(_tool_channel_route(reply_expr=reply_expr, reply_texts=ReplyTexts(error=_ROUTE_TEXT))),
+        channel,
+    )
     _wire_tool(monkeypatch, tool_fn)
     if patch is not None:
         monkeypatch.setattr(tool_turn_module, *patch)
@@ -297,3 +317,19 @@ async def test_a_platform_owned_agent_turn_failure_keeps_the_built_in_line(env, 
     assert record is not None
     assert record.answer_status == "error"
     assert record.answer == outcome_module._ERROR_ANSWER_TEXT
+
+
+# === the route reply chokepoint ===============================================
+
+
+def test_reply_text_returns_a_set_member_else_the_default():
+    route = _tool_channel_route(reply_texts=ReplyTexts(slow_down="Más despacio."))
+    assert outcome_module.reply_text(route, "slow_down", "Slow down.") == "Más despacio."
+    assert outcome_module.reply_text(route, "error", "Built in.") == "Built in."
+    assert outcome_module.reply_text(_tool_channel_route(), "slow_down", "Slow down.") == "Slow down."
+    assert outcome_module.reply_text(None, "slow_down", "Slow down.") == "Slow down."
+
+
+def test_reply_text_refuses_an_unknown_member_loudly():
+    with pytest.raises(KeyError, match="slowdown"):
+        outcome_module.reply_text(None, "slowdown", "Slow down.")

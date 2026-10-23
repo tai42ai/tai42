@@ -80,6 +80,35 @@ def _our_identity(settings: TelegramSettings) -> str | JSONResponse:
         return _misconfigured("CHANNEL_TELEGRAM_BOT_TOKEN")
 
 
+def _message_medium_id(message: dict[str, object]) -> str | None:
+    """The message's own ``message_id`` as the id a quote names, or ``None`` when it carries no integer one."""
+    message_id = message.get("message_id")
+    return str(message_id) if isinstance(message_id, int) else None
+
+
+def _reply_to_message_id(message: dict[str, object]) -> str | None:
+    """The ``message_id`` of the message ``message`` replies to, or ``None`` when it replies to none.
+
+    Read from ``reply_to_message.message_id`` (an integer). In a forum topic Telegram fills
+    ``reply_to_message`` with the topic's own first message on every message posted to the topic,
+    whether or not the sender replied to it: a topic message (``is_topic_message``) whose
+    ``reply_to_message`` is the topic's first message (its ``message_id`` equals the message's
+    ``message_thread_id``) replies to none. ``external_reply`` (a reply to a message of another
+    chat) is not read: its id is scoped to that other chat.
+    """
+    reply_to = message.get("reply_to_message")
+    replied_id = reply_to.get("message_id") if isinstance(reply_to, dict) else None
+    if not isinstance(replied_id, int) or isinstance(replied_id, bool):
+        return None
+    if message.get("is_topic_message") is True and replied_id == message.get("message_thread_id"):
+        return None
+    return str(replied_id)
+
+
+def _no_message_id() -> JSONResponse:
+    return JSONResponse({"error": "message carries no integer message_id"}, status_code=400)
+
+
 def _ignored(reason: str) -> JSONResponse:
     logger.info("telegram inbound: update ignored: %s", reason)
     return JSONResponse({"data": {"status": "ignored"}}, status_code=200)
@@ -141,6 +170,9 @@ async def _resolve_answer(
     chat_id: int,
     text: str,
     update: dict[str, object],
+    *,
+    medium_message_id: str | None,
+    reply_to_medium_message_id: str | None,
     params: dict[str, str] | None = None,
 ) -> Response | None:
     """Resolve a ForceReply answer against its pending ask via the ONE shared ladder.
@@ -159,6 +191,10 @@ async def _resolve_answer(
     ``update_id`` is the bridge's idempotency key and ``our_identity`` the bot's
     numeric id (a malformed token is a loud 500), both resolved up front so the
     :class:`InboundBridge` a 404/hard-mismatch bridge needs is ready before the call.
+    ``medium_message_id`` is the end user's own ``message_id`` a quote names, ``None``
+    for a button tap (no message of theirs). ``reply_to_medium_message_id`` is the
+    ``message_id`` of the message the reply quotes (for a button tap, the message holding
+    the keyboard), ``None`` when it quotes none; the bridge carries it on both arms.
     """
     update_id = update.get("update_id")
     if not isinstance(update_id, int):
@@ -180,6 +216,8 @@ async def _resolve_answer(
             # and the party the turn cap holds accountable.
             cap_key=str(chat_id),
             provider_message_id=str(update_id),
+            medium_message_id=medium_message_id,
+            reply_to_medium_message_id=reply_to_medium_message_id,
             bridge_text=text,
             # Opaque tap enrichment (reply_id / reply_description); the ladder threads it to
             # the callback door on a forward and onto the bridged turn when the reply digresses.
@@ -196,6 +234,9 @@ async def _bridge(
     chat_id: int,
     text: str,
     update: dict[str, object],
+    *,
+    medium_message_id: str | None,
+    reply_to_medium_message_id: str | None,
     params: dict[str, str] | None = None,
     attachments: list[MediaItem] | None = None,
 ) -> Response:
@@ -203,7 +244,10 @@ async def _bridge(
 
     ``our_identity`` is this bot's numeric id (malformed token -> loud 500);
     ``client_address`` is the numeric chat id; ``provider_message_id`` is the
-    update id. ``params`` are the channel's opaque tap enrichment (reply_id /
+    update id; ``medium_message_id`` is the end user's own ``message_id`` a quote
+    names, ``None`` for a button tap; ``reply_to_medium_message_id`` is the ``message_id``
+    the message quotes (the keyboard's message for a tap), ``None`` when it quotes none.
+    ``params`` are the channel's opaque tap enrichment (reply_id /
     reply_description — see the module's vocabulary block) plus the parity ``media_*``
     vocabulary of a media turn, validated against the contract's transport bounds and
     dropped whole on a violation so a poison value never 5xx-loops. ``attachments`` is the
@@ -227,6 +271,8 @@ async def _bridge(
             cap_key=str(chat_id),
             text=text,
             provider_message_id=str(update_id),
+            medium_message_id=medium_message_id,
+            reply_to_medium_message_id=reply_to_medium_message_id,
             # Telegram redelivers a 5xx forever: an over-bound set is dropped (logged and
             # counted), never the participant's message.
             params=bound_entry_params(params, mode=OverBoundParamsMode.DROP, door="telegram"),
@@ -256,6 +302,8 @@ async def _resolve_or_bridge(
     update: dict[str, object],
     params: dict[str, str] | None = None,
     attachments: list[MediaItem] | None = None,
+    *,
+    reply_to_medium_message_id: str | None,
 ) -> Response:
     """Resolve a recipient's reply against a pending ask, or bridge the message as a fresh turn.
 
@@ -270,11 +318,35 @@ async def _resolve_or_bridge(
     attachments, so a correlated media reply resolves the ask with the caption/placeholder text and
     the parity ``media_*`` params only, while ``attachments`` (the typed served media) rides the
     bridge fallthrough alone.
+
+    ``reply_to_medium_message_id`` is the ``message_id`` the message quotes
+    (:func:`_reply_to_message_id`), handed to both arms.
     """
+    medium_message_id = _message_medium_id(message)
+    if medium_message_id is None:
+        return _no_message_id()
     reply_to = message.get("reply_to_message")
     replied_id = reply_to.get("message_id") if isinstance(reply_to, dict) else None
     if isinstance(replied_id, int) and _is_recipient_chat(chat, settings):
-        resolved = await _resolve_answer(settings, replied_id, chat_id, text, update, params=params)
+        resolved = await _resolve_answer(
+            settings,
+            replied_id,
+            chat_id,
+            text,
+            update,
+            medium_message_id=medium_message_id,
+            reply_to_medium_message_id=reply_to_medium_message_id,
+            params=params,
+        )
         if resolved is not None:
             return resolved
-    return await _bridge(settings, chat_id, text, update, params=params, attachments=attachments)
+    return await _bridge(
+        settings,
+        chat_id,
+        text,
+        update,
+        medium_message_id=medium_message_id,
+        reply_to_medium_message_id=reply_to_medium_message_id,
+        params=params,
+        attachments=attachments,
+    )

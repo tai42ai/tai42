@@ -1,7 +1,7 @@
 """The delivery-state machine over an answer record.
 
 The exactly-once send lease and the provisional / delivered / failed / receipt transitions,
-plus the outbound reverse index (keyspace 3).
+plus the outbound reverse index (keyspace 3) and the message refs.
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ from tai42_contract.conversations import DeliveryReceipt
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.conversations import records as _records
-from tai42_skeleton.conversations.models import DeliveryStatus
+from tai42_skeleton.conversations.models import DeliveryStatus, SentMessage
+from tai42_skeleton.conversations.record_keys import _member
 from tai42_skeleton.conversations.record_scripts import (
     _CLAIM_DELIVERY_LUA,
     _DELIVERED_LUA,
@@ -23,10 +24,17 @@ from tai42_skeleton.conversations.record_scripts import (
     _RECEIPT_LUA,
     _UNREADABLE_LUA,
 )
+from tai42_skeleton.conversations.record_send_scripts import (
+    _INDEX_OUTBOUND_LUA,
+)
 from tai42_skeleton.conversations.record_store_base import RecordStoreBase
 from tai42_skeleton.utils.redis_typing import awaited, eval_script
 
 logger = logging.getLogger(__name__)
+
+
+def _sends_json(sends: list[SentMessage]) -> str:
+    return json.dumps([sent.model_dump(mode="json") for sent in sends])
 
 
 class RecordDeliveryMixin(RecordStoreBase):
@@ -59,7 +67,7 @@ class RecordDeliveryMixin(RecordStoreBase):
             return int(await awaited(r.hincrby(self.settings.record_key(message_id), _F_ATTEMPTS, 1)))
 
     async def mark_provisional(
-        self, message_id: str, outbound_ids: list[str], attempts: int, now: float, token: str
+        self, message_id: str, sends: list[SentMessage], attempts: int, now: float, token: str
     ) -> int:
         """Move ``message_id`` to ``provisional`` awaiting an async delivery receipt or grace expiry.
 
@@ -77,7 +85,7 @@ class RecordDeliveryMixin(RecordStoreBase):
                     _PROVISIONAL_LUA,
                     len(keys),
                     *keys,
-                    json.dumps(outbound_ids),
+                    _sends_json(sends),
                     attempts,
                     grace_deadline,
                     now,
@@ -90,7 +98,7 @@ class RecordDeliveryMixin(RecordStoreBase):
             )
 
     async def mark_delivered(
-        self, message_id: str, outbound_ids: list[str], attempts: int, now: float, token: str
+        self, message_id: str, sends: list[SentMessage], attempts: int, now: float, token: str
     ) -> int:
         """Terminal delivered write with the retention TTL.
 
@@ -105,7 +113,7 @@ class RecordDeliveryMixin(RecordStoreBase):
                     _DELIVERED_LUA,
                     len(keys),
                     *keys,
-                    json.dumps(outbound_ids),
+                    _sends_json(sends),
                     attempts,
                     now,
                     self.settings.answer_retention_ttl_seconds * 1000,
@@ -115,8 +123,10 @@ class RecordDeliveryMixin(RecordStoreBase):
                 )
             )
 
-    async def mark_failed(self, message_id: str, attempts: int, now: float, token: str) -> int:
-        """Terminal failed write with the retention TTL.
+    async def mark_failed(
+        self, message_id: str, attempts: int, now: float, token: str, *, sends: list[SentMessage]
+    ) -> int:
+        """Terminal failed write with the retention TTL, recording the parts already sent (``sends``).
 
         Returns 1 transitioned, 0 already failed, -1 gone, -2 the send already completed
         (delivered/shed/provisional), -3 a different worker's live lease. ``token`` is the delivery
@@ -142,6 +152,7 @@ class RecordDeliveryMixin(RecordStoreBase):
                     token,
                     message_id,
                     self._index_score(DeliveryStatus.FAILED, now),
+                    _sends_json(sends),
                 )
             )
         if result == 2:
@@ -223,17 +234,49 @@ class RecordDeliveryMixin(RecordStoreBase):
 
     # -- outbound reverse index (keyspace 3) ---------------------------------
 
-    async def index_outbound(self, channel: str, outbound_ids: list[str], message_id: str) -> None:
-        """Map each outbound provider id back to ``message_id`` so an out-of-band receipt resolves to the record.
+    async def index_outbound(
+        self, channel: str, our_identity: str, client_address: str, outbound_ids: list[str], message_id: str
+    ) -> int:
+        """Map each sent provider id back to ``message_id``: keyspace 3 for receipts and the message refs.
 
-        Written with the retention TTL, so it is swept with it.
+        One script on the record's row, idempotent per (key, record), so re-indexing a chunk that
+        is already indexed changes nothing. ``client_address`` is the address inbound uses for the
+        participant (the record's own). Written with the retention TTL. Returns 1 written (or
+        nothing to write), -1 the row is gone and nothing was written.
         """
-        if not outbound_ids:
-            return
-        ttl = self.settings.answer_retention_ttl_seconds
+        ids = list(dict.fromkeys(outbound_ids))
+        if not ids:
+            return 1
+        keys = [self.settings.record_key(message_id)]
+        keys.extend(self.settings.outbound_index_key(channel, pid) for pid in ids)
+        keys.extend(self.settings.message_ref_key(channel, our_identity, client_address, pid) for pid in ids)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            for outbound_id in outbound_ids:
-                await awaited(r.set(self.settings.outbound_index_key(channel, outbound_id), message_id, ex=ttl))
+            return int(
+                await eval_script(
+                    r,
+                    _INDEX_OUTBOUND_LUA,
+                    len(keys),
+                    *keys,
+                    message_id,
+                    self.settings.answer_retention_ttl_seconds * 1000,
+                    len(ids),
+                )
+            )
+
+    async def resolve_message_ref(
+        self, channel: str, our_identity: str, client_address: str, medium_message_id: str
+    ) -> list[str]:
+        """Every record ``message_id`` carrying ``medium_message_id``, in the order they were written.
+
+        Only members whose record still exists are returned, so a record past its retention is a
+        miss; an id that was never ours, or whose records are all gone, answers ``[]``.
+        """
+        key = self.settings.message_ref_key(channel, our_identity, client_address, medium_message_id)
+        async with _records.client_ctx(RedisClient, self.settings.redis) as r:
+            members = [_member(member) for member in await awaited(r.lrange(key, 0, -1))]
+            return [
+                message_id for message_id in members if await awaited(r.exists(self.settings.record_key(message_id)))
+            ]
 
     async def resolve_outbound(self, channel: str, outbound_id: str) -> str | None:
         """The ``message_id`` an outbound provider id maps to, or ``None`` when the index holds no such id.

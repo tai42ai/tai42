@@ -19,7 +19,7 @@ from tai42_contract.interactions import AnswerFormat, check_addressing, check_as
 
 from tai42_skeleton.access_control.user import clamp_write_audience
 from tai42_skeleton.channels.registry import resolve_channel
-from tai42_skeleton.interactions.form_schema import validate_channel_form_schema, validate_form_answer_schema
+from tai42_skeleton.interactions.form_schema import check_channel_form, validate_form_answer_schema
 from tai42_skeleton.interactions.schema_rules import check_answer_schema_rules
 
 from .format_args import check_format_arguments, parse_answer_format
@@ -212,14 +212,10 @@ def _validate_channel_form(
         # schema must fall in the renderable subset. Normalize once (pydantic model ->
         # JSON schema) and carry the dict forward so nothing re-normalizes it.
         schema = normalize_schema(schema)
-        validate_channel_form_schema(schema)
-        # Channel-specific form limits (reserved names, per-medium caps, question-text
-        # caps) the generic subset does not know: the channel's OPTIONAL
-        # ``validate_form_schema`` hook enforces them at the chokepoint, raising
+        # The subset walk, then the channel's OPTIONAL ``validate_form_schema`` hook for the
+        # medium's own limits (reserved names, per-medium caps, question-text caps), raising
         # ``ValueError`` before any state is written.
-        validate_form_schema = getattr(channel_obj, "validate_form_schema", None)
-        if validate_form_schema is not None:
-            validate_form_schema(schema, question)
+        check_channel_form(channel_obj, schema, question)
     return schema
 
 

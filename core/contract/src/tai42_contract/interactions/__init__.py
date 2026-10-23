@@ -14,7 +14,7 @@ cancel/resume jq results into ``visit`` arguments; ``visit`` holds the ``Visit``
 every door drives a parkable run through, the ``VisitOutcome``/``ParkedEntry`` value types, and the
 ``RunAnswer`` a run door hands its caller; ``reply_text`` holds the one participant-facing reply
 type (``ReplyText``) and its validator, shared by a terminal failure's ``reply`` and a route's
-``error_reply_text``.
+``reply_texts`` members.
 """
 
 from __future__ import annotations
@@ -65,7 +65,10 @@ from tai42_contract.interactions.door_contract import (
 )
 from tai42_contract.interactions.models import (
     CALLBACK_LINK_FORMATS,
+    DATE_CONSTRAINT_KEYS,
+    ELICIT_META_REPLY_TO,
     FILE_MEDIA_KINDS,
+    FORM_WEEKDAYS,
     LOCATION_ADDRESS_MAX_CHARS,
     LOCATION_NAME_MAX_CHARS,
     MEDIA_CAPTION_MAX_CHARS,
@@ -78,10 +81,12 @@ from tai42_contract.interactions.models import (
     MEDIA_URL_MAX_CHARS,
     REJECTION_NOTICE_MAX_CHARS,
     SHAPE_KEYWORDS,
+    TIME_OF_KEY,
     AnswerFormat,
     AnswerMismatchPolicy,
     AnswerPageWording,
     AnswerWording,
+    AskAnswer,
     ChoiceWording,
     CountdownWording,
     DisplayBlock,
@@ -135,6 +140,13 @@ from tai42_contract.interactions.models.media_errors import (
     MediaTooLargeError,
     MediaTypeNotAllowedError,
 )
+from tai42_contract.interactions.models.reaction_errors import (
+    FORM_REACTION_REASON_MAX_CHARS,
+    FormReactionClosedError,
+    FormReactionError,
+    FormReactionHandlerError,
+    FormReactionRequestError,
+)
 from tai42_contract.interactions.park_markers import (
     RESUME_BUFFERED_MARKER_KEY,
     RESUME_BUFFERED_MARKER_SCHEMA,
@@ -158,8 +170,10 @@ from tai42_contract.interactions.visit import (
     RunNoneAnswer,
     RunParkedAnswer,
     RunResultAnswer,
+    SettleVisitClaim,
     UndeclaredExtrasKeyError,
     Visit,
+    VisitAct,
     VisitOutcome,
     VisitRequestError,
 )
@@ -169,8 +183,12 @@ __all__ = [
     "CALLER_ASK_TOOL",
     "CHAINED_PARK_KEY_PREFIX",
     "CHAINED_PARK_TOKEN_KEY",
+    "DATE_CONSTRAINT_KEYS",
+    "ELICIT_META_REPLY_TO",
     "EXPIRY_ANSWER",
     "FILE_MEDIA_KINDS",
+    "FORM_REACTION_REASON_MAX_CHARS",
+    "FORM_WEEKDAYS",
     "LOCATION_ADDRESS_MAX_CHARS",
     "LOCATION_NAME_MAX_CHARS",
     "MEDIA_CAPTION_MAX_CHARS",
@@ -193,12 +211,14 @@ __all__ = [
     "SHAPE_KEYWORDS",
     "SUSPENDED_INTERACTION_MARKER_KEY",
     "SUSPENDED_INTERACTION_MARKER_SCHEMA",
+    "TIME_OF_KEY",
     "AnswerFormat",
     "AnswerMismatchError",
     "AnswerMismatchPolicy",
     "AnswerPageWording",
     "AnswerWording",
     "Ask",
+    "AskAnswer",
     "CallerAskLanding",
     "ChainedResume",
     "ChoiceWording",
@@ -214,9 +234,13 @@ __all__ = [
     "FormOption",
     "FormPage",
     "FormPageWording",
+    "FormReactionClosedError",
+    "FormReactionError",
     "FormReactionEvent",
     "FormReactionEventBody",
     "FormReactionEventKind",
+    "FormReactionHandlerError",
+    "FormReactionRequestError",
     "FormReactions",
     "FormShapeError",
     "FormShapeKind",
@@ -260,12 +284,14 @@ __all__ = [
     "RunParkedAnswer",
     "RunResultAnswer",
     "RunTerminalFailed",
+    "SettleVisitClaim",
     "StatusWording",
     "SubmittedEvent",
     "SuspendedInteraction",
     "TakeItem",
     "UndeclaredExtrasKeyError",
     "Visit",
+    "VisitAct",
     "VisitOutcome",
     "VisitRequestError",
     "Wording",

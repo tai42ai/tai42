@@ -13,23 +13,15 @@ from datetime import datetime
 from typing import Any, Literal
 
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import AnswerMismatchPolicy
+from tai42_contract.interactions import AnswerMismatchPolicy, AskAnswer, SuspendedInteraction
 from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_skeleton.interactions import ask as _ask
 
-# The answer is returned as ``Any`` — a scalar (text→str, confirm→bool,
-# select→str) or a dict (external/JSON formats) — so FastMCP derives no output
-# schema and a scalar answer would reach the caller only as unstructured
-# ``content``, never ``structuredContent``/``result.data`` (a dict answer already
-# populates it). Advertise a permissive wrap schema so EVERY answer surfaces in
-# ``result.data``: the server wraps it as ``{"result": <answer>}`` and the client
-# unwraps it back (a string stays a string, a dict stays a dict).
-_ANSWER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {"result": {"title": "Result"}},
-    "x-fastmcp-wrap-result": True,
-}
+# A sync ask returns the ``AskAnswer`` JSON ``{answer, reply_to, params}``, the object a parked
+# ask's driver hands back too, so the tool declares that object's schema. An async ask's park
+# sentinel is admitted beside it by the MCP edge's park markers.
+_ANSWER_SCHEMA: dict[str, Any] = AskAnswer.model_json_schema()
 
 
 @tai42_app.tools.tool(output_schema=_ANSWER_SCHEMA, tags={"interactions"}, meta={TOOL_META_PAUSES: True})
@@ -64,7 +56,7 @@ async def ask(
 
     Args:
         question: The question shown to the human.
-        answer_format: How the answer is collected and typed:
+        answer_format: How the answer (the result's ``answer``) is collected and typed:
             - "text": free-form text, returned as a string.
             - "confirm": a yes/no choice, returned as a bool.
             - "select": one value from ``options``, the chosen string returned.
@@ -126,7 +118,7 @@ async def ask(
             only text ignores it (media is an enhancement, never a refusal). Invalid
             media fails the call before the question is stored.
         mode: The wait discipline. "sync" (the default) blocks and returns the
-            typed answer. "async" PARKS the caller: it stores (and optionally
+            answer object (see Returns). "async" PARKS the caller: it stores (and optionally
             delivers) the question but returns a suspension sentinel immediately,
             and a later answer or expiry resumes the run's driver out of band.
             An "async" ask requires a resuming driver bound by the engine.
@@ -168,7 +160,9 @@ async def ask(
         wording: The caller's per-send catalogue of the question's platform-drawn texts, in the
             end-user's language (absent, every surface shows its own word). An object grouped by
             what each word decorates — ``form`` (a form's chrome: title/open/cancel/back/submit,
-            review line, per-field picker placeholders), ``choice`` (a choice list's control
+            review line, the refusal summary line, the could-not-update sentence, the
+            step-progress line, and per-field picker placeholders, yes/no words, length hint,
+            required sentence and list words), ``choice`` (a choice list's control
             label, numbered-reply hint, group name), ``answer`` (a non-form question's open /
             affirmative / negative / submit controls, reply hint, and the ``rejected`` /
             ``rejected_final`` refusal sentences), ``lines`` (the delivery message's answer-link /
@@ -187,8 +181,13 @@ async def ask(
             Applies only to an async park.
 
     Returns:
-        The typed answer (text -> str, confirm -> bool, select -> chosen value,
-        form -> validated dict, external -> the callback payload).
+        In "sync" mode the object ``{"answer", "reply_to", "params"}``: ``answer`` is the typed
+        answer (text -> str, confirm -> bool, select -> chosen value, form -> validated dict,
+        external -> the callback payload); ``reply_to`` is the message the answering reply quoted
+        (``{"message_id", "status", "text"}``), or null when it quoted none or the answer did not
+        come over a channel; ``params`` is the channel's extra detail of the answering tap or
+        reply, or null. In "async" mode the park sentinel; the run's driver later hands the same
+        object back as the ask's result.
 
     Raises:
         InteractionTimeoutError: No answer arrived before the timeout elapsed.
@@ -202,7 +201,7 @@ async def ask(
         RuntimeError: An ``external`` question (or one bound to a ``channel``)
             was asked without ``INTERACTIONS_PUBLIC_BASE_URL`` configured.
     """
-    return await _ask(
+    result = await _ask(
         question,
         answer_format=answer_format,
         options=options,
@@ -228,6 +227,9 @@ async def ask(
         payload=payload,
         on_expiry=on_expiry,
     )
+    if isinstance(result, SuspendedInteraction):
+        return result
+    return result.model_dump(mode="json")
 
 
 @tai42_app.tools.tool(tags={"interactions"})

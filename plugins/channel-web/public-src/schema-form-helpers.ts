@@ -5,8 +5,8 @@
  * in the SDK's `fieldWording` shape, and the step-focus hook. No JSX — the presentational
  * pieces live in `schema-form-answer`.
  */
-import type { JsonSchema, SchemaFormErrors } from '@tai42/studio-sdk';
-import { defaultValueForSchema } from '@tai42/studio-sdk';
+import type { FieldWords, JsonSchema, SchemaFormErrors } from '@tai42/studio-sdk';
+import { defaultValueForSchema, fieldDrawingOrder } from '@tai42/studio-sdk';
 import type { RefObject } from 'react';
 import { useEffect, useRef } from 'react';
 
@@ -23,16 +23,27 @@ export function propertyOrder(schema: JsonSchema): readonly string[] {
 }
 
 /** The pages to render: the per-send steps when set, else one page carrying every
- * top-level property in schema order (the whole form on one step). */
+ * top-level property in schema order (the whole form on one step). Each page's fields are
+ * in drawing order, each `timeOf` time right after its date. */
 export function resolvePages(
   schema: JsonSchema,
   pages: readonly FormPage[] | null,
 ): readonly FormPage[] {
-  return (
-    pages ?? [
-      { title: '', fields: propertyOrder(schema), display: [], kind: 'input', buttonLabel: null },
-    ]
-  );
+  const properties: Readonly<Record<string, JsonSchema>> = isPlainObject(schema.properties)
+    ? schema.properties
+    : {};
+  if (pages === null) {
+    return [
+      {
+        title: '',
+        fields: fieldDrawingOrder(propertyOrder(schema), properties),
+        display: [],
+        kind: 'input',
+        buttonLabel: null,
+      },
+    ];
+  }
+  return pages.map((page) => ({ ...page, fields: fieldDrawingOrder(page.fields, properties) }));
 }
 
 /** The initial form value: the schema's defaults overlaid with any prefilled
@@ -92,22 +103,30 @@ function fieldOfPath(path: string): string {
   return cut.length > 0 ? path.slice(0, Math.min(...cut)) : path;
 }
 
-/** The SDK's per-field words: a field's `choiceLabel` and `invalid` sentence. */
-export type SdkFieldWording = Readonly<Record<string, { choiceLabel?: string; invalid?: string }>>;
+/** The SDK's per-field words, keyed by property name. */
+export type SdkFieldWording = Readonly<Record<string, FieldWords>>;
 
 /** The parsed per-field wording as the SDK's `fieldWording` record, keyed by property
  * name, carrying only the words the caller set. `SchemaForm` reads `choiceLabel` (an
- * unset one leaves the `enum` select its default placeholder); `validateAgainstSchema`
- * reads `invalid` (an unset one leaves the SDK's word for the failing shape). */
+ * unset one leaves the `enum` select its default placeholder) and a list field's
+ * `addItem` / `removeItem` / `itemLabel` / `noItems`; `validateAgainstSchema` reads
+ * `invalid` and `required` (an unset one leaves the SDK's own message). The yes/no
+ * labels are drawn by the widget's own readback, not handed to the SDK. Each entry is an
+ * own key, so a field named after a built-in object member keeps its words. */
 export function toSdkFieldWording(fields: Readonly<Record<string, FieldWording>>): SdkFieldWording {
-  const out: Record<string, { choiceLabel?: string; invalid?: string }> = {};
+  const entries: [string, FieldWords][] = [];
   for (const [name, field] of Object.entries(fields)) {
-    const words: { choiceLabel?: string; invalid?: string } = {};
+    const words: { -readonly [K in keyof FieldWords]: FieldWords[K] } = {};
     if (field.choiceLabel !== null) words.choiceLabel = field.choiceLabel;
     if (field.invalid !== null) words.invalid = field.invalid;
-    if (Object.keys(words).length > 0) out[name] = words;
+    if (field.required !== null) words.required = field.required;
+    if (field.addItem !== null) words.addItem = field.addItem;
+    if (field.removeItem !== null) words.removeItem = field.removeItem;
+    if (field.itemLabel !== null) words.itemLabel = field.itemLabel;
+    if (field.noItems !== null) words.noItems = field.noItems;
+    if (Object.keys(words).length > 0) entries.push([name, words]);
   }
-  return out;
+  return Object.fromEntries(entries);
 }
 
 /** Just the errors whose field is one of `fields` — the per-page slice used to

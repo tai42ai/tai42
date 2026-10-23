@@ -10,8 +10,9 @@ import {
   propertyOrder,
   resolvePages,
   singleFieldSchema,
+  toSdkFieldWording,
 } from '@/schema-form-helpers';
-import type { FormPage } from '@/transcript-model';
+import type { FieldWording, FormPage } from '@/transcript-model';
 
 const page = (fields: string[]): FormPage => ({
   title: '',
@@ -41,7 +42,36 @@ describe('propertyOrder', () => {
 describe('resolvePages', () => {
   it('returns the per-send pages when set', () => {
     const pages = [page(['a'])];
-    expect(resolvePages({} as unknown as JsonSchema, pages)).toBe(pages);
+    expect(resolvePages({} as unknown as JsonSchema, pages)).toEqual(pages);
+  });
+
+  const timed = {
+    type: 'object',
+    properties: {
+      start: { type: 'string', format: 'date' },
+      end: { type: 'string', format: 'date', rangeStart: 'start' },
+      note: { type: 'string' },
+      start_time: { type: 'string', format: 'time', timeOf: 'start' },
+      end_time: { type: 'string', format: 'time', timeOf: 'end' },
+    },
+  } as unknown as JsonSchema;
+
+  it('lists each time right after its date on the default page', () => {
+    expect(resolvePages(timed, null)[0]?.fields).toEqual([
+      'start',
+      'start_time',
+      'end',
+      'end_time',
+      'note',
+    ]);
+  });
+
+  it('lists each time right after its date on every per-send page', () => {
+    const pages = [page(['note']), page(['end_time', 'start_time', 'start', 'end'])];
+    expect(resolvePages(timed, pages).map((resolved) => resolved.fields)).toEqual([
+      ['note'],
+      ['start', 'start_time', 'end', 'end_time'],
+    ]);
   });
 
   it('falls back to one input page carrying every top-level property in order', () => {
@@ -143,5 +173,54 @@ describe('firstPageWithError', () => {
     const pages = [page(['name'])];
     const errors = { phone: 'required' } as unknown as SchemaFormErrors;
     expect(firstPageWithError(pages, errors)).toBe(-1);
+  });
+});
+
+describe('toSdkFieldWording', () => {
+  const unset: FieldWording = {
+    choiceLabel: null,
+    invalid: null,
+    trueLabel: null,
+    falseLabel: null,
+    required: null,
+    addItem: null,
+    removeItem: null,
+    itemLabel: null,
+    noItems: null,
+  };
+
+  it('hands the SDK every word it draws, and only the words the caller set', () => {
+    const sdk = toSdkFieldWording({
+      email: { ...unset, invalid: 'Not an address', required: 'Your email, please' },
+      tags: {
+        ...unset,
+        addItem: 'Add a tag',
+        removeItem: 'Drop',
+        itemLabel: 'Tag {n}',
+        noItems: 'No tags yet',
+      },
+      kind: { ...unset, choiceLabel: 'Pick a kind' },
+      agree: { ...unset, trueLabel: 'Agreed', falseLabel: 'Declined' },
+    });
+
+    expect(sdk).toEqual({
+      email: { invalid: 'Not an address', required: 'Your email, please' },
+      tags: {
+        addItem: 'Add a tag',
+        removeItem: 'Drop',
+        itemLabel: 'Tag {n}',
+        noItems: 'No tags yet',
+      },
+      kind: { choiceLabel: 'Pick a kind' },
+    });
+  });
+
+  it('keeps the words of a field named after a built-in object member as its own entry', () => {
+    const fields = Object.fromEntries([['__proto__', { ...unset, required: 'Say something' }]]);
+
+    const sdk = toSdkFieldWording(fields);
+
+    expect(Object.hasOwn(sdk, '__proto__')).toBe(true);
+    expect(Object.getPrototypeOf(sdk)).toBe(Object.prototype);
   });
 });

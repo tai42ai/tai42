@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from tai42_contract.channels import ReplyWindow
 from tai42_contract.conversations import ConversationRoute, Person
 from tai42_contract.monitoring import RunAttribution
 from tai42_contract.states import StateContext, SubjectCandidates
@@ -48,16 +49,22 @@ def _resolved_locale(person: Person | None, record: ConversationRecord, route: C
 
 
 def _turn_block(
-    record: ConversationRecord, route: ConversationRoute, *, person: Person | None, thread_id: str
+    record: ConversationRecord,
+    route: ConversationRoute,
+    *,
+    person: Person | None,
+    thread_id: str,
+    reply_window: ReplyWindow,
 ) -> dict[str, object]:
-    """The generic ``turn`` block surfaced on every tool turn's payload.
+    """The generic ``turn`` block surfaced on every turn's payload, tool and agent target alike.
 
     Carries the turn id (the record's ``message_id``, no new mint), the inbound
     descriptor (``inbound.id`` / ``inbound.kind`` message/event /
     ``inbound.source``), and the ``subject`` block a flow's ``subject_expr``
     reads — the target scope plus the ``person`` id (null off a non-multichannel
     target) and the resolved ``thread`` id, the same candidates the ambient state
-    context carries.
+    context carries. ``reply_window`` is the pair's window as the channel reported it
+    (``{state, closes_at}``; ``none`` where the channel or address has no window).
     """
     inbound_id, source = _inbound_id_and_source(record, route)
     return {
@@ -70,6 +77,7 @@ def _turn_block(
             "thread": thread_id,
             "locale": _resolved_locale(person, record, route),
         },
+        "reply_window": reply_window.model_dump(mode="json"),
     }
 
 

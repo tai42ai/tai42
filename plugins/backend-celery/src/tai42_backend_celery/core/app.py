@@ -1,7 +1,9 @@
 """The Celery application and the pool-child fork-safety hooks.
 
 ``celery_app`` is built at import time from :class:`CelerySettings` (RedBeat beat
-scheduler; pool restarts and task events enabled). ``worker_process_init`` evicts
+scheduler; pool restarts and task events enabled). Every Redis connection it makes — the
+broker, the result backend and the RedBeat store — carries the kit's connection
+behaviour (retry, socket timeouts); see :mod:`tai42_backend_celery.core.redis_seam`. ``worker_process_init`` evicts
 the monitoring vendor client in each forked child (its parent-owned
 threads/sockets are dead there; the child rebuilds it on first use).
 ``worker_process_shutdown`` flushes buffered monitoring spans and closes each
@@ -17,7 +19,9 @@ from typing import Any
 from celery import Celery, signals
 from celery_pydantic import pydantic_celery
 from tai42_contract.app import tai42_app
+from tai42_kit.clients.impl.redis import redis_from_url_kwargs
 
+from tai42_backend_celery.core.redis_seam import KitAMQP, KitLoader, configure_redis_seam
 from tai42_backend_celery.core.settings import celery_settings
 
 logger = logging.getLogger(__name__)
@@ -66,19 +70,37 @@ def on_worker_process_shutdown(sender: Any = None, **kwargs: Any) -> None:
 
 
 def create_celery_app() -> Celery:
-    """Build and configure the Celery app from ``TAI_CELERY_*`` settings."""
+    """Build and configure the Celery app from the ``CELERY_*`` settings.
+
+    The loader and the AMQP facet select the kit's Redis result backend and broker
+    transport for whatever Redis URL celery resolves; RedBeat's client takes the
+    ``CELERY_REDBEAT_*`` connection through ``redbeat_redis_options``. Raises
+    :class:`~tai42_backend_celery.core.redis_seam.UnsupportedRedisUrlError` for a Redis
+    URL form the kit's connection cannot carry.
+    """
     settings = celery_settings()
     app = Celery(
         "TaiMCPCelery",
         broker=settings.broker_url,
         backend=settings.result_backend,
+        loader=KitLoader,
+        amqp=KitAMQP,
     )
 
     pydantic_celery(app)
 
     app.conf.update(
         beat_scheduler="redbeat.RedBeatScheduler",
-        redbeat_redis_url=settings.redbeat_redis_url,
+        redbeat_redis_url=settings.redbeat.redis_url,
+        # Every key but the URL reaches RedBeat's ``Redis.from_url``; RedBeat decodes
+        # responses on ``redis://`` itself, and ``rediss://`` / ``unix://`` match it.
+        redbeat_redis_options={
+            key: value
+            for key, value in redis_from_url_kwargs(
+                {**settings.redbeat.client_kwargs(), "decode_responses": True}, sync=True
+            ).items()
+            if key != "url"
+        },
         redbeat_key_prefix=settings.redbeat_key_prefix,
         beat_max_loop_interval=settings.beat_max_loop_interval,
         timezone="UTC",
@@ -90,6 +112,7 @@ def create_celery_app() -> Celery:
         # that runs past it. Bound when the worker starts.
         task_time_limit=settings.task_timeout,
     )
+    configure_redis_seam(app)
 
     return app
 

@@ -18,11 +18,12 @@ from typing import Any
 
 import pytest
 from fakeredis import FakeServer, aioredis
-from redis.asyncio.client import PubSub
 from tai42_contract.conversations import ChannelConversationRoute
+from tai42_kit.clients.impl.redis import KitAsyncPubSub
 from tai42_kit.settings import UnknownOwnedSettingError
 
 from tai42_skeleton.conversations import caps as caps_module
+from tai42_skeleton.conversations import persons as persons_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations.caps import TurnCaps
@@ -33,6 +34,7 @@ from tai42_skeleton.conversations.turn import operator_send
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.settings.owned_settings import require_known_owned_settings
 
+from .._fakes.kit_redis import KitFakeRedis
 from .conftest import durable_manager, fixed_settings
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
@@ -97,6 +99,7 @@ def _wire(monkeypatch, fake: FakeRecordRedis) -> None:
     ctx = make_record_client_ctx(fake)
     monkeypatch.setattr(records_module, "client_ctx", ctx)
     monkeypatch.setattr(thread_lease_module, "client_ctx", ctx)
+    monkeypatch.setattr(persons_module, "client_ctx", ctx)
 
 
 @pytest.fixture
@@ -417,11 +420,6 @@ class _FakeProviderSettings:
     checkpoint_conn_string = None
 
 
-class _PersonStoreGone:
-    async def get_by_id(self, person_id: str):
-        return None
-
-
 def _stub_checkpoint(monkeypatch) -> _RecordingSaver:
     import tai42_kit.llm.checkpoint.checkpoint_registry as registry_mod
     import tai42_kit.llm.settings as settings_mod
@@ -501,7 +499,8 @@ async def test_door_delete_thread_blocks_behind_a_turn(fake, monkeypatch):
 
 async def test_door_person_gone_branch_serializes_behind_a_turn(fake, monkeypatch):
     saver = _stub_checkpoint(monkeypatch)
-    manager = durable_manager(persons=_PersonStoreGone())
+    # No person row is seeded: the erase takes its person-gone branch.
+    manager = durable_manager()
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: manager)
     thread_id = f"{PERSON_THREAD_PREFIX}PID1"
 
@@ -512,7 +511,7 @@ async def test_door_person_gone_branch_serializes_behind_a_turn(fake, monkeypatc
         assert saver.deleted == []
 
     result = await _aio.wait_for(delete, 2)
-    assert result == {"person_id": "PID1", "removed": 0, "erased": False, "states_erased": 0}
+    assert result == {"person_id": "PID1", "removed": 0, "erased": False, "states_erased": 0, "absorbed_person_ids": []}
     assert saver.deleted == [thread_id]
 
 
@@ -551,6 +550,11 @@ class _LuaServer:
         self.open_subscriptions = 0
         # Set by a test to make the next subscribe fail.
         self.refuse_subscribe = False
+        # Set by a test to drop the listener's connection under its pending read; the read
+        # then waits for ``reconnect_gap`` and reconnects inside the same call, raising nothing.
+        self.drop_under_read = _aio.Event()
+        self.dropped = _aio.Event()
+        self.reconnect_gap = _aio.Event()
 
     def client_ctx(self):
         server = self
@@ -572,8 +576,9 @@ class _LuaServer:
         return _ctx
 
 
-class _FailingPubSub(PubSub):
-    """A pub/sub whose pending listening read raises once the test sets ``lose_subscription``."""
+class _FailingPubSub(KitAsyncPubSub):
+    """A pub/sub whose pending listening read raises once the test sets ``lose_subscription``,
+    or reconnects inside the read once it sets ``drop_under_read``."""
 
     def __init__(self, owner: _LuaServer, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -599,25 +604,36 @@ class _FailingPubSub(PubSub):
             return await super().get_message(ignore_subscribe_messages, timeout)
         read = _aio.ensure_future(super().get_message(ignore_subscribe_messages, timeout))
         trip = _aio.ensure_future(self._owner.lose_subscription.wait())
+        drop = _aio.ensure_future(self._owner.drop_under_read.wait())
         try:
-            done, _ = await _aio.wait({read, trip}, return_when=_aio.FIRST_COMPLETED)
+            done, _ = await _aio.wait({read, trip, drop}, return_when=_aio.FIRST_COMPLETED)
         finally:
-            for pending in (read, trip):
+            for pending in (read, trip, drop):
                 if not pending.done():
                     pending.cancel()
-        if trip in done and read not in done:
+        if read in done:
+            return read.result()
+        if trip in done:
             self._owner.lose_subscription.clear()
             raise ConnectionError("simulated lost subscription")
-        return read.result()
+        self._owner.drop_under_read.clear()
+        connection = self.connection
+        assert connection is not None
+        await connection.disconnect()
+        self._owner.dropped.set()
+        await self._owner.reconnect_gap.wait()
+        # The next read finds the connection closed and reconnects it, running the
+        # connection's connect callbacks (the re-subscribe, then ``on_reconnect``).
+        return await super().get_message(ignore_subscribe_messages, timeout=0.0)
 
 
-class _ListenerRedis(aioredis.FakeRedis):
+class _ListenerRedis(KitFakeRedis):
     def __init__(self, owner: _LuaServer, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._owner = owner
 
-    def pubsub(self, **kwargs: Any) -> PubSub:
-        return _FailingPubSub(self._owner, self.connection_pool, **kwargs)
+    def pubsub(self, *, on_reconnect: Any = None, **kwargs: Any) -> KitAsyncPubSub:
+        return _FailingPubSub(self._owner, self.connection_pool, on_reconnect=on_reconnect, **kwargs)
 
 
 @pytest.fixture
@@ -785,6 +801,34 @@ async def test_a_release_during_a_resubscribe_is_not_missed(lua, monkeypatch, ca
     backoff_gate.set()
     await _aio.wait_for(waiter, 1)
     assert "thread lease release listener lost its subscription; re-subscribing" in caplog.text
+
+
+async def test_a_release_during_a_reconnect_the_retry_hides_wakes_the_waiter(lua, monkeypatch):
+    # The listener's connection drops and its read reconnects and re-subscribes inside the
+    # call, so no error reaches the listener; the release sent in between is never heard.
+    settings = ConversationsSettings()
+    endings = _record_wait_endings(monkeypatch)
+    worker_a, worker_b = ThreadTurnLease(lambda: settings), ThreadTurnLease(lambda: settings)
+    a_in, a_release, b_waiting = _aio.Event(), _aio.Event(), _aio.Event()
+    holder = _aio.create_task(_hold(worker_a, _THREAD, a_in, a_release))
+    await _aio.wait_for(a_in.wait(), 1)
+    waiter = _aio.create_task(_wait_and_take(worker_b, _THREAD, b_waiting))
+    await _aio.wait_for(b_waiting.wait(), 1)
+    for _ in range(100):
+        if lua.open_subscriptions == 1:
+            break
+        await _aio.sleep(0.01)
+    assert lua.open_subscriptions == 1
+
+    lua.drop_under_read.set()
+    await _aio.wait_for(lua.dropped.wait(), 1)
+    a_release.set()
+    await holder
+    lua.reconnect_gap.set()
+
+    # The reconnect wakes every waiter, so B re-attempts and takes the released lease.
+    await _aio.wait_for(waiter, 1)
+    assert endings == ["woken"]
 
 
 async def test_the_listener_subscribes_for_the_first_waiter_and_closes_after_the_last(lua):

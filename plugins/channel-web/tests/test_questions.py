@@ -29,7 +29,9 @@ _QUESTION_KEY = "channel:web:question:int-1"
 async def test_reserve_sets_record_with_remaining_ttl(fake_redis: FakeRedis):
     before = datetime.now(UTC)
     timeout_at = _deadline(120)
-    record = QuestionRecord(callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=timeout_at)
+    record = QuestionRecord(
+        callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=timeout_at, sensitive=False
+    )
     await reserve_question("int-1", record)
     after = datetime.now(UTC)
 
@@ -39,6 +41,7 @@ async def test_reserve_sets_record_with_remaining_ttl(fake_redis: FakeRedis):
         "identity": IDENTITY,
         "address": VISITOR_ID,
         "timeout_at": timeout_at.astimezone(UTC).isoformat(),
+        "sensitive": False,
         "restores": 0,
     }
     ttl = fake_redis.ttls[_QUESTION_KEY]
@@ -48,14 +51,18 @@ async def test_reserve_sets_record_with_remaining_ttl(fake_redis: FakeRedis):
 async def test_reserve_past_deadline_raises_and_stores_nothing(fake_redis: FakeRedis):
     from tai42_contract.channels import ChannelDeliveryError
 
-    record = QuestionRecord(callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(-1))
+    record = QuestionRecord(
+        callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(-1), sensitive=False
+    )
     with pytest.raises(ChannelDeliveryError, match="already passed"):
         await reserve_question("int-1", record)
     assert _QUESTION_KEY not in fake_redis.store
 
 
 async def test_peek_reads_without_claiming(fake_redis: FakeRedis):
-    record = QuestionRecord(callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline())
+    record = QuestionRecord(
+        callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(), sensitive=False
+    )
     await reserve_question("int-1", record)
 
     assert await peek_question("int-1") == record
@@ -63,12 +70,27 @@ async def test_peek_reads_without_claiming(fake_redis: FakeRedis):
     assert await claim_question("int-1") == record
 
 
+@pytest.mark.parametrize("sensitive", [True, False])
+async def test_a_record_round_trips_whether_its_answer_is_sensitive(fake_redis: FakeRedis, sensitive: bool):
+    record = QuestionRecord(
+        callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(), sensitive=sensitive
+    )
+    await reserve_question("int-1", record)
+
+    assert json.loads(fake_redis.store[_QUESTION_KEY])["sensitive"] is sensitive
+    claimed = await claim_question("int-1")
+    assert claimed is not None
+    assert claimed.sensitive is sensitive
+
+
 async def test_peek_unknown_question_is_none(fake_redis: FakeRedis):
     assert await peek_question("int-nope") is None
 
 
 async def test_claim_is_atomic_getdel(fake_redis: FakeRedis):
-    record = QuestionRecord(callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline())
+    record = QuestionRecord(
+        callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(), sensitive=False
+    )
     await reserve_question("int-1", record)
 
     assert await claim_question("int-1") == record
@@ -76,14 +98,18 @@ async def test_claim_is_atomic_getdel(fake_redis: FakeRedis):
 
 
 async def test_release_drops_the_reservation(fake_redis: FakeRedis):
-    record = QuestionRecord(callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline())
+    record = QuestionRecord(
+        callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(), sensitive=False
+    )
     await reserve_question("int-1", record)
     await release_question("int-1")
     assert await claim_question("int-1") is None
 
 
 async def test_restore_uses_remaining_ttl(fake_redis: FakeRedis):
-    record = QuestionRecord(callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(600))
+    record = QuestionRecord(
+        callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(600), sensitive=False
+    )
     await reserve_question("int-1", record)
     claimed = await claim_question("int-1")
     assert claimed is not None
@@ -95,18 +121,26 @@ async def test_restore_uses_remaining_ttl(fake_redis: FakeRedis):
 
 
 async def test_restore_past_deadline_stores_nothing(fake_redis: FakeRedis):
-    stale = QuestionRecord(callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(-1))
+    stale = QuestionRecord(
+        callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(-1), sensitive=False
+    )
     assert await restore_question("int-1", stale, 5) is False
     assert _QUESTION_KEY not in fake_redis.store
 
 
 async def test_restore_never_clobbers_a_new_reservation(fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture):
-    record = QuestionRecord(callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline())
+    record = QuestionRecord(
+        callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(), sensitive=False
+    )
     await reserve_question("int-1", record)
     claimed = await claim_question("int-1")
     assert claimed is not None
     new_record = QuestionRecord(
-        callback_url="https://app.example/next", identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline()
+        callback_url="https://app.example/next",
+        identity=IDENTITY,
+        address=VISITOR_ID,
+        timeout_at=_deadline(),
+        sensitive=False,
     )
     await reserve_question("int-1", new_record)
 
@@ -121,7 +155,9 @@ async def test_restore_never_clobbers_a_new_reservation(fake_redis: FakeRedis, c
 async def test_restore_counts_itself_on_the_record(fake_redis: FakeRedis):
     # The count rides the record, so it expires exactly with the question and needs
     # no second key of its own.
-    record = QuestionRecord(callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline())
+    record = QuestionRecord(
+        callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(), sensitive=False
+    )
     await reserve_question("int-1", record)
     claimed = await claim_question("int-1")
     assert claimed is not None
@@ -140,7 +176,12 @@ async def test_restore_is_refused_once_the_cap_is_spent(fake_redis: FakeRedis, c
     # door's own rate limit (keyed on this server's egress IP, shared by every
     # channel): past the cap the record stays dropped, loudly.
     record = QuestionRecord(
-        callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline(), restores=2
+        callback_url=CALLBACK,
+        identity=IDENTITY,
+        address=VISITOR_ID,
+        timeout_at=_deadline(),
+        sensitive=False,
+        restores=2,
     )
     with caplog.at_level("ERROR"):
         assert await restore_question("int-1", record, 2) is False

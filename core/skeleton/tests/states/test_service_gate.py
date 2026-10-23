@@ -198,10 +198,13 @@ async def test_validate_subject_person_branch(svc: StatesService, monkeypatch: p
     await svc.put_declaration(decl)
 
     class _FakePersonStore:
-        async def get_by_id(self, person_id):
+        async def get_by_id(self, person_id, *, include_erasing=False):
             if person_id == "known":
                 return SimpleNamespace(person_id="known", target_kind="agent", target_name="a")
             return None
+
+        async def is_erasing(self, person_id: str) -> bool:
+            return False
 
     manager = RedisConversationsManager(ConversationsSettings())
     manager.persons = _FakePersonStore()  # type: ignore[assignment]  # the accessor serves the double
@@ -225,8 +228,11 @@ async def test_validate_subject_person_store_is_lazy_and_single(
     gated on the redis conversations backend — and a person subject reads it exactly once."""
 
     class _PersonStore:
-        async def get_by_id(self, person_id: str) -> object:
+        async def get_by_id(self, person_id: str, *, include_erasing: bool = False) -> object:
             return SimpleNamespace(person_id=person_id, target_kind="agent", target_name="a")
+
+        async def is_erasing(self, person_id: str) -> bool:
+            return False
 
     lookups = 0
     backend_present = False

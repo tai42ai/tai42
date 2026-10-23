@@ -61,6 +61,7 @@ from tai42_contract.conversations.routes import (
     ConversationRouteBody,
     ConversationRouteCreate,
     ConversationRouteCreateBody,
+    ReplyTexts,
     TargetBindValidator,
 )
 from tai42_contract.conversations.targets import (
@@ -89,6 +90,7 @@ from tai42_contract.entry_params import (
     validate_entry_params,
 )
 from tai42_contract.interactions.reply_text import NON_BLANK_PATTERN
+from tai42_contract.reply_to import ReplyTo, ReplyToStatus
 
 __all__ = [
     "CHANNEL_NAME_PATTERN",
@@ -146,6 +148,9 @@ __all__ = [
     "PairCodeInvalidError",
     "Person",
     "PersonAddress",
+    "ReplyTexts",
+    "ReplyTo",
+    "ReplyToStatus",
     "TargetBindValidator",
     "TargetConversationConfig",
     "ThreadQueueOverflowError",

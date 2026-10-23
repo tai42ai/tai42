@@ -1,12 +1,13 @@
-"""The one rich-send capability table both channel gates read."""
+"""The one rich-send capability table both channel gates read, and the per-part channel check."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from tai42_contract.channels import Channel, ChannelTemplate
 
-from tai42_skeleton.channels.capabilities import RICH_CAPABILITIES, unsupported_capability
+from tai42_skeleton.channels.capabilities import RICH_CAPABILITIES, check_channel_part, unsupported_capability
 
 
 class _TextOnly:
@@ -45,3 +46,76 @@ def test_an_advertised_flag_admits_its_fields_and_the_first_miss_wins() -> None:
         "media",
         "media",
     )
+
+
+# -- the per-part channel check -------------------------------------------------
+
+
+class _CheckingChannel:
+    """Records every call to its template and form hooks; refuses a template carrying ``reject``."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, ...]] = []
+
+    def validate_template(self, template: ChannelTemplate) -> None:
+        self.calls.append(("template", template))
+        if template.parameters and "reject" in template.parameters:
+            raise ValueError("template parameter 'reject' has no slot")
+
+    def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
+        self.calls.append(("form", schema, question))
+
+
+_FORM = {"type": "object", "properties": {"city": {"type": "string"}}}
+
+
+def test_check_channel_part_calls_the_template_hook_for_a_template():
+    channel = _CheckingChannel()
+    template = ChannelTemplate(name="status_update", language="en_US", parameters={"ref": "A-42"})
+
+    check_channel_part(cast("Channel", channel), message="ready", template=template, schema=None)
+
+    assert channel.calls == [("template", template)]
+
+
+def test_check_channel_part_runs_the_form_check_with_the_given_message():
+    channel = _CheckingChannel()
+
+    check_channel_part(cast("Channel", channel), message="which city?", template=None, schema=_FORM)
+
+    assert channel.calls == [("form", _FORM, "which city?")]
+
+
+def test_check_channel_part_refuses_a_form_outside_the_subset():
+    channel = _CheckingChannel()
+
+    with pytest.raises(ValueError, match="'address'"):
+        check_channel_part(
+            cast("Channel", channel),
+            message="where?",
+            template=None,
+            schema={"type": "object", "properties": {"address": {"type": "object"}}},
+        )
+    assert channel.calls == []
+
+
+def test_check_channel_part_checks_nothing_for_a_part_with_neither():
+    channel = _CheckingChannel()
+
+    check_channel_part(cast("Channel", channel), message="hello", template=None, schema=None)
+
+    assert channel.calls == []
+
+
+def test_check_channel_part_passes_a_template_through_a_channel_without_the_hook():
+    template = ChannelTemplate(name="status_update", language="en_US", parameters={"reject": True})
+
+    check_channel_part(cast("Channel", _TextOnly()), message="ready", template=template, schema=None)
+
+
+def test_check_channel_part_raises_the_hook_refusal_unchanged():
+    channel = _CheckingChannel()
+    template = ChannelTemplate(name="status_update", language="en_US", parameters={"reject": True})
+
+    with pytest.raises(ValueError, match=r"^template parameter 'reject' has no slot$"):
+        check_channel_part(cast("Channel", channel), message="ready", template=template, schema=None)

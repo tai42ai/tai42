@@ -28,6 +28,7 @@ from tai42_contract.channels import (
     ChannelTemplate,
     OptionSection,
     ReplyOption,
+    SendOutcome,
 )
 from tai42_contract.interactions import MEDIA_ROUTE_PREFIX
 from tai42_contract.interactions.models import (
@@ -39,6 +40,7 @@ from tai42_contract.interactions.models import (
     MediaKind,
     Wording,
 )
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.channels import notifications_sink
@@ -51,18 +53,19 @@ from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
 from .._fakes.recording_monitoring import RecordingMonitoring
 
 
-class RecordingChannel:
+class RecordingChannel(AddressingChannel):
     """Records every notification handed to ``notify``. Its ``notify`` returns
     ``None`` — a channel not yet on the id-returning contract."""
 
     def __init__(self) -> None:
         self.notifications: list[ChannelNotification] = []
 
-    async def notify(self, notification: ChannelNotification) -> None:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         self.notifications.append(notification)
+        return self.outcome(notification, [])
 
 
-class IdReturningChannel:
+class IdReturningChannel(AddressingChannel):
     """Records every notification and returns the medium-assigned outbound ids — a
     channel on the id-returning ``notify`` contract."""
 
@@ -70,12 +73,12 @@ class IdReturningChannel:
         self.notifications: list[ChannelNotification] = []
         self._ids = ids
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         self.notifications.append(notification)
-        return self._ids
+        return self.outcome(notification, self._ids)
 
 
-class RichChannel:
+class RichChannel(AddressingChannel):
     """A channel advertising ALL richer-notify capabilities via the OPTIONAL
     class-attribute convention; records every notification it receives."""
 
@@ -88,9 +91,9 @@ class RichChannel:
     def __init__(self) -> None:
         self.notifications: list[ChannelNotification] = []
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         self.notifications.append(notification)
-        return []
+        return self.outcome(notification, [])
 
 
 class FormHookChannel(RichChannel):
@@ -125,16 +128,16 @@ class TemplateHookChannel(RichChannel):
             raise ValueError("this channel cannot render a template whose parameters carry 'reject'")
 
 
-class FailingChannel:
-    async def notify(self, notification: ChannelNotification) -> None:
+class FailingChannel(AddressingChannel):
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         raise ChannelDeliveryError("provider unreachable")
 
 
-class CannotNotifyChannel:
+class CannotNotifyChannel(AddressingChannel):
     """A channel that cannot notify — its ``notify`` raises exactly what the
     contract protocol's default body raises."""
 
-    async def notify(self, notification: ChannelNotification) -> None:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         raise NotImplementedError
 
 
@@ -683,6 +686,41 @@ async def test_schema_outside_the_channel_subset_is_rejected(register_channel, s
     assert channel.notifications == []
     assert await notifications_sink.read_notifications(audience="alice") == []
     assert await notifications_sink.read_notifications() == []
+
+
+_TIMED_RANGE_PROPS = {
+    "start": {"type": "string", "format": "date"},
+    "end": {"type": "string", "format": "date", "rangeStart": "start"},
+    "end_time": {"type": "string", "format": "time", "timeOf": "end"},
+}
+
+
+@pytest.mark.parametrize(
+    ("properties", "pages", "message"),
+    [
+        (
+            {**_TIMED_RANGE_PROPS, "note": {"type": "string", "timeOf": "end"}},
+            None,
+            "form schema property 'note' carries timeOf but is not a time property",
+        ),
+        (
+            _TIMED_RANGE_PROPS,
+            [{"title": "Dates", "fields": ["start", "end"]}, {"title": "Late", "fields": ["end_time"]}],
+            "form schema property 'end_time' is the time of 'end' and must sit on the same page",
+        ),
+    ],
+)
+async def test_a_broken_time_of_is_rejected(register_channel, sink_redis, properties, pages, message):
+    # A ``timeOf`` on a field that is not a time, or a time on another page than its date, is
+    # refused at the door naming the property, before any feed write and before the channel is touched.
+    channel = register_channel("rich", RichChannel())
+    schema = {"type": "object", "properties": properties}
+
+    with pytest.raises(ValueError, match=re.escape(message)):
+        await notify_user("fill this in", channel="rich", schema=schema, pages=pages, audience="alice")
+
+    assert channel.notifications == []
+    assert await notifications_sink.read_notifications(audience="alice") == []
 
 
 async def test_schema_breaking_the_json_schema_rules_is_rejected(register_channel, sink_redis):

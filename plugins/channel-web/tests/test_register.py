@@ -29,6 +29,7 @@ _ROUTE_MODULES = (
     "tai42_channel_web.routes.reaction_routes",
     "tai42_channel_web.routes.session_routes",
     "tai42_channel_web.routes.gate_routes",
+    "tai42_channel_web.routes.words_routes",
 )
 _ROOT_SPEC = Path(__file__).resolve().parent.parent / "tai-plugin.yml"
 
@@ -79,9 +80,10 @@ def test_importing_register_registers_channel_and_routes(stub_app):
             "/gates/{identity}",
             "/gates/{identity}/codes",
             "/gates/{identity}/codes/{code_id}",
+            "/words/{identity}",
         }
         # The module defers auth to the declaration for every door (no explicit
-        # ``authed``). The chat doors pass no action; the entry-gate management doors
+        # ``authed``). The chat doors pass no action; the entry-gate and words management doors
         # each declare an explicit action-class (an authed door with none refuses to
         # register).
         assert all(route.authed is None for route in routes)
@@ -103,6 +105,9 @@ def test_importing_register_registers_channel_and_routes(stub_app):
             ("/gates/{identity}", ("PUT",), "write"),
             ("/gates/{identity}/codes", ("POST",), "write"),
             ("/gates/{identity}/codes/{code_id}", ("DELETE",), "write"),
+            ("/words/{identity}", ("GET",), "read"),
+            ("/words/{identity}", ("PUT",), "write"),
+            ("/words/{identity}", ("DELETE",), "write"),
         }
 
 

@@ -20,21 +20,40 @@ rejection leaves the record untouched. When the platform takes a delivered quest
 that question's interaction id, so a newer ask's hold on the same pair is never released. Upstream ``MessageSid`` dedupe
 (``already_seen``/``mark_seen``) is the replay guard that keeps a redelivered webhook
 from re-forwarding a peeked-but-not-released reply.
+
+A WhatsApp pair (``whatsapp:``-prefixed numbers) also keeps a REPLY-WINDOW key holding the close
+time of WhatsApp's 24-hour customer service window (the latest inbound's receive time + 24 hours,
+in epoch milliseconds) that expires at that instant; it is the kit's shared reply-window store,
+advanced on every inbound and never moved back. The receive time is the FIRST receipt of the
+inbound's ``MessageSid``: a FIRST-RECEIVED key per sid, written set-if-absent and kept for the
+window's length, so a webhook retry opens the window from the same instant as the first delivery.
+An SMS pair has no window and keeps no key.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Awaitable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final, cast
 
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDeliveryError, Correlation
+from tai42_contract.channels import ChannelDeliveryError, Correlation, ReplyWindow
 from tai42_contract.interactions.models import AnswerMismatchPolicy, Wording
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.conversations.reply_window import advance_reply_window, read_reply_window
 
 from tai42_channel_twilio.settings import TwilioRedisSettings, twilio_redis_settings, twilio_settings
+
+# WhatsApp's customer service window over Twilio: a free-form message is allowed for 24 hours
+# after the participant's latest inbound message. A vendor rule, so not an operator setting.
+_REPLY_WINDOW_SECONDS: Final = 86_400
+
+_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
+_MILLISECOND: Final = timedelta(milliseconds=1)
+
+# The address prefix Twilio gives a WhatsApp number; an SMS number has none.
+WHATSAPP_ADDRESS_PREFIX: Final = "whatsapp:"
 
 
 class PendingQuestionExistsError(ChannelDeliveryError):
@@ -52,6 +71,14 @@ def _pending_key(key: str) -> str:
 
 def _seen_key(message_sid: str) -> str:
     return f"channel:twilio:seen:{message_sid}"
+
+
+def _reply_window_key(twilio_number: str, human_number: str) -> str:
+    return f"channel:twilio:reply-window:{twilio_number}:{human_number}"
+
+
+def _first_received_key(message_sid: str) -> str:
+    return f"channel:twilio:first-received:{message_sid}"
 
 
 def _redis_settings() -> TwilioRedisSettings:
@@ -175,6 +202,14 @@ async def release_pending_for(twilio_number: str, human_number: str, interaction
     return bool(released)
 
 
+# Set-if-absent and read back in one atomic step: KEYS[1] = the sid's first-received key, ARGV[1] =
+# this receipt's time in epoch milliseconds, ARGV[2] = the key's lifetime in seconds. Returns the
+# stored first-receipt time, which is ARGV[1] on the sid's first receipt.
+_FIRST_RECEIVED_LUA: Final[str] = (
+    "redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) return redis.call('GET', KEYS[1])"
+)
+
+
 async def already_seen(message_sid: str) -> bool:
     """Whether this ``MessageSid`` was already handled (webhook retry or replay)."""
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
@@ -185,3 +220,42 @@ async def mark_seen(message_sid: str) -> None:
     """Remember a handled ``MessageSid`` for the configured dedupe window."""
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         await redis.set(_seen_key(message_sid), "1", ex=twilio_settings().dedupe_ttl)
+
+
+async def mark_reply_window(twilio_number: str, human_number: str, message_sid: str) -> None:
+    """Advance this WhatsApp pair's reply window to the sid's first receipt + 24 hours, never moving it back.
+
+    Twilio's inbound webhook carries no message time, so the receive time opens the window: the
+    time ``message_sid`` was FIRST received, recorded set-if-absent for the window's length, so a
+    retry of the same sid never moves the window. A stored first-receipt time that is not an
+    integer raises ``ValueError`` and advances nothing.
+    """
+    now = datetime.now(UTC)
+    now_ms = (now - _EPOCH) // _MILLISECOND
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        stored = await cast(
+            "Awaitable[str | bytes]",
+            redis.eval(
+                _FIRST_RECEIVED_LUA, 1, _first_received_key(message_sid), str(now_ms), str(_REPLY_WINDOW_SECONDS)
+            ),
+        )
+        try:
+            first_received_ms = int(stored)
+        except ValueError:
+            raise ValueError(f"the stored first-receipt time of MessageSid {message_sid!r} is not an integer") from None
+        await advance_reply_window(
+            redis,
+            _reply_window_key(twilio_number, human_number),
+            opened_at=_EPOCH + timedelta(milliseconds=first_received_ms),
+            window_seconds=_REPLY_WINDOW_SECONDS,
+            now=now,
+        )
+
+
+async def reply_window(twilio_number: str, human_number: str) -> ReplyWindow:
+    """This pair's reply window now: ``open`` until its close time, else ``closed``.
+
+    A stored value that is not an integer raises ``ValueError``.
+    """
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        return await read_reply_window(redis, _reply_window_key(twilio_number, human_number), now=datetime.now(UTC))

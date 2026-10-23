@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, Correlation
@@ -417,6 +418,8 @@ async def test_endpoint_form_sidecar_round_trips(fake_redis: FakeRedis):
         reactions={"field_changed": [], "page_advanced": ["T"], "submitted": False, "choices": []},
         option_fields=["a"],
         invalid={"a": "Use your work address"},
+        required={"a": "We need your address"},
+        lines={"error_line": "Please check the form", "update_failed": "Not refreshed: {reason}"},
     )
     await cache_endpoint_form("int-9", form, datetime.now(UTC) + timedelta(minutes=5))
 
@@ -434,7 +437,9 @@ async def test_endpoint_form_sidecar_miss_returns_none(fake_redis: FakeRedis):
 async def test_endpoint_form_sidecar_not_written_past_deadline(fake_redis: FakeRedis):
     from tai42_channel_whatsapp.correlation import EndpointForm, cache_endpoint_form, get_endpoint_form
 
-    form = EndpointForm(schema={"type": "object"}, pages=None, reactions=None, option_fields=[], invalid={})
+    form = EndpointForm(
+        schema={"type": "object"}, pages=None, reactions=None, option_fields=[], invalid={}, required={}, lines={}
+    )
     await cache_endpoint_form("int-past", form, datetime.now(UTC) - timedelta(minutes=1))
     assert await get_endpoint_form("int-past") is None
 
@@ -455,6 +460,50 @@ async def test_endpoint_form_sidecar_without_its_parts_is_a_miss(fake_redis: Fak
     assert await get_endpoint_form("int-noschema") is None
     fake_redis.store["channel:whatsapp:endpoint-form:int-partial"] = json.dumps({"schema": {}, "pages": None})
     assert await get_endpoint_form("int-partial") is None
+
+
+_WHOLE_SIDECAR = {
+    "schema": {"type": "object"},
+    "pages": None,
+    "reactions": None,
+    "option_fields": [],
+    "invalid": {},
+    "required": {},
+    "lines": {},
+}
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"lines": None},
+        {"required": None},
+        {"lines": {"title": "A screen title"}},
+        {"lines": {"error_line": 3}},
+        {"required": {"a": ["not", "text"]}},
+        {"invalid": {"a": None}},
+    ],
+)
+async def test_endpoint_form_sidecar_with_a_missing_or_malformed_word_map_is_a_miss(
+    fake_redis: FakeRedis, broken: dict[str, Any]
+):
+    import json
+
+    from tai42_channel_whatsapp.correlation import get_endpoint_form
+
+    stored = {**_WHOLE_SIDECAR, **broken}
+    stored = {key: value for key, value in stored.items() if value is not None}
+    fake_redis.store["channel:whatsapp:endpoint-form:int-words"] = json.dumps(stored)
+    assert await get_endpoint_form("int-words") is None
+
+
+async def test_a_whole_endpoint_form_sidecar_reads(fake_redis: FakeRedis):
+    import json
+
+    from tai42_channel_whatsapp.correlation import get_endpoint_form
+
+    fake_redis.store["channel:whatsapp:endpoint-form:int-whole"] = json.dumps(_WHOLE_SIDECAR)
+    assert await get_endpoint_form("int-whole") is not None
 
 
 async def test_release_pending_for_drops_the_pair_only_for_its_own_ask(fake_redis: FakeRedis):
@@ -481,7 +530,9 @@ async def test_drop_endpoint_form_deletes_the_sidecar_and_is_idempotent(fake_red
         get_endpoint_form,
     )
 
-    form = EndpointForm(schema={"type": "object"}, pages=None, reactions=None, option_fields=[], invalid={})
+    form = EndpointForm(
+        schema={"type": "object"}, pages=None, reactions=None, option_fields=[], invalid={}, required={}, lines={}
+    )
     await cache_endpoint_form("int-9", form, datetime.now(UTC) + timedelta(minutes=5))
     await drop_endpoint_form("int-9")
     assert await get_endpoint_form("int-9") is None

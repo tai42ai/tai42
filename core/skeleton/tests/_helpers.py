@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from tai42_contract.channels import ChannelNotification
+from tai42_contract.channels import ChannelAddress, ChannelDelivery, ChannelNotification, SendOutcome
 from tai42_contract.template import TemplatedText
 
 
@@ -22,13 +22,34 @@ def inline_templated_text(text: TemplatedText) -> str:
     return text.content
 
 
-class DeliverOnlyChannel:
+class AddressingChannel:
+    """Base for channel fakes: the ``Channel`` protocol's address side.
+
+    ``resolve_address`` answers the send's own recipient and identity, or the fake's defaults
+    when the send names none, and :meth:`outcome` reports a completed send from the same
+    address with the provider ids the fake assigned it.
+    """
+
+    default_identity = "+15550001111"
+    default_recipient = "+15550002222"
+
+    def resolve_address(self, recipient: str | None, sender_identity: str | None) -> ChannelAddress:
+        return ChannelAddress(
+            our_identity=sender_identity or self.default_identity, address=recipient or self.default_recipient
+        )
+
+    def outcome(self, send: ChannelNotification | ChannelDelivery, message_ids: list[str]) -> SendOutcome:
+        address = self.resolve_address(send.recipient, getattr(send, "sender_identity", None))
+        return SendOutcome(our_identity=address.our_identity, address=address.address, message_ids=message_ids)
+
+
+class DeliverOnlyChannel(AddressingChannel):
     """Base for delivery-focused channel fakes: satisfies the full ``Channel``
     protocol by declaring it cannot notify — ``notify`` raises
     ``NotImplementedError``, exactly as the contract prescribes for a channel
     without a notify capability. Subclasses implement ``deliver``."""
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         raise NotImplementedError
 
 

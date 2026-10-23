@@ -60,39 +60,88 @@ class FieldWording(BaseModel):
     """The caller's words for one form field's platform-drawn controls. Frozen, strict keys.
 
     ``choice_label`` is the placeholder of the field's picker (its empty-state prompt); ``invalid``
-    is the sentence shown when the field's value does not have its declared shape. Each is the
-    sender's own words, in the end-user's language; absent, the surface shows its own generic word
-    (for ``invalid``, its own word for the failing shape). A set value is non-blank; an empty object
-    names nothing and is refused; an unknown key is refused.
+    is the sentence shown when the field's value does not have its declared shape (never a missing
+    required value: that is ``required``); ``required`` is the sentence a surface shows when this
+    field's required value is missing (at the field or anywhere inside it). ``true_label`` /
+    ``false_label`` are the words a surface shows for a boolean field's true and false values, on
+    its control and in its readback. ``length_hint`` is the hint drawn under a text control that has
+    a maximum length; it MUST contain ``{max}`` (the maximum, filled by a plain substitution).
+    ``add_item`` / ``remove_item`` / ``item_label`` / ``no_items`` are the words of a free-text list
+    field: ``add_item`` its add button, ``remove_item`` each item's remove button, ``item_label``
+    each item's label, which MUST contain ``{n}`` (the item's number, a plain substitution), and
+    ``no_items`` the line shown while the list is empty. Each is the sender's own words, in the
+    end-user's language; absent, the surface shows its own generic word (for ``invalid``, its own
+    word for the failing shape). A set value is non-blank; an empty object names nothing and is
+    refused; an unknown key is refused.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     choice_label: str | None = None
     invalid: str | None = None
+    required: str | None = None
+    true_label: str | None = None
+    false_label: str | None = None
+    length_hint: str | None = None
+    add_item: str | None = None
+    remove_item: str | None = None
+    item_label: str | None = None
+    no_items: str | None = None
 
-    @field_validator("choice_label", "invalid")
+    @field_validator(
+        "choice_label",
+        "invalid",
+        "required",
+        "true_label",
+        "false_label",
+        "length_hint",
+        "add_item",
+        "remove_item",
+        "item_label",
+        "no_items",
+    )
     @classmethod
     def _non_blank(cls, value: str | None, info: ValidationInfo) -> str | None:
         return _member_non_blank(value, info, "wording.form.fields entry")
 
+    @field_validator("length_hint")
+    @classmethod
+    def _max_token(cls, value: str | None) -> str | None:
+        if value is not None and "{max}" not in value:
+            raise ValueError("wording.form.fields entry.length_hint must contain the {max} token")
+        return value
+
+    @field_validator("item_label")
+    @classmethod
+    def _n_token(cls, value: str | None) -> str | None:
+        if value is not None and "{n}" not in value:
+            raise ValueError("wording.form.fields entry.item_label must contain the {n} token")
+        return value
+
     @model_validator(mode="after")
     def _at_least_one_set(self) -> FieldWording:
-        if self.choice_label is None and self.invalid is None:
+        if all(getattr(self, name) is None for name in type(self).model_fields):
             raise ValueError("a form field wording must set at least one member")
         return self
 
 
 class FormWording(BaseModel):
-    """The caller's words for a form's platform-drawn chrome, for ONE send. Frozen, strict keys.
+    """The caller's words for a form's platform-drawn chrome and sentences, for ONE send. Frozen, strict keys.
 
     ``title`` heads the form surface; ``open`` labels the button that opens the form; ``cancel``
     labels its cancel/close; ``back`` labels the button that returns to the previous step of a
     stepped form; ``submit`` labels the terminal button of a form with no pages; ``review_empty``
-    is the line the review step shows before anything is filled; ``fields`` carries per-field
-    words keyed by property name. Each text is the sender's own words, in the end-user's language;
-    absent, the surface shows its own generic word. A set value is non-blank; an empty object names
-    nothing and is refused; an unknown key is refused.
+    is the line the review step shows before anything is filled; ``error_line`` is the one line a
+    surface shows above a form it refused, in place of its own per-field summary; ``update_failed``
+    is the sentence a surface shows when it could not update the form (a reaction failed or
+    returned something the surface cannot draw) and takes an OPTIONAL ``{reason}`` token, filled
+    with the reaction door's reason (``FormReactionError.reason``) and empty when the surface has
+    none; ``step_progress`` is the progress line a stepped form shows above its current step; it
+    MUST contain ``{step}`` (the current step's number) and ``{steps}`` (the step count), each filled
+    by a plain substitution; ``fields`` carries per-field words keyed by property name. Each text is
+    the sender's own words, in the end-user's language; absent, the surface shows its own generic
+    word. A set value is non-blank; an empty object names nothing and is refused; an unknown key is
+    refused.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -103,12 +152,26 @@ class FormWording(BaseModel):
     back: str | None = None
     submit: str | None = None
     review_empty: str | None = None
+    error_line: str | None = None
+    update_failed: str | None = None
+    step_progress: str | None = None
     fields: dict[str, FieldWording] = {}
 
-    @field_validator("title", "open", "cancel", "back", "submit", "review_empty")
+    @field_validator(
+        "title", "open", "cancel", "back", "submit", "review_empty", "error_line", "update_failed", "step_progress"
+    )
     @classmethod
     def _non_blank(cls, value: str | None, info: ValidationInfo) -> str | None:
         return _member_non_blank(value, info, "wording.form")
+
+    @field_validator("step_progress")
+    @classmethod
+    def _step_tokens(cls, value: str | None) -> str | None:
+        if value is not None:
+            for token in ("{step}", "{steps}"):
+                if token not in value:
+                    raise ValueError(f"wording.form.step_progress must contain the {token} token")
+        return value
 
     @model_validator(mode="after")
     def _at_least_one_set(self) -> FormWording:
@@ -119,6 +182,9 @@ class FormWording(BaseModel):
             and self.back is None
             and self.submit is None
             and self.review_empty is None
+            and self.error_line is None
+            and self.update_failed is None
+            and self.step_progress is None
             and not self.fields
         ):
             raise ValueError("wording.form must set at least one member")
@@ -161,12 +227,13 @@ class AnswerWording(BaseModel):
     affirmative control; ``decline`` labels its negative control; ``submit`` labels the button that
     sends a typed or picked answer; ``reply_hint`` is the hint shown in an empty reply input.
     ``rejected`` is the sentence drawn when an answer is refused and may be given again; its
-    OPTIONAL ``{reason}`` token takes the door's reason by a plain substitution. ``rejected_final``
-    is the sentence drawn when a refused answer also closes the question; it too takes an OPTIONAL
-    ``{reason}``. Each is the sender's own words, in the end-user's language; absent, the surface
-    shows its own generic word. A set value is non-blank; ``rejected`` / ``rejected_final`` are
-    bounded by :data:`REJECTION_NOTICE_MAX_CHARS`; an empty object names nothing and is refused; an
-    unknown key is refused.
+    OPTIONAL ``{reason}`` token takes the door's reason by a plain substitution and is empty when
+    the door gave no reason it may show. ``rejected_final`` is the sentence drawn when a refused
+    answer also closes the question; it too takes an OPTIONAL ``{reason}``. Each is the sender's own
+    words, in the end-user's language; absent, the surface shows its own generic word. A set value
+    is non-blank; ``rejected`` / ``rejected_final`` are bounded by
+    :data:`REJECTION_NOTICE_MAX_CHARS`; an empty object names nothing and is refused; an unknown key
+    is refused.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -265,23 +332,21 @@ class FormPageWording(BaseModel):
     """The caller's words for the form page's own sentences, for ONE send. Frozen, strict keys.
 
     ``failed`` is the line when the send did not land; ``network_error`` is the line when the
-    browser could not reach the server; ``update_failed`` is the line when a reacting form could
-    not refresh and takes an OPTIONAL ``{reason}`` token; ``choose_one`` is the validation line for
-    a required multi-choice left empty; ``date_unavailable`` is the validation line for a blocked
-    date. Each is the sender's own words, in the end-user's language; absent, the page shows its own
-    generic word. A set value is non-blank; an empty object names nothing and is refused; an unknown
-    key is refused.
+    browser could not reach the server; ``choose_one`` is the validation line for a required
+    multi-choice left empty; ``date_unavailable`` is the validation line for a blocked date. Each
+    is the sender's own words, in the end-user's language; absent, the page shows its own generic
+    word. A set value is non-blank; an empty object names nothing and is refused; an unknown key is
+    refused.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     failed: str | None = None
     network_error: str | None = None
-    update_failed: str | None = None
     choose_one: str | None = None
     date_unavailable: str | None = None
 
-    @field_validator("failed", "network_error", "update_failed", "choose_one", "date_unavailable")
+    @field_validator("failed", "network_error", "choose_one", "date_unavailable")
     @classmethod
     def _non_blank(cls, value: str | None, info: ValidationInfo) -> str | None:
         return _member_non_blank(value, info, "wording.answer_page.form")
@@ -291,7 +356,6 @@ class FormPageWording(BaseModel):
         if (
             self.failed is None
             and self.network_error is None
-            and self.update_failed is None
             and self.choose_one is None
             and self.date_unavailable is None
         ):
@@ -469,6 +533,9 @@ ADMISSION: dict[str, frozenset[str]] = {
     "form.back": frozenset({"form", "notify:form"}),
     "form.submit": frozenset({"form", "notify:form"}),
     "form.review_empty": frozenset({"form", "notify:form"}),
+    "form.error_line": frozenset({"form", "notify:form"}),
+    "form.update_failed": frozenset({"form", "notify:form"}),
+    "form.step_progress": frozenset({"form", "notify:form"}),
     "form.fields": frozenset({"form", "notify:form"}),
     # ``choice`` — the choice list.
     "choice.label": frozenset({"select", "notify:options", "notify:sections"}),
@@ -499,7 +566,7 @@ ADMISSION: dict[str, frozenset[str]] = {
     "status.expired": frozenset({"text", "confirm", "select", "form", "external"}),
     "status.closed": frozenset({"text", "confirm", "select", "form", "external", "notify:form"}),
     "status.sent": frozenset({"notify:form"}),
-    "status.unavailable": frozenset({"notify:form"}),
+    "status.unavailable": frozenset({"form", "notify:form"}),
     "status.countdown": frozenset({"text", "confirm", "select", "form", "external"}),
 }
 

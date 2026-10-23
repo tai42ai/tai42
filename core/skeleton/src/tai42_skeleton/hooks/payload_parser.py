@@ -49,15 +49,23 @@ async def _parse_xml_body(request: Request) -> dict[str, Any]:
 
 
 async def _parse_form_body(request: Request) -> dict[str, Any]:
-    """Parse a urlencoded/multipart form body into a dict.
+    """Parse a urlencoded/multipart form body into a dict of its text fields.
 
-    A malformed body raises ``ValueError``.
+    A malformed body raises ``ValueError``. A multipart file part also raises ``ValueError``
+    naming its fields: an upload lives only as long as the request, so no kept hook run can
+    carry it. The parsed form is closed before returning, releasing any spooled upload.
     """
     try:
         form_data = await request.form()
     except Exception as e:
         raise ValueError(f"malformed form body: {e}") from e
-    return dict(form_data)
+    try:
+        file_fields = [name for name, value in form_data.multi_items() if not isinstance(value, str)]
+        if file_fields:
+            raise ValueError(f"file parts are not supported: {', '.join(file_fields)}")
+        return dict(form_data)
+    finally:
+        await form_data.close()
 
 
 async def _parse_raw_body(request: Request) -> dict[str, Any]:

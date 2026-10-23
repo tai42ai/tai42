@@ -91,7 +91,7 @@ async def test_cancel_withdraws_a_pending_ask_and_a_later_reply_bridges_fresh(
                 },
                 retry_on_reloading=True,
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:

@@ -51,11 +51,15 @@ function resolveFormWords(form: FormWording | null | undefined): {
   readonly submit: string;
   readonly back: string;
   readonly fields: Readonly<Record<string, FieldWording>>;
+  readonly updateFailed: string | null;
+  readonly stepProgress: string | null;
 } {
   return {
     submit: form?.submit ?? SUBMIT_LABEL,
     back: form?.back ?? BACK_LABEL,
     fields: form?.fields ?? EMPTY_FIELDS,
+    updateFailed: form?.updateFailed ?? null,
+    stepProgress: form?.stepProgress ?? null,
   };
 }
 
@@ -155,6 +159,8 @@ export function FormCard({ item, onSubmitForm, locked }: FormCardProps): ReactEl
             backLabel={form.back}
             fieldWording={form.fields}
             fieldPlaceholder={FIELD_PLACEHOLDER}
+            updateFailedLine={form.updateFailed}
+            stepProgressLine={form.stepProgress}
           />
         ) : null}
         {error !== null && !gone ? (

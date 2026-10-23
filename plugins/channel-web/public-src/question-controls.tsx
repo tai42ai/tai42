@@ -9,7 +9,13 @@ import { Button, ExternalLinkButton, Spinner, TextInput } from '@tai42/studio-sd
 import type { ReactElement } from 'react';
 
 import { MalformedNotice, SchemaFormAnswer } from '@/schema-form-answer';
-import type { ChatItem, FormPage, FormPrefill, FormReactions } from '@/transcript-model';
+import type {
+  ChatItem,
+  FormPage,
+  FormPrefill,
+  FormReactions,
+  FormWording,
+} from '@/transcript-model';
 
 /** The transcript item this card renders. */
 export type QuestionItem = Extract<ChatItem, { kind: 'question' }>;
@@ -160,6 +166,18 @@ function isSchemaObject(value: unknown): value is JsonSchema {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** A question's form words resolved to the caller's or the widget's own; the two lines
+ *  stay `null` when the send set none, so the form draws its own. */
+function resolveFormWords(form: FormWording | null | undefined) {
+  return {
+    submit: form?.submit ?? FORM_SUBMIT_LABEL,
+    back: form?.back ?? FORM_BACK_LABEL,
+    fields: form?.fields ?? {},
+    updateFailed: form?.updateFailed ?? null,
+    stepProgress: form?.stepProgress ?? null,
+  };
+}
+
 function FormAnswer({
   question,
   sending,
@@ -181,7 +199,7 @@ function FormAnswer({
   if (!isSchemaObject(schema)) {
     return <MalformedNotice message="This form is malformed: its schema must be an object." />;
   }
-  const form = question.wording?.form;
+  const form = resolveFormWords(question.wording?.form);
   return (
     <SchemaFormAnswer
       schema={schema}
@@ -192,14 +210,16 @@ function FormAnswer({
       sending={sending}
       onSubmit={onSubmit}
       idPrefix={idPrefix}
-      submitLabel={form?.submit ?? FORM_SUBMIT_LABEL}
+      submitLabel={form.submit}
       // The last step of a paged form carries the page's own primary button, not
       // the one-page `form.submit` member; the web draws its generic word there.
       steppedSubmitLabel="Submit"
       sendingLabel={question.wording?.status?.sending ?? SENDING_LABEL}
-      backLabel={form?.back ?? FORM_BACK_LABEL}
-      fieldWording={form?.fields ?? {}}
+      backLabel={form.back}
+      fieldWording={form.fields}
       fieldPlaceholder={FIELD_PLACEHOLDER}
+      updateFailedLine={form.updateFailed}
+      stepProgressLine={form.stepProgress}
     />
   );
 }

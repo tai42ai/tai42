@@ -13,6 +13,7 @@ from tai42_contract.channels import (
     ChannelDeliveryError,
     ChannelInputError,
 )
+from tai42_contract.interactions import FORM_REACTION_REASON_MAX_CHARS
 from tai42_contract.interactions.models import (
     AnswerMismatchPolicy,
     FormData,
@@ -527,6 +528,66 @@ async def test_deliver_form_field_choice_label_over_150_refused_before_any_io(ht
     assert http_script.requests == []
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "x" * 3001,
+        "x" * (3000 - FORM_REACTION_REASON_MAX_CHARS + 1) + "{reason}",
+        "x" * (3000 - 2 * FORM_REACTION_REASON_MAX_CHARS + 1) + "{reason}{reason}",
+    ],
+    ids=["no-token", "one-token", "two-tokens"],
+)
+async def test_deliver_form_update_failed_past_3000_at_its_worst_refused_before_any_io(http_script, fake_redis, line):
+    # The update-failed banner is a section text (3000 characters). Each ``{reason}`` takes the
+    # reaction door's reason, at most FORM_REACTION_REASON_MAX_CHARS, so the line's worst case
+    # (its fixed text plus every token filled at the bound) is refused over the cap before any
+    # store or send.
+    delivery = make_delivery(
+        answer_format="form",
+        schema=_FORM_SCHEMA,
+        wording=Wording.model_validate({"form": {"update_failed": line}}),
+    )
+    with pytest.raises(ChannelInputError, match=r"update_failed.*3000"):
+        await SlackChannel().deliver(delivery)
+    assert _FORM_KEY not in fake_redis.store
+    assert http_script.requests == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "x" * 3000,
+        "x" * (3000 - FORM_REACTION_REASON_MAX_CHARS) + "{reason}",
+        "x" * (3000 - 2 * FORM_REACTION_REASON_MAX_CHARS) + "{reason}{reason}",
+    ],
+    ids=["no-token", "one-token", "two-tokens"],
+)
+async def test_deliver_form_update_failed_at_3000_at_its_worst_is_delivered(http_script, fake_redis, line):
+    http_script.results.append(_ok_response(ts="1.1"))
+    delivery = make_delivery(
+        answer_format="form",
+        schema=_FORM_SCHEMA,
+        wording=Wording.model_validate({"form": {"update_failed": line}}),
+    )
+    await SlackChannel().deliver(delivery)
+    assert fake_redis.store[_FORM_KEY]
+
+
+async def test_deliver_form_unavailable_line_past_the_carrier_cap_refused_before_any_io(http_script, fake_redis):
+    # The caller's ``status.unavailable`` rides the modal's private_metadata (3000 characters); the
+    # send-time probe builds the same modal, so a line that pushes the carrier past the cap is
+    # refused at send, never at the click.
+    delivery = make_delivery(
+        answer_format="form",
+        schema=_FORM_SCHEMA,
+        wording=Wording.model_validate({"status": {"unavailable": "x" * 2990}}),
+    )
+    with pytest.raises(ChannelInputError, match="private_metadata exceeds 3000"):
+        await SlackChannel().deliver(delivery)
+    assert _FORM_KEY not in fake_redis.store
+    assert http_script.requests == []
+
+
 async def test_deliver_select_choice_label_draws_nothing_on_slack(http_script, fake_redis):
     # Slack draws the choices inline (option buttons), so there is no list opener to label:
     # wording.choice.label changes nothing in the posted blocks (documented degrade).
@@ -613,7 +674,7 @@ async def test_deliver_form_reserves_record_before_send(stub_app, fake_redis):
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["present"] = _FORM_KEY in fake_redis.store
-        return httpx.Response(200, json={"ok": True, "ts": "1.1"})
+        return httpx.Response(200, json={"ok": True, "ts": "1.1", "channel": TEST_DEFAULT_RECIPIENT})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     stub_app.clients.clients[HttpxClient] = client

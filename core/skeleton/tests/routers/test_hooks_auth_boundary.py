@@ -30,6 +30,7 @@ from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz import execution as execution_module
+from tai42_skeleton.hooks.runs.models import AcceptResult
 from tai42_skeleton.hooks.trigger_links import ResolvedTrigger
 
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, _FakeApp, make_client_ctx, make_pg_ctx
@@ -73,8 +74,8 @@ class _Manager:
     async def unregister(self, name: str) -> bool:
         return False
 
-    async def on_event(self, topic: str, payload: dict, *, tool_kwargs_override: dict | None = None) -> None:
-        return None
+    async def on_event(self, topic: str, payload: dict, **kwargs) -> AcceptResult:
+        return AcceptResult(status="accepted", run_ids=())
 
     async def get_topic_verifier(self, topic: str) -> TopicVerifierBinding | None:
         return None
@@ -242,7 +243,7 @@ def test_webhook_ingress_reachable_unauthenticated(boundary_client):
 
 class _LockedManager(_Manager):
     """A manager that binds the ``shared_secret`` verifier to the ``locked`` topic (every
-    other topic is unbound) and treats every delivery id as fresh."""
+    other topic is unbound); its accept (inherited) treats every delivery id as fresh."""
 
     async def get_topic_verifier(self, topic: str) -> TopicVerifierBinding | None:
         if topic == "locked":
@@ -251,9 +252,6 @@ class _LockedManager(_Manager):
                 config={"header": "X-Secret", "secret_env": "E2E_HOOK_SECRET", "id_header": "X-Id"},
             )
         return None
-
-    async def claim_webhook_delivery(self, topic: str, key: str, ttl_seconds: int) -> bool:
-        return True
 
 
 @pytest.fixture

@@ -44,6 +44,7 @@ from tai42_skeleton.authz.execution_identity import (
 from tai42_skeleton.interactions import continuation as continuation_module
 from tai42_skeleton.interactions import giveup_delivery
 from tai42_skeleton.interactions import reaper as reaper_module
+from tai42_skeleton.interactions.run_completion import run_completion_id
 from tai42_skeleton.runs.chokepoint import get_resume_origin
 from tai42_skeleton.tools.state_binding import current_deferred_binding
 
@@ -178,7 +179,7 @@ async def test_with_no_owning_handler_the_run_failed_is_delivered(wired, monkeyp
     (fire,) = _door_fires(tools)
     assert fire["status"] == PARK_COMPLETION_FAILED
     assert fire["result"] == ABANDONED
-    assert fire["completion_id"] == continuation_module._completion_id("rd-g")
+    assert fire["completion_id"] == run_completion_id("rd-g")
 
 
 async def test_the_owning_driver_tells_its_captured_caller_inside_the_parks_frame(wired, monkeypatch, binds) -> None:
@@ -224,7 +225,7 @@ async def test_a_handled_answer_is_delivered_succeeded_with_the_deferred_binding
         return await real_give_up(interaction_id, failed_outcome)
 
     park_giveup._park_giveup_handlers[:] = [_give_up]
-    monkeypatch.setattr(continuation_module, "_apply_deferred_binding", _apply)
+    monkeypatch.setattr(continuation_module, "apply_deferred_binding", _apply)
     binding = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(content=".thread_id"))])
     request = _request(deferred_binding=binding, run_input={"k": "v"}, door_id="door-1")
 

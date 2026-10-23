@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import UUID4, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tai42_contract.conversations.inbound_form import validate_bounded_object, validate_inbound_form
 from tai42_contract.entry_params import validate_entry_params
@@ -81,6 +81,16 @@ class ConversationMessage(BaseModel):
             "subject so the platform's rendering layer resolves every template and list format "
             "against it — the caller states the language, the flow never selects one. ``null`` "
             "means none supplied (no silent default)."
+        ),
+    )
+    reply_to_message_id: UUID4 | None = Field(
+        default=None,
+        description=(
+            "The platform ``message_id`` of a message this conversation delivered to the caller "
+            "that this message replies to (a turn's answer, an operator's message, or an event "
+            "turn's answer): the ``message_id`` carried by the ``200`` answer, the signed callback, "
+            "or the poll-door record. The platform resolves its text from the conversation record: "
+            "the text delivered under that id. ``null`` means it replies to none."
         ),
     )
     form_tag: str | None = Field(

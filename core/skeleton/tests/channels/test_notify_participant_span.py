@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelNotification
+from tai42_contract.channels import ChannelNotification, SendOutcome
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.channels.inbound import InboundBridge, _notify_participant
@@ -19,16 +20,17 @@ from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
 from .._fakes.recording_monitoring import RecordingMonitoring
 
 
-class _RecordingChannel:
+class _RecordingChannel(AddressingChannel):
     def __init__(self) -> None:
         self.notifications: list[ChannelNotification] = []
 
-    async def notify(self, notification: ChannelNotification) -> None:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         self.notifications.append(notification)
+        return self.outcome(notification, [])
 
 
-class _FailingChannel:
-    async def notify(self, notification: ChannelNotification) -> None:
+class _FailingChannel(AddressingChannel):
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         raise RuntimeError("provider unreachable")
 
 
@@ -39,6 +41,8 @@ def _bridge() -> InboundBridge:
         client_address="+15550001111",
         cap_key="+15550001111",
         provider_message_id="prov-msg-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
         bridge_text="hello there",
     )
 

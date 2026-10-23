@@ -9,6 +9,7 @@ from tai42_contract.channels import ChannelDeliveryError
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_whatsapp.client import (
+    SentMessage,
     send_audio,
     send_document,
     send_image,
@@ -37,8 +38,8 @@ def _body_with_links(message: str, links: list[MediaItem]) -> str:
     return "\n".join([message, *link_lines])
 
 
-async def _send_one_file(phone_number_id: str, target: str, item: MediaItem) -> str:
-    """Send one file-media item (image/document/video/audio) as its own native message and return its ``wamid``.
+async def _send_one_file(phone_number_id: str, target: str, item: MediaItem) -> SentMessage:
+    """Send one file-media item (image/document/video/audio) as its own native message and return it.
 
     A ``link`` never reaches here (it renders as a body line).
     """
@@ -54,10 +55,12 @@ async def _send_one_file(phone_number_id: str, target: str, item: MediaItem) -> 
     return await send_audio(phone_number_id=phone_number_id, to=target, link=item.url)
 
 
-async def _send_file_media(phone_number_id: str, target: str, files: list[MediaItem], sent: list[str]) -> list[str]:
+async def _send_file_media(
+    phone_number_id: str, target: str, files: list[MediaItem], sent: list[SentMessage]
+) -> list[SentMessage]:
     """Send each file-media item (image/document/video/audio) as its own native message.
 
-    Extends ``sent`` with the minted ``wamid`` in order and returns it.
+    Extends ``sent`` with each accepted message in order and returns it.
 
     Each item is its own message, so there is no native per-send cap here — the platform
     guard bounds the item count. A part that fails mid-send raises naming the wamids already
@@ -67,11 +70,13 @@ async def _send_file_media(phone_number_id: str, target: str, files: list[MediaI
         try:
             sent.append(await _send_one_file(phone_number_id, target, item))
         except ChannelDeliveryError as exc:
-            raise ChannelDeliveryError(f"WhatsApp multi-part send failed after delivering {sent}: {exc}") from exc
+            raise ChannelDeliveryError(
+                f"WhatsApp multi-part send failed after delivering {[message.wamid for message in sent]}: {exc}"
+            ) from exc
     return sent
 
 
-async def _send_media_prelude(phone_number_id: str, target: str, media: list[MediaItem]) -> list[str]:
+async def _send_media_prelude(phone_number_id: str, target: str, media: list[MediaItem]) -> list[SentMessage]:
     """Send a delivered question's accompanying display media as its own messages, BEFORE the question.
 
     Any ``link`` items go out as one text line-block, then each file item
@@ -85,7 +90,7 @@ async def _send_media_prelude(phone_number_id: str, target: str, media: list[Med
     """
     files = [item for item in media if item.kind is not MediaKind.LINK]
     links = [item for item in media if item.kind == MediaKind.LINK]
-    sent: list[str] = []
+    sent: list[SentMessage] = []
     if links:
         sent.append(
             await send_message(

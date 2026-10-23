@@ -43,6 +43,7 @@ from .conftest import (
     _tool_channel_route,
     _wire,
     _wire_tool,
+    create_record,
 )
 from .conftest import (
     _store as _conversation_store,
@@ -122,8 +123,8 @@ async def test_a_fresh_claim_writes_the_record_the_claim_and_refreshes_the_mode_
     await lua_redis.set(_s().mode_key(_THREAD), "manual", ex=60)
     lua_redis.commands.clear()
 
-    owner = await _store().create_record(
-        _intake("m1"), intake_token="tok", claim_key=_s().dedupe_key("twilio", "PID1"), refresh_mode=True
+    owner = await create_record(
+        _store(), _intake("m1"), intake_token="tok", claim_key=_s().dedupe_key("twilio", "PID1"), refresh_mode=True
     )
 
     assert owner == "m1"
@@ -139,8 +140,8 @@ async def test_a_lost_claim_writes_nothing_and_returns_the_owner(lua_redis):
     await lua_redis.set(_s().dedupe_key("twilio", "PID1"), "winner")
     await lua_redis.set(_s().mode_key(_THREAD), "manual", ex=60)
 
-    owner = await _store().create_record(
-        _intake("loser"), intake_token="tok", claim_key=_s().dedupe_key("twilio", "PID1"), refresh_mode=True
+    owner = await create_record(
+        _store(), _intake("loser"), intake_token="tok", claim_key=_s().dedupe_key("twilio", "PID1"), refresh_mode=True
     )
 
     assert owner == "winner"
@@ -153,7 +154,7 @@ async def test_a_lost_claim_writes_nothing_and_returns_the_owner(lua_redis):
 
 
 async def test_an_absent_mode_key_stays_absent(lua_redis):
-    await _store().create_record(_intake("m1"), intake_token="tok", refresh_mode=True)
+    await create_record(_store(), _intake("m1"), intake_token="tok", refresh_mode=True)
 
     assert await lua_redis.exists(_s().mode_key(_THREAD)) == 0
 
@@ -161,7 +162,9 @@ async def test_an_absent_mode_key_stays_absent(lua_redis):
 async def test_a_same_id_re_create_proceeds(lua_redis):
     await lua_redis.set(_s().dedupe_key("twilio", "PID1"), "m1")
 
-    owner = await _store().create_record(_intake("m1"), intake_token="tok", claim_key=_s().dedupe_key("twilio", "PID1"))
+    owner = await create_record(
+        _store(), _intake("m1"), intake_token="tok", claim_key=_s().dedupe_key("twilio", "PID1")
+    )
 
     assert owner == "m1"
     assert await lua_redis.hget(_s().record_key("m1"), "delivery_status") == "accepted"
@@ -170,8 +173,8 @@ async def test_a_same_id_re_create_proceeds(lua_redis):
 async def test_an_event_claim_uses_its_own_key_family(lua_redis):
     await lua_redis.set(_s().dedupe_key("line", "E1"), "channel-owner")
 
-    owner = await _store().create_record(
-        _intake("ev"), intake_token="tok", claim_key=_s().event_dedupe_key("line", "E1")
+    owner = await create_record(
+        _store(), _intake("ev"), intake_token="tok", claim_key=_s().event_dedupe_key("line", "E1")
     )
 
     assert owner == "ev"
@@ -182,8 +185,8 @@ async def test_the_route_missing_marker_and_warning_are_unchanged_under_a_claim(
     await lua_redis.delete(_s().route_key("line"))
 
     with caplog.at_level(logging.WARNING):
-        owner = await _store().create_record(
-            _intake("m1"), intake_token="tok", claim_key=_s().dedupe_key("twilio", "PID1"), refresh_mode=True
+        owner = await create_record(
+            _store(), _intake("m1"), intake_token="tok", claim_key=_s().dedupe_key("twilio", "PID1"), refresh_mode=True
         )
 
     assert owner == "m1"
@@ -195,7 +198,7 @@ async def test_the_route_missing_marker_and_warning_are_unchanged_under_a_claim(
 async def test_a_create_with_no_claim_returns_its_own_id(lua_redis):
     record = _intake("m1").model_copy(update={"delivery_status": DeliveryStatus.PENDING_DELIVERY})
 
-    assert await _store().create_record(record) == "m1"
+    assert await create_record(_store(), record) == "m1"
 
 
 # -- every create site sends one script and nothing else ---------------------------------
@@ -239,7 +242,16 @@ async def test_the_channel_door_creates_claims_and_refreshes_in_one_script(env, 
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     _echo(monkeypatch)
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert (sites.creates, sites.claims, sites.mode_expires) == (1, 0, 0)
@@ -249,7 +261,16 @@ async def test_a_channel_redelivery_that_loses_the_claim_writes_no_record(env, s
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     _echo(monkeypatch)
-    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    first = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     # A concurrent attempt for the same pair commits between this attempt's fast-path read and
     # its create: the read finds no owner, the claim already stands when the create runs.
@@ -260,7 +281,16 @@ async def test_a_channel_redelivery_that_loses_the_claim_writes_no_record(env, s
 
     monkeypatch.setattr(ConversationRecordStore, "get_inbound_owner", no_owner_yet)
 
-    owner = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
+    owner = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "two",
+        "PID2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert owner == first
@@ -277,7 +307,16 @@ async def test_both_shed_sites_create_and_claim_in_one_script(env, sites, monkey
     _echo(monkeypatch)
 
     for index in range(3):  # a turn, then the slow-down reply, then a silent shed
-        await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", f"PID{index}")
+        await turn_module.accept(
+            "twilio",
+            "+15550001111",
+            "+15550002222",
+            "+15550002222",
+            "hi",
+            f"PID{index}",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
+        )
         await _settle()
 
     assert (sites.creates, sites.claims, sites.mode_expires) == (3, 0, 0)

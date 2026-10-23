@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -147,7 +148,7 @@ def _definition(name: str, *, enabled: bool = True, tool: str = "echo") -> str:
 
 
 class _FakeSettings:
-    redbeat_redis_url = "redis://fake/0"
+    redbeat = SimpleNamespace(client_kwargs=lambda: {"url": "redis://fake/0", "decode_responses": True})
     redbeat_schedule_key = "redbeat::schedule"
     redbeat_key_prefix = "redbeat:"
     # A NON-default tool-name key: the backend splits it out of stored kwargs itself.
@@ -700,3 +701,38 @@ async def test_update_schedule_next_run_in_ms_takes_precedence(fake_settings, st
     assert out["status"] == "updated"
     # next_run_in_ms wins over the absolute timestamp: the score is "now", not 1.0.
     assert redis.zset["redbeat:job"] > 1.0
+
+
+def test_the_redbeat_store_client_takes_the_full_connection_settings(monkeypatch, stub_app):
+    """The schedule tools lease the RedBeat store with every ``CELERY_REDBEAT_*`` connection setting, read as bytes."""
+    from tai42_kit.clients.impl.redis import RedisClient
+
+    from tai42_backend_celery.core.settings import CelerySettings
+
+    for key in ("CELERY_REDBEAT_REDIS_URL", "TAI_DEFAULT_REDIS_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("CELERY_REDBEAT_REDIS_URL", "redis://beat:6379/5")
+    monkeypatch.setenv("CELERY_REDBEAT_REDIS_MAX_CONNECTIONS", "7")
+    monkeypatch.setenv("CELERY_REDBEAT_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("CELERY_REDBEAT_SOCKET_TIMEOUT", "3")
+    monkeypatch.setattr(tools, "celery_settings", CelerySettings)
+    seen: list[tuple[Any, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        stub_app.clients, "client_ctx", lambda client_cls, **kwargs: seen.append((client_cls, kwargs)) or object()
+    )
+
+    tools._redbeat_redis()
+
+    assert seen == [
+        (
+            RedisClient,
+            {
+                "url": "redis://beat:6379/5",
+                "max_connections": 7,
+                "decode_responses": False,
+                "env_prefix": "CELERY_REDBEAT_",
+                "retry_attempts": 2,
+                "socket_timeout": 3.0,
+            },
+        )
+    ]

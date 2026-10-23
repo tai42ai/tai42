@@ -21,13 +21,14 @@ from typing import Any, cast
 
 import pytest
 import tai42_kit.clients as kit_clients
-from tai42_contract.channels import Channel, ChannelDelivery
+from tai42_contract.channels import Channel, ChannelDelivery, SendOutcome
 from tai42_contract.conversations import DeliveryReceipt
 from tai42_contract.interactions import ResumeItem, SuspendedInteraction, TakeItem
 from tai42_contract.states import StateContext, SubjectCandidates
 from tai42_kit.clients.base import advance_client_epoch
 from tai42_kit.settings import reset_all_settings, sweep_stale_settings
 from tai42_kit.utils.state_context import state_context
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.channels import notifications_sink as notifications_sink_module
 from tai42_skeleton.channels import send_receipts as send_receipts_module
@@ -294,9 +295,10 @@ async def test_a_sync_ask_suspended_pruning_its_question_holds_no_retired_settin
 async def test_a_channel_delivery_suspended_in_its_send_holds_no_retired_settings(
     caplog: pytest.LogCaptureFixture, gate: asyncio.Future[None]
 ) -> None:
-    class _ParkedChannel:
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+    class _ParkedChannel(AddressingChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             await gate
+            return self.outcome(delivery, [])
 
     async def _door() -> None:
         now = datetime.now(UTC)
@@ -313,6 +315,7 @@ async def test_a_channel_delivery_suspended_in_its_send_holds_no_retired_setting
                 interaction_id="i-1",
                 question="proceed?",
                 answer_format="text",
+                sensitive=False,
                 callback_url="https://h.example/api/interactions/callback/tk",
                 timeout_at=window.timeout_at,
             ),

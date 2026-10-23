@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -23,10 +24,11 @@ import pytest
 from pydantic import BaseModel
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelInputError
+from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelInputError, SendOutcome
 from tai42_contract.hooks import TopicVerifierBinding
 from tai42_contract.interactions import (
     MEDIA_ROUTE_PREFIX,
+    AskAnswer,
     MediaItem,
     SuspendedInteraction,
     reset_resume_continuation_tool,
@@ -62,17 +64,18 @@ class FakeChannel(DeliverOnlyChannel):
     def __init__(self) -> None:
         self.deliveries: list[ChannelDelivery] = []
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
         self.deliveries.append(delivery)
+        return self.outcome(delivery, [])
 
 
 class FailingChannel(DeliverOnlyChannel):
-    async def deliver(self, delivery: ChannelDelivery) -> None:
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
         raise ChannelDeliveryError("provider unreachable")
 
 
 class BuggyChannel(DeliverOnlyChannel):
-    async def deliver(self, delivery: ChannelDelivery) -> None:
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
         raise RuntimeError("plugin bug")
 
 
@@ -203,7 +206,7 @@ async def test_fake_channel_text_loop(wired, fake_channel):
     assert json.loads(bytes(resp.body))["data"]["status"] == "answered"
 
     # 5. the blocked ask returns the TYPED answer (str) — loop closed
-    assert await task == "please"
+    assert await task == AskAnswer(answer="please", reply_to=None, params=None)
 
 
 async def test_fake_channel_confirm_loop(wired, fake_channel):
@@ -215,7 +218,10 @@ async def test_fake_channel_confirm_loop(wired, fake_channel):
     # Tap flow: the GET-confirm page's form POSTs an empty body → recorded True.
     resp = await router.callback(_make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b""))
     assert resp.status_code == 200
-    assert await task is True  # the TYPED bool
+    answered = await task
+    assert isinstance(answered, AskAnswer)
+    assert answered.answer is True  # the TYPED bool
+    assert answered == AskAnswer(answer=True, reply_to=None, params=None)
 
 
 _PNG = base64.b64encode(bytes.fromhex("89504e470d0a1a0a")).decode()
@@ -254,7 +260,7 @@ async def test_data_media_forwarded_absolute_on_channel_delivery(wired, fake_cha
         _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "yes"}')
     )
     assert resp.status_code == 200
-    assert await task == "yes"
+    assert await task == AskAnswer(answer="yes", reply_to=None, params=None)
 
 
 async def test_data_media_channel_ask_requires_public_base_url(monkeypatch, wired, fake_channel):
@@ -291,9 +297,10 @@ async def test_delivery_runs_after_persist(wired, fake_channel):
     seen: dict = {}
 
     class ProbingChannel(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             seen["state"] = await wired.store.get_state(wired.fake, delivery.interaction_id)
             seen["delivery"] = delivery
+            return self.outcome(delivery, [])
 
     app._channel_registry.reset()
     tai42_app.channels.register("probe", ProbingChannel())
@@ -309,7 +316,7 @@ async def test_delivery_runs_after_persist(wired, fake_channel):
             _make_request("POST", path_params={"ticket": _ticket(seen["delivery"])}, body=b'{"answer": "done"}')
         )
         assert resp.status_code == 200
-        assert await task == "done"
+        assert await task == AskAnswer(answer="done", reply_to=None, params=None)
     finally:
         app._channel_registry.reset()
 
@@ -331,7 +338,7 @@ async def test_channel_external_url_is_callback_url(wired, fake_channel):
         _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"approved": true}')
     )
     assert resp.status_code == 200
-    assert await task == {"approved": True}
+    assert await task == AskAnswer(answer={"approved": True}, reply_to=None, params=None)
 
 
 async def test_recipient_forwarded_in_delivery(wired, fake_channel):
@@ -347,7 +354,7 @@ async def test_recipient_forwarded_in_delivery(wired, fake_channel):
         _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "pong"}')
     )
     assert resp.status_code == 200
-    assert await task == "pong"
+    assert await task == AskAnswer(answer="pong", reply_to=None, params=None)
 
 
 async def test_recipient_persisted_on_record(wired, fake_channel):
@@ -365,7 +372,7 @@ async def test_recipient_persisted_on_record(wired, fake_channel):
         _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "pong"}')
     )
     assert resp.status_code == 200
-    assert await task == "pong"
+    assert await task == AskAnswer(answer="pong", reply_to=None, params=None)
 
 
 async def test_channel_delivery_forwards_media_and_inbox_keeps_it(wired, fake_channel):
@@ -392,7 +399,7 @@ async def test_channel_delivery_forwards_media_and_inbox_keeps_it(wired, fake_ch
         _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "ok"}')
     )
     assert resp.status_code == 200
-    assert await task == "ok"
+    assert await task == AskAnswer(answer="ok", reply_to=None, params=None)
 
 
 async def test_channel_select_delivery_carries_options(wired, fake_channel):
@@ -409,7 +416,7 @@ async def test_channel_select_delivery_carries_options(wired, fake_channel):
         _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "blue"}')
     )
     assert resp.status_code == 200
-    assert await task == "blue"  # the TYPED chosen option, not a dict
+    assert await task == AskAnswer(answer="blue", reply_to=None, params=None)  # the TYPED chosen option, not a dict
 
 
 # -- loud validation (nothing persisted) ----------------------------------------
@@ -464,6 +471,48 @@ async def test_form_channel_without_schema_raises_before_persist(wired):
         app._channel_registry.reset()
 
 
+_TIMED_RANGE = {
+    "type": "object",
+    "properties": {
+        "start": {"type": "string", "format": "date"},
+        "start_time": {"type": "string", "format": "time", "timeOf": "start"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start"},
+        "end_time": {"type": "string", "format": "time", "timeOf": "end"},
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("schema", "pages", "message"),
+    [
+        (
+            {
+                "type": "object",
+                "properties": {**_TIMED_RANGE["properties"], "note": {"type": "string", "timeOf": "end"}},
+            },
+            None,
+            "form schema property 'note' carries timeOf but is not a time property",
+        ),
+        (
+            _TIMED_RANGE,
+            [{"title": "Dates", "fields": ["start", "start_time", "end"]}, {"title": "Late", "fields": ["end_time"]}],
+            "form schema property 'end_time' is the time of 'end' and must sit on the same page",
+        ),
+    ],
+)
+async def test_form_channel_refuses_a_broken_time_of_before_persist(wired, schema, pages, message):
+    # A ``timeOf`` time that is not a time field, or that sits on another page than its date, is
+    # refused when the form is asked over a channel, naming the property, before any state is written.
+    app._channel_registry.reset()
+    tai42_app.channels.register("form", FormChannel())
+    try:
+        with pytest.raises(ValueError, match=re.escape(message)):
+            await ask("q", answer_format="form", schema=schema, pages=pages, channel="form", timeout=5)
+        assert _empty(wired.fake)
+    finally:
+        app._channel_registry.reset()
+
+
 async def test_form_channel_delivery_carries_schema_and_loops(wired):
     # A form over a channel that advertises the capability: the delivery carries the
     # normalized schema, and the human's typed dict answer round-trips through the
@@ -487,7 +536,7 @@ async def test_form_channel_delivery_carries_schema_and_loops(wired):
             _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": {"x": 7}}')
         )
         assert resp.status_code == 200
-        assert await task == {"x": 7}
+        assert await task == AskAnswer(answer={"x": 7}, reply_to=None, params=None)
     finally:
         app._channel_registry.reset()
 
@@ -548,10 +597,11 @@ class HookFormChannel(DeliverOnlyChannel):
         if "reserved" in (schema.get("properties") or {}):
             raise ValueError("form property 'reserved': reserved on this channel")
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
         self.deliveries.append(delivery)
         if "reserved" in ((delivery.schema or {}).get("properties") or {}):
             raise ChannelInputError("form property 'reserved': reserved on this channel")
+        return self.outcome(delivery, [])
 
 
 class NoHookFormChannel(DeliverOnlyChannel):
@@ -564,10 +614,11 @@ class NoHookFormChannel(DeliverOnlyChannel):
     def __init__(self) -> None:
         self.deliveries: list[ChannelDelivery] = []
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
         self.deliveries.append(delivery)
         if "reserved" in ((delivery.schema or {}).get("properties") or {}):
             raise ChannelInputError("form property 'reserved': reserved on this channel")
+        return self.outcome(delivery, [])
 
 
 _RESERVED_SCHEMA = {"type": "object", "properties": {"reserved": {"type": "string"}}}
@@ -643,7 +694,7 @@ async def test_channel_text_delivery_carries_suggested_reply_options(wired, fake
         _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "Good"}')
     )
     assert resp.status_code == 200
-    assert await task == "Good"
+    assert await task == AskAnswer(answer="Good", reply_to=None, params=None)
 
 
 async def test_channel_requires_public_base_url(monkeypatch, fake_redis, fake_client_ctx, fake_channel):
@@ -697,7 +748,7 @@ async def test_terminal_delivery_failure_emits_delivery_failed_once(wired, monke
     captured: dict[str, str] = {}
 
     class CapturingFailer(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             captured["iid"] = delivery.interaction_id
             raise ChannelDeliveryError("provider unreachable")
 
@@ -733,7 +784,7 @@ async def test_delivery_success_after_retry_emits_no_delivery_failed(wired, monk
     attempts: list[ChannelDelivery] = []
 
     class FlakyChannel(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             attempts.append(delivery)
             if len(attempts) == 1:
                 raise ChannelDeliveryError("provider throttled", retryable=True)
@@ -741,11 +792,12 @@ async def test_delivery_success_after_retry_emits_no_delivery_failed(wired, monk
                 _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "second"}')
             )
             assert resp.status_code == 200
+            return self.outcome(delivery, [])
 
     app._channel_registry.reset()
     tai42_app.channels.register("flaky", FlakyChannel())
     try:
-        assert await ask("q", channel="flaky", timeout=5) == "second"
+        assert await ask("q", channel="flaky", timeout=5) == AskAnswer(answer="second", reply_to=None, params=None)
     finally:
         app._channel_registry.reset()
 
@@ -762,7 +814,7 @@ async def test_cancelled_delivery_emits_no_delivery_failed(wired, monkeypatch):
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
 
     class CancelledChannel(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             raise asyncio.CancelledError
 
     app._channel_registry.reset()
@@ -782,7 +834,7 @@ async def test_failed_delivery_ticket_unclaimable(wired):
     captured: dict = {}
 
     class CapturingFailer(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             captured["delivery"] = delivery
             raise ChannelDeliveryError("send failed")
 
@@ -813,7 +865,7 @@ async def test_delivery_failure_after_recorded_answer_falls_through(wired, monke
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
 
     class AnswerThenFail(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             resp = await router.callback(
                 _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "fast"}')
             )
@@ -823,7 +875,7 @@ async def test_delivery_failure_after_recorded_answer_falls_through(wired, monke
     app._channel_registry.reset()
     tai42_app.channels.register("racy", AnswerThenFail())
     try:
-        assert await ask("q", channel="racy", timeout=5) == "fast"
+        assert await ask("q", channel="racy", timeout=5) == AskAnswer(answer="fast", reply_to=None, params=None)
     finally:
         app._channel_registry.reset()
 
@@ -835,8 +887,9 @@ async def test_hung_delivery_times_out_prunes_and_raises(wired):
     # timeout budget; a deliver still running at that deadline is a hung plugin,
     # so the ask fails loudly instead of blocking forever on the send.
     class HungChannel(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             await asyncio.sleep(60)
+            return self.outcome(delivery, [])
 
     app._channel_registry.reset()
     tai42_app.channels.register("hung", HungChannel())
@@ -858,7 +911,7 @@ async def test_retryable_failure_retries_and_the_second_attempt_delivers(wired, 
     attempts: list[Any] = []
 
     class FlakyChannel(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             attempts.append(delivery)
             if len(attempts) == 1:
                 raise ChannelDeliveryError("provider throttled", retryable=True)
@@ -868,11 +921,12 @@ async def test_retryable_failure_retries_and_the_second_attempt_delivers(wired, 
                 _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "second"}')
             )
             assert resp.status_code == 200
+            return self.outcome(delivery, [])
 
     app._channel_registry.reset()
     tai42_app.channels.register("flaky", FlakyChannel())
     try:
-        assert await ask("q", channel="flaky", timeout=5) == "second"
+        assert await ask("q", channel="flaky", timeout=5) == AskAnswer(answer="second", reply_to=None, params=None)
     finally:
         app._channel_registry.reset()
 
@@ -887,7 +941,7 @@ async def test_non_retryable_failure_is_not_retried(wired, monkeypatch):
     attempts: list[ChannelDelivery] = []
 
     class HardFailer(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             attempts.append(delivery)
             raise ChannelDeliveryError("recipient refused")
 
@@ -910,7 +964,7 @@ async def test_retries_exhaust_the_attempt_cap_then_prune_and_raise(wired, monke
     attempts: list[ChannelDelivery] = []
 
     class AlwaysThrottled(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             attempts.append(delivery)
             raise ChannelDeliveryError(f"throttled #{len(attempts)}", retryable=True)
 
@@ -933,7 +987,7 @@ async def test_retry_after_wins_over_the_backoff(wired, monkeypatch):
     at: list[float] = []
 
     class RetryAfterChannel(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             at.append(asyncio.get_running_loop().time())
             raise ChannelDeliveryError("slow down", retryable=True, retry_after=asked_for)
 
@@ -956,7 +1010,7 @@ async def test_no_retry_once_the_budget_cannot_hold_the_wait(wired, monkeypatch)
     attempts: list[ChannelDelivery] = []
 
     class AlwaysThrottled(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             attempts.append(delivery)
             raise ChannelDeliveryError("throttled", retryable=True)
 
@@ -978,7 +1032,7 @@ async def test_cancelled_delivery_is_never_retried(wired, monkeypatch):
     attempts: list[ChannelDelivery] = []
 
     class CancelledChannel(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             attempts.append(delivery)
             raise asyncio.CancelledError
 
@@ -1000,12 +1054,13 @@ async def test_hung_delivery_that_recorded_an_answer_times_out_at_the_budget(wir
     # the ask times out at the budget rather than blocking past it (the durable
     # answered state remains, but this caller is not held open beyond its deadline).
     class AnswerThenHang(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             resp = await router.callback(
                 _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "fast"}')
             )
             assert resp.status_code == 200
             await asyncio.sleep(60)
+            return self.outcome(delivery, [])
 
     app._channel_registry.reset()
     tai42_app.channels.register("hang", AnswerThenHang())
@@ -1034,17 +1089,18 @@ async def test_delivery_time_shrinks_the_answer_wait(wired, monkeypatch):
     delivery_cost = 0.1
 
     class SlowDeliverChannel(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             await asyncio.sleep(delivery_cost)  # measurable delivery time
             resp = await router.callback(
                 _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "ok"}')
             )
             assert resp.status_code == 200
+            return self.outcome(delivery, [])
 
     app._channel_registry.reset()
     tai42_app.channels.register("slowdeliver", SlowDeliverChannel())
     try:
-        assert await ask("q", channel="slowdeliver", timeout=5) == "ok"
+        assert await ask("q", channel="slowdeliver", timeout=5) == AskAnswer(answer="ok", reply_to=None, params=None)
     finally:
         app._channel_registry.reset()
 
@@ -1067,10 +1123,11 @@ async def test_delivery_that_eats_the_budget_times_out_without_a_forever_wait(wi
     monkeypatch.setattr(InteractionStore, "wait_for_reply", capturing)
 
     class BudgetEatingChannel(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
             # Return successfully but only after most of the budget is gone; no
             # answer is posted, so the shrunken wait finds nothing.
             await asyncio.sleep(0.2)
+            return self.outcome(delivery, [])
 
     app._channel_registry.reset()
     tai42_app.channels.register("budgeteater", BudgetEatingChannel())
@@ -1097,8 +1154,8 @@ async def test_timeout_when_record_already_gone_reports_gone(wired, monkeypatch)
     monkeypatch.setattr(InteractionStore, "prune_pending", gone)
 
     class SilentChannel(DeliverOnlyChannel):
-        async def deliver(self, delivery: ChannelDelivery) -> None:
-            return  # delivered, but no answer is ever posted
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
+            return self.outcome(delivery, [])  # delivered, but no answer is ever posted
 
     app._channel_registry.reset()
     tai42_app.channels.register("silent", SilentChannel())
@@ -1149,6 +1206,8 @@ async def test_async_park_callback_door_answerable_through_the_retention_horizon
         caller_ask_landing=None,
         chain_keys=(),
         *,
+        reply_to_medium_message_id,
+        params,
         mark_detached=True,
     ):
         resumed.append(answer)

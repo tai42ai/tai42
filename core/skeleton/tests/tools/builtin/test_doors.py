@@ -10,6 +10,8 @@ accountable principal off the persisted record.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -290,6 +292,7 @@ class _Recorder:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str | None]] = []
+        self.reply_to_message_ids: list[str | None] = []
 
     async def __call__(
         self,
@@ -304,13 +307,31 @@ class _Recorder:
         location=None,
         locale=None,
         form_tag=None,
+        reply_to_message_id=None,
         *,
         client_connected,
     ):
         from tai42_skeleton.conversations.turn import ApiSubmitResult
 
         self.calls.append((route_name, external_user_id, caller_principal))
+        self.reply_to_message_ids.append(reply_to_message_id)
         return ApiSubmitResult(message_id="m-1", thread_id=f"bridge:{route_name}:{external_user_id}", answer=None)
+
+
+async def test_the_message_tool_hands_the_engine_the_quoted_message_id_as_a_string(
+    ac, bound_app, door_routes_registered, monkeypatch
+):
+    ac.add_route("/api/conversations/chat/messages", "conv-x")
+    _seed_key(ac, "runner", ["conv-x"])
+    recorder = _Recorder()
+    monkeypatch.setattr(conversations_package, "submit_api_message", recorder)
+    quoted = UUID("3f2b8c1e-5a4d-4e6f-9b7a-1c2d3e4f5a6b")
+
+    async with bind_execution_identity("runner", bound_fingerprint="fp-runner"):
+        await doors.send_conversation_message("chat", "u-7", "hi", reply_to_message_id=quoted)
+        await doors.send_conversation_message("chat", "u-7", "hi")
+
+    assert recorder.reply_to_message_ids == [str(quoted), None]
 
 
 async def test_the_http_door_and_the_tool_reach_the_same_verdict(ac, bound_app, door_routes_registered, monkeypatch):

@@ -127,12 +127,12 @@ describe('sendMessage', () => {
     expect((error as ChatApiError).message).not.toContain('ThreadQueueOverflow');
   });
 
-  it('keeps the door wording for a rejected body, which is already specific', async () => {
+  it("never draws the door's own error as the sentence of a rejected body", async () => {
     fetchMock.mockResolvedValue(reply(400, { error: 'message text is blank' }));
 
     const error = await sendMessage('site-alpha', ' ', KEY).catch((err: unknown) => err);
 
-    expect((error as ChatApiError).message).toBe('message text is blank');
+    expect((error as ChatApiError).message).toBe("That message couldn't be sent.");
   });
 
   it('names an attachment the door can no longer bind, as a refusal no retry changes', async () => {
@@ -473,5 +473,124 @@ describe('API base derivation', () => {
 
     await expect(sendMessage('site-alpha', 'hi', KEY)).rejects.toThrow(/no data-api-base/);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+/** The shell with the route's own refusal sentences on `#root`'s `data-words`. */
+function mountShellWithWords(words: Record<string, string>): void {
+  const root = document.createElement('div');
+  root.id = 'root';
+  root.dataset.apiBase = '/api/channels/web';
+  root.dataset.words = JSON.stringify(words);
+  document.body.replaceChildren(root);
+}
+
+describe("the route's refusal words", () => {
+  it('draws each status from its own member', async () => {
+    mountShellWithWords({
+      session_ended: 'Session over.',
+      wrong_site: 'Wrong site.',
+      not_listening: 'Nobody here.',
+      already_answered: 'Done already.',
+      busy: 'Hold on.',
+      not_switched_on: 'Off.',
+      failed: 'Broken.',
+    });
+    const cases: [number, string][] = [
+      [401, 'Session over.'],
+      [403, 'Wrong site.'],
+      [404, 'Nobody here.'],
+      [409, 'Done already.'],
+      [429, 'Hold on.'],
+      [503, 'Hold on.'],
+      [501, 'Off.'],
+      [500, 'Broken.'],
+    ];
+    for (const [status, expected] of cases) {
+      fetchMock.mockResolvedValueOnce(reply(status, { error: 'internal detail' }));
+      const error = await sendMessage('site-alpha', 'hi', KEY).catch((err: unknown) => err);
+      expect((error as ChatApiError).message).toBe(expected);
+    }
+  });
+
+  it('fills {subject} with the door subject the route set', async () => {
+    mountShellWithWords({
+      too_long: '{subject} is over the limit.',
+      not_sent: '{subject} was refused.',
+      subject_message: 'Your note',
+      subject_answer: 'Your reply',
+    });
+
+    fetchMock.mockResolvedValueOnce(reply(413, { error: 'body too large' }));
+    const tooLong = await sendMessage('site-alpha', 'hi', KEY).catch((err: unknown) => err);
+    expect((tooLong as ChatApiError).message).toBe('Your note is over the limit.');
+
+    fetchMock.mockResolvedValueOnce(reply(422, { error: 'answer must be a finite number' }));
+    const refused = await answerQuestion('int-1', Infinity).catch((err: unknown) => err);
+    expect((refused as ChatApiError).message).toBe('Your reply was refused.');
+  });
+
+  it('draws the attachment and entry-gate codes from their members', async () => {
+    mountShellWithWords({
+      attachment_gone: 'Attach it again.',
+      attachment_already_sent: 'Sent before.',
+      entry_refused: 'Use your link.',
+    });
+
+    fetchMock.mockResolvedValueOnce(reply(400, { error: 'gone', code: 'media_unbindable' }));
+    const gone = await sendMessage('site-alpha', 'hi', KEY).catch((err: unknown) => err);
+    expect((gone as ChatApiError).message).toBe('Attach it again.');
+
+    fetchMock.mockResolvedValueOnce(reply(400, { error: 'bound', code: 'media_already_bound' }));
+    const bound = await sendMessage('site-alpha', 'hi', KEY).catch((err: unknown) => err);
+    expect((bound as ChatApiError).message).toBe('Sent before.');
+
+    fetchMock.mockResolvedValueOnce(reply(403, { error: 'entry refused', code: 'entry_refused' }));
+    const refused = await rotateSession('site-alpha').catch((err: unknown) => err);
+    expect((refused as ChatApiError).message).toBe('Use your link.');
+  });
+
+  it("fills {reason} with the answer door's reason and carries the reason on the error", async () => {
+    mountShellWithWords({
+      answer_refused: 'Not taken: {reason}',
+      answer_retries_spent: 'Closed now: {reason}',
+    });
+
+    fetchMock.mockResolvedValueOnce(
+      reply(400, { error: 'pick a date', code: 'answer_refused', reason: 'pick a date' }),
+    );
+    const refused = await answerQuestion('int-1', 'x').catch((err: unknown) => err);
+    expect((refused as ChatApiError).message).toBe('Not taken: pick a date');
+    expect((refused as ChatApiError).reason).toBe('pick a date');
+    expect((refused as ChatApiError).code).toBe('answer_refused');
+
+    fetchMock.mockResolvedValueOnce(
+      reply(400, { error: 'pick a date', code: 'answer_retries_spent', reason: 'pick a date' }),
+    );
+    const spent = await answerQuestion('int-1', 'x').catch((err: unknown) => err);
+    expect((spent as ChatApiError).message).toBe('Closed now: pick a date');
+  });
+
+  it("draws the built-in refusal sentences when the route set none, never the door's error", async () => {
+    fetchMock.mockResolvedValueOnce(
+      reply(400, { error: 'the answer was refused', code: 'answer_refused' }),
+    );
+    const refused = await answerQuestion('int-1', 'x').catch((err: unknown) => err);
+    expect((refused as ChatApiError).message).toBe('That answer was not accepted.');
+    expect((refused as ChatApiError).reason).toBeNull();
+
+    fetchMock.mockResolvedValueOnce(
+      reply(400, { error: 'too late', code: 'answer_retries_spent', reason: 'too late' }),
+    );
+    const spent = await answerQuestion('int-1', 'x').catch((err: unknown) => err);
+    expect((spent as ChatApiError).message).toBe(
+      'That answer was not accepted, and that question can no longer be answered. too late',
+    );
+
+    fetchMock.mockResolvedValueOnce(reply(403, { error: 'entry refused', code: 'entry_refused' }));
+    const gated = await rotateSession('site-alpha').catch((err: unknown) => err);
+    expect((gated as ChatApiError).message).toBe(
+      'This chat is private. Open it from the link you were given.',
+    );
   });
 });

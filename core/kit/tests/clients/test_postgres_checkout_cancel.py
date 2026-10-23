@@ -72,7 +72,7 @@ async def pool(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(pg_mod.AsyncConnection, "connect", _fake_connect)
     monkeypatch.setattr(_FakeConn, "gate", asyncio.Event())
     monkeypatch.setattr(_FakeConn, "in_check", asyncio.Event())
-    built = await pg_mod._open_named_pool(_DSN, min_size=1, max_size=1, name="checkout-cancel")
+    built = await pg_mod._open_named_pool(_DSN, min_size=1, max_size=1, name="checkout-cancel", retry_attempts=0)
     try:
         yield built
     finally:

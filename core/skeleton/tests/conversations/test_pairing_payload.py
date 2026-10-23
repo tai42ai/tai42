@@ -19,6 +19,7 @@ from tai42_contract.conversations import (
 )
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils import render as door_contract_module
+from tests._helpers import AddressingChannel
 from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.authz.identity import CallerIdentity
@@ -44,9 +45,10 @@ from tai42_skeleton.conversations.turn import outcome as outcome_module
 from tai42_skeleton.conversations.turn import overlap as overlap_module
 from tai42_skeleton.conversations.turn import pairing as pairing_module
 from tai42_skeleton.conversations.turn import record as turn_record_module
+from tai42_skeleton.conversations.turn import reply_window as reply_window_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
-from .conftest import FakeManager, _connected, _settle, rendered_user_message
+from .conftest import NO_REPLY_WINDOW, FakeManager, _connected, _settle, rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 _CODE_RE = re.compile(r"LINK-[A-Z0-9]{8}")
@@ -69,13 +71,13 @@ class EchoAgent(MemorylessTestAgent):
         return f"echo: {text}"
 
 
-class FakeChannel:
+class FakeChannel(AddressingChannel):
     def __init__(self) -> None:
         self.sends: list = []
 
     async def notify(self, notification):
         self.sends.append(notification)
-        return [f"out-{len(self.sends)}"]
+        return self.outcome(notification, [f"out-{len(self.sends)}"])
 
 
 class _FakeChannels:
@@ -172,7 +174,9 @@ def _wire(monkeypatch, manager: FakeManager, channel: FakeChannel | None = None,
     monkeypatch.setattr(tool_turn_module, "tai42_app", _FakeTemplateApp())
     monkeypatch.setattr(door_contract_module, "tai42_app", _FakeTemplateApp())
     if channel is not None:
+        # The reply's send and the turn's reply-window read resolve the SAME registered channel.
         monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
+        monkeypatch.setattr(reply_window_module, "tai42_app", _FakeApp(channel))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"assistant": agent or EchoAgent()})
 
 
@@ -252,7 +256,16 @@ async def _answer_of(message_id: str) -> str:
 async def _mint_via_link(monkeypatch, fake, route, *, address="+15550002222", provider="PID-L") -> str:
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(route), channel)
-    mid = await turn_module.accept("twilio", route.our_identity, address, address, "/link", provider)
+    mid = await turn_module.accept(
+        "twilio",
+        route.our_identity,
+        address,
+        address,
+        "/link",
+        provider,
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     answer = await _answer_of(mid)
     match = _CODE_RE.search(answer)
@@ -267,7 +280,16 @@ async def test_tool_payload_off_carries_no_person_keys(env, monkeypatch):
     seen: list[dict] = []
     _wire(monkeypatch, FakeManager(_tool_route(start_expr=".")), FakeChannel())
     _wire_tool(monkeypatch, lambda kw: seen.append(kw) or "pong")
-    await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "hi",
+        "PID-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     assert len(seen) == 1
     assert set(seen[0]) == {"message", "sender", "our_identity", "channel", "route", "thread_id", "turn"}
@@ -280,9 +302,27 @@ async def test_tool_payload_on_carries_a_stable_person_id(env, monkeypatch):
     seen: list[dict] = []
     _wire(monkeypatch, FakeManager(_tool_route(start_expr=".")), FakeChannel())
     _wire_tool(monkeypatch, lambda kw: seen.append(kw) or "pong")
-    await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "hi",
+        "PID-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
-    await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi again", "PID-2")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "hi again",
+        "PID-2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     person = await _person_store().get_person(
         _TOOL_TARGET, door="channel", channel="twilio", our_identity="+15550001111", address="+2000"
@@ -301,7 +341,16 @@ async def test_start_expr_can_read_person_id_and_addresses(env, monkeypatch):
     route = _tool_route(start_expr="{who: .person_id, addrs: .person_addresses}")
     _wire(monkeypatch, FakeManager(route), FakeChannel())
     _wire_tool(monkeypatch, lambda kw: seen.append(kw) or "pong")
-    await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "hi",
+        "PID-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     person = await _person_store().get_person(
         _TOOL_TARGET, door="channel", channel="twilio", our_identity="+15550001111", address="+2000"
@@ -320,21 +369,48 @@ async def test_tool_route_thread_keys_route_then_person_when_linked(env, monkeyp
     _wire_tool(monkeypatch, lambda kw: "pong")
 
     # First contact from a single-address person → the route thread.
-    solo_mid = await turn_module.accept("twilio", "+15550001111", "+1000", "+1000", "hi", "PID-solo")
+    solo_mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+1000",
+        "+1000",
+        "hi",
+        "PID-solo",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     solo_record = await _store().get_record(solo_mid)
     assert solo_record is not None
     assert solo_record.thread_id == "bridge:tool-a:+1000"
 
     # addrA mints a link code (the pairing turn intercepts before any dispatch).
-    link_mid = await turn_module.accept("twilio", "+15550001111", "+1000", "+1000", "/link", "PID-link")
+    link_mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+1000",
+        "+1000",
+        "/link",
+        "PID-link",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     match = _CODE_RE.search(await _answer_of(link_mid))
     assert match is not None
     code = match.group(0)
 
     # addrB redeems on route B → the two addresses merge into one person.
-    await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-redeem")
+    await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        code,
+        "PID-redeem",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     person = await _person_store().get_person(
         _TOOL_TARGET, door="channel", channel="twilio", our_identity="+15550009999", address="+2000"
@@ -343,7 +419,16 @@ async def test_tool_route_thread_keys_route_then_person_when_linked(env, monkeyp
     assert {a.address for a in person.addresses} == {"+1000", "+2000"}
 
     # The NEXT plain message from addrB keys the aggregated person thread.
-    next_mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", "hi again", "PID-next")
+    next_mid = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        "hi again",
+        "PID-next",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     next_record = await _store().get_record(next_mid)
     assert next_record is not None
@@ -469,7 +554,7 @@ def _resolved(outcome):
 
 
 def _agent_turn_args(route, thread_id="bridge:x:y"):
-    """The ``record``/``batch`` an agent turn needs, for the drain tests that drive it directly."""
+    """The ``record``/``batch``/``reply_window`` an agent turn needs, for the drain tests that drive it directly."""
     from tai42_skeleton.conversations.models import DeliveryStatus
 
     record = turn_record_module._new_record(
@@ -483,7 +568,11 @@ def _agent_turn_args(route, thread_id="bridge:x:y"):
         inbound_text="hi",
         delivery_status=DeliveryStatus.ACCEPTED,
     )
-    return {"record": record, "batch": overlap_module.Batch(lead=record, members=[record])}
+    return {
+        "record": record,
+        "batch": overlap_module.Batch(lead=record, members=[record]),
+        "reply_window": NO_REPLY_WINDOW,
+    }
 
 
 async def test_agent_drain_serializes_structured_finals(env, monkeypatch):

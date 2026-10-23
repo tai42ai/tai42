@@ -17,6 +17,7 @@ from tai42_contract.template import TemplatedText
 from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.conversations import mode as mode_module
+from tai42_skeleton.conversations import persons as persons_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations import turn as turn_module
@@ -28,7 +29,7 @@ from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, NotFoundError, NotSupportedError
 
-from .conftest import FakeManager, serve_stores
+from .conftest import FakeManager, create_record, serve_stores
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 _ROUTE_THREAD = "bridge:chat:+15550002222"
@@ -85,6 +86,7 @@ def wired(monkeypatch):
     monkeypatch.setattr(records_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(mode_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(thread_lease_module, "client_ctx", make_record_client_ctx(fake))
+    monkeypatch.setattr(persons_module, "client_ctx", make_record_client_ctx(fake))
     manager = FakeManager(_channel_route())
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: manager)
     # The route's ``relay`` agent holds thread memory by default, so manual mode is permitted.
@@ -105,7 +107,8 @@ async def _seed_record(
     *, message_id: str, route_name: str, thread_id: str, address: str, channel: str = "twilio"
 ) -> None:
     now = time.time()
-    await ConversationRecordStore(ConversationsSettings()).create_record(
+    await create_record(
+        ConversationRecordStore(ConversationsSettings()),
         ConversationRecord(
             message_id=message_id,
             route_name=route_name,
@@ -121,7 +124,7 @@ async def _seed_record(
             delivery_status=DeliveryStatus.DELIVERED,
             created_at=now,
             updated_at=now,
-        )
+        ),
     )
 
 
@@ -417,17 +420,9 @@ def _person() -> Person:
     )
 
 
-def _wire_person(person: Person | None) -> None:
-    class _FakePersonStore:
-        async def get_by_id(self, person_id: str) -> Person | None:
-            return person if person is not None and person_id == person.person_id else None
-
-    serve_stores(ops.get_conversations_manager(), persons=_FakePersonStore())
-
-
 async def test_send_person_default_targets_the_newest_record(wired, monkeypatch):
     calls = _capture_operator_send(monkeypatch)
-    _wire_person(_person())
+    wired.redis.seed_person(_person())
     # The person spans chat + chat-b; add chat-b to the manager so the newest record's route
     # resolves live.
     wired.manager._routes["chat-b"] = _channel_route("chat-b", our_identity="+15550003333")
@@ -448,7 +443,7 @@ async def test_send_person_default_targets_the_newest_record(wired, monkeypatch)
 
 async def test_send_person_explicit_address_must_be_one_of_the_persons(wired, monkeypatch):
     calls = _capture_operator_send(monkeypatch)
-    _wire_person(_person())
+    wired.redis.seed_person(_person())
     wired.manager._routes["chat-b"] = _channel_route("chat-b", our_identity="+15550003333")
 
     await ops.send_conversation_thread_message("chat", _PERSON_THREAD, "on it", address="+1000")
@@ -461,7 +456,7 @@ async def test_send_person_explicit_address_must_be_one_of_the_persons(wired, mo
 
 async def test_send_empty_person_thread_without_address_is_a_400(wired, monkeypatch):
     _capture_operator_send(monkeypatch)
-    _wire_person(_person())
+    wired.redis.seed_person(_person())
     wired.manager._routes["chat-b"] = _channel_route("chat-b", our_identity="+15550003333")
 
     with pytest.raises(BadRequestError, match="no record to infer a send address"):
@@ -470,7 +465,7 @@ async def test_send_empty_person_thread_without_address_is_a_400(wired, monkeypa
 
 async def test_send_person_thread_off_route_is_a_404(wired, monkeypatch):
     _capture_operator_send(monkeypatch)
-    _wire_person(_person())
+    wired.redis.seed_person(_person())
     with pytest.raises(NotFoundError):
         await ops.send_conversation_thread_message("nope-route", _PERSON_THREAD, "on it")
 
@@ -555,7 +550,7 @@ async def test_mode_get_unknown_route_is_a_404(wired):
 async def test_get_mode_person_thread_defaults_manual_if_any_route_is_manual(wired, monkeypatch):
     # The person spans chat (agent) and chat-b (manual); the aggregated thread's no-override
     # default is manual, since one operator control decision covers every channel it spans.
-    _wire_person(_person())
+    wired.redis.seed_person(_person())
     wired.manager._routes["chat"] = _channel_route("chat", initial_mode="agent")
     wired.manager._routes["chat-b"] = _channel_route("chat-b", initial_mode="manual", our_identity="+15550003333")
 
@@ -563,7 +558,7 @@ async def test_get_mode_person_thread_defaults_manual_if_any_route_is_manual(wir
 
 
 async def test_get_mode_person_thread_defaults_agent_if_every_route_is_agent(wired, monkeypatch):
-    _wire_person(_person())
+    wired.redis.seed_person(_person())
     wired.manager._routes["chat"] = _channel_route("chat", initial_mode="agent")
     wired.manager._routes["chat-b"] = _channel_route("chat-b", initial_mode="agent", our_identity="+15550003333")
 

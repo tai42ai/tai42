@@ -354,3 +354,54 @@ def test_reaction_fed_choice_still_type_checks():
     schema = {"type": "object", "properties": {"slot": {"type": "string", "enum": ["9am"]}}}
     with pytest.raises(AnswerMismatchError):
         check_answer(_reacting_choice_form(schema), {"slot": 5})
+
+
+def test_form_date_time_range_refuses_a_same_day_earlier_end_instant():
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date-time"},
+            "end": {"type": "string", "format": "date-time", "rangeStart": "start"},
+        },
+    }
+    check_answer(_form(schema), {"start": "2026-03-01T09:00:00Z", "end": "2026-03-01T10:00:00Z"})
+    with pytest.raises(AnswerMismatchError) as exc:
+        check_answer(_form(schema), {"start": "2026-03-01T10:00:00Z", "end": "2026-03-01T09:00:00Z"})
+    assert exc.value.field == "end"
+
+
+@pytest.mark.parametrize(
+    ("start_format", "end_format", "start", "end"),
+    [
+        ("date", "date-time", "2026-03-02", "2026-03-01T23:00:00Z"),
+        ("date-time", "date", "2026-03-02T00:30:00+01:00", "2026-03-01"),
+    ],
+)
+def test_form_mixed_range_refuses_an_earlier_written_date(start_format, end_format, start, end):
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": start_format},
+            "end": {"type": "string", "format": end_format, "rangeStart": "start"},
+        },
+    }
+    with pytest.raises(AnswerMismatchError) as exc:
+        check_answer(_form(schema), {"start": start, "end": end})
+    assert exc.value.field == "end"
+
+
+def test_form_timed_range_refuses_a_same_day_earlier_end_time_on_the_end_time():
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+            "start_time": {"type": "string", "format": "time", "timeOf": "start"},
+            "end_time": {"type": "string", "format": "time", "timeOf": "end"},
+        },
+    }
+    day = {"start": "2026-03-01", "end": "2026-03-01"}
+    check_answer(_form(schema), {**day, "start_time": "09:00", "end_time": "10:00"})
+    with pytest.raises(AnswerMismatchError, match="The end time must be on or after the start time") as exc:
+        check_answer(_form(schema), {**day, "start_time": "10:00", "end_time": "09:00"})
+    assert exc.value.field == "end_time"

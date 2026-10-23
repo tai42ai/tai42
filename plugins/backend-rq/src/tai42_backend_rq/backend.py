@@ -18,7 +18,6 @@ from tai42_contract.app import tai42_app
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
 from tai42_kit.backend import ManagedBackend
 
-from tai42_backend_rq.queue import TASK_BUDGET_QUEUE_PATH
 from tai42_backend_rq.settings import rq_settings
 from tai42_backend_rq.worker import RqWorkerRuntime
 
@@ -28,23 +27,17 @@ from tai42_backend_rq.worker import RqWorkerRuntime
 _DRAIN_MARGIN_SECONDS = 30.0
 
 
-class _VendorCliRuntime(BackendRuntime):
-    """A vendor CLI entrypoint, run INLINE on the serving loop.
+class _InlineRuntime(BackendRuntime):
+    """A runtime run INLINE on the serving loop, from its raw subcommand args.
 
     Beat and the dashboard pull no queued work, so there is nothing to
     readiness-gate and nothing to drain; they block the loop deliberately and
     keep whatever signal disposition their own CLI installs. That is a decision,
     not an oversight: nothing else runs on their loop, so there is no host
     handler for a vendor install to destroy.
-
-    Their options belong to the vendor CLI, so they are handed through as argv
-    rather than parsed here.
     """
 
     mode = ExecutionMode.inline
-
-    argv0: ClassVar[str]
-    """The program name the vendor CLI expects to find in ``sys.argv[0]``."""
 
     def __init__(self, args: Sequence[str]) -> None:
         self._args = list(args)
@@ -53,32 +46,34 @@ class _VendorCliRuntime(BackendRuntime):
     def from_args(cls, args: Sequence[str]) -> Self:
         return cls(args)
 
+
+class _VendorCliRuntime(_InlineRuntime):
+    """A vendor CLI entrypoint whose options belong to the vendor, handed through as argv."""
+
+    argv0: ClassVar[str]
+    """The program name the vendor CLI expects to find in ``sys.argv[0]``."""
+
     def _publish_argv(self) -> None:
         """Hand this runtime's options to the vendor CLI the only way it reads them — the process argv."""
         sys.argv = [self.argv0, *self._args]
 
 
-class RqBeatRuntime(_VendorCliRuntime):
-    """``rq-scheduler``: moves due scheduled jobs onto the queue.
+class RqBeatRuntime(_InlineRuntime):
+    """The rq beat: moves due scheduled jobs onto the queue.
 
-    It enqueues work rather than pulling it, so it is not a consuming runtime.
+    It enqueues work rather than pulling it, so it is not a consuming runtime. Its
+    options are parsed by :func:`~tai42_backend_rq.beat.run_beat`.
     """
 
     name = "beat"
-    argv0 = "rq-scheduler"
-
-    def _publish_argv(self) -> None:
-        """Hand the options to ``rq-scheduler`` plus the queue class that bounds every moved job by ``task_timeout``."""
-        sys.argv = [self.argv0, *self._args, "--queue-class", TASK_BUDGET_QUEUE_PATH]
 
     def run_blocking(self) -> None:
-        """Run the ``rq-scheduler`` process in the foreground."""
-        self._publish_argv()
+        """Run the rq scheduler in the foreground on a connection built by the kit seam."""
         # Imported on the path that runs it: only this runtime needs the
-        # scheduler script, and only this process ever becomes one.
-        from rq_scheduler.scripts.rqscheduler import main as scheduler_main
+        # scheduler, and only this process ever becomes one.
+        from tai42_backend_rq import beat
 
-        scheduler_main()
+        beat.run_beat(self._args)
 
 
 class RqDashboardRuntime(_VendorCliRuntime):

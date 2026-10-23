@@ -322,6 +322,12 @@ class CodeRevokedResponse(BaseModel):
     status: Literal["revoked"]
 
 
+class WordsClearedResponse(BaseModel):
+    """Ack of a web route's words being cleared."""
+
+    status: Literal["cleared"]
+
+
 def _object_refusal(value: dict[str, Any], what: str) -> str | None:
     """The ONE transport bound on a visitor-sent JSON object.
 

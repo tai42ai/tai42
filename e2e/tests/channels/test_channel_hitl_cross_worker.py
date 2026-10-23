@@ -75,7 +75,7 @@ async def test_ask_via_channel_on_a_inbound_on_b_resolves_on_a(
     async def ask() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
             result = await mcp.call_tool("ask", {"question": question, "channel": case.name})
-        return result.data
+        return result.data.answer
 
     # Baseline the correlation keys BEFORE the ask, so the guard below waits for
     # THIS ask's key rather than leaning on any leftover.
@@ -127,7 +127,7 @@ async def test_inbound_rejected_fail_closed(channel_case: ChannelCase, uniq: Cal
     async def ask() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
             result = await mcp.call_tool("ask", {"question": question, "channel": case.name})
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -171,7 +171,7 @@ async def test_tier1_confirm_message_carries_callback_url(
     async def ask_probe() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
             result = await mcp.call_tool("ask", {"question": probe_q, "channel": case.name})
-        return result.data
+        return result.data.answer
 
     probe_task = asyncio.create_task(ask_probe())
     try:
@@ -200,7 +200,7 @@ async def test_tier1_confirm_message_carries_callback_url(
             result = await mcp.call_tool(
                 "ask", {"question": confirm_q, "channel": case.name, "answer_format": "confirm"}
             )
-        return result.data
+        return result.data.answer
 
     confirm_task = asyncio.create_task(ask_confirm())
     try:

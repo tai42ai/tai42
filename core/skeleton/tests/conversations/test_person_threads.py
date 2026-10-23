@@ -32,6 +32,7 @@ from tai42_skeleton.conversations.thread_ids import PERSON_THREAD_PREFIX
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import NotFoundError
 
+from .conftest import create_record
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 _PERSON_ID = "P1"
@@ -172,10 +173,24 @@ async def test_aggregated_read_merges_two_routes_in_both_orders(fake):
     fake.seed_route("line-b")
     store = _store()
     # Interleaved created_at across two routes.
-    await store.create_record(_person_record("a1", "line-a", door="channel", created_at=10.0))
-    await store.create_record(_person_record("b1", "line-b", door="channel", created_at=20.0))
-    await store.create_record(_person_record("a2", "line-a", door="channel", created_at=30.0))
-    await store.create_record(_person_record("b2", "line-b", door="channel", created_at=40.0))
+    _seed_person(
+        fake,
+        _person(
+            [
+                _addr(
+                    door="channel",
+                    address="+2000",
+                    routes=["line-a", "line-b"],
+                    channel="twilio",
+                    our_identity="+15550009999",
+                )
+            ]
+        ),
+    )
+    await create_record(store, _person_record("a1", "line-a", door="channel", created_at=10.0))
+    await create_record(store, _person_record("b1", "line-b", door="channel", created_at=20.0))
+    await create_record(store, _person_record("a2", "line-a", door="channel", created_at=30.0))
+    await create_record(store, _person_record("b2", "line-b", door="channel", created_at=40.0))
 
     asc, _ = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=0, limit=10)
     assert [r.message_id for r in asc.records] == ["a1", "b1", "a2", "b2"]
@@ -191,9 +206,23 @@ async def test_aggregated_read_pages_across_the_index_boundary(fake):
     fake.seed_route("line-a")
     fake.seed_route("line-b")
     store = _store()
-    await store.create_record(_person_record("a1", "line-a", door="channel", created_at=10.0))
-    await store.create_record(_person_record("b1", "line-b", door="channel", created_at=20.0))
-    await store.create_record(_person_record("a2", "line-a", door="channel", created_at=30.0))
+    _seed_person(
+        fake,
+        _person(
+            [
+                _addr(
+                    door="channel",
+                    address="+2000",
+                    routes=["line-a", "line-b"],
+                    channel="twilio",
+                    our_identity="+15550009999",
+                )
+            ]
+        ),
+    )
+    await create_record(store, _person_record("a1", "line-a", door="channel", created_at=10.0))
+    await create_record(store, _person_record("b1", "line-b", door="channel", created_at=20.0))
+    await create_record(store, _person_record("a2", "line-a", door="channel", created_at=30.0))
 
     page1, _ = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=0, limit=2)
     page2, _ = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=2, limit=2)
@@ -207,8 +236,22 @@ async def test_aggregated_read_breaks_equal_created_at_ties_deterministically(fa
     fake.seed_route("line-b")
     store = _store()
     # Two routes, SAME created_at: the message_id tie-break mirrors redis equal-score order.
-    await store.create_record(_person_record("m-aaa", "line-a", door="channel", created_at=50.0))
-    await store.create_record(_person_record("m-bbb", "line-b", door="channel", created_at=50.0))
+    _seed_person(
+        fake,
+        _person(
+            [
+                _addr(
+                    door="channel",
+                    address="+2000",
+                    routes=["line-a", "line-b"],
+                    channel="twilio",
+                    our_identity="+15550009999",
+                )
+            ]
+        ),
+    )
+    await create_record(store, _person_record("m-aaa", "line-a", door="channel", created_at=50.0))
+    await create_record(store, _person_record("m-bbb", "line-b", door="channel", created_at=50.0))
 
     asc, _ = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=0, limit=10)
     assert [r.message_id for r in asc.records] == ["m-aaa", "m-bbb"]
@@ -230,7 +273,21 @@ async def test_aggregated_read_skips_a_missing_or_corrupt_row_keeping_the_total(
     # (left for the prune pass) while the indexed ``total`` still counts them.
     fake.seed_route("line-a")
     store = _store()
-    await store.create_record(_person_record("a1", "line-a", door="channel", created_at=10.0))
+    _seed_person(
+        fake,
+        _person(
+            [
+                _addr(
+                    door="channel",
+                    address="+2000",
+                    routes=["line-a", "line-b"],
+                    channel="twilio",
+                    our_identity="+15550009999",
+                )
+            ]
+        ),
+    )
+    await create_record(store, _person_record("a1", "line-a", door="channel", created_at=10.0))
     settings = ConversationsSettings()
     thread_key = settings.thread_index_key("line-a", _THREAD)
     fake._zsets.setdefault(thread_key, {})["missing"] = 20.0  # indexed, no row
@@ -250,10 +307,6 @@ async def test_api_caller_reads_both_its_api_leg_and_the_channel_leg(fake, monke
     fake.seed_route("chat-api")
     fake.seed_route("line-b")
     store = _store()
-    await store.create_record(
-        _person_record("api-1", "chat-api", door="api", caller_principal="alice", created_at=10.0)
-    )
-    await store.create_record(_person_record("chan-1", "line-b", door="channel", created_at=20.0))
     _seed_person(
         fake,
         _person(
@@ -269,6 +322,10 @@ async def test_api_caller_reads_both_its_api_leg_and_the_channel_leg(fake, monke
             ]
         ),
     )
+    await create_record(
+        store, _person_record("api-1", "chat-api", door="api", caller_principal="alice", created_at=10.0)
+    )
+    await create_record(store, _person_record("chan-1", "line-b", door="channel", created_at=20.0))
     _wire_manager(monkeypatch, _api_route("chat-api"), _channel_route("line-b"))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
 
@@ -285,10 +342,10 @@ async def test_another_grant_holder_reads_the_person_thread(fake, monkeypatch):
     # caller-safe projection.
     fake.seed_route("chat-api")
     store = _store()
-    await store.create_record(
-        _person_record("api-1", "chat-api", door="api", caller_principal="alice", created_at=10.0)
-    )
     _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
+    await create_record(
+        store, _person_record("api-1", "chat-api", door="api", caller_principal="alice", created_at=10.0)
+    )
     _wire_manager(monkeypatch, _api_route("chat-api"))
     _as_caller(monkeypatch, _Caller("bob", is_admin=False))
     read = await ops.get_conversation_thread("chat-api", _THREAD)
@@ -299,10 +356,10 @@ async def test_another_grant_holder_reads_the_person_thread(fake, monkeypatch):
 async def test_admin_reads_any_person_thread_on_a_valid_route(fake, monkeypatch):
     fake.seed_route("chat-api")
     store = _store()
-    await store.create_record(
-        _person_record("api-1", "chat-api", door="api", caller_principal="alice", created_at=10.0)
-    )
     _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
+    await create_record(
+        store, _person_record("api-1", "chat-api", door="api", caller_principal="alice", created_at=10.0)
+    )
     _wire_manager(monkeypatch, _api_route("chat-api"))
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     read = await ops.get_conversation_thread("chat-api", _THREAD)
@@ -334,13 +391,6 @@ async def test_person_transcript_q_search_filters_the_merged_history(fake, monke
     fake.seed_route("chat-api")
     fake.seed_route("line-b")
     store = _store()
-    await store.create_record(
-        _person_record("m-widget-a", "chat-api", door="api", caller_principal="alice", created_at=10.0)
-    )
-    await store.create_record(
-        _person_record("m-plain-a", "chat-api", door="api", caller_principal="alice", created_at=20.0)
-    )
-    await store.create_record(_person_record("m-widget-b", "line-b", door="channel", created_at=30.0))
     _seed_person(
         fake,
         _person(
@@ -352,6 +402,13 @@ async def test_person_transcript_q_search_filters_the_merged_history(fake, monke
             ]
         ),
     )
+    await create_record(
+        store, _person_record("m-widget-a", "chat-api", door="api", caller_principal="alice", created_at=10.0)
+    )
+    await create_record(
+        store, _person_record("m-plain-a", "chat-api", door="api", caller_principal="alice", created_at=20.0)
+    )
+    await create_record(store, _person_record("m-widget-b", "line-b", door="channel", created_at=30.0))
     _wire_manager(monkeypatch, _api_route("chat-api"), _channel_route("line-b"))
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 
@@ -369,13 +426,14 @@ async def test_person_transcript_q_search_reports_truncated_on_budget(fake, monk
     monkeypatch.setattr(records_module, "_FILTER_RECORD_SCAN", 2)
     fake.seed_route("chat-api")
     store = _store()
+    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
     for index in range(3):
-        await store.create_record(
+        await create_record(
+            store,
             _person_record(
                 f"m-widget-{index}", "chat-api", door="api", caller_principal="alice", created_at=10.0 + index
-            )
+            ),
         )
-    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
     _wire_manager(monkeypatch, _api_route("chat-api"))
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 

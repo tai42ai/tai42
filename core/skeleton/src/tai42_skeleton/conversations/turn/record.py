@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from typing import Any, Literal
 
-from tai42_contract.conversations import AnswerPart, AnswerStatus, ConversationRoute, joined_answer_text
+from tai42_contract.conversations import AnswerPart, AnswerStatus, ConversationRoute, ReplyTo, joined_answer_text
 from tai42_contract.interactions import LocationElement, MediaItem
 
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
@@ -37,7 +37,9 @@ def _new_record(
     inbound_form_tag: str | None = None,
     inbound_attachments: list[MediaItem] | None = None,
     inbound_location: LocationElement | None = None,
+    inbound_reply_to: ReplyTo | None = None,
     inbound_locale: str | None = None,
+    inbound_message_id: str | None = None,
     inbound_kind: Literal["message", "event"] = "message",
     inbound_event: dict[str, Any] | None = None,
     submitted_by: str | None = None,
@@ -48,12 +50,13 @@ def _new_record(
     verbatim, durable from here so the record reads as a turn of a conversation and not
     only as its answer; ``inbound_form`` is the structured submission that rode WITH it
     (an ask-less form's answers), ``inbound_form_tag`` the caller-set opaque per-send tag that
-    rode back with that submission, and ``inbound_attachments``/``inbound_location`` are the media
-    and location the participant sent with it — all stored beside the text, ``None`` for an ordinary
-    text-only inbound. A ``client`` api-door record MUST name the authenticated caller its
-    thread and rate bucket are keyed by, and a ``client`` channel-door record names none; an
-    ``operator`` record names the operator that sent it on EITHER door — it rides no rate
-    bucket and carries no inbound to dedupe.
+    rode back with that submission, ``inbound_attachments``/``inbound_location`` are the media
+    and location the participant sent with it, ``inbound_reply_to`` the message it quotes as the
+    door resolved it, and ``inbound_message_id`` the id the medium gave it — all stored beside
+    the text, ``None`` for an ordinary text-only inbound. A ``client`` api-door record MUST name
+    the authenticated caller its thread and rate bucket are keyed by, and a ``client``
+    channel-door record names none; an ``operator`` record names the operator
+    that sent it on EITHER door — it rides no rate bucket and carries no inbound to dedupe.
     """
     if origin == "operator":
         if not (caller_principal and caller_principal.strip()):
@@ -85,7 +88,9 @@ def _new_record(
         inbound_form_tag=inbound_form_tag,
         inbound_attachments=inbound_attachments,
         inbound_location=inbound_location,
+        inbound_reply_to=inbound_reply_to,
         inbound_locale=inbound_locale,
+        inbound_message_id=inbound_message_id,
         inbound_kind=inbound_kind,
         inbound_event=inbound_event,
         submitted_by=submitted_by,

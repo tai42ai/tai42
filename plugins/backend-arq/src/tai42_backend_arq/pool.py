@@ -6,7 +6,8 @@ pooled async Redis client for this backend's connection settings and drive arq t
 job (de)serializers and queue name. The pool is the kit's: one per client epoch, drained
 when the serving generation that leased it retires, its connections opened from an empty
 context. The facade owns nothing and is built per lease. An unreachable Redis fails loudly
-at first use, as for every kit-pooled client, through the client's own command retry.
+at first use, as for every kit-pooled client, after the kit seam's logged connection retry
+(``ARQ_RETRY_ATTEMPTS``).
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from typing import Any
 
 from arq import ArqRedis
 from redis.asyncio import ConnectionPool
+from redis.asyncio import Redis as AsyncRedis
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -24,20 +26,30 @@ from tai42_backend_arq.settings import arq_settings, job_deserializer, job_seria
 
 
 def enqueue_client_kwargs() -> dict[str, Any]:
-    """The kit Redis client kwargs for this backend's connection settings.
+    """The kit Redis client kwargs for this backend's connection settings, read as bytes.
 
     The URL carries the host, port, database, credentials and TLS (``rediss://``); the
-    connection cap and arq's connect timeout ride beside it. Responses stay bytes, the
-    shape arq reads.
+    connection cap, the socket timeouts and the connection retry ride beside it, all from
+    :class:`~tai42_backend_arq.settings.ArqRedisSettings`. Responses stay bytes, the shape
+    arq reads.
     """
-    settings = arq_settings()
-    return {
-        "url": settings.redis_url,
-        "max_connections": settings.redis_max_connections,
-        "decode_responses": False,
-        "socket_connect_timeout": settings.redis_settings.conn_timeout,
-        "env_prefix": settings.model_config.get("env_prefix") or "",
-    }
+    return {**arq_settings().redis.client_kwargs(), "decode_responses": False}
+
+
+def arq_redis_over(client: AsyncRedis, *, queue_name: str) -> ArqRedis:
+    """An ``ArqRedis`` over ``client``'s connection pool, with this backend's job (de)serializers.
+
+    The pool's connection kwargs carry the kit's retry, so every arq command runs under it.
+    """
+    connection_pool = client.connection_pool
+    if not isinstance(connection_pool, ConnectionPool):
+        raise TypeError(f"the kit Redis client's pool is {type(connection_pool).__name__}, not an asyncio pool")
+    return ArqRedis(
+        pool_or_conn=connection_pool,
+        job_serializer=job_serializer,
+        job_deserializer=job_deserializer,
+        default_queue_name=queue_name,
+    )
 
 
 @asynccontextmanager
@@ -48,12 +60,4 @@ async def arq_connection() -> AsyncIterator[Any]:
     async shapes, while this async client's commands always return an awaitable.
     """
     async with client_ctx(RedisClient, **enqueue_client_kwargs()) as client:
-        connection_pool = client.connection_pool
-        if not isinstance(connection_pool, ConnectionPool):
-            raise TypeError(f"the kit Redis client's pool is {type(connection_pool).__name__}, not an asyncio pool")
-        yield ArqRedis(
-            pool_or_conn=connection_pool,
-            job_serializer=job_serializer,
-            job_deserializer=job_deserializer,
-            default_queue_name=arq_settings().queue_name,
-        )
+        yield arq_redis_over(client, queue_name=arq_settings().queue_name)

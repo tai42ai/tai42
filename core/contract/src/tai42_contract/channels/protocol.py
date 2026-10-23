@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from tai42_contract.channels.delivery import ChannelDelivery
+from tai42_contract.channels.delivery import ChannelAddress, ChannelDelivery, SendOutcome
 from tai42_contract.channels.notification import ChannelNotification
 
 
@@ -72,7 +72,9 @@ class Channel(Protocol):
     :class:`ChannelInputError`). The SAME hook is reused for a form notification:
     the notify helper calls ``channel.validate_form_schema(schema, message)`` with
     the notification's ``message`` as the ``question`` argument before the send, so
-    one declared method covers both the ask and the notify form surfaces.
+    one declared method covers both the ask and the notify form surfaces. A
+    conversation's send admission runs the same hook once per form part, with the
+    part's final message as the ``question``, before any part of the reply is sent.
 
     A channel that advertises ``supports_template_notifications`` MAY also declare one OPTIONAL
     method, ``validate_template``, following the same documented-member convention (read
@@ -83,8 +85,9 @@ class Channel(Protocol):
     and raises ``ValueError`` on a shape the channel could never map — so a template the channel
     could never render is refused up front instead of failing at delivery. A channel that omits the
     hook advertises no ask-time parameter check; its ``notify`` still refuses an unmappable template
-    at send time (a permanent :class:`ChannelInputError`). The platform never looks inside
-    ``parameters`` itself; the declaring channel owns the shape end to end.
+    at send time (a permanent :class:`ChannelInputError`). A conversation's send admission runs the
+    same hook once per template part, before any part of the reply is sent. The platform never
+    looks inside ``parameters`` itself; the declaring channel owns the shape end to end.
 
     A channel MAY also declare the OPTIONAL outbound message-length cap it splits a long answer
     against — an OPTIONAL ``ClassVar max_message_chars: int`` giving the medium's own per-message
@@ -133,9 +136,38 @@ class Channel(Protocol):
     :class:`ChannelDeliveryError` (``retryable=True`` for a transient store fault) only on a
     fault, never for "nothing to release". A channel that keeps nothing withdrawable omits the
     member (absent = nothing to release).
+
+    A channel whose medium allows a free-form reply only within a window after the client's
+    last message MAY also declare one OPTIONAL method, ``async def reply_window(self, *,
+    recipient: str, sender_identity: str | None = None) -> ReplyWindow`` — the same
+    documented-member convention, NOT a Protocol method, read defensively with
+    ``getattr(channel, "reply_window", None)``. It reports the window for ``recipient`` (the
+    client address, as ``deliver`` addresses one) and ``sender_identity`` (our identity on the
+    medium; ``None`` = the channel default, resolved exactly as ``deliver`` resolves it): a
+    :class:`ReplyWindow` that is ``open`` with its ``closes_at``, ``closed``, or ``none`` for a
+    pair the medium keeps no window for. It reads state only and sends nothing. It raises on a
+    fault (an unreachable store, a corrupt stored value, an unaddressable pair), never answers a
+    guessed state. A channel that omits the member has no reply window: the platform reports
+    ``none``. The medium's own rejection of a send outside its window stays the final check.
     """
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
+    def resolve_address(self, recipient: str | None, sender_identity: str | None) -> ChannelAddress:
+        """The identity and participant address this channel would send to, known before sending.
+
+        Synchronous, no I/O. ``recipient`` and ``sender_identity`` are the send's own values
+        (``None`` = the channel's default), resolved exactly as ``notify`` / ``deliver`` resolve
+        them. The identity is the one the send goes from, and a completed send's
+        :class:`SendOutcome` reports the same identity. The address may not be the canonical
+        one: a medium that resolves a handle only when it sends returns the handle here. The
+        platform uses this address only to place a send that never reported an outcome (it
+        raised, it timed out, it was cancelled, or the process stopped); a completed send is
+        placed by its :class:`SendOutcome`. Raises :class:`ChannelAddressError` when the target
+        cannot be resolved (a recipient off the operator allowlist, no recipient and no
+        configured default).
+        """
+        ...
+
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
         """Push ``delivery`` to the medium, or raise :class:`ChannelDeliveryError`.
 
         Send the question to the resolved recipient — ``delivery.recipient``
@@ -146,8 +178,11 @@ class Channel(Protocol):
         Any delivery failure — an unreachable or rejecting medium, a recipient
         outside the operator allowlist, a required credential or recipient not
         configured, a bad send response — raises
-        :class:`ChannelDeliveryError`; a plain return is the only success
-        signal. One send attempt only: retrying is the caller's decision, never
+        :class:`ChannelDeliveryError`; a return is the only success signal and
+        yields the :class:`SendOutcome` of the question's messages (the identity
+        and participant address it went from and to, and the per-message ids the
+        medium assigned, empty when it exposes none). One send attempt only:
+        retrying is the caller's decision, never
         an implicit loop here — the raised error's ``retryable`` and
         ``retry_after`` drive that decision, so a fault the medium can recover
         from is classified rather than blind-retried here. The dispatcher never
@@ -155,7 +190,7 @@ class Channel(Protocol):
         """
         ...
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         """Send a fire-and-forget message, or raise :class:`ChannelDeliveryError`.
 
         No interaction, no ticket, no callback, no reply. Any delivery failure raises
@@ -163,10 +198,11 @@ class Channel(Protocol):
         content (an input the medium cannot render BY NATURE) raises
         :class:`ChannelInputError` instead — retrying it cannot succeed. A return means
         the medium ACCEPTED the message —
-        not that a human saw it — and yields the per-message ids it assigned this send
-        (several when the medium splits a long message, empty when it exposes no id),
-        which later correlate an out-of-band delivery receipt back to this send. One
-        send attempt only, no retry. A channel that cannot notify raises
-        :class:`NotImplementedError`.
+        not that a human saw it — and yields the :class:`SendOutcome`: the identity and
+        participant address the message went from and to, and the per-message ids the
+        medium assigned this send (several when the medium splits a long message, empty
+        when it exposes no id), which later correlate an out-of-band delivery receipt or a
+        quote back to this send. One send attempt only, no retry. A channel that cannot
+        notify raises :class:`NotImplementedError`.
         """
         raise NotImplementedError

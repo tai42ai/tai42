@@ -17,6 +17,7 @@ from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import ChannelConversationRoute, ConversationRoute
 from tai42_contract.template import TemplatedText
+from tests._helpers import AddressingChannel
 from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.access_control import management
@@ -39,6 +40,7 @@ from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.turn import accessors as accessors_module
+from tai42_skeleton.conversations.turn import reply_window as reply_window_module
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations.registry import operation_registry
 
@@ -90,13 +92,13 @@ class ToolCallingAgent(MemorylessTestAgent):
         return str(await tool.invoke(self._arguments))
 
 
-class FakeChannel:
+class FakeChannel(AddressingChannel):
     def __init__(self) -> None:
         self.sends: list = []
 
     async def notify(self, notification):
         self.sends.append(notification)
-        return [f"out-{len(self.sends)}"]
+        return self.outcome(notification, [f"out-{len(self.sends)}"])
 
 
 class _FakeChannels:
@@ -184,7 +186,9 @@ def _wire_turn(monkeypatch, execution_key: str, tool: str, arguments: dict) -> t
     channel = FakeChannel()
     monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: manager)
+    # The reply's send and the turn's reply-window read resolve the SAME registered channel.
     monkeypatch.setattr(delivery_module, "tai42_app", _FakeDeliveryApp(channel))
+    monkeypatch.setattr(reply_window_module, "tai42_app", _FakeDeliveryApp(channel))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {_AGENT: ToolCallingAgent(tool, arguments)})
     return channel, route
 
@@ -196,7 +200,14 @@ async def _run_turn_answer(store: ConversationRecordStore) -> tuple[str, str, st
     import asyncio
 
     message_id = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", f"PID-{time.time()}"
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        f"PID-{time.time()}",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
     )
     for _ in range(200):
         record = await store.get_record(message_id)

@@ -13,11 +13,13 @@ non-navigation answers ``not_a_navigation`` regardless of any code it presents (
 oracle); an existing session is an already-granted capability and is admitted without a code;
 throttling is per client bucket, not a global lockout; and the management doors are authed —
 a list never returns a raw code, a mint returns it exactly once, and an unauthed caller is
-refused.
+refused. A route's own words, set through their doors, word its refusal pages and ride its chat
+page as ``data-words``.
 """
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from collections.abc import Callable
@@ -203,6 +205,49 @@ async def test_a_wrong_code_is_refused_identically_to_a_bare_navigation(
     wrong_headers = {k.lower(): v for k, v in wrong.headers.items() if k.lower() != "date"}
     assert missing_headers == wrong_headers, "no stable header may differ by code validity (no oracle)"
     assert _refusal_code(wrong.text) == "entry_refused"
+
+
+async def test_a_routes_own_words_are_stored_drawn_on_its_refusal_pages_and_cleared(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    """The words doors read, replace and clear one web route's words. With words stored, a bare
+    navigation and a wrong code both read the route's own ``entry_refused`` page (still one
+    byte-constant answer), and the chat page carries its ``transport`` sentences as
+    ``data-words``. Cleared, every page draws the built-in English again."""
+    identity = await _tool_route(bridge, uniq, "l23w", start_expr='{key: "x", value: .message}')
+    await _open_gate(bridge, identity)
+    code, _code_id = await _mint_code(bridge, identity)
+    base = _base_url(bridge)
+    built_in = await get_chat_page(base, identity)
+    assert built_in.status_code == 403
+
+    words = {
+        "page": {"entry_refused": {"heading": "Members only", "text": "Ask for a fresh link to join."}},
+        "transport": {"busy": "One moment, please send that again."},
+    }
+    await bridge.api().get(f"/api/channels/web/words/{identity}", expect=404)
+    assert await bridge.api().put(f"/api/channels/web/words/{identity}", json=words) == words
+    assert await bridge.api().get(f"/api/channels/web/words/{identity}") == words
+
+    missing = await get_chat_page(base, identity)
+    wrong = await get_chat_page(base, identity, query={"tai_entry": uniq("nope")})
+    assert missing.status_code == 403
+    assert _refusal_code(missing.text) == "entry_refused"
+    assert "<title>Members only</title>" in missing.text
+    assert "<h1>Members only</h1>" in missing.text
+    assert "<p>Ask for a fresh link to join.</p>" in missing.text
+    assert missing.text == wrong.text, "the route's refusal page must stay byte-identical (no oracle)"
+
+    admitted = await get_chat_page(base, identity, query={"tai_entry": code})
+    assert admitted.status_code == 200, admitted.text
+    match = re.search(r'data-words="([^"]*)"', admitted.text)
+    assert match is not None, admitted.text[:1000]
+    assert json.loads(html.unescape(match.group(1))) == words["transport"]
+
+    assert await bridge.api().delete(f"/api/channels/web/words/{identity}") == {"status": "cleared"}
+    await bridge.api().get(f"/api/channels/web/words/{identity}", expect=404)
+    assert (await get_chat_page(base, identity)).text == built_in.text
+    assert "data-words" not in (await get_chat_page(base, identity, query={"tai_entry": code})).text
 
 
 async def test_the_navigation_guard_runs_before_the_gate(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:

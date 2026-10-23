@@ -260,7 +260,7 @@ describe('FormCard', () => {
   it("draws the caller's terminal button, sent badge, session-ended badge and no-longer-available line", async () => {
     const user = userEvent.setup();
     const cardWording: Wording = {
-      form: { submit: 'File it', back: null, fields: {} },
+      form: { submit: 'File it', back: null, updateFailed: null, stepProgress: null, fields: {} },
       choice: null,
       answer: null,
       status: {
@@ -334,5 +334,69 @@ describe('FormCard', () => {
     await user.type(screen.getByRole('textbox'), 'ship it');
     await user.click(screen.getByRole('button', { name: 'Send' }));
     expect(await screen.findByText('That form is closed.')).toBeInTheDocument();
+  });
+});
+
+describe('FormCard — a date range with a time on each end', () => {
+  // The times are declared LAST; each draws and reads back right after its own date.
+  const TIMED: JsonSchema = {
+    type: 'object',
+    properties: {
+      from: { type: 'string', format: 'date', title: 'From' },
+      to: { type: 'string', format: 'date', title: 'To', rangeStart: 'from' },
+      note: { type: 'string', title: 'Note' },
+      from_time: { type: 'string', format: 'time', title: 'From time', timeOf: 'from' },
+      to_time: { type: 'string', format: 'time', title: 'To time', timeOf: 'to' },
+    },
+  };
+
+  function drawnLabels(): (string | undefined)[] {
+    return Array.from(document.querySelectorAll('input')).map(
+      (input) => input.labels?.[0]?.textContent ?? undefined,
+    );
+  }
+
+  it('draws each time as its own text field right after its date', () => {
+    renderCard(enrichedItem(TIMED, null, null));
+    expect(drawnLabels()).toEqual(['From', 'From time', 'To', 'To time', 'Note']);
+    expect(screen.getByLabelText('From time')).toHaveAttribute('type', 'text');
+  });
+
+  it('refuses an earlier same-day end time under the end time and sends nothing', async () => {
+    const user = userEvent.setup();
+    const values = { from: '2026-03-01', to: '2026-03-01', from_time: '10:00', to_time: '09:00' };
+    const { onSubmitForm } = renderCard(enrichedItem(TIMED, { values, options: {} }, null));
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText('must be on or after the start time')).toBeInTheDocument();
+    expect(screen.getByLabelText('To time')).toHaveAccessibleDescription(
+      'must be on or after the start time',
+    );
+    expect(onSubmitForm).not.toHaveBeenCalled();
+  });
+
+  it('reads each time back right after its date on a review page', async () => {
+    const user = userEvent.setup();
+    const values = { from: '2026-03-01', to: '2026-03-02', from_time: '10:00', to_time: '09:00' };
+    const pages: readonly FormPage[] = [
+      {
+        title: 'When',
+        fields: ['from', 'to', 'note', 'from_time', 'to_time'],
+        display: [],
+        kind: 'input',
+        buttonLabel: null,
+      },
+      { title: 'Review', fields: [], kind: 'review', display: [], buttonLabel: null },
+    ];
+    renderCard(enrichedItem(TIMED, { values, options: {} }, pages));
+    expect(drawnLabels()).toEqual(['From', 'From time', 'To', 'To time', 'Note']);
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    const review = await screen.findByTestId('form-review');
+    expect(Array.from(review.querySelectorAll('dt')).map((term) => term.textContent)).toEqual([
+      'From',
+      'From time',
+      'To',
+      'To time',
+      'Note',
+    ]);
   });
 });

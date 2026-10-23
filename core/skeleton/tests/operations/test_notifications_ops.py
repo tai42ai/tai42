@@ -28,6 +28,7 @@ from tai42_contract.channels import (
     ChannelTemplate,
     OptionSection,
     ReplyOption,
+    SendOutcome,
 )
 from tai42_contract.errors import UnavailableError
 from tai42_contract.interactions.models import (
@@ -40,6 +41,7 @@ from tai42_contract.interactions.models import (
     Wording,
 )
 from tai42_contract.manifest import ApiToolsConfig
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_identity_claims,
@@ -96,7 +98,7 @@ def sink_redis(monkeypatch, fake_redis):
     return fake_redis
 
 
-class _RichChannel:
+class _RichChannel(AddressingChannel):
     """A channel advertising media support that records the notifications it receives —
     a real target so the seam's substitution runs end-to-end through the op."""
 
@@ -105,9 +107,9 @@ class _RichChannel:
     def __init__(self) -> None:
         self.notifications: list[ChannelNotification] = []
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         self.notifications.append(notification)
-        return []
+        return self.outcome(notification, [])
 
 
 class _RecordingHelper:
@@ -696,7 +698,7 @@ async def test_restricted_notify_rejects_own_owner_as_403(sink_redis) -> None:
     assert await notifications_sink.read_notifications() == []
 
 
-class _RecordingChannel:
+class _RecordingChannel(AddressingChannel):
     """Records every notification handed to ``notify`` — proves whether the channel
     path was reached. ``notify_user`` never calls ``deliver`` (that is the ``ask``
     surface), so its protocol stub asserts if ever reached."""
@@ -704,12 +706,12 @@ class _RecordingChannel:
     def __init__(self) -> None:
         self.notifications: list[ChannelNotification] = []
 
-    async def deliver(self, delivery: object) -> None:
+    async def deliver(self, delivery: object) -> SendOutcome:
         raise AssertionError("notify_user must never call deliver")
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         self.notifications.append(notification)
-        return []
+        return self.outcome(notification, [])
 
 
 async def test_restricted_notify_channel_path_rejects_other_identity_as_403(sink_redis) -> None:

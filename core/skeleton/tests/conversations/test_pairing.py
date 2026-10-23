@@ -7,6 +7,7 @@ import asyncio
 import re
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 import pytest
 from pydantic import BaseModel
@@ -17,12 +18,14 @@ from tai42_contract.conversations import (
     ConversationRoute,
     ConversationTargetKind,
     OverlapPolicy,
+    ReplyTexts,
     TargetConversationConfig,
     TurnSupersededError,
 )
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils import render as door_contract_module
 from tai42_kit.utils.data.string_util import hash_api_key
+from tests._helpers import AddressingChannel
 from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.authz.identity import CallerIdentity
@@ -49,6 +52,7 @@ from tai42_skeleton.conversations.turn import intake as intake_module
 from tai42_skeleton.conversations.turn import outcome as outcome_module
 from tai42_skeleton.conversations.turn import overlap as overlap_module
 from tai42_skeleton.conversations.turn import pairing as pairing_module
+from tai42_skeleton.conversations.turn import reply_window as reply_window_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
 from .conftest import FakeManager, _connected, _settle, rendered_user_message
@@ -74,7 +78,7 @@ class EchoAgent(MemorylessTestAgent):
         return f"echo: {text}"
 
 
-class FakeChannel:
+class FakeChannel(AddressingChannel):
     # A neutral fixture channel declares its OWN outbound split cap through the generic
     # ``max_message_chars`` seam, read off the channel by the conversation-delivery machine.
     max_message_chars = 1600
@@ -84,7 +88,7 @@ class FakeChannel:
 
     async def notify(self, notification):
         self.sends.append(notification)
-        return [f"out-{len(self.sends)}"]
+        return self.outcome(notification, [f"out-{len(self.sends)}"])
 
 
 class _FakeChannels:
@@ -182,7 +186,9 @@ def _wire(monkeypatch, manager: FakeManager, channel: FakeChannel | None = None,
     monkeypatch.setattr(tool_turn_module, "tai42_app", _FakeTemplateApp())
     monkeypatch.setattr(door_contract_module, "tai42_app", _FakeTemplateApp())
     if channel is not None:
+        # The reply's send and the turn's reply-window read resolve the SAME registered channel.
         monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
+        monkeypatch.setattr(reply_window_module, "tai42_app", _FakeApp(channel))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"assistant": agent or EchoAgent()})
 
 
@@ -294,7 +300,16 @@ def test_classify_form_rendered_text_is_passthrough():
 async def _mint_via_link(monkeypatch, fake, route, *, address="+15550002222", provider="PID-L") -> str:
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(route), channel)
-    mid = await turn_module.accept("twilio", route.our_identity, address, address, "/link", provider)
+    mid = await turn_module.accept(
+        "twilio",
+        route.our_identity,
+        address,
+        address,
+        "/link",
+        provider,
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     answer = await _answer_of(mid)
     match = _CODE_RE.search(answer)
@@ -325,7 +340,16 @@ async def test_redeem_across_two_routes_merges_and_switches_the_person_thread(en
     # addrB redeems on route B — the redeem turn itself keys the PRE-merge route thread.
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(route_a, route_b), channel)
-    redeem_mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-B")
+    redeem_mid = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        code,
+        "PID-B",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     redeem_record = await _store().get_record(redeem_mid)
     assert redeem_record is not None
@@ -340,7 +364,16 @@ async def test_redeem_across_two_routes_merges_and_switches_the_person_thread(en
     assert {a.address for a in person.addresses} == {"+1000", "+2000"}
 
     # The NEXT message from addrB keys the aggregated person thread.
-    next_mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", "hi again", "PID-B2")
+    next_mid = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        "hi again",
+        "PID-B2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     next_record = await _store().get_record(next_mid)
     assert next_record is not None
@@ -354,11 +387,29 @@ async def test_unlink_detaches_and_returns_to_the_route_thread(env, monkeypatch)
     code = await _mint_via_link(monkeypatch, env, route_a, address="+1000", provider="PID-A")
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(route_a, route_b), channel)
-    await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-B")
+    await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        code,
+        "PID-B",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     # /unlink from addrB detaches it back to its own provisional person.
-    unlink_mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", "/unlink", "PID-U")
+    unlink_mid = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        "/unlink",
+        "PID-U",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     assert "no longer linked" in (await _answer_of(unlink_mid)).lower()
 
@@ -369,7 +420,16 @@ async def test_unlink_detaches_and_returns_to_the_route_thread(env, monkeypatch)
     assert [a.address for a in solo.addresses] == ["+2000"]
 
     # Its next message is back on the route thread (and not re-greeted — created=False).
-    next_mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", "hi", "PID-U2")
+    next_mid = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        "hi",
+        "PID-U2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     next_record = await _store().get_record(next_mid)
     assert next_record is not None
@@ -380,7 +440,16 @@ async def test_unlink_on_a_never_linked_address_is_a_loud_answered_reply(env, mo
     _seed_config(env)
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
-    mid = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "/unlink", "PID-U")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "/unlink",
+        "PID-U",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     record = await _store().get_record(mid)
     assert record is not None
@@ -391,7 +460,16 @@ async def test_unlink_on_a_never_linked_address_is_a_loud_answered_reply(env, mo
 async def test_invalid_code_is_an_answered_uniform_reply(env, monkeypatch):
     _seed_config(env)
     _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel())
-    mid = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "LINK-ZZZZZZZZ", "PID-X")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "LINK-ZZZZZZZZ",
+        "PID-X",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     record = await _store().get_record(mid)
     assert record is not None
@@ -419,14 +497,32 @@ async def test_cross_target_redeem_is_an_answered_refusal(env, monkeypatch):
     # Mint on the tool target.
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(tool_route, agent_route), channel)
-    tool_mint = await turn_module.accept("twilio", "+15557770000", "+3000", "+3000", "/link", "PID-T")
+    tool_mint = await turn_module.accept(
+        "twilio",
+        "+15557770000",
+        "+3000",
+        "+3000",
+        "/link",
+        "PID-T",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     tool_mint_match = _CODE_RE.search(await _answer_of(tool_mint))
     assert tool_mint_match is not None
     code = tool_mint_match.group(0)
 
     # Redeem it on the AGENT target — cross-target merge is refused, answered.
-    mid = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", code, "PID-C")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        code,
+        "PID-C",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     record = await _store().get_record(mid)
     assert record is not None
@@ -448,7 +544,16 @@ async def test_a_store_fault_mid_redeem_is_a_loud_error_outcome_not_invalid_code
         raise RuntimeError("redis reset mid-merge")
 
     monkeypatch.setattr(persons_module.ConversationPersonStore, "merge", _boom)
-    mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-B")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        code,
+        "PID-B",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     record = await _store().get_record(mid)
     assert record is not None
@@ -458,15 +563,15 @@ async def test_a_store_fault_mid_redeem_is_a_loud_error_outcome_not_invalid_code
     assert "redis reset" in record.error
 
 
-async def test_a_store_fault_mid_redeem_uses_the_route_error_reply_text_when_set(env, monkeypatch):
+async def test_a_store_fault_mid_redeem_uses_the_route_reply_texts_error_when_set(env, monkeypatch):
     # The pairing infra-fault path (turn.py:911) resolves the participant-facing reply through the
-    # route: a route carrying ``error_reply_text`` sends THAT custom notice, while the record's
+    # route: a route carrying ``reply_texts.error`` sends THAT custom notice, while the record's
     # internal ``error`` detail keeps the diagnosable wording.
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
     _seed_config(env)
     route_a = _channel_route(route_name="line-a", our_identity="+15550001111")
     route_b = _channel_route(route_name="line-b", our_identity="+15550009999").model_copy(
-        update={"error_reply_text": spanish}
+        update={"reply_texts": ReplyTexts(error=spanish)}
     )
     code = await _mint_via_link(monkeypatch, env, route_a, address="+1000", provider="PID-A")
     channel = FakeChannel()
@@ -476,7 +581,16 @@ async def test_a_store_fault_mid_redeem_uses_the_route_error_reply_text_when_set
         raise RuntimeError("redis reset mid-merge")
 
     monkeypatch.setattr(persons_module.ConversationPersonStore, "merge", _boom)
-    mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-B")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        code,
+        "PID-B",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     record = await _store().get_record(mid)
     assert record is not None
@@ -493,12 +607,30 @@ async def test_first_contact_greeting_prepends_to_the_answer_once(env, monkeypat
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route()), channel, agent=agent)
 
-    first = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
+    first = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "hi",
+        "PID-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     assert (await _answer_of(first)) == "Welcome!\n\necho: hi"
 
     # The SECOND message from the same address is past first contact — no greeting.
-    second = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "again", "PID-2")
+    second = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "again",
+        "PID-2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     assert (await _answer_of(second)) == "echo: again"
 
@@ -507,7 +639,16 @@ async def test_greeting_with_no_template_and_no_config_does_not_fire(env, monkey
     _seed_config(env, greeting_template=None)
     agent = EchoAgent()
     _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel(), agent=agent)
-    mid = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "hi",
+        "PID-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     assert (await _answer_of(mid)) == "echo: hi"
 
@@ -516,7 +657,16 @@ async def test_greeting_with_placeholder_mints_a_live_code(env, monkeypatch):
     _seed_config(env, greeting_template="Hi! Pair with {pairing_code}")
     agent = EchoAgent()
     _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel(), agent=agent)
-    mid = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "hi",
+        "PID-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     answer = await _answer_of(mid)
     match = _CODE_RE.search(answer)
@@ -535,7 +685,16 @@ async def test_first_contact_redeem_greets_and_links_in_one_reply(env, monkeypat
     _wire(monkeypatch, FakeManager(route_a, route_b), channel)
 
     # addrB's FIRST message is the redeem.
-    mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-B")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        code,
+        "PID-B",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     answer = await _answer_of(mid)
     assert answer.startswith("Welcome!\n\n")
@@ -561,7 +720,16 @@ async def test_a_redeem_of_a_tool_minted_code_ensures_the_minting_side(env, monk
             address="+1000",
         )
     )
-    mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-B")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        code,
+        "PID-B",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     assert "linked" in (await _answer_of(mid)).lower()
     person = await _person_store().get_person(
@@ -583,12 +751,30 @@ async def test_a_locked_source_does_not_burn_a_valid_code_and_leaks_no_oracle(en
     # Two invalid redeems from addrB arm the backoff lock (threshold 1).
     replies = []
     for index in range(2):
-        mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", "LINK-QQQQQQQQ", f"PID-I{index}")
+        mid = await turn_module.accept(
+            "twilio",
+            "+15550009999",
+            "+2000",
+            "+2000",
+            "LINK-QQQQQQQQ",
+            f"PID-I{index}",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
+        )
         await _settle()
         replies.append(await _answer_of(mid))
 
     # Now redeem the GENUINELY VALID code while locked: refused with the SAME uniform reply...
-    locked_mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", good_code, "PID-G")
+    locked_mid = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        good_code,
+        "PID-G",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     locked_reply = await _answer_of(locked_mid)
     assert locked_reply == pairing_module._INVALID_CODE_TEXT
@@ -648,7 +834,16 @@ async def test_first_contact_link_greeting_and_reply_share_one_live_code(env, mo
     route_b = _channel_route(route_name="line-b", our_identity="+15550009999")
     _wire(monkeypatch, FakeManager(route_a, route_b), FakeChannel())
 
-    mid = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "/link", "PID-1")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "/link",
+        "PID-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     answer = await _answer_of(mid)
 
@@ -662,7 +857,16 @@ async def test_first_contact_link_greeting_and_reply_share_one_live_code(env, mo
     assert code in link_line
 
     # The single shown code is LIVE: redeeming it from another conversation links the two.
-    redeem = await turn_module.accept("twilio", "+15550009999", "+3000", "+3000", code, "PID-2")
+    redeem = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+3000",
+        "+3000",
+        code,
+        "PID-2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     assert "linked" in (await _answer_of(redeem)).lower()
 
@@ -673,7 +877,16 @@ async def test_multichannel_off_passes_pairing_syntax_through_as_plain_text(env,
     # target agent verbatim and NO person row is created.
     agent = EchoAgent()
     _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel(), agent=agent)
-    mid = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", text, "PID-1")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        text,
+        "PID-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     assert agent.calls == [(text, "bridge:line-a:+2000")]
     assert (await _answer_of(mid)) == f"echo: {text}"
@@ -687,7 +900,16 @@ async def test_config_present_but_multichannel_false_is_also_off(env, monkeypatc
     _seed_config(env, multichannel=False, greeting_template="Welcome!")
     agent = EchoAgent()
     _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel(), agent=agent)
-    mid = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "/link", "PID-1")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "/link",
+        "PID-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     # No greeting, no code, plain passthrough.
     assert (await _answer_of(mid)) == "echo: /link"
@@ -701,10 +923,28 @@ async def test_redelivery_of_a_redeem_does_not_double_redeem(env, monkeypatch):
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(route_a, route_b), channel)
 
-    first = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-DUP")
+    first = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        code,
+        "PID-DUP",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     # A provider redelivery (same provider_message_id) returns the prior id, runs no 2nd turn.
-    second = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-DUP")
+    second = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        code,
+        "PID-DUP",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     assert first == second
     person = await _person_store().get_person(
@@ -723,12 +963,39 @@ async def test_a_detached_address_is_not_re_greeted_on_its_next_message(env, mon
     code = await _mint_via_link(monkeypatch, env, route_a, address="+1000", provider="PID-A")
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(route_a, route_b), channel)
-    await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-B")
+    await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        code,
+        "PID-B",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
-    await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", "/unlink", "PID-U")
+    await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        "/unlink",
+        "PID-U",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
-    nxt = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", "hi", "PID-N")
+    nxt = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        "hi",
+        "PID-N",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     assert (await _answer_of(nxt)) == "echo: hi"  # no "Welcome!" prefix
 
@@ -742,9 +1009,27 @@ async def test_a_rate_shed_first_contact_creates_no_person_row(env, monkeypatch)
     _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel())
 
     # addr-A drains the shared cap bucket; addr-B's FIRST message shares it and is shed.
-    await turn_module.accept("twilio", "+15550001111", "visitor-a", "net-bucket", "hi", "PID-A")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "visitor-a",
+        "net-bucket",
+        "hi",
+        "PID-A",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
-    shed = await turn_module.accept("twilio", "+15550001111", "visitor-b", "net-bucket", "hi", "PID-B")
+    shed = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "visitor-b",
+        "net-bucket",
+        "hi",
+        "PID-B",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     shed_record = await _store().get_record(shed)
     assert shed_record is not None
@@ -762,7 +1047,16 @@ async def test_greeting_due_first_contact_with_a_silent_tool_outcome_delivers_th
     _wire(monkeypatch, FakeManager(_tool_route()), channel)
     _wire_tool(monkeypatch, lambda kw: None)  # a silent tool outcome
 
-    mid = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "hi",
+        "PID-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     record = await _store().get_record(mid)
     assert record is not None
@@ -783,7 +1077,16 @@ async def test_greeting_due_first_contact_with_an_error_outcome_keeps_the_greeti
             raise RuntimeError("agent blew up")
 
     _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel(), agent=_BoomAgent())
-    mid = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
+    mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+2000",
+        "+2000",
+        "hi",
+        "PID-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     record = await _store().get_record(mid)
     assert record is not None
@@ -869,13 +1172,17 @@ async def test_a_greeting_carries_to_the_successor_when_the_first_turn_yields(en
     _wire(monkeypatch, FakeManager(_tool_route()), FakeChannel())
     _wire_tool(monkeypatch, _YieldingTool())
 
-    first = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1")
+    first = await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1", medium_message_id=None, reply_to_medium_message_id=None
+    )
     await _settle()
     r1 = await _store().get_record(first)
     assert r1 is not None
     assert r1.delivery_status is DeliveryStatus.SUPERSEDED  # yielded: the greeting was not delivered
 
-    second = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "again", "PID-2")
+    second = await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "again", "PID-2", medium_message_id=None, reply_to_medium_message_id=None
+    )
     await _settle()
     assert (await _answer_of(second)) == "Welcome!\n\nok"
 
@@ -889,9 +1196,13 @@ async def test_a_greeting_carries_to_the_successor_when_the_first_turn_is_cancel
     agent = _BlockingAssistant()
     _wire(monkeypatch, FakeManager(_cancel_agent_route()), FakeChannel(), agent=agent)
 
-    first = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "one", "PID-1")
+    first = await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "one", "PID-1", medium_message_id=None, reply_to_medium_message_id=None
+    )
     await asyncio.wait_for(agent.entered.wait(), 2)  # the first turn is running (and blocking)
-    second = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "two", "PID-2")
+    second = await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "two", "PID-2", medium_message_id=None, reply_to_medium_message_id=None
+    )
     await _poll_until(lambda: _record_status(first, DeliveryStatus.SUPERSEDED))
     agent.release.set()  # let the surviving second turn deliver
     await _settle()
@@ -935,11 +1246,17 @@ async def test_the_owed_greeting_is_consumed_exactly_once(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_tool_route()), FakeChannel())
     _wire_tool(monkeypatch, _YieldingTool())
 
-    await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1")  # yields, owes the greeting
+    await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1", medium_message_id=None, reply_to_medium_message_id=None
+    )  # yields, owes the greeting
     await _settle()
-    second = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "again", "PID-2")
+    second = await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "again", "PID-2", medium_message_id=None, reply_to_medium_message_id=None
+    )
     await _settle()
-    third = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "more", "PID-3")
+    third = await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "more", "PID-3", medium_message_id=None, reply_to_medium_message_id=None
+    )
     await _settle()
 
     assert (await _answer_of(second)) == "Welcome!\n\nok"  # consumed here
@@ -953,9 +1270,13 @@ async def test_no_greeting_is_owed_when_none_is_due(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_tool_route()), FakeChannel())
     _wire_tool(monkeypatch, _YieldingTool())
 
-    await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1")  # yields, owes nothing
+    await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1", medium_message_id=None, reply_to_medium_message_id=None
+    )  # yields, owes nothing
     await _settle()
-    second = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "again", "PID-2")
+    second = await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "again", "PID-2", medium_message_id=None, reply_to_medium_message_id=None
+    )
     await _settle()
     assert (await _answer_of(second)) == "ok"
     # No owed-greeting key was ever written for the thread.
@@ -971,7 +1292,9 @@ async def test_the_owed_greeting_is_read_from_the_shared_store_cross_worker(env,
     _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel(), agent=agent)
 
     # A first-contact turn delivers and consumes its own greeting; the person now exists.
-    await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1")
+    await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1", medium_message_id=None, reply_to_medium_message_id=None
+    )
     await _settle()
 
     # A sibling worker's superseded first-contact turn parked an owed greeting on the thread.
@@ -979,7 +1302,9 @@ async def test_the_owed_greeting_is_read_from_the_shared_store_cross_worker(env,
     env._strings[ConversationsSettings().owed_greeting_key(thread_id)] = "Carried!"
 
     # This worker's next turn (past first contact) reads and burns it from the shared store.
-    nxt = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "again", "PID-2")
+    nxt = await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "again", "PID-2", medium_message_id=None, reply_to_medium_message_id=None
+    )
     await _settle()
     assert (await _answer_of(nxt)) == "Carried!\n\necho: again"
     assert ConversationsSettings().owed_greeting_key(thread_id) not in env._strings  # burned once
@@ -1014,7 +1339,9 @@ async def test_a_lost_persist_guard_leaves_the_greeting_owed_for_the_successor(e
     monkeypatch.setattr(target_module, "_persist_completed", _resolve_elsewhere_then_persist)
 
     thread_id = "bridge:line-a:+2000"
-    await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1")  # first contact; owes "Welcome!"
+    await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1", medium_message_id=None, reply_to_medium_message_id=None
+    )  # first contact; owes "Welcome!"
     await _settle()
 
     assert len(raised) == 1  # the persist lost its guard and raised loudly
@@ -1023,7 +1350,9 @@ async def test_a_lost_persist_guard_leaves_the_greeting_owed_for_the_successor(e
     assert env._strings[ConversationsSettings().owed_greeting_key(thread_id)] == "Welcome!"
 
     # The next delivering turn prepends and burns it — a greeting once due is never dropped.
-    second = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "again", "PID-2")
+    second = await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "again", "PID-2", medium_message_id=None, reply_to_medium_message_id=None
+    )
     await _settle()
     assert (await _answer_of(second)) == "Welcome!\n\necho: again"
     assert ConversationsSettings().owed_greeting_key(thread_id) not in env._strings
@@ -1051,7 +1380,9 @@ async def test_the_owed_greeting_is_burned_after_the_persist(env, monkeypatch):
     monkeypatch.setattr(ConversationRecordStore, "complete_turn", _recording_complete)
     monkeypatch.setattr(ConversationRecordStore, "burn_owed_greeting", _recording_burn)
 
-    first = await turn_module.accept("twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1")  # first contact; delivers greeting
+    first = await turn_module.accept(
+        "twilio", _OUR, _ADDR, _ADDR, "hi", "PID-1", medium_message_id=None, reply_to_medium_message_id=None
+    )  # first contact; delivers greeting
     await _settle()
 
     assert order == ["complete_turn", "burn_owed_greeting"]  # burned after the persist, not before
@@ -1070,10 +1401,28 @@ async def test_a_carried_greeting_code_is_still_live_and_redeemable(env, monkeyp
     _wire_tool(monkeypatch, _YieldingTool())
 
     # addrA's first-contact turn yields, leaving the code-bearing greeting owed on the thread.
-    await turn_module.accept("twilio", "+15550001111", "+1000", "+1000", "hi", "PID-1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+1000",
+        "+1000",
+        "hi",
+        "PID-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     # The successor turn delivers the greeting, carrying the SAME rendered code.
-    second = await turn_module.accept("twilio", "+15550001111", "+1000", "+1000", "again", "PID-2")
+    second = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+1000",
+        "+1000",
+        "again",
+        "PID-2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     answer = await _answer_of(second)
     assert answer.startswith("Pair with LINK-")
@@ -1082,7 +1431,16 @@ async def test_a_carried_greeting_code_is_still_live_and_redeemable(env, monkeyp
     code = match.group(0)
 
     # The carried code is still live: addrB redeems it and the two conversations link.
-    redeem_mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-B")
+    redeem_mid = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        code,
+        "PID-B",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     assert "linked" in (await _answer_of(redeem_mid)).lower()
     person = await _person_store().get_person(
@@ -1090,3 +1448,115 @@ async def test_a_carried_greeting_code_is_still_live_and_redeemable(env, monkeyp
     )
     assert person is not None
     assert {a.address for a in person.addresses} == {"+1000", "+2000"}
+
+
+# === the route's own pairing replies (reply_texts) ===========================
+
+_ROUTE_PAIRING_TEXTS = ReplyTexts(
+    pairing_linked="Listo, conversaciones unidas.",
+    pairing_unlinked="Listo, ya no están unidas.",
+    pairing_not_linked="No hay nada que separar.",
+    pairing_code_invalid="Ese código no sirve.",
+    pairing_code="Tu código es {pairing_code}, válido hasta {expires_at}.",
+)
+
+
+def _worded_route(route_name: str, our_identity: str) -> ConversationRoute:
+    return _channel_route(route_name=route_name, our_identity=our_identity).model_copy(
+        update={"reply_texts": _ROUTE_PAIRING_TEXTS}
+    )
+
+
+async def test_each_pairing_reply_draws_the_route_words(env, monkeypatch):
+    monkeypatch.setenv("CONVERSATIONS_REDEEM_BACKOFF_THRESHOLD", "1")
+    _seed_config(env)
+    route_a = _worded_route("line-a", "+15550001111")
+    route_b = _worded_route("line-b", "+15550009999")
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(route_a, route_b), channel)
+
+    # /link renders the route's template with the code and its ISO-8601 expiry.
+    link_mid = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+1000",
+        "+1000",
+        "/link",
+        "PID-A",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
+    await _settle()
+    link_answer = await _answer_of(link_mid)
+    match = re.fullmatch(r"Tu código es (LINK-[A-Z0-9]{8}), válido hasta (\S+)\.", link_answer)
+    assert match is not None, link_answer
+    code, expiry = match.groups()
+    assert datetime.fromisoformat(expiry).tzinfo is not None
+
+    # /unlink on an address linked to nothing.
+    not_linked = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        "/unlink",
+        "PID-N",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
+    await _settle()
+    assert await _answer_of(not_linked) == "No hay nada que separar."
+
+    # A redeem of a valid code links the two.
+    linked = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        code,
+        "PID-B",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
+    await _settle()
+    assert await _answer_of(linked) == "Listo, conversaciones unidas."
+
+    # /unlink detaches it.
+    unlinked = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+2000",
+        "+2000",
+        "/unlink",
+        "PID-U",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
+    await _settle()
+    assert await _answer_of(unlinked) == "Listo, ya no están unidas."
+
+    # An invalid code, and then a locked source, both draw the route's refusal.
+    invalid = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+3000",
+        "+3000",
+        "LINK-QQQQQQQQ",
+        "PID-I",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
+    await _settle()
+    assert await _answer_of(invalid) == "Ese código no sirve."
+    locked = await turn_module.accept(
+        "twilio",
+        "+15550009999",
+        "+3000",
+        "+3000",
+        "LINK-WWWWWWWW",
+        "PID-L",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
+    await _settle()
+    assert await _answer_of(locked) == "Ese código no sirve."

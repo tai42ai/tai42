@@ -135,8 +135,10 @@ async def test_referral_fields_carried_as_params(handler, stub_app, fake_redis: 
     }
 
 
-async def test_reply_context_carried_as_params(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    # A message quoting an earlier one carries context.id as params.context_message_id.
+async def test_a_quoting_message_carries_the_quoted_id_not_a_param(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A message quoting an earlier one hands context.id to the bridge as the quoted message's id.
     message = {
         "id": _WAMID,
         "from": WA_ID,
@@ -149,14 +151,15 @@ async def test_reply_context_carried_as_params(handler, stub_app, fake_redis: Fa
     assert result.status_code == 200
     (call,) = stub_app.conversations.accept_calls
     assert call["text"] == "re: that"
-    assert call["params"] == {"context_message_id": "wamid.QUOTED"}
+    assert call["reply_to_medium_message_id"] == "wamid.QUOTED"
+    assert call["params"] is None
 
 
-async def test_referral_and_context_merge_with_reply_id_on_a_tap(
+async def test_a_quoting_tap_carries_its_reply_id_and_the_quoted_id(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # The message-level referral/context params merge with an interactive tap's reply_id
-    # on one bridged turn (the union of both key spaces).
+    # An interactive tap on a message carries the tap's reply_id in params and the tapped
+    # message's id as the quoted message's id.
     message = {
         "id": _WAMID,
         "from": WA_ID,
@@ -168,7 +171,8 @@ async def test_referral_and_context_merge_with_reply_id_on_a_tap(
 
     assert result.status_code == 200
     (call,) = stub_app.conversations.accept_calls
-    assert call["params"] == {"reply_id": "int-1:0", "context_message_id": "wamid.QUOTED"}
+    assert call["params"] == {"reply_id": "int-1:0"}
+    assert call["reply_to_medium_message_id"] == "wamid.QUOTED"
 
 
 def _dropped(unit: str) -> float:
@@ -187,7 +191,6 @@ async def test_an_over_bound_params_set_bridges_without_params_and_is_counted(
         "type": "text",
         "text": {"body": "hi"},
         "referral": dict.fromkeys(("source_url", "source_id", "source_type", "headline", "body"), "y" * 500),
-        "context": {"id": "z" * 500},
     }
     before = _dropped("set")
     with caplog.at_level("WARNING"):

@@ -6,13 +6,15 @@ idempotency ledger.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from psycopg import AsyncConnection
+from psycopg.errors import LockNotAvailable
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from tai42_contract.errors import UnavailableError
 from tai42_contract.states.errors import StateNotFoundError, SubjectFoldError
 from tai42_contract.states.models import CompletedOrigin, StateSubject
 
@@ -24,6 +26,7 @@ from tai42_skeleton.states.schema import _validate_document
 from .base import ApplyEntry, ApplyEntrySource, _StoreBase
 from .connection import _pool, _settings
 from .cursors import _subject_cols
+from .person_gate import lock_person_gates_shared, person_gate_key
 from .trace import _refuse_composing_shape, stamp_trace, trace_stamp
 
 
@@ -42,12 +45,43 @@ class ProjectedWrite:
     row: bool
 
 
+# Admits a written subject inside its transaction from the locked declaration's ``subject_kinds``
+# and the canonical subject the write lands on (the subject itself when it has no alias).
+SubjectAdmission = Callable[[list[str], StateSubject], Awaitable[None]]
+
+
 class _ProjectionMovedError(Exception):
     """The compare-and-set found a moved base, a moved declaration version, or a ledger conflict."""
 
 
 class _RecordWriteStore(_StoreBase):
     """The record write path plus the ``state_writes`` provenance row and ``state_applied_ops`` idempotency ledger."""
+
+    async def _resolve_admitted(
+        self,
+        cur: Any,
+        state: str,
+        subject: StateSubject,
+        subject_kinds: list[str],
+        admit: SubjectAdmission,
+        *,
+        check_outbox: bool,
+        also_gated: Sequence[StateSubject] = (),
+    ) -> StateSubject:
+        """Resolve ``subject`` to the canonical its write lands on, gate both, admit both; the canonical.
+
+        Runs under the declaration lock ``FOR SHARE``, which ``erase_subject`` and ``clear_subject``
+        also take while they delete a canonical's aliases, so the alias read here can be followed by
+        that delete in the same window. The admission of the resolved person covers it: the person
+        gates of ``subject``, its canonical and ``also_gated`` are taken shared in one key-ordered
+        acquisition, then ``admit`` runs with the canonical, so a write through an alias onto a
+        ``person`` record is ordered against that person's erase and admitted like a direct one.
+        """
+        kind, key = await self._resolve_subject(cur, state, subject, check_outbox=check_outbox)
+        canonical = StateSubject(target_kind=subject.target_kind, target_name=subject.target_name, kind=kind, key=key)
+        await lock_person_gates_shared(cur, [*also_gated, subject, canonical])
+        await admit(subject_kinds, canonical)
+        return canonical
 
     @staticmethod
     async def _insert_write(
@@ -96,7 +130,7 @@ class _RecordWriteStore(_StoreBase):
         *,
         origin: CompletedOrigin,
         catalog: ApplyEntrySource,
-        validate_subject_in_txn: Any,
+        validate_subject_in_txn: SubjectAdmission,
         validate: bool = True,
         conn: AsyncConnection[Any] | None = None,
         check_outbox: bool = True,
@@ -104,20 +138,24 @@ class _RecordWriteStore(_StoreBase):
         """Replace ``subject``'s whole document with ``data`` and record the write.
 
         ONE txn under the declaration ``FOR SHARE`` lock, which reads the ``version`` and the
-        declared ``subject_kinds``; ``validate_subject_in_txn`` refuses the subject under that lock,
-        so the write is admitted by the declaration it lands under. ``data`` is validated whole with
-        the declaration version's validator (``validate=False`` leaves the check to a caller that
-        validates the batch it belongs to); the write records paths ``[[]]`` (the whole document).
-        The subject resolves through the alias table first. With ``conn`` the write joins the
+        declared ``subject_kinds``. The subject resolves through the alias table first; the person
+        gates of the subject and its canonical are taken shared and ``validate_subject_in_txn``
+        refuses the subject (with its canonical) under those locks, so the write is admitted by the
+        declaration it lands under and ordered against the erase of the person it writes. ``data``
+        is validated whole with the declaration version's validator (``validate=False`` leaves the
+        check to a caller that validates the batch it belongs to); the write records paths ``[[]]``
+        (the whole document). With ``conn`` the write joins the
         caller's transaction (the unit of work's commit replaying a staged replace alongside the
         batch's other writes). Without ``conn`` the write raises :class:`OutboxPending`, before
         writing, when the subject has an unapplied pending save (unless ``check_outbox`` is off).
         """
         async with self._write_cursor(conn) as cur:
             version, subject_kinds = await self._lock_declaration(cur, state, "SHARE")
-            await validate_subject_in_txn(subject_kinds)
+            canonical = await self._resolve_admitted(
+                cur, state, subject, subject_kinds, validate_subject_in_txn, check_outbox=check_outbox and conn is None
+            )
+            kind, key = canonical.kind, canonical.key
             entry = await catalog.write_entry(cur, state, version)
-            kind, key = await self._resolve_subject(cur, state, subject, check_outbox=check_outbox and conn is None)
             if validate:
                 _validate_document(entry.validator, data)
             await cur.execute(
@@ -189,7 +227,7 @@ class _RecordWriteStore(_StoreBase):
         op_id: str | None,
         origin: CompletedOrigin,
         catalog: ApplyEntrySource,
-        validate_subject_in_txn: Any,
+        validate_subject_in_txn: SubjectAdmission,
         validate: bool = True,
         conn: AsyncConnection[Any] | None = None,
         check_outbox: bool = True,
@@ -199,36 +237,38 @@ class _RecordWriteStore(_StoreBase):
         Returns ``(applied, merged_document, seq, guarded_skipped)`` —
         ``(False, None, None, [])`` on an op-id replay.
 
-        Order (pinned): the declaration row ``FOR SHARE`` — the schema-change serialization pin,
-        reading the ``version`` and the declared ``subject_kinds``; ``validate_subject_in_txn``
-        refuses the subject under that lock; the version's entry (validator, composed regime +
-        traced paths) from ``catalog`` (a miss reads the effective schema and the attachments on
-        this transaction); refuse a ``composing`` shape violation BEFORE the op-ledger insert; the
-        op-ledger ``INSERT ... ON CONFLICT DO NOTHING`` when ``op_id`` is set (replay ⇒ return
-        without touching the record); the ATOMIC UPSERT-LOCK on the record row; the
-        COMPARE-AND-SET GUARD filter; the ``_trace`` stamp under a traced attach; the SHARED pure
-        ops apply; the whole-document validation (skipped with ``validate=False``, for a caller
-        that validates the batch the write belongs to); the UPDATE + ``state_writes`` row as ONE
-        writable CTE. With ``conn`` the write joins the caller's transaction (a reconciler's
-        record write commits or rolls back with the attach); without it the subject resolve raises
-        :class:`OutboxPending`, before any write, when the subject has an unapplied pending save
-        (unless ``check_outbox`` is off).
+        Order (pinned): the declaration row ``FOR SHARE`` — the schema-change serialization pin, reading the
+        ``version`` and the declared ``subject_kinds``; the subject resolve through the alias table; the
+        person gates, shared, of the subject and its canonical; ``validate_subject_in_txn`` refuses the
+        subject (with its canonical) under those locks; the version's entry (validator,
+        composed regime + traced paths) from ``catalog`` (a miss reads the effective schema and the
+        attachments on this transaction); refuse a ``composing`` shape violation BEFORE the op-ledger
+        insert; the op-ledger ``INSERT ... ON CONFLICT DO NOTHING`` when ``op_id`` is set (replay ⇒ return
+        without touching the record); the ATOMIC UPSERT-LOCK on the record row; the COMPARE-AND-SET GUARD
+        filter; the ``_trace`` stamp under a traced attach; the SHARED pure ops apply; the whole-document
+        validation (skipped with ``validate=False``, for a caller that validates the batch the write belongs
+        to); the UPDATE + ``state_writes`` row as ONE writable CTE. With ``conn`` the write joins the
+        caller's transaction (a reconciler's record write commits or rolls back with the attach); without it
+        the subject resolve raises :class:`OutboxPending`, before any write, when the subject has an
+        unapplied pending save (unless ``check_outbox`` is off).
         """
         async with self._write_cursor(conn) as cur:
             version, subject_kinds = await self._lock_declaration(cur, state, "SHARE")
 
-            # Refuse the subject inside this transaction, under the declaration lock: the one
-            # locked read of the declaration serves the subject admission check AND the entry
-            # the validation uses; the door does not separately pre-read the declaration.
-            await validate_subject_in_txn(subject_kinds)
+            # Refuse the subject inside this transaction, under the declaration lock and the
+            # person-subject gates: the one locked read of the declaration serves the subject
+            # admission check AND the entry the validation uses; the door does not separately
+            # pre-read the declaration.
+            canonical = await self._resolve_admitted(
+                cur, state, subject, subject_kinds, validate_subject_in_txn, check_outbox=check_outbox and conn is None
+            )
+            kind, key = canonical.kind, canonical.key
 
             entry = await catalog.write_entry(cur, state, version)
             regime_paths, traced_paths = entry.regime_paths, entry.traced_paths
 
             # (i) refuse a composing shape violation BEFORE the ledger insert.
             _refuse_composing_shape(ops, regime_paths)
-
-            kind, key = await self._resolve_subject(cur, state, subject, check_outbox=check_outbox and conn is None)
 
             if op_id is not None:
                 await cur.execute(
@@ -466,6 +506,23 @@ class _RecordWriteStore(_StoreBase):
                     cur, state, subject.target_kind, subject.target_name, kind, key, None, origin, [[]], None
                 )
 
+    async def settle_person_writes(self, subject: StateSubject, *, timeout_seconds: float) -> None:
+        """Take ``subject``'s person gate EXCLUSIVE in a transaction of its own, and commit.
+
+        Returns once every transaction that took the gate shared before it has committed; a wait
+        past ``timeout_seconds`` raises :class:`UnavailableError`, retriable, with nothing changed.
+        """
+        try:
+            async with self._write_cursor(None) as cur:
+                await cur.execute(
+                    "SELECT set_config('lock_timeout', %s, true)", (f"{max(1, int(timeout_seconds * 1000))}ms",)
+                )
+                await cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (person_gate_key(subject),))
+        except LockNotAvailable as exc:
+            raise UnavailableError(
+                f"person {subject.key!r}: a state write on it did not finish within {timeout_seconds}s; retry the erase"
+            ) from exc
+
     async def clear_subject(self, subject: StateSubject, *, origin: CompletedOrigin) -> int:
         """The cross-state RTBF delete — every state the subject appears in, in ONE txn.
 
@@ -532,12 +589,16 @@ class _RecordWriteStore(_StoreBase):
         *,
         origin: CompletedOrigin,
         catalog: ApplyEntrySource,
+        validate_subjects_in_txn: SubjectAdmission,
     ) -> dict[str, Any]:
         """Fold ``subject`` into ``into`` in ONE txn under the declaration row ``FOR UPDATE``.
 
-        Every ``apply_ops``'s ``FOR SHARE`` blocks, so no write lands mid-fold.
-        Both keys resolve first. ``switch`` drops the subject's record; ``merge``
-        folds it into the survivor (survivor wins). Refusals raise
+        Every ``apply_ops``'s ``FOR SHARE`` blocks, so no write lands mid-fold. Both keys resolve
+        first; both subjects are admitted inside the transaction (``validate_subjects_in_txn``, from
+        the locked declaration's ``subject_kinds`` and the canonical ``into`` resolves to, whose
+        record the fold writes) after the person gates of both and of that canonical are taken
+        shared.
+        ``switch`` drops the subject's record; ``merge`` folds it into the survivor (survivor wins). Refusals raise
         :class:`SubjectFoldError`; a retried fold is a quiet no-op. Records one
         write row for the survivor.
         """
@@ -552,7 +613,11 @@ class _RecordWriteStore(_StoreBase):
             conn.transaction(),
             conn.cursor(row_factory=dict_row) as cur,
         ):
-            version, _subject_kinds = await self._lock_declaration(cur, state, "UPDATE")
+            version, subject_kinds = await self._lock_declaration(cur, state, "UPDATE")
+            canonical_into = await self._resolve_admitted(
+                cur, state, into, subject_kinds, validate_subjects_in_txn, check_outbox=False, also_gated=[subject]
+            )
+            target_kind, target_key = canonical_into.kind, canonical_into.key
             entry = await catalog.write_entry(cur, state, version)
 
             tk, tn = subject.target_kind, subject.target_name
@@ -562,10 +627,8 @@ class _RecordWriteStore(_StoreBase):
                 (state, tk, tn, subject.kind, subject.key),
             )
             existing = await cur.fetchone()
-            target_kind, target_key = await self._resolve_subject(cur, state, into, check_outbox=False)
             # The declaration ``FOR UPDATE`` blocks every apply; a pending save enqueued since the
             # caller drained both subjects would apply under keys this fold rewrites.
-            canonical_into = StateSubject(target_kind=tk, target_name=tn, kind=target_kind, key=target_key)
             await cur.execute(
                 "SELECT EXISTS (SELECT 1 FROM state_outbox WHERE record_keys && %s::text[] "
                 "AND (status = 'pending' OR (status = 'failed' AND records_applied_at IS NULL))) AS pending",

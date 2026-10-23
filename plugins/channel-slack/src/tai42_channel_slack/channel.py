@@ -30,10 +30,13 @@ from typing import Any, ClassVar
 import httpx
 from pydantic import SecretStr
 from tai42_contract.channels import (
+    ChannelAddress,
+    ChannelAddressError,
     ChannelDelivery,
     ChannelDeliveryError,
     ChannelInputError,
     ChannelNotification,
+    SendOutcome,
 )
 from tai42_contract.interactions import CALLBACK_LINK_FORMATS
 from tai42_kit.settings import require, require_secret
@@ -62,6 +65,7 @@ from tai42_channel_slack.forms import (
     FormSchemaError,
     build_message_blocks,
     build_modal_view,
+    check_update_failed_line,
 )
 from tai42_channel_slack.forms import validate_form_schema as _validate_form_schema
 from tai42_channel_slack.settings import SlackSettings, slack_settings
@@ -228,16 +232,44 @@ def _resolve_recipient(settings: SlackSettings, requested: str | None) -> str:
 
     A caller-requested recipient must be on the operator allowlist or is refused
     loudly (fail CLOSED; empty allowlist rejects every request); no requested
-    recipient uses the operator-set default (no allowlist check). Missing config
-    raises :class:`ChannelDeliveryError` naming the env var.
+    recipient uses the operator-set default (no allowlist check). Either refusal is a
+    :class:`ChannelAddressError`.
     """
     if requested is None:
-        return _require_for_delivery(settings.default_recipient, "CHANNEL_SLACK_DEFAULT_RECIPIENT")
+        return _default_recipient(settings)
     if requested not in set(settings.allowed_recipients):
-        raise ChannelDeliveryError(
+        raise ChannelAddressError(
             f"recipient {requested!r} is not on CHANNEL_SLACK_ALLOWED_RECIPIENTS; refusing to send"
         )
     return requested
+
+
+def _default_recipient(settings: SlackSettings) -> str:
+    """``CHANNEL_SLACK_DEFAULT_RECIPIENT``, or :class:`ChannelAddressError` naming it when unset."""
+    try:
+        return require(settings.default_recipient, "the slack channel", "CHANNEL_SLACK_DEFAULT_RECIPIENT")
+    except ValueError as exc:
+        raise ChannelAddressError(str(exc)) from exc
+
+
+def _sent_outcome(identity: str, body: dict[str, Any], *, ts_required: bool) -> SendOutcome:
+    """The outcome of one accepted ``chat.postMessage``: the bot, the conversation id, the ``ts``.
+
+    The address is the ``channel`` the response names, the conversation id the events door
+    passes as ``client_address`` (a send to a user id lands in a direct-message conversation
+    whose id only the response gives). An ok response with no ``channel``, or with no ``ts``
+    where the send needs it, raises :class:`ChannelDeliveryError`; a send that needs no ``ts``
+    and got none reports no id.
+    """
+    channel = body.get("channel")
+    if not isinstance(channel, str) or not channel:
+        raise ChannelDeliveryError("chat.postMessage ok response carried no channel")
+    ts = body.get("ts")
+    if isinstance(ts, str) and ts:
+        return SendOutcome(our_identity=identity, address=channel, message_ids=[ts])
+    if ts_required:
+        raise ChannelDeliveryError("chat.postMessage ok response carried no ts")
+    return SendOutcome(our_identity=identity, address=channel, message_ids=[])
 
 
 async def _post_message(
@@ -447,7 +479,7 @@ def _form_reactions_dict(delivery: ChannelDelivery) -> dict[str, Any] | None:
     }
 
 
-async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> None:
+async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> dict[str, Any]:
     """Deliver a ``form`` question: post a section and an open-modal button after reserving the form's state.
 
     The full modal view the click will build is composed here (and discarded)
@@ -456,7 +488,8 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
     :class:`ChannelDeliveryError` naming the fault, and nothing is stored or sent;
     an uncompletable form is never delivered only to 500 at the click. The form
     record is written (reserve-before-send) and released if the send fails, so a
-    failed post never leaves a live record with no message behind it.
+    failed post never leaves a live record with no message behind it. Returns the post's
+    response body.
     """
     schema = delivery.schema
     if not schema:
@@ -483,6 +516,10 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
     # label over the 24-character modal-text cap, or a field placeholder over the 150-character
     # select-placeholder cap is a permanent input refusal (:class:`FormSchemaError`, a
     # ``ChannelInputError``), raised before any store or send — never a retryable delivery failure.
+    # The caller's ``status.unavailable`` rides the modal's private_metadata, so a line that pushes
+    # it past Slack's cap is refused here too, never at the click; the caller's ``update_failed``
+    # banner line is checked against the section cap.
+    status = wording.get("status") if wording is not None else None
     build_modal_view(
         delivery.interaction_id,
         delivery.question,
@@ -492,7 +529,9 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
         pages,
         reactions=reactions,
         form_wording=form_wording,
+        status_unavailable=status.get("unavailable") if isinstance(status, dict) else None,
     )
+    check_update_failed_line(form_wording.get("update_failed"))
     # Any display media rides above the form's section + open-modal button (a data:
     # image is refused here, before the reserve or send). The open button's own 75-character
     # cap is enforced in build_message_blocks, also before the reserve or send.
@@ -513,7 +552,7 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
         on_mismatch=delivery.on_mismatch,
     )
     try:
-        await _post_message(token, target, delivery.question, blocks=message_blocks)
+        return await _post_message(token, target, delivery.question, blocks=message_blocks)
     except ChannelDeliveryError:
         # Reserve-before-send: a failed post releases the reservation so no live
         # form record dangles without a message.
@@ -574,17 +613,45 @@ class SlackChannel:
         except FormSchemaError as exc:
             raise ValueError(str(exc)) from exc
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
-        """Deliver ``delivery`` as a Slack message, storing the reply correlation for a Tier-2 typed reply."""
+    def resolve_address(self, recipient: str | None, sender_identity: str | None) -> ChannelAddress:
+        """The bot identity and the conversation a send with these values posts as and into.
+
+        The identity is ``CHANNEL_SLACK_BOT_USER_ID``, this deployment's single bot (unset is a
+        :class:`ChannelDeliveryError`). A ``sender_identity`` must name it, or the send is
+        refused with :class:`ChannelDeliveryError` (never a send from the wrong face); with it
+        set (a bridge reply) the recipient is taken as given, the allowlist bypassed, else
+        ``CHANNEL_SLACK_DEFAULT_RECIPIENT``. Without it the recipient follows
+        ``_resolve_recipient``'s allowlist policy. The address is the recipient as the caller
+        names it, which for a user id is not the direct-message conversation id the send's
+        outcome reports. An unresolvable recipient raises :class:`ChannelAddressError`.
+        """
+        settings = slack_settings()
+        identity = _require_for_delivery(settings.bot_user_id, "CHANNEL_SLACK_BOT_USER_ID")
+        if sender_identity is None:
+            return ChannelAddress(our_identity=identity, address=_resolve_recipient(settings, recipient))
+        if sender_identity != identity:
+            raise ChannelDeliveryError(
+                f"sender_identity {sender_identity!r} is not this channel's identity {identity!r}"
+            )
+        address = recipient if recipient is not None else _default_recipient(settings)
+        return ChannelAddress(our_identity=identity, address=address)
+
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
+        """Deliver ``delivery`` as a Slack message, storing the reply correlation for a Tier-2 typed reply.
+
+        Returns the outcome of the posted message (``_sent_outcome``): a Tier-2 question needs
+        its ``ts`` as the reply correlation, a link-answered or form question reports it when
+        the response carries one.
+        """
         # Settings read fresh each call so a rotated token or changed recipient
         # policy takes effect on the next question. Missing config is a delivery
         # failure: ChannelDeliveryError naming the env var, before any network call.
         settings = slack_settings()
         token = _require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
-        target = _resolve_recipient(settings, delivery.recipient)
+        pair = self.resolve_address(delivery.recipient, None)
+        target = pair.address
         if delivery.answer_format == "form":
-            await _deliver_form(token, target, delivery)
-            return
+            return _sent_outcome(pair.our_identity, await _deliver_form(token, target, delivery), ts_required=False)
         # Display media and tappable options ride as Block Kit blocks alongside the
         # text (the notification fallback Slack requires). A data: image is refused
         # here, before the send. Tier-1 (confirm/external) carries no options — its
@@ -598,47 +665,31 @@ class SlackChannel:
         if delivery.answer_format in CALLBACK_LINK_FORMATS:
             # Tier-1 (confirm/external): the plain link IS the answer path — no
             # correlation entry, no threaded reply expected.
-            return
-        ts = body.get("ts")
-        if not isinstance(ts, str) or not ts:
-            raise ChannelDeliveryError("chat.postMessage ok response carried no ts")
+            return _sent_outcome(pair.our_identity, body, ts_required=False)
+        outcome = _sent_outcome(pair.our_identity, body, ts_required=True)
         await store_correlation(
-            ts,
+            outcome.message_ids[0],
             delivery.callback_url,
             delivery.interaction_id,
             delivery.timeout_at,
             on_mismatch=delivery.on_mismatch,
             wording=delivery.wording,
         )
+        return outcome
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
-        """Post one plain fire-and-forget message via ``chat.postMessage``, returning the posted ``[ts]``.
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
+        """Post one plain fire-and-forget message via ``chat.postMessage``, returning its outcome.
 
-        No correlation, no deadline, no reply — the text is sent as-is. Without
-        ``sender_identity`` the recipient follows ``deliver``'s allowlist policy;
-        with it set (a bridge reply) it must equal this deployment's single bot
-        identity — else refused with
-        :class:`~tai42_contract.channels.ChannelDeliveryError`, never a send from the
-        wrong face — and the recipient is the initiating conversation verbatim,
-        allowlist bypassed. A return means Slack ACCEPTED it (not that a human saw
-        it); any failure raises ``ChannelDeliveryError``. Settings read fresh.
+        No correlation, no deadline, no reply — the text is sent as-is. The bot identity and
+        the recipient are ``resolve_address``'s for the notification's recipient and
+        ``sender_identity``. The outcome carries the posted conversation id and ``ts``
+        (``_sent_outcome``). A return means Slack ACCEPTED it (not that a human saw it); any
+        failure raises ``ChannelDeliveryError``. Settings read fresh.
         """
         settings = slack_settings()
         token = _require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
-        if notification.sender_identity is not None:
-            identity = _require_for_delivery(settings.bot_user_id, "CHANNEL_SLACK_BOT_USER_ID")
-            if notification.sender_identity != identity:
-                raise ChannelDeliveryError(
-                    f"sender_identity {notification.sender_identity!r} is not this channel's identity {identity!r}"
-                )
-            # Bridge reply: send to the initiating conversation verbatim, allowlist bypassed.
-            target = (
-                notification.recipient
-                if notification.recipient is not None
-                else _require_for_delivery(settings.default_recipient, "CHANNEL_SLACK_DEFAULT_RECIPIENT")
-            )
-        else:
-            target = _resolve_recipient(settings, notification.recipient)
+        pair = self.resolve_address(notification.recipient, notification.sender_identity)
+        target = pair.address
         # The full richer-send vocabulary rides as Block Kit blocks: header/media/location,
         # typed options (reply buttons submit their text; link buttons open a url) or a
         # sectioned option list, and a footer. A tap on a reply button enters the
@@ -652,7 +703,4 @@ class SlackChannel:
         blocks = _notification_blocks(notification)
         text = _notification_text_fallback(notification)
         body = await _post_message(token, target, text, blocks=blocks)
-        ts = body.get("ts")
-        if not isinstance(ts, str) or not ts:
-            raise ChannelDeliveryError("chat.postMessage ok response carried no ts")
-        return [ts]
+        return _sent_outcome(pair.our_identity, body, ts_required=True)

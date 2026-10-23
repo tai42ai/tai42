@@ -144,7 +144,8 @@ async def _process_event(payload: dict, event_id: str) -> Response:
     subtype = event.get("subtype")
     if subtype == "file_share":
         # A file share is participant content and bridges one turn per file.
-        return await _bridge_files(event, settings.bot_user_id, event_id)
+        quoted = _quoted_ts(event, _message_ts(event, event_id))
+        return await _bridge_files(event, settings.bot_user_id, event_id, reply_to_medium_message_id=quoted)
     if subtype is not None and subtype not in _PARTICIPANT_TEXT_SUBTYPES:
         # A subtype whose payload is not a participant utterance is not content this
         # door represents and stays ack-ignored: edits such as message_changed and
@@ -155,11 +156,45 @@ async def _process_event(payload: dict, event_id: str) -> Response:
     text = event.get("text")
     channel = event.get("channel")
     thread_ts = event.get("thread_ts")
+    ts = _message_ts(event, event_id)
+    quoted = _quoted_ts(event, ts)
 
     if isinstance(thread_ts, str) and thread_ts and isinstance(channel, str) and channel in recipients:
-        return await _resolve_answer(thread_ts, text, settings.bot_user_id, channel, event_id)
+        return await _resolve_answer(
+            thread_ts,
+            text,
+            settings.bot_user_id,
+            channel,
+            event_id,
+            medium_message_id=ts,
+            reply_to_medium_message_id=quoted,
+        )
 
-    return await _bridge(settings.bot_user_id, channel, text, event_id)
+    return await _bridge(
+        settings.bot_user_id, channel, text, event_id, medium_message_id=ts, reply_to_medium_message_id=quoted
+    )
+
+
+def _quoted_ts(event: dict, ts: str) -> str | None:
+    """The ``ts`` of the message a thread reply quotes: its thread parent, or ``None``.
+
+    A reply in a thread carries the parent's ``ts`` as ``thread_ts``; the parent message itself
+    carries ``thread_ts == ts`` and quotes nothing, as does a message outside any thread.
+    """
+    thread_ts = _nonempty_str(event.get("thread_ts"))
+    return thread_ts if thread_ts is not None and thread_ts != ts else None
+
+
+def _message_ts(event: dict, event_id: str) -> str:
+    """The message's own ``ts``, the id a later quote of it names.
+
+    Slack sets it on every message event, so one without it raises ``ValueError`` (a 500 the
+    door turns into Slack's retry), never a message bridged with no quotable id.
+    """
+    ts = _nonempty_str(event.get("ts"))
+    if ts is None:
+        raise ValueError(f"slack message event {event_id} carries no ts")
+    return ts
 
 
 def _file_download_url(file: dict) -> str | None:
@@ -177,7 +212,7 @@ def _file_download_url(file: dict) -> str | None:
 
 async def _reject_file(
     channel: str,
-    our_identity: str | None,
+    our_identity: str,
     event_id: str,
     index: int,
     kind: str,
@@ -254,11 +289,13 @@ async def _bridge_one_file(
     index: int,
     *,
     channel: str,
-    our_identity: str | None,
+    our_identity: str,
     event_id: str,
+    message_ts: str,
     user: str,
     bot_token: str,
     caption: str | None,
+    reply_to_medium_message_id: str | None,
 ) -> bool:
     """Fetch, ingest and bridge ONE file, or send its permanent-rejection notice.
 
@@ -267,7 +304,9 @@ async def _bridge_one_file(
     The bridged turn carries the typed served :class:`MediaItem` as ``attachments`` AND the
     parity ``media_*`` params off that ONE ingest, with the SERVED id, the seam's computed
     sha256, and the seam's SANITISED filename (the raw vendor ``name`` never enters a param
-    value or the placeholder label). Returns ``True`` iff a media turn was bridged.
+    value or the placeholder label) and the message's ``message_ts`` as its quotable id, and
+    ``reply_to_medium_message_id`` (the thread parent the message quotes, else ``None``).
+    Returns ``True`` iff a media turn was bridged.
     """
     if not isinstance(file, dict):
         raise ValueError(f"slack file_share event {event_id} file {index} is not an object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
@@ -306,6 +345,8 @@ async def _bridge_one_file(
         channel,
         turn_text,
         event_id,
+        medium_message_id=message_ts,
+        reply_to_medium_message_id=reply_to_medium_message_id,
         attachments=[outcome.item],
         params=build_inbound_media_params(
             door="slack",
@@ -321,7 +362,9 @@ async def _bridge_one_file(
     return True
 
 
-async def _bridge_files(event: dict, our_identity: str | None, event_id: str) -> Response:
+async def _bridge_files(
+    event: dict, our_identity: str | None, event_id: str, *, reply_to_medium_message_id: str | None
+) -> Response:
     """Bridge a ``file_share`` message — one served attachment per file, none dropped.
 
     Each file's bytes are fetched from Slack and ingested into the platform's served media;
@@ -333,7 +376,8 @@ async def _bridge_files(event: dict, our_identity: str | None, event_id: str) ->
     silent drop, while its siblings still bridge; a transient fetch/read fault re-raises so
     the door frees the ``event_id`` claim and Slack redelivers. When no file bridges but the
     message carried a caption, the caption bridges as a plain text turn under the message's
-    own ``event_id``.
+    own ``event_id``. Every turn (each file's and the caption's) carries
+    ``reply_to_medium_message_id``, the thread parent the message quotes (``None`` outside a thread).
     """
     channel = event.get("channel")
     if not isinstance(channel, str) or not channel:
@@ -341,9 +385,14 @@ async def _bridge_files(event: dict, our_identity: str | None, event_id: str) ->
     user = event.get("user")
     if not isinstance(user, str) or not user:
         raise ValueError(f"slack file_share event {event_id} carries no user")
+    message_ts = _message_ts(event, event_id)
     files = event.get("files")
     if not isinstance(files, list) or not files:
         raise ValueError(f"slack file_share event {event_id} carries no files")
+    if our_identity is None:
+        # Every file either bridges or is refused with a notice drawn from the route of the
+        # receiving identity; both need the bot user id, so an unset one is operator misconfig.
+        raise ValueError("the slack channel bridge is not configured: set CHANNEL_SLACK_BOT_USER_ID")
 
     bot_token = require_secret(slack_settings().bot_token, "the slack channel", "CHANNEL_SLACK_BOT_TOKEN")
 
@@ -359,9 +408,11 @@ async def _bridge_files(event: dict, our_identity: str | None, event_id: str) ->
             channel=channel,
             our_identity=our_identity,
             event_id=event_id,
+            message_ts=message_ts,
             user=user,
             bot_token=bot_token,
             caption=offered_caption,
+            reply_to_medium_message_id=reply_to_medium_message_id,
         ):
             bridged = True
 
@@ -378,6 +429,8 @@ async def _bridge_files(event: dict, our_identity: str | None, event_id: str) ->
             channel,
             caption,
             event_id,
+            medium_message_id=message_ts,
+            reply_to_medium_message_id=reply_to_medium_message_id,
             params=build_inbound_media_params(
                 door="slack", kind=inbound_media_kind_for_mime(first_mime), mime_type=first_mime
             ),

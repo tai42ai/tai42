@@ -32,7 +32,7 @@ def _subj(key="t1", kind="thread", tk: ConversationTargetKind = "agent", tn="a")
     return StateSubject(target_kind=tk, target_name=tn, kind=kind, key=key)
 
 
-async def _admit(subject_kinds: list[str]) -> None:
+async def _admit(subject_kinds: list[str], canonical: StateSubject) -> None:
     """A permissive in-txn subject check — these SQL tests isolate the store, not admission."""
 
 
@@ -114,7 +114,9 @@ async def test_writes_follows_a_fold(pg: FakeStatesPg, store: PostgresStatesStor
     pg.seed_declaration("alerts")
     s1, s2 = _subj(key="old"), _subj(key="new")
     await store.replace("alerts", s2, {"n": 2}, origin=_ORIGIN, catalog=catalog, validate_subject_in_txn=_admit)
-    await store.fold_subject("alerts", s1, s2, "switch", origin=_ORIGIN, catalog=catalog)
+    await store.fold_subject(
+        "alerts", s1, s2, "switch", origin=_ORIGIN, catalog=catalog, validate_subjects_in_txn=_admit
+    )
     # the old key's audit trail resolves onto the survivor's writes
     rows = await store.writes("alerts", s1, limit=10, cursor=None)
     assert rows  # the survivor's replace + the fold write row are visible through the old key

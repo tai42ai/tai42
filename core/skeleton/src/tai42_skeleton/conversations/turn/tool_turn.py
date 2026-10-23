@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING, Any, cast
 
 from tai42_contract.app import tai42_app
+from tai42_contract.channels import ReplyWindow
 from tai42_contract.conversations import AnswerPart, ConversationRoute, Person, TurnSupersededError
 from tai42_contract.interactions import (
     LocationElement,
@@ -60,7 +61,7 @@ def _overlap_message_entries(records: list[ConversationRecord]) -> list[dict[str
     """The ``{id, text, accepted_at}`` payload entries for a batch's records, media/form when carried.
 
     Each record contributes its id, verbatim inbound text and acceptance moment, plus its
-    ``form`` / ``form_tag`` / ``attachments`` / ``location`` when it carried them — the shape the
+    ``form`` / ``form_tag`` / ``attachments`` / ``location`` / ``reply_to`` when it carried them — the shape the
     ``messages`` and ``superseded`` payload keys share under ``deliver="all"``.
     """
     entries: list[dict[str, object]] = []
@@ -74,8 +75,40 @@ def _overlap_message_entries(records: list[ConversationRecord]) -> list[dict[str
             entry["attachments"] = [a.model_dump(mode="json") for a in r.inbound_attachments]
         if r.inbound_location is not None:
             entry["location"] = r.inbound_location.model_dump(mode="json")
+        if r.inbound_reply_to is not None:
+            entry["reply_to"] = r.inbound_reply_to.model_dump(mode="json")
         entries.append(entry)
     return entries
+
+
+def _structured_inbound(
+    record: ConversationRecord,
+    *,
+    params: dict[str, str] | None,
+    form: dict[str, Any] | None,
+    form_tag: str | None,
+    attachments: list[MediaItem] | None,
+    location: LocationElement | None,
+) -> dict[str, object]:
+    """The optional structured payload keys of a tool turn, each present only when carried.
+
+    ``params`` (when non-empty), ``form``, ``form_tag``, ``attachments`` and ``location`` are the
+    turn's own; ``reply_to`` is the quoted message the intake record resolved.
+    """
+    fields: dict[str, object] = {}
+    if params:
+        fields["params"] = params
+    if form is not None:
+        fields["form"] = form
+    if form_tag is not None:
+        fields["form_tag"] = form_tag
+    if attachments is not None:
+        fields["attachments"] = [a.model_dump(mode="json") for a in attachments]
+    if location is not None:
+        fields["location"] = location.model_dump(mode="json")
+    if record.inbound_reply_to is not None:
+        fields["reply_to"] = record.inbound_reply_to.model_dump(mode="json")
+    return fields
 
 
 def _tool_payload(
@@ -92,12 +125,13 @@ def _tool_payload(
     form_tag: str | None,
     attachments: list[MediaItem] | None,
     location: LocationElement | None,
+    reply_window: ReplyWindow,
 ) -> dict[str, object]:
     """Assemble the dispatch payload dict for a tool turn.
 
-    Carries the message/sender/route/event/person/params/form/form_tag/attachments/location
-    fields plus the generic ``turn`` block. ``route`` is the name of the conversation
-    route the turn entered through — a required non-blank string on every door, so a flow
+    Carries the message/sender/route/event/person fields, the optional structured fields of
+    :func:`_structured_inbound`, plus the generic ``turn`` block. ``route`` is the name of the
+    conversation route the turn entered through — a required non-blank string on every door, so a flow
     bound to several routes can tell them apart. An event turn nulls
     ``message``/``sender`` and carries its structured ``event``; the person and
     the optional structured fields ride only when present. Under ``deliver="all"``
@@ -112,7 +146,7 @@ def _tool_payload(
         "channel": route.channel,
         "route": route.route_name,
         "thread_id": thread_id,
-        "turn": _turn_block(record, route, person=person, thread_id=thread_id),
+        "turn": _turn_block(record, route, person=person, thread_id=thread_id, reply_window=reply_window),
     }
     if record.inbound_kind == "event":
         # An event turn has no human text and no sender; its structured payload rides the
@@ -125,16 +159,9 @@ def _tool_payload(
     if person is not None:
         payload["person_id"] = person.person_id
         payload["person_addresses"] = [a.model_dump(mode="json") for a in person.addresses]
-    if params:
-        payload["params"] = params
-    if form is not None:
-        payload["form"] = form
-    if form_tag is not None:
-        payload["form_tag"] = form_tag
-    if attachments is not None:
-        payload["attachments"] = [a.model_dump(mode="json") for a in attachments]
-    if location is not None:
-        payload["location"] = location.model_dump(mode="json")
+    payload |= _structured_inbound(
+        record, params=params, form=form, form_tag=form_tag, attachments=attachments, location=location
+    )
     if route.overlap.deliver == "all" and is_message_turn(record):
         # The whole turn: the ordered batch, and the superseded records it carries when non-empty.
         # An event turn is never batched, so it never grows these keys.
@@ -259,6 +286,7 @@ async def _run_tool_turn(
     *,
     record: ConversationRecord,
     batch: Batch,
+    reply_window: ReplyWindow,
 ) -> _ToolOutcome:
     """Dispatch one tool turn as the route's execution key and return its resolved outcome.
 
@@ -317,6 +345,7 @@ async def _run_tool_turn(
         form_tag=form_tag,
         attachments=attachments,
         location=location,
+        reply_window=reply_window,
     )
     # The run's currently parked interactions on this turn's subject, read once and bound as
     # ``$parked`` in every door jq, dumped to the one compact shape every door presents.

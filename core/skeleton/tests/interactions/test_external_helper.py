@@ -15,7 +15,7 @@ import pytest
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 from tai42_contract.hooks import TopicVerifierBinding
-from tai42_contract.interactions import InteractionResponse
+from tai42_contract.interactions import AskAnswer, InteractionResponse
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
@@ -123,7 +123,7 @@ async def test_template_substitution_preserves_other_braces(monkeypatch, fake_re
     result = await ask("q", answer_format="external", link=template, timeout=5)
     await answerer
 
-    assert result == {"ok": True}
+    assert result == AskAnswer(answer={"ok": True}, reply_to=None, params=None)
     assert captured["url"].startswith("https://sign.example/doc/https://cb.example/api/interactions/callback/")
     # The unrelated ``{other}`` brace survived (replace, not format).
     assert captured["url"].endswith("?keep={other}")
@@ -198,7 +198,7 @@ async def test_http_localhost_accepted(monkeypatch, fake_redis, fake_client_ctx,
     answerer = asyncio.create_task(_answer_plain(fake_redis, store, "ok"))
     result = await ask("q", answer_format="external", link="{callback_url}", timeout=5)
     await answerer
-    assert result == "ok"
+    assert result == AskAnswer(answer="ok", reply_to=None, params=None)
 
 
 # -- concurrency guard -------------------------------------------------------
@@ -213,7 +213,7 @@ async def test_max_concurrent_admits_below_limit(monkeypatch, fake_redis, fake_c
     answerer = asyncio.create_task(_answer_plain(fake_redis, store, "hi"))
     result = await ask("q", timeout=5)
     await answerer
-    assert result == "hi"
+    assert result == AskAnswer(answer="hi", reply_to=None, params=None)
 
 
 async def test_max_concurrent_trips_at_limit(monkeypatch, fake_redis, fake_client_ctx):
@@ -237,7 +237,7 @@ async def test_max_concurrent_purges_stale_then_admits(monkeypatch, fake_redis, 
     answerer = asyncio.create_task(_answer_plain(fake_redis, store, "ok"))
     result = await ask("q", timeout=5)
     await answerer
-    assert result == "ok"
+    assert result == AskAnswer(answer="ok", reply_to=None, params=None)
 
 
 async def test_max_concurrent_atomic_under_burst(monkeypatch, fake_redis, fake_client_ctx):

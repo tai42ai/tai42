@@ -12,6 +12,10 @@
   verifier name is rejected at bind time (400).
 * ``delete_topic_verifier`` removes a topic's binding — reopening its public ingress
   door to anyone who knows the topic name; a missing binding is a 404.
+* ``list_hook_runs`` lists the kept hook runs (outstanding, failed, or both) with their
+  totals, never their payloads; ``retry_hook_run`` re-queues a failed run as a fresh run
+  with the same id; ``discard_hook_run`` deletes a failed run. A missing run is a 404 and a
+  run that is not failed, or whose hook committed a resume or a take (retry only), a 409.
 
 These operations are the single source the ``/api/hooks*`` routes, the ``tai hooks``
 CLI, and the MCP tool surface derive from — one definition behind every edge. Not all of
@@ -39,7 +43,9 @@ BEFORE the write, so a refusal leaves no record behind.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+import logging
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal, NoReturn
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
@@ -50,15 +56,22 @@ from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, ex
 
 from tai42_skeleton.hooks import trigger_links
 from tai42_skeleton.hooks.cache import get_hooks_manager
+from tai42_skeleton.hooks.runs import runtime as hook_runs_runtime
+from tai42_skeleton.hooks.runs.metrics import hook_run_metrics
+from tai42_skeleton.hooks.runs.models import HookRun, page_offset
 from tai42_skeleton.hooks.trigger_auth import webhook_trigger_auth
 from tai42_skeleton.hooks.trigger_links import TriggerLinkError
-from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
+from tai42_skeleton.operations import BadRequestError, NotFoundError, ValidationRejectedError, operation
 from tai42_skeleton.operations._authority import assert_execution_key_bindable, resolve_caller
 from tai42_skeleton.operations.definition_door import definition_door
 from tai42_skeleton.operations.errors import ConflictError, ForbiddenError, NotSupportedError
 from tai42_skeleton.operations.response_models_group_b import (
     HookListView,
     HookRegisterResult,
+    HookRunClaimIntentView,
+    HookRunDiscarded,
+    HookRunsPage,
+    HookRunView,
     RemovedByName,
     RemovedByTopic,
     StringListResponse,
@@ -66,6 +79,8 @@ from tai42_skeleton.operations.response_models_group_b import (
     TriggerLinkCreated,
     TriggerLinkListView,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class HookListQuery(BaseModel):
@@ -492,3 +507,150 @@ async def delete_trigger_link(name: str) -> dict[str, Any]:
     except TriggerLinkError as exc:
         raise _map_trigger_error(exc) from exc
     return {"removed": True, "name": name}
+
+
+# -- hook runs: the operator doors over failed and outstanding runs ------------
+
+_MAX_RUNS_LIMIT = 200
+
+
+def _run_time(value: float) -> datetime:
+    return datetime.fromtimestamp(value, tz=UTC)
+
+
+def hook_run_view(run: HookRun) -> dict[str, Any]:
+    """A hook run as the doors serve it: no event payload, no start spec."""
+    intent = run.claim_intent
+    return HookRunView(
+        id=run.id,
+        topic=run.topic,
+        hook=run.hook,
+        status=run.status,
+        attempts=run.attempts,
+        next_attempt_at=_run_time(run.next_attempt_at),
+        acted=run.acted,
+        acted_ids=list(run.acted_ids),
+        claim_intent=None if intent is None else HookRunClaimIntentView(action=intent.action, ids=list(intent.ids)),
+        last_error=run.last_error,
+        last_error_kind=run.last_error_kind,
+        created_at=_run_time(run.created_at),
+        failed_at=None if run.failed_at is None else _run_time(run.failed_at),
+    ).model_dump(mode="json")
+
+
+def _refused_retry_text(run: HookRun) -> str:
+    """Why a failed run whose hook committed a resume or a take cannot be retried, and what to do."""
+    ids = list(run.acted_ids)
+    if run.acted == "resume":
+        return (
+            f"hook run {run.id}: its hook resumed {ids}; the resumed run's continuation keeps its due record "
+            "and the interactions reaper redelivers it, so a retry would act on it twice. Discard this run "
+            "once handled."
+        )
+    return (
+        f"hook run {run.id}: its hook took the waiting outcome of {ids}; a taken outcome is removed when it "
+        "is taken and nothing redelivers it, so a retry cannot take it again. Its failure is in last_error. "
+        "Discard this run once handled."
+    )
+
+
+def _refuse_absent(run_id: str, outcome: str) -> NoReturn:
+    if outcome == "missing":
+        raise NotFoundError(f"no hook run {run_id}")
+    raise ConflictError(f"hook run {run_id} is not failed")
+
+
+@operation(
+    summary="List hook runs",
+    tags=["hooks"],
+    errors=[ValidationRejectedError],
+    response_model=HookRunsPage,
+)
+async def list_hook_runs(
+    status: Literal["outstanding", "failed"] | None = None, limit: int = 50, cursor: str | None = None
+) -> dict[str, Any]:
+    """Kept hook runs, with the outstanding and failed totals; never their payloads.
+
+    ``status`` ``outstanding`` lists the pending and running runs, the soonest due first;
+    ``failed`` the failed runs, the most recently failed first; none lists both, outstanding
+    first. A page holds at most ``limit`` runs; ``cursor`` continues from a page's ``next_cursor``.
+    """
+    if status not in (None, "outstanding", "failed"):
+        raise ValidationRejectedError(f"status is 'outstanding' or 'failed', got {status!r}")
+    if not 1 <= limit <= _MAX_RUNS_LIMIT:
+        raise ValidationRejectedError(f"limit is between 1 and {_MAX_RUNS_LIMIT}, got {limit}")
+    try:
+        page_offset(cursor)
+    except ValueError as exc:
+        raise ValidationRejectedError(str(exc)) from None
+    manager = get_hooks_manager()
+    page = await manager.list_hook_runs(status, limit, cursor)
+    counts = await manager.count_hook_runs()
+    return {
+        "items": [hook_run_view(run) for run in page.items],
+        "next_cursor": page.next_cursor,
+        "outstanding": counts.outstanding,
+        "failed": counts.failed,
+    }
+
+
+@operation(
+    summary="Retry a failed hook run",
+    tags=["hooks"],
+    destructive=False,
+    errors=[NotFoundError, ConflictError],
+    response_model=HookRunView,
+)
+async def retry_hook_run(id: str) -> dict[str, Any]:  # noqa: A002 - the door's path parameter
+    """Re-queue a failed hook run as a fresh run with the same id, and so the same idempotency key.
+
+    A run whose hook started its tool replays that start alone; any other runs its hook again on
+    the current parked entries. A run whose hook committed a resume or a take is refused: retrying
+    it would act twice, so it can only be discarded. Answers the re-queued run.
+    """
+    manager = get_hooks_manager()
+    now = hook_runs_runtime.now()
+    spawn = hook_runs_runtime.on_serving_loop() and not hook_runs_runtime.stopping()
+    if spawn:
+        result = await manager.retry_hook_run(
+            id,
+            now,
+            claimed_by=hook_runs_runtime.claimed_by(),
+            lease_until=now + manager.settings.run_lease_seconds,
+        )
+    else:
+        result = await manager.retry_hook_run(id, now)
+    if result.outcome == "refused":
+        if result.run is None:
+            raise RuntimeError(f"the hook-run store refused retrying {id} without the run")
+        raise ConflictError(_refused_retry_text(result.run))
+    if result.outcome != "ok":
+        _refuse_absent(id, result.outcome)
+    run = result.run
+    if run is None:
+        raise RuntimeError(f"the hook-run store re-queued {id} without the run")
+    hook_run_metrics().retried.inc()
+    logger.info("hook run %s (%s on %s) retried by an operator", run.id, run.hook, run.topic)
+    if spawn:
+        hook_runs_runtime.spawn_attempt(run)
+    return hook_run_view(run)
+
+
+@operation(
+    summary="Discard a failed hook run",
+    tags=["hooks"],
+    destructive=True,
+    errors=[NotFoundError, ConflictError],
+    response_model=HookRunDiscarded,
+)
+async def discard_hook_run(id: str) -> dict[str, Any]:  # noqa: A002 - the door's path parameter
+    """Delete a failed hook run for good: its hook never runs again for that event."""
+    from tai42_skeleton.access_control.user import request_identity
+
+    outcome = await get_hooks_manager().discard_hook_run(id)
+    if outcome != "ok":
+        _refuse_absent(id, outcome)
+    principal, _restricted = request_identity()
+    hook_run_metrics().discarded.inc()
+    logger.warning("hook run %s discarded by %s", id, principal)
+    return {"discarded": id}

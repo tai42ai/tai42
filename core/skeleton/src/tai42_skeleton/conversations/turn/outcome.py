@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from typing import Literal
 
-from tai42_contract.conversations import AnswerPart, ConversationRoute, joined_answer_text
+from tai42_contract.conversations import AnswerPart, ConversationRoute, ReplyTexts, joined_answer_text
 from tai42_contract.interactions import RunTerminalFailed
 
 from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
@@ -97,15 +97,30 @@ def _text_part(text: str) -> AnswerPart:
     return AnswerPart(message=text)
 
 
+def reply_text(route: ConversationRoute | None, member: str, default: str) -> str:
+    """The participant-facing text of one of the platform's fixed replies on ``route``.
+
+    The route's ``reply_texts`` member named ``member`` when the route and that member are set,
+    else ``default`` (the built-in English). ``member`` must name a
+    :class:`~tai42_contract.conversations.ReplyTexts` member: an unknown name raises
+    :class:`KeyError`, so a misspelt member is a loud bug, never a silent default.
+    """
+    if member not in ReplyTexts.model_fields:
+        raise KeyError(member)
+    texts = route.reply_texts if route is not None else None
+    value = getattr(texts, member) if texts is not None else None
+    return value if value is not None else default
+
+
 def _error_answer_text(route: ConversationRoute | None) -> str:
     """The platform's fixed participant-facing text for a failed turn.
 
-    The route's configured ``error_reply_text`` when it carries one, else the built-in English
-    default. A ``None`` route (no route in scope) falls back to the default. Only the
-    participant-facing ``answer`` resolves through the route — the record's ``error`` detail and
-    the logs keep the built-in wording.
+    The route's ``reply_texts.error`` when it carries one, else the built-in English default. A
+    ``None`` route (no route in scope) falls back to the default. Only the participant-facing
+    ``answer`` resolves through the route — the record's ``error`` detail and the logs keep the
+    built-in wording.
     """
-    return (route.error_reply_text if route is not None else None) or _ERROR_ANSWER_TEXT
+    return reply_text(route, "error", _ERROR_ANSWER_TEXT)
 
 
 def _failure_answer_text(route: ConversationRoute | None, reply: str | None) -> str:
@@ -114,7 +129,7 @@ def _failure_answer_text(route: ConversationRoute | None, reply: str | None) -> 
     The target's ``reply`` when the failure carries one
     (:class:`~tai42_contract.interactions.RunTerminalFailed` / ``RunFailed`` ``reply``), shown as
     the target wrote it; else the platform's fixed text (:func:`_error_answer_text`: the route's
-    ``error_reply_text``, else the built-in line). The failure's internal detail is never part of
+    ``reply_texts.error``, else the built-in line). The failure's internal detail is never part of
     this text.
     """
     return reply if reply is not None else _error_answer_text(route)

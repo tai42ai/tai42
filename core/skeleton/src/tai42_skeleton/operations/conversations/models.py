@@ -133,7 +133,7 @@ class ThreadMessageSend(BaseModel):
     address: str | None = Field(
         default=None,
         description="On a linked person's aggregated thread, the person address to target; "
-        "omitted, the target is the thread's newest record.",
+        "omitted, the target is the thread's newest record that is not a send record.",
     )
     media: list[dict[str, JsonValue]] | None = Field(
         default=None, description="Display media items delivered alongside the text."

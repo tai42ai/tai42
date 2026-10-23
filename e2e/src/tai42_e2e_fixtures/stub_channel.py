@@ -3,7 +3,8 @@
 Imported via a manifest ``channel_modules`` entry; on import it runs
 ``tai42_app.channels.register(...)`` exactly as a real channel plugin does, so a
 stack can drive a channel-delivered ``ask`` without loading a real medium
-plugin. Delivery is a no-op success (a plain return): the question is persisted
+plugin. Delivery is a no-op success that reports the send's own address and no
+message id: the question is persisted
 and its callback ticket minted before ``deliver`` is called, and the test bridges
 the human's reply back by POSTing that ticket to the public callback door itself —
 so the stub never has to reach an external medium.
@@ -28,8 +29,10 @@ from uuid import uuid4
 
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery, ChannelNotification
+from tai42_contract.channels import ChannelDelivery, ChannelNotification, SendOutcome
 from tai42_kit.clients import RedisConnectionSettings
+
+from tai42_e2e_fixtures.stub_addressing import StubAddressing
 
 STUB_CHANNEL_NAME = "stub"
 
@@ -44,7 +47,7 @@ WORKING_SIGNAL_OFF_STUB_CHANNEL_NAME = "stub_working_off"
 WORKING_SIGNAL_STUB_EXPIRY_ENV = "E2E_WORKING_SIGNAL_EXPIRY_SECONDS"
 
 
-class _StubChannel:
+class _StubChannel(StubAddressing):
     """Satisfies the full ``Channel`` protocol. ``deliver`` succeeds without
     contacting any medium; ``notify`` raises, exactly as the contract prescribes
     for a channel without a notify capability.
@@ -56,10 +59,10 @@ class _StubChannel:
 
     supports_form_delivery = True
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
-        return None
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
+        return self._outcome(delivery, [])
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         raise NotImplementedError
 
 
@@ -79,10 +82,10 @@ def _working_signal_record_key(provider_message_id: str | None) -> str:
     return f"e2e:rec:working_signal:{provider_message_id}"
 
 
-class _CountingWorkingSignalChannel:
+class _CountingWorkingSignalChannel(StubAddressing):
     """A channel that delivers a bridged answer and COUNTS every working-signal refresh.
 
-    ``notify`` accepts the answer (a no-op success returning one opaque outbound id) so a
+    ``notify`` accepts the answer (a no-op success reporting one opaque outbound id) so a
     bridged turn reaches ``provisional`` and the loop's first-send cancel fires; ``deliver`` is
     the no-op the ask path needs. ``signal_working`` RPUSHes ``{active, recipient,
     provider_message_id, sender_identity}`` onto the harness probe list so a spec proves the
@@ -96,11 +99,11 @@ class _CountingWorkingSignalChannel:
     def __init__(self, *, working_signal_expiry_seconds: float | None) -> None:
         self.working_signal_expiry_seconds = working_signal_expiry_seconds
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
-        return None
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
+        return self._outcome(delivery, [])
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
-        return [uuid4().hex]
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
+        return self._outcome(notification, [uuid4().hex])
 
     async def signal_working(
         self,

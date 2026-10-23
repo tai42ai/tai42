@@ -155,6 +155,8 @@ class _StubConversations:
         cap_key: str,
         text: str,
         provider_message_id: str,
+        medium_message_id: str | None,
+        reply_to_medium_message_id: str | None,
         params: dict[str, str] | None = None,
         attachments: Any = None,
         locale: str | None = None,
@@ -167,6 +169,8 @@ class _StubConversations:
                 cap_key=cap_key,
                 text=text,
                 provider_message_id=provider_message_id,
+                medium_message_id=medium_message_id,
+                reply_to_medium_message_id=reply_to_medium_message_id,
                 params=params,
                 attachments=attachments,
                 locale=locale,
@@ -176,13 +180,15 @@ class _StubConversations:
             raise self.accept_error
         return self.accept_result
 
-    async def record_delivery_status(self, channel: str, provider_message_id: str, status: Any) -> None:
+    async def record_delivery_status(
+        self, channel: str, provider_message_id: str, status: Any, *, errors: Any = None
+    ) -> None:
         self.status_calls.append(
-            SimpleNamespace(channel=channel, provider_message_id=provider_message_id, status=status)
+            SimpleNamespace(channel=channel, provider_message_id=provider_message_id, status=status, errors=errors)
         )
 
     async def notify_inbound_rejected(
-        self, *, channel_id: str, recipient: str, sender_identity: str | None, kind: str, reason: Any
+        self, *, channel_id: str, recipient: str, sender_identity: str, kind: str, reason: Any
     ) -> None:
         self.rejected_calls.append(
             SimpleNamespace(

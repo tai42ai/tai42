@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.channels import SendOutcome
 from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
     AnswerFormat,
@@ -26,12 +27,14 @@ from tai42_contract.interactions import (
 from tai42_contract.states import StateContext, SubjectCandidates
 from tai42_kit.interactions import park_kill as kit_park_kill
 from tai42_kit.interactions.park_kill import register_park_kill_handler
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.interactions import authorization
 from tai42_skeleton.interactions import continuation as continuation_module
 from tai42_skeleton.interactions import kill as kill_module
 from tai42_skeleton.interactions import reaper as reaper_module
 from tai42_skeleton.interactions.kill import kill_park
+from tai42_skeleton.interactions.run_completion import run_completion_id
 
 from ._continuation_support import RecordingHooks, configure_interactions_store, make_wired
 
@@ -91,7 +94,7 @@ def _wire_tools(monkeypatch, handlers: dict[str, Any], channels: Any = None) -> 
 
 
 def _cid(run_delivery_id: str) -> str:
-    return continuation_module._completion_id(run_delivery_id)
+    return run_completion_id(run_delivery_id)
 
 
 async def _add_park(
@@ -527,6 +530,8 @@ async def test_expiry_resume_takes_the_continuation_path_not_the_kill(wired, mon
         caller_ask_landing=None,
         chain_keys=(),
         *,
+        reply_to_medium_message_id,
+        params,
         mark_detached=True,
     ):
         captured.append(interaction_id)
@@ -782,6 +787,62 @@ async def test_cancel_parks_for_thread_kills_via_both_indices(wired, monkeypatch
     assert await wired.store.get_state(wired.fake, "conv") is None
 
 
+async def test_a_thread_forget_withdraws_a_park_answered_by_a_quoting_reply_before_its_continuation_runs(
+    wired, monkeypatch, kill_handlers
+):
+    # The quoting reply is claimed (its continuation-due record holds the quoted message's id) and the
+    # thread is forgotten before the continuation drives: the park is withdrawn, so no continuation
+    # ever runs with a quote of the forgotten thread.
+    from tai42_contract.interactions import PARK_COMPLETION_WITHDRAWN, InteractionResponse
+
+    from tai42_skeleton.interactions.helper import cancel_parks_for_thread
+
+    ran: list[str] = []
+
+    async def _never(*args, **kwargs):
+        ran.append("continuation")
+
+    monkeypatch.setattr(continuation_module, "_run_continuation", _never)
+    tools = _wire_tools(monkeypatch, {"deliver_tool": lambda a: None})
+    _register(_recording_handler([]))
+    candidates = SubjectCandidates(target_kind="agent", target_name="scope-q", by_kind={"thread": "bridge:chat:q"})
+    await _add_park(
+        wired,
+        iid="quoted",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-quoted",
+        candidates=candidates,
+    )
+    now = datetime.now(UTC)
+    response = InteractionResponse(
+        interaction_id="quoted",
+        answer="yes",
+        answered_by="participant",
+        answered_at=now,
+        medium_message_id="mid-reply",
+        reply_to_medium_message_id="mid-quoted",
+    )
+    assert await wired.store.record_answer(
+        wired.fake,
+        response,
+        "kg",
+        60,
+        continuation_due_ttl=3600,
+        continuation_first_attempt_at_ms=int(now.timestamp() * 1000) + 10_000,
+    )
+    due = await wired.fake.hgetall(wired.store.continuation_due_key("quoted"))
+    assert "mid-quoted" in str(due)
+
+    reached = await cancel_parks_for_thread("bridge:chat:q", reason="thread_deleted")
+
+    assert reached == ["quoted"]
+    assert not bool(await wired.fake.hgetall(wired.store.continuation_due_key("quoted")))
+    assert await wired.store.due_continuations(wired.fake, now + timedelta(days=1)) == []
+    assert ran == []
+    fires = [c for c in tools.calls if c["key"] == "deliver_tool"]
+    assert [f["arguments"]["status"] for f in fires] == [PARK_COMPLETION_WITHDRAWN]
+
+
 async def test_cancel_parks_for_thread_also_reaches_the_extra_subjects(wired, monkeypatch, kill_handlers):
     from tai42_skeleton.interactions.helper import cancel_parks_for_thread
 
@@ -814,7 +875,7 @@ async def test_rekey_park_subjects_skips_a_move_onto_itself(wired, monkeypatch, 
 # --- the channel that delivered the ask is told; the door names its terminal -------------
 
 
-class _StubChannel:
+class _StubChannel(AddressingChannel):
     """A neutral channel that records each withdrawal on a ledger it shares with the door's fires."""
 
     def __init__(self, ledger: list[tuple[str, Any]], *, fail_first: bool = False) -> None:
@@ -822,11 +883,11 @@ class _StubChannel:
         self.withdrawn: list[Any] = []
         self._fail_first = fail_first
 
-    async def deliver(self, delivery: Any) -> None:
-        return None
+    async def deliver(self, delivery: Any) -> SendOutcome:
+        return self.outcome(delivery, [])
 
-    async def notify(self, notification: Any) -> list[str]:
-        return []
+    async def notify(self, notification: Any) -> SendOutcome:
+        return self.outcome(notification, [])
 
     async def withdraw(self, withdrawal: Any) -> None:
         self.withdrawn.append(withdrawal)
@@ -837,14 +898,14 @@ class _StubChannel:
             raise ChannelDeliveryError("store unreachable", retryable=True)
 
 
-class _PlainChannel:
+class _PlainChannel(AddressingChannel):
     """A neutral channel that keeps nothing withdrawable, so it omits the ``withdraw`` member."""
 
-    async def deliver(self, delivery: Any) -> None:
-        return None
+    async def deliver(self, delivery: Any) -> SendOutcome:
+        return self.outcome(delivery, [])
 
-    async def notify(self, notification: Any) -> list[str]:
-        return []
+    async def notify(self, notification: Any) -> SendOutcome:
+        return self.outcome(notification, [])
 
 
 def _channels(**channels: Any) -> Any:

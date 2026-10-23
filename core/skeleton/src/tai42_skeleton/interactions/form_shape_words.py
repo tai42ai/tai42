@@ -100,6 +100,8 @@ def shape_sentence(kind: FormShapeKind, params: Mapping[str, Any]) -> str:  # no
         case FormShapeKind.DATE_UNAVAILABLE:
             return "That date is unavailable, choose another"
         case FormShapeKind.RANGE_ORDER:
+            if params.get("by") == "time":
+                return "The end time must be on or after the start time"
             return "The end date must be on or after the start date"
         case FormShapeKind.RANGE_SPAN:
             return _span_sentence(params)

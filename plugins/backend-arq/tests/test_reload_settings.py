@@ -20,6 +20,10 @@ from tai42_backend_arq import settings as settings_module
 from tai42_backend_arq.worker import ArqWorkerRuntime
 
 
+# The built worker owns a real pool, and arq's ``Worker.close`` releases it through redis-py's
+# deprecated ``close`` alias.
+@pytest.mark.filterwarnings("ignore:Call to deprecated close:DeprecationWarning")
+@pytest.mark.usefixtures("redis_url")
 async def test_a_boot_worker_job_reads_the_reloaded_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ARQ_CALLBACK_TIMEOUT", "5")
     settings_module.arq_settings.cache_clear()

@@ -35,14 +35,15 @@ from tai42_channel_whatsapp.channel.interactive import (
 )
 from tai42_channel_whatsapp.channel.media import _body_with_links, _send_file_media, _send_one_file
 from tai42_channel_whatsapp.client import (
-    _header_object as _build_header_object,
-)
-from tai42_channel_whatsapp.client import (
+    SentMessage,
     send_interactive_buttons,
     send_interactive_cta_url,
     send_interactive_list,
     send_location,
     send_message,
+)
+from tai42_channel_whatsapp.client import (
+    _header_object as _build_header_object,
 )
 
 
@@ -229,7 +230,7 @@ def _interactive_header(header: MediaItem | None) -> dict[str, Any] | None:
 
 async def _leading_header(
     phone_number_id: str, target: str, header: MediaItem | None, header_obj: dict[str, Any] | None
-) -> list[str]:
+) -> list[SentMessage]:
     """Send the header as its own leading message when it is present but not on the interactive header slot.
 
     Applies to an audio header, or a text-fallback message; else nothing.
@@ -248,7 +249,7 @@ async def _render_section_list(
     footer: str | None,
     choice_label: str | None,
     reply_hint: str | None,
-) -> list[str]:
+) -> list[SentMessage]:
     """Render a sectioned notification as an interactive LIST, or the numbered-text fallback.
 
     The fallback is used when a section/row title, a row description, or the body exceeds
@@ -257,7 +258,7 @@ async def _render_section_list(
     """
     section_ids = _mint_wire_ids([row.id for section in sections for row in section.rows], "notification")
     if not _sections_renderable(body, sections):
-        prelude: list[str] = []
+        prelude: list[SentMessage] = []
         if header is not None:
             prelude.append(await _send_one_file(phone_number_id, target, header))
         text_body = _numbered_sections_body(body, sections, footer, reply_hint)
@@ -280,7 +281,7 @@ async def _render_section_list(
 
 async def _render_lone_cta_url(
     phone_number_id: str, target: str, link: LinkOption, body: str, header: MediaItem | None, footer: str | None
-) -> list[str]:
+) -> list[SentMessage]:
     """Render a lone link option as a ``cta_url`` interactive (one URL button)."""
     header_obj = _interactive_header(header)
     prelude = await _leading_header(phone_number_id, target, header, header_obj)
@@ -300,13 +301,13 @@ async def _render_lone_cta_url(
 
 async def _render_link_only(
     phone_number_id: str, target: str, body_with_links: str, header: MediaItem | None, footer: str | None
-) -> list[str]:
+) -> list[SentMessage]:
     """Render an only-link notification (a lone over-cap link, or ≥2 links) as a plain text body.
 
     The body is ``label: url`` lines with the footer appended and any media header sent
     ahead.
     """
-    prelude: list[str] = []
+    prelude: list[SentMessage] = []
     if header is not None:
         prelude.append(await _send_one_file(phone_number_id, target, header))
     text_body = _append_lines(body_with_links, [footer] if footer else [])
@@ -338,10 +339,10 @@ async def _render_reply_kind(
     footer: str | None,
     choice_label: str | None,
     reply_hint: str | None,
-) -> str:
+) -> SentMessage:
     """Send the reply-options message in its chosen shape (buttons / list / numbered text).
 
-    Returns its ``wamid``. Descriptions ride the numbered lines whole on the text tier —
+    Returns its :class:`SentMessage`. Descriptions ride the numbered lines whole on the text tier —
     a degrade never silently drops content. ``reply_hint`` draws the type-an-option line on
     the numbered-text shape (the buttons and list shapes draw none).
     """
@@ -378,7 +379,7 @@ async def _render_reply_options(
     footer: str | None,
     choice_label: str | None,
     reply_hint: str | None,
-) -> list[str]:
+) -> list[SentMessage]:
     """Render reply options as buttons or a list.
 
     Buttons render no description, so any described row prefers the list, and an over-cap
@@ -411,7 +412,7 @@ async def _render_options(
     footer: str | None,
     choice_label: str | None,
     reply_hint: str | None,
-) -> list[str]:
+) -> list[SentMessage]:
     """Render a flat ``options`` notification.
 
     A lone link option renders as a ``cta_url`` interactive, an only-link set as a plain
@@ -432,10 +433,10 @@ async def _render_options(
 
 async def _send_interactive_notification(
     phone_number_id: str, target: str, notification: ChannelNotification, links_media: list[MediaItem]
-) -> list[str]:
+) -> list[SentMessage]:
     """Render an interactive notification (``options`` or ``sections``) to its native WhatsApp shape.
 
-    Returns every ``wamid`` in send order (any audio header, or a header on a text
+    Returns every :class:`SentMessage` in send order (any audio header, or a header on a text
     fallback, rides ahead of the interactive so the actionable message stays at the
     foot). ``links_media`` are the ``link`` MEDIA items appended to the body as text
     lines.
@@ -485,8 +486,8 @@ async def _send_interactive_notification(
     )
 
 
-async def _send_notification(phone_number_id: str, target: str, notification: ChannelNotification) -> list[str]:
-    """Send a freeform notification and return every ``wamid`` in send order.
+async def _send_notification(phone_number_id: str, target: str, notification: ChannelNotification) -> list[SentMessage]:
+    """Send a freeform notification and return every :class:`SentMessage` in send order.
 
     In order: the message body / interactive choice surface (carrying the text and any
     tappable ``options``/``sections``, plus ``link`` media appended as body lines), then a
@@ -501,7 +502,7 @@ async def _send_notification(phone_number_id: str, target: str, notification: Ch
     link_media = [item for item in media if item.kind == MediaKind.LINK]
     file_media = [item for item in media if item.kind is not MediaKind.LINK]
 
-    sent: list[str] = []
+    sent: list[SentMessage] = []
     if notification.options is not None or notification.sections is not None:
         # An interactive surface requires a non-blank message (contract), so the body is
         # always non-blank here.

@@ -71,6 +71,7 @@ def _delivery(
         callback_url=_CALLBACK,
         timeout_at=datetime.now(UTC) + timedelta(seconds=timeout_in),
         recipient=recipient,
+        sensitive=False,
         **extra,
     )
 
@@ -162,6 +163,7 @@ async def test_deliver_sends_image_media_then_question(http_recorder, fake_redis
         media=media,
         callback_url=_CALLBACK,
         timeout_at=datetime.now(UTC) + timedelta(seconds=600),
+        sensitive=False,
     )
     await TelegramChannel().deliver(delivery)
 
@@ -184,6 +186,7 @@ async def test_deliver_rejects_data_uri_image_before_any_send(http_recorder, fak
         media=media,
         callback_url=_CALLBACK,
         timeout_at=datetime.now(UTC) + timedelta(seconds=600),
+        sensitive=False,
     )
     with pytest.raises(ChannelInputError, match="data: image"):
         await TelegramChannel().deliver(delivery)
@@ -641,6 +644,7 @@ async def test_reply_hint_over_cap_with_media_sends_nothing(http_recorder, fake_
         wording=Wording(answer=AnswerWording(reply_hint="z" * 65)),
         callback_url=_CALLBACK,
         timeout_at=datetime.now(UTC) + timedelta(seconds=600),
+        sensitive=False,
     )
     with pytest.raises(ChannelInputError, match="1-64 characters"):
         await TelegramChannel().deliver(delivery)

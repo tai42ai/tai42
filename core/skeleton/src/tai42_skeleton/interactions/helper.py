@@ -31,6 +31,7 @@ from tai42_contract.hooks import TopicVerifierBinding
 from tai42_contract.interactions import (
     PARK_COMPLETION_WITHDRAWN,
     AnswerMismatchPolicy,
+    AskAnswer,
     FormData,
     FormPage,
     FormReactions,
@@ -145,14 +146,16 @@ async def ask(
     to: Literal["user", "caller"] = "user",
     payload: dict[str, Any] | None = None,
     on_expiry: Literal["kill", "resume"] = "kill",
-) -> Any:
+) -> AskAnswer | SuspendedInteraction:
     """Ask a human ``question`` and return their answer.
 
     In ``mode="sync"`` block until the answer returns; in ``mode="async"`` park the caller and
     return a ``SuspendedInteraction`` immediately.
 
-    Returns the typed answer per ``answer_format`` (text->str, confirm->bool,
-    select->chosen value, form->validated dict, external->the callback payload).
+    A sync ask returns an :class:`~tai42_contract.interactions.AskAnswer`: its ``answer`` is
+    the typed answer per ``answer_format`` (text->str, confirm->bool, select->chosen value,
+    form->validated dict, external->the callback payload), beside it ``reply_to``, the message
+    the answering reply quoted (``None`` when it quoted none), and the answer's ``params``.
     Raises ``InteractionTimeoutError`` on expiry, ``InteractionLimitError`` when
     the ``max_concurrent`` guard trips, ``ValueError`` for a bad format/argument
     combination or a blank ``audience``, ``CrossIdentityAudienceError`` when a
@@ -174,7 +177,7 @@ async def ask(
     server-side in the ``format_payload`` and stripped from the client frame.
 
     ``sensitive`` marks the answer body as not-to-be-persisted AND wraps the
-    returned answer in a ``SecretValue``: the caller reaches the real answer only
+    returned ``answer`` in a ``SecretValue``: the caller reaches the real answer only
     through ``reveal()`` (its repr and JSON dump refuse to expose it), while the
     durable answered record keeps only the status (no response body). Use it for
     credentials or personal data.
@@ -361,7 +364,7 @@ async def ask(
     interaction_id = str(uuid.uuid4())
     group = group_id or str(uuid.uuid4())
     store = InteractionStore(interactions_settings().key_prefix)
-    reply_to = store.reply_key(interaction_id)
+    reply_key = store.reply_key(interaction_id)
 
     # A ``to="caller"`` ask addresses another RUN, never a human: it performs NO send of any
     # kind (no callback ticket, no external link, no channel delivery, no re-park notice). Its
@@ -417,7 +420,7 @@ async def ask(
         format_payload=format_payload,
         reaction_tool=reaction_tool,
         on_mismatch=on_mismatch,
-        reply_to=reply_to,
+        reply_to=reply_key,
         sensitive=sensitive,
         channel=channel,
         recipient=recipient,
@@ -449,6 +452,7 @@ async def ask(
             on_mismatch=on_mismatch,
             callback_url=callback.callback_url,
             timeout_at=window.timeout_at,
+            sensitive=sensitive,
         )
         await delivery.deliver_with_retry(
             validation.channel_obj,
@@ -493,7 +497,7 @@ async def ask(
         window,
         interaction_id=interaction_id,
         group=group,
-        reply_to=reply_to,
+        reply_key=reply_key,
         question=question,
         sensitive=sensitive,
     )

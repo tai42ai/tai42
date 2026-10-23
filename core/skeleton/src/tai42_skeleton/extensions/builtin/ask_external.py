@@ -19,7 +19,7 @@ neither drop nor forge the callback authentication.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 from makefun import create_function
@@ -27,6 +27,7 @@ from pydantic import ValidationError
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.hooks import TopicVerifierBinding
+from tai42_contract.interactions import AskAnswer
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.render import resolve_schema_body
@@ -56,6 +57,30 @@ def _author_verifier(raw: object) -> TopicVerifierBinding | None:
         ) from None
 
 
+def _check_wrapped_params(params: Mapping[str, inspect.Parameter]) -> None:
+    """Refuse a wrapped tool whose params cannot ride the composed signature."""
+    if "callback_url" not in params:
+        raise TaiValidationError("tool wrapped by ask_external must accept callback_url")
+    for control in _CONTROL_PARAMS:
+        if control in params:
+            raise TaiValidationError(
+                f"tool wrapped by ask_external must not define '{control}'; it collides with an injected control param"
+            )
+    # Every param is forwarded by keyword: the tool's own params ride the composed
+    # signature (re-presented keyword-only) into ``**tool_kwargs``, and
+    # ``callback_url`` is passed by name in ``build``. A positional-only param,
+    # ``*args``, or ``**kwargs`` cannot survive that round-trip and would crash at
+    # call time — including a positional-only ``callback_url`` — so reject them
+    # loudly at wrap time (checking ``callback_url`` too, not just the tool params).
+    unsupported = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    for p in params.values():
+        if p.kind in unsupported:
+            raise TaiValidationError(
+                f"tool wrapped by ask_external cannot use parameter '{p.name}' of kind {p.kind.description}; "
+                "its params must be positional-or-keyword or keyword-only"
+            )
+
+
 @tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="ask_external")
 def ask_external(
     func: Callable[..., Any], name: str, description: str, config: dict[str, Any] | None = None
@@ -78,28 +103,8 @@ def ask_external(
         raise TaiValidationError(f"ask_external config has unknown key(s): {', '.join(unknown)}")
     verifier = _author_verifier(config.get("verifier"))
 
-    sig = inspect.signature(func)
-    params = sig.parameters
-    if "callback_url" not in params:
-        raise TaiValidationError("tool wrapped by ask_external must accept callback_url")
-    for control in _CONTROL_PARAMS:
-        if control in params:
-            raise TaiValidationError(
-                f"tool wrapped by ask_external must not define '{control}'; it collides with an injected control param"
-            )
-    # Every param is forwarded by keyword: the tool's own params ride the composed
-    # signature (re-presented keyword-only) into ``**tool_kwargs``, and
-    # ``callback_url`` is passed by name in ``build``. A positional-only param,
-    # ``*args``, or ``**kwargs`` cannot survive that round-trip and would crash at
-    # call time — including a positional-only ``callback_url`` — so reject them
-    # loudly at wrap time (checking ``callback_url`` too, not just the tool params).
-    unsupported = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-    for p in params.values():
-        if p.kind in unsupported:
-            raise TaiValidationError(
-                f"tool wrapped by ask_external cannot use parameter '{p.name}' of kind {p.kind.description}; "
-                "its params must be positional-or-keyword or keyword-only"
-            )
+    params = inspect.signature(func).parameters
+    _check_wrapped_params(params)
 
     async def wrapper(
         *,
@@ -117,7 +122,7 @@ def ask_external(
             return result
 
         resolved_schema = await resolve_schema_body("ask_external answer_schema", answer_schema)
-        return await ask(
+        answered = await ask(
             question,
             answer_format="external",
             schema=resolved_schema,
@@ -125,6 +130,12 @@ def ask_external(
             link=build,
             verifier=verifier,
         )
+        # A sync ask always answers with an ``AskAnswer``. The external system answers through
+        # its callback, never over a channel, so no quote or params reach it: the answer is the
+        # callback payload alone.
+        if not isinstance(answered, AskAnswer):
+            raise TypeError(f"a sync ask answered with {type(answered).__name__}, not an AskAnswer")
+        return answered.answer
 
     # Composed signature: original params (minus callback_url) re-presented as
     # keyword-only so makefun forwards them by name into ``**tool_kwargs``, plus

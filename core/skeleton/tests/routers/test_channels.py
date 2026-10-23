@@ -8,6 +8,7 @@ import json
 import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
+from tai42_contract.channels import SendOutcome
 
 from tai42_skeleton.routers import channels as router
 
@@ -15,8 +16,8 @@ from .._helpers import DeliverOnlyChannel
 
 
 class _Chan(DeliverOnlyChannel):
-    async def deliver(self, delivery) -> None:
-        return None
+    async def deliver(self, delivery) -> SendOutcome:
+        return self.outcome(delivery, [])
 
 
 @pytest.fixture

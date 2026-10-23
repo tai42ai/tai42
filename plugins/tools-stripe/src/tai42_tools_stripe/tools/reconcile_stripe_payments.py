@@ -1,9 +1,10 @@
 """The ``reconcile_stripe_payments`` tool: the recovery layer that re-answers lost payments.
 
 Re-derives the truth from Stripe's own Checkout Session list -- the system of record for whether
-money moved -- and re-answers anything the single-delivery webhook path lost, for as long as the
-ask is alive. The Stripe list call, the livemode assert, the callback pin, the answer builder and the
-bounded retry live in :mod:`tai42_tools_stripe._internal.tools.stripe_client`.
+money moved -- and re-answers any paid session whose webhook never arrived, or whose hook run is
+held as failed, for as long as the ask is alive. The Stripe list call, the livemode assert, the
+callback pin, the answer builder and the bounded retry live in
+:mod:`tai42_tools_stripe._internal.tools.stripe_client`.
 
 This is NOT a user or agent tool: it holds the bridge secret and answers payment asks. Its callers
 are the scheduler and an authed operator.

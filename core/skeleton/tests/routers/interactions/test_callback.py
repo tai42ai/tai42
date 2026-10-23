@@ -8,7 +8,7 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from tai42_contract.interactions import AnswerFormat, InteractionResponse
+from tai42_contract.interactions import AnswerFormat, AskAnswer, InteractionResponse
 
 from tai42_skeleton.interactions import InteractionStore, ask
 from tai42_skeleton.interactions.caller_ask import CALLER_ASK_RESOLUTION_REFUSED
@@ -72,7 +72,7 @@ async def test_post_valid_body_wakes_caller(wired):
     assert _json(resp)["data"]["status"] == "answered"
 
     result = await task
-    assert result == {"signed": True}
+    assert result == AskAnswer(answer={"signed": True}, reply_to=None, params=None)
     state = await wired.store.get_state(wired.fake, iid)
     assert state is not None
     assert state.response is not None
@@ -166,6 +166,20 @@ async def test_post_answered_idempotent_200_and_ticket_survives(wired):
     assert await wired.store.resolve_ticket(wired.fake, "TKT") == "i1"
 
 
+async def test_an_external_answer_keeps_a_quoted_id_key_as_payload_and_quotes_nothing(wired):
+    # An external answer is the verbatim body: a ``reply_to_medium_message_id`` key in it is the
+    # payload's own data, never the medium's quoted-message id.
+    await _seed(wired)
+    body = {"approved": True, "reply_to_medium_message_id": "mid-9"}
+    resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=json.dumps(body).encode()))
+    assert resp.status_code == 200
+    state = await wired.store.get_state(wired.fake, "i1")
+    assert state is not None
+    assert state.response is not None
+    assert state.response.answer == body
+    assert state.response.reply_to_medium_message_id is None
+
+
 @pytest.mark.parametrize("body", [b"[1,2]", b'"scalar"', b"not json at all"])
 async def test_post_non_object_body_400(wired, body):
     await _seed(wired)
@@ -188,7 +202,7 @@ async def test_post_schema_invalid_then_valid(wired):
 
     good = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"x":7}'))
     assert good.status_code == 200
-    assert await task == {"x": 7}
+    assert await task == AskAnswer(answer={"x": 7}, reply_to=None, params=None)
 
 
 async def test_post_oversized_body_413(wired):
@@ -217,7 +231,7 @@ async def test_post_empty_body_uses_query_params(wired):
     await await_add_event(wired.fake, wired.store)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, query="a=1&tag=x&tag=y"))
     assert resp.status_code == 200
-    assert await task == {"a": "1", "tag": ["x", "y"]}
+    assert await task == AskAnswer(answer={"a": "1", "tag": ["x", "y"]}, reply_to=None, params=None)
 
 
 async def test_post_body_wins_over_query(wired):
@@ -225,7 +239,7 @@ async def test_post_body_wins_over_query(wired):
     await await_add_event(wired.fake, wired.store)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, query="a=1", body=b'{"b":2}'))
     assert resp.status_code == 200
-    assert await task == {"b": 2}
+    assert await task == AskAnswer(answer={"b": 2}, reply_to=None, params=None)
 
 
 async def test_post_deeply_nested_body_400_not_500(wired):
@@ -276,7 +290,7 @@ async def test_get_pending_confirm_page_no_state_change(wired):
 
     # Finish so the task doesn't dangle.
     await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"ok":1}'))
-    assert await task == {"ok": 1}
+    assert await task == AskAnswer(answer={"ok": 1}, reply_to=None, params=None)
 
 
 async def test_get_answered_done_page(wired):
@@ -385,7 +399,7 @@ async def test_get_single_and_multi_query_values(wired):
     # The confirm form POSTs back to the same URL with the query string.
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, query="a=1&tag=a&tag=b"))
     assert resp.status_code == 200
-    assert await task == {"a": "1", "tag": ["a", "b"]}
+    assert await task == AskAnswer(answer={"a": "1", "tag": ["a", "b"]}, reply_to=None, params=None)
 
 
 async def test_post_lost_race_is_already_answered(wired, monkeypatch):
@@ -405,7 +419,7 @@ async def test_post_three_repeated_query_values(wired):
     await await_add_event(wired.fake, wired.store)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, query="tag=a&tag=b&tag=c"))
     assert resp.status_code == 200
-    assert await task == {"tag": ["a", "b", "c"]}
+    assert await task == AskAnswer(answer={"tag": ["a", "b", "c"]}, reply_to=None, params=None)
 
 
 def test_reply_ttl_clamps_past_deadline(wired):
@@ -1011,5 +1025,107 @@ async def test_post_reads_the_body_once(wired, monkeypatch):
     await await_add_event(wired.fake, wired.store)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"signed":true}'))
     assert resp.status_code == 200
-    assert await task == {"signed": True}
+    assert await task == AskAnswer(answer={"signed": True}, reply_to=None, params=None)
     assert len(reads) == 1
+
+
+# -- the deployment's words on the callback page's gone and fault answers ------
+
+
+def _set_callback_words(wired, **env: str) -> None:
+    # The deployment's env read into the settings object the callback door is wired with.
+    from tai42_skeleton.interactions.settings import InteractionsSettings
+
+    for name, value in env.items():
+        wired.monkeypatch.setenv(name, value)
+    settings = InteractionsSettings(public_base_url=wired.settings.public_base_url)
+    wired.monkeypatch.setattr(router, "interactions_settings", lambda: settings)
+
+
+async def test_every_gone_answer_carries_the_deployments_gone_text(wired, verifier_registry):
+    _set_callback_words(wired, INTERACTIONS_CALLBACK_GONE_TEXT="Este enlace ya no está disponible.")
+    gone = "Este enlace ya no está disponible.".encode()
+
+    # An unknown ticket.
+    resp = await router.callback(make_request("GET", path_params={"ticket": "NOPE"}))
+    assert (resp.status_code, bytes(resp.body)) == (404, gone)
+    # A pruned state.
+    await _seed(wired)
+    await wired.store.prune_pending(wired.fake, "i1", "g1")
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert (resp.status_code, bytes(resp.body)) == (404, gone)
+    # A verifier-bound question.
+    verifier_registry.register("prov", _FakeVerifier())
+    await _seed(wired, ticket="BOUND", iid="i2", gid="g2", verifier=_BINDING)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "BOUND"}))
+    assert (resp.status_code, bytes(resp.body)) == (404, gone)
+    # The store switched off.
+    wired.monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    wired.monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert (resp.status_code, bytes(resp.body)) == (404, gone)
+
+
+@pytest.mark.parametrize("name", ["INTERACTIONS_CALLBACK_GONE_TEXT", "INTERACTIONS_CALLBACK_FAULT_TEXT"])
+def test_a_blank_callback_text_is_refused_at_settings_load(monkeypatch, name):
+    from pydantic import ValidationError
+
+    from tai42_skeleton.interactions.settings import InteractionsSettings
+
+    monkeypatch.setenv(name, "   ")
+    with pytest.raises(ValidationError, match="must not be blank"):
+        InteractionsSettings()
+
+
+@pytest.mark.parametrize(
+    "schema",
+    ["not-a-dict", {"type": "object", "properties": {"blob": {"type": "array"}}}],
+)
+async def test_an_unrenderable_form_record_answers_the_deployments_fault_text(wired, schema):
+    _set_callback_words(wired, INTERACTIONS_CALLBACK_FAULT_TEXT="Algo salió mal.")
+    await _seed_form(wired, schema=schema)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 500
+    assert bytes(resp.body) == "Algo salió mal.".encode()
+
+
+async def test_an_unrenderable_form_record_answers_the_default_fault_text(wired):
+    await _seed_form(wired, schema="not-a-dict")
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert (resp.status_code, bytes(resp.body)) == (500, b"Internal Server Error")
+
+
+_BROKEN_WORDING = {"answer_page": {"bogus": {}}}
+
+
+async def _seed_broken_wording(wired, fmt: AnswerFormat, *, answered: bool) -> None:
+    # A record whose stored wording fails ``Wording``: every write door validates it, so the stored
+    # request is overwritten in place, as a record that bypassed the ask door would read.
+    request = _typed_request(wired.store, fmt)
+    await wired.store.add(wired.fake, request, idle_ttl=86400, ticket="TKT", ticket_ttl=60)
+    stored = json.loads(request.model_dump_json())
+    stored["format_payload"] = {"wording": _BROKEN_WORDING}
+    await wired.fake.hset(wired.store.state_key("t1"), "request", json.dumps(stored))
+    if answered:
+        prior = InteractionResponse(
+            interaction_id="t1", answer=True, answered_by="external-callback", answered_at=datetime.now(UTC)
+        )
+        await wired.store.record_answer(wired.fake, prior, "tg1", reply_ttl=60, ticket="TKT", ticket_ttl=86400)
+
+
+@pytest.mark.parametrize(
+    ("fmt", "answered"),
+    [(AnswerFormat.CONFIRM, False), (AnswerFormat.TEXT, False), (AnswerFormat.CONFIRM, True)],
+    ids=["confirm", "awaiting", "answered"],
+)
+async def test_a_stored_wording_that_fails_the_model_answers_the_fault_text(wired, caplog, fmt, answered):
+    _set_callback_words(wired, INTERACTIONS_CALLBACK_FAULT_TEXT="Algo salió mal.")
+    await _seed_broken_wording(wired, fmt, answered=answered)
+
+    with caplog.at_level("ERROR"):
+        resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+
+    assert resp.status_code == 500
+    assert resp.media_type == "text/plain"
+    assert bytes(resp.body) == "Algo salió mal.".encode()
+    assert any("t1" in record.getMessage() for record in caplog.records if record.levelname == "ERROR")

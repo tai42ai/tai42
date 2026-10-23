@@ -126,6 +126,7 @@ async def submit_run(tool_name: str, arguments: dict[str, object], subject: Stat
                     arguments=arguments,
                     extras=None,
                     state_context=submit_context,
+                    crash_resume_eligible=True,
                 )
             supervisor._spawn_supervisor(run_id, tool_name, arguments, subject)
         except Exception:

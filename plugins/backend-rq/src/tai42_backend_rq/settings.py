@@ -1,7 +1,9 @@
 """RQ backend settings.
 
 A ``TaiBaseSettings`` subclass reading the ``RQ_`` env group, exposed through the
-cached ``rq_settings`` accessor. The dispatch surface the host and this backend
+cached ``rq_settings`` accessor. Its Redis connection is :class:`RqRedisSettings`, the
+kit's connection settings under ``RQ_``, and :func:`rq_client_kwargs` is the one set of
+client kwargs every Redis connection of this backend is built from. The dispatch surface the host and this backend
 must agree on (``manifest_key`` / ``task_timeout`` / ``tool_name_arg``) is
 INHERITED from ``BackendDispatchSettings`` rather than mirrored here, so its
 names, defaults and reload classes are declared once for both sides while this
@@ -10,24 +12,36 @@ group keeps its own ``RQ_`` prefix.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import ClassVar
+from typing import Any
 
+from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.backend import BackendDispatchSettings
-from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, settings_cache
+from tai42_kit.clients import RedisConnectionSettingsBase
+from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
-class RqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSettings):
+class RqRedisSettings(RedisConnectionSettingsBase):
+    """The RQ backend's Redis connection, composed from the kit connection shape under ``RQ_``.
+
+    ``RQ_REDIS_URL`` / ``RQ_REDIS_MAX_CONNECTIONS`` fall back to the shared
+    ``TAI_DEFAULT_*`` namespace when unset; the retry and the socket timeouts
+    (``RQ_RETRY_ATTEMPTS``, ``RQ_RETRY_ON_TIMEOUT``, ``RQ_SOCKET_TIMEOUT``,
+    ``RQ_SOCKET_CONNECT_TIMEOUT``) are read from ``RQ_*`` alone.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="RQ_")
+
+    redis_url: str | None = "redis://localhost:6379/0"
+
+
+class RqSettings(BackendDispatchSettings, TaiBaseSettings):
     """RQ backend settings from the ``RQ_`` env group, with RQ's Redis key shapes."""
 
     model_config = SettingsConfigDict(env_prefix="RQ_")
 
-    # ``redis_url`` falls back to the shared ``TAI_DEFAULT_REDIS_URL`` when
-    # ``RQ_REDIS_URL`` is unset; a set ``RQ_REDIS_URL`` always wins.
-    tai_default_fields: ClassVar[Mapping[str, str]] = {"redis_url": "redis_url"}
-
-    redis_url: str = "redis://localhost:6379/0"
+    # The Redis connection every side uses, composed from the kit (a field, not a base).
+    redis: RqRedisSettings = Field(default_factory=RqRedisSettings)
     # Key prefix RQ uses for all of its Redis structures.
     rq_prefix: str = "rq:"
     # The RQ queue name every enqueue, worker, and scheduler binds. RQ's own
@@ -80,3 +94,12 @@ class RqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSettings
 def rq_settings() -> RqSettings:
     """The cached :class:`RqSettings`."""
     return RqSettings()
+
+
+def rq_client_kwargs() -> dict[str, Any]:
+    """The kit Redis client kwargs for this backend's connection settings, read as bytes.
+
+    The URL, the connection cap, the socket timeouts and the connection retry, all from
+    :class:`RqRedisSettings`. Responses stay bytes, the shape RQ reads.
+    """
+    return {**rq_settings().redis.client_kwargs(), "decode_responses": False}

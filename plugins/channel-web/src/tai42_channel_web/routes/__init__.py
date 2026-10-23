@@ -2,10 +2,10 @@
 
 Importing this package registers every door as a side effect: each door submodule
 carries its ``@tai42_app.http.custom_route`` declaration, and the imports at the foot
-of this module load all seven.
+of this module load them all.
 
-The chat doors are PUBLIC; the entry-gate management doors are AUTHED — they carry the
-platform api key and declare an explicit action-class.
+The chat doors are PUBLIC; the entry-gate and words management doors are AUTHED — they
+carry the platform api key and declare an explicit action-class.
 
 * ``GET /api/channels/web/chat/{identity}`` — the standalone chat page for one web
   route: the HTML shell around the built bundle. Mints AND registers the visitor's
@@ -64,8 +64,13 @@ refusals a caller must tell apart from their status alone — ``session_missing`
 ``web_transcript_store_off`` (501), and the upload door's ingestion refusals
 ``media_too_large`` (413), ``media_type_not_allowed`` (415),
 ``media_store_unavailable`` (503), ``media_read_failed`` (400) and ``invalid_upload``
-(400), and the message door's attachment-bind refusals ``media_unbindable`` (400) and
-``media_already_bound`` (409).
+(400), the message door's attachment-bind refusals ``media_unbindable`` (400) and
+``media_already_bound`` (409), and the answer door's refusals of a forwarded answer
+``answer_refused`` (400, the question may be answered again) and ``answer_retries_spent``
+(400, it can no longer be answered). A refusal the interactions door gave a reason for —
+the answer door's 400 and the react door's 400/409/413/502 — also carries that reason as
+``reason``, so a client can fill it into a sentence of its own; ``error`` is never more
+than that reason or the door's fixed line.
 
 The chat page door is the exception: its caller is a browser NAVIGATION, which would
 render a JSON body as text, so every refusal it answers is a minimal HTML page under
@@ -82,7 +87,9 @@ list, revoke codes and toggle the gate for a web route, keyed by the platform ap
 key, and each declares an explicit ``read``/``write`` action-class (an authed route
 with none fails to register). Entry codes are hashed at rest, multi-use, optionally
 expiring; the raw code is returned once at mint and never read back. A gate refuses
-uniformly.
+uniformly. The words doors (``GET`` / ``PUT`` / ``DELETE /api/channels/web/words/{identity}``)
+read, replace and clear a web route's own words: its refusal pages, drawn by the chat page
+door, and the widget's refusal sentences, handed to the bundle on ``#root``'s ``data-words``.
 
 Flood control on these doors is NOT this plugin's: the platform's public-door limiter
 bounds requests per caller ahead of them, and the operator's ingress bounds what
@@ -105,4 +112,5 @@ from tai42_channel_web.routes import (  # noqa: F401  (route registration side-e
     session_routes,
     stream_routes,
     upload_routes,
+    words_routes,
 )

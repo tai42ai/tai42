@@ -15,6 +15,7 @@ from typing import Any
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.app import tai42_app
 from tai42_contract.secrets import SecretValue
+from tai42_contract.tools import ToolRetryPolicy
 from tai42_kit.clients import RedisConnectionSettings, current_client_epoch
 from tai42_kit.settings import KeyMaterial, TaiBaseSettings
 
@@ -225,6 +226,45 @@ async def e2e_record(key: str, value: str) -> str:
         # The pooled client yields an async Redis; rpush returns an awaitable.
         await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", record))
     return "recorded"
+
+
+async def _fail_until(key: str, failures: int) -> int:
+    """Count this call on ``e2e:count:{key}``; raise ``ConnectionError`` while the count is at or
+    below ``failures``, else RPUSH ``{count, idempotency_key, pid}`` onto ``e2e:rec:{key}``."""
+    from collections.abc import Awaitable
+    from typing import cast
+
+    from tai42_contract.tools import TOOL_EXTRA_IDEMPOTENCY_KEY
+    from tai42_kit.clients import client_ctx
+    from tai42_kit.clients.impl.redis import RedisClient
+
+    async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
+        count = await cast(Awaitable[int], client.incr(f"e2e:count:{key}"))
+        if count <= failures:
+            raise ConnectionError(f"e2e_fail_until {key!r}: call {count} of {failures} failing calls")
+        record = json.dumps(
+            {
+                "count": count,
+                "idempotency_key": tai42_app.tools.extras().get(TOOL_EXTRA_IDEMPOTENCY_KEY),
+                "pid": os.getpid(),
+            }
+        )
+        await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", record))
+    return count
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_fail_until(key: str, failures: int) -> int:
+    """Raise ``ConnectionError`` on the first ``failures`` calls under ``key`` (counted on
+    ``e2e:count:{key}``), then record ``{count, idempotency_key, pid}`` on ``e2e:rec:{key}``.
+    Declares no retry policy, so the tool seam runs it once per call."""
+    return await _fail_until(key, failures)
+
+
+@tai42_app.tools.tool(tags={"e2e"}, retry=ToolRetryPolicy(max_attempts=3, idempotent=True))
+async def e2e_fail_until_retried(key: str, failures: int) -> int:
+    """The same counted failure, declared with a three-attempt retry policy the tool seam applies."""
+    return await _fail_until(key, failures)
 
 
 @tai42_app.tools.tool(tags={"e2e"})

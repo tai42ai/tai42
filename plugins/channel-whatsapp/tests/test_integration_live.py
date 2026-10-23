@@ -87,18 +87,19 @@ def live_clients(stub_app):
     reset_all_settings()
 
 
-async def test_send_message_returns_a_wamid():
+async def test_send_message_returns_a_wamid_and_the_recipient_wa_id():
     settings = whatsapp_settings()
     assert settings.default_phone_number_id is not None
     recipient = settings.allowed_recipients[0]
 
-    wamid = await send_message(
+    sent = await send_message(
         phone_number_id=settings.default_phone_number_id,
         to=recipient,
         body="tai42-channel-whatsapp live smoke: send_message",
     )
 
-    assert wamid.startswith("wamid.")
+    assert sent.wamid.startswith("wamid.")
+    assert sent.wa_id.isdigit()
 
 
 async def test_full_deliver_reaches_the_configured_human(monkeypatch: pytest.MonkeyPatch):
@@ -352,6 +353,25 @@ async def test_native_shapes_publish_without_validation_errors():
     }
     flow_json, _ = build_form_flow(native)
     assert "data_api_version" not in flow_json
+    async with _probe_flows() as flows:
+        created = await flows.create(_probe_name(), flow_json)
+        assert created.validation_errors == []
+
+
+@_needs_waba
+async def test_a_boolean_review_readback_publishes_without_validation_errors():
+    # The vendor authority for the review readback of a boolean: an ``If`` on the boolean's ``__val``
+    # carrier at the screen's top level, each branch one literal ``TextBody`` with the caller's word,
+    # created as a draft — Meta returns its validation errors for any shape it refuses.
+    schema = {
+        "type": "object",
+        "properties": {"agree": {"type": "boolean", "title": "Agree"}, "note": {"type": "string"}},
+    }
+    pages = [
+        {"title": "Ask", "fields": ["agree", "note"], "kind": "input"},
+        {"title": "Check", "fields": [], "kind": "review"},
+    ]
+    flow_json, _ = build_form_flow(schema, pages, boolean_words={"agree": ("Si", "No")})
     async with _probe_flows() as flows:
         created = await flows.create(_probe_name(), flow_json)
         assert created.validation_errors == []

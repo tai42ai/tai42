@@ -266,9 +266,9 @@ async def test_notify_attaches_video_audio_and_renders_document_line(fake_redis:
         MediaItem(kind=MediaKind.VIDEO, url="https://cdn.test/clip.mp4", caption=None),
         MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.test/r.pdf", filename="report.pdf"),
     ]
-    ids = await TwilioChannel().notify(ChannelNotification(message="Update.", media=media))
+    outcome = await TwilioChannel().notify(ChannelNotification(message="Update.", media=media))
 
-    assert ids == ["SM_rich"]
+    assert outcome.message_ids == ["SM_rich"]
     data = fake_httpx.calls[0]["data"]
     assert data["MediaUrl"] == ["https://cdn.test/clip.mp4"]
     assert data["Body"] == "Update.\nreport.pdf: https://cdn.test/r.pdf"
@@ -279,9 +279,9 @@ async def test_notify_document_only_renders_the_line_as_the_body(fake_redis: Fak
     # AS the Body (no leading blank line), with no MediaUrl at all.
     fake_httpx.responses.append(response(201, json={"sid": "SM_doconly"}))
     media = [MediaItem(kind=MediaKind.DOCUMENT, url="https://cdn.test/r.pdf", filename="report.pdf")]
-    ids = await TwilioChannel().notify(ChannelNotification(message="", media=media))
+    outcome = await TwilioChannel().notify(ChannelNotification(message="", media=media))
 
-    assert ids == ["SM_doconly"]
+    assert outcome.message_ids == ["SM_doconly"]
     data = fake_httpx.calls[0]["data"]
     assert data["Body"] == "report.pdf: https://cdn.test/r.pdf"
     assert "MediaUrl" not in data
@@ -302,9 +302,9 @@ async def test_notify_attaches_image_media_and_appends_links(fake_redis: FakeRed
         MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/x.png", caption=None),
         MediaItem(kind=MediaKind.LINK, url="https://docs.test/y", caption="doc"),
     ]
-    ids = await TwilioChannel().notify(ChannelNotification(message="Update.", media=media))
+    outcome = await TwilioChannel().notify(ChannelNotification(message="Update.", media=media))
 
-    assert ids == ["SM_media"]
+    assert outcome.message_ids == ["SM_media"]
     data = fake_httpx.calls[0]["data"]
     assert data["MediaUrl"] == ["https://cdn.test/x.png"]
     assert data["Body"] == "Update.\ndoc: https://docs.test/y"
@@ -315,9 +315,9 @@ async def test_notify_media_only_sends_a_body_less_mms(fake_redis: FakeRedis, fa
     # field is OMITTED entirely and only the MediaUrl rides — Twilio accepts that with media.
     fake_httpx.responses.append(response(201, json={"sid": "SM_mediaonly"}))
     media = [MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/x.png", caption=None)]
-    ids = await TwilioChannel().notify(ChannelNotification(message="", media=media))
+    outcome = await TwilioChannel().notify(ChannelNotification(message="", media=media))
 
-    assert ids == ["SM_mediaonly"]
+    assert outcome.message_ids == ["SM_mediaonly"]
     data = fake_httpx.calls[0]["data"]
     assert data["MediaUrl"] == ["https://cdn.test/x.png"]
     assert "Body" not in data  # no empty Body sent
@@ -331,9 +331,9 @@ async def test_notify_media_only_with_a_link_renders_the_link_as_the_body(fake_r
         MediaItem(kind=MediaKind.LINK, url="https://docs.test/y", caption="doc"),
         MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/x.png", caption=None),
     ]
-    ids = await TwilioChannel().notify(ChannelNotification(message="", media=media))
+    outcome = await TwilioChannel().notify(ChannelNotification(message="", media=media))
 
-    assert ids == ["SM_link"]
+    assert outcome.message_ids == ["SM_link"]
     data = fake_httpx.calls[0]["data"]
     assert data["Body"] == "doc: https://docs.test/y"
     assert data["MediaUrl"] == ["https://cdn.test/x.png"]
@@ -660,9 +660,9 @@ async def test_notify_missing_auth_token_raises_delivery_error_and_nothing_sent(
 async def test_notify_returns_message_sid(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     fake_httpx.responses.append(response(201, json={"sid": "SM_notify"}))
 
-    ids = await TwilioChannel().notify(ChannelNotification(message="Deploy finished."))
+    outcome = await TwilioChannel().notify(ChannelNotification(message="Deploy finished."))
 
-    assert ids == ["SM_notify"]
+    assert outcome.message_ids == ["SM_notify"]
 
 
 async def test_notify_sender_identity_sends_from_it_and_bypasses_whitelist(
@@ -672,11 +672,11 @@ async def test_notify_sender_identity_sends_from_it_and_bypasses_whitelist(
     # recipient allowlist NOT consulted (the recipient is off the allowlist here).
     fake_httpx.responses.append(response(201, json={"sid": "SM_bridge"}))
 
-    ids = await TwilioChannel().notify(
+    outcome = await TwilioChannel().notify(
         ChannelNotification(message="Reply.", recipient="+15559999999", sender_identity="+15550000042")
     )
 
-    assert ids == ["SM_bridge"]
+    assert outcome.message_ids == ["SM_bridge"]
     call = fake_httpx.calls[0]["data"]
     assert call["From"] == "+15550000042"  # sent from the routed identity, not CHANNEL_TWILIO_FROM
     assert call["To"] == "+15559999999"  # delivered to the initiator despite not being allowlisted
@@ -693,9 +693,9 @@ async def test_notify_no_sender_identity_uses_default_sender_and_enforces_whitel
     assert not fake_httpx.calls
 
     fake_httpx.responses.append(response(201, json={"sid": "SM_default"}))
-    ids = await TwilioChannel().notify(ChannelNotification(message="Reply.", recipient="+15550000003"))
+    outcome = await TwilioChannel().notify(ChannelNotification(message="Reply.", recipient="+15550000003"))
 
-    assert ids == ["SM_default"]
+    assert outcome.message_ids == ["SM_default"]
     assert fake_httpx.calls[0]["data"]["From"] == "+15550000001"  # CHANNEL_TWILIO_FROM
     assert fake_httpx.calls[0]["data"]["To"] == "+15550000003"
 
@@ -726,9 +726,9 @@ async def test_notify_sender_identity_falls_back_to_default_recipient_when_none_
     # sender_identity set but no recipient: the operator default is the destination.
     fake_httpx.responses.append(response(201, json={"sid": "SM_def"}))
 
-    ids = await TwilioChannel().notify(ChannelNotification(message="Reply.", sender_identity="+15550000042"))
+    outcome = await TwilioChannel().notify(ChannelNotification(message="Reply.", sender_identity="+15550000042"))
 
-    assert ids == ["SM_def"]
+    assert outcome.message_ids == ["SM_def"]
     assert fake_httpx.calls[0]["data"]["From"] == "+15550000042"
     assert fake_httpx.calls[0]["data"]["To"] == "+15550000002"  # CHANNEL_TWILIO_DEFAULT_RECIPIENT
 

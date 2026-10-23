@@ -30,6 +30,7 @@ from tai42_skeleton.conversations.turn.errors import (
     ConversationRouteResolutionError,
     EventTargetNotToolError,
     OperatorAppendError,
+    ThreadAddressUnknownError,
     ThreadNotFoundError,
     UnauthenticatedApiCallerError,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "ConversationRouteResolutionError",
     "EventTargetNotToolError",
     "OperatorAppendError",
+    "ThreadAddressUnknownError",
     "ThreadNotFoundError",
     "UnauthenticatedApiCallerError",
     "accept",

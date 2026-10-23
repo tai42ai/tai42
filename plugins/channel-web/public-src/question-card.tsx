@@ -18,10 +18,11 @@ import { Badge } from '@tai42/studio-sdk';
 import type { ReactElement, RefObject } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { ChatApiError } from '@/api';
+import { ANSWER_REFUSED_CODE, ANSWER_RETRIES_SPENT_CODE, ChatApiError } from '@/api';
 import { MediaItems } from '@/media-card';
 import { QuestionControls, type QuestionItem } from '@/question-controls';
-import type { CountdownWording, StatusWording } from '@/transcript-model';
+import type { AnswerWording, CountdownWording, StatusWording } from '@/transcript-model';
+import { fillToken } from '@/words';
 
 export type { QuestionItem };
 
@@ -48,14 +49,23 @@ export interface CountdownWords {
   readonly underTenSeconds: string;
 }
 
-/** The visitor-facing line for a failed answer send. A door rejection (HTTP 400)
- * carries the reason the answer was refused; when the send set a refusal sentence, it
- * is drawn with that reason substituted for its optional `{reason}` token (a plain
- * replace, never `String.replace`, whose replacement string would interpret `$&`/`$1`).
- * Any other failure keeps the widget's own refusal copy. */
-function rejectionMessage(err: unknown, rejected: string | null): string {
-  if (err instanceof ChatApiError && err.status === 400 && rejected !== null) {
-    return rejected.split('{reason}').join(err.message);
+/** The visitor-facing line for a failed answer send. The answer door's refusal of the
+ * answer carries a code: `answer_refused` while the question may be answered again,
+ * `answer_retries_spent` once it can no longer be; the send's own sentence for that code
+ * (`rejected` / `rejectedFinal`) is drawn with the door's reason filled into its optional
+ * `{reason}` token (nothing when the door gave none). Without a sentence for the code,
+ * and on every other failure, the line is the error's own message: the route's refusal
+ * words, already filled. */
+function rejectionMessage(err: unknown, answer: AnswerWording | null | undefined): string {
+  if (err instanceof ChatApiError && err.status === 400) {
+    const sentence =
+      err.code === ANSWER_RETRIES_SPENT_CODE
+        ? answer?.rejectedFinal
+        : err.code === ANSWER_REFUSED_CODE
+          ? answer?.rejected
+          : null;
+    if (sentence !== null && sentence !== undefined)
+      return fillToken(sentence, 'reason', err.reason ?? '').trim();
   }
   return err instanceof Error ? err.message : String(err);
 }
@@ -250,7 +260,7 @@ export function QuestionCard({
         },
         (err: unknown) => {
           setSending(false);
-          setError(rejectionMessage(err, question.wording?.answer?.rejected ?? null));
+          setError(rejectionMessage(err, question.wording?.answer));
           if (held && document.activeElement === document.body) cardRef.current?.focus();
         },
       );

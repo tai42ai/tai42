@@ -8,6 +8,7 @@ import json
 
 import httpx
 import pytest
+from tai42_contract.conversations.routes import ReplyTexts
 
 from .remote_harness import data_response, error_response, run_cli, visible
 
@@ -259,64 +260,85 @@ def test_conversations_create_omits_turns_per_hour_override_when_unset(monkeypat
     assert result.exit_code == 0, result.output
 
 
-def test_conversations_create_sets_error_reply_text(monkeypatch: pytest.MonkeyPatch) -> None:
+_CHANNEL_ROUTE_ARGS = [
+    "conversations",
+    "create",
+    "chat",
+    "--door",
+    "channel",
+    "--target-name",
+    "relay",
+    "--execution-key",
+    "svc",
+    "--channel",
+    "twilio",
+    "--identity",
+    "+15550001111",
+]
+
+_REPLY_FLAGS = [
+    ("--reply-error", "error"),
+    ("--reply-slow-down", "slow_down"),
+    ("--reply-pairing-linked", "pairing_linked"),
+    ("--reply-pairing-unlinked", "pairing_unlinked"),
+    ("--reply-pairing-not-linked", "pairing_not_linked"),
+    ("--reply-pairing-code-invalid", "pairing_code_invalid"),
+    ("--reply-pairing-code", "pairing_code"),
+    ("--reply-pairing-link-unavailable", "pairing_link_unavailable"),
+    ("--reply-pairing-unlink-unavailable", "pairing_unlink_unavailable"),
+    ("--reply-rejected-unsupported-type", "rejected_unsupported_type"),
+    ("--reply-rejected-too-large", "rejected_too_large"),
+    ("--reply-rejected-could-not-receive", "rejected_could_not_receive"),
+]
+
+
+def test_conversations_create_has_a_flag_for_every_reply_text() -> None:
+    assert sorted(member for _, member in _REPLY_FLAGS) == sorted(ReplyTexts.model_fields)
+
+
+@pytest.mark.parametrize(("flag", "member"), _REPLY_FLAGS)
+def test_conversations_create_sets_one_reply_text(monkeypatch: pytest.MonkeyPatch, flag: str, member: str) -> None:
     text = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        assert body["error_reply_text"] == text
+        assert body["reply_texts"] == {member: text}
         return data_response({"created": True})
 
-    result = run_cli(
-        monkeypatch,
-        handler,
-        [
-            "conversations",
-            "create",
-            "chat",
-            "--door",
-            "channel",
-            "--target-name",
-            "relay",
-            "--execution-key",
-            "svc",
-            "--channel",
-            "twilio",
-            "--identity",
-            "+15550001111",
-            "--error-reply-text",
-            text,
-        ],
-    )
+    result = run_cli(monkeypatch, handler, [*_CHANNEL_ROUTE_ARGS, flag, text])
     assert result.exit_code == 0, result.output
 
 
-def test_conversations_create_omits_error_reply_text_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_conversations_create_packs_every_reply_text(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        assert "error_reply_text" not in body
+        assert body["reply_texts"] == {member: f"text for {member}" for _, member in _REPLY_FLAGS}
         return data_response({"created": True})
 
-    result = run_cli(
-        monkeypatch,
-        handler,
-        [
-            "conversations",
-            "create",
-            "chat",
-            "--door",
-            "channel",
-            "--target-name",
-            "relay",
-            "--execution-key",
-            "svc",
-            "--channel",
-            "twilio",
-            "--identity",
-            "+15550001111",
-        ],
-    )
+    args = [part for flag, member in _REPLY_FLAGS for part in (flag, f"text for {member}")]
+    result = run_cli(monkeypatch, handler, [*_CHANNEL_ROUTE_ARGS, *args])
     assert result.exit_code == 0, result.output
+
+
+def test_conversations_create_omits_reply_texts_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "reply_texts" not in body
+        return data_response({"created": True})
+
+    result = run_cli(monkeypatch, handler, _CHANNEL_ROUTE_ARGS)
+    assert result.exit_code == 0, result.output
+
+
+def test_conversations_create_surfaces_a_refused_reply_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["reply_texts"] == {"error": " "}
+        return error_response("reply_texts.error: must not be blank", 422)
+
+    result = run_cli(monkeypatch, handler, [*_CHANNEL_ROUTE_ARGS, "--reply-error", " "])
+    assert result.exit_code != 0
+    assert "reply_texts.error: must not be blank" in visible(result.output)
 
 
 def test_conversations_create_sets_locale(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -520,8 +542,7 @@ def test_conversations_create_help_says_the_error_reply_yields_to_the_targets_ow
     result = run_cli(monkeypatch, handler, ["conversations", "create", "--help"])
     assert result.exit_code == 0, result.output
     assert (
-        "Participant-facing reply sent when a turn on this route fails and the target supplied no reply of its "
-        "own; unset uses the built-in default."
+        "Reply sent when a turn fails and the target gave no reply of its own. Unset sends the built-in English text."
     ) in visible(result.output)
 
 
@@ -574,6 +595,74 @@ def test_conversations_delete_thread(monkeypatch: pytest.MonkeyPatch) -> None:
         ["conversations", "delete-thread", "chat", "bridge:chat:+15550001111/user-7"],
     )
     assert result.exit_code == 0, result.output
+
+
+def test_conversations_delete_person_of_an_absorbed_id_surfaces_the_409_and_exits_non_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = (
+        "conversation person 'p-old' was absorbed into person 'p-new' by a link and is not erased on its own: "
+        "erase 'p-new', which clears 'p-new' and every person it absorbed, 'p-old' included"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/conversations/persons/p-old"
+        return httpx.Response(409, json={"error": message, "absorbed_into_person_id": "p-new"})
+
+    result = run_cli(monkeypatch, handler, ["conversations", "delete-person", "p-old"])
+
+    assert result.exit_code != 0
+    shown = visible(result.output)
+    assert message in shown
+    assert "409" in shown
+
+
+def test_conversations_transcript_renders_send_records(monkeypatch: pytest.MonkeyPatch) -> None:
+    sends = [{"part": 0, "chars": 5, "provider_message_ids": ["wamid.1"]}]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return data_response(
+            {
+                "items": [
+                    {"message_id": "s1", "origin": "send", "delivery_status": "outcome_unknown", "sends": []},
+                    {"message_id": "s2", "origin": "send", "delivery_status": "sending", "sends": sends},
+                ]
+            }
+        )
+
+    result = run_cli(monkeypatch, handler, ["conversations", "transcript", "chat", "bridge:chat:+1"])
+
+    assert result.exit_code == 0, result.output
+    header, _rule, *rows = result.output.splitlines()
+    assert {"origin", "delivery_status", "sends"} <= set(header.split())
+    assert "outcome_unknown" in rows[0]
+    assert "send" in rows[0].split()
+    assert "sending" in rows[1]
+    assert "wamid.1" in rows[1]
+
+
+def test_conversations_get_message_renders_its_sends(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return data_response(
+            {
+                "message_id": "s1",
+                "origin": "send",
+                "delivery_status": "provisional",
+                "sends": [
+                    {"part": 0, "chars": 5, "provider_message_ids": ["wamid.1"]},
+                    {"part": 1, "chars": 7, "provider_message_ids": ["wamid.2", "wamid.3"]},
+                ],
+            }
+        )
+
+    result = run_cli(monkeypatch, handler, ["conversations", "get-message", "chat", "s1"])
+
+    assert result.exit_code == 0, result.output
+    rows = {line.split()[0]: line for line in result.output.splitlines()[2:]}
+    assert rows["origin"].split() == ["origin", "send"]
+    assert rows["delivery_status"].split() == ["delivery_status", "provisional"]
+    assert all(wamid in rows["sends"] for wamid in ("wamid.1", "wamid.2", "wamid.3"))
 
 
 def test_conversations_get_message(monkeypatch: pytest.MonkeyPatch) -> None:

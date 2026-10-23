@@ -52,6 +52,10 @@ def test_llm_settings_accessors_build():
     assert llm_settings_mod.llm_provider_settings().llm == "openai"
     assert llm_settings_mod.llm_settings().model == "gpt-4o"
     assert llm_settings_mod.embedding_settings().model == "text-embedding-3-small"
+    assert isinstance(llm_settings_mod.llm_store_connection_options(), llm_settings_mod.LlmStoreConnectionOptions)
+    assert isinstance(
+        llm_settings_mod.llm_checkpoint_connection_options(), llm_settings_mod.LlmCheckpointConnectionOptions
+    )
 
 
 def test_unset_temperature_absent_from_provider_kwargs():

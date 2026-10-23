@@ -170,6 +170,17 @@ async def test_inline_resume_returns_final(store, fake_redis):
     assert not await _due_present(store, fake_redis, "i1")  # due record cleared after a live-receiver terminal
 
 
+async def test_a_caller_resume_hands_the_continuation_no_quote_and_no_params(store, fake_redis):
+    await store.add(fake_redis, _caller_park(store, "i1"), idle_ttl=86400, to="caller")
+    async with _app():
+        outcome = await visit_module.visit(
+            target_name="t", cancel=[], resume=[ResumeItem(id="i1", payload={"value": 7})], start=None, extras={}
+        )
+    assert outcome.result["value"] == 7
+    assert outcome.result["reply_to_received"] is None
+    assert outcome.result["params_received"] is None
+
+
 async def test_inline_resume_reparks_user_only(store, fake_redis):
     await store.add(fake_redis, _caller_park(store, "i1"), idle_ttl=86400, to="caller")
     async with _app():

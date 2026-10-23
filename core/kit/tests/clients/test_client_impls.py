@@ -119,30 +119,6 @@ async def test_redis_create_rejects_unknown_kwarg():
         await redis_mod.RedisClient()._create(url="redis://localhost:6379/0", bogus=1)
 
 
-def test_redis_with_retry_zero_leaves_kwargs_unchanged():
-    redis_mod = _redis_mod()
-    out = redis_mod._with_retry({"url": "redis://x", "retry_attempts": 0})
-    assert "retry" not in out
-    assert "retry_on_error" not in out
-
-
-def test_redis_with_retry_builds_retry_async():
-    redis_mod = _redis_mod()
-    from redis.asyncio.retry import Retry
-
-    out = redis_mod._with_retry({"url": "redis://x", "retry_attempts": 3})
-    assert isinstance(out["retry"], Retry)
-    assert out["retry_on_error"]  # connection/timeout errors registered
-
-
-def test_redis_with_retry_builds_retry_sync():
-    redis_mod = _redis_mod()
-    from redis.retry import Retry
-
-    out = redis_mod._with_retry({"url": "redis://x", "retry_attempts": 2}, sync=True)
-    assert isinstance(out["retry"], Retry)
-
-
 async def test_redis_async_create_builds_through_the_kit_client_builder(monkeypatch):
     redis_mod = _redis_mod()
     captured = {}
@@ -204,7 +180,7 @@ async def test_redis_sync_create_and_close(monkeypatch):
         def close(self):
             self.closed = True
 
-    monkeypatch.setattr(redis_mod.SyncRedis, "from_url", staticmethod(lambda **kw: _FakeSyncRedis()))
+    monkeypatch.setattr(redis_mod.KitSyncRedis, "from_url", staticmethod(lambda **kw: _FakeSyncRedis()))
     client = await redis_mod.SyncRedisClient()._create(url="redis://localhost:6379/0")
     await redis_mod.SyncRedisClient()._close(client)
     # from_url is patched to yield the fake, so the returned client is one.
@@ -341,7 +317,7 @@ async def test_redis_sync_distinct_configurations_get_distinct_pooled_clients(mo
         def close(self):
             pass
 
-    monkeypatch.setattr(redis_mod.SyncRedis, "from_url", staticmethod(lambda **kw: _FakeSyncRedis(kw)))
+    monkeypatch.setattr(redis_mod.KitSyncRedis, "from_url", staticmethod(lambda **kw: _FakeSyncRedis(kw)))
     url = "redis://h:6379/0"
     client = redis_mod.SyncRedisClient()
     try:
@@ -801,5 +777,6 @@ def test_pg_pool_key_from_settings():
         "dsn": "postgresql://u:p@h:5433/d?connect_timeout=10&options=-c%20statement_timeout%3D60000",
         "min_size": 2,
         "max_size": 10,
+        "retry_attempts": 0,
         "env_prefix": "",
     }

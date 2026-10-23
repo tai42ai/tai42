@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from tai42_contract.conversations import ReplyTexts
 from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 
 from tai42_skeleton.conversations import caps as caps_module
@@ -39,7 +40,16 @@ async def test_accept_channel_happy_path(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", " +15550002222 ", " +15550002222 ", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        " +15550002222 ",
+        " +15550002222 ",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert agent.calls == [("hi", "bridge:line:+15550002222")]  # canonical address, reserved thread ns
@@ -61,9 +71,27 @@ async def test_accept_is_idempotent_on_provider_message_id(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
 
-    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    first = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
-    second = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi again", "PID1")
+    second = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi again",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert first == second
@@ -74,7 +102,16 @@ async def test_no_matching_route_raises_loudly(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_channel_route()))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": EchoAgent()})
     with pytest.raises(turn_module.ConversationRouteResolutionError):
-        await turn_module.accept("twilio", "+19999999999", "+15550002222", "+15550002222", "hi", "PID9")
+        await turn_module.accept(
+            "twilio",
+            "+19999999999",
+            "+15550002222",
+            "+15550002222",
+            "hi",
+            "PID9",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
+        )
 
 
 async def test_two_routes_claiming_one_channel_identity_is_a_loud_corrupt_table(env, monkeypatch):
@@ -83,7 +120,16 @@ async def test_two_routes_claiming_one_channel_identity_is_a_loud_corrupt_table(
     _wire(monkeypatch, FakeManager(_channel_route("line-a"), _channel_route("line-b")))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": EchoAgent()})
     with pytest.raises(RuntimeError, match="routing table is inconsistent"):
-        await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PIDX")
+        await turn_module.accept(
+            "twilio",
+            "+15550001111",
+            "+15550002222",
+            "+15550002222",
+            "hi",
+            "PIDX",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
+        )
 
 
 async def test_blank_inbound_text_is_refused_before_any_state(env, monkeypatch):
@@ -94,7 +140,16 @@ async def test_blank_inbound_text_is_refused_before_any_state(env, monkeypatch):
 
     for blank in ("", "   ", "\t\n"):
         with pytest.raises(BlankInboundTextError):
-            await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", blank, "PID1")
+            await turn_module.accept(
+                "twilio",
+                "+15550001111",
+                "+15550002222",
+                "+15550002222",
+                blank,
+                "PID1",
+                medium_message_id=None,
+                reply_to_medium_message_id=None,
+            )
     await _settle()
 
     assert (await _store().list_by_status(frozenset(DeliveryStatus))).items == []
@@ -108,7 +163,16 @@ async def test_a_blank_accountable_cap_key_is_refused_loudly(env, monkeypatch):
 
     for blank in ("", "   ", "\t\n"):
         with pytest.raises(ValueError, match="non-blank"):
-            await turn_module.accept("twilio", "+15550001111", "+15550002222", blank, "hi", "PID1")
+            await turn_module.accept(
+                "twilio",
+                "+15550001111",
+                "+15550002222",
+                blank,
+                "hi",
+                "PID1",
+                medium_message_id=None,
+                reply_to_medium_message_id=None,
+            )
     await _settle()
 
     assert (await _store().list_by_status(frozenset(DeliveryStatus))).items == []
@@ -120,9 +184,27 @@ async def test_two_messages_from_one_address_remember_via_the_thread_id(env, mon
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
 
-    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID-A")
+    first = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "one",
+        "PID-A",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
-    second = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID-B")
+    second = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "two",
+        "PID-B",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     # Both turns ran on the one reserved thread id, so the agent's per-thread memory
@@ -144,11 +226,38 @@ async def test_rate_shed_records_the_paid_reply_and_the_silent_drop(env, monkeyp
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    admitted = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
+    admitted = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "one",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
-    replied = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
+    replied = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "two",
+        "PID2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
-    dropped = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "three", "PID3")
+    dropped = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "three",
+        "PID3",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     # Only the admitted message bought a turn.
@@ -173,6 +282,45 @@ async def test_rate_shed_records_the_paid_reply_and_the_silent_drop(env, monkeyp
     assert [n.message for n in channel.sends] == ["echo: one", intake_module._SLOW_DOWN_TEXT]
 
 
+async def test_rate_shed_sends_the_route_slow_down_reply_when_set(env, monkeypatch):
+    monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "1")
+    caps_module._CAPS_CACHE.clear()
+    agent = EchoAgent()
+    channel = FakeChannel()
+    spanish = "Vas muy rápido. Espera un momento."
+    _wire(monkeypatch, FakeManager(_channel_route(reply_texts=ReplyTexts(slow_down=spanish))), channel)
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
+    store = _store()
+
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "one",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
+    await _settle()
+    replied = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "two",
+        "PID2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
+    await _settle()
+
+    reply = await store.get_record(replied)
+    assert reply is not None
+    assert reply.answer == spanish
+    assert [n.message for n in channel.sends] == ["echo: one", spanish]
+
+
 async def test_a_blank_provider_message_id_is_refused_with_nothing_written(env, monkeypatch):
     # A blank id is not a usable idempotency key: every blank id on the channel names the
     # SAME dedupe marker, so the first such message would swallow every later one as its
@@ -184,7 +332,16 @@ async def test_a_blank_provider_message_id_is_refused_with_nothing_written(env, 
 
     for blank in ("", "   "):
         with pytest.raises(ValueError, match="provider_message_id must be a non-blank string"):
-            await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", blank)
+            await turn_module.accept(
+                "twilio",
+                "+15550001111",
+                "+15550002222",
+                "+15550002222",
+                "hi",
+                blank,
+                medium_message_id=None,
+                reply_to_medium_message_id=None,
+            )
     await _settle()
 
     assert agent.calls == []
@@ -204,7 +361,16 @@ async def test_a_shed_reply_that_loses_its_claim_writes_nothing_deliverable(env,
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
+    first = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "one",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     # The concurrent attempt committed between this one's fast-path read and its create.
     await env.set(ConversationsSettings().dedupe_key("twilio", "PID2"), first)
@@ -213,7 +379,16 @@ async def test_a_shed_reply_that_loses_its_claim_writes_nothing_deliverable(env,
         return None
 
     monkeypatch.setattr(ConversationRecordStore, "get_inbound_owner", _no_owner_yet)
-    owner = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
+    owner = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "two",
+        "PID2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await delivery_module.sweep_stalled_deliveries()
     await _settle()
 
@@ -235,7 +410,15 @@ async def test_accept_with_form_stamps_the_record_and_the_tool_payload(env, monk
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
     message_id = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "name: Alice\nsize: 42", "PID1", form=_FORM
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "name: Alice\nsize: 42",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+        form=_FORM,
     )
     await _settle()
 
@@ -255,7 +438,16 @@ async def test_accept_without_form_keeps_the_payload_byte_identical(env, monkeyp
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert "form" not in tools.calls[0]["arguments"]
@@ -274,7 +466,15 @@ async def test_accept_form_reaches_an_agent_target_as_text_only(env, monkeypatch
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
 
     message_id = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "name: Alice", "PID1", form={"name": "Alice"}
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "name: Alice",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+        form={"name": "Alice"},
     )
     await _settle()
 
@@ -299,6 +499,8 @@ async def test_accept_refuses_an_invalid_form_before_any_state(env, monkeypatch)
             "+15550002222",
             "hi",
             "PID1",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
             form=["nope"],  # type: ignore[arg-type]
         )
     await _settle()
@@ -316,14 +518,39 @@ async def test_shed_records_carry_the_inbound_form(env, monkeypatch):
     _wire_tool(monkeypatch, lambda kw: "ok")
     store = _store()
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "one",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     shed_with_reply = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "name: Alice", "PID2", form={"name": "Alice"}
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "name: Alice",
+        "PID2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+        form={"name": "Alice"},
     )
     await _settle()
     shed_silent = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "name: Bob", "PID3", form={"name": "Bob"}
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "name: Bob",
+        "PID3",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+        form={"name": "Bob"},
     )
     await _settle()
 
@@ -379,6 +606,8 @@ async def test_accept_with_attachments_and_location_stamps_record_and_the_tool_p
         "+15550002222",
         "see attached",
         "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
         attachments=[_DOC],
         location=_LOCATION,
     )
@@ -396,6 +625,7 @@ async def test_accept_with_attachments_and_location_stamps_record_and_the_tool_p
             "thread": "bridge:tool-line:+15550002222",
             "locale": None,
         },
+        "reply_window": {"state": "none", "closes_at": None},
     }
     assert kwargs == {
         **_BASELINE_CHANNEL_PAYLOAD,
@@ -419,7 +649,16 @@ async def test_accept_without_attachments_or_location_keeps_payload_byte_identic
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert "attachments" not in tools.calls[0]["arguments"]
@@ -439,7 +678,15 @@ async def test_accept_attachments_reach_an_agent_target_as_text_only(env, monkey
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
 
     message_id = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "see attached", "PID1", attachments=[_DOC]
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "see attached",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+        attachments=[_DOC],
     )
     await _settle()
 
@@ -457,7 +704,17 @@ async def test_accept_refuses_invalid_attachments_before_any_state(env, monkeypa
     _wire_tool(monkeypatch, lambda kw: "ok")
 
     with pytest.raises(ValueError, match="non-empty list when present"):
-        await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", attachments=[])
+        await turn_module.accept(
+            "twilio",
+            "+15550001111",
+            "+15550002222",
+            "+15550002222",
+            "hi",
+            "PID1",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
+            attachments=[],
+        )
     await _settle()
 
     assert await _store().get_inbound_owner("twilio", "PID1") is None
@@ -472,14 +729,39 @@ async def test_shed_records_carry_attachments_and_location(env, monkeypatch):
     _wire_tool(monkeypatch, lambda kw: "ok")
     store = _store()
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "one",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     shed_with_reply = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2", attachments=[_DOC]
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "two",
+        "PID2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+        attachments=[_DOC],
     )
     await _settle()
     shed_silent = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "three", "PID3", location=_LOCATION
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "three",
+        "PID3",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+        location=_LOCATION,
     )
     await _settle()
 
@@ -539,7 +821,15 @@ async def test_media_params_surface_on_target_payload(env, monkeypatch):
         "media_size": "1234",
     }
     message_id = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "see photo", "PID1", params=media_params
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "see photo",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+        params=media_params,
     )
     await _settle()
 
@@ -564,6 +854,8 @@ async def test_accept_with_form_tag_stamps_the_record_and_the_tool_payload(env, 
         "+15550002222",
         "name: Alice",
         "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
         form=_FORM,
         form_tag="ref-42",
     )
@@ -585,7 +877,15 @@ async def test_accept_without_form_tag_keeps_the_payload_byte_identical(env, mon
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
     message_id = await turn_module.accept(
-        "twilio", "+15550001111", "+15550002222", "+15550002222", "name: Alice", "PID1", form=_FORM
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "name: Alice",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+        form=_FORM,
     )
     await _settle()
 
@@ -604,7 +904,15 @@ async def test_accept_form_tag_requires_a_form_before_any_state(env, monkeypatch
 
     with pytest.raises(ValueError, match="form_tag rides a form submission"):
         await turn_module.accept(
-            "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", form_tag="ref-42"
+            "twilio",
+            "+15550001111",
+            "+15550002222",
+            "+15550002222",
+            "hi",
+            "PID1",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
+            form_tag="ref-42",
         )
     await _settle()
     assert await _store().get_inbound_owner("twilio", "PID1") is None
@@ -624,6 +932,8 @@ async def test_accept_form_tag_bound_is_enforced_before_any_state(env, monkeypat
             "+15550002222",
             "name: Alice",
             "PID1",
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
             form=_FORM,
             form_tag="has:colon",
         )
@@ -641,7 +951,16 @@ async def test_shed_records_carry_the_inbound_form_tag(env, monkeypatch):
     _wire_tool(monkeypatch, lambda kw: "ok")
     store = _store()
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "one",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     shed_with_reply = await turn_module.accept(
         "twilio",
@@ -650,6 +969,8 @@ async def test_shed_records_carry_the_inbound_form_tag(env, monkeypatch):
         "+15550002222",
         "name: Alice",
         "PID2",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
         form={"name": "Alice"},
         form_tag="tag-a",
     )
@@ -661,6 +982,8 @@ async def test_shed_records_carry_the_inbound_form_tag(env, monkeypatch):
         "+15550002222",
         "name: Bob",
         "PID3",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
         form={"name": "Bob"},
         form_tag="tag-b",
     )

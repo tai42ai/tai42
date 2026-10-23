@@ -25,13 +25,16 @@ from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksM
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.operations.errors import PermissionDeniedError
 
+from .._fakes.hook_runs import MarkRecorder
 from ..access_control.conftest import FakeAccessControlPg, make_pg_ctx
 from ..access_control.conftest import FakeRedis as AcFakeRedis
 from ..access_control.conftest import make_client_ctx as make_ac_client_ctx
 
 
-def _manager() -> InMemoryHooksManager:
-    return InMemoryHooksManager(HooksSettings())
+def _manager(hook_runs) -> InMemoryHooksManager:
+    manager = InMemoryHooksManager(HooksSettings())
+    hook_runs.use(manager)
+    return manager
 
 
 def _record_bound_keys(app) -> list[tuple[str, str | None]]:
@@ -70,15 +73,15 @@ async def test_a_keyless_record_that_reaches_the_fire_is_refused_and_runs_nothin
     app = make_app()
     keyless = HookParams.model_construct(name="h", topic="t", tool="noop", execution_key="", tool_kwargs={})
     with pytest.raises(PermissionDeniedError, match="binds no execution key"):
-        await InMemoryHooksManager._run_hook(keyless, {})
+        await InMemoryHooksManager._run_hook(keyless, {}, idempotency_key="run-1", mark_acted=MarkRecorder())
     assert app.tools.runs == []
 
 
-async def test_a_keyless_record_in_a_fan_out_fails_only_its_own_hook(make_app, caplog) -> None:
+async def test_a_keyless_record_in_a_fan_out_fails_only_its_own_hook(hook_runs, make_app, caplog) -> None:
     # The refusal surfaces on the existing per-hook error-outcome path: the rest of the
     # topic still fires, and the failure is logged rather than swallowed.
     app = make_app()
-    manager = _manager()
+    manager = _manager(hook_runs)
     await manager.register(
         HookParams(name="good", topic="t", tool="ok", execution_key="k-fire", execution_key_fingerprint="fp-k-fire")
     )
@@ -89,6 +92,7 @@ async def test_a_keyless_record_in_a_fan_out_fails_only_its_own_hook(make_app, c
 
     with caplog.at_level(logging.ERROR):
         await manager.on_event("t", {})
+        await hook_runs.drain()
 
     assert [name for name, _ in app.tools.runs] == ["ok"]
     assert any("bad" in record.getMessage() for record in caplog.records if record.levelno == logging.ERROR)
@@ -97,9 +101,9 @@ async def test_a_keyless_record_in_a_fan_out_fails_only_its_own_hook(make_app, c
 # -- one key per hook, per task ------------------------------------------------
 
 
-async def test_each_fired_hook_runs_under_its_own_key(make_app) -> None:
+async def test_each_fired_hook_runs_under_its_own_key(hook_runs, make_app) -> None:
     app = make_app()
-    manager = _manager()
+    manager = _manager(hook_runs)
     await manager.register(
         HookParams(name="a", topic="t", tool="tool_a", execution_key="k-a", execution_key_fingerprint="fp-k-a")
     )
@@ -112,15 +116,16 @@ async def test_each_fired_hook_runs_under_its_own_key(make_app) -> None:
     seen = _record_bound_keys(app)
 
     await manager.on_event("t", {})
+    await hook_runs.drain()
 
     # Each hook ran under exactly the key its own record names: a contextvar set inside
     # a task is invisible to its siblings, so no key bleeds across.
     assert dict(seen) == {"tool_a": "k-a", "tool_b": "k-b", "tool_c": "k-c"}
 
 
-async def test_a_hooks_key_is_bound_only_for_its_own_dispatch(make_app) -> None:
+async def test_a_hooks_key_is_bound_only_for_its_own_dispatch(hook_runs, make_app) -> None:
     app = make_app()
-    manager = _manager()
+    manager = _manager(hook_runs)
     await manager.register(
         HookParams(name="a", topic="t", tool="tool_a", execution_key="k-a", execution_key_fingerprint="fp-k-a")
     )
@@ -128,31 +133,33 @@ async def test_a_hooks_key_is_bound_only_for_its_own_dispatch(make_app) -> None:
 
     assert get_execution_identity() is None
     await manager.on_event("t", {})
+    await hook_runs.drain()
     assert seen == [("tool_a", "k-a")]
     # Released with the fire: the fan-out leaves nothing bound behind it.
     assert get_execution_identity() is None
 
 
-async def test_the_binding_is_released_after_a_failing_fire(make_app) -> None:
+async def test_the_binding_is_released_after_a_failing_fire(hook_runs, make_app) -> None:
     app = make_app(raise_tools={"boom"})
-    manager = _manager()
+    manager = _manager(hook_runs)
     await manager.register(
         HookParams(name="bad", topic="t", tool="boom", execution_key="k-a", execution_key_fingerprint="fp-k-a")
     )
 
     await manager.on_event("t", {})
+    await hook_runs.drain()
 
     assert [name for name, _ in app.tools.runs] == ["boom"]
     assert get_execution_identity() is None
 
 
-async def test_an_outer_binding_does_not_reach_the_hooks(make_app) -> None:
+async def test_an_outer_binding_does_not_reach_the_hooks(hook_runs, make_app) -> None:
     # The door binds the LINK's key around the fan-out, but each hook re-binds its own
     # inside its task — a hook is never fired under the door's key.
     from tai42_skeleton.authz.execution import bind_execution_identity
 
     app = make_app()
-    manager = _manager()
+    manager = _manager(hook_runs)
     await manager.register(
         HookParams(name="a", topic="t", tool="tool_a", execution_key="k-hook", execution_key_fingerprint="fp-k-hook")
     )
@@ -160,6 +167,7 @@ async def test_an_outer_binding_does_not_reach_the_hooks(make_app) -> None:
 
     async with bind_execution_identity("k-link", bound_fingerprint="fp-link"):
         await manager.on_event("t", {})
+        await hook_runs.drain()
         # The door's own binding is intact once the fan-out returns.
         outer = get_execution_identity()
         assert outer is not None
@@ -172,7 +180,7 @@ async def test_an_outer_binding_does_not_reach_the_hooks(make_app) -> None:
 
 
 async def test_a_fire_whose_key_no_longer_exists_is_refused_and_isolated(
-    monkeypatch: pytest.MonkeyPatch, make_app, caplog
+    hook_runs, monkeypatch: pytest.MonkeyPatch, make_app, caplog
 ) -> None:
     # The identity is built from the key's live grants, so deleting a key denies its
     # hook's next fire with no cascade, while the sibling with a live key still runs.
@@ -185,7 +193,7 @@ async def test_a_fire_whose_key_no_longer_exists_is_refused_and_isolated(
     monkeypatch.setattr(policy_module, "client_ctx", make_ac_client_ctx(AcFakeRedis()))
     monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=True))
 
-    manager = _manager()
+    manager = _manager(hook_runs)
     await manager.register(
         HookParams(
             name="live", topic="t", tool="tool_live", execution_key="k-live", execution_key_fingerprint="fp-k-live"
@@ -203,6 +211,7 @@ async def test_a_fire_whose_key_no_longer_exists_is_refused_and_isolated(
 
     with caplog.at_level(logging.ERROR):
         await manager.on_event("t", {})
+        await hook_runs.drain()
 
     assert [name for name, _ in app.tools.runs] == ["tool_live"]
     assert any("gone" in record.getMessage() for record in caplog.records if record.levelno == logging.ERROR)
@@ -210,7 +219,7 @@ async def test_a_fire_whose_key_no_longer_exists_is_refused_and_isolated(
 
 
 async def test_a_revoke_remint_of_the_execution_key_is_denied_not_run_as_admin(
-    monkeypatch: pytest.MonkeyPatch, make_app, caplog
+    hook_runs, monkeypatch: pytest.MonkeyPatch, make_app, caplog
 ) -> None:
     # ``svc`` (fingerprint F1) is revoked and the SAME user_id reminted admin-shaped
     # with a fresh F2: the record's F1 no longer matches, so the fire is DENIED at the
@@ -224,12 +233,13 @@ async def test_a_revoke_remint_of_the_execution_key_is_denied_not_run_as_admin(
     monkeypatch.setattr(policy_module, "client_ctx", make_ac_client_ctx(AcFakeRedis()))
     monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=True))
 
-    manager = _manager()
+    manager = _manager(hook_runs)
     await manager.register(
         HookParams(name="h", topic="t", tool="tool_svc", execution_key="svc", execution_key_fingerprint="F1")
     )
     # A normal fire under the unrevoked key still runs — the fingerprint matches.
     await manager.on_event("t", {})
+    await hook_runs.drain()
     assert [name for name, _ in app.tools.runs] == ["tool_svc"]
 
     # Revoke + remint the same user_id as the admin-shaped key with a fresh fingerprint.
@@ -238,6 +248,7 @@ async def test_a_revoke_remint_of_the_execution_key_is_denied_not_run_as_admin(
 
     with caplog.at_level(logging.ERROR):
         await manager.on_event("t", {})
+        await hook_runs.drain()
 
     # The tool did NOT run again: the fire was denied, not executed as the reminted admin.
     assert [name for name, _ in app.tools.runs] == ["tool_svc"]

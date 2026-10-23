@@ -3,7 +3,7 @@
 An async park stores a generic ``continuation_tool`` and the ``continuation_identity``
 to run it as. When the park resolves — a human/callback ANSWER, or the expiry
 reaper — the continuation fires EXACTLY ONCE, bound to the stored identity (never
-the answerer's), carrying only ``{interaction_id, answer}``. The seam is
+the answerer's), carrying only ``{interaction_id, answer, reply_to, params}``. The seam is
 flow-blind: it runs a registered tool name under a rebound execution identity and
 knows nothing of the driver's resume state.
 
@@ -14,8 +14,8 @@ whose claim commits fires the continuation.
 Delivery is DURABLE and AT-LEAST-ONCE, via a transactional outbox. Firing is a
 detached task, so a worker crash after the claim but before ``run_tool`` returns
 would otherwise lose the resume forever. To close that with ZERO window, the
-durable, self-contained, FLOW-BLIND continuation-due record (tool NAME +
-``{interaction_id, answer}`` + stored identity + fingerprint) is enqueued in the
+durable, self-contained, FLOW-BLIND continuation-due record (tool NAME + the answer, the
+quoted message's medium id and the params + stored identity + fingerprint) is enqueued in the
 SAME atomic MULTI as the resolving claim (``InteractionStore.record_answer``) —
 so a claimed answer can never exist without its due-record. Every resolution door
 (authenticated answer, callback answer, expiry reaper) funnels through that claim,
@@ -38,7 +38,6 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AbstractContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime
 from typing import Any, Final
-from uuid import NAMESPACE_URL, uuid5
 
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
@@ -49,6 +48,7 @@ from tai42_contract.interactions import (
     CallerAskLanding,
     DeliveryAddress,
     InteractionRequest,
+    InteractionResponse,
     ParkRunTakenDownError,
     ResumeBuffered,
     RunFailed,
@@ -64,6 +64,8 @@ from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
 from tai42_skeleton.app.root_task import spawn_root_task
 from tai42_skeleton.authz.execution import bind_execution_identity
+from tai42_skeleton.conversations.reply_to import resolve_ask_reply_to
+from tai42_skeleton.interactions.run_completion import apply_deferred_binding, run_completion_id
 from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
 from tai42_skeleton.interactions.store import ContinuationDue, InteractionStore
 from tai42_skeleton.runs.chokepoint import delivery_fire, resume_lineage, resume_origin
@@ -111,16 +113,6 @@ def _log_continuation_done(task: asyncio.Task[Any], tool: str, interaction_id: s
     exc = task.exception()
     if exc is not None:
         logger.error("interaction %s continuation %r failed", interaction_id, tool, exc_info=exc)
-
-
-def _completion_id(run_delivery_id: str) -> str:
-    """The per-run delivery id every ladder rung keys on — a uuid5 over the run's delivery identity.
-
-    A run has exactly one terminal, so keying on the RUN (not on whichever interaction's resume
-    reached the terminal) makes every sibling / re-park / nested ask of the run resolve to the SAME
-    id: an address fire dedupes, a waiting outcome writes once, a redelivery lands once.
-    """
-    return str(uuid5(NAMESPACE_URL, f"tai42:park-delivery:{run_delivery_id}"))
 
 
 def _is_nonterminal(result: Any) -> bool:
@@ -208,14 +200,19 @@ async def _run_continuation(
     caller_ask_landing: CallerAskLanding | None = None,
     chain_keys: Sequence[str] = (),
     *,
+    reply_to_medium_message_id: str | None,
+    params: dict[str, str] | None,
     mark_detached: bool = True,
 ) -> Any:
-    """Run ``tool`` with the park's ``{interaction_id, answer}`` in the park's continuation frame; RETURN its result.
+    """Run ``tool`` with ``{interaction_id, answer, reply_to, params}`` in the park's continuation frame.
+
+    ``reply_to`` is the message the answering reply quoted, resolved here from the ask's thread (so
+    a redelivery reads the record as it is then), as its JSON; ``None`` when the reply quoted none.
 
     The frame (:func:`_continuation_scope`) binds ``resume_origin(interaction_id)`` UNCONDITIONALLY
     (the origin names the interaction being resumed regardless of who receives the outcome); the
     parking run's call chain is restored (passed as ``continues_chain`` so the continuation tool's
-    own name is not re-added), and the ``run_tool`` return value is ALWAYS taken.
+    own name is not re-added), and the ``run_tool`` return value is ALWAYS taken and returned.
 
     An inline resume under a live caller passes ``mark_detached=False`` to run under that caller's
     budget. The run-DELIVERY context settle (re-establishing the stored context, or leaving the
@@ -225,9 +222,13 @@ async def _run_continuation(
     async with _continuation_scope(
         identity, fingerprint, interaction_id, park_context, caller_ask_landing, chain_keys, mark_detached=mark_detached
     ):
-        return await tai42_app.tools.run_tool(
-            tool, {"interaction_id": interaction_id, "answer": answer}, continues_chain=park_asked_by
+        reply_to = (
+            None
+            if reply_to_medium_message_id is None
+            else (await resolve_ask_reply_to(interaction_id, reply_to_medium_message_id)).model_dump(mode="json")
         )
+        arguments = {"interaction_id": interaction_id, "answer": answer, "reply_to": reply_to, "params": params}
+        return await tai42_app.tools.run_tool(tool, arguments, continues_chain=park_asked_by)
 
 
 async def _deliver_terminal(
@@ -270,7 +271,7 @@ async def _deliver_terminal(
             f"interaction {interaction_id!r} reached delivery with no stored run_delivery_id "
             "(a parkable run always mints one at its outermost start)"
         )
-    completion_id = _completion_id(run_delivery_id)
+    completion_id = run_completion_id(run_delivery_id)
     if delivery is not None and delivery.tool is not None:
         payload = {
             **(delivery.context or {}),
@@ -319,47 +320,6 @@ async def _deliver_terminal(
     logger.info(
         "interaction %s reached a terminal with no delivery address and no subject to track; outcome dropped",
         interaction_id,
-    )
-
-
-async def _apply_deferred_binding(
-    *,
-    deferred_binding: StateBinding | None,
-    run_input: Mapping[str, Any] | None,
-    door_id: str | None,
-    output: Any,
-    run_delivery_id: str | None,
-) -> None:
-    """Apply a parked run's DEFERRED door binding UPDATES at its real terminal, once per run.
-
-    The door that STARTED the run dropped its binding updates on the park (a pause is not a clean
-    output); they are applied HERE, over the run's real terminal ``output``, exactly as the live
-    dispatch would have. Keyed on the run's ``completion_id`` so an at-least-once redelivery
-    re-driving the same terminal replays the same ops idempotently. A run that carried no binding
-    (``deferred_binding`` None — a bindingless door, or a park stored before this deploy) is a
-    no-op; a stored binding with no run input or door id is a torn record and raises.
-    """
-    if deferred_binding is None:
-        return
-    if run_delivery_id is None:
-        raise RuntimeError(
-            "a parked run carries a deferred binding but no run_delivery_id to key its terminal apply on"
-        )
-    if run_input is None or door_id is None:
-        raise RuntimeError("a parked run's deferred binding is missing its run input or door id")
-    # The concrete process app the binding runtime applies through (``app.states``/``app.storage``).
-    # Function-local: a module-level edge into the app singleton would couple the detached-fire
-    # module to the whole server build at import.
-    from tai42_skeleton.app.instance import build_app
-    from tai42_skeleton.tools.state_binding import apply_binding_updates
-
-    await apply_binding_updates(
-        build_app(),
-        deferred_binding,
-        dict(run_input),
-        output,
-        door_id,
-        idempotency_scope=_completion_id(run_delivery_id),
     )
 
 
@@ -425,6 +385,8 @@ async def drive_and_deliver(
     tool: str,
     interaction_id: str,
     answer: Any,
+    reply_to_medium_message_id: str | None,
+    params: dict[str, str] | None,
     park_context: StateContext | None,
     park_asked_by: Sequence[str],
     caller_ask_landing: CallerAskLanding | None = None,
@@ -464,7 +426,7 @@ async def drive_and_deliver(
     without any inspection of the returned value.
 
     On a real terminal SUCCESS — both branches, a live inline receiver and a receiver-less drive —
-    the run's DEFERRED door binding updates apply over the terminal output (``_apply_deferred_binding``),
+    the run's DEFERRED door binding updates apply over the terminal output (``apply_deferred_binding``),
     so a run that parked to ask writes the door updates the pause dropped; never on a
     ``RunTerminalFailed`` or a re-park, matching the live apply which runs only on a clean output.
 
@@ -508,6 +470,8 @@ async def drive_and_deliver(
                 park_asked_by,
                 caller_ask_landing,
                 chain_keys,
+                reply_to_medium_message_id=reply_to_medium_message_id,
+                params=params,
                 mark_detached=not receives_outcome,
             )
     except RunTerminalFailed as exc:
@@ -554,7 +518,7 @@ async def drive_and_deliver(
     if receives_outcome:
         # A live inline receiver takes the run's outcome; nothing is fired. The run's deferred door
         # updates apply over the terminal output before the record is cleared.
-        await _apply_deferred_binding(
+        await apply_deferred_binding(
             deferred_binding=deferred_binding,
             run_input=run_input,
             door_id=door_id,
@@ -610,7 +574,7 @@ async def _deliver_run_outcome(
             reply=result.reply,
         )
         return
-    await _apply_deferred_binding(
+    await apply_deferred_binding(
         deferred_binding=deferred_binding,
         run_input=run_input,
         door_id=door_id,
@@ -636,6 +600,8 @@ def _spawn_detached_delivery(
     tool: str,
     interaction_id: str,
     answer: Any,
+    reply_to_medium_message_id: str | None,
+    params: dict[str, str] | None,
     park_context: StateContext | None,
     park_asked_by: Sequence[str],
     caller_ask_landing: CallerAskLanding | None,
@@ -662,6 +628,8 @@ def _spawn_detached_delivery(
             tool=tool,
             interaction_id=interaction_id,
             answer=answer,
+            reply_to_medium_message_id=reply_to_medium_message_id,
+            params=params,
             park_context=park_context,
             park_asked_by=park_asked_by,
             caller_ask_landing=caller_ask_landing,
@@ -699,9 +667,11 @@ def continuation_due_timing(settings: InteractionsSettings) -> tuple[int, int]:
 
 
 def dispatch_continuation(
-    store: InteractionStore, request: InteractionRequest, fingerprint: str | None, answer: Any
+    store: InteractionStore, request: InteractionRequest, fingerprint: str | None, response: InteractionResponse
 ) -> None:
-    """Fire ``request``'s stored continuation ONCE, as its stored identity — a no-op for a sync question.
+    """Fire ``request``'s stored continuation ONCE with ``response``, as its stored identity.
+
+    A no-op for a sync question.
 
     Call only after a TRUE claim, which has ALREADY enqueued the
     durable continuation-due record ATOMICALLY (see ``InteractionStore.record_answer``);
@@ -723,7 +693,9 @@ def dispatch_continuation(
         fingerprint=fingerprint,
         tool=request.continuation_tool,
         interaction_id=request.interaction_id,
-        answer=answer,
+        answer=response.answer,
+        reply_to_medium_message_id=response.reply_to_medium_message_id,
+        params=response.params,
         park_context=request.continuation_state_context,
         park_asked_by=request.asked_by,
         caller_ask_landing=request.caller_ask_landing,
@@ -756,6 +728,8 @@ def redeliver_continuation(store: InteractionStore, due: ContinuationDue) -> Non
         tool=due.tool,
         interaction_id=due.interaction_id,
         answer=due.answer,
+        reply_to_medium_message_id=due.reply_to_medium_message_id,
+        params=due.params,
         park_context=due.state_context,
         park_asked_by=due.asked_by,
         caller_ask_landing=due.caller_ask_landing,
@@ -770,9 +744,9 @@ def redeliver_continuation(store: InteractionStore, due: ContinuationDue) -> Non
 
 
 async def fire_continuation_after_claim(
-    r: Any, store: InteractionStore, request: InteractionRequest, answer: Any
+    r: Any, store: InteractionStore, request: InteractionRequest, response: InteractionResponse
 ) -> None:
-    """The shared post-claim seam both answer doors call after a TRUE claim.
+    """The shared post-claim seam both answer doors call after a TRUE claim of ``response``.
 
     Reads the stashed fire fingerprint and fires the stored continuation. A sync question is a
     no-op; an async park fires its continuation (the claim already made this the sole
@@ -781,7 +755,7 @@ async def fire_continuation_after_claim(
     if request.mode != "async" or request.continuation_tool is None:
         return
     fingerprint = await store.continuation_fingerprint(r, request.interaction_id)
-    dispatch_continuation(store, request, fingerprint, answer)
+    dispatch_continuation(store, request, fingerprint, response)
 
 
 def _current_state_context_for_park() -> StateContext | None:

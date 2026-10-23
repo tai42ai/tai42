@@ -20,8 +20,11 @@ from starlette.testclient import TestClient
 
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
+from tai42_skeleton.conversations.persons import ConversationPersonStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.thread_ids import route_thread_id
 
+from .conftest import create_record, standing_person
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 from .test_read_doors import _Caller, _DictManager
 
@@ -83,7 +86,8 @@ async def _seed() -> None:
     """One api-door record, written through the store the doors read."""
     store_cls = importlib.import_module("tai42_skeleton.conversations.records").ConversationRecordStore
     now = time.time()
-    await store_cls(ConversationsSettings()).create_record(
+    await create_record(
+        store_cls(ConversationsSettings()),
         ConversationRecord(
             message_id="t0",
             route_name="chat",
@@ -99,7 +103,7 @@ async def _seed() -> None:
             delivery_status=DeliveryStatus.DELIVERED,
             created_at=now,
             updated_at=now,
-        )
+        ),
     )
 
 
@@ -255,6 +259,7 @@ def delete_client(monkeypatch) -> tuple[TestClient, _RecordingSaver]:
     ctx = make_record_client_ctx(fake)
     monkeypatch.setattr(importlib.import_module("tai42_skeleton.conversations.records"), "client_ctx", ctx)
     monkeypatch.setattr(importlib.import_module("tai42_skeleton.conversations.thread_lease"), "client_ctx", ctx)
+    monkeypatch.setattr(importlib.import_module("tai42_skeleton.conversations.persons"), "client_ctx", ctx)
     router = _router()
 
     seam_pkg = router._delete_conversation_thread_op.__globals__["_pkg"]
@@ -297,7 +302,8 @@ async def _seed_channel_record(
     store_cls = importlib.import_module("tai42_skeleton.conversations.records").ConversationRecordStore
     now = time.time()
     answered = status is DeliveryStatus.DELIVERED
-    await store_cls(ConversationsSettings()).create_record(
+    await create_record(
+        store_cls(ConversationsSettings()),
         ConversationRecord(
             message_id=message_id,
             route_name="chat",
@@ -420,10 +426,11 @@ async def test_delete_thread_door_answers_503_when_a_foreign_worker_holds_the_le
 
 
 @pytest.fixture
-def person_delete_client(monkeypatch) -> tuple[TestClient, _RecordingSaver]:
+def person_delete_client(monkeypatch) -> tuple[TestClient, _RecordingSaver, FakeRecordRedis]:
     """The person-erase door mounted over the same fake redis (records AND the person store
     share it), with the checkpoint access path stubbed so the aggregated thread's memory
-    delete is captured rather than dialled at a real provider."""
+    delete is captured rather than dialled at a real provider. Answers the client, the saver and
+    the fake redis."""
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     fake = FakeRecordRedis()
     fake.seed_route("chat")
@@ -458,16 +465,69 @@ def person_delete_client(monkeypatch) -> tuple[TestClient, _RecordingSaver]:
     )
 
     routes = [Route("/api/conversations/persons/{person_id}", router.delete_conversation_person, methods=["DELETE"])]
-    return TestClient(Starlette(routes=routes), raise_server_exceptions=False), saver
+    return TestClient(Starlette(routes=routes), raise_server_exceptions=False), saver, fake
 
 
 async def test_delete_person_door_erases_an_unknown_person_idempotently(person_delete_client):
     # An unknown person is not a 404: the door answers 200 erased=false and forgets the
     # aggregated checkpoint regardless (reachable from the id alone).
-    client, saver = person_delete_client
+    client, saver, _fake = person_delete_client
 
     response = client.delete("/api/conversations/persons/p-unknown")
 
     assert response.status_code == 200
-    assert response.json()["data"] == {"person_id": "p-unknown", "removed": 0, "erased": False, "states_erased": 0}
+    assert response.json()["data"] == {
+        "person_id": "p-unknown",
+        "removed": 0,
+        "erased": False,
+        "states_erased": 0,
+        "absorbed_person_ids": [],
+    }
     assert saver.deleted == ["bridge:@person:p-unknown"]
+
+
+async def test_delete_person_door_answers_the_409_naming_the_absorbing_person(person_delete_client):
+    # An id a link absorbed: the door's 409 body carries the message and the survivor's id.
+    client, saver, fake = person_delete_client
+    settings = ConversationsSettings()
+    fake._strings[settings.person_key("s-1")] = "{}"
+    fake._strings[settings.person_absorbed_into_key("p-absorbed")] = "s-1"
+
+    response = client.delete("/api/conversations/persons/p-absorbed")
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "conversation person 'p-absorbed' was absorbed into person 's-1' by a link and is not erased on "
+        "its own: erase 's-1', which clears 's-1' and every person it absorbed, 'p-absorbed' included",
+        "absorbed_into_person_id": "s-1",
+    }
+    assert saver.deleted == []
+
+
+async def test_delete_person_door_answers_the_409_for_a_write_that_landed_while_the_erase_ran(
+    person_delete_client, monkeypatch
+):
+    # A write by the person in a thread its erase has not visited lands just before the final
+    # step: the door answers the retryable 409 naming the write, and the person's row and erase
+    # mark stand, so the retry finishes the erase.
+    client, _saver, fake = person_delete_client
+    settings = ConversationsSettings()
+    fake.seed_person(standing_person("p-1", "chat"))
+    late_thread = route_thread_id("chat", "+15550002009")
+    erase = ConversationPersonStore.erase
+
+    async def _with_a_late_write(self, person, absorbed_ids, visited):
+        fake._sadd(settings.writer_threads_key("p-1"), late_thread)
+        return await erase(self, person, absorbed_ids, visited)
+
+    monkeypatch.setattr(ConversationPersonStore, "erase", _with_a_late_write)
+
+    response = client.delete("/api/conversations/persons/p-1")
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": f"a write by 'p-1' in the thread {late_thread!r} landed while the erase of 'p-1' ran; "
+        "retry the erase, which clears that thread too",
+    }
+    assert fake._strings.get(settings.person_key("p-1")) is not None
+    assert fake._strings.get(settings.person_erasing_key("p-1")) is not None

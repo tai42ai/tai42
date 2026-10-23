@@ -144,13 +144,47 @@ async def test_build_passes_zero_keep_result_and_burst_through(worker_env) -> No
     assert worker_env.latest().kwargs["burst"] is True
 
 
+async def test_build_hands_the_worker_a_ready_pool_on_the_kit_connection_seam(worker_env, monkeypatch) -> None:
+    """The worker runs on a pool the kit built: the kit's logged retry and timeouts reach its
+    startup connect and every poll, and arq builds no pool (and runs no connect loop) of its own."""
+    from arq import ArqRedis
+    from tai42_kit.clients.impl.redis import _LoggedAsyncRetry
+
+    from tai42_backend_arq.settings import arq_settings, job_deserializer, job_serializer
+
+    monkeypatch.setenv("ARQ_REDIS_URL", "redis://configured:6391/4")
+    monkeypatch.setenv("ARQ_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("ARQ_SOCKET_TIMEOUT", "3")
+    monkeypatch.setenv("ARQ_QUEUE_NAME", "own:queue")
+    arq_settings.cache_clear()
+    try:
+        await _built()
+    finally:
+        arq_settings.cache_clear()
+
+    kwargs = worker_env.latest().kwargs
+    assert "redis_settings" not in kwargs
+    redis_pool = kwargs["redis_pool"]
+    assert isinstance(redis_pool, ArqRedis)
+    assert redis_pool.default_queue_name == "own:queue"
+    assert redis_pool.job_serializer is job_serializer
+    assert redis_pool.job_deserializer is job_deserializer
+    connection_kwargs = redis_pool.connection_pool.connection_kwargs
+    assert (connection_kwargs["host"], connection_kwargs["port"], connection_kwargs["db"]) == ("configured", 6391, 4)
+    assert connection_kwargs["decode_responses"] is False
+    assert connection_kwargs["socket_timeout"] == 3
+    assert connection_kwargs["socket_connect_timeout"] == 1
+    retry = connection_kwargs["retry"]
+    assert isinstance(retry, _LoggedAsyncRetry)
+    assert retry._budget == 2
+    assert retry._label == "ARQ_REDIS_URL"
+
+
 async def test_build_applies_the_redis_url_override(worker_env) -> None:
     await _built("--redis-url", "redis://elsewhere:6390/3")
 
-    redis_settings = worker_env.latest().kwargs["redis_settings"]
-    assert redis_settings.host == "elsewhere"
-    assert redis_settings.port == 6390
-    assert redis_settings.database == 3
+    connection_kwargs = worker_env.latest().kwargs["redis_pool"].connection_pool.connection_kwargs
+    assert (connection_kwargs["host"], connection_kwargs["port"], connection_kwargs["db"]) == ("elsewhere", 6390, 3)
 
 
 async def test_build_takes_the_warm_drain_window_from_settings(worker_env, monkeypatch) -> None:

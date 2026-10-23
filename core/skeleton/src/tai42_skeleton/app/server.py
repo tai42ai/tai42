@@ -57,13 +57,14 @@ from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from fastmcp.server.auth import TokenVerifier
     from fastmcp.tools import Tool
     from tai42_contract.app import PendingMessage, TaiApp
+    from tai42_contract.channels import SendOutcome
     from tai42_contract.connectors.models import ResolvedConnectionAuth
-    from tai42_contract.conversations import DeliveryReceipt, InboundMediaKind, InboundRejectionReason
+    from tai42_contract.conversations import AnswerPart, DeliveryReceipt, InboundMediaKind, InboundRejectionReason
     from tai42_contract.interactions.models import IngestedMedia, LocationElement, MediaItem, MediaOrigin
     from tai42_contract.presets import PresetStore
     from tai42_contract.tool_meta import ToolMetaStore
@@ -542,6 +543,8 @@ class TaiMCP(TaiMCPLifecycleMixin):
         cap_key: str,
         text: str,
         provider_message_id: str,
+        medium_message_id: str | None,
+        reply_to_medium_message_id: str | None,
         params: dict[str, str] | None = None,
         form: dict[str, Any] | None = None,
         attachments: "list[MediaItem] | None" = None,
@@ -558,6 +561,8 @@ class TaiMCP(TaiMCPLifecycleMixin):
             cap_key,
             text,
             provider_message_id,
+            medium_message_id,
+            reply_to_medium_message_id,
             params=params,
             form=form,
             attachments=attachments,
@@ -567,11 +572,30 @@ class TaiMCP(TaiMCPLifecycleMixin):
         )
 
     async def _conversation_record_delivery_status(
-        self, channel: str, provider_message_id: str, status: "DeliveryReceipt"
+        self, channel: str, provider_message_id: str, status: "DeliveryReceipt", *, errors: Any = None
     ) -> None:
         from tai42_skeleton.conversations import record_delivery_status
 
-        await record_delivery_status(channel, provider_message_id, status)
+        await record_delivery_status(channel, provider_message_id, status, errors=errors)
+
+    async def _conversation_send_recorded(
+        self,
+        *,
+        channel: str,
+        our_identity: str,
+        client_address: str,
+        content: "AnswerPart",
+        send: "Callable[[], Awaitable[SendOutcome]]",
+    ) -> "SendOutcome":
+        from tai42_skeleton.conversations import send_recorded
+
+        return await send_recorded(
+            channel=channel,
+            our_identity=our_identity,
+            client_address=client_address,
+            content=content,
+            send=send,
+        )
 
     async def _conversation_pending_messages(self, thread_id: str, *, after: str) -> "list[PendingMessage]":
         from tai42_skeleton.conversations import pending_messages
@@ -583,7 +607,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         *,
         channel_id: str,
         recipient: str,
-        sender_identity: str | None,
+        sender_identity: str,
         kind: str,
         reason: "InboundRejectionReason",
     ) -> None:

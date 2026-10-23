@@ -52,8 +52,10 @@ from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_bo
 from tai42_kit.settings import require, require_secret
 
 from tai42_channel_twilio.correlation import (
+    WHATSAPP_ADDRESS_PREFIX,
     already_seen,
     correlation_key,
+    mark_reply_window,
     mark_seen,
     twilio_correlation_store,
 )
@@ -193,6 +195,13 @@ async def twilio_inbound(request: Request) -> Response:
     # Inbound direction: To = the deployment's Twilio number, From = the human.
     twilio_number = form.get("To", "")
     human_number = form.get("From", "")
+
+    # Every WhatsApp message from the human — a correlated answer or media included — opens the
+    # 24-hour reply window from the sid's first receipt, so it advances before the ladder decides
+    # what the message is, and a retry after a raised ladder opens it from the same instant.
+    if human_number.startswith(WHATSAPP_ADDRESS_PREFIX):
+        await mark_reply_window(twilio_number, human_number, message_sid)
+    quoted_sid = _replied_message_sid(form)
     result = await tai42_app.channels.handle_inbound_answer(
         channel_id="twilio",
         correlation_key=correlation_key(twilio_number, human_number),
@@ -207,17 +216,30 @@ async def twilio_inbound(request: Request) -> Response:
             # identity and the party the turn cap holds accountable.
             cap_key=human_number,
             provider_message_id=message_sid,
+            # The MessageSid is also the id a later quote of this message names.
+            medium_message_id=message_sid,
+            reply_to_medium_message_id=quoted_sid,
             # A bridged (gone-ask / hard-mismatch) reply carries the Body verbatim.
             bridge_text=form.get("Body", ""),
         ),
     )
     if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
         # No pending question (unrelated text or expired) — route to the bridge.
-        return await _bridge_inbound(form, message_sid)
+        return await _bridge_inbound(form, message_sid, reply_to_medium_message_id=quoted_sid)
     # FORWARDED / RETRY_KEPT / BRIDGED: the ladder resolved (or already bridged) the
     # reply; ack 204 and mark the sid seen so a redelivery is not re-processed.
     await mark_seen(message_sid)
     return Response(status_code=204)
+
+
+def _replied_message_sid(form: dict[str, str]) -> str | None:
+    """The ``MessageSid`` of the message this one replies to, or ``None``.
+
+    Twilio sends ``OriginalRepliedMessageSid`` only on WhatsApp, for a reply to a message from
+    the last 7 days; an SMS never carries it. An absent or blank value quotes nothing.
+    """
+    sid = form.get("OriginalRepliedMessageSid")
+    return sid if sid is not None and sid.strip() else None
 
 
 def _media_count(form: dict[str, str]) -> int:
@@ -232,7 +254,9 @@ def _media_count(form: dict[str, str]) -> int:
     return int(raw)
 
 
-async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
+async def _bridge_inbound(
+    form: dict[str, str], message_sid: str, *, reply_to_medium_message_id: str | None
+) -> Response:
     """Route an uncorrelated inbound message into the conversation bridge.
 
     ``our_identity`` = To, ``client_address`` = From (verbatim). A text-only message
@@ -240,16 +264,17 @@ async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
     media item, bridging ONE served turn per item (``provider_message_id=f"{sid}-{N}"``)
     with the typed attachment and the parity ``media_*`` params — the ``Body`` caption
     rides the first item, a caption-less item a sanitised ``[kind]`` placeholder so the
-    turn is never blank. A permanent media failure notifies the participant once and acks;
-    a transient fetch/read fault propagates so Twilio redelivers. A message with no route
-    bound, or with no body and no media, is logged and success-acked (the provider must
-    not retry-storm a permanently-unrouted or empty message); a retryable overflow, a
-    message refused while the server reloads, or an infrastructure failure propagates as a
-    5xx so Twilio redelivers when its webhook URL carries the ``#rp=5xx`` override, rather
-    than silently dropping it.
+    turn is never blank. Every turn carries ``reply_to_medium_message_id``, the sid of the
+    message this one replies to (``None`` when it replies to none). A permanent media failure
+    notifies the participant once and acks; a transient fetch/read fault propagates so Twilio
+    redelivers. A message with no route bound, or with no body and no media, is logged and
+    success-acked (the provider must not retry-storm a permanently-unrouted or empty message);
+    a retryable overflow, a message refused while the server reloads, or an infrastructure
+    failure propagates as a 5xx so Twilio redelivers when its webhook URL carries the
+    ``#rp=5xx`` override, rather than silently dropping it.
     """
     try:
-        await _accept_inbound(form, message_sid)
+        await _accept_inbound(form, message_sid, reply_to_medium_message_id=reply_to_medium_message_id)
     except BlankInboundTextError as exc:
         logger.warning("blank Twilio inbound %s dropped: %s", message_sid, exc)
     except LookupError as exc:
@@ -258,7 +283,7 @@ async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
     return Response(status_code=204)
 
 
-async def _accept_inbound(form: dict[str, str], message_sid: str) -> None:
+async def _accept_inbound(form: dict[str, str], message_sid: str, *, reply_to_medium_message_id: str | None) -> None:
     """Accept the inbound as one text turn, or one served turn per MMS media item.
 
     The provider attests the From number, so it is both the conversation identity and
@@ -278,6 +303,8 @@ async def _accept_inbound(form: dict[str, str], message_sid: str) -> None:
             cap_key=client_address,
             text=form.get("Body", ""),
             provider_message_id=message_sid,
+            medium_message_id=message_sid,
+            reply_to_medium_message_id=reply_to_medium_message_id,
         )
         return
 
@@ -297,6 +324,7 @@ async def _accept_inbound(form: dict[str, str], message_sid: str) -> None:
             account_sid=account_sid,
             auth_token=auth_token,
             caption=caption,
+            reply_to_medium_message_id=reply_to_medium_message_id,
         )
 
 
@@ -310,6 +338,7 @@ async def _accept_media_item(
     account_sid: str,
     auth_token: str,
     caption: str | None,
+    reply_to_medium_message_id: str | None,
 ) -> None:
     """Fetch one MMS media item from Twilio, ingest it, and bridge one served turn.
 
@@ -353,6 +382,7 @@ async def _accept_media_item(
             declared_mime=content_type,
             message_sid=message_sid,
             index=index,
+            reply_to_medium_message_id=reply_to_medium_message_id,
         )
         return
 
@@ -364,6 +394,9 @@ async def _accept_media_item(
         cap_key=client_address,
         text=text,
         provider_message_id=provider_message_id,
+        # Every item's record comes from the one message, so each carries its MessageSid.
+        medium_message_id=message_sid,
+        reply_to_medium_message_id=reply_to_medium_message_id,
         attachments=[ingested.item],
         # Twilio redelivers a 5xx: an over-bound set is dropped (logged and counted), never the
         # participant's message.
@@ -393,6 +426,7 @@ async def _reject_media_item(
     declared_mime: str,
     message_sid: str,
     index: int,
+    reply_to_medium_message_id: str | None,
 ) -> None:
     """Notify the participant once that one media could not be received, then keep any caption.
 
@@ -423,6 +457,8 @@ async def _reject_media_item(
             cap_key=client_address,
             text=caption,
             provider_message_id=f"{message_sid}-{index}",
+            medium_message_id=message_sid,
+            reply_to_medium_message_id=reply_to_medium_message_id,
             params=bound_entry_params(
                 build_inbound_media_params(door="twilio", kind=kind, mime_type=declared_mime),
                 mode=OverBoundParamsMode.DROP,
@@ -465,7 +501,9 @@ async def twilio_status(request: Request) -> Response:
         return Response(status_code=204)
 
     try:
-        await tai42_app.conversations.record_delivery_status("twilio", message_sid, receipt)
+        await tai42_app.conversations.record_delivery_status(
+            "twilio", message_sid, receipt, errors=form.get("ErrorCode")
+        )
     except LookupError as exc:
         # Not a bridge outbound: it may be a ``notify_user`` send with no conversation
         # record. Post the receipt onto the originating trace via the send-outcome index;

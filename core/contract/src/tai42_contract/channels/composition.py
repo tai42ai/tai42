@@ -15,6 +15,7 @@ from tai42_contract.interactions.models import (
     LocationElement,
     MediaItem,
     Wording,
+    check_form_date_rules,
     check_form_property_names,
     check_wording_for_notification,
 )
@@ -137,6 +138,9 @@ def check_interactive_composition(
     * a form ``schema`` declares no top-level property named ``__proto__``
       (:func:`~tai42_contract.interactions.models.forms.check_form_property_names`), the one
       name a form drawn in a browser cannot keep — the same refusal an asked form meets.
+    * a form ``schema``'s date keys make sense
+      (:func:`~tai42_contract.interactions.models.form_dates.check_form_date_rules`), the same
+      build-time date rules an asked form meets.
     """
     _require_prompt_for_surfaces(message, media, location, options, sections, schema, noun)
     _check_surface_exclusivity(options, sections, schema, noun)
@@ -144,6 +148,7 @@ def check_interactive_composition(
     _check_template_standalone(template, media, location, options, sections, schema, header, footer, noun)
     if isinstance(schema, dict):
         check_form_property_names(schema)
+        check_form_date_rules(schema)
     if wording is not None:
         check_wording_for_notification(
             wording,

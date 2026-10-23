@@ -34,25 +34,16 @@ class ClientSettings(DefaultNamespaceMixin, TaiBaseSettings):
         raise NotImplementedError
 
 
-class RedisConnectionSettings(ClientSettings):
-    """Base Redis connection settings with unprefixed field names for a store to subclass with its own prefix."""
+class RedisConnectionOptions(TaiBaseSettings):
+    """Redis connection behaviour options, with no connection identity.
 
-    # Base with unprefixed field names — a product subclasses it with its own
-    # ``env_prefix``; excluded here so the unprefixed base is not a bogus group.
+    The base of :class:`RedisConnectionSettings`, and of a door's own namespace when the
+    door brings its own connection string and takes only its behaviour from settings.
+    """
+
+    # Behaviour-only base — a door subclasses it under its own prefix; excluded here so
+    # the unprefixed base is not a bogus group.
     registry_exclude: ClassVar[bool] = True
-
-    # Connection-identity fields fall back to the shared ``TAI_DEFAULT_*``
-    # namespace when this store's own namespace leaves them unset. Only identity
-    # is mapped — behavior knobs (timeouts, retries, pool bounds,
-    # ``decode_responses``) stay per-store.
-    tai_default_fields: ClassVar[Mapping[str, str]] = {
-        "redis_url": "redis_url",
-        "redis_max_connections": "redis_max_connections",
-    }
-
-    redis_url: str | None = None
-    redis_max_connections: int | None = None
-    decode_responses: bool = True
 
     # Resilience — opt-in. Defaults match redis-py's no-timeout/no-retry behavior,
     # so a feature that sets none of these connects exactly as a bare from_url.
@@ -62,7 +53,47 @@ class RedisConnectionSettings(ClientSettings):
     # which also applies to blocking commands.
     socket_connect_timeout: float | None = Field(default=None, gt=0)
     retry_on_timeout: bool = False
-    retry_attempts: int = 0  # >0 attaches an exponential-backoff Retry on ConnectionError/TimeoutError
+    # Re-tries after a first connection/timeout failure (total tries = 1 + n), with the
+    # kit's exponential backoff; each retried failure logs a WARNING. 0 = off.
+    retry_attempts: int = 0
+
+    def connection_options(self) -> dict[str, Any]:
+        """The behaviour knobs that are set, in the kwarg form ``redis_connection_options`` takes."""
+        options: dict[str, Any] = {}
+        if self.socket_timeout is not None:
+            options["socket_timeout"] = self.socket_timeout
+        if self.socket_connect_timeout is not None:
+            options["socket_connect_timeout"] = self.socket_connect_timeout
+        if self.retry_on_timeout:
+            options["retry_on_timeout"] = True
+        if self.retry_attempts > 0:
+            options["retry_attempts"] = self.retry_attempts
+        return options
+
+
+class RedisConnectionSettingsBase(ClientSettings, RedisConnectionOptions):
+    """Redis connection identity and behaviour, with no decode mode.
+
+    The base of :class:`RedisConnectionSettings`, and of a component's own connection
+    when its code fixes the decode mode at each connection: ``client_kwargs`` then
+    carries no ``decode_responses``, and every caller adds the one its code reads.
+    """
+
+    # Base with unprefixed field names — a product subclasses it with its own
+    # ``env_prefix``; excluded here so the unprefixed base is not a bogus group.
+    registry_exclude: ClassVar[bool] = True
+
+    # Connection-identity fields fall back to the shared ``TAI_DEFAULT_*``
+    # namespace when this store's own namespace leaves them unset. Only identity
+    # is mapped — behavior knobs (timeouts, retries, pool bounds, the decode mode)
+    # stay per-store.
+    tai_default_fields: ClassVar[Mapping[str, str]] = {
+        "redis_url": "redis_url",
+        "redis_max_connections": "redis_max_connections",
+    }
+
+    redis_url: str | None = None
+    redis_max_connections: int | None = None
 
     def client_kwargs(self) -> dict[str, Any]:
         """Connection kwargs for the pooled client — JSON-serializable only.
@@ -72,31 +103,56 @@ class RedisConnectionSettings(ClientSettings):
         select one pooled client per loop. For redis-py the connection options are the
         client's contract, so two components resolving to the same URL with different
         options get two clients by design — never a conflict. Every value must be
-        JSON-serializable: ``retry_attempts`` travels as an int and the redis client
-        turns it into a ``Retry`` object at construction time.
+        JSON-serializable: ``retry_attempts`` travels as an int and the kit's materialiser
+        (``redis_from_url_kwargs``) turns it into a ``Retry`` object at construction time.
 
         ``env_prefix`` names this store's component (so the client can name its own env
         var when ``redis_url`` is unset) and is a passenger, not identity — it never
-        splits a pool.
+        splits a pool. No decode mode is carried here; the caller adds it.
         """
-        kwargs: dict[str, Any] = {
+        return {
             "url": self.redis_url,
             "max_connections": self.redis_max_connections,
-            "decode_responses": self.decode_responses,
             "env_prefix": self.model_config.get("env_prefix") or "",
+            **self.connection_options(),
         }
-        if self.socket_timeout is not None:
-            kwargs["socket_timeout"] = self.socket_timeout
-        if self.socket_connect_timeout is not None:
-            kwargs["socket_connect_timeout"] = self.socket_connect_timeout
-        if self.retry_on_timeout:
-            kwargs["retry_on_timeout"] = True
-        if self.retry_attempts > 0:
-            kwargs["retry_attempts"] = self.retry_attempts
-        return kwargs
 
 
-class PostgresConnectionSettings(ClientSettings):
+class RedisConnectionSettings(RedisConnectionSettingsBase):
+    """Base Redis connection settings with unprefixed field names for a store to subclass with its own prefix.
+
+    The decode mode is a setting of the store (``<PREFIX>DECODE_RESPONSES``, default on).
+    """
+
+    registry_exclude: ClassVar[bool] = True
+
+    decode_responses: bool = True
+
+    def client_kwargs(self) -> dict[str, Any]:
+        """The base connection kwargs plus this store's ``decode_responses``."""
+        return {**super().client_kwargs(), "decode_responses": self.decode_responses}
+
+
+class PostgresConnectionOptions(TaiBaseSettings):
+    """Postgres connection behaviour options, with no connection identity.
+
+    The base of :class:`PostgresConnectionSettings`, and of a door's own namespace when
+    the door brings its own DSN and takes only its behaviour from settings.
+    """
+
+    # Behaviour-only base — a door subclasses it under its own prefix; excluded here so
+    # the unprefixed base is not a bogus group.
+    registry_exclude: ClassVar[bool] = True
+
+    # Re-attempts of connection establishment after its first failure (total tries = 1 + n),
+    # with the kit's exponential backoff (16 ms doubling, capped at 512 ms) and a WARNING per
+    # retried failure. Only establishing a connection is retried; a statement is never
+    # re-run. A pool build then waits at most (n + 1) x pg_connect_timeout plus the delays.
+    # 0 = a single attempt.
+    pg_retry_attempts: int = Field(default=0, ge=0)
+
+
+class PostgresConnectionSettings(ClientSettings, PostgresConnectionOptions):
     """Base Postgres connection settings loaded under a database's ``TAI_DATABASE_<NAME>_`` prefix."""
 
     # Base with unprefixed field names — the registry loads it under a database's
@@ -168,16 +224,17 @@ class PostgresConnectionSettings(ClientSettings):
     def client_kwargs(self) -> dict[str, Any]:
         """Connection kwargs for the pooled client — JSON-serializable only.
 
-        One pool per DSN per loop. ``min_size``/``max_size`` are this database's
-        deployment settings, read when the pool is built; a second settings prefix
-        resolving to the same DSN with different sizes raises rather than forking a
-        second pool. ``env_prefix`` rides along (not identity) so the client can
+        One pool per DSN per loop. ``min_size``/``max_size`` and ``retry_attempts`` are
+        this database's deployment build options, read when the pool is built; a second
+        settings prefix resolving to the same DSN with different values raises rather than
+        forking a second pool. ``env_prefix`` rides along (not identity) so the client can
         derive the owning component for the pool name.
         """
         return {
             "dsn": self.pg_dsn,
             "min_size": self.pg_min_connections,
             "max_size": self.pg_max_connections,
+            "retry_attempts": self.pg_retry_attempts,
             "env_prefix": self.model_config.get("env_prefix") or "",
         }
 

@@ -11,6 +11,7 @@ extras key so the undeclared-extras pre-check has a target to check against.
 from typing import Any
 
 from tai42_contract.app import tai42_app
+from tai42_contract.conversations import ReplyTo
 from tai42_contract.interactions import (
     ResumeBuffered,
     RunTerminalFailed,
@@ -21,7 +22,7 @@ from tai42_contract.tools import TOOL_META_PAUSES, current_tool_invocation
 
 
 @tai42_app.tools.tool(meta={TOOL_META_PAUSES: True})
-async def resume_tool(interaction_id: str, answer: Any) -> Any:
+async def resume_tool(interaction_id: str, answer: Any, reply_to: ReplyTo | None, params: dict[str, str] | None) -> Any:
     """A continuation face: branch on ``answer`` to return each outcome shape a driver produces.
 
     A terminal result records whether an ambient door ``ToolInvocation`` binding was present when it
@@ -55,6 +56,9 @@ async def resume_tool(interaction_id: str, answer: Any) -> Any:
         # The exact answer the continuation received, so a test can assert the resume
         # delivered the EFFECTIVE answer (a FORM's conditionally-hidden fields dropped).
         "answer_received": answer,
+        # The quoted message and the params the continuation received beside the answer.
+        "reply_to_received": reply_to,
+        "params_received": params,
     }
 
 

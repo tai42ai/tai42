@@ -115,7 +115,16 @@ async def _seed_channel_thread(monkeypatch, fake, channel: FakeChannel) -> str:
     thread (the same row the real conversations manager plants at route create)."""
     fake.seed_route("tool-line")
     _wire_tool(monkeypatch, lambda kw: "seed")
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hello", "SEED")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hello",
+        "SEED",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     channel.sends.clear()
     return "bridge:tool-line:+15550002222"
@@ -151,6 +160,7 @@ async def test_turn_block_on_the_event_door(env, monkeypatch):
             "thread": thread_id,
             "locale": None,
         },
+        "reply_window": {"state": "none", "closes_at": None},
     }
     assert kwargs["event"] == {"id": "evt-1", "kind": "provider.update", "payload": {"amount": 5}}
     assert result.thread_id == thread_id
@@ -421,7 +431,16 @@ async def test_event_on_a_linked_person_thread_carries_the_person_fields_like_a_
 
     # A message turn on the linked address aggregates to the @person thread and carries the
     # person fields in its payload.
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     message_kwargs = tools.calls[-1]["arguments"]
     assert message_kwargs["thread_id"].startswith(PERSON_THREAD_PREFIX)
@@ -478,7 +497,16 @@ async def test_event_on_a_linked_person_thread_never_writes_greets_or_classifies
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
     # A message turn establishes the @person thread AND runs the person-write path.
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
     assert ensure_calls  # the message turn wrote the person side
     assert classify_calls  # and classified the inbound text
@@ -544,7 +572,16 @@ async def test_event_runs_after_an_in_flight_message_turn_on_the_thread(env, mon
     monkeypatch.setattr(accessors_module, "_tools", lambda: tools)
 
     # The message turn creates the thread and holds the per-thread lease inside run_tool.
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await asyncio.wait_for(tools.first_entered.wait(), timeout=2.0)
 
     # The event submits behind the FIFO while the message turn holds the lease.
@@ -674,6 +711,7 @@ async def test_preset_target_sees_turn_and_event_under_its_payload_arg(env, monk
             "thread": thread_id,
             "locale": None,
         },
+        "reply_window": {"state": "none", "closes_at": None},
     }
     assert received["event"] == {"id": "evt-1", "kind": "provider.update", "payload": {"n": 1}}
     assert received["message"] is None

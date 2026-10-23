@@ -153,7 +153,7 @@ def test_range_order_and_the_one_sided_span_sentences():
     assert _kinds(errors) == {
         "end": (
             FormShapeKind.RANGE_ORDER,
-            {"rangeStart": "start"},
+            {"rangeStart": "start", "by": "date"},
             "The end date must be on or after the start date",
         ),
         "until": (FormShapeKind.RANGE_SPAN, {"maxDays": 2, "days": 5}, "Choose at most 2 days"),
@@ -206,6 +206,39 @@ def test_a_range_end_on_this_step_reads_its_start_from_an_earlier_step():
     }
     errors = form_shape_errors(_form(schema), {"start": "2026-03-10", "end": "2026-03-01"}, fields=["end"])
     assert [(error.field, error.kind) for error in errors] == [("end", FormShapeKind.RANGE_ORDER)]
+
+
+_TIMED_RANGE = {
+    "type": "object",
+    "properties": {
+        "start": {"type": "string", "format": "date"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start"},
+        "start_time": {"type": "string", "format": "time", "timeOf": "start"},
+        "end_time": {"type": "string", "format": "time", "timeOf": "end"},
+    },
+}
+
+
+def test_a_same_day_earlier_end_time_is_the_end_times_error_with_the_time_sentence():
+    answer = {"start": "2026-03-10", "end": "2026-03-10", "start_time": "10:00", "end_time": "09:00"}
+    assert _kinds(form_shape_errors(_form(_TIMED_RANGE), answer)) == {
+        "end_time": (
+            FormShapeKind.RANGE_ORDER,
+            {"rangeStart": "start", "by": "time"},
+            "The end time must be on or after the start time",
+        )
+    }
+    errors = form_shape_errors(_form(_TIMED_RANGE), answer, fields=["end", "end_time"])
+    assert [(error.field, error.kind) for error in errors] == [("end_time", FormShapeKind.RANGE_ORDER)]
+
+
+def test_shape_sentence_reads_the_order_by_date_or_by_time():
+    by_date = "The end date must be on or after the start date"
+    assert shape_sentence(FormShapeKind.RANGE_ORDER, {"by": "date"}) == by_date
+    assert (
+        shape_sentence(FormShapeKind.RANGE_ORDER, {"by": "time"}) == "The end time must be on or after the start time"
+    )
+    assert shape_sentence(FormShapeKind.RANGE_ORDER, {}) == by_date
 
 
 def test_a_hidden_field_is_neither_demanded_nor_checked():

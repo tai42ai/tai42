@@ -44,30 +44,37 @@ def _deadline() -> float:
 
 
 class _AttachmentMixin(_StatesServiceBase):
-    async def _admit_subject(self, state: str, subject: StateSubject) -> tuple[int, list[str], str]:
+    async def _admit_subject(
+        self, state: str, subject: StateSubject, *, admit_erasing: bool = False
+    ) -> tuple[int, list[str], str]:
         """Refuse a subject ``state`` does not admit, from one narrow declaration read.
 
         Returns the declaration's ``(version, subject_kinds, default_subject_kind)``; an undeclared
-        state raises :class:`StateNotFoundError`.
+        state raises :class:`StateNotFoundError`. ``admit_erasing`` as for
+        :meth:`_validate_subject_admitted`.
         """
         scalars = await self._store.declaration_scalars(state)
         if scalars is None:
             raise StateNotFoundError(f"no state declared as {state!r}")
-        await self._validate_subject_admitted(scalars[1], state, subject)
+        await self._validate_subject_admitted(scalars[1], state, subject, admit_erasing=admit_erasing)
         return scalars
 
     async def _validate_subject_admitted(
-        self, subject_kinds: list[str], state_name: str, subject: StateSubject
+        self, subject_kinds: list[str], state_name: str, subject: StateSubject, *, admit_erasing: bool = False
     ) -> None:
         """Refuse a subject the declared ``subject_kinds`` do not admit.
 
-        An undeclared kind, or — for kind ``person`` — an unknown person or a person whose target does
-        not match the subject's. The person store is reached through the conversations manager
-        (``get_conversations_manager().persons``) ONLY on the ``person`` branch (it refuses with a
-        501 without the redis conversations backend), so no state of another kind is gated on
-        redis. The write path calls this inside the record transaction, under the declaration
-        ``FOR SHARE`` lock, from the ``subject_kinds`` the locked declaration row returns — so the
-        subject is refused without a second declaration read.
+        An undeclared kind, or — for kind ``person`` — a person being erased
+        (:class:`PersonErasingError`, unless ``admit_erasing``), an unknown person, or a person whose
+        target does not match the subject's. ``admit_erasing`` is set only by the outbox apply's
+        replay of a save admitted when it was written: it reads the person as the erase does, so a
+        person whose row stands under its erase mark is admitted. The person store is reached
+        through the conversations manager (``get_conversations_manager().persons``) ONLY on the
+        ``person`` branch (it refuses with a 501 without the redis conversations backend), so no
+        state of another kind is gated on redis. The write path calls this inside the record
+        transaction, under the declaration ``FOR SHARE`` lock and the person gate, from the
+        ``subject_kinds`` the locked declaration row returns — so the subject is refused without a
+        second declaration read.
         """
         if subject.kind not in subject_kinds:
             raise SubjectRefusedError(
@@ -76,10 +83,37 @@ class _AttachmentMixin(_StatesServiceBase):
             )
         if subject.kind != PERSON_KIND:
             return
-        from tai42_skeleton.conversations.cache import get_conversations_manager
+        await self._admit_person(subject, admit_erasing=admit_erasing)
 
-        person = await get_conversations_manager().persons.get_by_id(subject.key)
+    async def _validate_written_subject_admitted(
+        self,
+        subject_kinds: list[str],
+        state_name: str,
+        subject: StateSubject,
+        canonical: StateSubject,
+        *,
+        admit_erasing: bool = False,
+    ) -> None:
+        """:meth:`_validate_subject_admitted` for a written subject, then the ``person`` it resolves to.
+
+        ``canonical`` is the subject the write lands on through the alias table. When it is another
+        subject of kind ``person``, the write changes that person's record, so the person is admitted
+        as a direct write on it would be. The write path calls this under the person gates of both.
+        """
+        await self._validate_subject_admitted(subject_kinds, state_name, subject, admit_erasing=admit_erasing)
+        if canonical != subject and canonical.kind == PERSON_KIND:
+            await self._admit_person(canonical, admit_erasing=admit_erasing)
+
+    async def _admit_person(self, subject: StateSubject, *, admit_erasing: bool = False) -> None:
+        """Refuse a ``person`` subject being erased, unknown, or of another target than the subject's."""
+        from tai42_skeleton.conversations.cache import get_conversations_manager
+        from tai42_skeleton.conversations.persons import PersonErasingError
+
+        persons = get_conversations_manager().persons
+        person = await persons.get_by_id(subject.key, include_erasing=admit_erasing)
         if person is None:
+            if not admit_erasing and await persons.is_erasing(subject.key):
+                raise PersonErasingError(subject.key, "a state write on its subject")
             raise SubjectRefusedError(
                 f"subject key {subject.key!r} of kind 'person' names no person in the identity store"
             )
@@ -88,6 +122,27 @@ class _AttachmentMixin(_StatesServiceBase):
                 f"person {subject.key!r} belongs to target {person.target_kind}/{person.target_name}, "
                 f"not the subject's {subject.target_kind}/{subject.target_name}"
             )
+
+    async def _admit_persons(self, subjects: list[StateSubject]) -> None:
+        """:meth:`_admit_person` for each of the ``person`` subjects a gated write names."""
+        for subject in subjects:
+            await self._admit_person(subject)
+
+    async def _refuse_erasing_persons(self, subjects: list[StateSubject]) -> None:
+        """Refuse, with :class:`PersonErasingError`, any of the ``person`` subjects that is being erased.
+
+        The check a write that admits nothing else makes under the person gate: a person with no row
+        and no erase mark passes.
+        """
+        if not subjects:
+            return
+        from tai42_skeleton.conversations.cache import get_conversations_manager
+        from tai42_skeleton.conversations.persons import PersonErasingError
+
+        persons = get_conversations_manager().persons
+        for subject in subjects:
+            if await persons.get_by_id(subject.key) is None and await persons.is_erasing(subject.key):
+                raise PersonErasingError(subject.key, "a state write on its subject")
 
     async def list_attachments(self, state: str | None = None, *, template: str | None = None) -> list[dict[str, Any]]:
         self._ensure_available()

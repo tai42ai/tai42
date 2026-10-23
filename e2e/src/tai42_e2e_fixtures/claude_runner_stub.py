@@ -145,12 +145,18 @@ def _script_reasoning(io: _Runner, start: dict[str, Any], session_id: str) -> No
 
 
 def _script_ask_sync(io: _Runner, start: dict[str, Any], session_id: str) -> None:
-    """A SYNC ask: block for the ``answer`` frame the adapter writes, then continue to terminal."""
+    """A SYNC ask: block for the ``answer`` frame the adapter writes, then continue to terminal.
+
+    The frame's ``answer`` is the ask's answer object ``{answer, reply_to, params}``; the stub
+    reports the answer and the quoted message it carries."""
     io.ask(ask_id="ask-1", question="proceed?", mode="sync")
     frame = io.read_frame()
     if frame is None or frame.get("type") != "answer":
         raise RuntimeError(f"stub expected an answer frame, got {frame!r}")
-    io.result(session_id=session_id, result=f"answered:{frame.get('answer')!r}")
+    answered = frame.get("answer")
+    if not isinstance(answered, dict) or "answer" not in answered or "reply_to" not in answered:
+        raise RuntimeError(f"stub expected an answer object {{answer, reply_to, params}}, got {answered!r}")
+    io.result(session_id=session_id, result=f"answered:{answered['answer']!r} reply_to:{answered['reply_to']!r}")
 
 
 def _script_ask_async(io: _Runner, start: dict[str, Any], session_id: str) -> None:

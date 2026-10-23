@@ -1,4 +1,4 @@
-"""Keys a registrant sets in a tool's ``meta`` and the platform reads."""
+"""Keys a registrant sets in a tool's ``meta`` and the platform reads, and the extras keys the platform sets."""
 
 from __future__ import annotations
 
@@ -15,6 +15,10 @@ TOOL_META_BADGES: Final = "tai42/badges"
 TOOL_META_CRASH_RESUME: Final = "tai42/crash_resume"
 """Value ``True``: a detached recorded run of this tool (a hook or trigger fire, a background submit) found
 lost after a worker crash is resumed instead of left lost."""
+
+TOOL_EXTRA_IDEMPOTENCY_KEY: Final = "tai42/idempotency_key"
+"""The extras key under which the platform passes a run's idempotency key: the same value on every
+attempt and replay of one logical run, so a tool that declares reading it can make a repeated call a no-op."""
 
 TOOL_META_PAUSES: Final = "tai42/pauses"
 """Value ``True``: this tool can pause — it can return a park signal (``SuspendedInteraction`` or

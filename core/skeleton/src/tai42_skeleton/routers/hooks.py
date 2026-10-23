@@ -3,8 +3,10 @@
 The management doors are the ones the Studio's hooks UI consumes.
 
 - ``POST|GET /universal_webhook/{topic}`` (PUBLIC ingress) — external systems
-  deliver events here; the payload is parsed and dispatched to the topic's
-  registered hooks in the background. This is the most exposed door in the
+  deliver events here; the payload is parsed and kept as one hook run per
+  registered hook on the topic before the door answers, so a 200 ``accepted``
+  means the runs are kept; they then run, and are retried, asynchronously. A store
+  fault keeping them is a loud 500 and keeps nothing. This is the most exposed door in the
   system, so the ingress is bounded (body + query cap -> 413), parses hostile
   content types safely (entity-expansion off), and answers with ``nosniff`` +
   ``no-store``. Rate limiting lives in the app-level ``RateLimitMiddleware``.
@@ -16,9 +18,10 @@ The management doors are the ones the Studio's hooks UI consumes.
   passing verifier then declares its replay defense: a scheme carrying a stable
   per-delivery id yields a seen-set claim, and a delivery whose id was already
   claimed within the window is a REPLAY — answered with the idempotent
-  ``already_seen`` 200, dispatching nothing, so no bound hook re-fires. This
-  ingress carries a discriminated status body (413/401/405/500/accepted/already_seen)
-  with custom headers and a background dispatch task, so it stays a native handler.
+  ``already_seen`` 200, keeping nothing, so no bound hook re-fires. The claim is taken
+  in the same store step that keeps the runs, so a delivery whose runs were not kept
+  is never answered ``already_seen``. This ingress carries a discriminated status body
+  (413/401/405/500/accepted/already_seen) with custom headers, so it stays a native handler.
 - ``GET /api/hooks`` (AUTHED) — list registered hooks (``?topic=`` filters) plus
   the per-topic verifier bindings under ``data.topic_verifiers`` and, under
   ``data.trigger_auth``, how a topic's webhook ingress door authenticates its caller
@@ -47,8 +50,14 @@ The management doors are the ones the Studio's hooks UI consumes.
   authenticated principal beside the token — a token holder without one gets a 403,
   and a credential the authentication backend does not admit (invalid, disabled, or
   role-governed and refused at this door's method) never reaches this handler. The
-  dispatch is gated on the link's bound execution key; each fired hook's tool call is
-  authorized against the HOOK's key.
+  payload is kept as hook runs before the door answers (a store fault is a loud 500),
+  and every attempt of each run is gated on the link's bound execution key; each fired
+  hook's tool call is authorized against the HOOK's key.
+- ``GET /api/hook-runs`` (AUTHED, ``read``) — list the kept hook runs
+  (``?status=outstanding|failed``, ``?limit=``, ``?cursor=``) with their totals, never their
+  payloads.
+- ``POST /api/hook-runs/{id}/retry`` (AUTHED, ``write``) — re-queue a failed hook run.
+- ``DELETE /api/hook-runs/{id}`` (AUTHED, ``write``) — discard a failed hook run.
 - ``POST /api/hooks/trigger-links`` (AUTHED, ``write``) — mint a trigger link.
 - ``GET /api/hooks/trigger-links`` (AUTHED, ``read``) — list trigger links.
 - ``DELETE /api/hooks/trigger-links/{name}`` (AUTHED, ``write``) — revoke by name.
@@ -67,7 +76,6 @@ import logging
 
 from fastapi import Request
 from pydantic import BaseModel
-from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import DeclaredRouteMetadata, tai42_app
 from tai42_contract.hooks import HookRegister, TopicVerifierBinding
@@ -75,13 +83,13 @@ from tai42_contract.webhooks import FreshnessWindow, SeenSetClaim
 from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 
 from tai42_skeleton.access_control.settings import access_control_settings
-from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.hooks.cache import get_hooks_manager
 from tai42_skeleton.hooks.payload_parser import parse_any_payload
-from tai42_skeleton.hooks.trigger_links import ResolvedTrigger, TriggerLinkError, resolve_trigger_token
+from tai42_skeleton.hooks.runs.models import DispatchKey, ReplayClaim
+from tai42_skeleton.hooks.trigger_links import TriggerLinkError, resolve_trigger_token
 from tai42_skeleton.middleware.rate_limit import SKELETON_DOOR_BUDGET
 from tai42_skeleton.operations import (
-    PermissionDeniedError,
+    BadRequestError,
     operation_metadata_of,
     register_operation_route,
 )
@@ -90,10 +98,13 @@ from tai42_skeleton.operations.hooks import TriggerLinkCreate
 from tai42_skeleton.operations.hooks import create_trigger_link as _create_trigger_link_op
 from tai42_skeleton.operations.hooks import delete_topic_verifier as _delete_topic_verifier_op
 from tai42_skeleton.operations.hooks import delete_trigger_link as _delete_trigger_link_op
+from tai42_skeleton.operations.hooks import discard_hook_run as _discard_hook_run_op
+from tai42_skeleton.operations.hooks import list_hook_runs as _list_hook_runs_op
 from tai42_skeleton.operations.hooks import list_hooks as _list_hooks_op
 from tai42_skeleton.operations.hooks import list_trigger_links as _list_trigger_links_op
 from tai42_skeleton.operations.hooks import list_verifiers as _list_verifiers_op
 from tai42_skeleton.operations.hooks import register_hook as _register_hook_op
+from tai42_skeleton.operations.hooks import retry_hook_run as _retry_hook_run_op
 from tai42_skeleton.operations.hooks import set_topic_verifier as _set_topic_verifier_op
 from tai42_skeleton.operations.hooks import unregister_hook as _unregister_hook_op
 from tai42_skeleton.webhooks.settings import webhook_ingress_settings
@@ -110,13 +121,16 @@ _INGRESS_HEADERS = {"X-Content-Type-Options": "nosniff", "Cache-Control": "no-st
 # authenticated principal — actionable, and reachable only by a token holder.
 _API_KEY_REQUIRED = "this trigger link requires an authenticated api key"
 
+# The body of the 500 an ingress door answers when the event's runs could not be kept.
+_ACCEPT_FAILED = "accept failed"
+
 
 def _error(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code, headers=dict(_INGRESS_HEADERS))
 
 
-def _ingress_json(payload: dict, status_code: int = 200, background: BackgroundTask | None = None) -> JSONResponse:
-    return JSONResponse(payload, status_code=status_code, headers=dict(_INGRESS_HEADERS), background=background)
+def _ingress_json(payload: dict, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(payload, status_code=status_code, headers=dict(_INGRESS_HEADERS))
 
 
 def _sanitize_topic_for_log(topic: str) -> str:
@@ -134,8 +148,8 @@ def _sanitize_topic_for_log(topic: str) -> str:
 class WebhookIngressResult(BaseModel):
     """The webhook ingress door's raw (non-enveloped) 200 body.
 
-    The delivery's disposition (``accepted`` for a dispatched delivery,
-    ``already_seen`` for an idempotent replay that dispatched nothing) and the topic it
+    The delivery's disposition (``accepted`` for a delivery whose hook runs are kept,
+    ``already_seen`` for an idempotent replay that kept nothing) and the topic it
     addressed.
     """
 
@@ -160,7 +174,7 @@ class WebhookIngressResult(BaseModel):
     ),
 )
 async def universal_webhook(request: Request) -> Response:
-    """Ingest a public webhook delivery for ``{topic}`` and dispatch it in the background."""
+    """Ingest a public webhook delivery for ``{topic}``: keep one hook run per hook on it, then answer."""
     topic = request.path_params["topic"]
     logger.info("--- INCOMING EVENT ON TOPIC: %s ---", _sanitize_topic_for_log(topic))
 
@@ -181,12 +195,12 @@ async def universal_webhook(request: Request) -> Response:
     # its topic's dispatched payload must therefore exclude the unauthenticated
     # query string (else a captured signed delivery replays with appended params).
     strip_query = False
+    claim: SeenSetClaim | None = None
     if binding is not None:
-        # ``_verify_ingress`` verifies, then consults the verifier's replay defense and
-        # claims the delivery's seen-set id: it returns a terminal response for a failed
-        # verification (401/405/500) OR a refused REPLAY (the idempotent already-seen
-        # 200, dispatching nothing), and ``None`` only for a legitimate first delivery.
-        verify_response, strip_query = await _verify_ingress(request, raw, binding, topic, manager)
+        # ``_verify_ingress`` verifies and reads the verifier's replay defense: it returns a
+        # terminal response for a failed verification (401/405/500), or the delivery's
+        # seen-set claim (``None`` for a freshness-window scheme) for the accept to take.
+        verify_response, strip_query, claim = await _verify_ingress(request, raw, binding, topic)
         if verify_response is not None:
             return verify_response
 
@@ -195,8 +209,21 @@ async def universal_webhook(request: Request) -> Response:
     except ValueError as e:
         return _ingress_json({"status": "rejected", "topic": topic, "error": str(e)}, status_code=400)
 
-    task = BackgroundTask(manager.on_event, topic=topic, payload=payload)
-    return _ingress_json({"status": "accepted", "topic": topic}, background=task)
+    replay_claim = None if claim is None else ReplayClaim(claim.key, claim.ttl_seconds)
+    try:
+        result = await manager.on_event(topic=topic, payload=payload, replay_claim=replay_claim)
+    except Exception:
+        # Nothing was kept and no delivery id was claimed, so the sender's redelivery is
+        # processed fresh. Loud 500, logged.
+        logger.error("webhook accept failed for topic %s", _sanitize_topic_for_log(topic), exc_info=True)
+        return _error(VERIFY_ERROR if claim is not None else _ACCEPT_FAILED, 500)
+    if result.status == "already_seen":
+        # A delivery id already claimed within the window: a replay (or the sender's own
+        # redelivery). Refused loudly in the log, answered with the idempotent already-seen
+        # 200: nothing is kept, no hook re-fires.
+        logger.warning("webhook replay refused for topic %s (delivery id already seen)", _sanitize_topic_for_log(topic))
+        return _ingress_json({"status": "already_seen", "topic": topic})
+    return _ingress_json({"status": "accepted", "topic": topic})
 
 
 class TriggerResult(BaseModel):
@@ -219,7 +246,7 @@ class TriggerResult(BaseModel):
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=True,
-        error_statuses=(400, 403, 404, 413, 501),
+        error_statuses=(400, 403, 404, 413, 500, 501),
         success_status=200,
         rate_limit_budget=SKELETON_DOOR_BUDGET,
     ),
@@ -244,9 +271,11 @@ async def trigger_link(request: Request) -> Response:
     holder); the payload rides query/body under the ingress byte cap; and the link's
     stored ``tool_kwargs`` merge into each fired hook's input BELOW that hook's own
     static ``tool_kwargs``, filling only the arguments its author left unpinned — a
-    link can never restate an argument the hook pinned. Every route-emitted
-    response (accepted / 404 / 403 / 400 / 413) carries ``nosniff`` + ``no-store`` — a
-    capability-URL response must never be cached.
+    link can never restate an argument the hook pinned. The accepted response means the
+    topic's hook runs are kept; a store fault keeping them is a loud 500. Every attempt of
+    each run binds the link's execution key, so a revoked link key fails the run, recorded
+    and notified. Every route-emitted response (accepted / 404 / 403 / 400 / 413 / 500)
+    carries ``nosniff`` + ``no-store`` — a capability-URL response must never be cached.
     """
     token = request.path_params["token"]
 
@@ -279,8 +308,18 @@ async def trigger_link(request: Request) -> Response:
         # No topic echoed on the rejection — the link hides its topic.
         return _ingress_json({"status": "rejected", "error": str(e)}, status_code=400)
 
-    task = BackgroundTask(_dispatch_trigger_link, resolved, payload)
-    return _ingress_json({"status": "accepted"}, background=task)
+    try:
+        await get_hooks_manager().on_event(
+            topic=resolved.topic,
+            payload=payload,
+            tool_kwargs_override=resolved.tool_kwargs,
+            dispatch_key=DispatchKey(resolved.execution_key, resolved.execution_key_fingerprint),
+        )
+    except Exception:
+        # Nothing was kept. Loud 500, logged; the topic stays out of the body.
+        logger.error("trigger accept failed for topic %r", resolved.topic, exc_info=True)
+        return _error(_ACCEPT_FAILED, 500)
+    return _ingress_json({"status": "accepted"})
 
 
 def _authenticated_caller(request: Request) -> bool:
@@ -296,47 +335,20 @@ def _authenticated_caller(request: Request) -> bool:
     return bool(request.user.is_authenticated)
 
 
-async def _dispatch_trigger_link(resolved: ResolvedTrigger, payload: dict) -> None:
-    """Dispatch a resolved link's topic under the LINK's own execution identity.
-
-    The bind wraps the whole fan-out, so nothing here runs with the server's unbounded
-    authority and a deleted/disabled/policy-less key refuses the dispatch before any hook
-    runs; each fired hook then re-binds its OWN key inside its own task.
-
-    That refusal is a routine revocation outcome landing after the ``accepted`` response,
-    so it is logged as an error outcome rather than raised. Everything else propagates.
-    """
-    try:
-        async with bind_execution_identity(
-            resolved.execution_key, bound_fingerprint=resolved.execution_key_fingerprint
-        ):
-            await get_hooks_manager().on_event(
-                topic=resolved.topic, payload=payload, tool_kwargs_override=resolved.tool_kwargs
-            )
-    except PermissionDeniedError as exc:
-        # A routine revocation outcome, not a crash: log the cause without a stack trace.
-        logger.error(  # noqa: TRY400 routine refusal outcome, not an unexpected error — no traceback
-            "hooks: trigger dispatch refused topic=%r execution_key=%r cause=%s",
-            resolved.topic,
-            resolved.execution_key,
-            exc,
-        )
-
-
 async def _verify_ingress(
-    request: Request, raw: bytes, binding: TopicVerifierBinding, topic: str, manager
-) -> tuple[Response | None, bool]:
-    """Verify the topic's bound verifier over the raw body, then enforce its replay defense.
+    request: Request, raw: bytes, binding: TopicVerifierBinding, topic: str
+) -> tuple[Response | None, bool, SeenSetClaim | None]:
+    """Verify the topic's bound verifier over the raw body, then read its replay defense.
 
-    Return ``(terminal_response, False)`` when the door must answer without dispatching
-    — a verification failure OR a refused replay — or ``(None, post_only)`` for a
-    legitimate first delivery, where ``post_only`` tells the caller whether to drop the
-    unauthenticated query string (True for a body-signature verifier).
+    Return ``(terminal_response, False, None)`` when the door must answer without keeping
+    anything (a verification failure), or ``(None, post_only, claim)`` for a verified
+    delivery: ``post_only`` tells the caller whether to drop the unauthenticated query string
+    (True for a body-signature verifier), and ``claim`` is the delivery's seen-set claim the
+    accept takes together with keeping the runs (``None`` for a freshness-window scheme,
+    whose verify already stale-rejects).
 
     Fails CLOSED on every failure path (:func:`verify_webhook`: 401 / 405 / 500 with the
-    constant bodies); a replay-store error or an unrecognized replay declaration is a 500. A
-    refused REPLAY is NOT a failure: it returns the idempotent already-seen 200 (nothing
-    dispatched), because the sender's redelivery of an id already handled is correct.
+    constant bodies); an unrecognized replay declaration is a 500.
     """
     safe_topic = _sanitize_topic_for_log(topic)
     try:
@@ -349,30 +361,17 @@ async def _verify_ingress(
             with_replay_defense=True,
         )
     except WebhookVerifyFailure as exc:
-        return _error(exc.message, exc.status), False
+        return _error(exc.message, exc.status), False, None
     defense = verdict.replay_defense
     if isinstance(defense, SeenSetClaim):
-        try:
-            fresh = await manager.claim_webhook_delivery(topic, defense.key, defense.ttl_seconds)
-        except Exception:
-            # The seen-set store is unreachable: refuse to dispatch undefended rather
-            # than let a possible replay through. Loud 500, logged.
-            logger.error("webhook replay-defense store error for topic %s", safe_topic, exc_info=True)
-            return _error(VERIFY_ERROR, 500), False
-        if not fresh:
-            # A delivery id already claimed within the window: a replay (or the
-            # sender's own redelivery). Refuse LOUDLY in the log, but answer the
-            # idempotent already-seen 200 — nothing is dispatched, no hook re-fires.
-            logger.warning("webhook replay refused for topic %s (delivery id already seen)", safe_topic)
-            return _ingress_json({"status": "already_seen", "topic": topic}), verdict.post_only
-    elif not isinstance(defense, FreshnessWindow):
-        # Both known forms are handled above and here (a FreshnessWindow needs no
-        # seen-set — its verify already stale-rejects). ANY other value is an
-        # unrecognized replay declaration: never dispatch it undefended. Fail CLOSED
-        # with a loud 500, logged — the same posture as a verifier bug.
+        return None, verdict.post_only, defense
+    if not isinstance(defense, FreshnessWindow):
+        # ANY value other than the two known forms is an unrecognized replay declaration:
+        # never keep it undefended. Fail CLOSED with a loud 500, logged — the same posture
+        # as a verifier bug.
         logger.error("webhook verify: unrecognized replay defense %r for topic %s", type(defense), safe_topic)
-        return _error(VERIFY_ERROR, 500), False
-    return None, verdict.post_only
+        return _error(VERIFY_ERROR, 500), False, None
+    return None, verdict.post_only, None
 
 
 # -- Hook management (AUTHED) — HTTP-edge extractors --------------------------
@@ -384,6 +383,21 @@ async def _extract_list_query(request: Request) -> dict:
     A GET reads its parameters from the query string, never a body.
     """
     return {"topic": request.query_params.get("topic")}
+
+
+async def _extract_hook_runs_query(request: Request) -> dict:
+    """The ``?status=``, ``?limit=`` and ``?cursor=`` of the hook-runs listing as the operation's arguments.
+
+    A ``limit`` that is not an integer is a 400 here; the operation owns the range check.
+    """
+    ctx: dict = {"status": request.query_params.get("status"), "cursor": request.query_params.get("cursor")}
+    raw_limit = request.query_params.get("limit")
+    if raw_limit is not None:
+        try:
+            ctx["limit"] = int(raw_limit)
+        except ValueError as exc:
+            raise BadRequestError("'limit' must be an integer") from exc
+    return ctx
 
 
 async def _extract_hook_params(request: Request) -> dict:
@@ -495,6 +509,31 @@ delete_trigger_link = register_operation_route(
     tai42_app,
     operation_metadata_of(_delete_trigger_link_op),
     path="/api/hooks/trigger-links/{name}",
+    method="DELETE",
+    action="write",
+)
+
+list_hook_runs = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_list_hook_runs_op),
+    path="/api/hook-runs",
+    method="GET",
+    context_extractor=_extract_hook_runs_query,
+    action="read",
+)
+
+retry_hook_run = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_retry_hook_run_op),
+    path="/api/hook-runs/{id}/retry",
+    method="POST",
+    action="write",
+)
+
+discard_hook_run = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_discard_hook_run_op),
+    path="/api/hook-runs/{id}",
     method="DELETE",
     action="write",
 )

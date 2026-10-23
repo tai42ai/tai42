@@ -168,7 +168,7 @@ async def test_ask_lands_in_the_live_web_conversation(bridge: BridgeHarness, uni
                 "ask",
                 {"question": question, "channel": "web", "recipient": web.recipient},
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:

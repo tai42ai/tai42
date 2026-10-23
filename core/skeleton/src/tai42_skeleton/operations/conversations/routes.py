@@ -16,6 +16,7 @@ from tai42_contract.conversations import (
     ConversationRouteBody,
     ConversationRouteCreateBody,
     OverlapPolicy,
+    ReplyTexts,
 )
 from tai42_contract.template import TemplatedText
 
@@ -154,7 +155,7 @@ async def create_conversation_route(
     our_identity: str | None = None,
     callback_url: str | None = None,
     turns_per_hour_override: int | None = None,
-    error_reply_text: str | None = None,
+    reply_texts: ReplyTexts | None = None,
     locale: str | None = None,
     overlap: OverlapPolicy | None = None,
 ) -> dict[str, Any]:
@@ -181,8 +182,10 @@ async def create_conversation_route(
     back from the poll door. A positive
     ``turns_per_hour_override`` runs this route's per-address buckets at that rate instead
     of the global ``per_address_turns_per_hour`` cap; ``None`` runs them at the global rate.
-    A non-blank ``error_reply_text`` is the participant-facing reply sent when a turn on this route
-    fails; ``None`` uses the built-in default.
+    A ``reply_texts`` catalogue carries the route's own words for the platform's fixed
+    participant replies (a failed turn, the slow-down line, the pairing replies, the inbound
+    refusal notices), in the line's language; ``None`` or an unset member sends the built-in
+    English reply.
     A ``locale`` is the operator-declared default language templated reply parts render in when
     a turn supplies none; it is the last fallback under a per-turn or stored-contact locale and
     is stored canonicalized. ``None`` declares no route default (bare/English).
@@ -211,7 +214,7 @@ async def create_conversation_route(
                 "our_identity": our_identity,
                 "callback_url": callback_url,
                 "turns_per_hour_override": turns_per_hour_override,
-                "error_reply_text": error_reply_text,
+                "reply_texts": reply_texts,
                 "locale": locale,
                 "overlap": overlap if overlap is not None else OverlapPolicy(),
             }

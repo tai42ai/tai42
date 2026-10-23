@@ -134,7 +134,7 @@ async def _fail_stranded_turn(store: ConversationRecordStore, record: Conversati
     transition leaves the existing outcome standing.
 
     The intake record carries its ``route_name``, so the participant-facing text resolves the
-    route's ``error_reply_text`` best-effort: the route is looked up through the conversations
+    route's ``reply_texts.error`` best-effort: the route is looked up through the conversations
     manager and ANY failure (manager unavailable, route gone, exception) falls back to the
     built-in default. This is an interrupted-turn/lease-lapse repair path, so it must never be
     less robust than a bare default — the lookup only ever upgrades the text, never blocks the

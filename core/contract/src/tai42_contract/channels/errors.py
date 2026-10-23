@@ -64,3 +64,21 @@ class AnswerForwardError(Exception):
     redelivery) re-runs the ladder and the answer is never silently lost. A channel
     lets it propagate out of its inbound webhook so the provider redelivers.
     """
+
+
+class ChannelAddressError(ChannelDeliveryError):
+    """Raised by :meth:`Channel.resolve_address` when the send's target cannot be resolved.
+
+    A caller-supplied recipient off the channel's operator allowlist, or no recipient and no
+    configured default: the send is refused before anything is recorded or sent. It is a
+    :class:`ChannelDeliveryError` that is never retryable, so every caller that handles a
+    refused send handles this one the same way.
+    """
+
+    def __init__(self, message: str) -> None:
+        """Build the error; an unresolvable target never lands on a retry.
+
+        Args:
+            message: The human-facing description of why the target cannot be resolved.
+        """
+        super().__init__(message, retryable=False)

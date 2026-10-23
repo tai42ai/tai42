@@ -62,6 +62,8 @@ def make_captured(monkeypatch) -> list[dict]:
         caller_ask_landing=None,
         chain_keys=(),
         *,
+        reply_to_medium_message_id,
+        params,
         mark_detached=True,
     ):
         calls.append(
@@ -75,6 +77,8 @@ def make_captured(monkeypatch) -> list[dict]:
                 "park_asked_by": park_asked_by,
                 "caller_ask_landing": caller_ask_landing,
                 "chain_keys": chain_keys,
+                "reply_to_medium_message_id": reply_to_medium_message_id,
+                "params": params,
             }
         )
         # A re-park sentinel: non-terminal, so the delivery ladder delivers nothing and the drive

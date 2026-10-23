@@ -25,6 +25,8 @@ from tai42_contract.agent.events import (
 )
 from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import ResolvedConnectionAuth
+from tai42_contract.conversations import ReplyTo, ReplyToStatus
+from tai42_contract.interactions import AskAnswer
 from tai42_contract.monitoring.models import SpanKind, TokenUsage
 from tai42_contract.template import TemplatedText
 
@@ -105,13 +107,17 @@ def test_sync_ask_is_answered_adapter_side(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(SYNC_ASK))
     asked: list[str] = []
 
+    quote = ReplyTo(message_id="M-1", status=ReplyToStatus.FOUND, text="the earlier message")
+
     async def ask(question: str, **_: Any) -> Any:
         asked.append(question)
-        return "blue"
+        return AskAnswer(answer="blue", reply_to=quote, params={"button_payload": "P1"})
 
     events = _run(build_local_app(ask=ask), user_message=TemplatedText(content="hi"))
     assert asked == ["color?"]
-    assert any(isinstance(e, MessageFinal) and "answer=blue" in e.text for e in events)
+    # The runner reads the same answer object a resumed run reads: the answer, its quote, its params.
+    handed = {"answer": "blue", "reply_to": quote.model_dump(mode="json"), "params": {"button_payload": "P1"}}
+    assert any(isinstance(e, MessageFinal) and f"answer={handed}" in e.text for e in events)
 
 
 def test_plain_sync_ask_forwards_the_form_fields_as_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -124,7 +130,7 @@ def test_plain_sync_ask_forwards_the_form_fields_as_none(monkeypatch: pytest.Mon
     async def ask(question: str, **kwargs: Any) -> Any:
         captured["question"] = question
         captured.update(kwargs)
-        return "blue"
+        return AskAnswer(answer="blue", reply_to=None, params=None)
 
     _run(build_local_app(ask=ask), user_message=TemplatedText(content="hi"))
     assert captured["answer_format"] == "text"
@@ -145,7 +151,7 @@ def test_sync_form_ask_forwards_schema_data_pages(monkeypatch: pytest.MonkeyPatc
     async def ask(question: str, **kwargs: Any) -> Any:
         captured["question"] = question
         captured.update(kwargs)
-        return {"color": "blue"}
+        return AskAnswer(answer={"color": "blue"}, reply_to=None, params=None)
 
     events = _run(build_local_app(ask=ask), user_message=TemplatedText(content="hi"))
     assert captured["question"] == "pick"
@@ -156,7 +162,11 @@ def test_sync_form_ask_forwards_schema_data_pages(monkeypatch: pytest.MonkeyPatc
     # A plain (non-reacting) form leaves the reaction fields unset.
     assert captured["reaction_tool"] is None
     assert captured["reactions"] is None
-    assert any(isinstance(e, MessageFinal) and "answer={'color': 'blue'}" in e.text for e in events)
+    assert any(
+        isinstance(e, MessageFinal)
+        and "answer={'answer': {'color': 'blue'}, 'reply_to': None, 'params': None}" in e.text
+        for e in events
+    )
 
 
 def test_proxied_tool_call_runs_under_run_tool(monkeypatch: pytest.MonkeyPatch) -> None:

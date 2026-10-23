@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import ChannelConversationRoute, ConversationRoute
 from tai42_contract.template import TemplatedText
+from tests._helpers import AddressingChannel
 from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.authz.identity import CallerIdentity
@@ -75,7 +76,7 @@ class MemorylessAgent(MemorylessTestAgent):
         return "unexpected"
 
 
-class FakeChannel:
+class FakeChannel(AddressingChannel):
     # A neutral fixture channel declares its OWN outbound split cap through the generic
     # ``max_message_chars`` seam, read off the channel by the conversation-delivery machine.
     max_message_chars = 1600
@@ -85,7 +86,7 @@ class FakeChannel:
 
     async def notify(self, notification):
         self.sends.append(notification)
-        return [f"out-{len(self.sends)}"]
+        return self.outcome(notification, [f"out-{len(self.sends)}"])
 
 
 class _FakeChannels:
@@ -391,6 +392,64 @@ async def test_operator_send_schema_to_incapable_channel_fails_the_record(env, m
         text="fill this in",
         operator_principal="op-1",
         schema={"type": "object", "properties": {"name": {"type": "string"}}},
+    )
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.FAILED
+    assert channel.sends == []
+
+
+async def test_operator_send_schema_outside_the_channel_subset_fails_the_record(env, monkeypatch):
+    # A form-capable channel still holds an operator form part to the channel subset at the send
+    # admission: a schema it cannot draw fails the record before any send, and an operator send
+    # earns no participant notice.
+    channel = RichFakeChannel()
+    route = _channel_route(target_kind="tool")
+    _wire(monkeypatch, FakeManager(route), None, channel)
+
+    message_id = await operator_send(
+        route=route,
+        thread_id="bridge:line:+15550002222",
+        client_address="+15550002222",
+        text="fill this in",
+        operator_principal="op-1",
+        schema={"type": "object", "properties": {"address": {"type": "object"}}},
+    )
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.FAILED
+    assert channel.sends == []
+
+
+class _TemplateCheckingChannel(RichFakeChannel):
+    """A template-capable channel whose ``validate_template`` refuses a ``reject`` parameter."""
+
+    def validate_template(self, template) -> None:
+        if template.parameters and "reject" in template.parameters:
+            raise ValueError("template parameter 'reject' has no slot on this channel")
+
+
+async def test_operator_send_template_the_channel_cannot_map_fails_the_record(env, monkeypatch):
+    # The channel's own template hook holds for an operator template send at the send admission:
+    # parameters it refuses fail the record before any send, with no participant notice.
+    from tai42_contract.channels import ChannelTemplate
+
+    channel = _TemplateCheckingChannel()
+    route = _channel_route(target_kind="tool")
+    _wire(monkeypatch, FakeManager(route), None, channel)
+
+    template = ChannelTemplate(name="status_update", language="en_US", parameters={"reject": True})
+    message_id = await operator_send(
+        route=route,
+        thread_id="bridge:line:+15550002222",
+        client_address="+15550002222",
+        text="your update is ready",
+        operator_principal="op-1",
+        template=template,
     )
     await _settle()
 

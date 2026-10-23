@@ -16,14 +16,16 @@ a PLATFORM EVENT captured on the hooks manager's ``on_event``.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery, ChannelNotification, Correlation
+from tai42_contract.channels import ChannelDelivery, ChannelNotification, Correlation, SendOutcome
 from tai42_contract.conversations import BlankInboundTextError
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.channels import inbound as inbound_module
@@ -59,30 +61,30 @@ class FakeStore:
         self.released.append(key)
 
 
-class RecordingChannel:
+class RecordingChannel(AddressingChannel):
     """A registered channel that records every participant notice handed to ``notify``."""
 
     def __init__(self) -> None:
         self.notifications: list[ChannelNotification] = []
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:  # pragma: no cover - unused
-        return None
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:  # pragma: no cover - unused
+        return self.outcome(delivery, [])
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         self.notifications.append(notification)
-        return []
+        return self.outcome(notification, [])
 
 
-class FailingNotifyChannel:
+class FailingNotifyChannel(AddressingChannel):
     """A channel whose ``notify`` raises — proves a notify failure is non-fatal."""
 
     def __init__(self) -> None:
         self.calls = 0
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:  # pragma: no cover - unused
-        return None
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:  # pragma: no cover - unused
+        return self.outcome(delivery, [])
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
+    async def notify(self, notification: ChannelNotification) -> SendOutcome:
         self.calls += 1
         raise RuntimeError("provider unreachable")
 
@@ -107,13 +109,15 @@ def _entry(**overrides) -> Correlation:
     return Correlation(**base)
 
 
-def _bridge(*, owns_retry_notice: bool = False) -> InboundBridge:
+def _bridge(*, owns_retry_notice: bool = False, reply_to_medium_message_id: str | None = None) -> InboundBridge:
     return InboundBridge(
         channel_id="fakechan",
         our_identity="op-1",
         client_address="+15550001111",
         cap_key="+15550001111",
         provider_message_id="prov-msg-1",
+        medium_message_id=None,
+        reply_to_medium_message_id=reply_to_medium_message_id,
         bridge_text="hello there",
         owns_retry_notice=owns_retry_notice,
     )
@@ -136,6 +140,8 @@ def wired(monkeypatch):
         cap_key,
         text,
         provider_message_id,
+        medium_message_id,
+        reply_to_medium_message_id,
         params=None,
         form=None,
         attachments=None,
@@ -151,6 +157,8 @@ def wired(monkeypatch):
                 cap_key=cap_key,
                 text=text,
                 provider_message_id=provider_message_id,
+                medium_message_id=medium_message_id,
+                reply_to_medium_message_id=reply_to_medium_message_id,
                 params=params,
             )
         )
@@ -171,11 +179,19 @@ def wired(monkeypatch):
 
 def _stub_forward(monkeypatch, response: httpx.Response | None = None, *, raises: Exception | None = None):
     """Replace the httpx forward seam: return ``response`` or raise ``raises``.
-    Records the (callback_url, answer, params) it was called with."""
+    Records the (callback_url, answer, params, medium ids) it was called with."""
     calls: list[SimpleNamespace] = []
 
-    async def _fake(callback_url, answer, params=None):
-        calls.append(SimpleNamespace(callback_url=callback_url, answer=answer, params=params))
+    async def _fake(callback_url, answer, params, medium_message_id, reply_to_medium_message_id):
+        calls.append(
+            SimpleNamespace(
+                callback_url=callback_url,
+                answer=answer,
+                params=params,
+                medium_message_id=medium_message_id,
+                reply_to_medium_message_id=reply_to_medium_message_id,
+            )
+        )
         if raises is not None:
             raise raises
         assert response is not None
@@ -222,7 +238,15 @@ async def test_2xx_releases_and_forwards(wired, monkeypatch):
     assert result.retry_field is None
     # The answer reached the door verbatim; the correlation was released; nothing
     # else happened.
-    assert forward_calls == [SimpleNamespace(callback_url=_CALLBACK_URL, answer="yes", params=None)]
+    assert forward_calls == [
+        SimpleNamespace(
+            callback_url=_CALLBACK_URL,
+            answer="yes",
+            params=None,
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
+        )
+    ]
     assert store.released == ["k"]
     assert wired.channel.notifications == []
     assert wired.accept_calls == []
@@ -534,7 +558,15 @@ async def test_callback_host_match_forwards(wired, monkeypatch):
     )
 
     assert result.outcome is InboundAnswerOutcome.FORWARDED
-    assert forward_calls == [SimpleNamespace(callback_url=_CALLBACK_URL, answer="yes", params=None)]
+    assert forward_calls == [
+        SimpleNamespace(
+            callback_url=_CALLBACK_URL,
+            answer="yes",
+            params=None,
+            medium_message_id=None,
+            reply_to_medium_message_id=None,
+        )
+    ]
     assert store.released == ["k"]
 
 
@@ -577,7 +609,11 @@ async def test_callback_with_an_explicit_default_port_forwards(wired, monkeypatc
     )
 
     assert result.outcome is InboundAnswerOutcome.FORWARDED
-    assert forward_calls == [SimpleNamespace(callback_url=explicit, answer="yes", params=None)]
+    assert forward_calls == [
+        SimpleNamespace(
+            callback_url=explicit, answer="yes", params=None, medium_message_id=None, reply_to_medium_message_id=None
+        )
+    ]
 
 
 async def test_callback_pin_fails_closed_when_public_base_unset(wired, monkeypatch):
@@ -720,6 +756,8 @@ def _bridge_with_params() -> InboundBridge:
         client_address="+15550001111",
         cap_key="+15550001111",
         provider_message_id="prov-msg-1",
+        medium_message_id="medium-7",
+        reply_to_medium_message_id="medium-3",
         bridge_text="hello there",
         params={"reply_id": "wamid.X", "referral": "ad-42"},
     )
@@ -737,7 +775,13 @@ async def test_bridge_params_forward_to_the_door_alongside_the_answer(wired, mon
 
     assert result.outcome is InboundAnswerOutcome.FORWARDED
     assert forward_calls == [
-        SimpleNamespace(callback_url=_CALLBACK_URL, answer="yes", params={"reply_id": "wamid.X", "referral": "ad-42"})
+        SimpleNamespace(
+            callback_url=_CALLBACK_URL,
+            answer="yes",
+            params={"reply_id": "wamid.X", "referral": "ad-42"},
+            medium_message_id="medium-7",
+            reply_to_medium_message_id="medium-3",
+        )
     ]
 
 
@@ -754,6 +798,40 @@ async def test_bridge_params_pass_to_accept_on_the_bridge_arm(wired, monkeypatch
     assert result.outcome is InboundAnswerOutcome.BRIDGED
     assert len(wired.accept_calls) == 1
     assert wired.accept_calls[0].params == {"reply_id": "wamid.X", "referral": "ad-42"}
+    assert wired.accept_calls[0].medium_message_id == "medium-7"
+    assert wired.accept_calls[0].reply_to_medium_message_id == "medium-3"
+
+
+class _RecordingClient:
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, dict]] = []
+
+    async def post(self, url: str, *, json: dict) -> httpx.Response:
+        self.posts.append((url, json))
+        return httpx.Response(200)
+
+
+def _record_posts(monkeypatch) -> _RecordingClient:
+    client = _RecordingClient()
+
+    @asynccontextmanager
+    async def _ctx(*args, **kwargs):
+        yield client
+
+    monkeypatch.setattr(tai42_app.clients, "client_ctx", _ctx)
+    return client
+
+
+async def test_the_forwarded_body_names_the_quoted_message_only_when_there_is_one(monkeypatch):
+    client = _record_posts(monkeypatch)
+
+    await inbound_module._forward_answer(_CALLBACK_URL, "yes", None, "medium-7", "medium-3")
+    await inbound_module._forward_answer(_CALLBACK_URL, "yes", None, "medium-8", None)
+
+    assert client.posts == [
+        (_CALLBACK_URL, {"answer": "yes", "medium_message_id": "medium-7", "reply_to_medium_message_id": "medium-3"}),
+        (_CALLBACK_URL, {"answer": "yes", "medium_message_id": "medium-8"}),
+    ]
 
 
 # -- on_mismatch policy: retry (default) vs bridge (digression) at the 400 seam --------
@@ -774,7 +852,7 @@ async def test_400_bridge_policy_keeps_correlation_bridges_and_sends_no_notice(w
     result = await handle_inbound_answer(
         channel_id="fakechan",
         correlation_key="k",
-        answer="tell me about refunds",
+        answer="tell me something else",
         store=store,
         bridge=_bridge_with_params(),
     )
@@ -873,3 +951,39 @@ async def test_bridge_policy_ignores_caller_rejected(wired, monkeypatch):
     await handle_inbound_answer(channel_id="fakechan", correlation_key="k", answer="huh", store=store, bridge=_bridge())
 
     assert wired.channel.notifications == []
+
+
+@pytest.mark.parametrize(
+    ("retry", "member", "built_in_filler"),
+    [
+        (True, "rejected", "The answer wasn't in the expected format."),
+        (False, "rejected_final", "The answer wasn't accepted."),
+    ],
+)
+async def test_a_caller_refusal_sentence_with_no_door_reason_leaves_the_token_empty(
+    wired, monkeypatch, retry, member, built_in_filler
+):
+    # The door gave no reason: the caller's sentence is drawn with its {reason} token empty, never
+    # the platform's English filler.
+    store = FakeStore(_entry(wording={"answer": {member: "No vale.{reason}"}}))
+    _stub_forward(monkeypatch, httpx.Response(400, json={"retry_in_place": retry}))
+
+    await handle_inbound_answer(channel_id="fakechan", correlation_key="k", answer="huh", store=store, bridge=_bridge())
+
+    assert wired.channel.notifications[0].message == "No vale."
+    assert built_in_filler not in wired.channel.notifications[0].message
+
+
+@pytest.mark.parametrize(
+    ("retry", "built_in_filler"),
+    [(True, "The answer wasn't in the expected format."), (False, "The answer wasn't accepted.")],
+)
+async def test_the_built_in_refusal_notice_with_no_door_reason_keeps_its_filler(
+    wired, monkeypatch, retry, built_in_filler
+):
+    store = FakeStore(_entry())
+    _stub_forward(monkeypatch, httpx.Response(400, json={"retry_in_place": retry}))
+
+    await handle_inbound_answer(channel_id="fakechan", correlation_key="k", answer="huh", store=store, bridge=_bridge())
+
+    assert built_in_filler in wired.channel.notifications[0].message

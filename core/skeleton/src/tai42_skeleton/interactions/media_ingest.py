@@ -41,7 +41,7 @@ from tai42_contract.interactions.models.media_errors import (
 from tai42_kit.interactions import MediaIngestCapSettings, media_ingest_cap_settings
 from tai42_kit.net.media_faults import media_rejection_reason
 
-from tai42_skeleton.channels.inbound import emit_inbound_media_ingested, emit_inbound_media_rejected
+from tai42_skeleton.channels.inbound_events import emit_inbound_media_ingested, emit_inbound_media_rejected
 from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.media_meta import inbound_media_blob_path
 from tai42_skeleton.settings.media_ingest import MediaIngestSettings, media_ingest_settings

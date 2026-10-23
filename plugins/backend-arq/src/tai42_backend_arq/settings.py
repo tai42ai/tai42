@@ -1,6 +1,7 @@
 """Settings and job (de)serializers for the arq backend.
 
-``ArqSettings`` reads the ``ARQ_`` env group and mixes in
+``ArqSettings`` reads the ``ARQ_`` env group, carries its Redis connection as
+:class:`ArqRedisSettings` (the kit's connection settings under ``ARQ_``), and mixes in
 :class:`~tai42_kit.backend.BackendDispatchSettings`, the surface the host and
 every execution backend must agree on for tool dispatch to meet
 (``manifest_key`` / ``task_timeout`` / ``tool_name_arg``): the names, defaults
@@ -21,16 +22,17 @@ from __future__ import annotations
 
 import asyncio
 import traceback
-from collections.abc import Mapping
-from typing import Any, ClassVar
+from typing import Any
 
 import orjson
 from arq.constants import default_queue_name
+from pydantic import Field
 from pydantic_core import to_jsonable_python
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.secrets import SecretValue
 from tai42_kit.backend import BackendDispatchSettings
-from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, settings_cache
+from tai42_kit.clients import RedisConnectionSettingsBase
+from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 # Marker key of the tagged in-place description an unserializable value serializes to.
 UNSERIALIZABLE_KEY = "__tai_unserializable__"
@@ -122,22 +124,31 @@ def job_deserializer(data: bytes) -> Any:
     return payload
 
 
-class ArqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSettings):
+class ArqRedisSettings(RedisConnectionSettingsBase):
+    """The arq backend's Redis connection, composed from the kit connection shape under ``ARQ_``.
+
+    ``ARQ_REDIS_URL`` / ``ARQ_REDIS_MAX_CONNECTIONS`` fall back to the shared
+    ``TAI_DEFAULT_*`` namespace when unset; the retry and the socket timeouts
+    (``ARQ_RETRY_ATTEMPTS``, ``ARQ_RETRY_ON_TIMEOUT``, ``ARQ_SOCKET_TIMEOUT``,
+    ``ARQ_SOCKET_CONNECT_TIMEOUT``) are read from ``ARQ_*`` alone.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ARQ_")
+
+    redis_url: str | None = "redis://localhost:6379/0"
+    # arq's own connect timeout (seconds), kept as this backend's default.
+    socket_connect_timeout: float | None = Field(default=1, gt=0)
+
+
+class ArqSettings(BackendDispatchSettings, TaiBaseSettings):
     """The ``ARQ_*`` backend config: the Redis connection, queue name, drain timeouts and key namespace."""
 
     model_config = SettingsConfigDict(
         env_prefix="ARQ_",
     )
 
-    # Connection identity falls back to the shared ``TAI_DEFAULT_*`` namespace
-    # when ``ARQ_*`` leaves it unset; a set ``ARQ_`` value always wins.
-    tai_default_fields: ClassVar[Mapping[str, str]] = {
-        "redis_url": "redis_url",
-        "redis_max_connections": "redis_max_connections",
-    }
-
-    redis_url: str = "redis://localhost:6379/0"
-    redis_max_connections: int | None = None
+    # The Redis connection both sides use, composed from the kit (a field, not a base).
+    redis: ArqRedisSettings = Field(default_factory=ArqRedisSettings)
     # The arq queue key both sides bind: the enqueue pool's default target and the
     # worker's consume target. It is a full Redis key (arq's own default is the
     # literal ``arq:queue``), so co-tenant deployments on one logical DB diverge
@@ -152,23 +163,6 @@ class ArqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSetting
     # default. Must cover the longest job, and the deployment's termination grace
     # period must be >= this, or a drain still severs running work.
     job_completion_wait: int = 300
-
-    def make_redis_settings(self, url: str | None = None) -> Any:
-        """Build the arq ``RedisSettings`` for ``url`` (default: ``redis_url``).
-
-        Applies the configured connection cap.
-        """
-        from arq.connections import RedisSettings
-
-        settings = RedisSettings.from_dsn(url or self.redis_url)
-        if self.redis_max_connections:
-            settings.max_connections = self.redis_max_connections
-        return settings
-
-    @property
-    def redis_settings(self) -> Any:
-        """The arq ``RedisSettings`` for the configured ``redis_url``."""
-        return self.make_redis_settings()
 
     @property
     def arq_prefix(self) -> str:

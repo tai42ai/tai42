@@ -12,13 +12,15 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import itertools
-from collections.abc import AsyncIterator, Callable
+import threading
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from fakeredis import TcpFakeServer
 from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
@@ -483,3 +485,24 @@ def bind_pool(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], None]:
         monkeypatch.setattr(pool, "arq_connection", lease_of(fake))
 
     return bind
+
+
+@pytest.fixture
+def redis_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """Serve an in-process fake Redis over TCP and point the backend's settings at it."""
+    from tai42_backend_arq import settings as settings_module
+
+    server = TcpFakeServer(("127.0.0.1", 0), server_type="redis")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    url = f"redis://{host}:{port}/0"
+    monkeypatch.setenv("ARQ_REDIS_URL", url)
+    settings_module.arq_settings.cache_clear()
+    try:
+        yield url
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+        settings_module.arq_settings.cache_clear()

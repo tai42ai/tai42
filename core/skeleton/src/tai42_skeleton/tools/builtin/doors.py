@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from pydantic import UUID4
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import ConversationEvent, ConversationEventSubmission
 from tai42_contract.interactions import LocationElement, MediaItem
@@ -127,6 +128,7 @@ async def send_conversation_message(
     location: LocationElement | None = None,
     locale: str | None = None,
     form_tag: str | None = None,
+    reply_to_message_id: UUID4 | None = None,
 ) -> dict[str, str]:
     """Send a message to a conversation route from inside a run, under the deployment's own identity.
 
@@ -150,6 +152,9 @@ async def send_conversation_message(
         locale: The end user's BCP 47 language tag (e.g. ``he-IL``); ``None`` supplies none.
         form_tag: The caller-set opaque per-send form tag echoed back with ``form``; requires
             ``form`` and is bounded but never interpreted by the platform.
+        reply_to_message_id: The platform ``message_id`` of a message this conversation
+            delivered that this one replies to; the platform resolves the text delivered under
+            it into the turn's ``reply_to``. ``None`` replies to none.
 
     Returns:
         The accepted receipt ``{"message_id", "thread_id"}``.
@@ -177,6 +182,7 @@ async def send_conversation_message(
         location=location,
         locale=locale,
         form_tag=form_tag,
+        reply_to_message_id=None if reply_to_message_id is None else str(reply_to_message_id),
         client_connected=_never_connected,
     )
     return {"message_id": result.message_id, "thread_id": result.thread_id}

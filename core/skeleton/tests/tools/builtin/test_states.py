@@ -90,7 +90,7 @@ class _FakeStore:
         decl = self.declarations.get(state)
         if decl is None:
             raise StateNotFoundError(f"no state declared as {state!r}")
-        await validate_subject_in_txn(list(decl["subject_kinds"]))
+        await validate_subject_in_txn(list(decl["subject_kinds"]), subject)
         self._seq += 1
         self.records[self._key(state, subject)] = {"data": dict(data), "seq": self._seq}
         self._append_write(state, subject, origin, [[]])
@@ -102,7 +102,7 @@ class _FakeStore:
         if decl is None:
             raise StateNotFoundError(f"no state declared as {state!r}")
         # The real store validates the subject in-txn from the locked declaration's kinds.
-        await validate_subject_in_txn(list(decl["subject_kinds"]))
+        await validate_subject_in_txn(list(decl["subject_kinds"]), subject)
         self._seq += 1
         key = self._key(state, subject)
         doc = dict(self.records.get(key, {"data": {}})["data"])

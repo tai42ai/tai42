@@ -42,6 +42,11 @@ A KNOWN-CONTACT marker records that a ``(phone_number_id, wa_id)`` pair sent an
 inbound message within a rolling window (TTL refreshed per inbound); the
 template-send recipient policy reads it to admit a pair the operator has not
 allowlisted but who opened the conversation window.
+
+A REPLY-WINDOW key per ``(phone_number_id, wa_id)`` pair holds the close time of Meta's 24-hour
+customer service window (the participant's latest message time + 24 hours, in epoch
+milliseconds) and expires at that instant; it is the kit's shared reply-window store, advanced
+on every participant message and never moved back.
 """
 
 from __future__ import annotations
@@ -57,10 +62,12 @@ from typing import Any, Final, cast
 
 from redis.exceptions import LockError, LockNotOwnedError
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDeliveryError, Correlation
+from tai42_contract.channels import ChannelDeliveryError, Correlation, ReplyWindow
 from tai42_contract.interactions.models import AnswerMismatchPolicy, Wording
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.conversations.reply_window import advance_reply_window, read_reply_window
 
+from tai42_channel_whatsapp.flows_endpoint import FORM_LINE_MEMBERS
 from tai42_channel_whatsapp.settings import (
     WhatsAppRedisSettings,
     whatsapp_redis_settings,
@@ -68,6 +75,10 @@ from tai42_channel_whatsapp.settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Meta's customer service window: a free-form message is allowed for 24 hours after the
+# participant's latest message. A vendor rule, so not an operator setting.
+_REPLY_WINDOW_SECONDS: Final = 86_400
 
 
 class PendingQuestionExistsError(ChannelDeliveryError):
@@ -156,6 +167,10 @@ def _seen_key(wamid: str) -> str:
 
 def _contact_key(phone_number_id: str, wa_id: str) -> str:
     return f"channel:whatsapp:known-contact:{phone_number_id}:{wa_id}"
+
+
+def _reply_window_key(phone_number_id: str, wa_id: str) -> str:
+    return f"channel:whatsapp:reply-window:{phone_number_id}:{wa_id}"
 
 
 def _encode_pending(question: PendingQuestion) -> str:
@@ -521,8 +536,10 @@ class EndpointForm:
 
     ``schema`` and ``pages`` lay out its steps; ``reactions`` (the :class:`FormReactions` dump, or
     ``None``) names the consumer reactions to run after a clean shape check; ``option_fields`` the
-    fields whose per-send option list replaced their schema enum; ``invalid`` the caller's per-field
-    ``wording.form.fields[<name>].invalid`` sentence.
+    fields whose per-send option list replaced their schema enum; ``invalid`` and ``required`` the
+    caller's per-field ``wording.form.fields[<name>].invalid`` / ``.required`` sentences; ``lines``
+    the caller's form-level lines the endpoint draws, keyed by a member of
+    :data:`~tai42_channel_whatsapp.flows_endpoint.FORM_LINE_MEMBERS`.
     """
 
     schema: dict[str, Any]
@@ -530,6 +547,8 @@ class EndpointForm:
     reactions: dict[str, Any] | None
     option_fields: list[str]
     invalid: dict[str, str]
+    required: dict[str, str]
+    lines: dict[str, str]
 
 
 async def cache_endpoint_form(interaction_id: str, form: EndpointForm, timeout_at: datetime) -> None:
@@ -552,6 +571,8 @@ async def cache_endpoint_form(interaction_id: str, form: EndpointForm, timeout_a
             "reactions": form.reactions,
             "option_fields": sorted(form.option_fields),
             "invalid": form.invalid,
+            "required": form.required,
+            "lines": form.lines,
         }
     )
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
@@ -563,7 +584,8 @@ async def get_endpoint_form(interaction_id: str) -> EndpointForm | None:
 
     A miss means the form's token is unknown or its budget has expired — the data endpoint
     treats it as a no-longer-valid flow token (never a crash on the endpoint path). A stored value
-    that is not a complete sidecar is a miss too, logged.
+    that is not a complete sidecar is a miss too, logged: the ``invalid``, ``required`` and ``lines``
+    maps must each be a string-to-string map, and ``lines`` may key only a form-line member.
     """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         raw = await redis.get(_endpoint_form_key(interaction_id))
@@ -578,7 +600,10 @@ async def get_endpoint_form(interaction_id: str) -> EndpointForm | None:
         not isinstance(parsed, dict)
         or not isinstance(parsed.get("schema"), dict)
         or not isinstance(parsed.get("option_fields"), list)
-        or not isinstance(parsed.get("invalid"), dict)
+        or not _is_text_map(parsed.get("invalid"))
+        or not _is_text_map(parsed.get("required"))
+        or not _is_text_map(parsed.get("lines"))
+        or not set(parsed["lines"]) <= set(FORM_LINE_MEMBERS)
     ):
         logger.warning("cached endpoint form for %s is not a complete form sidecar; treating as a miss", interaction_id)
         return None
@@ -588,7 +613,14 @@ async def get_endpoint_form(interaction_id: str) -> EndpointForm | None:
         reactions=parsed.get("reactions"),
         option_fields=parsed["option_fields"],
         invalid=parsed["invalid"],
+        required=parsed["required"],
+        lines=parsed["lines"],
     )
+
+
+def _is_text_map(value: Any) -> bool:
+    # A sidecar map of the caller's words: string keys to string values.
+    return isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
 
 
 async def drop_endpoint_form(interaction_id: str) -> None:
@@ -625,6 +657,33 @@ async def mark_known_contact(phone_number_id: str, wa_id: str) -> None:
     ttl = window_days * 86_400
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         await redis.set(_contact_key(phone_number_id, wa_id), "1", ex=ttl)
+
+
+async def mark_reply_window(phone_number_id: str, wa_id: str, opened_at: datetime) -> None:
+    """Advance this pair's reply window to ``opened_at`` + 24 hours, never moving it back.
+
+    ``opened_at`` is the participant message's time; a value later than now is taken as now, so a
+    clock ahead of this replica's can never lengthen the window. A message whose window already
+    closed writes nothing.
+    """
+    now = datetime.now(UTC)
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        await advance_reply_window(
+            redis,
+            _reply_window_key(phone_number_id, wa_id),
+            opened_at=min(opened_at, now),
+            window_seconds=_REPLY_WINDOW_SECONDS,
+            now=now,
+        )
+
+
+async def reply_window(phone_number_id: str, wa_id: str) -> ReplyWindow:
+    """This pair's reply window now: ``open`` until its close time, else ``closed``.
+
+    A stored value that is not an integer raises ``ValueError``.
+    """
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        return await read_reply_window(redis, _reply_window_key(phone_number_id, wa_id), now=datetime.now(UTC))
 
 
 async def is_known_contact(phone_number_id: str, wa_id: str) -> bool:

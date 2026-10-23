@@ -12,7 +12,7 @@ import { validateAgainstSchema } from '@tai42/studio-sdk';
 import type { RefObject } from 'react';
 import { useRef, useState } from 'react';
 
-import { reactToForm } from '@/api';
+import { ChatApiError, reactToForm } from '@/api';
 import type { SdkFieldWording } from '@/schema-form-helpers';
 import {
   changedTopLevelKeys,
@@ -61,7 +61,7 @@ export interface ReactingForm {
   readonly pageCount: number;
   readonly stepped: boolean;
   readonly isLast: boolean;
-  readonly reactionError: string | null;
+  readonly reactionError: ReactionError | null;
   readonly busy: boolean;
   readonly pageRef: RefObject<HTMLDivElement | null>;
   readonly headingRef: RefObject<HTMLParagraphElement | null>;
@@ -135,9 +135,16 @@ function useFormState(schema: JsonSchema, formData: FormPrefill | null): FormSta
   };
 }
 
+/** A failed reaction: the visitor-facing message, and the react door's own reason for
+ * refusing when it gave one (`null` otherwise). */
+export interface ReactionError {
+  readonly message: string;
+  readonly reason: string | null;
+}
+
 interface ReactionRunner {
   readonly reacting: boolean;
-  readonly reactionError: string | null;
+  readonly reactionError: ReactionError | null;
   readonly clearError: () => void;
   readonly fireReaction: (
     event: ReactionEvent,
@@ -152,7 +159,7 @@ function useReactionRunner(
   applyUpdate: (update: FormUpdate) => void,
 ): ReactionRunner {
   const [reacting, setReacting] = useState(false);
-  const [reactionError, setReactionError] = useState<string | null>(null);
+  const [reactionError, setReactionError] = useState<ReactionError | null>(null);
   const seq = useRef(0);
   const fireReaction = async (
     event: ReactionEvent,
@@ -169,7 +176,10 @@ function useReactionRunner(
       return update;
     } catch (error) {
       if (mine === seq.current)
-        setReactionError(error instanceof Error ? error.message : String(error));
+        setReactionError({
+          message: error instanceof Error ? error.message : String(error),
+          reason: error instanceof ChatApiError ? error.reason : null,
+        });
       return null;
     } finally {
       if (mine === seq.current) setReacting(false);

@@ -36,20 +36,28 @@ import httpx
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import (
     AnswerForwardError,
+    Channel,
     ChannelNotification,
     Correlation,
     CorrelationStore,
     InboundAnswerOutcome,
     InboundAnswerResult,
     InboundBridge,
+    SendOutcome,
 )
 from tai42_contract.conversations import BlankInboundTextError, InboundRejectionReason
 from tai42_contract.interactions.models import AnswerMismatchPolicy, Wording
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.interactions import CallbackUrlRefusedError, pin_callback_url
 
+from tai42_skeleton.channels.inbound_events import _emit_event
 from tai42_skeleton.channels.send_span import send_span
-from tai42_skeleton.hooks import cache as hooks_cache
+from tai42_skeleton.conversations import cache as conversations_cache
+from tai42_skeleton.conversations.address import canonical_address
+from tai42_skeleton.conversations.sends import notification_part, recorded_send
+from tai42_skeleton.conversations.settings import conversations_settings
+from tai42_skeleton.conversations.turn import ConversationRouteResolutionError, _resolve_channel_route
+from tai42_skeleton.conversations.turn.outcome import reply_text
 from tai42_skeleton.interactions.settings import callback_url_prefix, interactions_settings
 
 logger = logging.getLogger(__name__)
@@ -62,16 +70,12 @@ __all__ = [
     "ANSWER_REJECTED_FINAL_NOTICE",
     "ANSWER_REJECTED_RETRY_NOTICE",
     "CALLBACK_DISCARDED_EVENT_TOPIC",
-    "INBOUND_MEDIA_INGESTED_EVENT_TOPIC",
-    "INBOUND_MEDIA_REJECTED_EVENT_TOPIC",
     "INBOUND_REJECTED_EVENT_TOPIC",
     "INBOUND_UNROUTED_EVENT_TOPIC",
     "AnswerForwardError",
     "InboundAnswerOutcome",
     "InboundAnswerResult",
     "InboundBridge",
-    "emit_inbound_media_ingested",
-    "emit_inbound_media_rejected",
     "handle_inbound_answer",
     "notify_inbound_rejected",
 ]
@@ -130,14 +134,6 @@ INBOUND_UNROUTED_EVENT_TOPIC = "conversations_inbound_unrouted"
 # recognised-but-unbridgeable content are different faults.
 INBOUND_REJECTED_EVENT_TOPIC = "conversations_inbound_rejected"
 
-# The seam's INGESTION-telemetry topics, emitted by the served-media ingestion chokepoint
-# (``AppMedia.ingest_media``): one on success, one before a raise. DISTINCT from the
-# participant-notice topic above — these are the operator/ops record of an ingest ATTEMPT (its
-# outcome, size and hashes), never the record that a participant was told. The payload NEVER
-# carries the ingested bytes or a vendor credential.
-INBOUND_MEDIA_INGESTED_EVENT_TOPIC = "conversations_inbound_media_ingested"
-INBOUND_MEDIA_REJECTED_EVENT_TOPIC = "conversations_inbound_media_rejected"
-
 # The one fixed participant notice per rejection reason. Generic and domain-neutral: the
 # notice states the fact without echoing the participant's content, and the specific kind
 # refused rides the operator event, never the reply text.
@@ -194,16 +190,27 @@ def _callback_pin_failure(callback_url: str, *, channel_id: str, interaction_id:
     return refused.reason.value
 
 
-async def _forward_answer(callback_url: str, answer: Any, params: dict[str, str] | None) -> httpx.Response:
-    """POST the answer (plus optional ``params``) to the interaction's callback door and return its response.
+async def _forward_answer(
+    callback_url: str,
+    answer: Any,
+    params: dict[str, str] | None,
+    medium_message_id: str | None,
+    reply_to_medium_message_id: str | None,
+) -> httpx.Response:
+    """POST the answer (plus optional ``params`` and medium ids) to the callback door.
 
     The body is ``{"answer": <value>}``, with ``"params"`` added when the inbound reply carried
-    channel enrichment; the caller applies the status policy. Uses a bounded-timeout app-pooled
-    httpx client. Absent params, the body carries only ``answer``, so the params seam is opt-in.
+    channel enrichment, ``"medium_message_id"`` when the medium gave the reply an id, and
+    ``"reply_to_medium_message_id"`` when the reply quotes an earlier message; the caller applies
+    the status policy. Uses a bounded-timeout app-pooled httpx client.
     """
     body: dict[str, Any] = {"answer": answer}
     if params:
         body["params"] = params
+    if medium_message_id is not None:
+        body["medium_message_id"] = medium_message_id
+    if reply_to_medium_message_id is not None:
+        body["reply_to_medium_message_id"] = reply_to_medium_message_id
     async with tai42_app.clients.client_ctx(HttpxClient, timeout=_FORWARD_TIMEOUT_SECONDS) as client:
         return await client.post(callback_url, json=body)
 
@@ -228,6 +235,8 @@ async def _bridge(bridge: InboundBridge) -> None:
             cap_key=bridge.cap_key,
             text=bridge.bridge_text,
             provider_message_id=bridge.provider_message_id,
+            medium_message_id=bridge.medium_message_id,
+            reply_to_medium_message_id=bridge.reply_to_medium_message_id,
             params=bridge.params,
         )
     except BlankInboundTextError:
@@ -245,39 +254,59 @@ async def _bridge(bridge: InboundBridge) -> None:
         )
 
 
-def _notice_text(wording: Wording | None, member: str, default: str, reason: str) -> str:
+def _notice_text(wording: Wording | None, member: str, default: str, error: str, no_reason: str) -> str:
     """The participant-facing rejection notice: the caller's ``wording.answer`` sentence when set, else ``default``.
 
     ``member`` is ``"rejected"`` (the ask stays open, the participant may answer again) or
     ``"rejected_final"`` (the ask is closed). The caller's sentence off the parked ask's
-    ``Correlation.wording`` REPLACES the built-in default; a literal ``{reason}`` token in either is
-    filled by a PLAIN substitution (``str.replace``, never ``str.format``) with the door's reason,
-    so a sentence without the token is sent verbatim and stray braces in authored text never raise.
+    ``Correlation.wording`` REPLACES the built-in default. A literal ``{reason}`` token is filled
+    by a PLAIN substitution (``str.replace``, never ``str.format``), so a sentence without the
+    token is sent verbatim and stray braces in authored text never raise. In the caller's sentence
+    the token takes the door's ``error``, empty when the door gave no reason it may show; in the
+    built-in default it takes ``error``, else the arm's own English ``no_reason`` filler.
     """
     template = getattr(wording.answer, member) if wording is not None and wording.answer is not None else None
-    return (template or default).replace("{reason}", reason)
+    if template:
+        return template.replace("{reason}", error)
+    return default.replace("{reason}", error or no_reason)
+
+
+async def _send_notice(channel: Channel, channel_id: str, notification: ChannelNotification) -> None:
+    """Send ``notification`` as a recorded ``notice`` send, raising what the send or its record raised."""
+
+    async def send() -> SendOutcome:
+        # Tier 1 send-outcome span, gated: in the inbound-webhook context there is no ambient
+        # trace, so ``send_span`` no-ops (a rootless span would attach to no run); under an
+        # active trace the notify failure is recorded on it.
+        with send_span(channel_id, recipient=notification.recipient):
+            return await channel.notify(notification)
+
+    await recorded_send(
+        channel=channel_id,
+        address=channel.resolve_address(notification.recipient, notification.sender_identity),
+        parts=[notification_part(notification)],
+        sent_by="notice",
+        send=send,
+        bound=conversations_settings().delivery_send_timeout_seconds,
+    )
 
 
 async def _notify_participant(bridge: InboundBridge, message: str) -> None:
     """Send the participant a rejection notice on the same channel the ask went out on.
 
-    Best-effort: a notify failure is logged and swallowed so it never turns a
-    handled rejection into a lost webhook — the operator event still fires and the
-    outcome still returns. Sends from the ask's own identity to the participant address.
+    The notice is a ``notice`` send record of the participant's conversation, bounded by
+    ``delivery_send_timeout_seconds``. Best-effort: a notify failure, or a store fault on the
+    notice's own record write (which stops the notice before it is sent), is logged and swallowed
+    so it never turns a handled rejection into a lost webhook — the operator event still fires and
+    the outcome still returns. Sends from the ask's own identity to the participant address.
     """
     try:
         channel = tai42_app.channels.get(bridge.channel_id)
-        # Tier 1 send-outcome span, gated: this runs in the inbound-webhook context, which
-        # carries no ambient trace, so ``send_span`` no-ops here (a rootless span would
-        # attach to no run) — the notice is covered honestly without fabricating one. On the
-        # rare path where a trace IS ambient the failure would be recorded; either way the
-        # error is swallowed below, keeping this notice best-effort.
-        with send_span(bridge.channel_id, recipient=bridge.client_address):
-            await channel.notify(
-                ChannelNotification(
-                    message=message, recipient=bridge.client_address, sender_identity=bridge.our_identity
-                )
-            )
+        await _send_notice(
+            channel,
+            bridge.channel_id,
+            ChannelNotification(message=message, recipient=bridge.client_address, sender_identity=bridge.our_identity),
+        )
     except Exception:
         logger.warning(
             "inbound: failed to send the answer-rejected notice to %s on channel %r; continuing",
@@ -325,20 +354,6 @@ async def _emit_answer_rejected(
         payload,
         failure_desc=f"for the rejected answer on channel {bridge.channel_id!r} interaction {interaction_id}",
     )
-
-
-async def _emit_event(topic: str, payload: dict[str, Any], *, failure_desc: str) -> None:
-    """Emit ``topic`` with ``payload`` on the hooks manager, best-effort.
-
-    The one seam the inbound emitters share: the hooks-manager lookup and the
-    log-then-swallow of a hooks-manager fault, so an operator-telemetry emit never fails the
-    inbound webhook. ``failure_desc`` completes the log line ``inbound: failed to emit
-    <topic> <failure_desc>``.
-    """
-    try:
-        await hooks_cache.get_hooks_manager().on_event(topic=topic, payload=payload)
-    except Exception:
-        logger.warning("inbound: failed to emit %r %s", topic, failure_desc, exc_info=True)
 
 
 async def _emit_callback_discarded(bridge: InboundBridge, *, interaction_id: str, reason: str) -> None:
@@ -389,7 +404,7 @@ async def notify_inbound_rejected(
     *,
     channel_id: str,
     recipient: str,
-    sender_identity: str | None,
+    sender_identity: str,
     kind: str,
     reason: InboundRejectionReason,
 ) -> None:
@@ -398,28 +413,54 @@ async def notify_inbound_rejected(
     The ONE chokepoint a channel adapter calls instead of silently ack-and-ignoring a
     content it recognises but cannot bridge — an unmappable media kind, a file over the
     platform cap, a byte source it could not fetch, or an unsupported content type.
-    ``reason`` selects the one fixed :data:`_REJECTION_NOTICES` copy sent to ``recipient``
-    over ``channel_id`` (from ``sender_identity`` when the channel fronts several identities,
-    ``None`` = the channel default), and names the generic notice; ``kind`` is a generic,
-    domain-neutral content label that rides the operator event, never the participant reply.
+    The notice goes to ``recipient`` over ``channel_id`` from ``sender_identity``, the
+    receiving identity that keys the channel route. ``reason`` selects the route's
+    ``reply_texts.rejected_<reason>`` member when the route sets it, else the built-in
+    :data:`_REJECTION_NOTICES` copy; ``kind`` is a generic, domain-neutral content label
+    that rides the operator event, never the participant reply.
 
     An unknown ``channel_id`` raises :class:`KeyError` from the registry, like a missing
-    route on the accept path. The reply send and the event emit are each best-effort: a
-    channel-``notify`` fault or a hooks-manager fault is logged and swallowed so a handled
+    route on the accept path. A deployment with no durable routing store, or an identity no
+    channel route serves, is logged as a warning and gets the built-in notice; any other
+    route-resolution fault (a store fault, an inconsistent routing table) propagates before
+    anything is sent, as on the accept path.
+    The reply is a ``notice`` send record of the participant's conversation, bounded by
+    ``delivery_send_timeout_seconds``. The reply send and the event emit are each best-effort: a
+    channel-``notify`` fault, a store fault on the notice's own record write (which stops the
+    notice before it is sent) or a hooks-manager fault is logged and swallowed so a handled
     rejection never turns into a lost inbound webhook.
     """
     channel = tai42_app.channels.get(channel_id)
-    try:
-        # Tier 1 send-outcome span, gated: in the inbound-webhook context there is no
-        # ambient trace, so ``send_span`` no-ops (a rootless span would attach to no run);
-        # under an active trace the notify failure is recorded, and either way the error is
-        # swallowed below, keeping the notice best-effort.
-        with send_span(channel_id, recipient=recipient):
-            await channel.notify(
-                ChannelNotification(
-                    message=_REJECTION_NOTICES[reason], recipient=recipient, sender_identity=sender_identity
-                )
+    default_notice = _REJECTION_NOTICES[reason]
+    if not conversations_cache.get_conversations_manager().durable:
+        logger.warning(
+            "inbound: no conversation routing store is configured; sending the built-in %r rejection notice "
+            "to %s on channel %r",
+            reason.value,
+            recipient,
+            channel_id,
+        )
+        notice = default_notice
+    else:
+        try:
+            route = await _resolve_channel_route(channel_id, canonical_address(sender_identity))
+        except ConversationRouteResolutionError:
+            logger.warning(
+                "inbound: no conversation route for identity %s on channel %r; "
+                "sending the built-in %r rejection notice",
+                sender_identity,
+                channel_id,
+                reason.value,
             )
+            notice = default_notice
+        else:
+            notice = reply_text(route, f"rejected_{reason.value}", default_notice)
+    try:
+        await _send_notice(
+            channel,
+            channel_id,
+            ChannelNotification(message=notice, recipient=recipient, sender_identity=sender_identity),
+        )
     except Exception:
         logger.warning(
             "inbound: failed to send the %r rejection notice to %s on channel %r; continuing",
@@ -452,72 +493,6 @@ async def _emit_inbound_rejected(*, channel_id: str, recipient: str, kind: str, 
     )
 
 
-async def emit_inbound_media_ingested(
-    *,
-    channel_id: str,
-    participant_identity: str,
-    message_id: str | None,
-    media_id: str,
-    kind: str,
-    size: int,
-    sha256: str,
-    mime: str,
-    pending: bool,
-) -> None:
-    """Emit the ``conversations_inbound_media_ingested`` event on a successful media ingest.
-
-    The seam's operator/ops telemetry of one ingest attempt's outcome. The payload names the
-    origin, the served ``media_id``, the derived ``kind``, the size, the content hash and the
-    sniffed ``mime`` — never the ingested bytes or a vendor credential. Best-effort: a
-    hooks-manager failure is logged and swallowed so it never fails the inbound webhook.
-    """
-    payload = {
-        "channel": channel_id,
-        "client_address": participant_identity,
-        "message_id": message_id,
-        "media_id": media_id,
-        "kind": kind,
-        "size": size,
-        "sha256": sha256,
-        "mime": mime,
-        "pending": pending,
-    }
-    await _emit_event(
-        INBOUND_MEDIA_INGESTED_EVENT_TOPIC,
-        payload,
-        failure_desc=f"for an ingested media on channel {channel_id!r}",
-    )
-
-
-async def emit_inbound_media_rejected(
-    *,
-    channel_id: str,
-    participant_identity: str,
-    message_id: str | None,
-    kind: str,
-    reason: InboundRejectionReason,
-) -> None:
-    """Emit the ``conversations_inbound_media_rejected`` event before the seam raises.
-
-    The seam's operator/ops telemetry of one FAILED ingest attempt. The payload names the origin,
-    the generic ``kind`` and the mapped ``reason`` — never the ingested bytes or a credential.
-    Emitting then raising is not a swallow: the seam still propagates the typed error. Best-effort:
-    a hooks-manager failure is logged and swallowed.
-    """
-    payload = {
-        "channel": channel_id,
-        "client_address": participant_identity,
-        "message_id": message_id,
-        "kind": kind,
-        "reason": reason.value,
-    }
-    await _emit_event(
-        INBOUND_MEDIA_REJECTED_EVENT_TOPIC,
-        payload,
-        failure_desc=f"for a rejected media on channel {channel_id!r}",
-    )
-
-
 async def handle_inbound_answer(
     *,
     channel_id: str,
@@ -532,6 +507,8 @@ async def handle_inbound_answer(
     the value forwarded to the door as ``{"answer": answer}`` (plus ``"params"`` when the
     reply carried channel enrichment on ``bridge.params``, landing on
     :attr:`~tai42_contract.interactions.models.InteractionResponse.params` for the asking flow);
+    ``bridge.medium_message_id`` rides the callback body as ``medium_message_id`` and the bridge
+    arm's ``accept`` the same way.
     ``store`` is the channel's :class:`~tai42_contract.channels.CorrelationStore`; ``bridge``
     carries the fields a bridged turn needs — including ``params``, which on the BRIDGE arm is
     passed to ``accept`` (the same seam symmetry, so enrichment is never dropped either way).
@@ -591,7 +568,9 @@ async def handle_inbound_answer(
         return InboundAnswerResult(outcome=InboundAnswerOutcome.NO_CORRELATION)
 
     try:
-        forwarded = await _forward_answer(entry.callback_url, answer, bridge.params)
+        forwarded = await _forward_answer(
+            entry.callback_url, answer, bridge.params, bridge.medium_message_id, bridge.reply_to_medium_message_id
+        )
     except httpx.HTTPError as exc:
         # Transport fault forwarding to the door — indeterminate. Keep the
         # correlation and fail loudly so the webhook redelivery re-resolves it.
@@ -693,10 +672,9 @@ async def _handle_live_rejection(
         # re-opened Flow/modal it renders off RETRY_KEPT), core skips its generic
         # participant notice so the participant is messaged exactly once — but still keeps the
         # correlation and still emits the operator event (tagged notice_owner).
-        reason = error or _NO_REASON_RETRY
         if not bridge.owns_retry_notice:
             await _notify_participant(
-                bridge, _notice_text(entry.wording, "rejected", ANSWER_REJECTED_RETRY_NOTICE, reason)
+                bridge, _notice_text(entry.wording, "rejected", ANSWER_REJECTED_RETRY_NOTICE, error, _NO_REASON_RETRY)
             )
         await _emit_answer_rejected(
             bridge,
@@ -725,10 +703,10 @@ async def _handle_live_rejection(
     # final notice (the participant must be told the question is closed) and owns it.
     # Release, tell the participant the question is closed, alert the operator, and
     # bridge the reply as a fresh turn.
-    reason = error or _NO_REASON_FINAL
     await store.release_correlation(correlation_key)
     await _notify_participant(
-        bridge, _notice_text(entry.wording, "rejected_final", ANSWER_REJECTED_FINAL_NOTICE, reason)
+        bridge,
+        _notice_text(entry.wording, "rejected_final", ANSWER_REJECTED_FINAL_NOTICE, error, _NO_REASON_FINAL),
     )
     await _emit_answer_rejected(
         bridge,

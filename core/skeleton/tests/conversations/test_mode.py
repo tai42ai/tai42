@@ -30,7 +30,7 @@ from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
 from tai42_skeleton.operations.errors import NotSupportedError
 
-from .conftest import FakeManager, serve_stores
+from .conftest import FakeManager, create_record, serve_stores
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -207,7 +207,8 @@ async def test_construction_refuses_without_the_backend(monkeypatch) -> None:
 
 async def _seed_record(store: ConversationRecordStore, *, message_id: str, route_name: str, thread_id: str) -> None:
     now = time.time()
-    await store.create_record(
+    await create_record(
+        store,
         ConversationRecord(
             message_id=message_id,
             route_name=route_name,
@@ -223,7 +224,7 @@ async def _seed_record(store: ConversationRecordStore, *, message_id: str, route
             delivery_status=DeliveryStatus.DELIVERED,
             created_at=now,
             updated_at=now,
-        )
+        ),
     )
 
 

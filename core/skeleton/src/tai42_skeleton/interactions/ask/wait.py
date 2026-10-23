@@ -1,17 +1,19 @@
 """The synchronous answer wait for an interaction question.
 
 Block for the reply on a fresh connection within the remaining budget, prune on cancel/timeout, and
-return the typed answer (a sensitive answer wrapped) or raise the timeout.
+return the :class:`~tai42_contract.interactions.AskAnswer` (a sensitive answer wrapped) or raise the
+timeout.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
+from tai42_contract.interactions import AskAnswer
 from tai42_contract.secrets import SecretValue
 from tai42_kit.clients.impl.redis import RedisClient
 
+from tai42_skeleton.conversations.reply_to import resolve_ask_reply_to
 from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.tools.turn_budget import mark_parked_question
 
@@ -26,16 +28,19 @@ async def await_answer(
     *,
     interaction_id: str,
     group: str,
-    reply_to: str,
+    reply_key: str,
     question: str,
     sensitive: bool,
-) -> Any:
-    """Block for the answer within what is LEFT of the budget after delivery, returning the typed answer.
+) -> AskAnswer:
+    """Block on the reply list ``reply_key`` within what is LEFT of the budget after delivery.
 
-    Uses the same monotonic ``deadline`` the delivery attempts ran against, wrapping a ``sensitive`` answer
-    in ``SecretValue``. On timeout or cancel the question is pruned (else it inflates the group count and
-    stays claimable by a late callback); a timeout then raises ``InteractionTimeoutError`` naming which of
-    the three end states the question reached.
+    Uses the same monotonic ``deadline`` the delivery attempts ran against. Returns the answer, the
+    message the answering reply quoted and the answer's ``params`` as one :class:`AskAnswer`: a
+    ``sensitive`` answer wrapped in ``SecretValue``; ``reply_to`` resolved from the ask's
+    conversation thread when the reply quoted a message, else ``None``. On timeout or cancel the
+    question is pruned (else it inflates the group count and stays claimable by a late callback); a
+    timeout then raises ``InteractionTimeoutError`` naming which of the three end states the
+    question reached.
     """
     loop = asyncio.get_running_loop()
     # Redis BLPOP reads its timeout at 1ms resolution and a 0/negative timeout as
@@ -57,7 +62,7 @@ async def await_answer(
             reply_redis = helper.interactions_settings().redis.model_copy(update={"socket_timeout": None})
             async with helper.client_ctx(RedisClient, reply_redis, fresh=True) as reply_conn:
                 response = await store.wait_for_reply(
-                    reply_conn, reply_to, remaining, helper.interactions_settings().blocking_grace_seconds
+                    reply_conn, reply_key, remaining, helper.interactions_settings().blocking_grace_seconds
                 )
         except asyncio.CancelledError as exc:
             # Prune on cancel so an abandoned question does not inflate the group count /
@@ -84,8 +89,12 @@ async def await_answer(
             f"ask timed out after {window.budget}s; the question record was already gone "
             f"(expired or pruned elsewhere) and no answer was returned (interaction {interaction_id})"
         )
+    reply_to = (
+        None
+        if response.reply_to_medium_message_id is None
+        else await resolve_ask_reply_to(interaction_id, response.reply_to_medium_message_id)
+    )
     # A sensitive answer is handed back wrapped so it cannot leak through a repr, a log
     # line, or a JSON dump — the caller reveals it deliberately.
-    if sensitive:
-        return SecretValue(response.answer)
-    return response.answer
+    answer = SecretValue(response.answer) if sensitive else response.answer
+    return AskAnswer(answer=answer, reply_to=reply_to, params=response.params)

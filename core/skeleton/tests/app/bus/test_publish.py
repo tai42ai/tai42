@@ -12,7 +12,7 @@ import fakeredis
 import pytest
 from fakeredis import aioredis
 from redis.exceptions import ConnectionError as RedisConnectionError
-from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.clients.impl.redis import KitAsyncRedis, RedisClient
 
 import tai42_skeleton.app.bus as bus_module
 from tai42_skeleton.app.bus import (
@@ -26,7 +26,9 @@ from tai42_skeleton.app.bus import (
     WorkerState,
 )
 from tai42_skeleton.app.bus.ops import ReloadConfig
+from tai42_skeleton.app.bus.publish import _ReplyLink
 
+from ..._fakes.kit_redis import KitFakeRedis
 from .conftest import (
     _drop_presence,
     _FramePubsub,
@@ -227,7 +229,9 @@ async def test_collect_discards_stale_generation_and_opid(
             {"name": "serve-1", "generation": 5, "op_id": "op-A", "phase": "terminal", "outcome": "applied"},
         ]
         with caplog.at_level(logging.WARNING):
-            results = await bus._collect(client, _FramePubsub(frames), expected, {}, "op-A", "reload_config")
+            results = await bus._collect(
+                client, _FramePubsub(frames), _ReplyLink(), expected, {}, "op-A", "reload_config"
+            )
         # The discarded frames never fold, so the true reply stands: applied.
         assert results["serve-1"].outcome == OpOutcome.applied
         messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -248,11 +252,72 @@ async def test_collect_transport_error_is_reported_on_the_affected_worker(
     await _register_bare_presence(server, bus._settings, "serve-1", WorkerKind.serve, ttl_ms=None)
     client = aioredis.FakeRedis(server=server, decode_responses=True)
     try:
-        results = await bus._collect(client, _RaisingPubsub(), {"serve-1": 1}, {}, "op-A", "reload_config")
+        results = await bus._collect(
+            client, _RaisingPubsub(), _ReplyLink(), {"serve-1": 1}, {}, "op-A", "reload_config"
+        )
         assert results["serve-1"].outcome == OpOutcome.missing
         assert "transport error" in (results["serve-1"].detail or "")
     finally:
         await client.aclose()
+
+
+async def test_a_reply_lost_to_a_reconnect_the_retry_hides_names_the_reconnect(
+    wire_bus_client: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The publisher's reply connection drops while the worker applies, so the worker's
+    # terminal reply is published while it is down. The next read reconnects and
+    # re-subscribes inside the call, so no error reaches the collector; the verdict
+    # names that reconnect as the cause of the lost reply.
+    pubsubs: list[Any] = []
+    kit_pubsub = KitAsyncRedis.pubsub
+
+    def recording_pubsub(self: KitAsyncRedis, **kwargs: Any) -> Any:
+        pubsub = kit_pubsub(self, **kwargs)
+        pubsubs.append(pubsub)
+        return pubsub
+
+    monkeypatch.setattr(KitFakeRedis, "pubsub", recording_pubsub)
+    publisher = make_bus(ack_timeout=0.5, apply_timeout=0.5)
+
+    async def apply(op: dict, *, deadline: float) -> None:
+        return None
+
+    worker = make_bus()
+    send_reply = worker._reply
+
+    async def reply_while_the_publisher_is_down(r: Any, channel: str, frame: dict[str, Any]) -> None:
+        if frame["phase"] != "terminal":
+            await send_reply(r, channel, frame)
+            return
+        # Drop the publisher's reply connection (the last pub/sub built) as the server
+        # sees a lost link, and hold its reconnect until the terminal reply is out.
+        connection = pubsubs[-1].connection
+        replied = asyncio.Event()
+        connect = connection.connect
+
+        async def connect_after_the_reply() -> None:
+            await replied.wait()
+            await connect()
+
+        monkeypatch.setattr(connection, "connect", connect_after_the_reply)
+        connection._sock.kill()
+        await connection.disconnect()
+        await send_reply(r, channel, frame)
+        replied.set()
+
+    monkeypatch.setattr(worker, "_reply", reply_while_the_publisher_is_down)
+    task, worker_id = await _spawn_subscriber(worker, apply)
+    try:
+        caplog.set_level(logging.WARNING, logger="tai42_skeleton.app.bus.publish")
+        result = await publisher.publish(_RELOAD, targets=None, local=LocalApplyResult(outcome=OpOutcome.applied))
+        verdict = {r.name: r for r in result.results}[worker_id.name]
+        # The received ack may also have been queued on the dropped connection, so the
+        # worker reads as acked-and-stuck or as silent; either way the cause is named.
+        assert verdict.outcome in {OpOutcome.timed_out, OpOutcome.missing}
+        assert "reply subscription reconnected" in (verdict.detail or ""), verdict.detail
+        assert [r for r in caplog.records if "reconnected" in r.getMessage() and r.levelno == logging.WARNING]
+    finally:
+        await _stop(task)
 
 
 # -- missing vs departed (real TTL expiry) ------------------------------------

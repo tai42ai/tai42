@@ -33,6 +33,7 @@ from tai42_contract.tools.invocation import (
     set_current_tool_invocation,
 )
 from tai42_contract.tools.meta import (
+    TOOL_EXTRA_IDEMPOTENCY_KEY,
     TOOL_META_BADGES,
     TOOL_META_CRASH_RESUME,
     TOOL_META_HIDDEN,
@@ -367,6 +368,7 @@ __all__ = [
     "DEFAULT_RETRYABLE_KINDS",
     "MAX_ATTEMPTS_CEILING",
     "NEVER_RETRYABLE_KINDS",
+    "TOOL_EXTRA_IDEMPOTENCY_KEY",
     "TOOL_META_BADGES",
     "TOOL_META_CRASH_RESUME",
     "TOOL_META_HIDDEN",

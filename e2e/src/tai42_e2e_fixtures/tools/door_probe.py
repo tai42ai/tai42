@@ -12,8 +12,10 @@ import json
 import os
 
 from tai42_contract.app import tai42_app
+from tai42_contract.conversations import ReplyTo
 from tai42_contract.tools import TOOL_META_PAUSES
 
+from tai42_e2e_fixtures.tools.ask_results import parked
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
 
@@ -54,7 +56,7 @@ async def e2e_caller_ask(question: str, expiry_seconds: float) -> object:
     )
     try:
         expiry_at = datetime.now(UTC) + timedelta(seconds=expiry_seconds)
-        suspended = await ask(question, mode="async", expiry_at=expiry_at, to="caller")
+        suspended = parked(await ask(question, mode="async", expiry_at=expiry_at, to="caller"))
     finally:
         if identity_token is not None:
             reset_execution_identity(identity_token)
@@ -89,7 +91,7 @@ async def e2e_schedule_park(question: str, expiry_seconds: float, record_key: st
     identity = bound.user_id if bound is not None else None
     with driving_as(continuation="e2e_schedule_park_deliver"):
         expiry_at = datetime.now(UTC) + timedelta(seconds=expiry_seconds)
-        suspended = await ask(question, mode="async", expiry_at=expiry_at)
+        suspended = parked(await ask(question, mode="async", expiry_at=expiry_at))
     record = json.dumps({"identity": identity, "interaction_id": suspended.interaction_id, "pid": os.getpid()})
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
         await cast(Awaitable[int], client.rpush(f"e2e:rec:{record_key}", record))
@@ -97,11 +99,13 @@ async def e2e_schedule_park(question: str, expiry_seconds: float, record_key: st
 
 
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_schedule_park_deliver(interaction_id: str, answer: object) -> dict:
+async def e2e_schedule_park_deliver(
+    interaction_id: str, answer: object, reply_to: ReplyTo | None, params: dict[str, str] | None
+) -> dict:
     """The stored resume continuation an ``e2e_schedule_park`` park is resumed through.
 
-    The platform's continuation seam fires it with ``{interaction_id, answer}`` under the park's
-    stored (schedule execution-key) identity when the park resolves by an answer or its expiry. A
+    The platform's continuation seam fires it with ``{interaction_id, answer, reply_to, params}``
+    under the park's stored (schedule execution-key) identity when the park resolves by an answer or its expiry. A
     schedule fire is receiver-less, so returning the answer as the run's terminal lets the platform
     subject-track it — no door completion to fire. Returns ``{answer}`` so a spec that drives the
     resume reads the value the continuation produced.
@@ -133,17 +137,19 @@ async def e2e_caller_hold(question: str, expiry_seconds: float) -> object:
     )
     with driving_as(continuation="e2e_caller_hold_deliver", identity=identity):
         expiry_at = datetime.now(UTC) + timedelta(seconds=expiry_seconds)
-        suspended = await ask(question, mode="async", expiry_at=expiry_at, to="caller")
+        suspended = parked(await ask(question, mode="async", expiry_at=expiry_at, to="caller"))
     return suspended
 
 
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_caller_hold_deliver(interaction_id: str, answer: object) -> dict:
+async def e2e_caller_hold_deliver(
+    interaction_id: str, answer: object, reply_to: ReplyTo | None, params: dict[str, str] | None
+) -> dict:
     """The stored resume continuation an ``e2e_caller_hold`` caller ask is resumed through.
 
-    Fired once with ``{interaction_id, answer}`` under the park's stored identity when a door resumes
-    the ask. Returns ``{answer}`` as the run's terminal so a receiver-less resuming door subject-tracks
-    it as the waiting outcome a later run takes.
+    Fired once with ``{interaction_id, answer, reply_to, params}`` under the park's stored identity
+    when a door resumes the ask. Returns ``{answer}`` as the run's terminal so a receiver-less
+    resuming door subject-tracks it as the waiting outcome a later run takes.
     """
     return {"answer": answer}
 

@@ -7,7 +7,7 @@ import json
 import httpx
 import pytest
 
-from .remote_harness import data_response, run_cli
+from .remote_harness import data_response, error_response, run_cli, visible
 
 
 def test_hooks_register_body(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -339,3 +339,93 @@ def test_create_trigger_link_rejects_both_params_and_file(monkeypatch: pytest.Mo
     )
     assert result.exit_code != 0
     assert "--params-file" in result.output
+
+
+# -- hook runs ----------------------------------------------------------------
+
+_RUN = {
+    "id": "r1",
+    "topic": "events",
+    "hook": "h1",
+    "status": "failed",
+    "attempts": 1,
+    "next_attempt_at": None,
+    "acted": "start",
+    "acted_ids": [],
+    "claim_intent": None,
+    "last_error": "interrupted after the hook acted (start)",
+    "last_error_kind": "unknown",
+    "created_at": "2026-01-01T00:00:00Z",
+    "failed_at": "2026-01-01T00:00:01Z",
+}
+
+
+def test_hook_runs_list_passes_its_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/hook-runs"
+        assert dict(request.url.params) == {"status": "failed", "limit": "10", "cursor": "50"}
+        return data_response({"items": [_RUN], "next_cursor": None, "outstanding": 0, "failed": 1})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["hooks", "runs", "list", "--status", "failed", "--limit", "10", "--cursor", "50"],
+        json_output=True,
+    )
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.output)
+    assert body["failed"] == 1
+    assert body["items"][0]["acted"] == "start"
+
+
+def test_hook_runs_list_renders_a_table_of_the_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert dict(request.url.params) == {}
+        return data_response({"items": [_RUN], "next_cursor": None, "outstanding": 0, "failed": 1})
+
+    result = run_cli(monkeypatch, handler, ["hooks", "runs", "list"])
+    assert result.exit_code == 0, result.output
+    shown = visible(result.output)
+    assert "r1" in shown
+    assert "acted" in shown
+
+
+def test_hook_runs_retry_posts_to_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/hook-runs/r1/retry"
+        return data_response({**_RUN, "status": "running", "attempts": 2})
+
+    result = run_cli(monkeypatch, handler, ["hooks", "runs", "retry", "r1"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["status"] == "running"
+
+
+def test_hook_runs_retry_surfaces_the_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return error_response("hook run r1: its hook resumed ['i1']; discard this run once handled.", 409)
+
+    result = run_cli(monkeypatch, handler, ["hooks", "runs", "retry", "r1"])
+    assert result.exit_code != 0
+    assert "its hook resumed" in visible(result.output)
+
+
+def test_hook_runs_discard_needs_yes(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request without --yes")
+
+    result = run_cli(monkeypatch, handler, ["hooks", "runs", "discard", "r1"])
+    assert result.exit_code != 0
+    assert "pass --yes to discard a hook run" in visible(result.output)
+
+
+def test_hook_runs_discard_deletes_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/hook-runs/r1"
+        return data_response({"discarded": "r1"})
+
+    result = run_cli(monkeypatch, handler, ["hooks", "runs", "discard", "r1", "--yes"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"discarded": "r1"}

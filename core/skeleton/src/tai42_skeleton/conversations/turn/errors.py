@@ -25,6 +25,15 @@ class ThreadNotFoundError(LookupError):
     """
 
 
+class ThreadAddressUnknownError(ValueError):
+    """The event door named a person thread that holds no message from the participant.
+
+    A person thread has no single address of its own; an event addressed by its id goes to where the
+    person last wrote from, and a thread that holds only send records names no such place. The
+    event is refused; it can be submitted by address instead.
+    """
+
+
 class EventTargetNotToolError(NotSupportedError):
     """The event door named a route whose target is an AGENT.
 

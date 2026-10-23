@@ -1,7 +1,7 @@
 """Tests for the participant-facing ``reply`` a target's terminal failure may carry.
 
 ``RunTerminalFailed`` and ``RunFailed`` carry an optional ``reply`` validated by the one shared
-:func:`validate_reply_text`, to the same bound as a conversation route's ``error_reply_text``.
+:func:`validate_reply_text`, to the same bound as a conversation route's ``reply_texts`` members.
 """
 
 from __future__ import annotations
@@ -34,12 +34,12 @@ _INVALID_REPLIES = [
 ]
 
 
-def test_the_reply_bound_is_the_route_error_reply_bound():
+def test_the_reply_bound_is_the_route_reply_texts_bound():
     assert REPLY_TEXT_MAX_CHARS == 2000
     assert REJECTION_NOTICE_MAX_CHARS == REPLY_TEXT_MAX_CHARS
     # One definition, exported from both packages.
     assert CONVERSATIONS_NON_BLANK_PATTERN is NON_BLANK_PATTERN
-    field_schema = ApiConversationRoute.model_json_schema()["properties"]["error_reply_text"]
+    field_schema = ApiConversationRoute.model_json_schema()["$defs"]["ReplyTexts"]["properties"]["error"]
     text_branch = next(branch for branch in field_schema["anyOf"] if branch.get("type") == "string")
     assert text_branch == {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": r"\S"}
 

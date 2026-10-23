@@ -1,7 +1,8 @@
-"""The platform's form vocabulary: the ``visibleWhen`` operators and evaluator, and the shared form constants.
+"""The platform's form vocabulary: the ``visibleWhen`` evaluator, the drawing order and the shared form constants.
 
-Every surface that validates, renders or evaluates a channel form reads these names, so a form draws
-and hides its fields the same way on every channel.
+Every surface that validates, renders or evaluates a channel form reads these names, so a form draws,
+orders and hides its fields the same way on every channel. The date-key names are defined once in the
+contract, beside the build-time date rules, and listed here with the rest of the vocabulary.
 """
 
 from __future__ import annotations
@@ -11,12 +12,16 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any, Final
 
+from tai42_contract.interactions.models.form_dates import DATE_CONSTRAINT_KEYS, FORM_WEEKDAYS, TIME_OF_KEY
+
 __all__ = [
     "DATE_CONSTRAINT_KEYS",
     "FORMAT_PATTERNS",
     "FORM_WEEKDAYS",
     "RADIO_OPTION_THRESHOLD",
+    "TIME_OF_KEY",
     "VISIBLE_WHEN_OPS",
+    "drawing_order",
     "drawn_number_bounds",
     "evaluate_visible_when",
     "hidden_fields",
@@ -30,9 +35,6 @@ VISIBLE_WHEN_OPS: Final = ("equals", "in", "notEmpty")
 #: renders as a radio group, more as a dropdown. One shared, documented constant so every
 #: surface draws the same short list the same way.
 RADIO_OPTION_THRESHOLD: Final = 5
-
-#: The date-constraint keywords a ``date``/``date-time`` property may carry.
-DATE_CONSTRAINT_KEYS: Final = ("minDate", "maxDate", "unavailableDates", "rangeStart", "minDays", "maxDays")
 
 #: The value shape of each typed string ``format`` a form field may declare, one regex each. Every
 #: pattern is anchored (``^``/``$``) and written in the syntax ECMAScript and Python regexes share
@@ -50,10 +52,6 @@ FORMAT_PATTERNS: Final[Mapping[str, str]] = MappingProxyType(
         "email": r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
     }
 )
-
-#: The lowercase weekday names an ``unavailableDates`` entry may name to exclude a recurring
-#: weekday (alongside explicit ``YYYY-MM-DD`` dates), indexed by ``date.weekday()``.
-FORM_WEEKDAYS: Final = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 
 def _numeric(value: Any) -> int | float | None:
@@ -108,3 +106,34 @@ def hidden_fields(properties: Mapping[str, Any], values: Mapping[str, Any]) -> s
         if isinstance(predicate, Mapping) and not evaluate_visible_when(predicate, values):
             hidden.add(str(name))
     return hidden
+
+
+def drawing_order(names: list[str], properties: Mapping[str, Any]) -> list[str]:
+    """``names`` in drawing order: each ``timeOf`` time moved to sit right after the date it names.
+
+    ``names`` is one page's fields, or every property of a page-less form or a readback, in their
+    given order. A time moves only when the name it points at is in ``names`` and does not itself
+    point at another listed name; any other time (its date not listed, a chain of times, a cycle)
+    keeps its place. Every name appears exactly once and every other name keeps its relative
+    order. Pure and idempotent, so every walker that orders the same list draws it the same way.
+    """
+    listed = set(names)
+    target_of: dict[str, str] = {}
+    for name in names:
+        prop = properties.get(name)
+        date_name = prop.get(TIME_OF_KEY) if isinstance(prop, Mapping) else None
+        if isinstance(date_name, str) and date_name != name and date_name in listed:
+            target_of[name] = date_name
+    times_of: dict[str, list[str]] = {}
+    for name in names:
+        date_name = target_of.get(name)
+        if date_name is not None and date_name not in target_of:
+            times_of.setdefault(date_name, []).append(name)
+    moved = {time_name for time_names in times_of.values() for time_name in time_names}
+    ordered: list[str] = []
+    for name in names:
+        if name in moved:
+            continue
+        ordered.append(name)
+        ordered.extend(times_of.get(name, ()))
+    return ordered

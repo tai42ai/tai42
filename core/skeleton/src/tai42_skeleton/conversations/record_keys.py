@@ -31,13 +31,17 @@ def _thread_address_suffix(thread_id: str, route_name: str) -> str | None:
 
 
 def _record_matches(record: ConversationRecord, needle: str) -> bool:
-    """Whether ``needle`` (already lower-cased) occurs in the record's inbound text or its answer.
+    """Whether ``needle`` (already lower-cased) occurs in the record's inbound text, its answer or its ask reply.
 
-    The two fields a conversation text search reads.
+    The fields a conversation text search reads; an ask reply is matched when its answer is text. A
+    sensitive ask's reply holds no answer, so it is never found by its text.
     """
     if needle in record.inbound_text.lower():
         return True
-    return record.answer is not None and needle in record.answer.lower()
+    if record.answer is not None and needle in record.answer.lower():
+        return True
+    reply = record.ask_reply
+    return reply is not None and isinstance(reply.answer, str) and needle in reply.answer.lower()
 
 
 def _resume_at(route_names: list[str], resume: str | None) -> list[str]:

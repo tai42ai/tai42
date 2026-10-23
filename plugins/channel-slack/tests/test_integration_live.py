@@ -9,6 +9,7 @@ human-by-definition (proven by the offline flow tests), and nothing polls
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -66,18 +67,17 @@ async def test_deliver_posts_real_message(live_clients):
         answer_format="text",
         callback_url=callback_url,
         timeout_at=datetime.now(UTC) + timedelta(minutes=2),
+        sensitive=False,
     )
 
-    await SlackChannel().deliver(delivery)
+    outcome = await SlackChannel().deliver(delivery)
 
-    # deliver returns None, so the posted ts is recovered by finding the
-    # correlation entry that carries this delivery's unique callback URL.
-    stored_key = None
-    async for key in redis.scan_iter(match=f"{_CORR_PREFIX}*"):
-        if await redis.get(key) == callback_url:
-            stored_key = key
-            break
-    assert stored_key is not None, "no correlation entry found for the delivered question"
+    # The outcome carries the posted ts, which keys the correlation entry.
+    [ts] = outcome.message_ids
+    stored_key = f"{_CORR_PREFIX}{ts}"
+    stored = await redis.get(stored_key)
+    assert stored is not None, "no correlation entry found for the delivered question"
+    assert json.loads(stored)["callback_url"] == callback_url
     ttl = await redis.ttl(stored_key)
     assert ttl > 0
     await redis.delete(stored_key)
@@ -94,6 +94,7 @@ async def test_ok_false_raises_live(live_clients, monkeypatch):
         answer_format="text",
         callback_url="http://gateway/api/interactions/callback/live-neg",
         timeout_at=datetime.now(UTC) + timedelta(minutes=2),
+        sensitive=False,
     )
 
     with pytest.raises(ChannelDeliveryError, match="channel_not_found"):

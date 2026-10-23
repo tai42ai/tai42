@@ -21,11 +21,13 @@ from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.mode import effective_mode, supports_thread_append
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.pairing import Passthrough, classify
+from tai42_skeleton.conversations.persons import PersonErasingError
 from tai42_skeleton.conversations.thread_ids import person_id_of
 from tai42_skeleton.conversations.turn import accessors, agent_turn, pairing, tool_turn
 from tai42_skeleton.conversations.turn.context import _conversation_attribution, _conversation_state_context
 from tai42_skeleton.conversations.turn.outcome import _SilentOutcome, _tool_error, _ToolOutcome
 from tai42_skeleton.conversations.turn.record import _outcome_record
+from tai42_skeleton.conversations.turn.reply_window import read_turn_reply_window
 from tai42_skeleton.conversations.turn.routing import _Multichannel
 from tai42_skeleton.states.context import state_context
 from tai42_skeleton.tools.attribution import run_attribution
@@ -72,6 +74,11 @@ async def _target_outcome(
     tool and agent branches alike — so any code running inside the turn, at any depth
     (contextvars propagate into the engine's fan-out), can learn which turn it serves and read
     the pending seam with the turn's lead ``message_id``.
+
+    The pair's reply window is read HERE, once per tool or agent turn
+    (:func:`read_turn_reply_window` over the record's channel, our identity and client address),
+    and rides the payload's ``turn`` block. A failed read runs no target: it is logged and the
+    turn takes the recorded client-safe ``error`` outcome.
     """
     turn_token = set_conversation_turn(
         ConversationTurnRef(thread_id=intake.thread_id, message_id=batch.lead.message_id, route_name=route.route_name)
@@ -79,6 +86,17 @@ async def _target_outcome(
     try:
         if await effective_mode(route, intake.thread_id) == "manual":
             return await _manual_target_outcome(route, intake, text)
+        try:
+            window = await read_turn_reply_window(intake.channel, intake.our_identity, intake.client_address)
+        except Exception as exc:
+            # No turn runs with a guessed window: a failed read is the recorded client-safe error
+            # outcome, its detail value-free (the exception class only) and the fault logged whole.
+            logger.exception(
+                "conversations: reading the reply window for route %r failed with %s",
+                route.route_name,
+                type(exc).__name__,
+            )
+            return _tool_error(f"reply window read failed ({type(exc).__name__})", route)
         attribution = _conversation_attribution(route, intake, person)
         context = _conversation_state_context(route, intake, person, actor=attribution.user_id)
         with run_attribution(attribution), state_context(context):
@@ -96,6 +114,7 @@ async def _target_outcome(
                     location,
                     record=intake,
                     batch=batch,
+                    reply_window=window,
                 )
             return await agent_turn._run_agent_turn(
                 route,
@@ -110,6 +129,7 @@ async def _target_outcome(
                 form_tag=form_tag,
                 attachments=attachments,
                 location=location,
+                reply_window=window,
             )
     finally:
         reset_conversation_turn(turn_token)
@@ -238,9 +258,15 @@ async def _resolve_turn_record(
             None,
         )
 
-    person, created = await cache.get_conversations_manager().persons.ensure_provisional(
-        multichannel.target, multichannel.address_row(), locale=intake.inbound_locale
-    )
+    try:
+        person, created = await cache.get_conversations_manager().persons.ensure_provisional(
+            multichannel.target, multichannel.address_row(), locale=intake.inbound_locale
+        )
+    except PersonErasingError as exc:
+        # The sender's person is being erased: the turn takes the error outcome with the refusal
+        # as its detail. Sent again after the erase, the address starts a fresh person.
+        logger.warning("conversations: turn on route %r refused: %s", route.route_name, exc)
+        return _outcome_record(intake, _tool_error(str(exc), route)), None
     greeting_code = await pairing._mint_and_owe_greeting(multichannel, intake.thread_id) if created else None
     action = classify(text)
     if isinstance(action, Passthrough):

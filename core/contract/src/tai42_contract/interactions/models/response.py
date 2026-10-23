@@ -1,6 +1,7 @@
 """The ``ask`` answer and interaction-state models.
 
 ``InteractionResponse`` is the validated answer pushed onto the reply channel;
+``AskAnswer`` is the one value a synchronous asker receives;
 ``InteractionState`` is the mutable record the answer endpoint reads;
 ``SuspendedInteraction`` is the sentinel an ``async`` ask returns in place of an answer.
 """
@@ -8,13 +9,21 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tai42_contract.entry_params import validate_entry_params
 from tai42_contract.interactions.models.request import InteractionRequest
 from tai42_contract.interactions.reply_text import ReplyText
+from tai42_contract.reply_to import ReplyTo
+
+#: The MCP ``_meta`` key under which the platform's elicitation bridge hands an elicitation asker
+#: the message the answering reply quoted: ``ReplyTo.model_dump(mode="json")``, or ``null`` when the
+#: reply quoted none or the answer did not come over a channel. The bridge asks an elicitation with no
+#: channel, so it is answered in the inbox and the key reads ``null`` there. Parsed back with
+#: :meth:`~tai42_contract.conversations.ReplyTo.model_validate`.
+ELICIT_META_REPLY_TO: Final = "tai42/reply_to"
 
 
 class InteractionResponse(BaseModel):
@@ -23,12 +32,21 @@ class InteractionResponse(BaseModel):
     ``params`` is the OPTIONAL opaque channel enrichment carried WITH the answer — the answer-path
     counterpart of the bridge path's :class:`~tai42_contract.channels.InboundBridge.params` and a
     conversation entry's ``params``: when a tap/reply that ANSWERS a pending ask also carries
-    channel-specific context (a tapped reply id, a template button payload, a referral, the
-    reply-to context the participant quoted) the channel encodes it as string entries here so the asking
-    flow reads them beside ``answer``. The SAME transport vocabulary
+    channel-specific context (a tapped reply id, a template button payload, a referral) the
+    channel encodes it as string entries here. The SAME transport vocabulary
     (:func:`~tai42_contract.entry_params.validate_entry_params`) bounds it as every params seam;
-    the platform attaches no meaning and NO TRUST. ``None`` means no enrichment — a plain answer,
-    byte-identical to the pre-params envelope.
+    the platform attaches no meaning and NO TRUST. ``None`` means no enrichment — a plain answer.
+    The asker receives it as is, beside ``answer`` (:class:`AskAnswer` and the continuation
+    payload).
+
+    ``medium_message_id`` is the id the medium gave the participant's reply message, the one a
+    later quote names; ``None`` when the answer did not arrive as a message on a medium (an
+    operator or caller answer) or the medium has no such id.
+
+    ``reply_to_medium_message_id`` is the medium's id of the message the answering reply quoted;
+    ``None`` when it quoted none or the answer did not arrive over a channel. It holds the id only,
+    never the quoted text: the platform resolves the text from the conversation record and hands
+    it to the asker as ``reply_to``, beside ``answer``.
     """
 
     interaction_id: str
@@ -36,6 +54,37 @@ class InteractionResponse(BaseModel):
     answered_by: str
     answered_at: datetime
     params: dict[str, str] | None = None
+    medium_message_id: str | None = None
+    reply_to_medium_message_id: str | None = None
+
+    @field_validator("params")
+    @classmethod
+    def _check_params(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        if value is None:
+            return None
+        return validate_entry_params(value)
+
+
+class AskAnswer(BaseModel):
+    """The one value a synchronous asker receives: the answer, the message it quoted, and its params.
+
+    ``answer`` is the answer value exactly as the answering party gave it; on a sensitive ask it is
+    the :class:`~tai42_contract.secrets.SecretValue` wrapping it, held by reference, so dumping this
+    value to JSON refuses loudly as a dump of the bare ``SecretValue`` does. The answer is never
+    changed or merged with the quote or the params.
+
+    ``reply_to`` is the message the answering reply quoted, as the platform resolved it from the
+    conversation record; ``None`` when the reply quoted none or the answer did not come over a
+    channel. ``params`` is the channel's opaque enrichment of the answering tap or reply
+    (:attr:`InteractionResponse.params`, the same vocabulary, no platform meaning), passed through
+    as is; ``None`` when the answer carried none. Frozen.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    answer: Any
+    reply_to: ReplyTo | None
+    params: dict[str, str] | None
 
     @field_validator("params")
     @classmethod

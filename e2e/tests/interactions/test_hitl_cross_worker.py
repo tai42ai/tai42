@@ -100,7 +100,7 @@ async def test_external_callback_answer_is_single_use(replicas_stack: TaiStack, 
                 },
                 retry_on_reloading=True,
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:

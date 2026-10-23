@@ -105,6 +105,33 @@ Content Telegram can send that this channel does not map to a media kind — a *
 participant gets one generic "unsupported" notice and a platform event records the drop,
 so nothing is silently lost.
 
+## Message ids and addresses
+
+The conversation bridge records every message this channel sends to a participant. These are
+the ids and addresses it records:
+
+- An inbound message passes its `message_id` as the medium message id.
+- `resolve_address` returns the bot's numeric id and the target as the caller names it, which
+  may be an `@username`. Telegram resolves the target only when it sends: a completed send
+  reports the numeric `chat.id` from the Bot API response, the id an inbound message from that
+  chat carries, and the `message_id` of each message sent. A send to an `@username` is
+  therefore recorded in the thread of its numeric chat.
+
+## Replies
+
+A message sent as a reply carries `reply_to_message.message_id`, the id of the message it
+quotes in the same chat. The channel hands that id to the platform beside the message, and
+the platform resolves it against the conversation's own records into a typed `reply_to`
+(`{message_id, status, text}`): a `tool` target reads it in its payload, an `agent` target
+through `start_expr`. An inline-keyboard tap is a reply to the message holding the keyboard.
+A message posted in a forum topic, whose `reply_to_message` Telegram fills with the topic's
+first message, is a reply only when the participant replied to another message. A reply to a
+message of another chat (`external_reply`) names no message of this chat, so it quotes none.
+
+When the reply answers a pending question, the asker receives the same `reply_to` beside the
+unchanged answer, and the reply's entry parameters (a tap's `reply_id` / `reply_description`,
+a media reply's `media_*`) as its `params`.
+
 ## Working-on-it signal
 
 While a message runs its turn, the platform keeps Telegram's **typing action**

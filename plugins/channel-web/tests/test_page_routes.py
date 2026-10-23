@@ -4,8 +4,10 @@ page-door entry gate."""
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime, timedelta
+from html import unescape
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,8 @@ from tai42_channel_web.page import PAGE_CSP
 from tai42_channel_web.routes.entry_admission import _ENTRY_REFUSED_MESSAGE
 from tai42_channel_web.store.entry_gate import mint_entry_code, revoke_entry_code, set_gate
 from tai42_channel_web.store.registrations import resolve_session
+from tai42_channel_web.store.words import set_words
+from tai42_channel_web.words import WebWords
 
 from .conftest import (
     _ASSETS,
@@ -28,6 +32,7 @@ from .conftest import (
     _SUBRESOURCE,
     ENTRY_ASSET,
     IDENTITY,
+    OTHER_IDENTITY,
     PLAIN_COOKIE,
     SECURE_COOKIE,
     SESSION_TOKEN,
@@ -539,3 +544,123 @@ async def test_page_and_rotate_refusals_share_the_entry_wording(
     assert _ENTRY_REFUSED_MESSAGE in bytes(page_resp.body).decode()
     assert _body(rotate_resp)["error"] == _ENTRY_REFUSED_MESSAGE
     assert _body(rotate_resp)["code"] == "entry_refused"
+
+
+# -- the identity's own refusal-page words and transport sentences ---------------
+
+_PAGE_WORDS = {
+    "not_a_navigation": {"heading": "Open it directly", "text": "Use the chat link in a new tab."},
+    "link_invalid": {"heading": "Broken link", "text": "Ask for a fresh chat link."},
+    "entry_refused": {"heading": "Members only", "text": "Use the link from your invitation."},
+    "page_unavailable": {"heading": "Down for now", "text": "Come back in a few minutes."},
+}
+
+
+async def _store_page_words(identity: str = IDENTITY) -> None:
+    await set_words(identity, WebWords.model_validate({"page": _PAGE_WORDS}))
+
+
+async def _refusal_for(stub_app, case: str, identity: str, tmp_path: Path, monkeypatch) -> Any:
+    handler = _handler(stub_app, _CHAT)
+    if case == "link_invalid":
+        return await handler(_chat_request(identity=identity, query="a=1&a=2"))
+    if case == "not_a_navigation":
+        return await handler(_chat_request(identity=identity, extra_headers=_SUBRESOURCE))
+    if case == "entry_refused":
+        await set_gate(identity, True)
+        return await handler(_chat_request(identity=identity))
+    from tai42_channel_web import page
+
+    monkeypatch.setattr(page, "_public_dir", lambda: tmp_path / "absent")
+    return await handler(_chat_request(identity=identity))
+
+
+_CASES = [
+    ("link_invalid", 400, "link_params_invalid"),
+    ("not_a_navigation", 403, "not_a_navigation"),
+    ("entry_refused", 403, "entry_refused"),
+    ("page_unavailable", 500, None),
+]
+
+
+@pytest.mark.parametrize(("case", "status", "code"), _CASES)
+async def test_each_refusal_page_shows_the_identity_words(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path, tmp_path: Path, monkeypatch, case, status, code
+):
+    await _store_page_words()
+    resp = await _refusal_for(stub_app, case, IDENTITY, tmp_path, monkeypatch)
+    assert resp.status_code == status
+    html = _refusal(resp, code)
+    words = _PAGE_WORDS[case]
+    assert f"<title>{words['heading']}</title>" in html
+    assert f"<h1>{words['heading']}</h1>" in html
+    assert f"<p>{words['text']}</p>" in html
+
+
+@pytest.mark.parametrize(("case", "status", "code"), _CASES)
+async def test_another_identity_keeps_the_built_in_refusal_pages(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path, tmp_path: Path, monkeypatch, case, status, code
+):
+    await _store_page_words(OTHER_IDENTITY)
+    resp = await _refusal_for(stub_app, case, IDENTITY, tmp_path, monkeypatch)
+    assert resp.status_code == status
+    html = _refusal(resp, code)
+    for words in _PAGE_WORDS.values():
+        assert words["heading"] not in html
+        assert words["text"] not in html
+
+
+async def test_a_refusal_page_with_only_a_heading_keeps_the_built_in_text(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    await set_words(IDENTITY, WebWords.model_validate({"page": {"entry_refused": {"heading": "Members only"}}}))
+    await set_gate(IDENTITY, True)
+    html = _refusal(await _handler(stub_app, _CHAT)(_chat_request()), "entry_refused")
+    assert "<h1>Members only</h1>" in html
+    assert f"<p>{_ENTRY_REFUSED_MESSAGE}</p>" in html
+
+
+async def test_the_entry_refusal_with_words_is_still_one_page_for_every_code(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    await _store_page_words()
+    await set_gate(IDENTITY, True)
+    handler = _handler(stub_app, _CHAT)
+    missing = await handler(_chat_request())
+    wrong = await handler(_chat_request(query="tai_entry=nope"))
+    assert bytes(missing.body) == bytes(wrong.body)
+
+
+async def test_the_served_page_carries_the_identity_transport_words(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    transport = {"busy": 'Hold on "a" <moment>.', "too_long": "{subject} is over the limit."}
+    await set_words(IDENTITY, WebWords.model_validate({"transport": transport, "page": _PAGE_WORDS}))
+    html = bytes((await _handler(stub_app, _CHAT)(_chat_request())).body).decode()
+    root = next(line for line in html.splitlines() if line.startswith('<div id="root"'))
+    raw = root.split('data-words="', 1)[1].split('"', 1)[0]
+    assert json.loads(unescape(raw)) == transport
+    assert "<moment>" not in html
+
+
+async def test_the_served_page_carries_no_words_attribute_without_transport_words(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    plain = bytes((await _handler(stub_app, _CHAT)(_chat_request())).body).decode()
+    assert "data-words" not in plain
+    await _store_page_words()
+    page_only = bytes((await _handler(stub_app, _CHAT)(_chat_request())).body).decode()
+    assert "data-words" not in page_only
+
+
+async def test_the_store_off_page_shows_the_deployment_words(no_web_env, stub_app, public_build: Path, monkeypatch):
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("CHANNEL_WEB_STORE_OFF_TITLE", "Closed <today>")
+    monkeypatch.setenv("CHANNEL_WEB_STORE_OFF_TEXT", "Come back later.")
+    reset_all_settings()
+    resp = await _handler(stub_app, _CHAT)(_chat_request())
+    assert resp.status_code == 501
+    html = _refusal(resp, "web_transcript_store_off")
+    assert "<h1>Closed &lt;today&gt;</h1>" in html
+    assert "<p>Come back later.</p>" in html

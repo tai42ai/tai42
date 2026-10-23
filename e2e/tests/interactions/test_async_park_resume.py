@@ -6,7 +6,7 @@ plus a synthetic execution identity and calls ``ask(mode="async", expiry_at=...)
 on replica A. The ask PARKS — it returns a ``SuspendedInteraction`` at once, never
 blocking — and the stored generic continuation (``e2e_async_resume``) fires exactly
 once when the park resolves, REBOUND to the STORED park identity (never the answerer's
-or reaper's default), carrying ``{interaction_id, answer}`` and recording which branch it
+or reaper's default), carrying ``{interaction_id, answer, reply_to, params}`` and recording which branch it
 resumed through, in which process, and under which identity.
 
 Two legs cover the two resolutions:

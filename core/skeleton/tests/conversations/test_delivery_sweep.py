@@ -11,7 +11,8 @@ import inspect
 import time
 
 import pytest
-from tai42_contract.channels import ChannelDeliveryError, ChannelInputError
+from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, SendOutcome
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import delivery_sweep as delivery_sweep_module
@@ -22,7 +23,7 @@ from tai42_skeleton.conversations.models import ConversationRecord, Conversation
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
-from .conftest import FakeManager
+from .conftest import FakeManager, create_record, sent
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 #: Every answer in this module is chunked at this width, so a handful of characters makes
@@ -35,7 +36,7 @@ class WorkerDiedError(RuntimeError):
     ``ChannelDeliveryError``, so the executor does not turn it into a ``failed`` record."""
 
 
-class FakeChannel:
+class FakeChannel(AddressingChannel):
     """Records every chunk it is asked to send. ``crash_on`` abandons the send on the nth
     chunk (a dead worker), ``fail_on`` refuses it the way a provider does, ``input_fail_on``
     permanently refuses its shape (a ``ChannelInputError``), and ``hang_on`` never returns
@@ -59,7 +60,7 @@ class FakeChannel:
         self._hang_on = hang_on
         self._watch = watch
 
-    async def notify(self, notification) -> list[str]:
+    async def notify(self, notification) -> SendOutcome:
         self.sends.append(notification.message)
         if self._watch is not None:
             watched = self._watch()
@@ -73,7 +74,7 @@ class FakeChannel:
             raise ChannelInputError("the provider cannot render the chunk")
         if self._hang_on is not None and len(self.sends) == self._hang_on:
             await asyncio.Event().wait()
-        return [f"{self._prefix}-{len(self.sends)}"]
+        return self.outcome(notification, [f"{self._prefix}-{len(self.sends)}"])
 
 
 class _FakeChannels:
@@ -185,7 +186,7 @@ async def test_sweep_redrives_a_record_whose_lease_has_lapsed(monkeypatch, fake,
     """
     channel = FakeChannel()
     _wire_channel(monkeypatch, channel)
-    await store.create_record(_record("m-dead", "the answer"))
+    await create_record(store, _record("m-dead", "the answer"))
     # The dead worker's lease, taken 200s ago under a 120s lease: long lapsed.
     assert await store.claim_delivery("m-dead", time.time() - 200, "dead-worker", 120) == 1
 
@@ -201,7 +202,7 @@ async def test_sweep_leaves_another_workers_live_lease_alone(monkeypatch, fake, 
     else's send in flight. The sweep must not steal it."""
     channel = FakeChannel()
     _wire_channel(monkeypatch, channel)
-    await store.create_record(_record("m-live", "the answer"))
+    await create_record(store, _record("m-live", "the answer"))
     assert await store.claim_delivery("m-live", time.time(), "other-worker", 120) == 1
 
     await delivery_module.sweep_stalled_deliveries()
@@ -216,10 +217,10 @@ async def test_sweep_confirms_a_provisional_record_past_its_grace(monkeypatch, f
     """The worker that scheduled the fallback confirmation died holding it, so nothing in
     the process would ever close the record. The sweep does."""
     _wire_channel(monkeypatch, FakeChannel())
-    await store.create_record(_record("m-prov", "the answer"))
+    await create_record(store, _record("m-prov", "the answer"))
     # Sent a whole grace window (and a second) ago, so its grace has run out.
     sent_at = time.time() - ConversationsSettings().delivery_grace_seconds - 1
-    await store.mark_provisional("m-prov", ["out-1"], 1, sent_at, "tok")
+    await store.mark_provisional("m-prov", sent("out-1"), 1, sent_at, "tok")
 
     await delivery_module.sweep_stalled_deliveries()
     await _drain_spawned(store)
@@ -229,8 +230,8 @@ async def test_sweep_confirms_a_provisional_record_past_its_grace(monkeypatch, f
 
 async def test_sweep_does_not_confirm_a_provisional_record_still_within_grace(monkeypatch, fake, store):
     _wire_channel(monkeypatch, FakeChannel())
-    await store.create_record(_record("m-young", "the answer"))
-    await store.mark_provisional("m-young", ["out-1"], 1, time.time(), "tok")
+    await create_record(store, _record("m-young", "the answer"))
+    await store.mark_provisional("m-young", sent("out-1"), 1, time.time(), "tok")
 
     await delivery_module.sweep_stalled_deliveries()
     await _drain_spawned(store)
@@ -243,7 +244,7 @@ async def test_sweep_fails_a_record_that_has_spent_every_attempt(monkeypatch, fa
     spent it becomes a loud, retained ``failed`` instead."""
     channel = FakeChannel()
     _wire_channel(monkeypatch, channel)
-    await store.create_record(_record("m-spent", "the answer"))
+    await create_record(store, _record("m-spent", "the answer"))
     for _ in range(ConversationsSettings().delivery_max_attempts):
         await store.bump_attempt("m-spent")
 
@@ -393,8 +394,8 @@ async def test_sweep_moves_unrecoverable_row_to_failed(monkeypatch, fake, store)
 
 
 async def _provisional(store: ConversationRecordStore, message_id: str, sent_at: float) -> None:
-    await store.create_record(_record(message_id, "the answer"))
-    await store.mark_provisional(message_id, ["out-1"], 1, sent_at, "tok")
+    await create_record(store, _record(message_id, "the answer"))
+    await store.mark_provisional(message_id, sent("out-1"), 1, sent_at, "tok")
 
 
 def _count_row_reads(fake: FakeRecordRedis) -> list[str]:

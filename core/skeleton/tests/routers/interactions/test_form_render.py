@@ -3,6 +3,10 @@ question's schema into an escaped HTML form."""
 
 from __future__ import annotations
 
+import html
+import json
+import re
+
 from tai42_skeleton.routers import interactions as router
 from tai42_skeleton.routers.interactions.form_render import _reactions_attr
 
@@ -625,7 +629,9 @@ def test_reactions_attr_carries_only_the_triggers_not_choices():
 # === the shapes caught on the page ===========================================
 
 
-def _page(properties: dict, *, required: list[str] | None = None, wording: dict | None = None) -> str:
+def _page(
+    properties: dict, *, required: list[str] | None = None, wording: dict | None = None, pages: list | None = None
+) -> str:
     from tai42_skeleton.routers.interactions.form_render import _render_form_page
 
     schema: dict = {"type": "object", "properties": properties}
@@ -634,6 +640,8 @@ def _page(properties: dict, *, required: list[str] | None = None, wording: dict 
     payload: dict = {"schema": schema}
     if wording is not None:
         payload["wording"] = wording
+    if pages is not None:
+        payload["pages"] = pages
     return _render_form_page(payload)
 
 
@@ -746,3 +754,208 @@ def test_the_door_refusal_is_pinned_once_even_when_its_field_is_on_another_step(
     assert _FORM_SUBMIT_SCRIPT.count("pinFieldError(data.field, reason)") == 1
     show_body = _FORM_SUBMIT_SCRIPT.split("function show(i) {", 1)[1].split("\n  function ", 1)[0]
     assert "clearFieldErrors" not in show_body
+
+
+# === a time paired with each end of a date range ==============================
+
+
+def _timed_range(**extra: dict) -> dict:
+    # The two times are declared last, so the drawn order is the drawing step's, not the schema's.
+    return {
+        "start": {"type": "string", "format": "date", "title": "From"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start", "title": "To"},
+        **extra,
+        "start_time": {"type": "string", "format": "time", "timeOf": "start", "title": "From time"},
+        "end_time": {"type": "string", "format": "time", "timeOf": "end", "title": "To time"},
+    }
+
+
+def _drawn_fields(body: str) -> list[str]:
+    markup = body.split("<script>")[0]
+    return re.findall(r'data-field="([^"]+)"', markup)
+
+
+def _control(body: str, name: str) -> str:
+    match = re.search(rf'<input data-field="{name}"[^>]*>', body)
+    assert match is not None, name
+    return match.group(0)
+
+
+def test_a_timed_range_draws_four_controls_in_one_group_in_drawing_order():
+    body = _page(_timed_range())
+    group = body.split('<fieldset class="daterange">', 1)[1].split("</fieldset>", 1)[0]
+    assert _drawn_fields(group) == ["start", "start_time", "end", "end_time"]
+    assert "<legend>From \u2013 To</legend>" in group
+    assert "From time" in group
+    assert "To time" in group
+    # Each time is drawn once, inside the group: never again as its own row.
+    assert _drawn_fields(body) == ["start", "start_time", "end", "end_time"]
+    assert 'data-field-row="start_time"' not in body
+    assert 'data-field-row="end_time"' not in body
+
+
+def test_an_unmerged_timed_range_draws_each_time_after_its_date():
+    note = {"note": {"type": "string", "visibleWhen": {"field": "end", "equals": "2026-01-01"}}}
+    body = _page(_timed_range(**note))
+    assert '<fieldset class="daterange">' not in body
+    assert _drawn_fields(body) == ["start", "start_time", "end", "end_time", "note"]
+    assert 'data-field-row="end_time"' in body
+
+
+def test_the_end_time_carries_its_start_time_and_the_time_order_sentence():
+    body = _page(_timed_range())
+    end_time = _control(body, "end_time")
+    assert 'data-time-of="end"' in end_time
+    assert 'data-range-start-time="start_time"' in end_time
+    assert 'data-msg-range_order="The end time must be on or after the start time"' in end_time
+    start_time = _control(body, "start_time")
+    assert 'data-time-of="start"' in start_time
+    assert "data-range-start-time" not in start_time
+    assert "data-msg-range_order" not in start_time
+
+
+def test_the_callers_invalid_sentence_rides_a_grouped_time():
+    body = _page(_timed_range(), wording={"form": {"fields": {"end_time": {"invalid": "Finish after you begin"}}}})
+    assert 'data-invalid="Finish after you begin"' in _control(body, "end_time")
+
+
+def test_an_instant_pair_marks_its_end_and_a_mixed_pair_does_not():
+    def end_control(start_format: str, end_format: str) -> str:
+        body = _page(
+            {
+                "start": {"type": "string", "format": start_format},
+                "end": {"type": "string", "format": end_format, "rangeStart": "start"},
+            }
+        )
+        return _control(body, "end")
+
+    assert "data-range-instant" in end_control("date-time", "date-time")
+    assert "data-range-instant" not in end_control("date", "date-time")
+    assert "data-range-instant" not in end_control("date-time", "date")
+    assert "data-range-instant" not in end_control("date", "date")
+
+
+def test_the_review_readback_lists_each_time_after_its_date():
+    pages = [
+        {"title": "When", "fields": ["start", "end", "start_time", "end_time"]},
+        {"title": "Review", "kind": "review", "fields": []},
+    ]
+    body = _page(_timed_range(), pages=pages)
+    match = re.search(r'data-labels="([^"]*)"', body)
+    assert match is not None
+    raw = html.unescape(match.group(1))
+    assert list(json.loads(raw)) == ["start", "start_time", "end", "end_time"]
+
+
+def test_the_page_script_orders_same_day_times_and_reads_written_dates():
+    from tai42_skeleton.routers.interactions.pages import _FORM_SUBMIT_SCRIPT
+
+    assert "data-range-start-time" in _FORM_SUBMIT_SCRIPT
+    assert "data-range-instant" in _FORM_SUBMIT_SCRIPT
+    assert "iso.slice(0, 10)" in _FORM_SUBMIT_SCRIPT
+
+
+# === the caller's form and field words on the callback page ==================
+
+
+def test_the_could_not_update_sentence_rides_the_form_chapter():
+    body = _page({"name": {"type": "string"}}, wording={"form": {"update_failed": "No se pudo actualizar: {reason}"}})
+    assert 'data-text-update_failed="No se pudo actualizar: {reason}"' in body
+
+
+def test_the_page_chapter_no_longer_carries_the_could_not_update_sentence():
+    body = _page(
+        {"name": {"type": "string"}},
+        wording={"answer_page": {"form": {"update_failed": "No se pudo actualizar."}}},
+    )
+    assert "data-text-update_failed" not in body.split("<script>")[0]
+
+
+def test_the_callers_length_hint_replaces_the_maximum_line():
+    body = _page(
+        {
+            "code": {"type": "string", "maxLength": 12},
+            "notes": {"type": "string", "control": "textarea", "maxLength": 500},
+        },
+        wording={
+            "form": {
+                "fields": {
+                    "code": {"length_hint": "hasta {max} <letras>"},
+                    "notes": {"length_hint": "máximo {max}"},
+                }
+            }
+        },
+    )
+    assert '<small class="hint">hasta 12 &lt;letras&gt;</small>' in body
+    assert '<small class="hint">máximo 500</small>' in body
+    assert "characters</small>" not in body
+
+
+def test_a_field_without_a_length_hint_keeps_the_maximum_line():
+    body = _page({"code": {"type": "string", "maxLength": 12}}, wording={"form": {"fields": {"other": {}}}})
+    assert '<small class="hint">up to 12 characters</small>' in body
+
+
+def test_the_callers_yes_no_words_ride_the_boolean_control():
+    body = _page(
+        {"agree": {"type": "boolean"}, "plain": {"type": "boolean"}},
+        wording={"form": {"fields": {"agree": {"true_label": "Sí", "false_label": "No <nunca>"}}}},
+    )
+    assert (
+        'data-field="agree" data-kind="boolean" type="checkbox" '
+        'data-true-label="Sí" data-false-label="No &lt;nunca&gt;"' in body
+    )
+    plain = _control(body, "plain")
+    assert "data-true-label" not in plain
+    assert "data-false-label" not in plain
+
+
+def test_the_review_readback_draws_a_boolean_with_the_callers_words():
+    from tai42_skeleton.routers.interactions.pages import _FORM_SUBMIT_SCRIPT
+
+    assert "data-true-label" in _FORM_SUBMIT_SCRIPT
+    assert "data-false-label" in _FORM_SUBMIT_SCRIPT
+
+
+def test_the_callers_required_sentence_rides_every_required_control():
+    sentence = "Rellena <esto>"
+    escaped = "Rellena &lt;esto&gt;"
+    fields = {
+        "name": {"type": "string"},
+        "pick": {"type": "string", "enum": ["a", "b"]},
+        "big": {"type": "string", "enum": [str(n) for n in range(12)]},
+        "tags": {"type": "array", "items": {"type": "string", "enum": ["x", "y"]}},
+        "start": {"type": "string", "format": "date"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start"},
+        "count": {"type": "integer"},
+    }
+    words = {name: {"required": sentence} for name in fields}
+    body = _page(fields, required=list(fields), wording={"form": {"fields": words}}).split("<script>")[0]
+    assert re.search(rf'<input data-field="name"[^>]* required data-required="{escaped}"', body)
+    assert len(re.findall(rf'type="radio"[^>]* required data-required="{escaped}"', body)) == 2
+    assert re.search(rf'<select data-field="big"[^>]* required data-required="{escaped}"', body)
+    assert re.search(rf'<fieldset data-array-required="1" data-required="{escaped}">', body)
+    assert re.search(rf'<input data-field="start"[^>]* required data-required="{escaped}"', body)
+    assert re.search(rf'<input data-field="end"[^>]* required data-required="{escaped}"', body)
+    assert re.search(rf'<input data-field="count"[^>]* required data-required="{escaped}"', body)
+
+
+def test_a_required_control_without_the_callers_sentence_carries_no_required_words():
+    body = _page({"name": {"type": "string"}}, required=["name"]).split("<script>")[0]
+    assert " required" in body
+    assert "data-required" not in body
+
+
+def test_the_page_script_shows_the_callers_required_sentence():
+    from tai42_skeleton.routers.interactions.pages import _FORM_SUBMIT_SCRIPT
+
+    assert "getAttribute('data-required')" in _FORM_SUBMIT_SCRIPT
+
+
+def test_rebuilt_radios_keep_the_callers_required_sentence():
+    from tai42_skeleton.routers.interactions.pages import _FORM_SUBMIT_SCRIPT
+
+    rebuild = _FORM_SUBMIT_SCRIPT.split("function rebuildChoices(name, options) {", 1)[1].split("\n  function ", 1)[0]
+    radios = rebuild.split("var fieldset = first.closest('fieldset');", 1)[1]
+    assert "var requiredWords = first.getAttribute('data-required');" in radios
+    assert "input.setAttribute('data-required', requiredWords);" in radios

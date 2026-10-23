@@ -10,6 +10,7 @@ network work.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from tai42_contract.channels import ChannelInputError
@@ -23,7 +24,15 @@ from tai42_channel_whatsapp.flows_components import (
     _valid_iso_date,
     component_names,
 )
-from tai42_channel_whatsapp.flows_endpoint import error_carriers, error_fields, form_endpoint_driven, shaped_fields
+from tai42_channel_whatsapp.flows_endpoint import (
+    FORM_LINE_MEMBERS,
+    error_carriers,
+    error_fields,
+    form_endpoint_driven,
+    form_line_carrier,
+    required_fields,
+    shaped_fields,
+)
 from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages, slot_datanames
 from tai42_channel_whatsapp.flows_second_line import data_source_rows
 
@@ -35,6 +44,8 @@ def build_flow_data(
     pages: list[dict[str, Any]] | None = None,
     field_invalid: dict[str, str] | None = None,
     carry_invalid: bool = False,
+    field_required: dict[str, str] | None = None,
+    form_lines: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The ``flow_action_payload.data`` a per-send form carries.
 
@@ -57,7 +68,9 @@ def build_flow_data(
     ``error-message`` gets an empty ``__err`` (no error shown; a merged range START's is the object
     ``{start-date, end-date}`` of two empty strings); with ``carry_invalid`` (an ask-less
     endpoint-driven form) every shaped field's ``__invalid`` carries the caller's ``field_invalid``
-    sentence, else the empty string. Each display slot of the entry page reads the empty string.
+    sentence, every field the shape check can report missing its ``__required`` the caller's
+    ``field_required`` sentence, and each form-line carrier the caller's ``form_lines`` line, each else
+    the empty string. Each display slot of the entry page reads the empty string.
     Raises ``ChannelInputError``.
     """
     values = values or {}
@@ -97,7 +110,13 @@ def build_flow_data(
             data[f"{cname}__ds"] = _choice_data_source(name, prop, options)
     data.update(
         _shape_carriers(
-            properties, required, option_fields, names, range_merges, fields_by_screen, field_invalid, carry_invalid
+            properties,
+            required,
+            option_fields,
+            names,
+            range_merges,
+            fields_by_screen,
+            _CallerWords(field_invalid or {}, field_required or {}, form_lines or {}) if carry_invalid else None,
         )
     )
     # The entry screen's display slots read empty until a reaction fills them.
@@ -112,22 +131,34 @@ def _shape_carriers(
     names: dict[str, str],
     range_merges: dict[str, str],
     fields_by_screen: list[list[str]],
-    field_invalid: dict[str, str] | None,
-    carry_invalid: bool,
+    words: _CallerWords | None,
 ) -> dict[str, Any]:
     # The per-send shape carriers: an empty ``__err`` for every control binding an error-message (a
     # merged range's the empty ``{start-date, end-date}`` object), and (an ask-less endpoint-driven
-    # form) each shaped field's ``__invalid`` sentence, empty when unset.
+    # form, ``words`` given) each shaped field's ``__invalid`` sentence, each reportable-missing
+    # field's ``__required`` sentence and each form-line carrier's line, empty when unset.
     bound = error_fields(properties, required, option_fields, names, set(range_merges))
     carriers = error_carriers(properties, names, bound, range_merges, {})
     endpoint = form_endpoint_driven(
         properties, required, option_fields, names, range_merges, reacting=False, fields_by_screen=fields_by_screen
     )
-    if carry_invalid and endpoint:
-        sentences = field_invalid or {}
+    if words is not None and endpoint:
         for name in shaped_fields(properties):
-            carriers[f"{names[name]}__invalid"] = sentences.get(name, "")
+            carriers[f"{names[name]}__invalid"] = words.invalid.get(name, "")
+        for name in required_fields(properties, required):
+            carriers[f"{names[name]}__required"] = words.required.get(name, "")
+        for member in FORM_LINE_MEMBERS:
+            carriers[form_line_carrier(member)] = words.lines.get(member, "")
     return carriers
+
+
+@dataclass(frozen=True)
+class _CallerWords:
+    # The caller's words an ask-less endpoint-driven form carries as screen data: the per-field
+    # ``invalid`` and ``required`` sentences and the form-level lines, by property name / member.
+    invalid: dict[str, str]
+    required: dict[str, str]
+    lines: dict[str, str]
 
 
 def _field_init_value(name: str, prop: dict[str, Any], values: dict[str, Any]) -> Any:

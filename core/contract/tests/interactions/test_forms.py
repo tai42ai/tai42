@@ -533,3 +533,208 @@ def test_a_form_property_named_like_another_object_member_is_accepted():
     schema = {"type": "object", "properties": {"constructor": {"type": "string"}, "toString": {"type": "string"}}}
     request = _interaction(answer_format=AnswerFormat.FORM, format_payload={"schema": schema})
     assert request.format_payload == {"schema": schema}
+
+
+# === the build-time date rules (one seam every form-carrying door reaches) ===
+
+
+def _date_schema(**props: Any) -> dict[str, Any]:
+    return {"type": "object", "properties": props}
+
+
+_DATE = {"type": "string", "format": "date"}
+
+
+@pytest.mark.parametrize(
+    ("schema", "message"),
+    [
+        (_date_schema(n={"type": "integer", "minDate": "2024-01-01"}), "property 'n' carries date constraints"),
+        (_date_schema(d={**_DATE, "minDate": "soon"}), "property 'd' minDate must be a YYYY-MM-DD date, got 'soon'"),
+        (
+            _date_schema(d={**_DATE, "minDate": "2024-12-31", "maxDate": "2024-01-01"}),
+            "property 'd' has maxDate '2024-01-01' before minDate '2024-12-31'",
+        ),
+        (_date_schema(d={**_DATE, "unavailableDates": "monday"}), "property 'd' unavailableDates must be a list"),
+        (_date_schema(d={**_DATE, "unavailableDates": ["funday"]}), "property 'd' unavailableDates entries"),
+        (_date_schema(d={**_DATE, "rangeStart": " "}), "property 'd' rangeStart must name a start date property"),
+        (_date_schema(d={**_DATE, "minDays": 1}), "property 'd' carries minDays but declares no rangeStart"),
+        (
+            _date_schema(s=_DATE, d={**_DATE, "rangeStart": "s", "maxDays": -1}),
+            "property 'd' maxDays must be a non-negative integer, got -1",
+        ),
+        (
+            _date_schema(s=_DATE, d={**_DATE, "rangeStart": "s", "minDays": 5, "maxDays": 2}),
+            "property 'd' has minDays 5 above maxDays 2",
+        ),
+        (_date_schema(d={**_DATE, "rangeStart": "d"}), "property 'd' rangeStart cannot name itself"),
+        (_date_schema(d={**_DATE, "rangeStart": "ghost"}), "property 'd' rangeStart names undeclared property 'ghost'"),
+        (
+            _date_schema(s={"type": "string"}, d={**_DATE, "rangeStart": "s"}),
+            "property 'd' rangeStart names non-date property 's'",
+        ),
+        (
+            _date_schema(c=_DATE, b={**_DATE, "rangeStart": "c"}, a={**_DATE, "rangeStart": "b"}),
+            "property 'a' rangeStart names 'b', which is already paired with 'c'",
+        ),
+        (
+            _date_schema(s=_DATE, e1={**_DATE, "rangeStart": "s"}, e2={**_DATE, "rangeStart": "s"}),
+            "property 'e2' rangeStart names 's', which is already paired with 'e1'",
+        ),
+    ],
+)
+def test_check_form_date_rules_refuses_each_nonsensical_date_key(schema: dict[str, Any], message: str) -> None:
+    from tai42_contract.interactions.models import check_form_date_rules
+
+    with pytest.raises(ValueError, match=re.escape(message)):
+        check_form_date_rules(schema)
+
+
+def test_check_form_date_rules_admits_a_sound_range_and_bounds() -> None:
+    from tai42_contract.interactions.models import check_form_date_rules
+
+    check_form_date_rules(
+        _date_schema(
+            start={**_DATE, "minDate": "2024-01-01", "unavailableDates": ["2024-07-04", "sunday"]},
+            end={**_DATE, "rangeStart": "start", "minDays": 1, "maxDays": 30},
+        )
+    )
+
+
+def test_the_date_vocabulary_is_exported_by_the_contract() -> None:
+    from tai42_contract.interactions import DATE_CONSTRAINT_KEYS, FORM_WEEKDAYS
+
+    assert DATE_CONSTRAINT_KEYS == ("minDate", "maxDate", "unavailableDates", "rangeStart", "minDays", "maxDays")
+    assert FORM_WEEKDAYS[0] == "monday"
+    assert len(FORM_WEEKDAYS) == 7
+
+
+_TIME = {"type": "string", "format": "time"}
+_DATE_TIME = {"type": "string", "format": "date-time"}
+
+
+def _timed_range(**extra: Any) -> dict[str, Any]:
+    props: dict[str, Any] = {
+        "start": _DATE,
+        "start_time": {**_TIME, "timeOf": "start"},
+        "end": {**_DATE, "rangeStart": "start"},
+        "end_time": {**_TIME, "timeOf": "end"},
+    }
+    props.update(extra)
+    return _date_schema(**props)
+
+
+@pytest.mark.parametrize(
+    ("schema", "message"),
+    [
+        (
+            _timed_range(note={"type": "string", "timeOf": "start"}),
+            "property 'note' carries timeOf but is not a time property (a 'string' with format 'time')",
+        ),
+        (
+            _timed_range(at={"type": "string", "format": "date", "timeOf": "start"}),
+            "property 'at' carries timeOf but is not a time property",
+        ),
+        (_timed_range(at={**_TIME, "timeOf": " "}), "property 'at' timeOf must name a range end date property"),
+        (_timed_range(at={**_TIME, "timeOf": 3}), "property 'at' timeOf must name a range end date property"),
+        (_timed_range(at={**_TIME, "timeOf": "ghost"}), "property 'at' timeOf names undeclared property 'ghost'"),
+        (
+            _timed_range(note={"type": "string"}, at={**_TIME, "timeOf": "note"}),
+            "property 'at' timeOf names 'note', which is not a 'date' property",
+        ),
+        (
+            _timed_range(lone=_DATE, at={**_TIME, "timeOf": "lone"}),
+            "property 'at' timeOf names 'lone', which is not an end of a date range",
+        ),
+        (
+            _date_schema(start=_DATE_TIME, end={**_DATE_TIME, "rangeStart": "start"}, at={**_TIME, "timeOf": "end"}),
+            "property 'at' timeOf names 'end', a 'date-time' property that already carries its own time",
+        ),
+        (
+            _date_schema(start=_DATE, end={**_DATE_TIME, "rangeStart": "start"}, at={**_TIME, "timeOf": "start"}),
+            "property 'at' timeOf names 'start', whose range's other end 'end' is a 'date-time' property",
+        ),
+        (
+            _date_schema(start=_DATE_TIME, end={**_DATE, "rangeStart": "start"}, at={**_TIME, "timeOf": "end"}),
+            "property 'at' timeOf names 'end', whose range's other end 'start' is a 'date-time' property",
+        ),
+        (
+            _timed_range(again={**_TIME, "timeOf": "end"}),
+            "property 'again' timeOf names 'end', which already has the time 'end_time'",
+        ),
+        (
+            _timed_range(end_time={**_TIME, "timeOf": "end", "visibleWhen": {"field": "start", "notEmpty": True}}),
+            "property 'end_time' must carry the same visibleWhen as its date 'end'",
+        ),
+    ],
+)
+def test_check_form_date_rules_refuses_each_time_of_mistake(schema: dict[str, Any], message: str) -> None:
+    from tai42_contract.interactions.models import check_form_date_rules
+
+    with pytest.raises(ValueError, match=re.escape(message)):
+        check_form_date_rules(schema)
+
+
+def test_check_form_date_rules_admits_a_timed_range() -> None:
+    from tai42_contract.interactions.models import check_form_date_rules
+
+    shown = {"field": "start", "notEmpty": True}
+    check_form_date_rules(
+        _date_schema(
+            start=_DATE,
+            start_time={**_TIME, "timeOf": "start"},
+            end={**_DATE, "rangeStart": "start", "visibleWhen": shown},
+            end_time={**_TIME, "timeOf": "end", "visibleWhen": shown},
+        )
+    )
+    # Either end may carry its time alone.
+    check_form_date_rules(
+        _date_schema(start=_DATE, end={**_DATE, "rangeStart": "start"}, at={**_TIME, "timeOf": "end"})
+    )
+
+
+def test_check_form_pages_refuses_a_time_on_another_page_than_its_date() -> None:
+    from tai42_contract.interactions.models import check_form_pages
+
+    pages = [
+        FormPage(title="Dates", fields=["start", "start_time", "end"]),
+        FormPage(title="Times", fields=["end_time"]),
+    ]
+    with pytest.raises(ValueError, match=re.escape("property 'end_time' is the time of 'end' and must sit on")):
+        check_form_pages(_timed_range(), pages)
+
+
+def test_check_form_pages_refuses_a_time_on_another_page_sharing_its_date_page_title() -> None:
+    from tai42_contract.interactions.models import check_form_pages
+
+    # Page titles may repeat: the two pages are still two pages.
+    pages = [
+        FormPage(title="Step", fields=["start", "end"]),
+        FormPage(title="Step", fields=["start_time", "end_time"]),
+    ]
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "property 'start_time' is the time of 'start' and must sit on the same page "
+            "(it is on page 2 'Step', its date on page 1 'Step')"
+        ),
+    ):
+        check_form_pages(_timed_range(), pages)
+
+
+def test_check_form_pages_accepts_a_time_on_the_page_of_its_date() -> None:
+    from tai42_contract.interactions.models import check_form_pages
+
+    pages = [
+        FormPage(title="From", fields=["start", "start_time"]),
+        FormPage(title="To", fields=["end_time", "end"]),
+        FormPage(title="Check", fields=[], kind="review"),
+    ]
+    check_form_pages(_timed_range(), pages)
+
+
+def test_the_time_of_key_is_exported_by_the_contract() -> None:
+    from tai42_contract.interactions import TIME_OF_KEY
+    from tai42_contract.interactions.models import form_dates
+
+    assert TIME_OF_KEY == "timeOf"
+    assert form_dates.TIME_OF_KEY is TIME_OF_KEY

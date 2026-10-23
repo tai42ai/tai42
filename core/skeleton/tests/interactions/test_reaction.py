@@ -9,14 +9,18 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from tai42_contract.interactions import AnswerFormat, InteractionRequest
+from tai42_contract.interactions import (
+    AnswerFormat,
+    FormReactionClosedError,
+    FormReactionError,
+    FormReactionHandlerError,
+    FormReactionRequestError,
+    InteractionRequest,
+)
 
 from tai42_skeleton.interactions import InteractionStore
 from tai42_skeleton.interactions import reaction as reaction_module
 from tai42_skeleton.interactions.reaction import (
-    FormReactionClosedError,
-    FormReactionHandlerError,
-    FormReactionRequestError,
     SubmittedCheckRejectedError,
     _declared_slots,
     _is_option_bearing,
@@ -285,6 +289,24 @@ async def test_handler_raise_surfaces_loudly(monkeypatch):
 
     with pytest.raises(FormReactionHandlerError, match="failed"):
         await _run_with_tool(monkeypatch, _boom, deadline=5)
+
+
+async def test_handler_raise_carries_its_message_as_reason(monkeypatch):
+    # The contract's error family: the reason is the door's sentence, a form's update_failed {reason}.
+    async def _boom(tool, args, continues_chain=None):
+        raise RuntimeError("handler blew up")
+
+    with pytest.raises(FormReactionHandlerError) as caught:
+        await _run_with_tool(monkeypatch, _boom, deadline=5)
+    assert caught.value.reason == str(caught.value)
+    assert "failed" in caught.value.reason
+
+
+def test_submitted_check_rejection_is_a_contract_reaction_error_with_its_message_as_reason():
+    error = SubmittedCheckRejectedError({"name": "taken"})
+    assert isinstance(error, FormReactionError)
+    assert error.errors == {"name": "taken"}
+    assert error.reason == str(error)
 
 
 async def test_handler_returns_the_tool_result(monkeypatch):

@@ -27,6 +27,7 @@ from .conftest import (
     _settle,
     _store,
     _wire,
+    create_record,
 )
 
 
@@ -86,7 +87,16 @@ async def test_schedule_turn_starts_the_working_signal_for_the_intake_record(env
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": EchoAgent()})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert [r.message_id for r in started] == [message_id]
@@ -109,7 +119,7 @@ async def test_deliver_channel_stops_the_records_working_signal_loop(env, monkey
     _wire(monkeypatch, FakeManager(_channel_route()), send_channel)
     store = _store()
     record = _answered_channel_record("m-deliver", "hello")
-    await store.create_record(record)
+    await create_record(store, record)
 
     working_signal.start(record)
     task = working_signal._WORKING_SIGNAL_TASKS[record.message_id]

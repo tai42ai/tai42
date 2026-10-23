@@ -16,16 +16,13 @@ from tai42_contract.app import tai42_app
 from tai42_contract.monitoring import RunAttribution, TraceContext, ambient_trace_context
 from tai42_contract.states.errors import DeferredCallRefusedError
 from tai42_contract.states.models import StateContext
-from tai42_contract.tools import TOOL_META_CRASH_RESUME
+from tai42_contract.tools import TOOL_EXTRA_IDEMPOTENCY_KEY, TOOL_META_CRASH_RESUME
 
 from tai42_skeleton.authz.execution_identity import capture_fire_identity
 from tai42_skeleton.states.context import current_state_context, state_context
 from tai42_skeleton.states.outbox.calls import register_deferred_call_kind
 from tai42_skeleton.tools.attribution import get_run_attribution, run_attribution
 from tai42_skeleton.tools.binding.errors import UnknownToolError
-
-# The door ``extras`` key carrying a deferred call's stable idempotency key.
-IDEMPOTENCY_KEY_EXTRA = "tai42/idempotency_key"
 
 
 class ToolCallKind:
@@ -77,7 +74,7 @@ class ToolCallKind:
             if payload.get("trace_id") is not None:
                 stack.enter_context(ambient_trace_context(TraceContext(trace_id=payload["trace_id"])))
             result = await tai42_app.tools.run_tool(
-                tool, payload["arguments"], extras={IDEMPOTENCY_KEY_EXTRA: idempotency_key}
+                tool, payload["arguments"], extras={TOOL_EXTRA_IDEMPOTENCY_KEY: idempotency_key}
             )
         outcome = await tai42_app.interactions.normalise_started(result)
         if outcome.kind in ("asks", "parked"):

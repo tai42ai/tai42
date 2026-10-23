@@ -130,6 +130,8 @@ class _StubConversations:
         cap_key: str,
         text: str,
         provider_message_id: str,
+        medium_message_id: str | None,
+        reply_to_medium_message_id: str | None,
         params: dict[str, str] | None = None,
         form: dict[str, Any] | None = None,
         attachments: list[MediaItem] | None = None,
@@ -144,6 +146,8 @@ class _StubConversations:
                 "cap_key": cap_key,
                 "text": text,
                 "provider_message_id": provider_message_id,
+                "medium_message_id": medium_message_id,
+                "reply_to_medium_message_id": reply_to_medium_message_id,
                 "params": params,
                 "form": form,
                 "attachments": attachments,
@@ -204,8 +208,20 @@ class _StubInteractions:
         return self.prefix
 
 
+class _StubLifecycle:
+    """Records the startup hooks a module arms at import (the backup section's registration)."""
+
+    def __init__(self) -> None:
+        self.startup_handlers: list[Callable[[], Any]] = []
+
+    def on_startup(self, func: Callable[[], Any]) -> Callable[[], Any]:
+        self.startup_handlers.append(func)
+        return func
+
+
 class _StubApp:
     def __init__(self) -> None:
+        self.lifecycle = _StubLifecycle()
         self.channels = _StubChannels()
         self.clients = _StubClients()
         self.http = _StubHttp()
@@ -472,6 +488,8 @@ _ENV_VARS = (
     "CHANNEL_WEB_MAX_STREAMS_PER_VISITOR",
     "CHANNEL_WEB_MAX_STREAMS_TOTAL",
     "CHANNEL_WEB_PAGE_TITLE",
+    "CHANNEL_WEB_STORE_OFF_TITLE",
+    "CHANNEL_WEB_STORE_OFF_TEXT",
 )
 
 # Shared test fixtures. SESSION_TOKEN is shaped like a minted cookie token (urlsafe
@@ -667,6 +685,7 @@ def make_delivery(**overrides: Any) -> ChannelDelivery:
         "options": None,
         "callback_url": CALLBACK,
         "timeout_at": datetime.now(UTC) + timedelta(minutes=5),
+        "sensitive": False,
     }
     fields.update(overrides)
     return ChannelDelivery(**fields)
@@ -857,8 +876,11 @@ async def _seed_question(
     callback_url: str = CALLBACK,
     address: str = VISITOR_ID,
     identity: str = IDENTITY,
+    sensitive: bool = False,
 ) -> QuestionRecord:
-    record = QuestionRecord(callback_url=callback_url, identity=identity, address=address, timeout_at=_deadline())
+    record = QuestionRecord(
+        callback_url=callback_url, identity=identity, address=address, timeout_at=_deadline(), sensitive=sensitive
+    )
     await reserve_question(interaction_id, record)
     return record
 

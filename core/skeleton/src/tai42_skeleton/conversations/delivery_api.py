@@ -41,7 +41,9 @@ async def _deliver_api(store: ConversationRecordStore, record: ConversationRecor
         return
     route = await _pkg.get_conversations_manager().get_route(record.route_name)
     if route is None or route.callback_secret is None:
-        await store.mark_failed(record.message_id, await store.bump_attempt(record.message_id), time.time(), token)
+        await store.mark_failed(
+            record.message_id, await store.bump_attempt(record.message_id), time.time(), token, sends=[]
+        )
         logger.error(
             "conversations: api record %s cannot be delivered — route %r is gone or carries no callback secret; "
             "marked failed",
@@ -70,7 +72,7 @@ async def _deliver_api(store: ConversationRecordStore, record: ConversationRecor
                 )
             return
         if attempt >= settings.delivery_max_attempts:
-            failed = await store.mark_failed(record.message_id, attempt, time.time(), token)
+            failed = await store.mark_failed(record.message_id, attempt, time.time(), token, sends=[])
             logger.error(
                 "conversations: api callback for record %s to %s exhausted %d attempts (last status %s; failed write "
                 "returned %d)",

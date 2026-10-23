@@ -1,6 +1,6 @@
 """Hooks-registry settings and the Redis key layout for hooks, triggers, and replay dedupe."""
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_kit.clients import RedisConnectionSettings
@@ -49,12 +49,31 @@ class HooksSettings(TaiBaseSettings):
     # so the feature config declares no connection fields of its own.
     redis: HooksRedisSettings = Field(default_factory=HooksRedisSettings)
 
-    # Global bound on in-flight hook executions per manager: the manager creates
-    # ONE semaphore of this size at construction, shared across every event's
-    # fan-out, so a burst of concurrent events cannot multiply the bound. Must be
+    # Bound on the hook-run attempts this process runs at once: the hook-run runtime holds ONE
+    # per-process count of slots, read against this value at each admission, so a burst of
+    # events and a config apply alike never push the in-flight work past it. Must be
     # positive — there is no unbounded mode.
     max_workers: int = Field(default=10, gt=0)
     prefix: str = "hooks"
+
+    # Hook runs: a run that fails before its hook acts is retried up to ``run_max_attempts``
+    # attempts in all, waiting ``run_retry_base_seconds * 2 ** (attempts - 1)`` capped at
+    # ``run_retry_cap_seconds`` between them. A running attempt holds a lease of
+    # ``run_lease_seconds`` (renewed at a third of it); the sweep claims due and lapsed runs every
+    # ``run_sweep_seconds``; shutdown gives the attempts in flight
+    # ``run_shutdown_grace_seconds`` before it cancels them.
+    run_max_attempts: int = Field(default=5, ge=1)
+    run_retry_base_seconds: float = Field(default=10.0, gt=0)
+    run_retry_cap_seconds: float = Field(default=600.0, gt=0)
+    run_lease_seconds: float = Field(default=60.0, gt=0)
+    run_sweep_seconds: float = Field(default=5.0, gt=0)
+    run_shutdown_grace_seconds: float = Field(default=20.0, ge=0)
+
+    @model_validator(mode="after")
+    def _run_retry_pair(self) -> "HooksSettings":
+        if self.run_retry_base_seconds > self.run_retry_cap_seconds:
+            raise ValueError("HOOKS_RUN_RETRY_BASE_SECONDS must not exceed HOOKS_RUN_RETRY_CAP_SECONDS")
+        return self
 
     @property
     def in_memory(self) -> bool:
@@ -86,6 +105,22 @@ class HooksSettings(TaiBaseSettings):
         cannot make one topic's delivery mask another's — distinct doors, distinct deliveries.
         """
         return f"{self.prefix}:webhook_seen:{topic}:{replay_key}"
+
+    # -- Hook-run keys ---------------------------------------------------------
+
+    def hook_run_key(self, run_id: str) -> str:
+        """The HASH key of one hook-run job."""
+        return f"{self.prefix}:run:{run_id}"
+
+    @property
+    def hook_runs_due_key(self) -> str:
+        """The ZSET of pending and running hook-run ids, scored by the next attempt time or the lease expiry."""
+        return f"{self.prefix}:runs:due"
+
+    @property
+    def hook_runs_failed_key(self) -> str:
+        """The ZSET of failed hook-run ids, scored by the time each failed."""
+        return f"{self.prefix}:runs:failed"
 
     # -- Trigger-link keys ---------------------------------------------------
     #

@@ -106,6 +106,27 @@ def test_non_positive_numeric_rejected(no_web_env, monkeypatch: pytest.MonkeyPat
         WebSettings()
 
 
+def test_store_off_page_words_default_and_override(no_web_env, monkeypatch: pytest.MonkeyPatch):
+    settings = WebSettings()
+    assert settings.store_off_title == "Chat is unavailable"
+    assert settings.store_off_text == "This chat is not switched on. Please contact the site owner."
+    monkeypatch.setenv("CHANNEL_WEB_STORE_OFF_TITLE", "Closed")
+    monkeypatch.setenv("CHANNEL_WEB_STORE_OFF_TEXT", "Come back later.")
+    reset_all_settings()
+    overridden = WebSettings()
+    assert (overridden.store_off_title, overridden.store_off_text) == ("Closed", "Come back later.")
+
+
+@pytest.mark.parametrize("env_var", ["CHANNEL_WEB_STORE_OFF_TITLE", "CHANNEL_WEB_STORE_OFF_TEXT"])
+def test_blank_store_off_page_words_rejected(no_web_env, monkeypatch: pytest.MonkeyPatch, env_var: str):
+    # An EMPTY env value reads as absent (the settings layer's ``env_ignore_empty``) and keeps
+    # the default; a whitespace-only one is a set value and refused.
+    monkeypatch.setenv(env_var, "   ")
+    reset_all_settings()
+    with pytest.raises(ValidationError, match=env_var.removeprefix("CHANNEL_WEB_").lower()):
+        WebSettings()
+
+
 def test_redis_settings_read_url_and_client_kwargs(web_env):
     settings = WebRedisSettings()
     assert settings.redis_url == "redis://test/0"

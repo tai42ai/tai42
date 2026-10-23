@@ -9,6 +9,9 @@ deterministically, plus the four atomic trigger create/revoke/restore/tombstone
 ``eval`` scripts. ``bound_app`` binds a fake ``tai42_app`` impl exposing the template
 manager + tool runner the firing path reaches.
 
+``lua_redis`` is a Lua-executing fake Redis for the scripts ``FakeRedis`` does not emulate
+(the hook-run store's).
+
 ``execution_gate_off`` short-circuits the execution-key machinery, so these oracles
 read hook/link behavior rather than a policy store.
 """
@@ -17,11 +20,13 @@ from __future__ import annotations
 
 import fnmatch
 import json
+from collections.abc import AsyncIterator
 from contextlib import ExitStack, asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fakeredis import aioredis
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -279,6 +284,28 @@ def fake_redis() -> FakeRedis:
 
 
 @pytest.fixture
+async def lua_redis(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[aioredis.FakeRedis]:
+    """A Lua-executing fake Redis behind ``RedisHooksManager``'s ``client_ctx`` seam.
+
+    It runs the manager's real scripts (the hook-run store's included) and decodes responses as
+    the kit's real client does.
+    """
+    from tai42_skeleton.hooks.managers import redis_hooks_manager as redis_module
+
+    client = aioredis.FakeRedis(decode_responses=True)
+
+    @asynccontextmanager
+    async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+        yield client
+
+    monkeypatch.setattr(redis_module, "client_ctx", _ctx)
+    try:
+        yield client
+    finally:
+        await client.aclose()
+
+
+@pytest.fixture
 def make_ctx():
     return make_client_ctx
 
@@ -304,10 +331,12 @@ class _FakeResourceManager:
 class _FakeTools:
     def __init__(self, raise_for: set[str] | None = None) -> None:
         self.runs: list = []
+        self.extras: list = []
         self._raise_for = raise_for or set()
 
     async def run_tool(self, name, tool_input, *, offload_sync=False, extras=None):
         self.runs.append((name, tool_input))
+        self.extras.append(dict(extras or {}))
         if name in self._raise_for:
             raise RuntimeError(f"tool {name} failed")
         return {"ok": True}
@@ -315,17 +344,26 @@ class _FakeTools:
 
 class _FakeInteractions:
     """The interactions facade the hook door drives through: a fake ``visit`` that deposits the door
-    binding around ``start`` alone and an empty ``$parked`` source."""
+    binding around ``start`` alone, notifies ``on_act`` before a start as the real visit does, and
+    an empty ``$parked`` source. ``settle_visit_claim`` answers the ids a test lists in ``gone``."""
 
     def __init__(self) -> None:
         self.visit_calls: list = []
         self.parked: list = []
+        self.gone: set[str] = set()
+        self.settle_calls: list = []
+
+    async def settle_visit_claim(self, act):
+        self.settle_calls.append(act)
+        return tuple(i for i in act.interaction_ids if i in self.gone)
 
     async def list_parked_for(self, context):
         return list(self.parked)
 
-    async def visit(self, *, target_name, cancel, resume, start, extras, state_binding=None, receives_outcome=True):
-        from tai42_contract.interactions import VisitOutcome
+    async def visit(
+        self, *, target_name, cancel, resume, start, extras, state_binding=None, receives_outcome=True, on_act=None
+    ):
+        from tai42_contract.interactions import VisitAct, VisitOutcome
         from tai42_contract.tools import (
             ToolInvocation,
             reset_current_tool_invocation,
@@ -345,6 +383,8 @@ class _FakeInteractions:
         )
         result = None
         if start is not None:
+            if on_act is not None:
+                await on_act(VisitAct(action="start", interaction_ids=(), phase="before"))
             token = (
                 set_current_tool_invocation(ToolInvocation(tool_name=target_name, state_binding=state_binding))
                 if state_binding is not None

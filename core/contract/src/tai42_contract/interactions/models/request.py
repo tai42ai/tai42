@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tai42_contract.interactions.caller_ask_landing import CallerAskLanding
 from tai42_contract.interactions.continuation import DeliveryAddress
+from tai42_contract.interactions.models.form_dates import check_form_date_rules
 from tai42_contract.interactions.models.formats import AnswerFormat, AnswerMismatchPolicy
 from tai42_contract.interactions.models.forms import (
     FormData,
@@ -63,6 +64,7 @@ def _check_form_payload(payload: dict[str, Any], wording: Wording | None) -> Non
     schema_obj = cast("dict[str, Any]", schema)
     if isinstance(schema, dict):
         check_form_property_names(schema_obj)
+        check_form_date_rules(schema_obj)
     data_model = FormData.model_validate(data) if data is not None else None
     page_models = [FormPage.model_validate(page) for page in cast("list[Any]", pages)] if pages is not None else None
     if data_model is not None:

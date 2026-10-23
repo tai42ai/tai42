@@ -16,7 +16,8 @@ from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, ConflictError, NotFoundError
 from tai42_skeleton.operations.response_models_group_a import PersonDeleteResult, ThreadDeleteResult
 
-from .conftest import _assert_park_cancelled, _seed_park, serve_stores
+from .conftest import _assert_park_cancelled, _seed_park, create_record
+from .quoting_records import QUOTED_TEXT, holds_text, quoting_records
 
 _THREAD = "bridge:chat:+15550001111"
 _PERSON_THREAD = "bridge:@person:p1"
@@ -62,7 +63,8 @@ async def _seed_record(*, message_id: str, route_name: str, thread_id: str) -> N
     """One delivered record under ``route_name`` on ``thread_id`` — a distinct message id per
     call, so a thread spanning several routes gets a distinct record on each."""
     now = time.time()
-    await ConversationRecordStore(ConversationsSettings()).create_record(
+    await create_record(
+        ConversationRecordStore(ConversationsSettings()),
         ConversationRecord(
             message_id=message_id,
             route_name=route_name,
@@ -78,14 +80,15 @@ async def _seed_record(*, message_id: str, route_name: str, thread_id: str) -> N
             delivery_status=DeliveryStatus.DELIVERED,
             created_at=now,
             updated_at=now,
-        )
+        ),
     )
 
 
 async def _seed_accepted(*, message_id: str, route_name: str, thread_id: str) -> None:
     """One ``accepted`` intake record holding a live intake lease — a turn in flight."""
     now = time.time()
-    await ConversationRecordStore(ConversationsSettings()).create_record(
+    await create_record(
+        ConversationRecordStore(ConversationsSettings()),
         ConversationRecord(
             message_id=message_id,
             route_name=route_name,
@@ -132,6 +135,25 @@ async def test_delete_thread_clears_checkpoint_records_and_indexes(wired, record
     rerun = await ops.delete_conversation_thread("chat", _THREAD)
     assert rerun == {"removed": 0, "route_name": "chat", "thread_id": _THREAD, "states_erased": 0}
     assert checkpoint_saver.deleted == [_THREAD, _THREAD]
+
+
+async def test_delete_thread_leaves_no_store_holding_a_quoted_text(wired, record_redis, checkpoint_saver):
+    await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    store = ConversationRecordStore(ConversationsSettings())
+    for record in quoting_records("chat", _THREAD, "+15550001111", "+15550001111"):
+        await create_record(store, record)
+    assert holds_text(record_redis, QUOTED_TEXT)
+
+    await ops.delete_conversation_thread("chat", _THREAD)
+
+    assert not holds_text(record_redis, QUOTED_TEXT)
 
 
 async def test_delete_never_seen_thread_on_its_route_forgets_the_checkpoint_with_removed_zero(
@@ -373,11 +395,7 @@ async def test_delete_person_thread_clears_every_route_index(wired, record_redis
         ],
     )
 
-    class _FakePersonStore:
-        async def get_by_id(self, person_id: str) -> Person | None:
-            return person if person_id == person.person_id else None
-
-    serve_stores(ops.get_conversations_manager(), persons=_FakePersonStore())
+    record_redis.seed_person(person)
 
     settings = ConversationsSettings()
     record_redis.seed_route("chat-a")
@@ -421,11 +439,7 @@ async def test_delete_person_thread_404s_when_the_route_is_not_the_persons(
         ],
     )
 
-    class _FakePersonStore:
-        async def get_by_id(self, person_id: str) -> Person | None:
-            return person
-
-    serve_stores(ops.get_conversations_manager(), persons=_FakePersonStore())
+    record_redis.seed_person(person)
 
     with pytest.raises(NotFoundError):
         await ops.delete_conversation_thread("chat-b", _PERSON_THREAD)
@@ -465,11 +479,7 @@ async def test_delete_person_thread_with_a_turn_in_flight_is_a_409(wired, record
         ],
     )
 
-    class _FakePersonStore:
-        async def get_by_id(self, person_id: str) -> Person | None:
-            return person if person_id == person.person_id else None
-
-    serve_stores(ops.get_conversations_manager(), persons=_FakePersonStore())
+    record_redis.seed_person(person)
 
     settings = ConversationsSettings()
     record_redis.seed_route("chat-a")
@@ -532,7 +542,7 @@ async def test_an_interrupted_thread_delete_is_finished_by_a_retry_not_404d(
 def test_delete_result_models_carry_a_required_states_erased_count():
     thread = ThreadDeleteResult(removed=1, route_name="chat", thread_id="bridge:chat:x", states_erased=2)
     assert thread.states_erased == 2
-    person = PersonDeleteResult(person_id="p1", removed=1, erased=True, states_erased=3)
+    person = PersonDeleteResult(person_id="p1", removed=1, erased=True, states_erased=3, absorbed_person_ids=[])
     assert person.states_erased == 3
     # The field is required: a result that omits the count is a loud validation error, never a
     # silent default that would mask a door that forgot to forget state.
@@ -624,19 +634,12 @@ async def test_delete_person_cascade_cancels_a_parked_ask(
         ],
     )
 
-    class _FakePersonStore:
-        async def get_by_id(self, person_id: str) -> Person | None:
-            return person if person_id == person.person_id else None
-
-        async def erase(self, p: Person):
-            return True, 1
-
-    serve_stores(ops.get_conversations_manager(), persons=_FakePersonStore())
+    record_redis.seed_person(person)
     record_redis.seed_route("chat-a")
     await _seed_record(message_id="pa", route_name="chat-a", thread_id=_PERSON_THREAD)
     await _seed_park(store, fake, interaction_id="i1", group_id="g1", thread_id=_PERSON_THREAD)
 
     result = await ops.delete_conversation_person("p1")
 
-    assert result == {"person_id": "p1", "removed": 1, "erased": True, "states_erased": 0}
+    assert result == {"person_id": "p1", "removed": 1, "erased": True, "states_erased": 0, "absorbed_person_ids": []}
     await _assert_park_cancelled(store, fake, interaction_id="i1", thread_id=_PERSON_THREAD)

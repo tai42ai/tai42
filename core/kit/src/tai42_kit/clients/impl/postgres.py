@@ -1,19 +1,30 @@
-"""Pooled Postgres client built on ``psycopg_pool.AsyncConnectionPool``."""
+"""Pooled Postgres client built on ``psycopg_pool.AsyncConnectionPool``.
+
+Every pool the kit builds proves its first connection before it is handed out, and that
+proof is the one place a connection's establishment is retried (``retry_attempts``, with
+the kit's exponential backoff and a WARNING per retried failure). A statement is never
+re-run.
+"""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, Final
 
+import psycopg
 from psycopg import AsyncConnection
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import TupleRow
 from psycopg.types.json import Json
 from psycopg_pool import AsyncConnectionPool
 
+from tai42_kit.clients.backoff import connect_retry_delay
 from tai42_kit.clients.base import PooledClient, reject_unknown_connection_kwargs
 from tai42_kit.clients.impl.postgres_json import configure_platform_json
-from tai42_kit.clients.settings import PostgresConnectionSettings
+from tai42_kit.clients.settings import PostgresConnectionOptions, PostgresConnectionSettings
+
+logger = logging.getLogger(__name__)
 
 # ``Json`` is re-exported so callers wrap jsonb params through the pooled
 # client's own module rather than importing psycopg directly — every pg
@@ -66,16 +77,17 @@ class _CancelSurfacingPool(AsyncConnectionPool[AsyncConnection[TupleRow]]):
 
 
 # Connection kwargs a Postgres client accepts. ``dsn`` is the pool identity;
-# ``min_size``/``max_size`` are this database's deployment build options; and
-# ``env_prefix`` rides along (a message-only passenger) so the pool name can carry
-# the owning component. Anything else is rejected so it can't silently change the
-# build.
-_ALLOWED_KWARGS = frozenset({"dsn", "min_size", "max_size", "env_prefix"})
+# ``min_size``/``max_size`` and ``retry_attempts`` are this database's deployment
+# build options; and ``env_prefix`` rides along (a message-only passenger) so the
+# pool name can carry the owning component. Anything else is rejected so it can't
+# silently change the build.
+_ALLOWED_KWARGS = frozenset({"dsn", "min_size", "max_size", "retry_attempts", "env_prefix"})
 
-# Default pool bounds when a caller supplies neither — the pooled-client defaults
+# Default build options when a caller supplies none — the pooled-client defaults
 # for a plain ``PostgresClient`` built from raw kwargs.
 _DEFAULT_MIN_SIZE = 2
 _DEFAULT_MAX_SIZE = 10
+_DEFAULT_RETRY_ATTEMPTS: Final = 0
 
 # The ``TAI_DATABASE_<NAME>_`` prefix a database's settings carry; the owning
 # component in a pool name is what remains after stripping it.
@@ -160,12 +172,42 @@ def _mask_dsn_password(dsn: str) -> str:
     return make_conninfo("", **info)
 
 
+async def _prove_first_connection(dsn: str, *, name: str, retry_attempts: int) -> None:
+    """Open and close one connection to ``dsn``, re-attempting a failed establishment.
+
+    A ``psycopg.OperationalError`` from the connect is re-attempted up to
+    ``retry_attempts`` times after the first failure, sleeping the kit's backoff between
+    attempts and logging one WARNING per retried failure, named by the pool ``name``
+    (never the DSN). The last failure is raised as the same error object, with a note
+    naming the attempts made. Any other error, and a cancellation, propagates at once.
+    """
+    for failures in range(retry_attempts + 1):
+        try:
+            async with await AsyncConnection.connect(dsn):
+                return
+        except psycopg.OperationalError as exc:
+            if failures == retry_attempts:
+                exc.add_note(f"Postgres connection {name!r} failed after {retry_attempts + 1} attempt(s)")
+                raise
+            delay = connect_retry_delay(failures + 1)
+            logger.warning(
+                "Postgres connection %r failed (attempt %d of %d): %s; retrying in %.3fs",
+                name,
+                failures + 1,
+                retry_attempts + 1,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+
 async def _open_named_pool(
     dsn: str,
     *,
     min_size: int,
     max_size: int,
     name: str,
+    retry_attempts: int,
     connection_kwargs: dict | None = None,
     configure: ConnectionCallback | None = None,
     reset: ConnectionCallback | None = None,
@@ -180,9 +222,10 @@ async def _open_named_pool(
     by the DSN's own ``connect_timeout``, which libpq applies across the whole
     establishment including the TLS handshake — surfaces that failure here as the real
     ``psycopg.OperationalError``, propagated unwrapped to the caller with no pool built
-    and no worker left retrying. A ``min_size > 1`` fill then proceeds in the
-    background: the server is proven reachable, and a later fill failure is what the
-    pool's own retry and checkout-time ``check`` exist for.
+    and no worker left retrying. With ``retry_attempts`` set, that one connect is
+    re-attempted with backoff before the error surfaces (:func:`_prove_first_connection`).
+    The ``min_size`` fill then runs: the server is proven reachable, and a later fill
+    failure is what the pool's own retry and checkout-time ``check`` exist for.
 
     ``connection_kwargs`` (psycopg_pool's ``kwargs=``) are applied to every connection
     the pool opens — a caller whose driver needs autocommit, a row factory, or prepared
@@ -191,8 +234,7 @@ async def _open_named_pool(
     connection returned to the pool once it is idle, and a connection it fails on or
     leaves outside a transaction-idle state is discarded.
     """
-    async with await AsyncConnection.connect(dsn):
-        pass
+    await _prove_first_connection(dsn, name=name, retry_attempts=retry_attempts)
 
     pool = _CancelSurfacingPool(
         conninfo=dsn,
@@ -257,24 +299,39 @@ EXPLICIT_DSN_POOL_MAX_SIZE: Final = 20
 
 
 async def open_dedicated_pool(
-    target: PostgresConnectionSettings | str, *, role: str, connection_kwargs: dict[str, Any] | None = None
+    target: PostgresConnectionSettings | str,
+    *,
+    role: str,
+    connection_kwargs: dict[str, Any] | None = None,
+    options: PostgresConnectionOptions | None = None,
 ) -> _CancelSurfacingPool:
     """Open a dedicated (not shared) named pool for ``role``, its first connection proven and its fill awaited.
 
-    A settings object supplies the DSN and the deployment's pool sizes; a DSN string gets
-    :data:`EXPLICIT_DSN_POOL_MIN_SIZE` / :data:`EXPLICIT_DSN_POOL_MAX_SIZE`. The pool is named
-    ``postgres@<host>/<db>:<role>``; ``connection_kwargs`` apply to every connection it opens. The
-    caller owns the pool and closes it.
+    A settings object supplies the DSN, the deployment's pool sizes and its
+    ``pg_retry_attempts``; a DSN string gets :data:`EXPLICIT_DSN_POOL_MIN_SIZE` /
+    :data:`EXPLICIT_DSN_POOL_MAX_SIZE` and the behaviour of ``options`` (the caller's own
+    namespace; omitted means a single attempt). ``options`` with a settings object raises
+    ``TypeError``: the settings carry their own. The pool is named
+    ``postgres@<host>/<db>:<role>``; ``connection_kwargs`` apply to every connection it opens.
+    The caller owns the pool and closes it.
     """
     if isinstance(target, str):
         dsn, min_size, max_size = target, EXPLICIT_DSN_POOL_MIN_SIZE, EXPLICIT_DSN_POOL_MAX_SIZE
+        retry_attempts = options.pg_retry_attempts if options is not None else _DEFAULT_RETRY_ATTEMPTS
     else:
+        if options is not None:
+            raise TypeError(
+                "open_dedicated_pool takes 'options' only with a DSN string; "
+                "connection settings carry their own pg_retry_attempts"
+            )
         dsn, min_size, max_size = target.pg_dsn, target.pg_min_connections, target.pg_max_connections
+        retry_attempts = target.pg_retry_attempts
     return await _open_named_pool(
         dsn,
         min_size=min_size,
         max_size=max_size,
         name=postgres_pool_name(dsn, _pool_owner(None), role),
+        retry_attempts=retry_attempts,
         connection_kwargs=connection_kwargs,
     )
 
@@ -282,9 +339,10 @@ async def open_dedicated_pool(
 class PostgresClient(PooledClient[_CancelSurfacingPool]):
     """Pooled ``psycopg_pool.AsyncConnectionPool``, one pool per DSN per loop.
 
-    The pool is named ``<owner>@<host>/<db>``; ``min_size``/``max_size`` are this
+    The pool is named ``<owner>@<host>/<db>``; ``min_size``/``max_size`` and
+    ``retry_attempts`` (re-attempts of the first connection's establishment) are this
     database's deployment settings read when the pool is built; a second settings
-    prefix resolving to the same DSN with different sizes raises. Compose
+    prefix resolving to the same DSN with different values raises. Compose
     ``PostgresConnectionSettings`` for the connection kwargs.
     """
 
@@ -292,10 +350,14 @@ class PostgresClient(PooledClient[_CancelSurfacingPool]):
         return {"dsn": kwargs["dsn"]}
 
     def _default_build_options(self) -> dict:
-        # The pool bounds a caller who omits them ends up with — the same defaults
+        # The build options a caller who omits them ends up with — the same defaults
         # ``_create`` applies. Comparing the effective build lets a caller that omits
-        # the sizes and one that passes these exact values share one pool.
-        return {"min_size": _DEFAULT_MIN_SIZE, "max_size": _DEFAULT_MAX_SIZE}
+        # them and one that passes these exact values share one pool.
+        return {
+            "min_size": _DEFAULT_MIN_SIZE,
+            "max_size": _DEFAULT_MAX_SIZE,
+            "retry_attempts": _DEFAULT_RETRY_ATTEMPTS,
+        }
 
     def _describe_identity(self, **kwargs) -> str:
         return _mask_dsn_password(kwargs.get("dsn", ""))
@@ -307,6 +369,9 @@ class PostgresClient(PooledClient[_CancelSurfacingPool]):
         if not dsn or not isinstance(dsn, str):
             raise ValueError("Postgres client 'dsn' must be a non-empty string")
         reject_unknown_connection_kwargs("Postgres client", kwargs, _ALLOWED_KWARGS)
+        retry_attempts = kwargs.get("retry_attempts", _DEFAULT_RETRY_ATTEMPTS)
+        if not isinstance(retry_attempts, int) or isinstance(retry_attempts, bool) or retry_attempts < 0:
+            raise ValueError(f"Postgres client 'retry_attempts' must be a non-negative int, got {retry_attempts!r}")
 
         name = postgres_pool_name(dsn, _pool_owner(kwargs.get("env_prefix")))
         return await _open_named_pool(
@@ -314,6 +379,7 @@ class PostgresClient(PooledClient[_CancelSurfacingPool]):
             min_size=kwargs.get("min_size", _DEFAULT_MIN_SIZE),
             max_size=kwargs.get("max_size", _DEFAULT_MAX_SIZE),
             name=name,
+            retry_attempts=retry_attempts,
             configure=configure_platform_json,
             reset=_restore_transactional,
         )
@@ -332,16 +398,23 @@ async def pinned_connection(settings: PostgresConnectionSettings) -> AsyncIterat
     """Yield one dedicated connection held for the whole context.
 
     A one-connection pool (``min_size == max_size == 1``) built outside the shared
-    cache, named ``<owner>@<host>/<db>:pinned``, opened through the same probe and
-    bounded fill as the pooled path. The caller holds exactly one connection, so a
-    session-scoped advisory lock taken on it covers every statement in the body, and
-    a driver error on it never touches the shared pool. The pool and its connection
+    cache, named ``<owner>@<host>/<db>:pinned``, opened through the same probe (with the
+    settings' ``pg_retry_attempts``) and bounded fill as the pooled path. The caller
+    holds exactly one connection, so a session-scoped advisory lock taken on it covers
+    every statement in the body, and a driver error on it never touches the shared pool. The pool and its connection
     close on any exit — normal return, exception, or cancellation.
     """
     kwargs = settings.client_kwargs()
     dsn = kwargs["dsn"]
     name = postgres_pool_name(dsn, _pool_owner(kwargs.get("env_prefix")), "pinned")
-    pool = await _open_named_pool(dsn, min_size=1, max_size=1, name=name, configure=configure_platform_json)
+    pool = await _open_named_pool(
+        dsn,
+        min_size=1,
+        max_size=1,
+        name=name,
+        retry_attempts=kwargs["retry_attempts"],
+        configure=configure_platform_json,
+    )
     try:
         async with pool.connection() as conn:
             yield conn

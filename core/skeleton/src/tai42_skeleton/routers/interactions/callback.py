@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import sys
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ValidationError
 from starlette.requests import Request
@@ -24,6 +24,9 @@ from tai42_contract.interactions import (
     CALLBACK_LINK_FORMATS,
     AnswerFormat,
     AnswerMismatchError,
+    FormReactionClosedError,
+    FormReactionHandlerError,
+    FormReactionRequestError,
     InteractionResponse,
     InteractionState,
     QuestionFormat,
@@ -35,6 +38,10 @@ from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_bo
 
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
+from tai42_skeleton.conversations.cache import get_conversations_manager
+from tai42_skeleton.conversations.models import AskReply
+from tai42_skeleton.conversations.reply_to import resolve_ask_reply_to
+from tai42_skeleton.conversations.settings import conversations_settings
 
 # The answer check is the shared ``check_answer`` (the one check every door reaches). The
 # still-handler callback door shares the human answer door's reply-TTL and serializer-guarded
@@ -43,9 +50,6 @@ from tai42_skeleton.interactions.answer_check import check_answer
 from tai42_skeleton.interactions.caller_ask import CALLER_ASK_RESOLUTION_REFUSED, is_caller_ask
 from tai42_skeleton.interactions.continuation import continuation_due_timing, fire_continuation_after_claim
 from tai42_skeleton.interactions.reaction import (
-    FormReactionClosedError,
-    FormReactionHandlerError,
-    FormReactionRequestError,
     SubmittedCheckRejectedError,
     enforce_submitted_check,
     react,
@@ -88,11 +92,28 @@ _EXTERNAL_ANSWERED_BY = "external-callback"
 # message: the answer must ride the signed body.
 _POST_ONLY_EMPTY_BODY_DENY = "verified callback requires a signed request body"
 
-# Every GET that will not serve a page answers ONE constant body: whether the
-# ticket is unknown, expired, pruned, or bound to a verifier-only question —
-# answered or still live — must not be distinguishable from outside. A ticket
-# holder would otherwise have a silent state oracle on a capability URL.
-_CALLBACK_GET_NOT_FOUND = "Not Found"
+
+def _callback_gone(settings: InteractionsSettings) -> Response:
+    """The 404 every GET answers when it will not serve a page.
+
+    Whether the ticket is unknown, expired, pruned, or bound to a verifier-only question —
+    answered or still live — must not be distinguishable from outside, or a ticket holder
+    would have a silent state oracle on a capability URL. So the body is ONE constant: the
+    deployment's ``INTERACTIONS_CALLBACK_GONE_TEXT``.
+    """
+    return PlainTextResponse(settings.callback_gone_text, status_code=404, headers=_BASE_HEADERS)
+
+
+def _callback_fault(settings: InteractionsSettings, interaction_id: str, case: str) -> Response:
+    """The loud 500 a GET answers when a stored record cannot be drawn.
+
+    A record that bypassed the ask door's checks is a server bug: the reason is logged with
+    the interaction id and the case, and the end user reads the deployment's
+    ``INTERACTIONS_CALLBACK_FAULT_TEXT`` as plain text — never the record's own words, which
+    ride the broken record, and never the generic JSON error envelope.
+    """
+    logger.exception("form callback GET: %s for interaction %s", case, interaction_id)
+    return PlainTextResponse(settings.callback_fault_text, status_code=500, headers=_BASE_HEADERS)
 
 
 def _callback_json(payload: dict, status_code: int) -> JSONResponse:
@@ -144,14 +165,24 @@ async def _record_callback_answer(
     state: InteractionState,
     answer: Any,
     params: dict[str, str] | None = None,
+    medium_message_id: str | None = None,
+    reply_to_medium_message_id: str | None = None,
 ) -> JSONResponse:
-    """Atomically claim ``answer`` for the ticketed question.
+    """Atomically claim ``answer`` for the ticketed question, then record it as the ask's channel reply.
 
     A lost race maps to the same idempotent 200 already_answered. ``params`` is the
     OPTIONAL channel enrichment the inbound-answer ladder forwarded alongside the answer
     (the answer-seam counterpart of a bridged turn's entry params); it rides the stored
     :class:`InteractionResponse.params` for the asking flow to read beside ``answer``.
-    ``None`` keeps the envelope byte-identical to a plain answer.
+    ``None`` keeps the envelope byte-identical to a plain answer. ``medium_message_id`` is
+    the id the medium gave the reply, when it gave one, and ``reply_to_medium_message_id`` the
+    medium's id of the message the reply quoted, when it quoted one; both ride the stored
+    :class:`InteractionResponse`, which holds the ids only, never a quoted text. The asker receives
+    ``params`` as is and the quote the platform resolves from the conversation record as
+    ``reply_to``, both beside ``answer``.
+
+    This is the one door a reply over the channel is claimed through, so a won claim here is
+    written onto the send record that carried the ask (see :func:`_record_ask_reply`).
     """
     response = InteractionResponse(
         interaction_id=interaction_id,
@@ -159,6 +190,8 @@ async def _record_callback_answer(
         answered_by=_EXTERNAL_ANSWERED_BY,
         answered_at=datetime.now(UTC),
         params=params,
+        medium_message_id=medium_message_id,
+        reply_to_medium_message_id=reply_to_medium_message_id,
     )
     # An async park enqueues its durable continuation-due record atomically with the
     # claim; a sync question passes no timing and enqueues nothing.
@@ -182,8 +215,46 @@ async def _record_callback_answer(
         return _callback_json({"data": {"status": "already_answered"}}, 200)
     # This door claimed the answer: fire an async park's stored continuation ONCE
     # (the shared post-claim seam both answer doors run).
-    await fire_continuation_after_claim(r, store, state.request, answer)
+    await fire_continuation_after_claim(r, store, state.request, response)
+    await _record_ask_reply(interaction_id, answer, medium_message_id, reply_to_medium_message_id)
     return _callback_json({"data": {"interaction_id": interaction_id, "status": "answered"}}, 200)
+
+
+async def _record_ask_reply(
+    interaction_id: str, answer: Any, medium_message_id: str | None, reply_to_medium_message_id: str | None
+) -> None:
+    """Write a claimed channel reply onto the send record that carried its ask.
+
+    The message the reply quoted, when it quoted one, is resolved from the ask's thread and written
+    beside the answer as ``reply_to``. Nothing is looked up without a conversations store. An ask
+    sent outside any conversation has no send record (DEBUG); a record removed with its forgotten
+    thread is a WARNING. A store fault, reading the quote included, is logged at ERROR and not
+    raised: the claim is already won and the answer goes on to its waiter and continuation, which a
+    raise here would not undo.
+    """
+    if conversations_settings().in_memory:
+        return
+    try:
+        reply_to = (
+            None
+            if reply_to_medium_message_id is None
+            else await resolve_ask_reply_to(interaction_id, reply_to_medium_message_id)
+        )
+        reply = AskReply(
+            answer=answer, medium_message_id=medium_message_id, reply_to=reply_to, answered_at=datetime.now(UTC)
+        )
+        outcome, message_id = await get_conversations_manager().records.record_ask_reply(interaction_id, reply)
+    except Exception:
+        logger.exception("ask reply for interaction %s not recorded: the conversations store failed", interaction_id)
+        return
+    if outcome == "unknown":
+        logger.debug("ask reply for interaction %s: no send record carries its ask", interaction_id)
+    elif outcome == "gone":
+        logger.warning(
+            "ask reply for interaction %s not recorded: its send record %s is gone (its thread was forgotten)",
+            interaction_id,
+            message_id,
+        )
 
 
 async def _claim_external(
@@ -257,18 +328,29 @@ async def _verify_callback(request: Request, raw: bytes, state: InteractionState
     return None, verdict.post_only
 
 
-def _parse_typed_answer(raw: bytes, fmt: AnswerFormat) -> Response | tuple[Any, dict[str, str] | None]:
-    """Parse a channel-delivered typed answer body into ``(value, params)``, or a 400 ``Response``.
+class _TypedAnswer(NamedTuple):
+    """A channel-delivered typed answer body: the answer and what the channel sent beside it."""
+
+    answer: Any
+    params: dict[str, str] | None
+    medium_message_id: str | None
+    reply_to_medium_message_id: str | None
+
+
+def _parse_typed_answer(raw: bytes, fmt: AnswerFormat) -> Response | _TypedAnswer:
+    """Parse a channel-delivered typed answer body into a :class:`_TypedAnswer`, or a 400.
 
     A malformed body yields the 400. An empty body is an affirmative confirm tap
-    (CONFIRM) or a required-answer 400 (text/select); a JSON object supplies ``answer``
-    and OPTIONAL ``params`` (channel enrichment validated against the shared transport
-    bounds). Query params never carry the answer here.
+    (CONFIRM) or a required-answer 400 (text/select); a JSON object supplies ``answer``,
+    OPTIONAL ``params`` (channel enrichment validated against the shared transport
+    bounds), OPTIONAL ``medium_message_id`` (a string: the id the medium gave the
+    reply) and OPTIONAL ``reply_to_medium_message_id`` (a non-blank string: the medium's id of
+    the message the reply quoted). Query params never carry the answer here.
     """
     if not raw:
         if fmt is AnswerFormat.CONFIRM:
             # The GET-confirm page's form POSTs an empty body — an affirmative tap.
-            return True, None
+            return _TypedAnswer(True, None, None, None)
         # text/select: an answer is required.
         return _callback_json({"error": "body must contain 'answer'"}, 400)
     try:
@@ -288,7 +370,15 @@ def _parse_typed_answer(raw: bytes, fmt: AnswerFormat) -> Response | tuple[Any, 
             )
         except ValueError as exc:
             return _callback_json({"error": f"invalid params: {exc}"}, 400)
-    return parsed["answer"], answer_params
+    medium_message_id = parsed.get("medium_message_id")
+    if medium_message_id is not None and not isinstance(medium_message_id, str):
+        return _callback_json({"error": "medium_message_id must be a string"}, 400)
+    reply_to_medium_message_id = parsed.get("reply_to_medium_message_id")
+    if reply_to_medium_message_id is not None and (
+        not isinstance(reply_to_medium_message_id, str) or not reply_to_medium_message_id.strip()
+    ):
+        return _callback_json({"error": "reply_to_medium_message_id must be a non-blank string"}, 400)
+    return _TypedAnswer(parsed["answer"], answer_params, medium_message_id, reply_to_medium_message_id)
 
 
 async def _claim_channel_typed(
@@ -303,14 +393,15 @@ async def _claim_channel_typed(
 ) -> Response:
     """The non-EXTERNAL branch: a ticketed channel-delivered question.
 
-    The plugin forwards the human's reply as ``{"answer": <value>}``. The value is
+    The plugin forwards the human's reply as ``{"answer": <value>}``, with the optional
+    ``params``, ``medium_message_id`` and ``reply_to_medium_message_id`` beside it. The value is
     validated against the STORED format (the authed door's exact rules) and the TYPED
     value recorded.
     """
     parsed = _parse_typed_answer(raw, state.request.answer_format)
     if isinstance(parsed, Response):
         return parsed
-    value, answer_params = parsed
+    value = parsed.answer
     try:
         # The returned value is the answer the consumer receives — identical but for a
         # FORM, whose conditionally-hidden fields are dropped at the one facet, so the
@@ -337,12 +428,23 @@ async def _claim_channel_typed(
     try:
         await enforce_submitted_check(interaction_id, state.request.answer_format, state.request.format_payload, value)
     except SubmittedCheckRejectedError as exc:
-        return _callback_json({"error": str(exc), "errors": exc.errors, "retry_in_place": True}, 400)
+        return _callback_json({"error": exc.reason, "errors": exc.errors, "retry_in_place": True}, 400)
     except FormReactionClosedError as exc:
-        return _callback_json({"error": str(exc)}, 409)
+        return _callback_json({"error": exc.reason}, 409)
     except FormReactionHandlerError as exc:
-        return _callback_json({"error": str(exc)}, 502)
-    return await _record_callback_answer(r, store, settings, ticket, interaction_id, state, value, params=answer_params)
+        return _callback_json({"error": exc.reason}, 502)
+    return await _record_callback_answer(
+        r,
+        store,
+        settings,
+        ticket,
+        interaction_id,
+        state,
+        value,
+        params=parsed.params,
+        medium_message_id=parsed.medium_message_id,
+        reply_to_medium_message_id=parsed.reply_to_medium_message_id,
+    )
 
 
 async def _claim_verbatim_external(
@@ -421,23 +523,27 @@ async def _callback_post(
 
 def _page_wording(state: InteractionState) -> Wording | None:
     # The parked ask's per-send ``wording`` catalogue off the stored ``format_payload``, parsed into
-    # the model once so each page draws the caller's heading/sentence/button. The record was
-    # validated at the ask door, so a stored value that fails to parse is the server-bug backstop —
-    # it raises here and the door answers a loud 500, as the form page's ``_FormRenderError`` does.
+    # the model once so each page draws the caller's heading/sentence/button. Reading the record
+    # already validated it against ``Wording`` (a record that fails is answered by
+    # :func:`_callback_fault` before any page is chosen).
     raw = (state.request.format_payload or {}).get("wording")
     return Wording.model_validate(raw) if raw is not None else None
 
 
-async def _callback_get(request: Request, r: Any, store: InteractionStore) -> Response:
+async def _callback_get(request: Request, r: Any, store: InteractionStore, settings: InteractionsSettings) -> Response:
     ticket = request.path_params["ticket"]
     interaction_id = await store.resolve_ticket(r, ticket)
     if interaction_id is None:
-        return PlainTextResponse(_CALLBACK_GET_NOT_FOUND, status_code=404, headers=_BASE_HEADERS)
-    state = await store.get_state(r, interaction_id)
+        return _callback_gone(settings)
+    try:
+        state = await store.get_state(r, interaction_id)
+    except ValidationError:
+        # A stored record that fails its model (its ``wording`` among it) cannot be drawn.
+        return _callback_fault(settings, interaction_id, "stored record fails its model")
     if state is None:
         # State pruned while the ticket lives out its TTL tail — plain 404, never
         # a confirm page for a dead interaction.
-        return PlainTextResponse(_CALLBACK_GET_NOT_FOUND, status_code=404, headers=_BASE_HEADERS)
+        return _callback_gone(settings)
     if _verifier_bound(state):
         # A verifier-bound question is server-to-server ONLY: the browser confirm
         # form posts an EMPTY body (answer in query params) and can never carry a
@@ -447,7 +553,7 @@ async def _callback_get(request: Request, r: Any, store: InteractionStore) -> Re
         # sends: a caller must not learn from the response whether the ticket is
         # live, answered, or dead. The ticket for a bound question is never
         # exported to a human, so no legitimate reader loses anything.
-        return PlainTextResponse(_CALLBACK_GET_NOT_FOUND, status_code=404, headers=_BASE_HEADERS)
+        return _callback_gone(settings)
     if state.status == "answered":
         return HTMLResponse(_render_done_page(_page_wording(state)), headers=_HTML_HEADERS)
     if state.request.answer_format is AnswerFormat.FORM:
@@ -457,8 +563,7 @@ async def _callback_get(request: Request, r: Any, store: InteractionStore) -> Re
         try:
             page = _render_form_page(state.request.format_payload)
         except _FormRenderError:
-            logger.exception("form callback GET: unrenderable schema for interaction %s", interaction_id)
-            return PlainTextResponse("Internal Server Error", status_code=500, headers=_BASE_HEADERS)
+            return _callback_fault(settings, interaction_id, "unrenderable schema")
         return HTMLResponse(page, headers=_FORM_HTML_HEADERS)
     if state.request.answer_format in CALLBACK_LINK_FORMATS:
         # Only these formats map the confirm form's empty-body POST to an
@@ -510,12 +615,12 @@ async def _callback_react(
     try:
         update = await react(interaction_id, event, values)
     except FormReactionClosedError as exc:
-        return _callback_json({"error": str(exc)}, 409)
+        return _callback_json({"error": exc.reason}, 409)
     except FormReactionRequestError as exc:
-        return _callback_json({"error": str(exc)}, 400)
+        return _callback_json({"error": exc.reason}, 400)
     except FormReactionHandlerError as exc:
         logger.exception("reaction callback: handler failed for interaction %s", interaction_id)
-        return _callback_json({"error": str(exc)}, 502)
+        return _callback_json({"error": exc.reason}, 502)
     return _callback_json({"data": {"update": update}}, 200)
 
 
@@ -603,7 +708,7 @@ async def callback(request: Request) -> Response:
     # the store's absence to an outsider.
     if not _pkg.interactions_store_configured():
         if request.method == "GET":
-            return PlainTextResponse(_CALLBACK_GET_NOT_FOUND, status_code=404, headers=_BASE_HEADERS)
+            return _callback_gone(settings)
         # A POST still runs the SAME size guard the configured path runs BEFORE the
         # uniform 404, so an oversized POST answers 413 identically in both states —
         # the size cap is not a configured-vs-off oracle on this public door.
@@ -614,7 +719,7 @@ async def callback(request: Request) -> Response:
 
     async with _pkg.client_ctx(RedisClient, settings.redis) as r:
         if request.method == "GET":
-            return await _callback_get(request, r, store)
+            return await _callback_get(request, r, store, settings)
         # Size caps (query string + actual body bytes) come first — the SAME guard the OFF
         # gate runs, so an oversized POST answers 413 in both states.
         guarded = await _callback_post_size_guard(request, settings)

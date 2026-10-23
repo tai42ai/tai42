@@ -112,7 +112,7 @@ async def test_form_data_pages_render_prefilled_stepped_and_the_post_carries_eve
                 },
                 retry_on_reloading=True,
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -192,7 +192,7 @@ async def test_form_shapes_ride_the_page_and_the_door_refuses_with_the_fields_se
                 },
                 retry_on_reloading=True,
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:

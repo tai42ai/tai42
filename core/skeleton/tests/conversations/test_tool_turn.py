@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 from tai42_contract.conversations import (
+    ReplyTexts,
     TargetConversationConfig,
 )
 from tai42_contract.template import TemplatedText
@@ -26,6 +27,7 @@ from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 from tai42_skeleton.operations.errors import PermissionDeniedError
 
 from .conftest import (
+    NO_REPLY_WINDOW,
     FakeChannel,
     FakeManager,
     _accepting_callback,
@@ -46,7 +48,16 @@ async def test_tool_target_delivers_its_string_reply(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
     tools = _wire_tool(monkeypatch, lambda kw: f"tool saw {kw['message']} from {kw['sender']}")
 
-    message_id = await turn_module.accept("twilio", "+15550001111", " +15550002222 ", " +15550002222 ", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        " +15550002222 ",
+        " +15550002222 ",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     # The default kwargs are {message, sender, our_identity, channel, route, turn} — canonical
@@ -72,6 +83,7 @@ async def test_tool_target_delivers_its_string_reply(env, monkeypatch):
                         "thread": "bridge:tool-line:+15550002222",
                         "locale": None,
                     },
+                    "reply_window": {"state": "none", "closes_at": None},
                 },
             },
             "offload_sync": True,
@@ -91,7 +103,16 @@ async def test_tool_target_none_or_blank_reply_is_silent(env, monkeypatch, reply
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
     _wire_tool(monkeypatch, lambda kw: reply)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -110,7 +131,16 @@ async def test_tool_target_start_expr_maps_the_kwargs(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "run it", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "run it",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert tools.calls[0]["arguments"] == {"example_config_kwargs": {"text": "run it", "from": "+15550002222"}}
@@ -156,6 +186,7 @@ async def test_a_tool_caller_ask_with_no_reply_or_resume_parks_nowhere(env, monk
         "+15550002222",
         record=record,
         batch=overlap_module.Batch(lead=record, members=[record]),
+        reply_window=NO_REPLY_WINDOW,
     )
     # The caller-ask is dropped silently — it parks nowhere.
     assert isinstance(outcome, outcome_module._SilentOutcome)
@@ -185,6 +216,7 @@ async def test_a_tool_caller_ask_with_reply_and_resume_lands(env, monkeypatch):
         "+15550002222",
         record=record,
         batch=overlap_module.Batch(lead=record, members=[record]),
+        reply_window=NO_REPLY_WINDOW,
     )
     assert isinstance(outcome, outcome_module._ResolvedOutcome)
     assert outcome.answer_status == "answered"
@@ -207,7 +239,16 @@ async def test_tool_target_parked_bound_as_jq_has_no_null_keys(env, monkeypatch)
 
     monkeypatch.setattr(tool_turn_module, "list_parked", _one)
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "run it", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "run it",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert tools.calls[0]["arguments"] == {"parked_nulls": []}
@@ -221,7 +262,16 @@ async def test_tool_target_kwargs_carry_the_turn_thread_id(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "run it", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "run it",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     expected_thread = route_thread_id("tool-line", "+15550002222")
@@ -239,7 +289,16 @@ async def test_tool_target_reply_expr_over_an_envelope_dict(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"result": {"reply": "from the envelope"}})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -254,7 +313,16 @@ async def test_tool_target_reply_expr_yielding_null_is_silent(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"result": {}})  # .reply // null -> null
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -270,7 +338,16 @@ async def test_tool_target_success_status_maps_through_reply_expr(env, monkeypat
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"status": "success", "result": {"reply": "all done"}})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -305,7 +382,16 @@ async def test_a_returned_value_maps_through_reply_expr_regardless_of_any_status
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: result)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -324,7 +410,16 @@ async def test_tool_target_suspended_interaction_ends_the_turn_silently(env, mon
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
     _wire_tool(monkeypatch, lambda kw: SuspendedInteraction(interaction_id="i-async"))
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -341,7 +436,16 @@ async def test_tool_target_wrong_typed_result_is_an_error(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
     _wire_tool(monkeypatch, lambda kw: {"unexpected": "dict"})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -360,7 +464,16 @@ async def test_tool_target_that_raises_is_an_error(env, monkeypatch):
 
     _wire_tool(monkeypatch, _boom)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -371,19 +484,28 @@ async def test_tool_target_that_raises_is_an_error(env, monkeypatch):
     assert [n.message for n in channel.sends] == [outcome_module._ERROR_ANSWER_TEXT]
 
 
-async def test_a_channel_tool_error_uses_the_route_error_reply_text_when_set(env, monkeypatch):
-    # A route carrying ``error_reply_text`` sends THAT participant-facing reply on a failed turn,
+async def test_a_channel_tool_error_uses_the_route_reply_texts_error_when_set(env, monkeypatch):
+    # A route carrying ``reply_texts.error`` sends THAT participant-facing reply on a failed turn,
     # while the record's internal ``error`` detail keeps the diagnosable wording unchanged.
     spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
     channel = FakeChannel()
-    _wire(monkeypatch, FakeManager(_tool_channel_route(error_reply_text=spanish)), channel)
+    _wire(monkeypatch, FakeManager(_tool_channel_route(reply_texts=ReplyTexts(error=spanish))), channel)
 
     def _boom(kw):
         raise RuntimeError("tool blew up")
 
     _wire_tool(monkeypatch, _boom)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -398,7 +520,7 @@ async def test_a_channel_tool_error_uses_the_route_error_reply_text_when_set(env
 
 
 async def test_a_channel_tool_error_falls_back_to_the_default_when_unset(env, monkeypatch):
-    # With no ``error_reply_text`` the same failure delivers the built-in default reply.
+    # With no ``reply_texts.error`` the same failure delivers the built-in default reply.
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
 
@@ -407,7 +529,16 @@ async def test_a_channel_tool_error_falls_back_to_the_default_when_unset(env, mo
 
     _wire_tool(monkeypatch, _boom)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -423,7 +554,16 @@ async def test_tool_target_start_expr_multi_emit_is_an_error(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "unreachable")
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert tools.calls == []  # the tool never ran
@@ -439,7 +579,16 @@ async def test_tool_target_start_expr_non_object_is_an_error(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "unreachable")
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert tools.calls == []  # the mapping failed before the tool ran
@@ -455,7 +604,16 @@ async def test_tool_target_reply_expr_multi_emit_is_an_error(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"a": "one", "b": "two"})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -470,7 +628,16 @@ async def test_tool_target_reply_expr_non_string_is_an_error(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"count": 42})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -492,7 +659,16 @@ async def test_tool_target_denied_dispatch_is_an_error(env, monkeypatch):
     monkeypatch.setattr(agent_turn_module, "bind_execution_identity", _deny_bind)
     monkeypatch.setattr(tool_turn_module, "bind_execution_identity", _deny_bind)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -509,7 +685,16 @@ async def test_tool_target_dispatch_is_offloaded_off_the_event_loop(env, monkeyp
     _wire(monkeypatch, FakeManager(_tool_channel_route()), FakeChannel())
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert tools.calls[0]["offload_sync"] is True
@@ -523,7 +708,16 @@ async def test_tool_target_start_expr_reads_our_identity_and_channel(env, monkey
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert tools.calls[0]["arguments"] == {"oid": "+15550001111", "ch": "twilio"}
@@ -551,7 +745,16 @@ async def test_tool_target_start_expr_reads_the_route_name(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), FakeChannel())
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     assert tools.calls[0]["arguments"] == {"r": "line-a"}
@@ -692,6 +895,7 @@ async def test_tool_turn_deposits_the_route_state_binding_on_the_ambient_invocat
         "+15550002222",
         record=record,
         batch=overlap_module.Batch(lead=record, members=[record]),
+        reply_window=NO_REPLY_WINDOW,
     )
     assert seen["binding"] == binding
 
@@ -704,7 +908,16 @@ async def test_a_tool_target_turn_drains_its_subjects_once_at_its_visit(env, mon
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
     _wire_tool(monkeypatch, lambda kw: "done")
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID-DRAIN")
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID-DRAIN",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
     await _settle()
 
     # One drain at the turn's visit, over the turn's candidate subject, before the tool ran.

@@ -37,6 +37,7 @@ from tai42_contract.channels import (
     ChannelTemplate,
     Option,
     OptionSection,
+    SendOutcome,
 )
 from tai42_contract.interactions.models import (
     MEDIA_ROUTE_PREFIX,
@@ -54,12 +55,13 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import clamp_write_audience
-from tai42_skeleton.channels.capabilities import unsupported_capability
+from tai42_skeleton.channels.capabilities import check_channel_part, unsupported_capability
 from tai42_skeleton.channels.notifications_sink import record_notification
 from tai42_skeleton.channels.registry import resolve_channel
 from tai42_skeleton.channels.send_receipts import index_send
 from tai42_skeleton.channels.send_span import active_trace_id, send_span
-from tai42_skeleton.interactions.form_schema import validate_channel_form_schema
+from tai42_skeleton.conversations.sends import notification_part, recorded_send
+from tai42_skeleton.conversations.settings import conversations_settings
 from tai42_skeleton.interactions.media import substitute_media
 from tai42_skeleton.interactions.settings import interactions_settings
 from tai42_skeleton.interactions.store import InteractionStore
@@ -107,36 +109,6 @@ def _guard_channel_capabilities(
     )
     if missing is not None:
         raise NotImplementedError(f"channel {channel!r} does not support {missing[1]} notifications")
-
-
-def _validate_channel_template(channel_obj: Channel, template: ChannelTemplate) -> None:
-    """Refuse a template the channel could never render, before any feed write or send.
-
-    The template's ``parameters`` are OPAQUE to the platform; the channel's OPTIONAL
-    ``validate_template`` hook parses them against the channel's OWN template-parameter schema
-    and raises ``ValueError`` on an unmappable shape, exactly as ``validate_form_schema`` checks a
-    form at ask-time. A channel that omits the hook advertises no up-front parameter check; its
-    ``notify`` still refuses an unmappable template at send time.
-    """
-    validate_template = getattr(channel_obj, "validate_template", None)
-    if validate_template is not None:
-        validate_template(template)
-
-
-def _validate_channel_form(channel_obj: Channel, schema: dict[str, Any], message: str) -> None:
-    """Refuse a form schema the channel could never render, before any feed write or send.
-
-    The shared channel-deliverable subset walk (``validate_channel_form_schema``
-    — the ONE definition the ask path's form delivery uses) refuses an
-    unrenderable schema loudly (``ValueError`` → 400); then the channel's
-    OPTIONAL ``validate_form_schema`` hook enforces its own medium-specific
-    limits (reserved names, per-medium caps) with the notification's MESSAGE as
-    the question, exactly as the ask path calls it.
-    """
-    validate_channel_form_schema(schema)
-    validate_form_schema = getattr(channel_obj, "validate_form_schema", None)
-    if validate_form_schema is not None:
-        validate_form_schema(schema, message)
 
 
 def _coerce_form_extras(
@@ -242,7 +214,12 @@ async def _record_feed(notification: ChannelNotification, audience: str | None) 
 async def _send_with_telemetry(
     channel_obj: Channel, channel: str, notification: ChannelNotification, recipient: str | None
 ) -> list[str]:
-    """Send on the channel inside the send-outcome monitoring span and return the accepted per-message ids.
+    """Send on the channel as a recorded send, inside the send-outcome monitoring span, and return its ids.
+
+    The send is a ``notify`` send record of the conversation its participant is in (written
+    before the send, completed from its outcome); a send outside any conversation goes out
+    unrecorded. The pre-send address is the channel's ``resolve_address``, which refuses an
+    unresolvable target before anything is written or sent.
 
     Tier 1: one structured ``send:<channel>`` span around the single send seam (a no-op
     outside an ambient trace); on failure the span is marked ERROR with the typed detail and
@@ -250,18 +227,38 @@ async def _send_with_telemetry(
     accepted id to this trace/span so a later out-of-band delivery receipt can be posted
     back onto this run. The provider has already ACCEPTED the send, so this best-effort
     telemetry write is caught-and-logged, never raised — an interactions-Redis outage here
-    must not raise a FALSE send failure (risking a double-send). ``None`` means accepted but
-    no correlatable per-message id — an empty id set, not an error and not a dropped id.
+    must not raise a FALSE send failure (risking a double-send). An empty id list means
+    accepted with no correlatable per-message id.
     """
-    with send_span(channel, recipient=recipient) as span:
-        outbound_ids = await channel_obj.notify(notification)
-        if span is not None and outbound_ids:
-            span.update(output={"messaging.message.id": outbound_ids})
-    if span is not None and outbound_ids:
+    address = channel_obj.resolve_address(recipient, notification.sender_identity)
+    span_id: str | None = None
+
+    async def send() -> SendOutcome:
+        nonlocal span_id
+        with send_span(channel, recipient=recipient) as span:
+            sent = await channel_obj.notify(notification)
+            if span is not None:
+                span_id = span.id
+                if sent.message_ids:
+                    span.update(output={"messaging.message.id": sent.message_ids})
+        return sent
+
+    outcome = await recorded_send(
+        channel=channel,
+        address=address,
+        parts=[notification_part(notification)],
+        sent_by="notify",
+        send=send,
+        bound=conversations_settings().delivery_send_timeout_seconds,
+    )
+    if outcome is None:
+        raise RuntimeError(f"channel {channel!r} notify returned no outcome")
+    outbound_ids = list(outcome.message_ids)
+    if span_id is not None and outbound_ids:
         trace_id = active_trace_id()
         if trace_id is not None:
             try:
-                await index_send(channel, outbound_ids, trace_id=trace_id, span_id=span.id)
+                await index_send(channel, outbound_ids, trace_id=trace_id, span_id=span_id)
             except Exception:
                 logger.warning(
                     "send-receipt indexing failed for channel %r ids %r; the send succeeded, "
@@ -269,8 +266,6 @@ async def _send_with_telemetry(
                     channel,
                     outbound_ids,
                 )
-    if outbound_ids is None:
-        return []
     return outbound_ids
 
 
@@ -492,10 +487,10 @@ async def notify_user(
         sections=sections,
         schema=schema,
     )
-    if template is not None:
-        _validate_channel_template(channel_obj, template)
+    # The channel's own template and form checks, the same per-part check a conversation's
+    # send admission runs: refused before any feed write or send.
+    check_channel_part(channel_obj, message=message, template=template, schema=schema)
     if schema is not None:
-        _validate_channel_form(channel_obj, schema, message)
         _validate_channel_form_extras(schema, data, pages, wording)
     if media is not None:
         media = await _prepare_channel_media(media, interactions_settings())

@@ -147,7 +147,7 @@ def _stored_rejections(fake_redis: FakeRedis) -> int:
 
 def _flow_accepted(wamid: str = "wamid.RESEND") -> httpx.Response:
     """A Cloud-API accept for a re-sent Flow message."""
-    return response(200, json={"messages": [{"id": wamid}]})
+    return response(200, json={"contacts": [{"input": WA_ID, "wa_id": WA_ID}], "messages": [{"id": wamid}]})
 
 
 async def test_form_reply_forwards_coerced_answer_dict(handler, channels, fake_redis: FakeRedis):
@@ -734,6 +734,8 @@ async def test_notify_form_reply_accepts_coerced_form_and_rendered_text(
             # (``true``), matching the web channel, never Python's ``True`` repr...
             "text": "note: ship it\nqty: 7\namount: 3.5\nagree: true",
             "provider_message_id": _WAMID,
+            "medium_message_id": _WAMID,
+            "reply_to_medium_message_id": None,
             "params": None,
             # ...and the structured copy: flow_token stripped, values coerced to the
             # cached schema's types.
@@ -1022,3 +1024,181 @@ async def test_form_rejection_resend_names_the_refused_field_by_its_label(
 
     body = fake_httpx.calls[0]["json"]["interactive"]["body"]["text"]
     assert body == f"{_FORM_QUESTION}\n\n{_FORM_REJECTION_LEAD} Email address: This value is not in the expected form"
+
+
+# --- the caller's error line, closing sentence and boolean words on the re-send path ------------
+
+
+async def _reserve_worded(fake_redis: FakeRedis, wording: Wording, pages: list | None = None) -> None:
+    delivery = make_delivery()
+    await reserve_pending(
+        PHONE_NUMBER_ID,
+        WA_ID,
+        delivery.callback_url,
+        delivery.timeout_at,
+        interaction_id="int-1",
+        schema=_FORM_SCHEMA,
+        question=_FORM_QUESTION,
+        form_pages=pages,
+        form_names={label: key for key, label in payload_labels(_FORM_SCHEMA["properties"]).items()},
+        wording=wording,
+    )
+
+
+@pytest.mark.parametrize(
+    ("form", "reason", "expected"),
+    [
+        (None, "note: must not be blank", "Closed. note: must not be blank."),
+        (None, None, "Closed. ."),
+        (FormWording(error_line="Please check the form"), "note: must not be blank", "Closed. Please check the form."),
+        (FormWording(error_line="Please check the form"), None, "Closed. Please check the form."),
+    ],
+)
+async def test_at_the_cap_the_closing_message_is_the_callers_rejected_final(
+    waba_env,
+    handler,
+    channels,
+    fake_redis: FakeRedis,
+    fake_httpx: FakeHttpx,
+    form: FormWording | None,
+    reason: str | None,
+    expected: str,
+):
+    wording = Wording(form=form, answer=AnswerWording(rejected_final="Closed. {reason}."))
+    await _reserve_worded(fake_redis, wording)
+    _set_stored_rejections(fake_redis, _MAX_FORM_REJECTIONS)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = reason
+    fake_httpx.responses.append(_flow_accepted("wamid.FINAL"))
+
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    final = fake_httpx.calls[-1]["json"]
+    assert final["type"] == "text"
+    assert final["text"]["body"] == expected
+    assert not await _pending_intact(fake_redis)
+
+
+async def test_a_resend_with_a_caller_rejected_and_no_door_reason_leaves_the_token_empty(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    await _reserve_worded(fake_redis, Wording(answer=AnswerWording(rejected="Not accepted: [{reason}]")))
+    _seed_flow_cache(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = None
+    fake_httpx.responses.append(_flow_accepted())
+
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    body = fake_httpx.calls[0]["json"]["interactive"]["body"]["text"]
+    assert body == f"{_FORM_QUESTION}\n\nNot accepted: []"
+    assert _CALLBACK_REJECTION_OPAQUE not in body
+
+
+@pytest.mark.parametrize(
+    ("answer", "tail"),
+    [
+        (AnswerWording(rejected="Not accepted: {reason}"), "Not accepted: Please check the form"),
+        (None, f"{_FORM_REJECTION_LEAD} Please check the form"),
+    ],
+)
+async def test_a_resend_puts_the_callers_error_line_in_place_of_the_doors_reason(
+    waba_env,
+    handler,
+    channels,
+    fake_redis: FakeRedis,
+    fake_httpx: FakeHttpx,
+    answer: AnswerWording | None,
+    tail: str,
+):
+    await _reserve_worded(fake_redis, Wording(form=FormWording(error_line="Please check the form"), answer=answer))
+    _seed_flow_cache(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "note: must not be blank"
+    fake_httpx.responses.append(_flow_accepted())
+
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    body = fake_httpx.calls[0]["json"]["interactive"]["body"]["text"]
+    assert body == f"{_FORM_QUESTION}\n\n{tail}"
+
+
+async def test_a_resend_reproduces_the_first_sends_boolean_words(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.interactions.models import FieldWording
+
+    pages = [
+        {"title": "Ask", "fields": ["note", "qty", "amount", "agree"], "kind": "input", "display": []},
+        {"title": "Check", "fields": [], "kind": "review", "display": []},
+    ]
+    wording = Wording(form=FormWording(fields={"agree": FieldWording(true_label="Si", false_label="Nein")}))
+    await _reserve_worded(fake_redis, wording, pages)
+    # The Flow the first send published, keyed with the caller's words baked in.
+    _, schema_hash = build_form_flow(_FORM_SCHEMA, pages, boolean_words={"agree": ("Si", "Nein")})
+    fake_redis.store[f"channel:whatsapp:flow:{_WABA_ID}:{expected_flow_identity(schema_hash)}"] = "flow-worded"
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "note: must not be blank"
+    fake_httpx.responses.append(_flow_accepted())
+
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    # The re-send resolves the SAME published Flow from the cache: no lookup, no create.
+    assert [call["json"]["type"] for call in fake_httpx.calls] == ["interactive"]
+    assert fake_httpx.calls[0]["json"]["interactive"]["action"]["parameters"]["flow_id"] == "flow-worded"
+
+
+# --- the quoted message's id on a form reply --------------------------------------------------
+
+_QUOTED_FLOW_MESSAGE = "wamid.FLOW"
+
+
+def _quoting_form_reply(response: dict) -> dict:
+    """A completed Flow sent as a reply to the Flow message ``_QUOTED_FLOW_MESSAGE``."""
+    payload = form_reply_payload(response)
+    payload["entry"][0]["changes"][0]["value"]["messages"][0]["context"] = {"id": _QUOTED_FLOW_MESSAGE}
+    return payload
+
+
+@pytest.mark.parametrize("outcome", [InboundAnswerOutcome.FORWARDED, InboundAnswerOutcome.BRIDGED])
+async def test_a_form_reply_answering_its_ask_hands_the_ladder_bridge_the_flow_message_id(
+    handler, channels, fake_redis: FakeRedis, outcome
+):
+    await _seed_pending_form()
+    channels.inbound_outcome = outcome
+
+    await handler(signed_request(_quoting_form_reply({"flow_token": "int-1", "note": "x"})))
+
+    (call,) = channels.inbound_calls
+    assert call.bridge.reply_to_medium_message_id == _QUOTED_FLOW_MESSAGE
+
+
+async def test_a_form_reply_for_another_ask_bridges_with_the_flow_message_id(handler, stub_app, fake_redis: FakeRedis):
+    await _seed_pending_form(interaction_id="int-1")
+
+    await handler(signed_request(_quoting_form_reply({"flow_token": "int-999", "note": "x"})))
+
+    (call,) = stub_app.conversations.accept_calls
+    assert call["reply_to_medium_message_id"] == _QUOTED_FLOW_MESSAGE
+
+
+async def test_a_notify_form_reply_hands_accept_the_flow_message_id(waba_env, handler, stub_app, fake_redis: FakeRedis):
+    _seed_schema_cache(fake_redis)
+
+    await handler(signed_request(_quoting_form_reply({"flow_token": _nf_token(), "note": "x"})))
+
+    (call,) = stub_app.conversations.accept_calls
+    assert call["reply_to_medium_message_id"] == _QUOTED_FLOW_MESSAGE
+    assert call["params"] is None
+
+
+async def test_a_form_reply_without_a_readable_response_bridges_with_the_flow_message_id(
+    handler, stub_app, fake_redis: FakeRedis
+):
+    payload = _quoting_form_reply({"flow_token": "int-1"})
+    payload["entry"][0]["changes"][0]["value"]["messages"][0]["interactive"]["nfm_reply"]["response_json"] = "{bad"
+
+    await handler(signed_request(payload))
+
+    (call,) = stub_app.conversations.accept_calls
+    assert call["reply_to_medium_message_id"] == _QUOTED_FLOW_MESSAGE

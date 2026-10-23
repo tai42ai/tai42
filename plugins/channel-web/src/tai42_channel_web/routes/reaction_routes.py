@@ -40,7 +40,7 @@ from tai42_channel_web.store.questions import QuestionRecord, peek_question
 logger = logging.getLogger(__name__)
 
 _QUESTION_NOT_FOUND = "question not found (unknown, expired, or already answered)"
-# What a visitor is told when the ticket react door refused the reaction without an error
+# The line answered when the ticket react door refused the reaction without an error
 # message of its own — never the raw body an intermediary may have written.
 _REACTION_REFUSED = "the reaction was refused"
 
@@ -58,8 +58,8 @@ def _react_url(callback_url: str) -> str:
     return f"{callback_url}/react"
 
 
-def _door_error_detail(response: httpx.Response) -> str:
-    """The ticket react door's OWN error message, or a fixed refusal when the reply does not carry one.
+def _door_error_detail(response: httpx.Response) -> str | None:
+    """The ticket react door's OWN error message, or ``None`` when the reply does not carry one.
 
     Only a body in this platform's envelope is relayed. Anything else — a proxy or WAF
     page, a framework traceback, an upstream banner — is replaced and logged: it is
@@ -78,7 +78,7 @@ def _door_error_detail(response: httpx.Response) -> str:
         response.status_code,
         response.text[:500],
     )
-    return _REACTION_REFUSED
+    return None
 
 
 def _reaction_from_body(raw: Any) -> tuple[Any, Any, JSONResponse | None]:
@@ -131,8 +131,10 @@ def _apply_reaction_result(forwarded: httpx.Response) -> Response:
     (an absent/malformed update is a server fault, raised). A 404 is terminal (the ticket is
     gone). A 400/409/413 relays the door's OWN error at the same status (a malformed event, a
     closed interaction, an over-cap body). A 502 — the handler raised or missed its deadline
-    — is surfaced LOUDLY as the door's error, never a stale/silent value. Anything else raises
-    so the failure is visible.
+    — is surfaced LOUDLY as the door's error, never a stale/silent value. Each of these
+    answers the door's error as ``error`` and again as ``reason`` (the widget fills it into
+    the caller's could-not-update line), or the fixed refusal and no ``reason`` when the
+    door gave none. Anything else raises so the failure is visible.
     """
     if forwarded.status_code // 100 == 2:
         try:
@@ -148,10 +150,9 @@ def _apply_reaction_result(forwarded: httpx.Response) -> Response:
         return _ok(update)
     if forwarded.status_code == 404:
         return _error("question expired or withdrawn", 404)
-    if forwarded.status_code in (400, 409, 413):
-        return _error(_door_error_detail(forwarded), forwarded.status_code)
-    if forwarded.status_code == 502:
-        return _error(_door_error_detail(forwarded), 502)
+    if forwarded.status_code in (400, 409, 413, 502):
+        reason = _door_error_detail(forwarded)
+        return _error(reason or _REACTION_REFUSED, forwarded.status_code, reason=reason)
     raise ReactionForwardError(
         f"ticket react door rejected the reaction: HTTP {forwarded.status_code}: {forwarded.text[:500]}"
     )

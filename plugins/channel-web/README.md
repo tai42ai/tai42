@@ -133,6 +133,10 @@ An **agent** target receives no params: the platform threads them onto a **tool*
 target's payload only. There is no splicing of params into prompt text — that would
 be an injection channel — so an agent turn never sees them.
 
+When the visitor answers a pending question, the asker receives the session's params beside
+the answer. The widget has no reply action, so a visitor message never quotes an earlier one
+(the message door passes `reply_to_medium_message_id=None`).
+
 ### Params carry no trust
 
 A link parameter is **transport, nothing more**. The platform carries, nests, caps,
@@ -213,6 +217,49 @@ doors below, these require the platform API key:
 - `DELETE /api/channels/web/gates/{identity}/codes/{code_id}` — revoke a code by its
   hash → `{"data": {"status": "revoked"}}`; an unknown id is a `404` envelope error.
 
+## Words
+
+A web route can set its own words, keyed by its identity like the gate. Every member
+is optional, and a member left unset draws the built-in English:
+
+- `page` — the chat page door's refusal pages, each a `heading` (the page's `<title>`
+  and `<h1>`) and a `text`: `not_a_navigation`, `link_invalid`, `entry_refused` and
+  `page_unavailable`.
+- `transport` — the sentences the widget draws when one of its own requests is
+  refused: `session_ended` (401), `wrong_site` (403), `not_listening` (404),
+  `already_answered` (409), `busy` (429 or 503), `not_switched_on` (501), `too_long`
+  (413) and `not_sent` (400 or 422), each of these two with `{subject}`, `failed`
+  (anything else), `attachment_gone`, `attachment_already_sent`, `entry_refused`, and
+  `answer_refused` / `answer_retries_spent` (each with `{reason}`, drawn when the
+  question set no `answer.rejected` / `answer.rejected_final`). `subject_message`,
+  `subject_answer`, `subject_form` and `subject_request` are the words `{subject}` is
+  filled with. The attachment tray's upload sentences are fixed and are not route words.
+
+A set member is a non-blank text. The chat page door hands the set `transport` members
+to the widget as the `#root` element's `data-words`; a server's error string is never
+drawn as one of these sentences, and reaches the end user only as `{reason}`. The
+page's other words are not per-route: the `<title>` of the chat page itself is
+`CHANNEL_WEB_PAGE_TITLE`, and the page served with no store is
+`CHANNEL_WEB_STORE_OFF_TITLE` / `CHANNEL_WEB_STORE_OFF_TEXT`.
+
+Three **authed** doors manage a route's words (the Studio's **Words** panel on a web
+route's drill-in drives them):
+
+- `GET /api/channels/web/words/{identity}` — the set members,
+  `{"data": {"page"?: {...}, "transport"?: {...}}}`; `404` when none are set.
+- `PUT /api/channels/web/words/{identity}` — replace the whole words object with the
+  body and answer what is now stored. A refused body is a `422` naming the first
+  refused member: `invalid request body: <member>: <reason>`. A body that sets nothing
+  (an empty object, an empty `page` or `transport` object, or a refusal page with
+  neither `heading` nor `text`) is refused the same way; `DELETE` goes back to the
+  built-in English.
+- `DELETE /api/channels/web/words/{identity}` — clear them →
+  `{"data": {"status": "cleared"}}`; `404` when none are set.
+
+The words are part of the platform backup as the `channel_web_words` section
+(`{"version": 1, "words": {identity: words}}`). An import validates the whole section
+before it writes anything, then replaces each listed identity's words.
+
 ## Configuration
 
 Settings are read from the `CHANNEL_WEB_` environment group (see `WebSettings` /
@@ -223,6 +270,8 @@ Settings are read from the `CHANNEL_WEB_` environment group (see `WebSettings` /
 | `CHANNEL_WEB_REDIS_URL` | yes | Session registrations + transcript replay store (plugin-owned Redis); falls back to `TAI_DEFAULT_REDIS_URL` |
 | `CHANNEL_WEB_REDIS_MAX_CONNECTIONS` … | no | The rest of the kit `RedisConnectionSettings` fields, same names under this prefix |
 | `CHANNEL_WEB_PAGE_TITLE` | no (`Chat`) | The chat page's `<title>` |
+| `CHANNEL_WEB_STORE_OFF_TITLE` | no (`Chat is unavailable`) | The heading of the page the chat page door serves while no store is configured |
+| `CHANNEL_WEB_STORE_OFF_TEXT` | no (`This chat is not switched on. Please contact the site owner.`) | The sentence of that page |
 | `CHANNEL_WEB_SESSION_TTL_SECONDS` | no (2592000) | Lifetime of the session cookie and its server-side registration, refreshed on every door that resolves it |
 | `CHANNEL_WEB_SESSION_PENDING_TTL_SECONDS` | no (600) | Lifetime a *freshly minted* registration gets until its cookie first comes back; then it is promoted to the full TTL |
 | `CHANNEL_WEB_SESSION_COOKIE_SECURE` | no (true) | `Secure` on that cookie, and with it the cookie's name and `Path` (see [Sessions](#sessions)); set false ONLY for a plain-http dev/e2e origin |
@@ -385,11 +434,17 @@ unknown token.
   pending record must belong to the caller's own conversation — both its web route identity
   and its address (a foreign one is reported as not found, never as
   "exists, but not yours"); the answer is then forwarded to the interactions callback
-  and a `chat.answered` frame appended on success. A callback door that reports the
+  and a `chat.answered` frame appended on success. For a question asked as sensitive,
+  the `chat.answered` frame records that the question was answered and carries no
+  answer. A callback door that reports the
   question already answered elsewhere → `409`, with no frame appended (the recorded
   answer is not this visitor's). A callback door that refuses the answer → `400`, and
   the record is put back so the visitor can re-answer — up to `MAX_ANSWER_RESTORES`
-  times, after which the question is left dropped and the refusal says so. Before
+  times, after which the question is left dropped. The `400` carries `"code":
+  "answer_refused"` while the question may be answered again and
+  `"code": "answer_retries_spent"` once it is gone, and `"reason"`, the callback
+  door's own error, when that door gave one (the widget fills it into the question's
+  `answer.rejected` / `answer.rejected_final` sentence as `{reason}`). Before
   the forward, the record's stored callback URL is pinned against the platform's
   callback prefix (`tai42_app.interactions.callback_url_prefix()`); a record outside
   it, or a deployment with no `INTERACTIONS_PUBLIC_BASE_URL`, is refused — an `ERROR`
@@ -397,7 +452,10 @@ unknown token.
   not restored, nothing is sent, and the door answers `500`. The session's link
   params ride the answer and an over-bound set is refused `422` before the claim.
   The reaction door (`POST /api/channels/web/questions/{interaction_id}/react`) pins
-  the same stored value before it forwards an event.
+  the same stored value before it forwards an event. A refused reaction answers the react door's
+  status with its own error as `"error"` and again as `"reason"`, which the widget
+  fills into the form's `update_failed` line; with no error of the door's own the
+  body carries the fixed refusal and no `reason`.
 - `POST /api/channels/web/forms/{token}` — body `{values}`, optionally
   `client_message_id` → `{message_id}`; submit an ask-less form card (a `chat.form`
   transcript entry). The token names the card's stored record — key
@@ -431,9 +489,12 @@ nowhere to register a session, so nothing downstream can work.
 Success bodies are `{"data": {...}}`; failures are `{"error": "<message>"}`, plus a
 `"code"` on the ones a caller must tell apart from the status alone:
 `session_missing` (401), `origin_mismatch` (403), `not_a_navigation` (403),
-`entry_refused` (403, the rotate door on a gated identity) and
-`web_transcript_store_off` (501). The chat page door is the exception — its caller is
+`entry_refused` (403, the rotate door on a gated identity), `answer_refused` and
+`answer_retries_spent` (400, the answer door) and `web_transcript_store_off` (501). The chat page door is the exception — its caller is
 a browser navigation, so it answers those refusals as HTML pages (above).
+
+The gate's and the words' management doors are authed, and listed under
+[Managing the gate](#managing-the-gate) and [Words](#words).
 
 ## How a delivery is addressed
 

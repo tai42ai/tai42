@@ -207,21 +207,34 @@ export interface LocationPoint {
 }
 
 /** The caller's words for one form field, keyed by property name in {@link FormWording.fields}:
- * its picker placeholder (its empty-state prompt) and its sentence for a value that breaks the
- * field's declared shape. Each `null` when the caller set none. */
+ * its picker placeholder (its empty-state prompt), its sentence for a value that breaks the
+ * field's declared shape, its sentence for a missing required value, the review readback of
+ * a yes/no value (`trueLabel`/`falseLabel`), and a list field's add and remove buttons, item
+ * heading and empty-list line. Each `null` when the caller set none. */
 export interface FieldWording {
   readonly choiceLabel: string | null;
   readonly invalid: string | null;
+  readonly trueLabel: string | null;
+  readonly falseLabel: string | null;
+  readonly required: string | null;
+  readonly addItem: string | null;
+  readonly removeItem: string | null;
+  readonly itemLabel: string | null;
+  readonly noItems: string | null;
 }
 
 /** The caller's words for a form's chrome: the terminal button of a one-page form
- * (`submit`), the Back button of a stepped form (`back`), and per-field picker
- * placeholders (`fields`). The web form draws no form `title`/`open`/`cancel` (it is
- * rendered inline), so those catalogue members are not read here. Each word is `null`
- * when the caller set none. */
+ * (`submit`), the Back button of a stepped form (`back`), the line drawn when a mid-form
+ * reaction fails (`updateFailed`, an optional `{reason}` token takes the door's reason), the
+ * stepped form's progress line (`stepProgress`, with `{step}` and `{steps}`), and the
+ * per-field words (`fields`). The web form draws no form `title`/`open`/`cancel`/
+ * `review_empty` (it is rendered inline) and no `error_line` summary, so those catalogue
+ * members are not read here. Each word is `null` when the caller set none. */
 export interface FormWording {
   readonly submit: string | null;
   readonly back: string | null;
+  readonly updateFailed: string | null;
+  readonly stepProgress: string | null;
   readonly fields: Readonly<Record<string, FieldWording>>;
 }
 
@@ -231,11 +244,13 @@ export interface ChoiceWording {
   readonly groupLabel: string | null;
 }
 
-/** The caller's words for a non-form question's answer controls and refusal sentence:
- * the link-out control (`open`), the affirmative/negative controls (`confirm`/`decline`),
- * the send button (`submit`), the empty-input hint (`replyHint`), and the sentence drawn
- * when an answer is refused and may be given again (`rejected`, an optional `{reason}`
- * token takes the door's reason). Each is `null` when the caller set none. */
+/** The caller's words for a question's answer controls and refusal sentences: the
+ * link-out control (`open`), the affirmative/negative controls (`confirm`/`decline`), the
+ * send button (`submit`), the empty-input hint (`replyHint`), the sentence drawn when an
+ * answer is refused and may be given again (`rejected`), and the one drawn when it is
+ * refused and the question can no longer be answered (`rejectedFinal`); in either an
+ * optional `{reason}` token takes the door's reason. Each is `null` when the caller set
+ * none. */
 export interface AnswerWording {
   readonly open: string | null;
   readonly confirm: string | null;
@@ -243,6 +258,7 @@ export interface AnswerWording {
   readonly submit: string | null;
   readonly replyHint: string | null;
   readonly rejected: string | null;
+  readonly rejectedFinal: string | null;
 }
 
 /** The caller's words for a live question card's countdown: the visible plural line

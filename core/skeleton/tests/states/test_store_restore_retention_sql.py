@@ -31,6 +31,11 @@ def _ok(schema, doc):
     return None
 
 
+async def _admit_persons(subjects: list[StateSubject]) -> None:
+    """A permissive person admission — the SQL tests isolate the store, not the person registry."""
+    return None
+
+
 def _subj(key="t1", kind="thread", tk: ConversationTargetKind = "agent", tn="a"):
     return StateSubject(target_kind=tk, target_name=tn, kind=kind, key=key)
 
@@ -43,7 +48,7 @@ async def test_restore_records_validates_and_audits(
         {"target_kind": "agent", "target_name": "a", "subject_kind": "thread", "subject_key": "t1", "data": {"n": 1}},
         {"target_kind": "agent", "target_name": "a", "subject_kind": "thread", "subject_key": "t2", "data": {"n": 2}},
     ]
-    await store.restore_records("alerts", rows, origin=_ORIGIN, catalog=catalog)
+    await store.restore_records("alerts", rows, origin=_ORIGIN, catalog=catalog, admit_persons_in_txn=_admit_persons)
     assert (await store.read_record("alerts", _subj(key="t1")))[0] == {"n": 1}
     assert len([w for w in pg.writes if w["paths"] == [[]]]) == 2
 
@@ -52,7 +57,7 @@ async def test_restore_records_undeclared_raises(
     pg: FakeStatesPg, store: PostgresStatesStore, catalog: CatalogSnapshot
 ) -> None:
     with pytest.raises(StateNotFoundError):
-        await store.restore_records("nope", [], origin=_ORIGIN, catalog=catalog)
+        await store.restore_records("nope", [], origin=_ORIGIN, catalog=catalog, admit_persons_in_txn=_admit_persons)
 
 
 async def test_restore_aliases_upserts(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
@@ -67,11 +72,11 @@ async def test_restore_aliases_upserts(pg: FakeStatesPg, store: PostgresStatesSt
             "mode": "switch",
         }
     ]
-    await store.restore_aliases("alerts", rows)
+    await store.restore_aliases("alerts", rows, admit_persons_in_txn=_admit_persons)
     assert pg.aliases[("alerts", "agent", "a", "thread", "old")]["canonical_key"] == "new"
     # a second restore of the same alias key overwrites (ON CONFLICT DO UPDATE), never errors
     rows[0]["canonical_key"] = "newer"
-    await store.restore_aliases("alerts", rows)
+    await store.restore_aliases("alerts", rows, admit_persons_in_txn=_admit_persons)
     assert pg.aliases[("alerts", "agent", "a", "thread", "old")]["canonical_key"] == "newer"
 
 

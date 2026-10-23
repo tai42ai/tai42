@@ -26,9 +26,9 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { type CSSProperties, type ReactNode, useRef, useState } from 'react';
 
 import { EntryCodesTable } from './EntryCodesTable';
-import { getGateBase } from './gate-base';
 import { MintEntryCodeDialog } from './MintEntryCodeDialog';
-import { gateQueryClient } from './query-client';
+import { getMountBase } from './mount-base';
+import { panelQueryClient } from './query-client';
 import { RevokeCodeDialog } from './RevokeCodeDialog';
 import { useEntryGate } from './useEntryGate';
 
@@ -64,14 +64,14 @@ function GateUnavailable(): ReactNode {
 }
 
 export function EntryGatePanel({ route }: RoutePanelProps): ReactNode {
-  const base = getGateBase();
+  const base = getMountBase();
   // The panel's own query cache with the host's rules (no retry; a 401 routes to sign-in),
   // held for the life of the mounted panel. The ref keeps the current sign-in handler.
   const onUnauthorized = useOnUnauthorized();
   const signIn = useRef(onUnauthorized);
   signIn.current = onUnauthorized;
   const [queryClient] = useState(() =>
-    gateQueryClient(() => {
+    panelQueryClient(() => {
       signIn.current();
     }),
   );

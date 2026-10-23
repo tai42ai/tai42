@@ -15,11 +15,10 @@ from collections.abc import Awaitable
 from typing import cast
 
 from tai42_contract.app import tai42_app
+from tai42_contract.tools import TOOL_EXTRA_IDEMPOTENCY_KEY
 
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 
-# The extras key a deferred call's idempotency key arrives under.
-_IDEMPOTENCY_KEY_EXTRA = "tai42/idempotency_key"
 # The longest a gate waits for its release before the call fails.
 _GATE_CEILING_SECONDS = 30
 
@@ -28,7 +27,7 @@ async def _record_and_wait(key: str) -> str:
     from tai42_kit.clients import client_ctx
     from tai42_kit.clients.impl.redis import RedisClient
 
-    idempotency_key = tai42_app.tools.extras().get(_IDEMPOTENCY_KEY_EXTRA)
+    idempotency_key = tai42_app.tools.extras().get(TOOL_EXTRA_IDEMPOTENCY_KEY)
     record = json.dumps({"key": key, "idempotency_key": idempotency_key, "pid": os.getpid()})
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
         await cast("Awaitable[int]", client.rpush(f"e2e:rec:{key}", record))

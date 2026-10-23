@@ -15,7 +15,13 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from tai42_contract.interactions import AnswerFormat, AnswerMismatchPolicy, CallerAskLanding, InteractionRequest
+from tai42_contract.interactions import (
+    AnswerFormat,
+    AnswerMismatchPolicy,
+    CallerAskLanding,
+    InteractionRequest,
+    InteractionResponse,
+)
 from tai42_contract.tools import current_call_chain, tool_call_frame
 
 if TYPE_CHECKING:
@@ -148,7 +154,17 @@ async def test_run_continuation_passes_the_chain_as_continues_chain(monkeypatch)
 
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=_Tools()))
 
-    await continuation_module._run_continuation("id-1", None, "resume_tool", "iid-1", {"a": 1}, None, ("main", "sub"))
+    await continuation_module._run_continuation(
+        "id-1",
+        None,
+        "resume_tool",
+        "iid-1",
+        {"a": 1},
+        None,
+        ("main", "sub"),
+        reply_to_medium_message_id=None,
+        params=None,
+    )
     assert seen["key"] == "resume_tool"
     assert seen["continues_chain"] == ("main", "sub")
 
@@ -170,7 +186,14 @@ async def test_dispatch_continuation_forwards_request_asked_by(wired, captured):
         expiry_at=now + timedelta(seconds=60),
         asked_by=["main", "sub"],
     )
-    continuation_module.dispatch_continuation(wired.store, request, "fp-1", "go")
+    continuation_module.dispatch_continuation(
+        wired.store,
+        request,
+        "fp-1",
+        InteractionResponse(
+            interaction_id=request.interaction_id, answer="go", answered_by="u-1", answered_at=datetime.now(UTC)
+        ),
+    )
     await drain()
     assert len(captured) == 1
     assert captured[0]["park_asked_by"] == ["main", "sub"]
@@ -212,7 +235,14 @@ async def test_dispatch_continuation_forwards_request_caller_ask_landing(wired, 
         expiry_at=now + timedelta(seconds=60),
         caller_ask_landing=CallerAskLanding(can_land=True, label="chat"),
     )
-    continuation_module.dispatch_continuation(wired.store, request, "fp-1", "go")
+    continuation_module.dispatch_continuation(
+        wired.store,
+        request,
+        "fp-1",
+        InteractionResponse(
+            interaction_id=request.interaction_id, answer="go", answered_by="u-1", answered_at=datetime.now(UTC)
+        ),
+    )
     await drain()
     assert len(captured) == 1
     assert captured[0]["caller_ask_landing"] == CallerAskLanding(can_land=True, label="chat")

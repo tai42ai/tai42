@@ -40,9 +40,13 @@ from tai42_backend_celery.core.settings import celery_settings
 def _redbeat_redis() -> AbstractAsyncContextManager[Any]:
     """The pooled async Redis client for the RedBeat store, typed ``Any``.
 
-    redis-py annotates each command as a sync/async union that cannot be awaited as-is.
+    It connects with the full ``CELERY_REDBEAT_*`` connection settings, read as bytes
+    (:func:`_text` decodes). redis-py annotates each command as a sync/async union that
+    cannot be awaited as-is.
     """
-    return tai42_app.clients.client_ctx(RedisClient, url=celery_settings().redbeat_redis_url)
+    return tai42_app.clients.client_ctx(
+        RedisClient, **{**celery_settings().redbeat.client_kwargs(), "decode_responses": False}
+    )
 
 
 def _text(value: Any) -> Any:

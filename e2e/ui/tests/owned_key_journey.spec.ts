@@ -85,10 +85,10 @@ test('owner → scoped owned key → QR-claim login → scoped shell, inbox answ
   const shellPage = await shellContext.newPage();
   await seedCredential(shellPage, ownedKey);
   // The tools explorer paginates client-side (24 entries per page by default) over the
-  // full projected catalog, so the projection sentinel is read through the `?tags=` deep
-  // link on e2e_echo's native `e2e` tag — the filter runs over the whole directory before
-  // the page slice, shrinking the list below one page.
-  await shellPage.goto('/tools?tags=e2e');
+  // full projected catalog, so the projection sentinel is read through the `?tags=` +
+  // `?q=` deep link on e2e_echo's native `e2e` tag and its name — both filters run over
+  // the whole directory before the page slice, shrinking the list below one page.
+  await shellPage.goto('/tools?tags=e2e&q=e2e_echo');
   const shellNav = shellPage.getByRole('navigation', { name: 'Primary' });
   // Sentinel: the covered feature is in the nav; absence: an operator-only entry is not.
   await expect(shellNav.getByRole('link', { name: 'Tools', exact: true })).toBeVisible();

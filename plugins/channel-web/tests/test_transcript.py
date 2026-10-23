@@ -129,12 +129,20 @@ async def test_append_question_omits_form_data_and_pages_when_none(fake_redis: F
 
 
 async def test_append_answered_carries_answer(fake_redis: FakeRedis):
-    await append_answered(IDENTITY, VISITOR_ID, "int-1", {"choice": "staging"})
+    await append_answered(IDENTITY, VISITOR_ID, "int-1", {"choice": "staging"}, sensitive=False)
     entry = _entries(fake_redis)[0]
     assert entry[1]["event"] == "chat.answered"
     payload = _data(entry)
     assert payload["interaction_id"] == "int-1"
     assert payload["answer"] == {"choice": "staging"}
+
+
+async def test_append_answered_for_a_sensitive_question_records_only_that_it_was_answered(fake_redis: FakeRedis):
+    entry_id = await append_answered(IDENTITY, VISITOR_ID, "int-1", "s3cret", sensitive=True, entry_id="ans-1")
+    entry = _entries(fake_redis)[0]
+    assert entry[1]["event"] == "chat.answered"
+    assert entry_id == "ans-1"
+    assert _data(entry) == {"id": "ans-1", "interaction_id": "int-1", "ts": _data(entry)["ts"], "sensitive": True}
 
 
 async def test_append_media_carries_card_fields(fake_redis: FakeRedis):

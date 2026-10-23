@@ -84,7 +84,7 @@ Settings are read from the `CHANNEL_WHATSAPP_` environment group (see
 | `CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS` | for cold templates | Whitelist of `wa_id`s a **template** send may reach when the recipient is not a known contact — comma-separated or a JSON list. Freeform sends are not fenced by it |
 | `CHANNEL_WHATSAPP_TEMPLATE_CONTACT_WINDOW_DAYS` | no (30) | Rolling "seen within N days" window admitting a template send to a `wa_id` the inbound webhook has messaged from; `0` disables known-contact tracking (allowlist-only templates) |
 | `CHANNEL_WHATSAPP_API_BASE_URL` | no | Graph API origin + pinned version (default `https://graph.facebook.com/v23.0`) |
-| `CHANNEL_WHATSAPP_REDIS_URL` | yes | Correlation + known-contact store (plugin-owned Redis) |
+| `CHANNEL_WHATSAPP_REDIS_URL` | yes | Correlation, known-contact and reply-window store (plugin-owned Redis) |
 | `CHANNEL_WHATSAPP_REDIS_MAX_CONNECTIONS` … | no | The rest of the kit `RedisConnectionSettings` fields, same names under this prefix |
 | `CHANNEL_WHATSAPP_HTTP_TIMEOUT_SECONDS` | no (30.0) | Outbound send + answer-forward timeout, seconds |
 | `CHANNEL_WHATSAPP_DEDUPE_TTL` | no (172800) | Seen-`wamid` replay-guard window, seconds |
@@ -95,7 +95,11 @@ message, while an ask delivery is sent from
 `CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID`. Recipient policy is split by what
 Meta itself fences. **Freeform** sends (questions, replies, media) reach any
 requested `wa_id` — Meta's own 24-hour customer-service window is the fence, so a
-send to a number outside it is rejected by Meta (error 131047) and raises.
+send to a number outside it is rejected by Meta (error 131047) and raises. The
+channel tracks that window per `(phone_number_id, wa_id)` pair from each client
+message's Meta `timestamp` and reports it on every bridged turn as
+`turn.reply_window` (`open` until `closes_at`, or `closed`), so a route can pick a
+template before Meta refuses a freeform reply; 131047 stays the final check.
 **Template** sends are the one send Meta delivers cold, so they keep an operator
 fence: the recipient must be on `CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS` **or** be a
 known contact — a `(phone_number_id, wa_id)` pair the inbound webhook has seen
@@ -177,7 +181,9 @@ no second-line slot, so on a chip grid it is folded onto the chip's title after 
 (`Gold — 2-3 days`), which Meta leaves uncapped.
 A page's **display blocks** (heading/body/
 image, each static or a reaction-filled slot) render ahead of its inputs, a
-**review** page shows a generic readback of the entered values, and a field with
+**review** page shows a generic readback of the entered values (a boolean reads back
+as the sender's `true_label` / `false_label`, else *Yes* / *No*, baked into the Flow),
+and a field with
 a `visibleWhen` predicate is shown/hidden by client-side `If`s — one per value
 when it is shown for several of a controlling field's values (a single `If`
 condition cannot test membership), each under a distinct per-case name. Such a
@@ -195,11 +201,13 @@ a forwarded form answer (`400` — a schema rule the Flow could not enforce, e.g
 minimum or pattern), a completed Flow has no re-reply surface, so the channel
 **re-sends a fresh Flow** for the same interaction: same flow token, the cached
 flow id, and a body that repeats the question with the refusal sentence — the
-sender's `wording.answer.rejected` (its `{reason}` token filled with the door's
-error line, which names the failing field) when set, else a generic lead and that
-line. This is **bounded** — after a fixed number of
-rejections the channel stops re-sending, tells the participant once the form could not
-be processed, and lets the ask time out on its own deadline. The platform
+sender's `wording.answer.rejected` (its `{reason}` token filled with the sender's
+`wording.form.error_line` when set, else the door's error line, which names the failing
+field; empty when there is neither) when set, else a generic lead and that line. This
+is **bounded** — after a fixed number of rejections the channel stops re-sending, tells
+the participant once (the sender's `wording.answer.rejected_final` with the same line in
+its `{reason}`, else a fixed line) that the form could not be processed, and lets the ask
+time out on its own deadline. The platform
 validates the answer schema against this subset when the question is asked —
 before the question is stored — so an out-of-subset schema (nested objects,
 arrays of non-strings, unions, unknown types) never reaches this send; the Flow
@@ -332,7 +340,6 @@ whichever keys it understands. This is the channel's public inbound contract:
 | `reply_id` | An interactive reply button / list row is tapped but is **not** an answer to a pending ask (no ask, or a stale/other id) | The question-bound wire id the outbound carried (`button_reply.id` / `list_reply.id`) |
 | `reply_description` | The tapped item is a **list row** that carried a secondary description line | `list_reply.description` |
 | `button_payload` | A **template quick-reply** button is tapped (a `button`-type message) | The developer-defined `button.payload` behind the visible `button.text` |
-| `context_message_id` | The message **quotes / replies to** an earlier one | `context.id` (the quoted `wamid`) |
 | `referral_source_url` | The message enters via **click-to-WhatsApp / QR** (`referral`) | `referral.source_url` |
 | `referral_source_id` | " | `referral.source_id` |
 | `referral_source_type` | " | `referral.source_type` (e.g. `ad`, `post`) |
@@ -358,6 +365,16 @@ turn text (a faithful `[image]` / `[document: file]` / `[voice message]` / …
 placeholder when caption-less); an inbound **location** lands as a typed
 `LocationElement` on the turn's `location` (a machine-consumable field, not a
 param), with the place name/coordinates as the text.
+
+A message sent as a **reply** to an earlier one carries Meta's `context.id` (the
+quoted message's `wamid`). The channel passes it to `conversations.accept` as
+`reply_to_medium_message_id` — never as an entry parameter — and the platform resolves
+it into the turn's typed `reply_to` (`{message_id, status, text}`). An interactive tap,
+a template quick-reply and a completed Flow carry the `context.id` of the message that
+held the buttons or the Flow. When the reply answers a pending question, the ladder's
+`InboundBridge` carries the same id, so the asker receives the resolved `reply_to`
+beside the unchanged answer; the answer arm sends no entry parameters, so the asker's
+`params` is `null`. A reaction is not a reply (`reaction_message_id` names its target).
 
 > **Inbound media.** WhatsApp inbound media arrives as a Graph media **id**; the
 > channel looks up the object's short-lived, Bearer-authenticated lookaside URL,
@@ -396,8 +413,8 @@ a later `statuses` webhook carries `sent`/`delivered`/`read`/`failed`. The same
 answer failed loudly; `sent`/`delivered` confirm it; `read` is informational and
 ignored.
 
-A `wamid` the conversation bridge does not own is not a dead end: it may be a
-**`notify_user` send** (which runs no conversation record). The webhook then
+A `wamid` no conversation record owns is not a dead end: it may be a
+**`notify_user` send** made outside any conversation route. The webhook then
 resolves the `wamid` through the send-outcome receipt index and, on a hit, posts a
 `delivery_receipt` event onto the send's originating monitoring trace, nested under
 its send span — `ERROR` for a `failed` receipt (carrying the provider `errors`),
@@ -433,9 +450,9 @@ status is acknowledged, never retried.
 | Limit | Consequence |
 |---|---|
 | One pending question per `(phone_number_id, wa_id)` pair | A second concurrent `ask` over this channel fails loudly with `PendingQuestionExistsError` while the first is unanswered/unexpired. The pair is released at once when the platform withdraws the first question (a cancel, a route's `cancel_expr`, or an erase of its thread, route or person); nothing is sent to the participant |
-| Freeform sends need the 24h window | A freeform send (question, reply, media) outside the human's 24-hour session window is rejected by Meta (error 131047), synchronously as a delivery error or asynchronously as a `failed` status. A template is the only send Meta accepts outside the window |
+| Freeform sends need the 24h window | A freeform send (question, reply, media) outside the human's 24-hour session window is rejected by Meta (error 131047), synchronously as a delivery error or asynchronously as a `failed` status. A template is the only send Meta accepts outside the window. The reported `turn.reply_window` is read once per turn, so a turn that runs past `closes_at` may still see `open`; a client message whose `timestamp` is missing or unreadable opens no window and logs a warning |
 | Single send attempt per part | A transient Cloud API outage fails the send instead of retrying (no idempotency key → a blind retry risks double-messaging). A multi-part media send that fails on the Nth part raises naming the wamids already delivered |
-| Form schema is a flat object subset | A `form` ask's answer schema is a top-level `object` whose properties are `string`, `string`+`enum`, an **array of strings** (a multiple-choice field), `boolean`, `integer`, or `number`. The platform enforces this subset at ask-time, so nested objects, arrays of non-strings, and `oneOf`/`anyOf` are refused before the question is stored; the Flow mapping refuses them defensively too, and additionally rejects a property named `flow_token` — Meta reserves that key on the Flow response, so a field of that name is unanswerable on this channel. An **endpoint-driven** form additionally reserves the property names `tai42_event`, `tai42_field`, and `tai42_page` (its data-exchange event markers) any name spelled like another field's screen-data carrier (`<field>__init`, `__ds`, `__err`, `__invalid`, `__val`), and any name spelled like a display slot's screen-data key (`slot_<slot>`), and refuses a form where a per-case control's name (`<field>__<value>`) is spelled like a property, another field's control, a marker, a carrier or a slot key, or is drawn by two fields |
+| Form schema is a flat object subset | A `form` ask's answer schema is a top-level `object` whose properties are `string`, `string`+`enum`, an **array of strings** (a multiple-choice field), `boolean`, `integer`, or `number`. The platform enforces this subset at ask-time, so nested objects, arrays of non-strings, and `oneOf`/`anyOf` are refused before the question is stored; the Flow mapping refuses them defensively too, and additionally rejects a property named `flow_token` — Meta reserves that key on the Flow response, so a field of that name is unanswerable on this channel. An **endpoint-driven** form additionally reserves the property names `tai42_event`, `tai42_field`, and `tai42_page` (its data-exchange event markers) any name spelled like another field's screen-data carrier (`<field>__init`, `__ds`, `__err`, `__invalid`, `__required`, `__val`) or like a form-line carrier (`tai42_error_line`, `tai42_update_failed`), and any name spelled like a display slot's screen-data key (`slot_<slot>`), and refuses a form where a per-case control's name (`<field>__<value>`) is spelled like a property, another field's control, a marker, a carrier or a slot key, or is drawn by two fields |
 | Template audio header unsupported | A `ChannelTemplate` maps `header_media` (image/video/document), `body_parameters`, and quick-reply/url `buttons` onto the template-message components. An **audio** `header_media` has no Cloud API template representation and is refused loudly (`ChannelInputError`); an audio interactive **header** on a notification is instead sent as its own message ahead of the interactive |
 | No timestamp in Meta's signature scheme | Replay of a captured request validates forever for that body; `wamid` dedupe (48h default window) + HTTPS are the guards (a Meta protocol property) |
 

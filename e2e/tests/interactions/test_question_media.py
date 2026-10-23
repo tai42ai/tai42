@@ -69,7 +69,7 @@ async def _ask(stack: TaiStack, question: str, media: list[dict[str, object]] | 
         # A boot-time ask races the ~2s self-resync gate (a retriable ``reloading``);
         # poll past it so the call parks on the real question, not the reload gate.
         result = await mcp.call_tool("ask", arguments, retry_on_reloading=True)
-    return result.data
+    return result.data.answer
 
 
 def _add_frame_data(frame: str) -> dict[str, Any] | None:

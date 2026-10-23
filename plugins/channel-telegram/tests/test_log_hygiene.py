@@ -114,7 +114,7 @@ async def test_notify_send_does_not_log_the_token(http_recorder, caplog: pytest.
     with caplog.at_level(logging.INFO, logger="httpx"):
         result = await TelegramChannel().notify(ChannelNotification(message="Deploy finished."))
 
-    assert result == ["42"]
+    assert result.message_ids == ["42"]
     assert str(http_recorder.requests[0].url) == _URL
     httpx_records = [r for r in caplog.records if r.name == "httpx"]
     assert httpx_records, "expected httpx to log the outbound request line"

@@ -122,7 +122,8 @@ class PostgresCheckpointProvider(CheckpointProvider):
         """Open the pool and set up the saver's and the kit's tables.
 
         ``None`` opens the base Postgres namespace (``PG_*``), whose DSN builder raises a named error
-        when its identity is unset.
+        when its identity is unset. A set conn string is the whole identity, with the first-connection
+        retry of ``LLM_PROVIDER_CHECKPOINT_PG_RETRY_ATTEMPTS``.
         """
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # pyright: ignore[reportMissingImports]
 
@@ -130,9 +131,20 @@ class PostgresCheckpointProvider(CheckpointProvider):
         from tai42_kit.clients.settings import PostgresConnectionSettings
         from tai42_kit.llm._langgraph_postgres import LANGGRAPH_CONNECTION_KWARGS, serialised_setup
         from tai42_kit.llm.checkpoint.checkpoint import CheckpointResource
+        from tai42_kit.llm.settings import llm_checkpoint_connection_options
 
-        target: PostgresConnectionSettings | str = PostgresConnectionSettings() if conn_string is None else conn_string
-        pool = await open_dedicated_pool(target, role="checkpoint", connection_kwargs=dict(LANGGRAPH_CONNECTION_KWARGS))
+        connection_kwargs = dict(LANGGRAPH_CONNECTION_KWARGS)
+        if conn_string is None:
+            pool = await open_dedicated_pool(
+                PostgresConnectionSettings(), role="checkpoint", connection_kwargs=connection_kwargs
+            )
+        else:
+            pool = await open_dedicated_pool(
+                conn_string,
+                role="checkpoint",
+                connection_kwargs=connection_kwargs,
+                options=llm_checkpoint_connection_options(),
+            )
         ledger = PostgresFinishedThreadLedger(pool)
         values = PostgresCheckpointValueStore(pool)
         try:

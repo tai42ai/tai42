@@ -36,7 +36,7 @@ from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.schedule_subject import SCHEDULE_STAMPED_DOOR_OPTS
 
 from tai42_backend_rq.schedules import apply_normalized_schedule, refuse_relative, scheduler_for
-from tai42_backend_rq.settings import rq_settings
+from tai42_backend_rq.settings import rq_client_kwargs, rq_settings
 from tai42_backend_rq.signatures import add_signature_params
 from tai42_backend_rq.tasks import RQ_SCHEDULE_OPTS, RQ_TASK_OPTS, enqueue_task, tool_execution
 
@@ -139,7 +139,7 @@ def schedule_task(func: Any, name: str, description: str) -> Any:
         cadence = _CADENCE.validate_python(kwargs.pop(SCHEDULE_CADENCE_KEY))
         refuse_relative(cadence)
 
-        async with client_ctx(SyncRedisClient, url=rq_settings().redis_url) as r:
+        async with client_ctx(SyncRedisClient, **rq_client_kwargs()) as r:
             scheduler = scheduler_for(r)
             await apply_normalized_schedule(scheduler, cadence, tool_execution, list(args), kwargs, schedule_name)
 

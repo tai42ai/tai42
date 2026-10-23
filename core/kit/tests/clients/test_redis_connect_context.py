@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -31,7 +32,7 @@ from redis.asyncio.connection import (
 )
 
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.redis import RedisClient, async_redis_from_url
+from tai42_kit.clients.impl.redis import RedisClient, async_redis_from_url, redis_from_url_kwargs
 
 _caller: contextvars.ContextVar[object] = contextvars.ContextVar("caller")
 
@@ -169,7 +170,7 @@ def test_every_url_scheme_selects_its_connection_with_an_empty_context_connect(
 ) -> None:
     connection_class = async_redis_from_url(url).connection_pool.connection_class
     assert issubclass(connection_class, url_class)
-    assert connection_class.connect is not url_class.connect
+    assert connection_class._connect is not url_class._connect
 
 
 def test_the_client_is_the_from_url_client_over_the_empty_context_pool() -> None:
@@ -191,11 +192,39 @@ def test_a_connection_class_without_an_empty_context_connect_is_refused() -> Non
         redis_impl._EmptyContextConnectionPool(connection_class=_OtherConnection)
 
 
-async def test_a_caller_cancelled_while_connecting_cancels_the_connect() -> None:
+async def test_a_direct_socket_open_keeps_no_context_of_its_caller() -> None:
+    # The socket open every connect path reaches on every redis-py major, called the way a
+    # command's reconnect and the sentinel connect call it.
+    async with _tcp_stub() as stub:
+        connection = cast("AbstractConnection", async_redis_from_url(stub.url).connection_pool.make_connection())
+        try:
+            marker = await _caller_marker_after(connection._connect)
+            assert connection.is_connected
+            assert marker() is None
+        finally:
+            await connection.disconnect()
+
+
+async def test_a_commands_reconnect_under_the_retry_keeps_no_context_of_its_caller() -> None:
+    async with _tcp_stub(close_after_ping=True) as stub:
+        redis = async_redis_from_url(**redis_from_url_kwargs({"url": stub.url, "retry_attempts": 1}))
+        try:
+            await redis.ping()
+            await asyncio.wait_for(stub.closed.wait(), 5)
+            await asyncio.sleep(0.05)
+            marker = await _caller_marker_after(redis.ping)
+            assert stub.connections == 2
+            assert marker() is None
+        finally:
+            await redis.aclose()
+
+
+async def test_a_caller_cancelled_while_connecting_leaves_no_kit_task_running() -> None:
     accepted = asyncio.Event()
     handlers: set[asyncio.Task[object]] = set()
 
     async def silent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Accepts the socket and never answers the handshake.
         handlers.add(asyncio.current_task())  # type: ignore[arg-type]
         accepted.set()
         await reader.read()
@@ -212,13 +241,11 @@ async def test_a_caller_cancelled_while_connecting_cancels_the_connect() -> None
             before = asyncio.all_tasks()
             caller = asyncio.create_task(ping())
             await asyncio.wait_for(accepted.wait(), 5)
-            started = asyncio.all_tasks() - before - handlers - {caller}
-            assert len(started) == 1
             caller.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await caller
-            (connect,) = started
             await asyncio.sleep(0)
-            assert connect.cancelled()
+            started = asyncio.all_tasks() - before - handlers - {caller}
+            assert started == set()
         finally:
             await redis.aclose()

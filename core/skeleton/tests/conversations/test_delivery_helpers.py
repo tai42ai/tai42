@@ -14,6 +14,7 @@ import pytest
 from tai42_contract.channels import Channel, LinkOption, OptionSection, ReplyOption
 from tai42_contract.conversations import AnswerPart
 from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations.address import canonical_address
@@ -173,9 +174,9 @@ def test_reply_part_bad_prefill_is_refused_loudly():
         _checked_reply_parts([{"message": "fill this in", "schema": _FORM_SCHEMA, "data": {"values": {"name": 42}}}])
 
 
-class _PlainChannel:
+class _PlainChannel(AddressingChannel):
     async def notify(self, notification):
-        return []
+        return self.outcome(notification, [])
 
 
 class _FormChannel(_PlainChannel):

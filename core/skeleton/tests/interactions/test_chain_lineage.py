@@ -202,22 +202,24 @@ async def _park(wired: SimpleNamespace, keys: Sequence[str]) -> InteractionState
     return state
 
 
-async def _claim(wired: SimpleNamespace, state: InteractionState, answer: Any = "yes") -> None:
+async def _claim(wired: SimpleNamespace, state: InteractionState, answer: Any = "yes") -> InteractionResponse:
     due_ttl, first_attempt_ms = continuation_module.continuation_due_timing(wired.settings)
+    response = InteractionResponse(
+        interaction_id=state.request.interaction_id,
+        answer=answer,
+        answered_by="u-1",
+        answered_at=datetime.now(UTC),
+    )
     claimed = await wired.store.record_answer(
         wired.fake,
-        InteractionResponse(
-            interaction_id=state.request.interaction_id,
-            answer=answer,
-            answered_by="u-1",
-            answered_at=datetime.now(UTC),
-        ),
+        response,
         state.group_id,
         3600,
         continuation_due_ttl=due_ttl,
         continuation_first_attempt_at_ms=first_attempt_ms,
     )
     assert claimed
+    return response
 
 
 async def _settle() -> None:
@@ -228,8 +230,8 @@ async def _settle() -> None:
 
 async def _answer_door(wired: SimpleNamespace, state: InteractionState) -> None:
     """The HTTP answer door's path: the atomic claim, then the shared post-claim fire (detached)."""
-    await _claim(wired, state)
-    await continuation_module.fire_continuation_after_claim(wired.fake, wired.store, state.request, "yes")
+    response = await _claim(wired, state)
+    await continuation_module.fire_continuation_after_claim(wired.fake, wired.store, state.request, response)
     await _settle()
 
 
@@ -254,6 +256,7 @@ async def _inline_visit(wired: SimpleNamespace, state: InteractionState) -> None
             ResumeItem(id=state.request.interaction_id, payload="yes"),
             True,
             "yes",
+            None,
         )
 
 

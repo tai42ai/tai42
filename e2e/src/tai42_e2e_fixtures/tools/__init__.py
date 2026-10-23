@@ -10,6 +10,7 @@ server/worker process."""
 from __future__ import annotations
 
 from tai42_e2e_fixtures.tools import (
+    ask_results,
     basic,
     caller,
     connector,
@@ -22,11 +23,13 @@ from tai42_e2e_fixtures.tools import (
     park,
     readiness,
     record_probe,
+    reply_to,
     sandbox,
     tool_target,
 )
 
 __all__ = [
+    "ask_results",
     "basic",
     "caller",
     "connector",
@@ -39,6 +42,7 @@ __all__ = [
     "park",
     "readiness",
     "record_probe",
+    "reply_to",
     "sandbox",
     "tool_target",
 ]

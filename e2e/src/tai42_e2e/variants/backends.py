@@ -83,9 +83,12 @@ class ArqVariant(BackendVariant):
         # leaked worker still consumes it would let that orphan dequeue this stack's
         # ``tool_execution`` jobs off the shared default queue key. Namespacing the
         # queue by the same per-stack token as the bus keeps each worker on its own.
+        # One connection retry runs every worker and enqueue command through the
+        # backend's composed connection settings and their logged retry.
         return {
             "ARQ_REDIS_URL": res.redis_url,
             "ARQ_QUEUE_NAME": f"{res.bus_namespace}:arq:queue",
+            "ARQ_RETRY_ATTEMPTS": "1",
         }
 
     def extra_backend_processes(self) -> list[list[str]]:
@@ -110,9 +113,11 @@ class RqVariant(BackendVariant):
     def feature_env(self, res: StackResources) -> dict[str, str]:
         # Same reasoning as arq: namespace the RQ queue by the per-stack token so a
         # leaked worker on a re-leased DB index cannot consume this stack's jobs.
+        # One connection retry, as for arq, covers the worker, the beat and the enqueue side.
         return {
             "RQ_REDIS_URL": res.redis_url,
             "RQ_QUEUE_NAME": f"{res.bus_namespace}:default",
+            "RQ_RETRY_ATTEMPTS": "1",
         }
 
     def extra_backend_processes(self) -> list[list[str]]:
@@ -143,12 +148,16 @@ class CeleryVariant(BackendVariant):
         # rename is needed. Result records key on unique task ids. The one shared
         # Redis structure is RedBeat's schedule store on the logical DB, so its key
         # prefix is namespaced by the per-stack token to stop a leaked beat on a
-        # re-leased DB from firing this stack's schedules.
+        # re-leased DB from firing this stack's schedules. One connection retry runs
+        # the RedBeat store and the Redis result backend through their logged retry;
+        # the broker is RabbitMQ, which keeps celery's own retries.
         return {
             "CELERY_BROKER_URL": broker_url,
             "CELERY_RESULT_BACKEND": res.redis_url,
             "CELERY_REDBEAT_REDIS_URL": res.redis_url,
             "CELERY_REDBEAT_KEY_PREFIX": f"{res.bus_namespace}:redbeat:",
+            "CELERY_REDBEAT_RETRY_ATTEMPTS": "1",
+            "CELERY_RESULT_BACKEND_RETRY_ATTEMPTS": "1",
         }
 
     def infra_check(self, settings: HarnessSettings) -> None:

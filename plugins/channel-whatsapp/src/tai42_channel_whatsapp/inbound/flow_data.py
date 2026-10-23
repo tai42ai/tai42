@@ -42,6 +42,7 @@ from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import (
     AnswerFormat,
     FieldChangedEvent,
+    FormReactionError,
     FormReactionEvent,
     FormReactionEventKind,
     FormReactions,
@@ -75,13 +76,16 @@ from tai42_channel_whatsapp.flows import (
 )
 from tai42_channel_whatsapp.flows_components import _chips_single_pick, split_range_values
 from tai42_channel_whatsapp.flows_endpoint import (
+    FORM_LINE_MEMBERS,
     REACTION_EVENT_KEY,
     REACTION_FIELD_KEY,
     REACTION_PAGE_KEY,
     RESERVED_REACTION_KEYS,
     error_carriers,
     error_fields,
+    form_line_carrier,
 )
+from tai42_channel_whatsapp.flows_resolve import form_drawing_order
 from tai42_channel_whatsapp.flows_send_data import _field_init_value, _init_value
 from tai42_channel_whatsapp.flows_shapes import channel_word
 from tai42_channel_whatsapp.flows_visibility import split_answer_cases
@@ -96,7 +100,8 @@ _MAX_BODY_BYTES = 1 * 1024 * 1024
 
 # The generic notice shown to the participant (via a screen ``error_message``) when a reaction
 # or the shape check cannot be computed — the vendor's error surface, paired with a loud operator
-# log. A broken shape is never this notice: it names the field.
+# log — unless the caller set the form's ``update_failed`` line. A broken shape is never this
+# notice: it names the field.
 _REACTION_FAILURE_NOTICE = "Sorry, this form could not be updated right now. Please try again."
 
 
@@ -195,7 +200,7 @@ async def _resolve_form(flow_token: str) -> tuple[EndpointForm, bool]:
 
     An ask's token is its interaction id, resolving its :class:`EndpointForm` sidecar. An ask-less
     form's ``tai42-nf:`` token carries its schema hash, resolving the notify sidecar under the
-    configured WABA; such a form reacts to nothing and its sentences ride the request. Raises
+    configured WABA; such a form reacts to nothing and its sentences and lines ride the request. Raises
     :class:`_FlowTokenInvalidError` on a miss.
     """
     if flow_token.startswith(_NOTIFY_FORM_TOKEN_PREFIX):
@@ -206,7 +211,13 @@ async def _resolve_form(flow_token: str) -> tuple[EndpointForm, bool]:
             logger.warning("whatsapp flow endpoint: no form sidecar for notify token %s", flow_token)
             raise _FlowTokenInvalidError
         form = EndpointForm(
-            schema=cached.schema, pages=cached.pages, reactions=None, option_fields=cached.option_fields, invalid={}
+            schema=cached.schema,
+            pages=cached.pages,
+            reactions=None,
+            option_fields=cached.option_fields,
+            invalid={},
+            required={},
+            lines={},
         )
         return form, False
     endpoint_form = await get_endpoint_form(flow_token)
@@ -234,15 +245,18 @@ async def _handle_data_exchange(payload: dict[str, Any]) -> dict[str, Any]:
     event = _build_event(data)
     if event is None:
         logger.error("whatsapp flow request for %s carried no recognised event marker", flow_token)
-        return _error_response(form, screen, data)
+        return _error_response(form, screen, data, "")
     partial = _partial_values(data, properties)
     try:
         if isinstance(event, FieldChangedEvent):
             if event.field not in reactions.field_changed:
                 logger.error("whatsapp flow request for %s names undeclared field trigger %r", flow_token, event.field)
-                return _error_response(form, screen, data)
+                return _error_response(form, screen, data, "")
             update = await tai42_app.interactions.react(flow_token, event, partial)
-            return {"screen": screen, "data": _screen_answer(form, screen, data, _update_data(update or {}, form))}
+            return {
+                "screen": screen,
+                "data": _screen_answer(form, screen, data, _update_data(update or {}, form, data)),
+            }
         refusal = _shape_refusal(form, screen, event, partial, data)
         if refusal is not None:
             return refusal
@@ -253,14 +267,19 @@ async def _handle_data_exchange(payload: dict[str, Any]) -> dict[str, Any]:
         if declared:
             update = await tai42_app.interactions.react(flow_token, event, partial) or {}
         return _translate_update(event, update, screen, flow_token, form, partial, data)
+    except FormReactionError as exc:
+        # The reaction door refused or failed; its reason fills the caller's ``update_failed``.
+        logger.exception("whatsapp flow request for %s: the reaction failed; surfacing the vendor error", flow_token)
+        return _error_response(form, screen, data, exc.reason)
     except ChannelInputError:
         # A reaction result this channel cannot render (e.g. an option second line past Meta's cap)
-        # is the same class as a failed reaction: logged loudly, answered with the vendor error.
+        # is the same class as a failed reaction: logged loudly, answered with the vendor error. Its
+        # text is this channel's own vendor message, never shown to the person.
         logger.exception("whatsapp flow request for %s returned an update WhatsApp cannot render", flow_token)
-        return _error_response(form, screen, data)
+        return _error_response(form, screen, data, "")
     except Exception:
         logger.exception("whatsapp flow request for %s failed; surfacing the vendor error", flow_token)
-        return _error_response(form, screen, data)
+        return _error_response(form, screen, data, "")
 
 
 def _build_event(data: dict[str, Any]) -> FormReactionEvent | None:
@@ -373,9 +392,36 @@ def _filled(partial: dict[str, Any]) -> dict[str, Any]:
     return {name: value for name, value in partial.items() if value != ""}
 
 
-def _error_response(form: EndpointForm, screen: str, data: dict[str, Any]) -> dict[str, Any]:
-    """Keep the form on its current screen, as the person left it, and show the generic failure notice."""
-    return {"screen": screen, "data": _screen_answer(form, screen, data, {"error_message": _REACTION_FAILURE_NOTICE})}
+def _error_response(form: EndpointForm, screen: str, data: dict[str, Any], reason: str) -> dict[str, Any]:
+    """Keep the form on its current screen, as the person left it, and show the could-not-update notice.
+
+    The notice is the caller's ``update_failed`` line with each ``{reason}`` replaced by ``reason``
+    (the reaction door's own sentence, or empty when the failure carries none a person may read),
+    else the generic :data:`_REACTION_FAILURE_NOTICE`.
+    """
+    template = _form_line(form, data, "update_failed")
+    notice = template.replace("{reason}", reason) if template is not None else _REACTION_FAILURE_NOTICE
+    return {"screen": screen, "data": _screen_answer(form, screen, data, {"error_message": notice})}
+
+
+def _form_line(form: EndpointForm, data: dict[str, Any], member: str) -> str | None:
+    """The caller's form-level ``member`` line: an ask's sidecar, else the carrier an ask-less form forwarded.
+
+    ``None`` when the caller set none (an ask-less form carries the empty string for an unset line).
+    """
+    own = form.lines.get(member)
+    if own:
+        return own
+    carried = data.get(form_line_carrier(member))
+    return carried if isinstance(carried, str) and carried else None
+
+
+def _error_line(form: EndpointForm, data: dict[str, Any], items: list[tuple[str, str]]) -> str:
+    """A refusal's pop-up summary: the caller's ``error_line``, else ``Label: sentence`` per failing field."""
+    line = _form_line(form, data, "error_line")
+    if line is not None:
+        return line
+    return "; ".join(f"{label}: {text}" for label, text in items)
 
 
 def _screen_answer(
@@ -433,13 +479,14 @@ def _screen_fields(form: EndpointForm, screen: str) -> tuple[list[list[str]], in
     return fields_by_screen, current
 
 
-def _sentence(form: EndpointForm, data: dict[str, Any], names: dict[str, str], name: str) -> str | None:
-    # The caller's ``invalid`` sentence for a field: an ask's sidecar, else the ``__invalid``
-    # carrier an ask-less form's request forwarded; ``None`` when the caller set none.
-    own = form.invalid.get(name)
+def _sentence(form: EndpointForm, data: dict[str, Any], names: dict[str, str], name: str, member: str) -> str | None:
+    # The caller's ``invalid`` or ``required`` sentence (``member``) for a field: an ask's sidecar,
+    # else the ``__invalid`` / ``__required`` carrier an ask-less form's request forwarded; ``None``
+    # when the caller set none.
+    own = (form.required if member == "required" else form.invalid).get(name)
     if own:
         return own
-    carried = data.get(f"{names[name]}__invalid")
+    carried = data.get(f"{names[name]}__{member}")
     return carried if isinstance(carried, str) and carried else None
 
 
@@ -451,11 +498,12 @@ def _shape_refusal(
     A step advance checks THIS screen's fields with nothing demanded; a submit the whole answer.
     A picker's membership in a per-send option list is never refused here (the list it drew is
     the list it offers; the answer door judges membership against the stored list). Each failing
-    field on the screen shows its sentence — the caller's ``invalid``, else this channel's word for
-    the shape (``required`` always the channel's word) — in its ``error-message`` (a merged range
-    end's on its own end of the pair's one error object); every other field's is cleared; the
-    snackbar names each failing field's label and sentence. The answer carries the screen's whole
-    data (:func:`_screen_answer`).
+    field on the screen shows its sentence — the caller's ``required`` for a missing value or
+    ``invalid`` for any other shape, else this channel's word for the shape — in its
+    ``error-message`` (a merged range end's on its own end of the pair's one error object); every
+    other field's is cleared; the snackbar is the caller's ``error_line``, else each failing field's
+    label and sentence (:func:`_error_line`). The answer carries the screen's whole data
+    (:func:`_screen_answer`).
     """
     properties = form.schema.get("properties")
     properties = properties if isinstance(properties, dict) else {}
@@ -476,14 +524,15 @@ def _shape_refusal(
     labels = payload_labels(properties)
     bound, range_merges = _error_bindings(form, properties, names)
     shown: dict[str, str] = {}
-    lines: list[str] = []
+    items: list[tuple[str, str]] = []
     for error in errors:
-        sentence = _sentence(form, data, names, error.field) if error.kind is not FormShapeKind.REQUIRED else None
+        member = "required" if error.kind is FormShapeKind.REQUIRED else "invalid"
+        sentence = _sentence(form, data, names, error.field, member)
         if error.field in this_fields:
             shown[error.field] = sentence or channel_word(error.kind, error.params)
-        lines.append(f"{labels.get(error.field, error.field)}: {sentence or error.message}")
+        items.append((labels.get(error.field, error.field), sentence or error.message))
     out: dict[str, Any] = error_carriers(this_fields, names, bound, range_merges, shown)
-    out["error_message"] = "; ".join(lines)
+    out["error_message"] = _error_line(form, data, items)
     return {"screen": screen, "data": _screen_answer(form, screen, data, out)}
 
 
@@ -509,18 +558,27 @@ def _translate_update(
     if isinstance(event, SubmittedEvent) and not errors:
         properties = form.schema.get("properties")
         properties = properties if isinstance(properties, dict) else {}
+        resolved, fields_by_screen = _resolve_pages(properties, form.pages)
+        merges = _form_range_merges(properties, resolved, fields_by_screen)
         return _completion(
-            flow_token, properties, payload_labels(properties), _filled(partial), update.get("values") or {}
+            flow_token, properties, payload_labels(properties), merges, _filled(partial), update.get("values") or {}
         )
     if isinstance(event, PageAdvancedEvent) and not errors:
         advanced = _advance_screen(screen, form, data, update)
         if advanced is not None:
             return advanced
-    return {"screen": screen, "data": _screen_answer(form, screen, data, _update_data(update, form), clear_errors=True)}
+    return {
+        "screen": screen,
+        "data": _screen_answer(form, screen, data, _update_data(update, form, data), clear_errors=True),
+    }
 
 
-def _update_data(update: dict[str, Any], form: EndpointForm) -> dict[str, Any]:
-    """The screen-``data`` keys a FORM UPDATE sets: field values, option lists, display slots, error message."""
+def _update_data(update: dict[str, Any], form: EndpointForm, data: dict[str, Any]) -> dict[str, Any]:
+    """The screen-``data`` keys a FORM UPDATE sets: field values, option lists, display slots, error message.
+
+    The error message of an update carrying field errors is the caller's ``error_line`` (an ask's
+    sidecar or the carrier of ``data``, the request's), else ``Label: message`` per field.
+    """
     properties = form.schema.get("properties")
     properties = properties if isinstance(properties, dict) else {}
     names = component_names(properties)
@@ -543,7 +601,9 @@ def _update_data(update: dict[str, Any], form: EndpointForm) -> dict[str, Any]:
             out[slots[slot]] = value
     errors = update.get("errors") or {}
     if errors:
-        out["error_message"] = "; ".join(f"{labels.get(field, field)}: {message}" for field, message in errors.items())
+        out["error_message"] = _error_line(
+            form, data, [(labels.get(str(field), str(field)), str(message)) for field, message in errors.items()]
+        )
     return out
 
 
@@ -551,6 +611,7 @@ def _completion(
     flow_token: str,
     properties: dict[str, Any],
     labels: dict[str, str],
+    merges: dict[str, str],
     filled: dict[str, Any],
     values_update: dict[str, Any],
 ) -> dict[str, Any]:
@@ -560,11 +621,14 @@ def _completion(
     human-readable labels the static Flow's completion uses, so the inbound ``nfm_reply`` decode
     maps them back to the schema keys uniformly; ``params.flow_token`` is the request's own token
     (an ask's interaction id, or an ask-less form's ``tai42-nf:`` token). The merged values are the
-    ones filled overlaid with any the submit reaction set.
+    ones filled overlaid with any the submit reaction set. The label keys come in the Flow's drawing
+    order (:func:`form_drawing_order` over ``merges``, the form's ``END -> START`` range merges):
+    each ``timeOf`` time right after its date, and a merged range END with its time right after
+    the START's time.
     """
     merged = {**filled, **values_update}
     params: dict[str, Any] = {"flow_token": flow_token}
-    for name in properties:
+    for name in form_drawing_order(list(properties), properties, merges):
         if name in merged:
             params[labels[name]] = merged[name]
     return {"screen": SUCCESS_SCREEN, "data": {"extension_message_response": {"params": params}}}
@@ -572,11 +636,12 @@ def _completion(
 
 def _forwarded_carriers(data: dict[str, Any], names: dict[str, str], later_fields: list[str]) -> dict[str, Any]:
     # The carriers the next screen declares that the request carried — each later field's
-    # ``__init``/``__ds``/``__err`` and every ``__invalid`` — passed on verbatim. The rest of the
-    # screen's data (its own fields' carriers, the ``__val`` carriers rebuilt here, its display
-    # slots) is not the next screen's.
+    # ``__init``/``__ds``/``__err``, every ``__invalid`` and ``__required``, and the form-line
+    # carriers — passed on verbatim. The rest of the screen's data (its own fields' carriers, the
+    # ``__val`` carriers rebuilt here, its display slots) is not the next screen's.
     keys = {f"{names[name]}{suffix}" for name in later_fields for suffix in ("__init", "__ds", "__err")}
-    keys |= {f"{cname}__invalid" for cname in names.values()}
+    keys |= {f"{cname}{suffix}" for cname in names.values() for suffix in ("__invalid", "__required")}
+    keys |= {form_line_carrier(member) for member in FORM_LINE_MEMBERS}
     return {key: value for key, value in data.items() if key in keys}
 
 
@@ -586,7 +651,8 @@ def _advance_screen(
     """The next-screen response for a clean page advance, or ``None`` when there is no next screen.
 
     Stateless: the next screen's whole data is the carriers the step footer carried for it (each
-    later field's ``__init``/``__ds``/``__err`` and every ``__invalid``), a ``__val`` carrier for
+    later field's ``__init``/``__ds``/``__err``, every ``__invalid`` and ``__required``, and the
+    form-line carriers), a ``__val`` carrier for
     each field collected so far — the control-shaped value the request carried (a merged range
     START its pair's object), or the reaction's value shaped for the control — and the next page's
     display slots, empty, with the update applied on top.
@@ -627,7 +693,7 @@ def _advance_screen(
             data_out[f"{cname}__val"] = _field_init_value(name, prop, update_values)
         else:
             data_out[f"{cname}__val"] = data[name]
-    data_out.update(_update_data(update, form))
+    data_out.update(_update_data(update, form, data))
     return {"screen": next_screen, "data": data_out}
 
 

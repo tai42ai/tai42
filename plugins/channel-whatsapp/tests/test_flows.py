@@ -1536,6 +1536,72 @@ def test_range_pair_with_a_review_page_draws_two_date_controls():
     assert "To: ${data.end__val}" in texts
 
 
+def _timed_range_schema(*, times_first: bool = False) -> dict:
+    # A range with a time on each end, the times declared last in the schema (else first, END time first).
+    schema = _range_schema()
+    times = {
+        "start_time": {"type": "string", "format": "time", "title": "From time", "timeOf": "start"},
+        "end_time": {"type": "string", "format": "time", "title": "To time", "timeOf": "end"},
+    }
+    if times_first:
+        schema["properties"] = {
+            "end_time": times["end_time"],
+            "start_time": times["start_time"],
+            **schema["properties"],
+        }
+    else:
+        schema["properties"].update(times)
+    return schema
+
+
+def _input_names(flow_json: dict, index: int = 0) -> list[str]:
+    return [control["name"] for control in _controls(flow_json, index) if "name" in control]
+
+
+@pytest.mark.parametrize("times_first", [False, True])
+def test_a_merged_range_picker_is_followed_by_the_start_time_then_the_end_time(times_first: bool):
+    flow_json, _ = build_form_flow(_timed_range_schema(times_first=times_first))
+    assert _input_names(flow_json) == ["start", "start_time", "end_time"]
+    picker = _field_by_name(flow_json, "start")
+    assert (picker["type"], picker["mode"]) == ("CalendarPicker", "range")
+    assert _field_by_name(flow_json, "start_time")["type"] == "TextInput"
+    assert _field_by_name(flow_json, "end_time")["type"] == "TextInput"
+
+
+def test_a_merged_range_end_time_follows_the_start_time_when_a_field_sits_between_the_ends():
+    # ``note`` is declared between the two ends: the end's time still draws after the picker,
+    # right after the start's time, and ``note`` comes after both times.
+    schema = _range_schema()
+    schema["properties"] = {
+        "start": schema["properties"]["start"],
+        "note": {"type": "string", "title": "Note"},
+        "end": schema["properties"]["end"],
+        "start_time": {"type": "string", "format": "time", "title": "From time", "timeOf": "start"},
+        "end_time": {"type": "string", "format": "time", "title": "To time", "timeOf": "end"},
+    }
+    flow_json, _ = build_form_flow(schema)
+    assert _input_names(flow_json) == ["start", "start_time", "end_time", "note"]
+
+
+def test_a_timed_range_with_a_review_page_draws_and_reads_back_each_time_after_its_date():
+    pages = [
+        {"title": "Dates", "fields": ["start", "end", "start_time", "end_time"], "kind": "input"},
+        {"title": "Review", "fields": [], "kind": "review"},
+    ]
+    flow_json, _ = build_form_flow(_timed_range_schema(), pages)
+    # No pair merges on a form with a review page: two date pickers, each followed by its time.
+    assert _input_names(flow_json) == ["start", "start_time", "end", "end_time"]
+    assert _field_by_name(flow_json, "end")["type"] == "CalendarPicker"
+    texts = [child["text"] for child in _screen_children(flow_json, 1) if child["type"] == "TextBody"]
+    readback = [text for text in texts if "__val}" in text]
+    assert readback == [
+        "From: ${data.start__val}",
+        "From time: ${data.start_time__val}",
+        "To: ${data.end__val}",
+        "To time: ${data.end_time__val}",
+    ]
+
+
 def test_merged_range_build_flow_data_emits_the_object_init_and_no_end_init():
     schema = _range_schema()
     data = build_flow_data(schema, {"start": "2026-05-01", "end": "2026-05-04"}, {})
@@ -2386,3 +2452,119 @@ def test_field_changed_on_a_merged_range_end_attaches_the_reaction_to_the_range_
     assert picker["mode"] == "range"
     assert picker["on-select-action"]["name"] == "data_exchange"
     assert picker["on-select-action"]["payload"]["tai42_field"] == "end"
+
+
+# --- the boolean review readback and the ask-less form-line carriers ---------------------------
+
+_READBACK_SCHEMA = {
+    "type": "object",
+    "properties": {"agree": {"type": "boolean", "title": "Agree"}, "note": {"type": "string", "title": "Note"}},
+}
+_READBACK_PAGES = [
+    {"title": "Ask", "fields": ["agree", "note"], "kind": "input"},
+    {"title": "Review", "fields": [], "kind": "review"},
+]
+
+
+def _readback(flow_json: dict) -> list[dict]:
+    return [
+        child for child in _screen_children(flow_json, 1) if child["type"] == "If" or "__val}" in child.get("text", "")
+    ]
+
+
+def test_a_review_page_reads_a_boolean_back_through_an_if_with_the_default_words():
+    flow_json, _ = build_form_flow(_READBACK_SCHEMA, _READBACK_PAGES)
+    assert _readback(flow_json) == [
+        {
+            "type": "If",
+            "condition": "${data.agree__val}",
+            "then": [{"type": "TextBody", "text": "Agree: Yes"}],
+            "else": [{"type": "TextBody", "text": "Agree: No"}],
+        },
+        {"type": "TextBody", "text": "Note: ${data.note__val}"},
+    ]
+
+
+def test_the_callers_boolean_words_fill_the_readback_and_leave_every_other_line():
+    flow_json, _ = build_form_flow(_READBACK_SCHEMA, _READBACK_PAGES, boolean_words={"agree": ("Si", "No grazie")})
+    boolean, other = _readback(flow_json)
+    assert boolean["then"] == [{"type": "TextBody", "text": "Agree: Si"}]
+    assert boolean["else"] == [{"type": "TextBody", "text": "Agree: No grazie"}]
+    assert other == {"type": "TextBody", "text": "Note: ${data.note__val}"}
+
+
+def test_the_boolean_words_fold_into_the_flow_key():
+    _, default_key = build_form_flow(_READBACK_SCHEMA, _READBACK_PAGES)
+    _, worded_key = build_form_flow(_READBACK_SCHEMA, _READBACK_PAGES, boolean_words={"agree": ("Si", "No")})
+    _, same_key = build_form_flow(_READBACK_SCHEMA, _READBACK_PAGES, boolean_words={"agree": ("Si", "No")})
+    assert default_key != worded_key
+    assert worded_key == same_key
+
+
+def test_a_readback_line_over_the_text_body_cap_is_refused_at_build():
+    with pytest.raises(ChannelInputError, match=r"form property 'agree': review readback line is 4097 characters"):
+        build_form_flow(_READBACK_SCHEMA, _READBACK_PAGES, boolean_words={"agree": ("x" * 4090, "No")})
+    # At the cap it builds: "Agree: " is 7 characters.
+    build_form_flow(_READBACK_SCHEMA, _READBACK_PAGES, boolean_words={"agree": ("x" * 4089, "No")})
+
+
+_LINED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "email": {"type": "string", "format": "email", "title": "Email"},
+        "on": {"type": "string", "format": "date", "title": "On"},
+        "code": {"type": "string", "pattern": "^[A-Z]{3}$", "title": "Code"},
+    },
+    "required": ["email", "on"],
+}
+_LINED_PAGES = [
+    {"title": "One", "fields": ["email"], "kind": "input"},
+    {"title": "Two", "fields": ["on", "code"], "kind": "input"},
+]
+
+
+def test_an_ask_less_endpoint_form_declares_the_line_and_required_carriers_on_every_screen():
+    flow_json, _ = build_form_flow(_LINED_SCHEMA, _LINED_PAGES, carry_invalid=True)
+    assert flow_json.get("data_api_version")
+    for screen in flow_json["screens"]:
+        declared = screen["data"]
+        for key in ("tai42_error_line", "tai42_update_failed", "email__required", "on__required"):
+            assert declared[key]["type"] == "string", (screen["id"], key)
+        assert "code__required" not in declared
+
+
+def test_an_ask_endpoint_form_declares_no_line_or_required_carrier():
+    flow_json, _ = build_form_flow(_LINED_SCHEMA, _LINED_PAGES)
+    for screen in flow_json["screens"]:
+        assert not any(key.startswith("tai42_") or key.endswith("__required") for key in screen["data"])
+
+
+def test_build_flow_data_fills_the_line_and_required_carriers_of_an_ask_less_endpoint_form():
+    data = build_flow_data(
+        _LINED_SCHEMA,
+        None,
+        None,
+        _LINED_PAGES,
+        carry_invalid=True,
+        field_required={"email": "We need your email"},
+        form_lines={"error_line": "Please check the form"},
+    )
+    assert data["tai42_error_line"] == "Please check the form"
+    assert data["tai42_update_failed"] == ""
+    assert data["email__required"] == "We need your email"
+    assert data["on__required"] == ""
+    assert "code__required" not in data
+
+
+def test_build_flow_data_carries_no_line_or_required_carrier_without_carry_invalid():
+    data = build_flow_data(
+        _LINED_SCHEMA, None, None, _LINED_PAGES, field_required={"email": "x"}, form_lines={"error_line": "y"}
+    )
+    assert not any(key.startswith("tai42_") or key.endswith("__required") for key in data)
+
+
+@pytest.mark.parametrize("carrier", ["tai42_error_line", "tai42_update_failed", "email__required"])
+def test_an_endpoint_form_property_named_like_a_line_or_required_carrier_is_refused(carrier: str):
+    schema = {**_LINED_SCHEMA, "properties": {**_LINED_SCHEMA["properties"], carrier: {"type": "string"}}}
+    with pytest.raises(ChannelInputError, match=carrier):
+        build_form_flow(schema, _LINED_PAGES)

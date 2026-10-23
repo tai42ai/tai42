@@ -11,7 +11,8 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from tai42_contract.channels import Channel, ChannelDelivery, ChannelDeliveryError
+from tai42_contract.channels import Channel, ChannelDelivery, ChannelDeliveryError, SendOutcome
+from tai42_contract.conversations import AnswerPart
 from tai42_contract.interactions import (
     AnswerFormat,
     FormData,
@@ -22,6 +23,8 @@ from tai42_contract.interactions import (
 )
 
 from tai42_skeleton.channels.send_span import send_span
+from tai42_skeleton.conversations.models import AskSend
+from tai42_skeleton.conversations.sends import SendAttempts, recorded_send
 from tai42_skeleton.hooks import cache as hooks_cache
 from tai42_skeleton.interactions import helper
 from tai42_skeleton.interactions.settings import InteractionsSettings
@@ -102,12 +105,14 @@ def build_delivery_frame(
     on_mismatch: Any,
     callback_url: str,
     timeout_at: Any,
+    sensitive: bool,
 ) -> ChannelDelivery:
     """Build the frozen ``ChannelDelivery`` frame reused across delivery attempts.
 
     Carries the question + format + suggested options, a form's normalized schema/prefill/pages, the
     display media (absolute served refs), the per-send ``wording`` catalogue, the digression policy,
-    the callback URL and the stored deadline.
+    the callback URL, the stored deadline and whether the answer is ``sensitive`` (its body not to be
+    persisted).
     """
     payload = format_payload or {}
     is_form = fmt is AnswerFormat.FORM
@@ -152,6 +157,7 @@ def build_delivery_frame(
         on_mismatch=on_mismatch,
         callback_url=callback_url,
         timeout_at=timeout_at,
+        sensitive=sensitive,
     )
 
 
@@ -195,8 +201,82 @@ async def deliver_with_retry(
     delivery failure — an unbounded await would block the caller forever with the
     question persisted.
 
+    The whole ask is one ``ask`` send record of the conversation its participant is in,
+    written before the first attempt and ended once, by the attempt that succeeded or by the
+    attempt history (see :func:`~tai42_skeleton.conversations.sends.recorded_send`); an ask
+    outside any conversation goes out unrecorded. The pre-send address is the channel's
+    ``resolve_address``; a target it refuses is a terminal failure before any attempt.
+
     The retry policy is read from the interactions settings at each decision, never kept across
     an await.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        address = channel_obj.resolve_address(recipient, None)
+    except Exception as exc:
+        # The target is refused before anything is sent: the question is abandoned like any
+        # terminal delivery failure.
+        if await _prune_and_report_failure(
+            store,
+            exc,
+            interaction_id=interaction_id,
+            group=group,
+            question=question,
+            sensitive=sensitive,
+            channel=channel,
+            recipient=recipient,
+        ):
+            raise
+        return
+    attempts = SendAttempts()
+    ask = AskSend(interaction_id=interaction_id, answer_format=delivery_frame.answer_format, sensitive=sensitive)
+    part = AnswerPart(message=question, media=delivery_frame.media)
+
+    async def send() -> SendOutcome | None:
+        return await _attempt_loop(
+            channel_obj,
+            delivery_frame,
+            store,
+            window,
+            attempts,
+            channel=channel,
+            recipient=recipient,
+            interaction_id=interaction_id,
+            group=group,
+            question=question,
+            sensitive=sensitive,
+        )
+
+    await recorded_send(
+        channel=channel,
+        address=address,
+        parts=[part],
+        sent_by="ask",
+        send=send,
+        bound=max(window.deadline - loop.time(), 0.0),
+        ask=ask,
+        attempts=attempts,
+    )
+
+
+async def _attempt_loop(
+    channel_obj: Channel,
+    delivery_frame: ChannelDelivery,
+    store: InteractionStore,
+    window: DeadlineWindow,
+    attempts: SendAttempts,
+    *,
+    channel: str,
+    recipient: str | None,
+    interaction_id: str,
+    group: str,
+    question: str,
+    sensitive: bool,
+) -> SendOutcome | None:
+    """The retry loop of :func:`deliver_with_retry`, reporting each attempt to ``attempts``.
+
+    Returns the outcome of the attempt that succeeded, or ``None`` when the question was
+    answered or gone before one did.
     """
     loop = asyncio.get_running_loop()
     attempt = 0
@@ -222,18 +302,25 @@ async def deliver_with_retry(
             # Each attempt is bounded by what is left of the budget: a plugin that
             # consumes it is hung. Tier 1 of the send-outcome monitoring layer: one
             # ``send:<channel>`` span per delivery ATTEMPT (the retry loop makes
-            # distinct sends). ``deliver`` returns None on success — no correlatable
-            # provider id at this seam — so no tier-2 receipt index is written here.
+            # distinct sends); the attempt's ids ride its send record, so no tier-2
+            # receipt index is written here.
             attempt_timeout = window.deadline - loop.time()
             with send_span(channel, recipient=recipient, attempt=attempt, retry_decision=decide):
+                attempts.start()
                 try:
-                    await asyncio.wait_for(channel_obj.deliver(delivery_frame), timeout=attempt_timeout)
+                    outcome = await asyncio.wait_for(channel_obj.deliver(delivery_frame), timeout=attempt_timeout)
                 except TimeoutError as exc:
-                    raise ChannelDeliveryError(
+                    timed_out = ChannelDeliveryError(
                         f"channel {channel!r} delivery timed out after {attempt_timeout:.1f}s "
                         f"of the ask's {window.budget}s budget (interaction {interaction_id})",
                         retryable=True,
-                    ) from exc
+                    )
+                    attempts.failed(timed_out, timed_out=True)
+                    raise timed_out from exc
+                except Exception as exc:
+                    attempts.failed(exc, timed_out=False)
+                    raise
+                attempts.returned()
         except BaseException as exc:
             if decided is not exc:
                 # Raised outside the send span (the backoff sleep): decided here.
@@ -262,7 +349,8 @@ async def deliver_with_retry(
                 recipient=recipient,
             ):
                 raise
-        break
+            return None
+        return outcome
 
 
 async def _prune_and_report_failure(

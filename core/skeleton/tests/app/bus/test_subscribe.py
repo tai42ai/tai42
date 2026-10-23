@@ -18,6 +18,7 @@ import fakeredis
 import pytest
 from fakeredis import aioredis
 from redis.exceptions import ConnectionError as RedisConnectionError
+from tai42_kit.clients.impl.redis import KitAsyncRedis
 
 import tai42_skeleton.app.bus as bus_module
 from tai42_skeleton.app.bus import (
@@ -29,9 +30,11 @@ from tai42_skeleton.app.bus import (
     WorkerState,
     _PresenceValue,
 )
+from tai42_skeleton.app.bus.models import _OP_PAYLOAD_KEY
 from tai42_skeleton.app.bus.ops import ReloadConfig, ReloadMcp
 from tai42_skeleton.app.bus.subscribe import _HeartbeatThread
 
+from ..._fakes.kit_redis import KitFakeRedis
 from .conftest import _noop_op, _RecordingRedis, _spawn_subscriber, _stop, _until, make_bus
 
 _RELOAD = ReloadConfig(op="reload_config")
@@ -276,6 +279,77 @@ async def test_reconnect_after_transport_drop(wire_bus_client: None, server: fak
         await _stop(task)
 
 
+async def test_a_reconnect_the_retry_hides_is_followed_by_the_resync(
+    wire_bus_client: None,
+    server: fakeredis.FakeServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The subscriber's own connection drops and its next read reconnects and
+    # re-subscribes inside the call, so no error reaches the loop. An op published
+    # while it was disconnected is never delivered, so the resync runs again.
+    pubsubs: list[Any] = []
+    kit_pubsub = KitAsyncRedis.pubsub
+
+    def recording_pubsub(self: KitAsyncRedis, **kwargs: Any) -> Any:
+        pubsub = kit_pubsub(self, **kwargs)
+        pubsubs.append(pubsub)
+        return pubsub
+
+    monkeypatch.setattr(KitFakeRedis, "pubsub", recording_pubsub)
+    publisher = make_bus(ack_timeout=_REPLY_WINDOW, apply_timeout=_REPLY_WINDOW)
+    worker = make_bus(heartbeat_ttl=5.0)
+    readies: list[str] = []
+    applied: list[dict] = []
+    gap_op = {"op": "reload_mcp"}
+
+    async def apply(op: dict, *, deadline: float) -> None:
+        applied.append(op)
+        if op == _RELOAD_WIRE:
+            # Drop only the subscriber's connection (the first pub/sub built; the
+            # publisher's reply pub/sub comes after it), then publish while it is down.
+            await pubsubs[0].connection.disconnect()
+            raw = KitFakeRedis(server=server, decode_responses=True)
+            frame = {
+                "name": "serve-gap",
+                "generation": 1,
+                "op_id": "gap",
+                "reply_to": "tai:gap-reply",
+                "targets": None,
+                _OP_PAYLOAD_KEY: gap_op,
+            }
+            await raw.publish(worker._settings.channel, json.dumps(frame))
+            await raw.aclose()
+
+    async def on_ready() -> None:
+        readies.append(worker.identity.name)
+
+    caplog.set_level(logging.WARNING, logger="tai42_skeleton.app.bus.subscribe")
+    task = asyncio.create_task(worker.subscribe(apply, on_ready))
+    try:
+        await asyncio.wait_for(_until(lambda: len(readies) == 1), timeout=2.0)
+        name = worker.identity.name
+        local = LocalApplyResult(outcome=OpOutcome.applied)
+        result = await publisher.publish(_RELOAD, targets=None, local=local)
+        assert {r.name: r for r in result.results}[name].outcome == OpOutcome.applied
+
+        await asyncio.wait_for(_until(lambda: len(readies) == 2), timeout=3.0)
+
+        async def _ready() -> bool:
+            rows = {r.name: r for r in await publisher.census()}
+            return name in rows and rows[name].state == WorkerState.ready
+
+        async with asyncio.timeout(2.0):
+            while not await _ready():
+                await asyncio.sleep(0.01)
+        assert readies == [name, name]
+        assert gap_op not in applied
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert [r for r in caplog.records if "resync" in r.getMessage() and r.levelno == logging.WARNING]
+    finally:
+        await _stop(task)
+
+
 async def test_reconnect_after_wrapped_disconnect(wire_pooled_bus_client: None, server: fakeredis.FakeServer) -> None:
     # The subscription's transport error arrives WRAPPED too: the pooled ``client_ctx``
     # folds the severed poll into ``ClientDisconnectedError``. The reconnect loop must
@@ -417,9 +491,9 @@ async def test_heartbeat_beats_off_the_subscription_loop(
     opened: list[tuple[str, bool]] = []
 
     @asynccontextmanager
-    async def spy(client_cls, settings=None, *, fresh: bool = False, **kw) -> AsyncIterator[aioredis.FakeRedis]:
+    async def spy(client_cls, settings=None, *, fresh: bool = False, **kw) -> AsyncIterator[KitFakeRedis]:
         opened.append((threading.current_thread().name, fresh))
-        client = aioredis.FakeRedis(server=server, decode_responses=True)
+        client = KitFakeRedis(server=server, decode_responses=True)
         try:
             yield client
         finally:
@@ -995,9 +1069,9 @@ async def test_subscription_uses_a_fresh_epoch_immune_connection(
     fresh_flags: list[bool] = []
 
     @asynccontextmanager
-    async def spy(client_cls, settings=None, *, fresh: bool = False, **kw) -> AsyncIterator[aioredis.FakeRedis]:
+    async def spy(client_cls, settings=None, *, fresh: bool = False, **kw) -> AsyncIterator[KitFakeRedis]:
         fresh_flags.append(fresh)
-        client = aioredis.FakeRedis(server=server, decode_responses=True)
+        client = KitFakeRedis(server=server, decode_responses=True)
         try:
             yield client
         finally:

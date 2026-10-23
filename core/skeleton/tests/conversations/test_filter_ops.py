@@ -17,6 +17,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, ForbiddenError, NotFoundError
 
+from .conftest import create_record
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 from .test_read_doors import _ROUTE, _as_api_route, _as_caller, _Caller, _DictManager
 
@@ -61,11 +62,11 @@ def _record(
 
 async def test_thread_listing_filters_by_status(store, monkeypatch):
     now = time.time()
-    await store.create_record(
-        _record("d0", thread_id="bridge:chat:+1000", status=DeliveryStatus.DELIVERED, created_at=now)
+    await create_record(
+        store, _record("d0", thread_id="bridge:chat:+1000", status=DeliveryStatus.DELIVERED, created_at=now)
     )
-    await store.create_record(
-        _record("f0", thread_id="bridge:chat:+2000", status=DeliveryStatus.FAILED, created_at=now + 1)
+    await create_record(
+        store, _record("f0", thread_id="bridge:chat:+2000", status=DeliveryStatus.FAILED, created_at=now + 1)
     )
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 
@@ -83,11 +84,11 @@ async def test_thread_listing_rejects_an_unknown_status(store, monkeypatch):
 
 async def test_thread_listing_filters_by_address(store, monkeypatch):
     now = time.time()
-    await store.create_record(
-        _record("a0", thread_id="bridge:chat:+15550002222", status=DeliveryStatus.DELIVERED, created_at=now)
+    await create_record(
+        store, _record("a0", thread_id="bridge:chat:+15550002222", status=DeliveryStatus.DELIVERED, created_at=now)
     )
-    await store.create_record(
-        _record("a1", thread_id="bridge:chat:+15559990000", status=DeliveryStatus.DELIVERED, created_at=now + 1)
+    await create_record(
+        store, _record("a1", thread_id="bridge:chat:+15559990000", status=DeliveryStatus.DELIVERED, created_at=now + 1)
     )
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 
@@ -100,13 +101,14 @@ async def test_the_thread_envelope_carries_the_truncated_field(store, monkeypatc
     monkeypatch.setattr(records_module, "_FILTER_THREAD_SCAN", 1)
     now = time.time()
     for index in range(3):
-        await store.create_record(
+        await create_record(
+            store,
             _record(
                 f"m{index}",
                 thread_id=f"bridge:chat:+100{index}",
                 status=DeliveryStatus.DELIVERED,
                 created_at=now + index,
-            )
+            ),
         )
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 
@@ -117,8 +119,8 @@ async def test_the_thread_envelope_carries_the_truncated_field(store, monkeypatc
 
 async def test_an_unfiltered_thread_listing_is_never_truncated(store, monkeypatch):
     now = time.time()
-    await store.create_record(
-        _record("d0", thread_id="bridge:chat:+1000", status=DeliveryStatus.DELIVERED, created_at=now)
+    await create_record(
+        store, _record("d0", thread_id="bridge:chat:+1000", status=DeliveryStatus.DELIVERED, created_at=now)
     )
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 
@@ -134,11 +136,13 @@ async def test_an_unfiltered_thread_listing_is_never_truncated(store, monkeypatc
 
 async def _seed_thread(store) -> None:
     now = time.time()
-    await store.create_record(
-        _record("t0", thread_id=_THREAD, status=DeliveryStatus.DELIVERED, created_at=now, inbound_text="a widget")
+    await create_record(
+        store,
+        _record("t0", thread_id=_THREAD, status=DeliveryStatus.DELIVERED, created_at=now, inbound_text="a widget"),
     )
-    await store.create_record(
-        _record("t1", thread_id=_THREAD, status=DeliveryStatus.DELIVERED, created_at=now + 1, inbound_text="hello")
+    await create_record(
+        store,
+        _record("t1", thread_id=_THREAD, status=DeliveryStatus.DELIVERED, created_at=now + 1, inbound_text="hello"),
     )
 
 
@@ -184,16 +188,18 @@ async def test_message_search_is_admin_only(store, monkeypatch):
 
 async def test_message_search_returns_whole_records_across_threads(store, monkeypatch):
     now = time.time()
-    await store.create_record(
+    await create_record(
+        store,
         _record(
             "a0",
             thread_id="bridge:chat:+1000",
             status=DeliveryStatus.DELIVERED,
             created_at=now,
             inbound_text="widget a",
-        )
+        ),
     )
-    await store.create_record(
+    await create_record(
+        store,
         _record(
             "b0",
             thread_id="bridge:chat:+2000",
@@ -201,7 +207,7 @@ async def test_message_search_returns_whole_records_across_threads(store, monkey
             created_at=now + 1,
             answer="widget b",
             error="boom",
-        )
+        ),
     )
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 

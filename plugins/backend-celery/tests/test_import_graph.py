@@ -57,6 +57,8 @@ ALLOWED_THIRD_PARTY = frozenset(
         "jwt",
         "kombu",
         "makefun",
+        # kombu's Redis transport, which the plugin's Redis seam subclasses, imports it eagerly.
+        "packaging",
         "pydantic",
         "pydantic_core",
         "pydantic_settings",

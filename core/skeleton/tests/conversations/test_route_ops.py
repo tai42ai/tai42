@@ -8,7 +8,12 @@ import time
 from typing import Any, cast
 
 import pytest
-from tai42_contract.conversations import ApiConversationRoute, ApiConversationRouteCreate, ConversationRouteCreate
+from tai42_contract.conversations import (
+    ApiConversationRoute,
+    ApiConversationRouteCreate,
+    ConversationRouteCreate,
+    ReplyTexts,
+)
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
@@ -17,7 +22,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, NotFoundError, ValidationRejectedError
 
-from .conftest import DOOR_RULE_REFUSALS, _assert_park_cancelled, _seed_park
+from .conftest import DOOR_RULE_REFUSALS, _assert_park_cancelled, _seed_park, create_record
 
 
 class _FakeRouteRequest:
@@ -36,7 +41,8 @@ class _FakeRouteRequest:
 async def _seed_thread_on(route_name: str, *, door: str, thread_id: str) -> None:
     """One delivered record on ``route_name``, so the route's thread index holds a thread."""
     now = time.time()
-    await ConversationRecordStore(ConversationsSettings()).create_record(
+    await create_record(
+        ConversationRecordStore(ConversationsSettings()),
         ConversationRecord(
             message_id=f"m-{thread_id}",
             route_name=route_name,
@@ -54,7 +60,7 @@ async def _seed_thread_on(route_name: str, *, door: str, thread_id: str) -> None
             delivery_status=DeliveryStatus.DELIVERED,
             created_at=now,
             updated_at=now,
-        )
+        ),
     )
 
 
@@ -125,10 +131,10 @@ async def test_route_create_seam_binds_extractor_to_the_operation(wired):
     assert stored.turns_per_hour_override == 6000
 
 
-async def test_route_create_seam_persists_error_reply_text(wired):
-    """The same extractor -> operation -> store seam carries ``error_reply_text``: a body that
-    sets it lands the custom participant-facing reply on the stored row, and a body that omits it
-    stores ``None`` (the built-in default applies at turn time)."""
+async def test_route_create_seam_persists_reply_texts(wired):
+    """The same extractor -> operation -> store seam carries ``reply_texts``: a body that sets
+    the catalogue lands it on the stored row, and a body that omits it stores ``None`` (the
+    built-in replies apply at turn time)."""
     from tai42_contract.app import tai42_app
 
     from tai42_skeleton.app import instance
@@ -146,24 +152,57 @@ async def test_route_create_seam_persists_error_reply_text(wired):
         "callback_url": "https://example.com/cb",
     }
 
-    # Default path: body omits the reply; the stored row carries ``None``.
+    # Default path: body omits the catalogue; the stored row carries ``None``.
     kwargs = await _extract_route_create(cast(Any, _FakeRouteRequest(dict(base), "chat")))
     result = await op.func(**kwargs)
     assert isinstance(result, dict)
     assert result["created"] is True
-    assert wired.rows["chat"].error_reply_text is None
+    assert wired.rows["chat"].reply_texts is None
 
-    # Custom path: a non-blank reply rides the body through the seam and persists verbatim.
-    text = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
-    kwargs_custom = await _extract_route_create(
-        cast(Any, _FakeRouteRequest({**base, "error_reply_text": text}, "spanish"))
-    )
+    # Custom path: the catalogue rides the body through the seam and persists verbatim.
+    texts = {"error": "Lo sentimos, algo salió mal.", "pairing_code": "Tu código: {pairing_code}"}
+    kwargs_custom = await _extract_route_create(cast(Any, _FakeRouteRequest({**base, "reply_texts": texts}, "spanish")))
     result_custom = await op.func(**kwargs_custom)
     assert isinstance(result_custom, dict)
     assert result_custom["created"] is True
     stored = await wired.get_route("spanish")
     assert stored is not None
-    assert stored.error_reply_text == text
+    assert stored.reply_texts == ReplyTexts.model_validate(texts)
+
+
+async def test_route_create_seam_refuses_a_malformed_reply_catalogue(wired):
+    from tai42_contract.app import tai42_app
+
+    from tai42_skeleton.app import instance
+
+    with tai42_app.bound(instance.build_app()):
+        from tai42_skeleton.routers.conversations import _extract_route_create
+
+    base = {
+        "door": "api",
+        "target_kind": "agent",
+        "target_name": "relay",
+        "execution_key": "svc",
+        "callback_url": "https://example.com/cb",
+    }
+    with pytest.raises(BadRequestError, match="reply_texts"):
+        await _extract_route_create(cast(Any, _FakeRouteRequest({**base, "reply_texts": {"error": "  "}}, "chat")))
+    assert wired.rows == {}
+
+
+async def test_the_operation_stores_and_refuses_reply_texts_on_a_direct_call(wired):
+    # The MCP tool and a direct call bypass the HTTP extractor; the operation validates the same catalogue.
+    fields: dict[str, Any] = {"target_kind": "agent", "target_name": "relay", "execution_key": "svc", "door": "api"}
+    await ops.create_conversation_route(
+        route_name="chat", reply_texts=cast(Any, {"slow_down": "Más despacio."}), **fields
+    )
+    assert wired.rows["chat"].reply_texts == ReplyTexts(slow_down="Más despacio.")
+    with pytest.raises(BadRequestError, match="invalid conversation route") as caught:
+        await ops.create_conversation_route(
+            route_name="other", reply_texts=cast(Any, {"pairing_code": "no code"}), **fields
+        )
+    assert "reply_texts" in str(caught.value)
+    assert "other" not in wired.rows
 
 
 async def test_route_create_seam_persists_locale(wired):
@@ -691,7 +730,8 @@ async def test_delete_reclaims_the_routes_thread_indexes(wired, record_redis):
     settings = ConversationsSettings()
     now = time.time()
     for index in range(2):
-        await ConversationRecordStore(settings).create_record(
+        await create_record(
+            ConversationRecordStore(settings),
             ConversationRecord(
                 message_id=f"m{index}",
                 route_name="chat",
@@ -707,7 +747,7 @@ async def test_delete_reclaims_the_routes_thread_indexes(wired, record_redis):
                 delivery_status=DeliveryStatus.DELIVERED,
                 created_at=now,
                 updated_at=now,
-            )
+            ),
         )
     assert settings.route_threads_key("chat") in record_redis._zsets
 

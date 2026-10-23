@@ -20,7 +20,7 @@ from typing import cast
 import pytest
 from redis.asyncio import Redis
 from tai42_contract.access_control import reset_request_user_id, set_request_user_id
-from tai42_contract.interactions import AnswerFormat, InteractionRequest, SuspendedInteraction
+from tai42_contract.interactions import AnswerFormat, InteractionRequest, InteractionResponse, SuspendedInteraction
 
 from tai42_skeleton.interactions import InteractionStore
 from tai42_skeleton.interactions import continuation as continuation_module
@@ -293,7 +293,7 @@ async def test_run_continuation_runs_tool_under_stored_identity(wired, monkeypat
     await drain()
     assert len(seen) == 1
     assert seen[0]["tool"] == "resume_tool"
-    assert seen[0]["arguments"] == {"interaction_id": "rc1", "answer": "go"}
+    assert seen[0]["arguments"] == {"interaction_id": "rc1", "answer": "go", "reply_to": None, "params": None}
     assert seen[0]["user_id"] == "svc-key"  # the STORED identity, never "answerer-x"
 
 
@@ -384,6 +384,8 @@ async def test_dispatch_continuation_retains_task_until_done(wired, monkeypatch)
         caller_ask_landing=None,
         chain_keys=(),
         *,
+        reply_to_medium_message_id,
+        params,
         mark_detached=True,
     ):
         started.set()
@@ -392,7 +394,12 @@ async def test_dispatch_continuation_retains_task_until_done(wired, monkeypatch)
 
     monkeypatch.setattr(continuation_module, "_run_continuation", _slow)
 
-    continuation_module.dispatch_continuation(wired.store, async_req(wired.store, iid="gc1"), "fp-1", "answer")
+    continuation_module.dispatch_continuation(
+        wired.store,
+        async_req(wired.store, iid="gc1"),
+        "fp-1",
+        InteractionResponse(interaction_id="gc1", answer="answer", answered_by="u-1", answered_at=datetime.now(UTC)),
+    )
     await started.wait()
     assert any(t.get_name() == "interaction-continuation-gc1" for t in continuation_module._CONTINUATION_TASKS)
     release.set()
@@ -505,6 +512,8 @@ async def test_due_record_is_flow_blind_and_cleared_on_return(wired, monkeypatch
         caller_ask_landing=None,
         chain_keys=(),
         *,
+        reply_to_medium_message_id,
+        params,
         mark_detached=True,
     ):
         await release.wait()
@@ -615,7 +624,9 @@ async def test_continuation_resume_runs_detached(monkeypatch):
 
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=_Tools()))
 
-    await continuation_module._run_continuation("id-1", None, "resume_tool", "iid-1", {"a": 1})
+    await continuation_module._run_continuation(
+        "id-1", None, "resume_tool", "iid-1", {"a": 1}, reply_to_medium_message_id=None, params=None
+    )
 
     assert seen["detached"] is True
     # The flag is unwound once the resume ends — never leaked past it.

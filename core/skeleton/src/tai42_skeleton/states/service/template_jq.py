@@ -229,6 +229,7 @@ class _TemplateJqMixin(_StatesServiceBase):
         input_: Any,
         *,
         conn: AsyncConnection[Any] | None = None,
+        admit_erasing: bool = False,
     ) -> list[dict[str, Any]]:
         """Resolve an ``update``-purpose ``template_jq`` program ``name`` to the op batch it authors for ``subject``.
 
@@ -241,9 +242,10 @@ class _TemplateJqMixin(_StatesServiceBase):
         object carrying exactly those keys (a value may be null) — a missing or undeclared key is a
         loud :class:`ValueValidationError`; a program that declares none accepts any ``input``. An
         ``input``-purpose name, or a jq that does not return an op batch, is a
-        :class:`ValueValidationError`.
+        :class:`ValueValidationError`. ``admit_erasing`` is the outbox replay's: a person under its
+        erase mark is admitted.
         """
-        version, _kinds, _default = await self._admit_subject(state, subject)
+        version, _kinds, _default = await self._admit_subject(state, subject, admit_erasing=admit_erasing)
         template, template_version, path, parameters, declarations, program_name = await self._resolve_template_jq(
             state, version, name, purpose="update"
         )
@@ -339,14 +341,16 @@ class _TemplateJqMixin(_StatesServiceBase):
         origin: CompletedOrigin,
         conn: AsyncConnection[Any] | None = None,
         validate: bool = True,
+        admit_erasing: bool = False,
     ) -> TemplateJqApplyResult:
         """The program's ops applied under an already-completed origin.
 
-        ``validate=False`` leaves the whole-document check to the caller.
+        ``validate=False`` leaves the whole-document check to the caller; ``admit_erasing`` (the outbox
+        replay's) admits a person under its erase mark at both of the write's admissions.
         """
-        ops = await self._resolve_template_jq_ops(state, subject, name, input_, conn=conn)
+        ops = await self._resolve_template_jq_ops(state, subject, name, input_, conn=conn, admit_erasing=admit_erasing)
         applied = await self._apply_completed(
-            state, subject, ops, op_id=op_id, origin=origin, conn=conn, validate=validate
+            state, subject, ops, op_id=op_id, origin=origin, conn=conn, validate=validate, admit_erasing=admit_erasing
         )
         return TemplateJqApplyResult(
             name=name, applied=applied.applied, data=applied.data, seq=applied.seq, skipped=applied.skipped

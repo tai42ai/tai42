@@ -12,7 +12,9 @@ from tai42_kit.interactions import (
     FORM_WEEKDAYS,
     FORMAT_PATTERNS,
     RADIO_OPTION_THRESHOLD,
+    TIME_OF_KEY,
     VISIBLE_WHEN_OPS,
+    drawing_order,
     drawn_number_bounds,
     evaluate_visible_when,
     hidden_fields,
@@ -124,3 +126,75 @@ def test_drawn_number_bounds_round_an_integers_bounds_inward(prop, bounds):
     assert drawn == bounds
     if prop["type"] == "integer":
         assert all(bound is None or type(bound) is int for bound in drawn)
+
+
+def test_the_date_key_names_are_the_contract_objects():
+    from tai42_contract.interactions.models import form_dates
+
+    assert DATE_CONSTRAINT_KEYS is form_dates.DATE_CONSTRAINT_KEYS
+    assert FORM_WEEKDAYS is form_dates.FORM_WEEKDAYS
+    assert TIME_OF_KEY is form_dates.TIME_OF_KEY
+    assert TIME_OF_KEY == "timeOf"
+
+
+_DATE = {"type": "string", "format": "date"}
+_TIME = {"type": "string", "format": "time"}
+_TIMED = {
+    "start": _DATE,
+    "end": {**_DATE, "rangeStart": "start"},
+    "start_time": {**_TIME, "timeOf": "start"},
+    "end_time": {**_TIME, "timeOf": "end"},
+}
+
+
+def test_drawing_order_puts_each_time_right_after_its_date():
+    assert drawing_order(["start", "end", "start_time", "end_time"], _TIMED) == [
+        "start",
+        "start_time",
+        "end",
+        "end_time",
+    ]
+
+
+def test_drawing_order_moves_a_time_declared_before_its_date():
+    assert drawing_order(["end_time", "start", "end"], _TIMED) == ["start", "end", "end_time"]
+
+
+def test_drawing_order_keeps_a_form_without_time_of_unchanged():
+    properties = {"b": _DATE, "a": {"type": "string"}, "t": _TIME}
+    assert drawing_order(["b", "a", "t"], properties) == ["b", "a", "t"]
+
+
+def test_drawing_order_keeps_a_time_whose_date_is_not_listed_in_place():
+    assert drawing_order(["note", "end_time", "start"], {**_TIMED, "note": {"type": "string"}}) == [
+        "note",
+        "end_time",
+        "start",
+    ]
+
+
+def test_drawing_order_is_idempotent():
+    once = drawing_order(["end_time", "end", "start_time", "start"], _TIMED)
+    assert once == ["end", "end_time", "start", "start_time"]
+    assert drawing_order(once, _TIMED) == once
+
+
+_CHAIN = {"d": _DATE, "t1": {**_TIME, "timeOf": "d"}, "t2": {**_TIME, "timeOf": "t1"}}
+_CYCLE = {"a": {**_TIME, "timeOf": "b"}, "b": {**_TIME, "timeOf": "a"}, "c": {"type": "string"}}
+
+
+def test_drawing_order_keeps_a_time_pointing_at_a_moving_name_in_place():
+    # t2 names t1, which itself moves after d: t2 keeps its place, and no name is lost.
+    assert drawing_order(["d", "t1", "t2"], _CHAIN) == ["d", "t1", "t2"]
+    assert drawing_order(["t2", "t1", "d"], _CHAIN) == ["t2", "d", "t1"]
+
+
+def test_drawing_order_keeps_a_time_of_cycle_in_place():
+    assert drawing_order(["a", "b", "c"], _CYCLE) == ["a", "b", "c"]
+    assert drawing_order(["c", "b", "a"], _CYCLE) == ["c", "b", "a"]
+
+
+def test_drawing_order_of_a_chain_or_cycle_is_idempotent():
+    for names, properties in ((["t2", "t1", "d"], _CHAIN), (["c", "b", "a"], _CYCLE)):
+        once = drawing_order(names, properties)
+        assert drawing_order(once, properties) == once

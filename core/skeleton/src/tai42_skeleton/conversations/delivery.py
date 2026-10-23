@@ -16,17 +16,24 @@ import hashlib
 import hmac
 import logging
 import time
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import DeliveryReceipt
 
 from tai42_skeleton.app.root_task import spawn_root_task
+from tai42_skeleton.channels.send_receipts import record_send_receipt
 from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.delivery_api import _deliver_api, _post_callback
-from tai42_skeleton.conversations.delivery_channel import _deliver_channel
-from tai42_skeleton.conversations.models import DeliveryStatus
+from tai42_skeleton.conversations.delivery_channel import _deliver_channel, _sent_messages
+from tai42_skeleton.conversations.ledger import LedgerInconsistentError
+from tai42_skeleton.conversations.models import DeliveryStatus, SentMessage
+from tai42_skeleton.conversations.record_send import send_placement_warning
 from tai42_skeleton.conversations.settings import ConversationsSettings
+
+if TYPE_CHECKING:
+    from tai42_skeleton.conversations.records import ConversationRecordStore
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +126,15 @@ async def deliver(message_id: str) -> None:
             record.attempts,
         )
     if record.attempts >= store.settings.delivery_max_attempts:
-        # Attempts spent without a terminal state: fail it so the sweep stops re-driving it.
-        outcome = await store.mark_failed(record.message_id, record.attempts, time.time(), token)
+        # Attempts spent without a terminal state: fail it so the sweep stops re-driving it, keeping
+        # the parts a channel send already got accepted.
+        outcome = await store.mark_failed(
+            record.message_id,
+            record.attempts,
+            time.time(),
+            token,
+            sends=await _ledgered_sends(record.message_id, record.door),
+        )
         logger.error(
             "conversations: record %s exhausted %d delivery attempt(s) without a terminal outcome "
             "(failed write returned %d)",
@@ -135,6 +149,25 @@ async def deliver(message_id: str) -> None:
         await _deliver_api(store, record, token)
 
 
+async def _ledgered_sends(message_id: str, door: str) -> list[SentMessage]:
+    """The parts a channel record's ledger holds as accepted; none for an api record.
+
+    A ledger that cannot describe its chunks is logged at ERROR and keeps no part: the record is
+    being failed either way.
+    """
+    if door != "channel":
+        return []
+    try:
+        return _sent_messages(await get_conversations_manager().send_ledger.sent_chunks(message_id))
+    except LedgerInconsistentError:
+        logger.error(
+            "conversations: the send ledger of record %s is inconsistent; the record is failed without its sent parts",
+            message_id,
+            exc_info=True,
+        )
+        return []
+
+
 async def _confirm_after_grace(message_id: str, grace_seconds: float) -> None:
     """Confirm a still-``provisional`` record ``delivered`` once its grace window elapses.
 
@@ -147,7 +180,9 @@ async def _confirm_after_grace(message_id: str, grace_seconds: float) -> None:
 # -- out-of-band receipt sink ------------------------------------------------
 
 
-async def record_delivery_status(channel: str, provider_message_id: str, status: DeliveryReceipt) -> None:
+async def record_delivery_status(
+    channel: str, provider_message_id: str, status: DeliveryReceipt, *, errors: Any = None
+) -> None:
     """Ingest a channel's out-of-band receipt for an outbound message.
 
     Resolves ``provider_message_id`` through the outbound reverse index and applies the
@@ -155,6 +190,9 @@ async def record_delivery_status(channel: str, provider_message_id: str, status:
     PARKED and applied when the send completes, so the door acks. Raises when the id maps to no
     record (unknown or already swept), and when it resolves to a record in a state that never
     sent an answer — a programmer error, since such a record carries no outbound id to resolve.
+
+    A receipt for a ``notify_user`` send record also reaches that send's trace, as the
+    ``delivery_receipt`` event carrying ``errors`` (the provider's error detail).
     """
     store = get_conversations_manager().records
     message_id = await store.resolve_outbound(channel, provider_message_id)
@@ -168,6 +206,9 @@ async def record_delivery_status(channel: str, provider_message_id: str, status:
         raise LookupError(
             f"conversations: outbound id {provider_message_id!r} resolved to record {message_id} which no longer exists"
         )
+    record = await store.get_record(message_id)
+    if record is not None and record.sent_by == "notify":
+        await record_send_receipt(channel, provider_message_id, status, errors=errors)
     if outcome == -3:
         raise RuntimeError(
             f"conversations: delivery receipt {status.value} for outbound id {provider_message_id!r} resolved to "
@@ -217,8 +258,10 @@ async def redrive_pending() -> None:
     ``provisional`` one past its grace, and reschedule the fallback confirmation for
     one still inside it. Only boot can rebuild the in-process grace timers lost with
     the previous process, so the rescheduling lives here and not in the periodic sweep.
+    A send record left ``sending`` past its settle deadline is settled, never re-sent.
     """
     store = get_conversations_manager().records
+    await _settle_stranded_sends(store)
     now = time.time()
     for work in await store.pending_work(due_only=False):
         if work.delivery_status is DeliveryStatus.PENDING_DELIVERY:
@@ -238,9 +281,11 @@ async def sweep_stalled_deliveries() -> None:
     The exactly-once claim is itself the lease-expiry test, so a re-driven
     ``pending_delivery`` record is only ever a genuinely abandoned one. A ``provisional``
     record past its grace is confirmed here because the in-process fallback confirmation
-    died with the worker that scheduled it.
+    died with the worker that scheduled it. A send record left ``sending`` past its settle
+    deadline is settled, never re-sent.
     """
     store = get_conversations_manager().records
+    await _settle_stranded_sends(store)
     now = time.time()
     for work in await store.pending_work(due_only=True):
         if work.delivery_status is DeliveryStatus.PENDING_DELIVERY:
@@ -251,6 +296,31 @@ async def sweep_stalled_deliveries() -> None:
             and now >= work.grace_deadline
         ):
             await store.ingest_receipt(work.message_id, DeliveryReceipt.DELIVERED, now)
+
+
+async def _settle_stranded_sends(store: ConversationRecordStore) -> None:
+    """End every send record a stopped process left ``sending`` past its settle deadline as ``outcome_unknown``.
+
+    Each is logged at WARNING; a record its placement step removed or found gone is logged with
+    that step's WARNING instead.
+    """
+    for settled in await store.settle_due_sends():
+        record, placement = settled.record, settled.placement
+        if placement.code == -2:
+            continue
+        warning = send_placement_warning(record, placement)
+        if placement.code == -1 and warning is not None:
+            logger.warning("conversations: %s", warning)
+            continue
+        logger.warning(
+            "conversations: send record %s on %s to %s was sent, outcome unknown: the process stopped before the "
+            "medium answered; not re-sent",
+            record.message_id,
+            record.channel,
+            record.client_address,
+        )
+        if warning is not None:
+            logger.warning("conversations: %s", warning)
 
 
 # -- task spawning -----------------------------------------------------------

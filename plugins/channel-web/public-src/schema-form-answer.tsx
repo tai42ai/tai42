@@ -17,8 +17,9 @@ import type { ReactElement, RefObject } from 'react';
 import { DisplayBlocks, ReviewReadback } from '@/form-display';
 import { isPlainObject, singleFieldSchema, toSdkFieldWording } from '@/schema-form-helpers';
 import type { FieldWording, FormOptionData, FormPage } from '@/transcript-model';
-import type { ReactingFormInput } from '@/use-reacting-form';
+import type { ReactingFormInput, ReactionError } from '@/use-reacting-form';
 import { useReactingForm } from '@/use-reacting-form';
+import { fillToken } from '@/words';
 
 /** A LOUD inline notice for a structurally-malformed schema: a visible `alert`
  * rather than an empty or silently-dropped control. */
@@ -221,6 +222,21 @@ function FormNav({
 /** The rendered form surface for the current step: the step marker, a loud reaction-error
  * banner, the page's display blocks, its body (input fields or a review readback), and the
  * Back / Next / Submit navigation. The stateful `useReactingForm` owns the value/handlers. */
+/** A stepped form's progress words: the caller's line with `{step}` and `{steps}` filled,
+ * else the widget's own. */
+function stepProgress(line: string | null, step: number, steps: number): string {
+  if (line === null) return `Step ${step} of ${steps}`;
+  return fillToken(fillToken(line, 'step', String(step)), 'steps', String(steps));
+}
+
+/** The line drawn when a mid-form reaction fails: the caller's line with the react
+ * door's own reason filled into `{reason}` (nothing when the door gave none, never the
+ * widget's English), else the widget's own line with the failure's message. */
+function updateFailed(line: string | null, error: ReactionError): string {
+  if (line === null) return `The form could not update: ${error.message}`;
+  return fillToken(line, 'reason', error.reason ?? '').trim();
+}
+
 function FormSurface({
   schema,
   page,
@@ -241,6 +257,8 @@ function FormSurface({
   backLabel,
   fieldWording,
   fieldPlaceholder,
+  updateFailedLine,
+  stepProgressLine,
   pageRef,
   headingRef,
   onChange,
@@ -259,7 +277,7 @@ function FormSurface({
   readonly errors: SchemaFormErrors;
   readonly slots: Readonly<Record<string, unknown>>;
   readonly idPrefix: string;
-  readonly reactionError: string | null;
+  readonly reactionError: ReactionError | null;
   readonly busy: boolean;
   readonly submitLabel: string;
   readonly steppedSubmitLabel: string;
@@ -267,6 +285,8 @@ function FormSurface({
   readonly backLabel: string;
   readonly fieldWording: Readonly<Record<string, FieldWording>>;
   readonly fieldPlaceholder: string;
+  readonly updateFailedLine: string | null;
+  readonly stepProgressLine: string | null;
   readonly pageRef: RefObject<HTMLDivElement | null>;
   readonly headingRef: RefObject<HTMLParagraphElement | null>;
   readonly onChange: (value: unknown) => void;
@@ -279,18 +299,18 @@ function FormSurface({
     <div className="tcw-question-actions tcw-question-form">
       {stepped ? (
         <p className="tcw-form-progress" role="status" ref={headingRef} tabIndex={-1}>
-          {`Step ${pageIndex + 1} of ${pageCount} · ${page.title}`}
+          {`${stepProgress(stepProgressLine, pageIndex + 1, pageCount)} · ${page.title}`}
         </p>
       ) : null}
       {reactionError !== null ? (
         <p className="tcw-form-reaction-error" role="alert" data-testid="form-reaction-error">
-          {`The form could not update: ${reactionError}`}
+          {updateFailed(updateFailedLine, reactionError)}
         </p>
       ) : null}
       <div className="tcw-form-page" ref={pageRef}>
         <DisplayBlocks blocks={page.display} slots={slots} />
         {page.kind === 'review' ? (
-          <ReviewReadback schema={schema} value={objectValue} />
+          <ReviewReadback schema={schema} value={objectValue} fieldWording={fieldWording} />
         ) : (
           page.fields.map((field) => (
             <FormField
@@ -339,6 +359,10 @@ export function SchemaFormAnswer(
     readonly backLabel: string;
     /** The placeholder of a per-send option field when the caller set none. */
     readonly fieldPlaceholder: string;
+    /** The caller's could-not-update line (`{reason}`), or `null` for the widget's own. */
+    readonly updateFailedLine: string | null;
+    /** The caller's step-progress line (`{step}`, `{steps}`), or `null` for the widget's own. */
+    readonly stepProgressLine: string | null;
   },
 ): ReactElement {
   const {
@@ -350,6 +374,8 @@ export function SchemaFormAnswer(
     backLabel,
     fieldWording,
     fieldPlaceholder,
+    updateFailedLine,
+    stepProgressLine,
   } = props;
   const form = useReactingForm(props);
   return (
@@ -373,6 +399,8 @@ export function SchemaFormAnswer(
       backLabel={backLabel}
       fieldWording={fieldWording}
       fieldPlaceholder={fieldPlaceholder}
+      updateFailedLine={updateFailedLine}
+      stepProgressLine={stepProgressLine}
       pageRef={form.pageRef}
       headingRef={form.headingRef}
       onChange={form.onChange}

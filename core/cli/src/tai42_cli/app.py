@@ -87,8 +87,9 @@ class TaiCLIGroup(TyperGroup):
     recognises its vendored exception types. Contributed launcher commands (and
     the native command modules) raise standard-``click`` exceptions, and remote
     commands raise :class:`ApiError`. This override translates all of those into
-    Typer's own control-flow exceptions so they render cleanly — a server/usage
-    message on stderr with a non-zero exit — instead of a traceback.
+    Typer's own control-flow exceptions so they render cleanly — a usage message,
+    or a server message with its HTTP status, on stderr and a non-zero exit —
+    instead of a traceback.
     """
 
     def invoke(self, ctx: Any) -> Any:
@@ -96,7 +97,7 @@ class TaiCLIGroup(TyperGroup):
         try:
             return super().invoke(ctx)
         except ApiError as exc:
-            typer.echo(f"Error: {exc}", err=True)
+            typer.echo(f"Error (HTTP {exc.status_code}): {exc}", err=True)
             raise typer.Exit(1) from exc
         except click.exceptions.Exit as exc:
             raise typer.Exit(exc.exit_code) from exc

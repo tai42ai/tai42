@@ -9,10 +9,12 @@ from tai42_contract.hooks.models import HookRegister
 from tai42_skeleton.channels.inbound import (
     ANSWER_REJECTED_EVENT_TOPIC,
     CALLBACK_DISCARDED_EVENT_TOPIC,
-    INBOUND_MEDIA_INGESTED_EVENT_TOPIC,
-    INBOUND_MEDIA_REJECTED_EVENT_TOPIC,
     INBOUND_REJECTED_EVENT_TOPIC,
     INBOUND_UNROUTED_EVENT_TOPIC,
+)
+from tai42_skeleton.channels.inbound_events import (
+    INBOUND_MEDIA_INGESTED_EVENT_TOPIC,
+    INBOUND_MEDIA_REJECTED_EVENT_TOPIC,
 )
 from tai42_skeleton.interactions.helper import DELIVERY_FAILED_EVENT_TOPIC
 from tai42_skeleton.interactions.reaper import (

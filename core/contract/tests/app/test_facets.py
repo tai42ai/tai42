@@ -29,7 +29,7 @@ def protocol_members(proto: type) -> set[str]:
     return {m for m in members if m not in _PROTOCOL_SCAFFOLDING and not m.startswith("__")}
 
 
-# The frozen facade surface: the 161 (sub-protocol, member) pairs over 157
+# The frozen facade surface: the 163 (sub-protocol, member) pairs over 159
 # distinct flat names. This is the
 # contract's own source of truth — no external lookup needed. Two leaf names
 # are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
@@ -93,10 +93,11 @@ EXPECTED_FACADE = {
     "names",
     "handle_inbound_answer",
     "record_send_receipt",
-    # conversations (5)
+    # conversations (6)
     "accept",
     "pending_messages",
     "record_delivery_status",
+    "send_recorded",
     "register_target_validator",
     "notify_inbound_rejected",
     # media (2)
@@ -116,6 +117,7 @@ EXPECTED_FACADE = {
     "react",
     "visit",
     "run_answer",
+    "settle_visit_claim",
     "normalise_started",
     "list_parked",
     "list_parked_for",
@@ -351,11 +353,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 161 (sub-protocol, member) pairs over 157 distinct names — ``store`` is exposed
+    # 163 (sub-protocol, member) pairs over 159 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 157, f"union={len(union)}"
-    assert total == 161 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 159, f"union={len(union)}"
+    assert total == 163 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_five_namespaces():
@@ -647,7 +649,12 @@ def test_app_conversations_is_runtime_checkable_and_shaped():
         ) -> str:
             return "m-1"
 
-        async def record_delivery_status(self, channel: str, provider_message_id: str, status: object) -> None:
+        async def record_delivery_status(
+            self, channel: str, provider_message_id: str, status: object, *, errors: object = None
+        ) -> None:
+            return None
+
+        async def send_recorded(self, **kwargs: object) -> object:
             return None
 
         async def pending_messages(self, thread_id: str, *, after: str) -> list[object]:
@@ -689,6 +696,8 @@ def test_facet_methods_are_coroutines_with_the_expected_parameters():
         "cap_key",
         "text",
         "provider_message_id",
+        "medium_message_id",
+        "reply_to_medium_message_id",
         "params",
         "form",
         "attachments",
@@ -696,13 +705,31 @@ def test_facet_methods_are_coroutines_with_the_expected_parameters():
         "locale",
         "form_tag",
     ]
+    reply_to_param = inspect.signature(AppConversations.accept).parameters["reply_to_medium_message_id"]
+    assert reply_to_param.default is inspect.Parameter.empty
     assert inspect.iscoroutinefunction(AppConversations.record_delivery_status)
     assert list(inspect.signature(AppConversations.record_delivery_status).parameters) == [
         "self",
         "channel",
         "provider_message_id",
         "status",
+        "errors",
     ]
+    assert inspect.iscoroutinefunction(AppConversations.send_recorded)
+    recorded_sig = inspect.signature(AppConversations.send_recorded)
+    assert list(recorded_sig.parameters) == [
+        "self",
+        "channel",
+        "our_identity",
+        "client_address",
+        "content",
+        "send",
+    ]
+    assert all(
+        param.kind is inspect.Parameter.KEYWORD_ONLY
+        for name, param in recorded_sig.parameters.items()
+        if name != "self"
+    )
     assert inspect.iscoroutinefunction(AppConversations.pending_messages)
     pending_sig = inspect.signature(AppConversations.pending_messages)
     assert list(pending_sig.parameters) == ["self", "thread_id", "after"]
@@ -712,6 +739,8 @@ def test_facet_methods_are_coroutines_with_the_expected_parameters():
     assert list(rejected_sig.parameters) == ["self", "channel_id", "recipient", "sender_identity", "kind", "reason"]
     for name in ("channel_id", "recipient", "sender_identity", "kind", "reason"):
         assert rejected_sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+    # The receiving identity is the route key the notice's words are read from, so it is required.
+    assert rejected_sig.parameters["sender_identity"].annotation == "str"
 
 
 def test_app_media_facet_methods_are_coroutines_with_the_expected_parameters():

@@ -27,7 +27,9 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, ConflictError, NotSupportedError
 
+from .conftest import create_record
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
+from .quoting_records import QUOTED_TEXT, holds_text, quoting_records
 from .test_read_doors import _DictManager
 
 _PERSON_ID = "p1"
@@ -115,7 +117,8 @@ def _seed_person(fake: FakeRecordRedis, person: Person) -> None:
 
 async def _seed_record(route_name: str, message_id: str) -> None:
     now = time.time()
-    await ConversationRecordStore(ConversationsSettings()).create_record(
+    await create_record(
+        ConversationRecordStore(ConversationsSettings()),
         ConversationRecord(
             message_id=message_id,
             route_name=route_name,
@@ -131,13 +134,14 @@ async def _seed_record(route_name: str, message_id: str) -> None:
             delivery_status=DeliveryStatus.DELIVERED,
             created_at=now,
             updated_at=now,
-        )
+        ),
     )
 
 
 async def _seed_accepted(route_name: str, message_id: str) -> None:
     now = time.time()
-    await ConversationRecordStore(ConversationsSettings()).create_record(
+    await create_record(
+        ConversationRecordStore(ConversationsSettings()),
         ConversationRecord(
             message_id=message_id,
             route_name=route_name,
@@ -164,7 +168,7 @@ async def test_store_erase_removes_the_row_and_its_index_mappings(fake):
     _seed_person(fake, person)
     settings = ConversationsSettings()
 
-    row_removed, fields_removed = await ConversationPersonStore(settings).erase(person)
+    row_removed, fields_removed = await ConversationPersonStore(settings).erase(person, [], [])
 
     assert row_removed is True
     assert fields_removed == 2
@@ -176,9 +180,9 @@ async def test_store_erase_is_idempotent(fake):
     person = _person()
     _seed_person(fake, person)
     store = ConversationPersonStore(ConversationsSettings())
-    await store.erase(person)
+    await store.erase(person, [], [])
 
-    row_removed, fields_removed = await store.erase(person)
+    row_removed, fields_removed = await store.erase(person, [], [])
 
     assert row_removed is False
     assert fields_removed == 0
@@ -200,7 +204,13 @@ async def test_delete_person_erases_every_person_scoped_store(fake, checkpoint_s
 
     result = await ops.delete_conversation_person(_PERSON_ID)
 
-    assert result == {"person_id": _PERSON_ID, "removed": 2, "erased": True, "states_erased": 0}
+    assert result == {
+        "person_id": _PERSON_ID,
+        "removed": 2,
+        "erased": True,
+        "states_erased": 0,
+        "absorbed_person_ids": [],
+    }
     # a. the aggregated agent checkpoint — forgotten once.
     assert checkpoint_saver.deleted == [_PERSON_THREAD]
     # b. the answer records + both route indexes + the thread's mode override.
@@ -216,6 +226,20 @@ async def test_delete_person_erases_every_person_scoped_store(fake, checkpoint_s
     assert fake._hashes.get(settings.person_index_key("agent", "relay"), {}) == {}
 
 
+async def test_delete_person_leaves_no_store_holding_a_quoted_text(fake, checkpoint_saver):
+    person = _person()
+    _seed_person(fake, person)
+    fake.seed_route("chat-a")
+    store = ConversationRecordStore(ConversationsSettings())
+    for record in quoting_records("chat-a", _PERSON_THREAD, "+1000", "+1000"):
+        await create_record(store, record)
+    assert holds_text(fake, QUOTED_TEXT)
+
+    await ops.delete_conversation_person(_PERSON_ID)
+
+    assert not holds_text(fake, QUOTED_TEXT)
+
+
 async def test_delete_person_is_idempotent(fake, checkpoint_saver):
     person = _person()
     _seed_person(fake, person)
@@ -229,14 +253,26 @@ async def test_delete_person_is_idempotent(fake, checkpoint_saver):
     # The row is gone; a retry is not a 404 — the checkpoint is forgotten again and erased is
     # False, so a partial run is finished rather than surfacing an error.
     second = await ops.delete_conversation_person(_PERSON_ID)
-    assert second == {"person_id": _PERSON_ID, "removed": 0, "erased": False, "states_erased": 0}
+    assert second == {
+        "person_id": _PERSON_ID,
+        "removed": 0,
+        "erased": False,
+        "states_erased": 0,
+        "absorbed_person_ids": [],
+    }
     assert checkpoint_saver.deleted == [_PERSON_THREAD, _PERSON_THREAD]
 
 
 async def test_delete_unknown_person_forgets_the_checkpoint_with_erased_false(fake, checkpoint_saver):
     result = await ops.delete_conversation_person("never-seen")
 
-    assert result == {"person_id": "never-seen", "removed": 0, "erased": False, "states_erased": 0}
+    assert result == {
+        "person_id": "never-seen",
+        "removed": 0,
+        "erased": False,
+        "states_erased": 0,
+        "absorbed_person_ids": [],
+    }
     assert checkpoint_saver.deleted == ["bridge:@person:never-seen"]
 
 

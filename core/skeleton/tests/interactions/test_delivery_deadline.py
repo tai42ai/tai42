@@ -12,8 +12,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError
+from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, SendOutcome
 from tai42_kit.settings import reset_all_settings
+from tests._helpers import AddressingChannel
 
 from tai42_skeleton.interactions.ask import delivery as delivery_module
 from tai42_skeleton.interactions.ask.delivery import deliver_with_retry
@@ -21,20 +22,21 @@ from tai42_skeleton.interactions.ask.timing import DeadlineWindow
 from tai42_skeleton.interactions.store import InteractionStore
 
 
-class _RecordingChannel:
+class _RecordingChannel(AddressingChannel):
     """A neutral channel that records each delivery and fails each one with ``failures`` in turn."""
 
     def __init__(self, failures: list[BaseException] | None = None) -> None:
         self.delivered: list[ChannelDelivery] = []
         self._failures = list(failures or [])
 
-    async def deliver(self, delivery: ChannelDelivery) -> None:
+    async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
         self.delivered.append(delivery)
         if self._failures:
             raise self._failures.pop(0)
+        return self.outcome(delivery, [])
 
-    async def notify(self, notification: Any) -> list[str]:  # pragma: no cover - not reached
-        return []
+    async def notify(self, notification: Any) -> SendOutcome:  # pragma: no cover - not reached
+        return self.outcome(notification, [])
 
 
 def _frame(timeout_at: datetime) -> ChannelDelivery:
@@ -42,6 +44,7 @@ def _frame(timeout_at: datetime) -> ChannelDelivery:
         interaction_id="i-1",
         question="?",
         answer_format="text",
+        sensitive=False,
         callback_url="https://h.example/api/interactions/callback/tk",
         timeout_at=timeout_at,
     )

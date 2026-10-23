@@ -58,6 +58,8 @@ async def test_crash_before_run_tool_is_redelivered_by_reaper(wired, monkeypatch
         caller_ask_landing=None,
         chain_keys=(),
         *,
+        reply_to_medium_message_id,
+        params,
         mark_detached=True,
     ):
         attempts["n"] += 1

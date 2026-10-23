@@ -474,7 +474,7 @@
       },
       "AnswerWording": {
         "additionalProperties": false,
-        "description": "The caller's words for a non-form question's answer controls and refusal sentences. Frozen, strict keys.\n\n``open`` labels the control that opens the question's answer page; ``confirm`` labels its\naffirmative control; ``decline`` labels its negative control; ``submit`` labels the button that\nsends a typed or picked answer; ``reply_hint`` is the hint shown in an empty reply input.\n``rejected`` is the sentence drawn when an answer is refused and may be given again; its\nOPTIONAL ``{reason}`` token takes the door's reason by a plain substitution. ``rejected_final``\nis the sentence drawn when a refused answer also closes the question; it too takes an OPTIONAL\n``{reason}``. Each is the sender's own words, in the end-user's language; absent, the surface\nshows its own generic word. A set value is non-blank; ``rejected`` / ``rejected_final`` are\nbounded by :data:`REJECTION_NOTICE_MAX_CHARS`; an empty object names nothing and is refused; an\nunknown key is refused.",
+        "description": "The caller's words for a non-form question's answer controls and refusal sentences. Frozen, strict keys.\n\n``open`` labels the control that opens the question's answer page; ``confirm`` labels its\naffirmative control; ``decline`` labels its negative control; ``submit`` labels the button that\nsends a typed or picked answer; ``reply_hint`` is the hint shown in an empty reply input.\n``rejected`` is the sentence drawn when an answer is refused and may be given again; its\nOPTIONAL ``{reason}`` token takes the door's reason by a plain substitution and is empty when\nthe door gave no reason it may show. ``rejected_final`` is the sentence drawn when a refused\nanswer also closes the question; it too takes an OPTIONAL ``{reason}``. Each is the sender's own\nwords, in the end-user's language; absent, the surface shows its own generic word. A set value\nis non-blank; ``rejected`` / ``rejected_final`` are bounded by\n:data:`REJECTION_NOTICE_MAX_CHARS`; an empty object names nothing and is refused; an unknown key\nis refused.",
         "properties": {
           "confirm": {
             "anyOf": [
@@ -626,21 +626,6 @@
             "title": "Door",
             "type": "string"
           },
-          "error_reply_text": {
-            "anyOf": [
-              {
-                "maxLength": 2000,
-                "minLength": 1,
-                "pattern": "\\S",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Error Reply Text"
-          },
           "execution_key": {
             "description": "The api-key ``user_id`` the turn runs AS; its live stored grants authorize the agent run or tool dispatch and every tool call the turn makes.",
             "minLength": 1,
@@ -734,14 +719,25 @@
               "returns": "the reply: null (silent), a string, or a list of answer parts",
               "variables": [
                 {
-                  "blurb": "the turn ids and subject this reply answers ({id, inbound, subject}); null when an out-of-band delivery's originating record has aged out",
+                  "blurb": "the turn this reply answers ({id, inbound, subject, reply_window}); reply_window {state, closes_at} is read when the turn starts, or at delivery for a late reply: open until closes_at, closed, or none; null when an out-of-band delivery's originating record has aged out",
                   "name": "turn",
                   "sample": {
                     "id": "m-1",
                     "inbound": {
                       "id": "i-1",
                       "kind": "message",
-                      "source": "api"
+                      "source": "chat-line"
+                    },
+                    "reply_window": {
+                      "closes_at": "2026-01-02T09:30:00Z",
+                      "state": "open"
+                    },
+                    "subject": {
+                      "locale": null,
+                      "person": null,
+                      "target_kind": "agent",
+                      "target_name": "assistant",
+                      "thread": "t-1"
                     }
                   }
                 },
@@ -775,6 +771,17 @@
                 }
               ]
             }
+          },
+          "reply_texts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReplyTexts"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "resume_expr": {
             "anyOf": [
@@ -883,7 +890,11 @@
                   "name": "location"
                 },
                 {
-                  "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/form_tag/attachments/location when that message carried them)",
+                  "gloss": "the earlier message this one replies to, {message_id, status, text}; present only when the inbound quoted one",
+                  "name": "reply_to"
+                },
+                {
+                  "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/form_tag/attachments/location/reply_to when that message carried them)",
                   "name": "messages"
                 },
                 {
@@ -891,7 +902,7 @@
                   "name": "superseded"
                 },
                 {
-                  "gloss": "the turn ids: {id, inbound: {id, kind, source}}",
+                  "gloss": "the turn: {id, inbound: {id, kind, source}, subject: {target_kind, target_name, person, thread, locale}, reply_window: {state, closes_at}}; reply_window.state is open (a free-form reply is allowed until closes_at), closed, or none (no window on this channel or address)",
                   "name": "turn"
                 },
                 {
@@ -1022,21 +1033,6 @@
             "title": "Door",
             "type": "string"
           },
-          "error_reply_text": {
-            "anyOf": [
-              {
-                "maxLength": 2000,
-                "minLength": 1,
-                "pattern": "\\S",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Error Reply Text"
-          },
           "execution_key": {
             "description": "The api-key ``user_id`` the turn runs AS; its live stored grants authorize the agent run or tool dispatch and every tool call the turn makes.",
             "minLength": 1,
@@ -1134,14 +1130,25 @@
               "returns": "the reply: null (silent), a string, or a list of answer parts",
               "variables": [
                 {
-                  "blurb": "the turn ids and subject this reply answers ({id, inbound, subject}); null when an out-of-band delivery's originating record has aged out",
+                  "blurb": "the turn this reply answers ({id, inbound, subject, reply_window}); reply_window {state, closes_at} is read when the turn starts, or at delivery for a late reply: open until closes_at, closed, or none; null when an out-of-band delivery's originating record has aged out",
                   "name": "turn",
                   "sample": {
                     "id": "m-1",
                     "inbound": {
                       "id": "i-1",
                       "kind": "message",
-                      "source": "api"
+                      "source": "chat-line"
+                    },
+                    "reply_window": {
+                      "closes_at": "2026-01-02T09:30:00Z",
+                      "state": "open"
+                    },
+                    "subject": {
+                      "locale": null,
+                      "person": null,
+                      "target_kind": "agent",
+                      "target_name": "assistant",
+                      "thread": "t-1"
                     }
                   }
                 },
@@ -1175,6 +1182,17 @@
                 }
               ]
             }
+          },
+          "reply_texts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReplyTexts"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "resume_expr": {
             "anyOf": [
@@ -1283,7 +1301,11 @@
                   "name": "location"
                 },
                 {
-                  "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/form_tag/attachments/location when that message carried them)",
+                  "gloss": "the earlier message this one replies to, {message_id, status, text}; present only when the inbound quoted one",
+                  "name": "reply_to"
+                },
+                {
+                  "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/form_tag/attachments/location/reply_to when that message carried them)",
                   "name": "messages"
                 },
                 {
@@ -1291,7 +1313,7 @@
                   "name": "superseded"
                 },
                 {
-                  "gloss": "the turn ids: {id, inbound: {id, kind, source}}",
+                  "gloss": "the turn: {id, inbound: {id, kind, source}, subject: {target_kind, target_name, person, thread, locale}, reply_window: {state, closes_at}}; reply_window.state is open (a free-form reply is allowed until closes_at), closed, or none (no window on this channel or address)",
                   "name": "turn"
                 },
                 {
@@ -1626,6 +1648,128 @@
           "applied"
         ],
         "title": "ApplyResult",
+        "type": "object"
+      },
+      "AskReplyView": {
+        "description": "A record's :class:`AskReply` as a read door serves it.\n\n``answer`` is ``None`` on a sensitive ask. An admin read carries every field; the\ncaller-scoped read carries only ``answer`` and ``reply_to``, so the others are absent from it.",
+        "properties": {
+          "answer": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer"
+          },
+          "answered_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Answered At"
+          },
+          "medium_message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Medium Message Id"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReplyTo"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "answer"
+        ],
+        "title": "AskReplyView",
+        "type": "object"
+      },
+      "AskSendView": {
+        "description": "A record's :class:`AskSend` as a read door serves it.\n\nAn admin read carries every field; the caller-scoped read carries only ``sensitive``, so the\nothers are absent from it.",
+        "properties": {
+          "answer_format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Answer Format"
+          },
+          "attempts": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Attempts"
+          },
+          "interaction_id": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Interaction Id"
+          },
+          "sensitive": {
+            "title": "Sensitive",
+            "type": "boolean"
+          },
+          "timed_out_attempts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Timed Out Attempts"
+          }
+        },
+        "required": [
+          "sensitive"
+        ],
+        "title": "AskSendView",
         "type": "object"
       },
       "AttachAck": {
@@ -2063,21 +2207,6 @@
             "title": "Door",
             "type": "string"
           },
-          "error_reply_text": {
-            "anyOf": [
-              {
-                "maxLength": 2000,
-                "minLength": 1,
-                "pattern": "\\S",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Error Reply Text"
-          },
           "execution_key": {
             "description": "The api-key ``user_id`` the turn runs AS; its live stored grants authorize the agent run or tool dispatch and every tool call the turn makes.",
             "minLength": 1,
@@ -2171,14 +2300,25 @@
               "returns": "the reply: null (silent), a string, or a list of answer parts",
               "variables": [
                 {
-                  "blurb": "the turn ids and subject this reply answers ({id, inbound, subject}); null when an out-of-band delivery's originating record has aged out",
+                  "blurb": "the turn this reply answers ({id, inbound, subject, reply_window}); reply_window {state, closes_at} is read when the turn starts, or at delivery for a late reply: open until closes_at, closed, or none; null when an out-of-band delivery's originating record has aged out",
                   "name": "turn",
                   "sample": {
                     "id": "m-1",
                     "inbound": {
                       "id": "i-1",
                       "kind": "message",
-                      "source": "api"
+                      "source": "chat-line"
+                    },
+                    "reply_window": {
+                      "closes_at": "2026-01-02T09:30:00Z",
+                      "state": "open"
+                    },
+                    "subject": {
+                      "locale": null,
+                      "person": null,
+                      "target_kind": "agent",
+                      "target_name": "assistant",
+                      "thread": "t-1"
                     }
                   }
                 },
@@ -2212,6 +2352,17 @@
                 }
               ]
             }
+          },
+          "reply_texts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReplyTexts"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "resume_expr": {
             "anyOf": [
@@ -2320,7 +2471,11 @@
                   "name": "location"
                 },
                 {
-                  "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/form_tag/attachments/location when that message carried them)",
+                  "gloss": "the earlier message this one replies to, {message_id, status, text}; present only when the inbound quoted one",
+                  "name": "reply_to"
+                },
+                {
+                  "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/form_tag/attachments/location/reply_to when that message carried them)",
                   "name": "messages"
                 },
                 {
@@ -2328,7 +2483,7 @@
                   "name": "superseded"
                 },
                 {
-                  "gloss": "the turn ids: {id, inbound: {id, kind, source}}",
+                  "gloss": "the turn: {id, inbound: {id, kind, source}, subject: {target_kind, target_name, person, thread, locale}, reply_window: {state, closes_at}}; reply_window.state is open (a free-form reply is allowed until closes_at), closed, or none (no window on this channel or address)",
                   "name": "turn"
                 },
                 {
@@ -2453,21 +2608,6 @@
             "title": "Door",
             "type": "string"
           },
-          "error_reply_text": {
-            "anyOf": [
-              {
-                "maxLength": 2000,
-                "minLength": 1,
-                "pattern": "\\S",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Error Reply Text"
-          },
           "execution_key": {
             "description": "The api-key ``user_id`` the turn runs AS; its live stored grants authorize the agent run or tool dispatch and every tool call the turn makes.",
             "minLength": 1,
@@ -2565,14 +2705,25 @@
               "returns": "the reply: null (silent), a string, or a list of answer parts",
               "variables": [
                 {
-                  "blurb": "the turn ids and subject this reply answers ({id, inbound, subject}); null when an out-of-band delivery's originating record has aged out",
+                  "blurb": "the turn this reply answers ({id, inbound, subject, reply_window}); reply_window {state, closes_at} is read when the turn starts, or at delivery for a late reply: open until closes_at, closed, or none; null when an out-of-band delivery's originating record has aged out",
                   "name": "turn",
                   "sample": {
                     "id": "m-1",
                     "inbound": {
                       "id": "i-1",
                       "kind": "message",
-                      "source": "api"
+                      "source": "chat-line"
+                    },
+                    "reply_window": {
+                      "closes_at": "2026-01-02T09:30:00Z",
+                      "state": "open"
+                    },
+                    "subject": {
+                      "locale": null,
+                      "person": null,
+                      "target_kind": "agent",
+                      "target_name": "assistant",
+                      "thread": "t-1"
                     }
                   }
                 },
@@ -2606,6 +2757,17 @@
                 }
               ]
             }
+          },
+          "reply_texts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReplyTexts"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "resume_expr": {
             "anyOf": [
@@ -2714,7 +2876,11 @@
                   "name": "location"
                 },
                 {
-                  "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/form_tag/attachments/location when that message carried them)",
+                  "gloss": "the earlier message this one replies to, {message_id, status, text}; present only when the inbound quoted one",
+                  "name": "reply_to"
+                },
+                {
+                  "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/form_tag/attachments/location/reply_to when that message carried them)",
                   "name": "messages"
                 },
                 {
@@ -2722,7 +2888,7 @@
                   "name": "superseded"
                 },
                 {
-                  "gloss": "the turn ids: {id, inbound: {id, kind, source}}",
+                  "gloss": "the turn: {id, inbound: {id, kind, source}, subject: {target_kind, target_name, person, thread, locale}, reply_window: {state, closes_at}}; reply_window.state is open (a free-form reply is allowed until closes_at), closed, or none (no window on this channel or address)",
                   "name": "turn"
                 },
                 {
@@ -3997,6 +4163,20 @@
             "description": "Opaque caller-supplied entry parameters delivered to a tool target's payload under ``params``; the platform attaches no meaning and no trust.",
             "title": "Params"
           },
+          "reply_to_message_id": {
+            "anyOf": [
+              {
+                "format": "uuid4",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The platform ``message_id`` of a message this conversation delivered to the caller that this message replies to (a turn's answer, an operator's message, or an event turn's answer): the ``message_id`` carried by the ``200`` answer, the signed callback, or the poll-door record. The platform resolves its text from the conversation record: the text delivered under that id. ``null`` means it replies to none.",
+            "title": "Reply To Message Id"
+          },
           "text": {
             "minLength": 1,
             "title": "Text",
@@ -4025,7 +4205,7 @@
         "type": "object"
       },
       "ConversationRecordView": {
-        "description": "A conversation answer record as a read door serves it.\n\nAn admin read carries every\nfield; the caller-scoped read withholds the route-key's internal detail — ``channel``,\n``our_identity``, ``provider_message_id``, ``callback_url``, ``error``,\n``outbound_message_ids`` and ``attempts`` are present only for an admin caller and are\nabsent from the caller_view subset.",
+        "description": "A conversation answer record as a read door serves it.\n\nAn admin read carries every\nfield; the caller-scoped read withholds the route-key's internal detail — ``channel``,\n``our_identity``, ``provider_message_id``, ``callback_url``, ``error``, ``attempts``, the\nper-part ``sends`` and all of ``ask`` but ``sensitive`` and of ``ask_reply`` but ``answer``\nare present only for an admin caller and are absent from the caller_view subset.",
         "properties": {
           "answer": {
             "anyOf": [
@@ -4072,6 +4252,28 @@
             ],
             "default": null,
             "title": "Answer Status"
+          },
+          "ask": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskSendView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "ask_reply": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskReplyView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "attempts": {
             "anyOf": [
@@ -4240,6 +4442,29 @@
             ],
             "default": null
           },
+          "inbound_message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Inbound Message Id"
+          },
+          "inbound_reply_to": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReplyTo"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "inbound_text": {
             "title": "Inbound Text",
             "type": "string"
@@ -4257,7 +4482,8 @@
           "origin": {
             "enum": [
               "client",
-              "operator"
+              "operator",
+              "send"
             ],
             "title": "Origin",
             "type": "string"
@@ -4273,21 +4499,6 @@
             ],
             "default": null,
             "title": "Our Identity"
-          },
-          "outbound_message_ids": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Outbound Message Ids"
           },
           "pending_receipt": {
             "anyOf": [
@@ -4323,6 +4534,31 @@
             "title": "Route Name",
             "type": "string"
           },
+          "sends": {
+            "items": {
+              "$ref": "#/components/schemas/SentMessage"
+            },
+            "title": "Sends",
+            "type": "array"
+          },
+          "sent_by": {
+            "anyOf": [
+              {
+                "enum": [
+                  "notify",
+                  "ask",
+                  "notice",
+                  "channel"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sent By"
+          },
           "submitted_by": {
             "anyOf": [
               {
@@ -4351,6 +4587,18 @@
             "minLength": 1,
             "title": "Thread Id",
             "type": "string"
+          },
+          "turn_message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Turn Message Id"
           },
           "updated_at": {
             "title": "Updated At",
@@ -4638,7 +4886,7 @@
         "type": "object"
       },
       "DeliveryStatus": {
-        "description": "Where a record sits between intake and a terminal outcome.\n\n``accepted`` is pre-turn intake and carries no answer; ``pending_delivery`` is\npersisted-but-unsent (what a re-drive resumes); ``provisional`` is sent and awaiting an\nout-of-band receipt or grace expiry; ``delivered``/``failed``/``shed``/``silent``/\n``merged``/``superseded`` are terminal and are the only states carrying the retention\nTTL. ``shed`` ran no turn and never sends; ``silent`` ran a tool turn whose reply mapped\nto nothing and so, by design, sends nothing; ``delivered`` on an api record without a\ncallback means the answer is readable at the message door and nothing was sent. ``merged``\nand ``superseded`` are the channel-door terminal states of an overlap outcome — a message\nwhose text was carried into a later turn (``merged``) or dropped in favour of one\n(``superseded``); each names that turn through ``successor_id`` and, like ``silent``, never\nsends. On the API door an overlap outcome rides ``pending_delivery`` carrying the matching\n``answer_status`` until its marker is delivered, the ``silent`` split.",
+        "description": "Where a record sits between intake and a terminal outcome.\n\n``accepted`` is pre-turn intake and carries no answer; ``pending_delivery`` is\npersisted-but-unsent (what a re-drive resumes); ``provisional`` is sent and awaiting an\nout-of-band receipt or grace expiry; ``delivered``/``failed``/``shed``/``silent``/\n``merged``/``superseded`` are terminal and are the only states carrying the retention\nTTL. ``shed`` ran no turn and never sends; ``silent`` ran a tool turn whose reply mapped\nto nothing and so, by design, sends nothing; ``delivered`` on an api record without a\ncallback means the answer is readable at the message door and nothing was sent. ``merged``\nand ``superseded`` are the channel-door terminal states of an overlap outcome — a message\nwhose text was carried into a later turn (``merged``) or dropped in favour of one\n(``superseded``); each names that turn through ``successor_id`` and, like ``silent``, never\nsends. On the API door an overlap outcome rides ``pending_delivery`` carrying the matching\n``answer_status`` until its marker is delivered, the ``silent`` split.\n\nTwo states belong to a send record (``origin=\"send\"``) alone. ``sending`` is not terminal:\nthe record is written and its send has started; nothing re-sends it, and a row left in it\npast its settle deadline is settled to ``outcome_unknown``. ``outcome_unknown`` is terminal:\nthe send started and never reported an outcome (it passed its bound, it was cancelled while\nthe medium call was in flight, or the process stopped), so the message may or may not have\nreached the participant; it is never re-sent.",
         "enum": [
           "accepted",
           "pending_delivery",
@@ -4648,7 +4896,9 @@
           "shed",
           "silent",
           "merged",
-          "superseded"
+          "superseded",
+          "sending",
+          "outcome_unknown"
         ],
         "title": "DeliveryStatus",
         "type": "string"
@@ -5325,8 +5575,20 @@
       },
       "FieldWording": {
         "additionalProperties": false,
-        "description": "The caller's words for one form field's platform-drawn controls. Frozen, strict keys.\n\n``choice_label`` is the placeholder of the field's picker (its empty-state prompt); ``invalid``\nis the sentence shown when the field's value does not have its declared shape. Each is the\nsender's own words, in the end-user's language; absent, the surface shows its own generic word\n(for ``invalid``, its own word for the failing shape). A set value is non-blank; an empty object\nnames nothing and is refused; an unknown key is refused.",
+        "description": "The caller's words for one form field's platform-drawn controls. Frozen, strict keys.\n\n``choice_label`` is the placeholder of the field's picker (its empty-state prompt); ``invalid``\nis the sentence shown when the field's value does not have its declared shape (never a missing\nrequired value: that is ``required``); ``required`` is the sentence a surface shows when this\nfield's required value is missing (at the field or anywhere inside it). ``true_label`` /\n``false_label`` are the words a surface shows for a boolean field's true and false values, on\nits control and in its readback. ``length_hint`` is the hint drawn under a text control that has\na maximum length; it MUST contain ``{max}`` (the maximum, filled by a plain substitution).\n``add_item`` / ``remove_item`` / ``item_label`` / ``no_items`` are the words of a free-text list\nfield: ``add_item`` its add button, ``remove_item`` each item's remove button, ``item_label``\neach item's label, which MUST contain ``{n}`` (the item's number, a plain substitution), and\n``no_items`` the line shown while the list is empty. Each is the sender's own words, in the\nend-user's language; absent, the surface shows its own generic word (for ``invalid``, its own\nword for the failing shape). A set value is non-blank; an empty object names nothing and is\nrefused; an unknown key is refused.",
         "properties": {
+          "add_item": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Add Item"
+          },
           "choice_label": {
             "anyOf": [
               {
@@ -5339,6 +5601,18 @@
             "default": null,
             "title": "Choice Label"
           },
+          "false_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "False Label"
+          },
           "invalid": {
             "anyOf": [
               {
@@ -5350,6 +5624,78 @@
             ],
             "default": null,
             "title": "Invalid"
+          },
+          "item_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Item Label"
+          },
+          "length_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Length Hint"
+          },
+          "no_items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "No Items"
+          },
+          "remove_item": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Remove Item"
+          },
+          "required": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Required"
+          },
+          "true_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "True Label"
           }
         },
         "title": "FieldWording",
@@ -5798,7 +6144,7 @@
       },
       "FormPageWording": {
         "additionalProperties": false,
-        "description": "The caller's words for the form page's own sentences, for ONE send. Frozen, strict keys.\n\n``failed`` is the line when the send did not land; ``network_error`` is the line when the\nbrowser could not reach the server; ``update_failed`` is the line when a reacting form could\nnot refresh and takes an OPTIONAL ``{reason}`` token; ``choose_one`` is the validation line for\na required multi-choice left empty; ``date_unavailable`` is the validation line for a blocked\ndate. Each is the sender's own words, in the end-user's language; absent, the page shows its own\ngeneric word. A set value is non-blank; an empty object names nothing and is refused; an unknown\nkey is refused.",
+        "description": "The caller's words for the form page's own sentences, for ONE send. Frozen, strict keys.\n\n``failed`` is the line when the send did not land; ``network_error`` is the line when the\nbrowser could not reach the server; ``choose_one`` is the validation line for a required\nmulti-choice left empty; ``date_unavailable`` is the validation line for a blocked date. Each\nis the sender's own words, in the end-user's language; absent, the page shows its own generic\nword. A set value is non-blank; an empty object names nothing and is refused; an unknown key is\nrefused.",
         "properties": {
           "choose_one": {
             "anyOf": [
@@ -5847,18 +6193,6 @@
             ],
             "default": null,
             "title": "Network Error"
-          },
-          "update_failed": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Update Failed"
           }
         },
         "title": "FormPageWording",
@@ -5866,7 +6200,7 @@
       },
       "FormWording": {
         "additionalProperties": false,
-        "description": "The caller's words for a form's platform-drawn chrome, for ONE send. Frozen, strict keys.\n\n``title`` heads the form surface; ``open`` labels the button that opens the form; ``cancel``\nlabels its cancel/close; ``back`` labels the button that returns to the previous step of a\nstepped form; ``submit`` labels the terminal button of a form with no pages; ``review_empty``\nis the line the review step shows before anything is filled; ``fields`` carries per-field\nwords keyed by property name. Each text is the sender's own words, in the end-user's language;\nabsent, the surface shows its own generic word. A set value is non-blank; an empty object names\nnothing and is refused; an unknown key is refused.",
+        "description": "The caller's words for a form's platform-drawn chrome and sentences, for ONE send. Frozen, strict keys.\n\n``title`` heads the form surface; ``open`` labels the button that opens the form; ``cancel``\nlabels its cancel/close; ``back`` labels the button that returns to the previous step of a\nstepped form; ``submit`` labels the terminal button of a form with no pages; ``review_empty``\nis the line the review step shows before anything is filled; ``error_line`` is the one line a\nsurface shows above a form it refused, in place of its own per-field summary; ``update_failed``\nis the sentence a surface shows when it could not update the form (a reaction failed or\nreturned something the surface cannot draw) and takes an OPTIONAL ``{reason}`` token, filled\nwith the reaction door's reason (``FormReactionError.reason``) and empty when the surface has\nnone; ``step_progress`` is the progress line a stepped form shows above its current step; it\nMUST contain ``{step}`` (the current step's number) and ``{steps}`` (the step count), each filled\nby a plain substitution; ``fields`` carries per-field words keyed by property name. Each text is\nthe sender's own words, in the end-user's language; absent, the surface shows its own generic\nword. A set value is non-blank; an empty object names nothing and is refused; an unknown key is\nrefused.",
         "properties": {
           "back": {
             "anyOf": [
@@ -5891,6 +6225,18 @@
             ],
             "default": null,
             "title": "Cancel"
+          },
+          "error_line": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error Line"
           },
           "fields": {
             "additionalProperties": {
@@ -5924,6 +6270,18 @@
             "default": null,
             "title": "Review Empty"
           },
+          "step_progress": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Step Progress"
+          },
           "submit": {
             "anyOf": [
               {
@@ -5947,6 +6305,18 @@
             ],
             "default": null,
             "title": "Title"
+          },
+          "update_failed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Update Failed"
           }
         },
         "title": "FormWording",
@@ -6524,6 +6894,204 @@
           "name"
         ],
         "title": "HookRegisterResult",
+        "type": "object"
+      },
+      "HookRunClaimIntentView": {
+        "description": "A resume or take claim a hook run's hook announced and did not confirm.",
+        "properties": {
+          "action": {
+            "enum": [
+              "resume",
+              "take"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "action",
+          "ids"
+        ],
+        "title": "HookRunClaimIntentView",
+        "type": "object"
+      },
+      "HookRunDiscarded": {
+        "description": "A discarded failed hook run's id.",
+        "properties": {
+          "discarded": {
+            "title": "Discarded",
+            "type": "string"
+          }
+        },
+        "required": [
+          "discarded"
+        ],
+        "title": "HookRunDiscarded",
+        "type": "object"
+      },
+      "HookRunView": {
+        "description": "One kept hook run, without its event payload or its start spec (either may carry secrets of the sender).\n\n``status`` is ``pending`` (due at ``next_attempt_at``), ``running`` (an attempt holds its lease) or\n``failed`` (held until an operator retries or discards it). ``acted`` says whether and how the\nhook acted on its parked entries: ``\"\"`` not at all, ``start`` started its tool, ``cancel``,\n``resume`` or ``take`` on ``acted_ids``. ``claim_intent`` is set while a claim is still to be\nsettled, and on a failed run whose claim could not be told.",
+        "properties": {
+          "acted": {
+            "enum": [
+              "",
+              "start",
+              "cancel",
+              "resume",
+              "take"
+            ],
+            "title": "Acted",
+            "type": "string"
+          },
+          "acted_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Acted Ids",
+            "type": "array"
+          },
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "claim_intent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HookRunClaimIntentView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "failed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed At"
+          },
+          "hook": {
+            "title": "Hook",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_error_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error Kind"
+          },
+          "next_attempt_at": {
+            "format": "date-time",
+            "title": "Next Attempt At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "topic",
+          "hook",
+          "status",
+          "attempts",
+          "next_attempt_at",
+          "acted",
+          "acted_ids",
+          "claim_intent",
+          "last_error",
+          "last_error_kind",
+          "created_at",
+          "failed_at"
+        ],
+        "title": "HookRunView",
+        "type": "object"
+      },
+      "HookRunsPage": {
+        "description": "One page of hook runs with the totals of every outstanding and every failed run.\n\nOutstanding runs come first, the soonest due first; failed runs follow, the most recently\nfailed first. ``next_cursor`` is the cursor the next page reads from, ``null`` on the last page.",
+        "properties": {
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/HookRunView"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "outstanding": {
+            "title": "Outstanding",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "outstanding",
+          "failed"
+        ],
+        "title": "HookRunsPage",
         "type": "object"
       },
       "HookSubject-Input": {
@@ -10155,8 +10723,15 @@
         "type": "object"
       },
       "PersonDeleteResult": {
-        "description": "A person erase.\n\n``removed`` counts the answer records deleted across the person's routes; ``erased`` says whether THIS\ncall removed the person row. ``states_erased`` counts the declared-state records this call forgot — the\nperson's own (``person``-subject) and its aggregated thread's (``thread``-subject) memory.",
+        "description": "A person erase.\n\n``removed`` counts the answer records deleted across the person's routes: in its aggregated thread, in\nthe aggregated thread of every person it absorbed by a link, and in every route thread the erase\ncleared (one only the person and the persons it absorbed wrote in); ``erased`` says whether THIS call\nremoved the person row. ``states_erased`` counts\nthe declared-state records this call forgot — the person's own (``person``-subject) and its aggregated\nthread's (``thread``-subject) memory, the same for every absorbed person, and the ``thread``-subject\nmemory of each route thread the erase cleared. ``absorbed_person_ids`` lists, sorted, the ids of the\npersons it absorbed that this call cleared (``[]`` when it absorbed none, or when its row was already\ngone): run traces keyed by those ids are the operator's to delete, and nothing else names them once the\nerase has finished.",
         "properties": {
+          "absorbed_person_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Absorbed Person Ids",
+            "type": "array"
+          },
           "erased": {
             "title": "Erased",
             "type": "boolean"
@@ -10178,7 +10753,8 @@
           "person_id",
           "removed",
           "erased",
-          "states_erased"
+          "states_erased",
+          "absorbed_person_ids"
         ],
         "title": "PersonDeleteResult",
         "type": "object"
@@ -12406,6 +12982,236 @@
         "title": "ReplyOption",
         "type": "object"
       },
+      "ReplyTexts": {
+        "additionalProperties": false,
+        "description": "The caller's words for the platform's fixed participant replies on one route. Frozen, strict keys.\n\n``error`` is sent when a turn fails and the target gave no reply; ``slow_down`` when an address\nis over the turn cap; ``pairing_linked`` when a pair code was redeemed and the two persons\nmerged; ``pairing_unlinked`` when ``/unlink`` detached the address; ``pairing_not_linked`` when\n``/unlink`` came from an address linked to nothing; ``pairing_code_invalid`` when a redeem was\nrefused; ``pairing_code`` is the ``/link`` reply carrying the fresh code, a template that MUST\nreference ``{pairing_code}`` and may reference ``{expires_at}`` (the code's ISO-8601 expiry),\nwith no conversion or format spec; ``pairing_link_unavailable`` when a redeem met a person being\nerased (its code is consumed, so the reply asks for a new one); ``pairing_unlink_unavailable``\nwhen ``/unlink`` met the sender's person being erased; ``rejected_unsupported_type`` / ``rejected_too_large`` /\n``rejected_could_not_receive`` are the notices for an inbound message the channel cannot\nbridge, a file over the cap, and a file the channel could not fetch. Every member but\n``pairing_code`` is literal text: a ``{`` in it is drawn as written. Each is a\n:data:`~tai42_contract.interactions.ReplyText` in the line's language; absent, the built-in\nEnglish reply is sent. An empty catalogue names nothing and is refused; an unknown key is\nrefused.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error"
+          },
+          "pairing_code": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pairing Code"
+          },
+          "pairing_code_invalid": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pairing Code Invalid"
+          },
+          "pairing_link_unavailable": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pairing Link Unavailable"
+          },
+          "pairing_linked": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pairing Linked"
+          },
+          "pairing_not_linked": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pairing Not Linked"
+          },
+          "pairing_unlink_unavailable": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pairing Unlink Unavailable"
+          },
+          "pairing_unlinked": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pairing Unlinked"
+          },
+          "rejected_could_not_receive": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rejected Could Not Receive"
+          },
+          "rejected_too_large": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rejected Too Large"
+          },
+          "rejected_unsupported_type": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rejected Unsupported Type"
+          },
+          "slow_down": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Slow Down"
+          }
+        },
+        "title": "ReplyTexts",
+        "type": "object"
+      },
+      "ReplyTo": {
+        "additionalProperties": false,
+        "description": "The message an inbound reply quotes, as the platform resolved it from the thread's record.\n\n``message_id`` is the id the end user's side names the quoted message by: the medium's message\nid on a channel, the platform's record ``message_id`` on the API door. ``status`` says what the\nplatform found (:class:`ReplyToStatus`). ``text`` is the quoted message's text when ``status``\nis ``found``, and ``None`` for every other status. Frozen.",
+        "properties": {
+          "message_id": {
+            "title": "Message Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReplyToStatus"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          }
+        },
+        "required": [
+          "message_id",
+          "status",
+          "text"
+        ],
+        "title": "ReplyTo",
+        "type": "object"
+      },
+      "ReplyToStatus": {
+        "description": "What the platform found for the message an inbound reply quotes.",
+        "enum": [
+          "found",
+          "not_found",
+          "sensitive",
+          "no_text"
+        ],
+        "title": "ReplyToStatus",
+        "type": "string"
+      },
       "RequiredEnvVar": {
         "description": "An env var a plugin spec requires, with its derived secret-ness.",
         "properties": {
@@ -14019,6 +14825,35 @@
           "scopes"
         ],
         "title": "ScopesUpdateAck",
+        "type": "object"
+      },
+      "SentMessage": {
+        "description": "One sent part of a record's answer and the provider ids its medium gave it.\n\n``part`` indexes the record's ``answer_parts`` (``0`` for a plain-text answer), ``chars``\nis how much of that part this message carried, and ``provider_message_ids`` are the ids an\nout-of-band receipt correlates.",
+        "properties": {
+          "chars": {
+            "minimum": 0,
+            "title": "Chars",
+            "type": "integer"
+          },
+          "part": {
+            "minimum": 0,
+            "title": "Part",
+            "type": "integer"
+          },
+          "provider_message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Provider Message Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "part",
+          "chars",
+          "provider_message_ids"
+        ],
+        "title": "SentMessage",
         "type": "object"
       },
       "ServedStateView": {
@@ -17512,7 +18347,7 @@
               }
             ],
             "default": null,
-            "description": "On a linked person's aggregated thread, the person address to target; omitted, the target is the thread's newest record.",
+            "description": "On a linked person's aggregated thread, the person address to target; omitted, the target is the thread's newest record that is not a send record.",
             "title": "Address"
           },
           "footer": {
@@ -19367,7 +20202,7 @@
   "info": {
     "description": "The operator HTTP surface served under /api/*. The platform's core routes. Plugin routes are published by each plugin.",
     "title": "tai42-skeleton API",
-    "version": "27.2.3"
+    "version": "28.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -25455,7 +26290,7 @@
     },
     "/api/conversations/persons/{person_id}": {
       "delete": {
-        "description": "Erase a LINKED person ENTIRELY, forgetting every store that names it.\n\n- the person's aggregated ``bridge:@person:{person_id}`` thread — its agent checkpoint,\n  and across EVERY route the person wrote under its answer records, per-thread transcript\n  indexes, route-thread index memberships and per-thread mode override (the thread-delete\n  machinery, reused);\n- the person row ``conversations:person:{person_id}``;\n- every ``person_index`` ``door_address_key → person_id`` mapping of its addresses.\n\nCaller authority is the door's grantable ``write`` action — the same grant that forgets a\nthread. IDEMPOTENT and retryable: the person row is the durable marker of an owed erase and\nis deleted LAST (atomically with its index mappings), so an interruption re-reads it and a\nretry FINISHES. A person that is already gone (a retry, or one that never existed) is not a\n404 — its aggregated checkpoint is forgotten regardless (it defaults to keep-forever) and\nthe call answers ``erased=false``. A turn IN FLIGHT on the aggregated thread is a 409\n(retry once it drains), re-checked under the per-thread FIFO before any teardown so an\nadmitted turn cannot re-create memory behind the erase; a full queue is the retriable 503.\nAs a live-caller sync door the acquisition is bounded by ``sync_door_wait_seconds`` (both the\nlinked and the already-gone branch): a wait past it — behind a turn possibly HITL-paused on\nanother worker — is the loud, retriable 503 ``ThreadBusyError`` rather than a block past the\nproxy timeout. A blank ``person_id`` is a 400; no backend is a loud 501.\n\nReturns ``{\"person_id\", \"removed\", \"erased\", \"states_erased\"}``, where ``removed`` counts the\nanswer records this call deleted across the person's routes, ``erased`` says whether THIS call\nremoved the person row, and ``states_erased`` counts the declared-state records forgotten —\nthe person's own (``person``-subject) and its aggregated thread's (``thread``-subject) memory.",
+        "description": "Erase a LINKED person and every person it absorbed by a link from the bridge's stores.\n\n- the person's aggregated ``bridge:@person:{person_id}`` thread — its agent checkpoint,\n  and across EVERY route the person wrote under (its addresses' routes and the routes its\n  thread's writes recorded) its answer records, per-thread transcript indexes, route-thread\n  index memberships and per-thread mode override (the thread-delete machinery, reused);\n- for every person it absorbed by a ``/link`` (a chain flattened into it): that person's\n  aggregated thread the same way;\n- every route-keyed thread, on any route, that only the person and the persons it absorbed\n  wrote in — its checkpoint, records, parks and ``thread``-subject state, exactly as a thread\n  delete forgets it. The thread's records decide, read under its hold: a thread a record of\n  another writer still stands in (another person, or an address nobody held when it wrote)\n  is left to them, unless that person's own erase is running too, and nothing is written to\n  a thread left;\n- the declared state of the person and of every person it absorbed (``person``-subject and\n  their aggregated threads' ``thread``-subject memory);\n- the person row ``conversations:person:{person_id}``, its absorbed SET, the absorbed\n  persons' pointers, their lists of the threads they wrote in, and every ``person_index``\n  ``door_address_key → person_id`` mapping of its addresses.\n\nThe bridge's stores only: the interaction store's answered state hashes (which keep a request's\n``recipient`` and a non-sensitive answer until their idle TTL) and the hook-runs store (whose\nfailed run can carry a participant's address in its event payload until an operator retries or\ndiscards it) are not erased by it.\n\nCaller authority is the door's grantable ``write`` action — the same grant that forgets a\nthread. IDEMPOTENT and retryable: the erase first sets the person's erase mark under the\nper-thread FIFO, and from then on every person write refuses the person, its addresses are\nattributed as unlinked and its thread takes no new record; the person row is the durable marker\nof an owed erase and is deleted LAST (atomically with its mark, its index mappings, its\nabsorbed SET and the lists of the threads they wrote in), so an interruption after the\nteardown began leaves the row and the mark and a retry FINISHES. A refusal before the\nteardown (a 409 or a 503) removes the mark first. A write by the person or a person it absorbed\nthat lands in a thread the erase had not reached, in its last moment, is a 409 after the\nteardown: the mark stands, and a retry finishes the erase and clears that thread too. A retry,\nor an id that was never a person, is not a 404 — its aggregated checkpoint is forgotten\nregardless (it defaults to keep-forever) and the call answers ``erased=false``. An id a\n``/link`` absorbed into another person is a 409 naming that person (``absorbed_into_person_id``), whose\nerase clears it. A turn IN FLIGHT on a thread the erase clears is a 409 (retry once it drains),\nre-checked under the thread's FIFO before its teardown so an admitted turn cannot re-create\nmemory behind the erase; a full queue is the retriable 503. As a\nlive-caller sync door every acquisition is bounded by ``sync_door_wait_seconds``: a wait past it\n— behind a turn possibly HITL-paused on another worker, behind a turn on an absorbed person's\nthread that holds its lock while it waits for a gate slot, or behind a ``delete-person`` call of\nan absorbed id — is the loud, retriable 503 ``ThreadBusyError`` rather than a block past the\nproxy timeout. A blank ``person_id`` is a 400; no backend is a loud 501.\n\nReturns ``{\"person_id\", \"removed\", \"erased\", \"states_erased\", \"absorbed_person_ids\"}``, where\n``removed`` counts the answer records this call deleted across the person's routes, in every\nabsorbed person's thread and in every route thread it cleared, ``erased`` says whether THIS call\nremoved the person row, ``states_erased`` counts the declared-state records forgotten for the person and every\nabsorbed person, the cleared route threads' ``thread`` subjects included, and\n``absorbed_person_ids`` lists, sorted, the absorbed ids this call cleared.\n\nA send still going out to one of the person's addresses keeps that address on its ``sending``\nrow until its completion, end or settle (at most one settle deadline), and ``removed`` does not\ncount it. A completion re-attributed once the erase has begun is placed without the person\nlink, in the route-keyed thread an inbound from that address would now start.",
         "operationId": "delete_api_conversations_persons_person_id",
         "parameters": [
           {
@@ -25634,7 +26469,7 @@
     },
     "/api/conversations/persons/{person_id}/locale": {
       "put": {
-        "description": "Set (or clear) a person's stored ``locale``.\n\nThe operator override the rendering layer resolves text against, winning over the\nchannel-seeded value on every later turn. ``locale`` is a BCP 47 tag (canonicalized here —\n``he-il`` stores as ``he-IL``); ``null`` clears it back to no-locale-known. A blank\n``person_id`` or a malformed ``locale`` is a 400; an unknown person a 404; no backend a loud\n501. Returns the updated person.",
+        "description": "Set (or clear) a person's stored ``locale``.\n\nThe operator override the rendering layer resolves text against, winning over the\nchannel-seeded value on every later turn. ``locale`` is a BCP 47 tag (canonicalized here —\n``he-il`` stores as ``he-IL``); ``null`` clears it back to no-locale-known. A blank\n``person_id`` or a malformed ``locale`` is a 400; an unknown person a 404; a person being\nerased a 503 with nothing changed; no backend a loud 501. Returns the updated person.",
         "operationId": "put_api_conversations_persons_person_id_locale",
         "parameters": [
           {
@@ -25704,6 +26539,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
           }
         },
         "security": [
@@ -25886,7 +26731,7 @@
         ]
       },
       "post": {
-        "description": "Create a conversation route from its flat parameters — an UPSERT (create AND edit path).\n\n``initial_mode`` is the route's default control mode (``agent`` runs the turn, ``manual``\nsuppresses it for an operator to answer) when a thread carries no per-thread override.\n\n``target_name`` must merely EXIST — the agent (``target_kind=agent``) or tool\n(``target_kind=tool``) — the key's live grants bound the turn at fire. ``execution_key`` is\nthe api-key identity the turn runs AS; the caller must be allowed to delegate it and it must\nbe usable by a tokenless fire. Both are decided at this door BEFORE the route write service\nruns the route's own rules, so a refusal leaves any existing row untouched. The write service\nruns the target's bind check (a refusal is a 422 carrying its lines), then renders and\ncompiles the door jqs (``start_expr``/``cancel_expr``/``resume_expr``/``extras_expr``) and\n``reply_expr``, so an invalid one — or a by-id text whose stored resource cannot be fetched —\nis refused at create, not at first message. A\n``channel`` row's ``our_identity`` is stored canonicalized and must not already be routed\non that channel. An edit that would change the ``door`` of a route already HOLDING\nthreads is refused: the two doors key their threads differently, so the held threads\ncannot be re-keyed under the new door.\nAn ``api`` row that declares a ``callback_url`` has its ``callback_secret`` minted by the\nwrite and returned ONCE; a poll-only api row (no callback) mints none and reads its answers\nback from the poll door. A positive\n``turns_per_hour_override`` runs this route's per-address buckets at that rate instead\nof the global ``per_address_turns_per_hour`` cap; ``None`` runs them at the global rate.\nA non-blank ``error_reply_text`` is the participant-facing reply sent when a turn on this route\nfails; ``None`` uses the built-in default.\nA ``locale`` is the operator-declared default language templated reply parts render in when\na turn supplies none; it is the last fallback under a per-turn or stored-contact locale and\nis stored canonicalized. ``None`` declares no route default (bare/English).\nAn ``overlap`` policy governs how a running turn treats the newer participant messages that\noverlap it (learn/cancel/carry); ``None`` stores the default policy (continue/one/no window),\nwhich runs one turn per message and leaves the payload unchanged.\nReturns ``{\"created\", \"route_name\", \"route\", \"callback_secret\"}``.",
+        "description": "Create a conversation route from its flat parameters — an UPSERT (create AND edit path).\n\n``initial_mode`` is the route's default control mode (``agent`` runs the turn, ``manual``\nsuppresses it for an operator to answer) when a thread carries no per-thread override.\n\n``target_name`` must merely EXIST — the agent (``target_kind=agent``) or tool\n(``target_kind=tool``) — the key's live grants bound the turn at fire. ``execution_key`` is\nthe api-key identity the turn runs AS; the caller must be allowed to delegate it and it must\nbe usable by a tokenless fire. Both are decided at this door BEFORE the route write service\nruns the route's own rules, so a refusal leaves any existing row untouched. The write service\nruns the target's bind check (a refusal is a 422 carrying its lines), then renders and\ncompiles the door jqs (``start_expr``/``cancel_expr``/``resume_expr``/``extras_expr``) and\n``reply_expr``, so an invalid one — or a by-id text whose stored resource cannot be fetched —\nis refused at create, not at first message. A\n``channel`` row's ``our_identity`` is stored canonicalized and must not already be routed\non that channel. An edit that would change the ``door`` of a route already HOLDING\nthreads is refused: the two doors key their threads differently, so the held threads\ncannot be re-keyed under the new door.\nAn ``api`` row that declares a ``callback_url`` has its ``callback_secret`` minted by the\nwrite and returned ONCE; a poll-only api row (no callback) mints none and reads its answers\nback from the poll door. A positive\n``turns_per_hour_override`` runs this route's per-address buckets at that rate instead\nof the global ``per_address_turns_per_hour`` cap; ``None`` runs them at the global rate.\nA ``reply_texts`` catalogue carries the route's own words for the platform's fixed\nparticipant replies (a failed turn, the slow-down line, the pairing replies, the inbound\nrefusal notices), in the line's language; ``None`` or an unset member sends the built-in\nEnglish reply.\nA ``locale`` is the operator-declared default language templated reply parts render in when\na turn supplies none; it is the last fallback under a per-turn or stored-contact locale and\nis stored canonicalized. ``None`` declares no route default (bare/English).\nAn ``overlap`` policy governs how a running turn treats the newer participant messages that\noverlap it (learn/cancel/carry); ``None`` stores the default policy (continue/one/no window),\nwhich runs one turn per message and leaves the payload unchanged.\nReturns ``{\"created\", \"route_name\", \"route\", \"callback_secret\"}``.",
         "operationId": "post_api_conversations_route_name",
         "parameters": [
           {
@@ -26533,7 +27378,7 @@
     },
     "/api/conversations/{route_name}/thread": {
       "delete": {
-        "description": "Forget ONE conversation thread: its agent checkpoint, its answer records and its thread indexes.\n\nA later message on the same address starts a memory the deleted turns never touched. A LINKED\nperson's aggregated ``bridge:@person:{id}`` thread is forgotten across every route index it\nspans.\n\nForgetting is ABSOLUTE: a valid id on its own route always succeeds, even when nothing is\nstored. An aged-out thread whose answer records already expired under the retention TTL,\nor one never seen, answers ``removed=0`` and never a 404 — and its checkpoint is deleted\nregardless, because that memory defaults to keep-forever and is otherwise left behind once\nthe records lapse. A route-keyed id MUST carry the route's ``bridge:{route_name}:`` prefix;\nan id belonging to another route is a loud 400, the sole guard stopping a delete on one\nroute from wiping another route's memory. A person ``bridge:@person:{id}`` thread whose\nperson is unknown, or whose ``route_name`` is not one of the person's routes, is a loud\n404. A turn IN FLIGHT on the thread (an ``accepted`` intake still holding a live lease) is\na 409: its completion re-writes checkpoint state and re-stamps the indexes behind the\ndelete, half-forgetting the memory — retry once it drains. The guard is re-checked under\nthe FIFO, so a turn admitted while the lock is being taken is refused before any teardown,\nnever left to re-create memory behind the delete. A ``route_name`` that is not a valid\nslug, or a blank ``thread_id``, is a 400.\n\nCaller authority is the door's grantable write action — the SAME write grant that creates\na route deletes routes and forgets threads — never a per-thread owner check.\n\nThe teardown runs in an order an interruption cannot strand: the checkpoint FIRST — its\nmemory is reachable only through the indexes once this call returns, so it must go while\nthe indexes still name the thread to bring a re-run back — then the records and the indexes\ntogether, the index being the durable marker of an owed reclamation and torn down LAST.\nIdempotent under re-run, so a partial completion is FINISHED by a retry.\n\nThe whole teardown runs under the thread's per-thread FIFO (the lock an operator send and\nan in-flight turn take), so an operator send already in flight on the thread within this\nworker drains BEFORE the delete rather than half-behind it; a full queue is the loud,\nretriable 503 that FIFO raises before anything is torn down. As a live-caller sync door the\nacquisition is bounded by ``sync_door_wait_seconds``: a wait past it — behind a turn possibly\nHITL-paused on another worker — is the loud, retriable 503 ``ThreadBusyError`` rather than a\nblock past the proxy timeout.\n\nReturns ``{\"removed\", \"route_name\", \"thread_id\", \"states_erased\"}``, where ``removed`` counts\nthe answer records this call deleted (0 when a prior run already cleared them, when their rows\nhad expired under the retention TTL, or when the id was never stored) and ``states_erased``\ncounts the thread-subject declared-state records forgotten across the routes the thread spans\n(0 when the states feature is off or the thread held no declared state).",
+        "description": "Forget ONE conversation thread: its agent checkpoint, its answer records and its thread indexes.\n\nA later message on the same address starts a memory the deleted turns never touched. A LINKED\nperson's aggregated ``bridge:@person:{id}`` thread is forgotten across every route index it\nspans.\n\nForgetting is ABSOLUTE: a valid id on its own route always succeeds, even when nothing is\nstored. An aged-out thread whose answer records already expired under the retention TTL,\nor one never seen, answers ``removed=0`` and never a 404 — and its checkpoint is deleted\nregardless, because that memory defaults to keep-forever and is otherwise left behind once\nthe records lapse. A route-keyed id MUST carry the route's ``bridge:{route_name}:`` prefix;\nan id belonging to another route is a loud 400, the sole guard stopping a delete on one\nroute from wiping another route's memory. A person ``bridge:@person:{id}`` thread whose\nperson is unknown, or whose ``route_name`` is not one of the person's routes, is a loud\n404. A turn IN FLIGHT on the thread (an ``accepted`` intake still holding a live lease) is\na 409: its completion re-writes checkpoint state and re-stamps the indexes behind the\ndelete, half-forgetting the memory — retry once it drains. The guard is re-checked under\nthe FIFO, so a turn admitted while the lock is being taken is refused before any teardown,\nnever left to re-create memory behind the delete. A ``route_name`` that is not a valid\nslug, or a blank ``thread_id``, is a 400.\n\nCaller authority is the door's grantable write action — the SAME write grant that creates\na route deletes routes and forgets threads — never a per-thread owner check.\n\nThe teardown runs in an order an interruption cannot strand: the checkpoint FIRST — its\nmemory is reachable only through the indexes once this call returns, so it must go while\nthe indexes still name the thread to bring a re-run back — then the records and the indexes\ntogether, the index being the durable marker of an owed reclamation and torn down LAST.\nIdempotent under re-run, so a partial completion is FINISHED by a retry.\n\nThe whole teardown runs under the thread's per-thread FIFO (the lock an operator send and\nan in-flight turn take), so an operator send already in flight on the thread within this\nworker drains BEFORE the delete rather than half-behind it; a full queue is the loud,\nretriable 503 that FIFO raises before anything is torn down. As a live-caller sync door the\nacquisition is bounded by ``sync_door_wait_seconds``: a wait past it — behind a turn possibly\nHITL-paused on another worker — is the loud, retriable 503 ``ThreadBusyError`` rather than a\nblock past the proxy timeout.\n\nReturns ``{\"removed\", \"route_name\", \"thread_id\", \"states_erased\"}``, where ``removed`` counts\nthe answer records this call deleted (0 when a prior run already cleared them, when their rows\nhad expired under the retention TTL, or when the id was never stored) and ``states_erased``\ncounts the thread-subject declared-state records forgotten across the routes the thread spans\n(0 when the states feature is off or the thread held no declared state).\n\nA send still going out on the thread when this call runs is forgotten when it ends, not by\nthis call: for at most one settle deadline its ``sending`` row, in no thread index, still holds\nthe participant's address, and ``removed`` does not count it.",
         "operationId": "delete_api_conversations_route_name_thread",
         "parameters": [
           {
@@ -26651,7 +27496,7 @@
     },
     "/api/conversations/{route_name}/thread/messages": {
       "post": {
-        "description": "Send a message BY HAND into ``thread_id`` on ``route_name`` as the route identity.\n\nReturns ``{\"message_id\", \"thread_id\"}``. No turn runs: the message is stored already\n``answered`` and delivered through the same machine a produced answer takes.\n\n``media`` (a list of ``{\"kind\", \"url\", \"caption\"?, \"filename\"?}`` display items),\n``location`` (a shared map pin ``{\"latitude\", \"longitude\", \"name\"?, \"address\"?}``),\n``template`` (a pre-approved out-of-window template ``{\"name\", \"language\", \"parameters\"?}`` —\n``parameters`` is the channel-owned opaque runtime-argument object), ``options`` (a list of\nFLAT tappable option objects —\neach a ``{\"kind\": \"reply\", \"text\"}`` reply or a ``{\"kind\": \"link\", \"label\", \"url\"}`` link\naction), ``sections`` (the SECTIONED tappable-options alternative — titled groups of reply\nrows), ``header``/``footer`` (a media header / trailing line composing an interactive\nmessage) and ``schema`` (an ask-less form's\nanswer schema — the channel renders ``text`` as the form's prompt, and the participant's\nsubmission enters the conversation as an ordinary inbound message) are OPTIONAL\nricher-send forms — FULL parity with the flow answer path's ``AnswerPart`` vocabulary —\ndelivered ALONGSIDE ``text`` — the message is then stored and delivered as one rich\npart, exactly as a produced rich answer is, including the delivery machine's capability\ngate (a channel that does not advertise the matching ``supports_*_notifications`` flag\nnever receives the part; the record fails loudly instead of the field dropping). A\ncontract-invalid value (an empty list/dict, an over-cap value, or a combination the shared\ncomposition matrix refuses — ``options`` XOR ``sections``, ``schema`` excludes both,\n``header``/``footer`` require a choice surface, ``template`` standalone) is a loud 400;\nomit them all for a plain text send.\n\nAllowed in either mode and it never flips the mode. Blank ``text`` is a loud 400, and a\npresent-but-blank ``address`` is a 400. The thread-belongs-to-route guard is the thread\ndelete's: a route-keyed id must carry the route's ``bridge:{route_name}:`` prefix (400\notherwise), a person thread must be on the named route (404 otherwise). ``address`` picks\nthe send target on a LINKED person's aggregated thread — it must be one of the person's\naddresses (400 otherwise); with no ``address`` the target is the thread's newest record,\nand an empty person thread with no ``address`` is a 400. For an agent target that holds\nthread memory the message is appended to the thread's checkpoint as an ``assistant`` reply\nBEFORE the record is created; an append that fails is a loud 500 and no record is created.\nThe send takes the thread's per-thread FIFO, so it waits behind an in-flight turn and\nnever interleaves it; a full queue is a loud, retriable 503. As a live-caller sync door the\nwait to acquire the slot is bounded by ``sync_door_wait_seconds``: a wait past it — behind a\nturn possibly HITL-paused on another worker — is the loud, retriable 503 ``ThreadBusyError``\nrather than a block past the proxy timeout.\n\nCaller authority is the door's grantable ``write`` action — the same write grant that\nforgets threads — and the record names the calling operator. An unauthenticated caller\n(access control disabled or unbound) is a loud 501, since an operator action must be\nattributable.",
+        "description": "Send a message BY HAND into ``thread_id`` on ``route_name`` as the route identity.\n\nReturns ``{\"message_id\", \"thread_id\"}``. No turn runs: the message is stored already\n``answered`` and delivered through the same machine a produced answer takes.\n\n``media`` (a list of ``{\"kind\", \"url\", \"caption\"?, \"filename\"?}`` display items),\n``location`` (a shared map pin ``{\"latitude\", \"longitude\", \"name\"?, \"address\"?}``),\n``template`` (a pre-approved out-of-window template ``{\"name\", \"language\", \"parameters\"?}`` —\n``parameters`` is the channel-owned opaque runtime-argument object), ``options`` (a list of\nFLAT tappable option objects —\neach a ``{\"kind\": \"reply\", \"text\"}`` reply or a ``{\"kind\": \"link\", \"label\", \"url\"}`` link\naction), ``sections`` (the SECTIONED tappable-options alternative — titled groups of reply\nrows), ``header``/``footer`` (a media header / trailing line composing an interactive\nmessage) and ``schema`` (an ask-less form's\nanswer schema — the channel renders ``text`` as the form's prompt, and the participant's\nsubmission enters the conversation as an ordinary inbound message) are OPTIONAL\nricher-send forms — FULL parity with the flow answer path's ``AnswerPart`` vocabulary —\ndelivered ALONGSIDE ``text`` — the message is then stored and delivered as one rich\npart, exactly as a produced rich answer is, including the delivery machine's capability\ngate (a channel that does not advertise the matching ``supports_*_notifications`` flag\nnever receives the part; the record fails loudly instead of the field dropping). A\ncontract-invalid value (an empty list/dict, an over-cap value, or a combination the shared\ncomposition matrix refuses — ``options`` XOR ``sections``, ``schema`` excludes both,\n``header``/``footer`` require a choice surface, ``template`` standalone) is a loud 400;\nomit them all for a plain text send.\n\nAllowed in either mode and it never flips the mode. Blank ``text`` is a loud 400, and a\npresent-but-blank ``address`` is a 400. The thread-belongs-to-route guard is the thread\ndelete's: a route-keyed id must carry the route's ``bridge:{route_name}:`` prefix (400\notherwise), a person thread must be on the named route (404 otherwise). ``address`` picks\nthe send target on a LINKED person's aggregated thread — it must be one of the person's\naddresses (400 otherwise); with no ``address`` the target is the thread's newest record\nthat is not a send record, and a person thread with no such record and no ``address`` is a\n400. For an agent target that holds thread memory the message is appended to the thread's\ncheckpoint as an ``assistant`` reply BEFORE the record is created; an append that fails is a\nloud 500 and no record is created.\nThe send takes the thread's per-thread FIFO, so it waits behind an in-flight turn and\nnever interleaves it; a full queue is a loud, retriable 503. As a live-caller sync door the\nwait to acquire the slot is bounded by ``sync_door_wait_seconds``: a wait past it — behind a\nturn possibly HITL-paused on another worker — is the loud, retriable 503 ``ThreadBusyError``\nrather than a block past the proxy timeout.\n\nCaller authority is the door's grantable ``write`` action — the same write grant that\nforgets threads — and the record names the calling operator. An unauthenticated caller\n(access control disabled or unbound) is a loud 501, since an operator action must be\nattributable.",
         "operationId": "post_api_conversations_route_name_thread_messages",
         "parameters": [
           {
@@ -27526,6 +28371,212 @@
         "summary": "List the worker fleet",
         "tags": [
           "backend"
+        ]
+      }
+    },
+    "/api/hook-runs": {
+      "get": {
+        "description": "Kept hook runs, with the outstanding and failed totals; never their payloads.\n\n``status`` ``outstanding`` lists the pending and running runs, the soonest due first;\n``failed`` the failed runs, the most recently failed first; none lists both, outstanding\nfirst. A page holds at most ``limit`` runs; ``cursor`` continues from a page's ``next_cursor``.",
+        "operationId": "get_api_hook_runs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/HookRunsPage"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Request failed validation."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "List hook runs",
+        "tags": [
+          "hooks"
+        ]
+      }
+    },
+    "/api/hook-runs/{id}": {
+      "delete": {
+        "description": "Delete a failed hook run for good: its hook never runs again for that event.",
+        "operationId": "delete_api_hook_runs_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/HookRunDiscarded"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Discard a failed hook run",
+        "tags": [
+          "hooks"
+        ],
+        "x-destructive": true
+      }
+    },
+    "/api/hook-runs/{id}/retry": {
+      "post": {
+        "description": "Re-queue a failed hook run as a fresh run with the same id, and so the same idempotency key.\n\nA run whose hook started its tool replays that start alone; any other runs its hook again on\nthe current parked entries. A run whose hook committed a resume or a take is refused: retrying\nit would act twice, so it can only be discarded. Answers the re-queued run.",
+        "operationId": "post_api_hook_runs_id_retry",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/HookRunView"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Retry a failed hook run",
+        "tags": [
+          "hooks"
         ]
       }
     },

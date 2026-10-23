@@ -348,7 +348,7 @@ async def test_ask_round_trip_over_whatsapp(bridge: BridgeHarness, uniq: Callabl
             result = await mcp.call_tool(
                 "ask", {"question": question, "channel": "whatsapp", "recipient": BRIDGE_WHATSAPP_CLIENT}
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -382,7 +382,7 @@ async def _ask_select(bridge: BridgeHarness, *, question: str, recipient: str, o
                     "options": options,
                 },
             )
-        return result.data
+        return result.data.answer
 
     return asyncio.create_task(ask())
 
@@ -677,7 +677,7 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
                     "schema": _FORM_SCHEMA,
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -770,7 +770,7 @@ async def test_form_with_odd_property_names_maps_to_identifier_safe_flow_and_ans
                     "schema": schema,
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -832,7 +832,7 @@ async def test_form_controls_render_native_flow_components_and_answer_resolves(
                     "wording": {"form": {"open": "Open the form"}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -917,7 +917,7 @@ async def test_form_range_pair_degrades_to_two_controls_when_a_sibling_depends_o
                     "schema": _RANGE_WITH_DEPENDENT_SIBLING_SCHEMA,
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -930,6 +930,300 @@ async def test_form_range_pair_degrades_to_two_controls_when_a_sibling_depends_o
         assert _component_by_name(flow_json, "CalendarPicker", "start")["mode"] == "single"
         assert _component_by_name(flow_json, "CalendarPicker", "end")["mode"] == "single"
         assert flow_json["data_api_version"] == "3.0"
+    finally:
+        await cancel_and_join(ask_task)
+
+
+# A range with a time on each end, the times declared LAST in the schema: the merged range picker
+# is followed by the start's time, then the end's time, each a text field.
+_TIMED_RANGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "start": {"type": "string", "format": "date", "title": "From"},
+        "end": {"type": "string", "format": "date", "title": "To", "rangeStart": "start"},
+        "start_time": {"type": "string", "format": "time", "title": "From time", "timeOf": "start"},
+        "end_time": {"type": "string", "format": "time", "title": "To time", "timeOf": "end"},
+    },
+    "required": ["start", "end", "start_time", "end_time"],
+}
+_TIME_ORDER_WORD = "End time is before start"
+_TIME_ORDER_SENTENCE = "The end time must be on or after the start time"
+_TIMED_DAY = "2026-05-01"
+
+
+async def _ask_timed_form(bridge: BridgeHarness, arguments: dict) -> asyncio.Task:
+    """Start a WhatsApp form ask on replica A; the task resolves with the answer."""
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool("ask", {"channel": "whatsapp", "answer_format": "form", **arguments})
+        return result.data.answer
+
+    return asyncio.create_task(ask())
+
+
+def _timed_entries(start_time: str, end_time: str) -> dict:
+    """The entries of the merged range picker and the two time fields, on one day."""
+    return {
+        "start": {"start-date": _TIMED_DAY, "end-date": _TIMED_DAY},
+        "start_time": start_time,
+        "end_time": end_time,
+    }
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_timed_range_draws_each_time_after_the_picker_and_refuses_an_earlier_end_time(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-timed-q")
+    wa_id = _fresh_wa_id()
+    ask_task = await _ask_timed_form(bridge, {"question": question, "recipient": wa_id, "schema": _TIMED_RANGE_SCHEMA})
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_json, flow_token, screen_data = _sent_flow(bridge, send)
+        # The merged range picker, then the start's time, then the end's time.
+        assert _flow_control_names(flow_json) == ["start", "start_time", "end_time"]
+        assert _component_by_name(flow_json, "CalendarPicker", "start")["mode"] == "range"
+        assert _text_input_by_name(flow_json, "end_time")["error-message"] == "${data.end_time__err}"
+
+        # The same day with an earlier end time: the data endpoint keeps the person on the screen
+        # and pins the channel's word on the END's time control.
+        refused = await bridge.whatsapp_flow_exchange(
+            whatsapp_flow_action_request(
+                flow_json,
+                screen="SCREEN_A",
+                flow_token=flow_token,
+                form=_timed_entries("10:00", "09:00"),
+                data=screen_data,
+            )
+        )
+        assert refused["screen"] == "SCREEN_A", refused
+        assert refused["data"]["end_time__err"] == _TIME_ORDER_WORD
+        assert refused["data"]["start_time__err"] == ""
+        assert refused["data"]["error_message"] == f"To time: {_TIME_ORDER_SENTENCE}"
+        assert not ask_task.done()
+
+        # A later end time completes the Flow; the labels come in drawing order.
+        params = await _complete_flow(
+            bridge,
+            whatsapp_flow_action_request(
+                flow_json,
+                screen="SCREEN_A",
+                flow_token=flow_token,
+                form=_timed_entries("10:00", "10:30"),
+                data=refused["data"],
+            ),
+            wa_id,
+            expected={"From": _TIMED_DAY, "From time": "10:00", "To": _TIMED_DAY, "To time": "10:30"},
+        )
+        assert list(params) == ["flow_token", "From", "From time", "To", "To time"]
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        await cancel_and_join(ask_task)
+
+    assert resolved == {"start": _TIMED_DAY, "end": _TIMED_DAY, "start_time": "10:00", "end_time": "10:30"}
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_timed_range_refusal_reads_the_caller_words_on_the_end_time(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-timed-words-q")
+    wa_id = _fresh_wa_id()
+    words = "Pick a later end time"
+    ask_task = await _ask_timed_form(
+        bridge,
+        {
+            "question": question,
+            "recipient": wa_id,
+            "schema": _TIMED_RANGE_SCHEMA,
+            "wording": {"form": {"fields": {"end_time": {"invalid": words}}}},
+        },
+    )
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_json, flow_token, screen_data = _sent_flow(bridge, send)
+        refused = await bridge.whatsapp_flow_exchange(
+            whatsapp_flow_action_request(
+                flow_json,
+                screen="SCREEN_A",
+                flow_token=flow_token,
+                form=_timed_entries("10:00", "09:00"),
+                data=screen_data,
+            )
+        )
+        assert refused["data"]["end_time__err"] == words
+        assert refused["data"]["error_message"] == f"To time: {words}"
+    finally:
+        await cancel_and_join(ask_task)
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_range_with_a_start_time_only_completes_with_the_time_after_its_date(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-start-time-q")
+    wa_id = _fresh_wa_id()
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": _TIMED_RANGE_SCHEMA["properties"]["start"],
+            "end": _TIMED_RANGE_SCHEMA["properties"]["end"],
+            "start_time": _TIMED_RANGE_SCHEMA["properties"]["start_time"],
+        },
+        "required": ["start", "end", "start_time"],
+    }
+    ask_task = await _ask_timed_form(bridge, {"question": question, "recipient": wa_id, "schema": schema})
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_json, flow_token, screen_data = _sent_flow(bridge, send)
+        assert _flow_control_names(flow_json) == ["start", "start_time"]
+        params = await _complete_flow(
+            bridge,
+            whatsapp_flow_action_request(
+                flow_json,
+                screen="SCREEN_A",
+                flow_token=flow_token,
+                form={"start": {"start-date": _TIMED_DAY, "end-date": "2026-05-03"}, "start_time": "09:00"},
+                data=screen_data,
+            ),
+            wa_id,
+            expected={"From": _TIMED_DAY, "From time": "09:00", "To": "2026-05-03"},
+        )
+        assert list(params) == ["flow_token", "From", "From time", "To"]
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        await cancel_and_join(ask_task)
+
+    assert resolved == {"start": _TIMED_DAY, "end": "2026-05-03", "start_time": "09:00"}
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_timed_range_with_a_review_page_draws_and_reads_back_each_time_after_its_date(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-timed-review-q")
+    wa_id = _fresh_wa_id()
+    pages = [
+        {"title": "Dates", "fields": ["start", "end", "start_time", "end_time"]},
+        {"title": "Review", "fields": [], "kind": "review"},
+    ]
+    ask_task = await _ask_timed_form(
+        bridge, {"question": question, "recipient": wa_id, "schema": _TIMED_RANGE_SCHEMA, "pages": pages}
+    )
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_json, _, _ = _sent_flow(bridge, send)
+        # A form with a review page merges no pair: two date pickers, each followed by its time.
+        assert _flow_control_names(flow_json) == ["start", "start_time", "end", "end_time"]
+        assert _component_by_name(flow_json, "CalendarPicker", "end")["mode"] == "single"
+        readback = [
+            child["text"]
+            for child in _components_of_type(flow_json, "TextBody")
+            if isinstance(child.get("text"), str) and "__val}" in child["text"]
+        ]
+        assert readback == [
+            "From: ${data.start__val}",
+            "From time: ${data.start_time__val}",
+            "To: ${data.end__val}",
+            "To time: ${data.end_time__val}",
+        ]
+    finally:
+        await cancel_and_join(ask_task)
+
+
+# A yes/no field read back on a review page: the readback line is an ``If`` on the field's
+# carried value, choosing between two literal lines baked into the published Flow.
+_BOOLEAN_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {"agree": {"type": "boolean", "title": "Agree"}},
+}
+_BOOLEAN_REVIEW_PAGES = [
+    {"title": "Ask", "fields": ["agree"]},
+    {"title": "Review", "fields": [], "kind": "review"},
+]
+
+
+def _boolean_readbacks(flow_json: dict) -> list[dict]:
+    """Every review readback ``If`` across the Flow's screens: a condition on a carried value."""
+    return [
+        child
+        for screen in flow_json["screens"]
+        for child in screen["layout"]["children"]
+        if child.get("type") == "If" and str(child.get("condition", "")).endswith("__val}")
+    ]
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+@pytest.mark.parametrize(
+    ("wording", "true_line", "false_line"),
+    [
+        pytest.param(
+            {"form": {"fields": {"agree": {"true_label": "Agreed", "false_label": "Declined"}}}},
+            "Agree: Agreed",
+            "Agree: Declined",
+            id="caller-words",
+        ),
+        pytest.param(None, "Agree: Yes", "Agree: No", id="built-in-words"),
+    ],
+)
+async def test_boolean_review_readback_reads_the_callers_words_or_yes_and_no(
+    bridge: BridgeHarness,
+    uniq: Callable[[str], str],
+    wording: dict | None,
+    true_line: str,
+    false_line: str,
+) -> None:
+    question = uniq("l7-boolean-review-q")
+    arguments: dict = {
+        "question": question,
+        "recipient": _fresh_wa_id(),
+        "schema": _BOOLEAN_REVIEW_SCHEMA,
+        "pages": _BOOLEAN_REVIEW_PAGES,
+    }
+    if wording is not None:
+        arguments["wording"] = wording
+    ask_task = await _ask_timed_form(bridge, arguments)
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_id = send["payload"]["interactive"]["action"]["parameters"]["flow_id"]
+        created = next(flow for flow in bridge.fake_whatsapp.flows if flow["id"] == flow_id)
+        readbacks = _boolean_readbacks(json.loads(created["flow_json"]))
+        assert len(readbacks) == 1, readbacks
+        (readback,) = readbacks
+        assert readback["condition"].endswith("agree__val}")
+        assert readback["then"] == [{"type": "TextBody", "text": true_line}]
+        assert readback["else"] == [{"type": "TextBody", "text": false_line}]
     finally:
         await cancel_and_join(ask_task)
 
@@ -997,8 +1291,11 @@ def _sent_flow(bridge: BridgeHarness, send: dict) -> tuple[dict, str, dict]:
 
 async def _complete_flow(
     bridge: BridgeHarness, request: dict, wa_id: str, *, expected: dict[str, str], port: int | None = None
-) -> None:
-    """Fire the completing ``request``, check the completion params, and relay them as the nfm_reply."""
+) -> dict:
+    """Fire the completing ``request``, check the completion params, and relay them as the nfm_reply.
+
+    Returns the completion params as the endpoint answered them, in their order.
+    """
     completed = await bridge.whatsapp_flow_exchange(request)
     assert completed["screen"] == "SUCCESS", completed
     params = completed["data"]["extension_message_response"]["params"]
@@ -1006,6 +1303,7 @@ async def _complete_flow(
     reply = bridge.whatsapp_nfm_reply(phone_number_id=BRIDGE_WHATSAPP_PHONE_ID, wa_id=wa_id, response=params)
     resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=port or bridge.stack.port_b)
     assert resp.status_code == 200, resp.text
+    return params
 
 
 @pytest.mark.needs(
@@ -1035,7 +1333,7 @@ async def test_shape_checked_form_refuses_a_bad_email_inside_the_form_then_compl
                     "wording": {"form": {"fields": {"email": {"invalid": "Enter your full address"}}}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -1117,7 +1415,7 @@ async def test_shape_checked_step_refuses_its_own_bad_email_and_advances_on_a_go
                     "pages": _SHAPED_PAGES,
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -1220,25 +1518,39 @@ def _if_conditions_of(children: list[dict], name: str, conditions: tuple[str, ..
     "setting:tool:ask",
     "topology:replicas",
 )
+@pytest.mark.parametrize(
+    ("wording", "required_sentence"),
+    [
+        pytest.param(None, "This field is required", id="default-sentence"),
+        # The required sentence rides the endpoint's answer, not the Flow JSON; the caller case
+        # also sets a form title, so it publishes a Flow of its own that the stub (reset before
+        # each spec) records.
+        pytest.param(
+            {"form": {"title": "Targets", "fields": {"target": {"required": "Pick a target first"}}}},
+            "Pick a target first",
+            id="caller-required",
+        ),
+    ],
+)
 async def test_multi_value_visible_when_fields_answer_from_the_shown_case_and_an_empty_one_is_required(
-    bridge: BridgeHarness, uniq: Callable[[str], str]
+    bridge: BridgeHarness, uniq: Callable[[str], str], wording: dict | None, required_sentence: str
 ) -> None:
     question = uniq("l7-multi-q")
     wa_id = _fresh_wa_id()
 
     async def ask() -> object:
+        arguments: dict = {
+            "question": question,
+            "channel": "whatsapp",
+            "recipient": wa_id,
+            "answer_format": "form",
+            "schema": _MULTI_VALUE_SCHEMA,
+        }
+        if wording is not None:
+            arguments["wording"] = wording
         async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
-            result = await mcp.call_tool(
-                "ask",
-                {
-                    "question": question,
-                    "channel": "whatsapp",
-                    "recipient": wa_id,
-                    "answer_format": "form",
-                    "schema": _MULTI_VALUE_SCHEMA,
-                },
-            )
-        return result.data
+            result = await mcp.call_tool("ask", arguments)
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -1261,7 +1573,8 @@ async def test_multi_value_visible_when_fields_answer_from_the_shown_case_and_an
 
         # ``kind`` b draws ``target__b`` and hides both days; the undrawn cases carry stale values the
         # endpoint must ignore. The person leaves the shown target empty and taps submit: the
-        # platform's check keeps them on the screen naming the empty shown field only.
+        # platform's check keeps them on the screen naming the empty shown field only, in the
+        # caller's ``required`` sentence when the ask set one.
         undrawn = {"target__a": "t1", "day__a": "2026-01-05", "day__c": "2026-01-06"}
         refused = await bridge.whatsapp_flow_exchange(
             whatsapp_flow_action_request(
@@ -1273,9 +1586,9 @@ async def test_multi_value_visible_when_fields_answer_from_the_shown_case_and_an
             )
         )
         assert refused["screen"] == "SCREEN_A", refused
-        assert refused["data"]["target__err"] == "This field is required"
+        assert refused["data"]["target__err"] == required_sentence
         assert refused["data"]["day__err"] == ""
-        assert refused["data"]["error_message"] == "Target: This field is required"
+        assert refused["data"]["error_message"] == f"Target: {required_sentence}"
         assert not ask_task.done()
 
         # Picking a target completes the form with the shown case's answer under the field's own key.
@@ -1394,6 +1707,99 @@ async def test_reacting_form_runs_its_field_reaction_over_a_bad_email_and_its_su
     }
 
 
+# A reacting form whose ``tier`` picks drive the ``e2e_form_reaction`` probe's three answers: a
+# re-filled label (gold), a raise (silver) and a field error on ``tier`` (bronze).
+_LINED_REACTING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string", "title": "Label"},
+        "tier": {"type": "string", "enum": ["gold", "silver", "bronze"], "title": "Tier"},
+        "email": {"type": "string", "format": "email", "title": "Email address"},
+    },
+    "required": ["label", "tier", "email"],
+}
+
+# The reason the platform's reaction door gives when the probe raises on a silver pick.
+_REACTION_RAISED_REASON = "reaction handler 'e2e_form_reaction' failed"
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "probe-tools",
+    "setting:seeded-access-control",
+    "store:redis",
+    "topology:replicas",
+)
+async def test_data_endpoint_answers_in_the_callers_error_line_and_could_not_update_line(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-lines-q")
+    wa_id = _fresh_wa_id()
+    caller_key = await bridge.mint_key(user_id=uniq("l7-lines-key"), scopes=["e2e-all"])
+    error_line = "Some answers need a second look"
+
+    async with bridge.stack.mcp(port=bridge.stack.port_a, auth=caller_key) as mcp:
+        await mcp.call_tool(
+            "e2e_reacting_form_ask",
+            {
+                "question": question,
+                "channel": "whatsapp",
+                "recipient": wa_id,
+                "schema": _LINED_REACTING_SCHEMA,
+                "reactions": {"field_changed": ["tier"]},
+                "expiry_seconds": 120.0,
+                "wording": {"form": {"error_line": error_line, "update_failed": "No update ({reason})"}},
+            },
+        )
+    send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+    flow_json, flow_token, screen_data = _sent_flow(bridge, send)
+
+    # A reaction that raises keeps the screen and shows the caller's could-not-update line, its
+    # {reason} filled with the reaction door's own reason.
+    raised = await bridge.whatsapp_flow_exchange(
+        whatsapp_flow_action_request(
+            flow_json,
+            screen="SCREEN_A",
+            flow_token=flow_token,
+            form={"label": "", "tier": "silver", "email": ""},
+            data=screen_data,
+            control="tier",
+        )
+    )
+    assert raised["screen"] == "SCREEN_A", raised
+    assert raised["data"]["error_message"] == f"No update ({_REACTION_RAISED_REASON})"
+
+    # A reaction's field errors ride the pop-up summary, which is the caller's error line in place
+    # of the built-in "Label: sentence".
+    refused_by_reaction = await bridge.whatsapp_flow_exchange(
+        whatsapp_flow_action_request(
+            flow_json,
+            screen="SCREEN_A",
+            flow_token=flow_token,
+            form={"label": "", "tier": "bronze", "email": ""},
+            data=raised["data"],
+            control="tier",
+        )
+    )
+    assert refused_by_reaction["screen"] == "SCREEN_A", refused_by_reaction
+    assert refused_by_reaction["data"]["error_message"] == error_line
+
+    # The platform's shape check on submit refuses the bad address in the caller's error line too.
+    refused_by_shape = await bridge.whatsapp_flow_exchange(
+        whatsapp_flow_action_request(
+            flow_json,
+            screen="SCREEN_A",
+            flow_token=flow_token,
+            form={"label": "x", "tier": "gold", "email": "dhdhdh"},
+            data=refused_by_reaction["data"],
+        )
+    )
+    assert refused_by_shape["screen"] == "SCREEN_A", refused_by_shape
+    assert refused_by_shape["data"]["email__err"] == _EMAIL_FIELD_WORD
+    assert refused_by_shape["data"]["error_message"] == error_line
+
+
 @pytest.mark.needs(
     "kind:channels:whatsapp",
     "helper:whatsapp",
@@ -1420,7 +1826,7 @@ async def test_form_wording_title_sets_the_single_screen_title(
                     "wording": {"form": {"title": "Form details"}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -1462,7 +1868,7 @@ async def test_form_open_label_is_reused_on_the_door_rejection_resend(
                     "wording": {"form": {"open": "Start now"}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -1518,7 +1924,7 @@ async def test_select_list_button_reads_the_caller_choice_wording_label(
                     "wording": {"choice": {"label": "Pick a region"}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -1557,7 +1963,7 @@ async def test_page_less_form_footer_reads_the_caller_submit_label(
                     "wording": {"form": {"submit": "Send answers"}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -1599,7 +2005,7 @@ async def test_numbered_text_select_reads_the_caller_reply_hint(
                     "wording": {"choice": {"reply_hint": "Type an option exactly."}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -1636,7 +2042,7 @@ async def test_confirm_tier1_link_line_reads_the_caller_template(
                     "wording": {"lines": {"answer_link": "Tap to reply: {url}"}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -1683,7 +2089,7 @@ async def test_door_rejection_resend_carries_the_caller_rejected_sentence(
                     "wording": {"answer": {"rejected": "Not accepted — {reason} — try again."}},
                 },
             )
-        return result.data
+        return result.data.answer
 
     ask_task = asyncio.create_task(ask())
     try:
@@ -1707,6 +2113,63 @@ async def test_door_rejection_resend_carries_the_caller_rejected_sentence(
         assert "Not accepted — amount: Enter a whole number — try again." in body
         assert "{reason}" not in body
         assert "Your last answer could not be accepted:" not in body
+    finally:
+        await cancel_and_join(ask_task)
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_door_rejection_resend_carries_the_callers_error_line_in_place_of_the_doors_reason(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-reject-line-q")
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"amount": {"type": "integer"}},
+                        "required": ["amount"],
+                    },
+                    "wording": {
+                        "form": {"error_line": "Check the amount"},
+                        "answer": {"rejected": "Not accepted — {reason}."},
+                    },
+                },
+            )
+        return result.data.answer
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        first = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        flow_token = first["payload"]["interactive"]["action"]["parameters"]["flow_token"]
+
+        # The door refuses the non-integer; the re-sent Flow's body fills the caller's refusal
+        # sentence with the caller's error line, never the door's own English reason.
+        reply = bridge.whatsapp_nfm_reply(
+            phone_number_id=BRIDGE_WHATSAPP_PHONE_ID,
+            wa_id=wa_id,
+            response={"flow_token": flow_token, "amount": "not-a-number"},
+        )
+        resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
+        assert resp.status_code == 200, resp.text
+        sends = await wait_channel_send_count(bridge.fake_whatsapp, question, 2)
+        body = sends[-1]["payload"]["interactive"]["body"]["text"]
+        assert "Not accepted — Check the amount." in body
+        assert "Enter a whole number" not in body
     finally:
         await cancel_and_join(ask_task)
 

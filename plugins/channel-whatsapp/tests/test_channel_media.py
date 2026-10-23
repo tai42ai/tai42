@@ -19,7 +19,7 @@ async def test_notify_media_sends_body_with_links_then_each_image(fake_redis: Fa
     fake_httpx.responses.append(_accepted("wamid.IMG1"))
     fake_httpx.responses.append(_accepted("wamid.IMG2"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         ChannelNotification(
             message="Here are the photos.",
             recipient=ALLOWED_A,
@@ -31,7 +31,7 @@ async def test_notify_media_sends_body_with_links_then_each_image(fake_redis: Fa
         )
     )
 
-    assert ids == ["wamid.BODY", "wamid.IMG1", "wamid.IMG2"]  # every wamid, in send order
+    assert outcome.message_ids == ["wamid.BODY", "wamid.IMG1", "wamid.IMG2"]  # every wamid, in send order
     # Body first, with the link item appended as a text line.
     assert fake_httpx.calls[0]["json"]["type"] == "text"
     assert fake_httpx.calls[0]["json"]["text"]["body"] == "Here are the photos.\nDetails page: https://docs.example/p/1"
@@ -46,7 +46,7 @@ async def test_notify_media_only_images_skip_the_body_send(fake_redis: FakeRedis
     fake_httpx.responses.append(_accepted("wamid.IMG1"))
     fake_httpx.responses.append(_accepted("wamid.IMG2"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         ChannelNotification(
             message="",
             recipient=ALLOWED_A,
@@ -57,7 +57,7 @@ async def test_notify_media_only_images_skip_the_body_send(fake_redis: FakeRedis
         )
     )
 
-    assert ids == ["wamid.IMG1", "wamid.IMG2"]
+    assert outcome.message_ids == ["wamid.IMG1", "wamid.IMG2"]
     assert len(fake_httpx.calls) == 2  # no body message — only the two images
     assert fake_httpx.calls[0]["json"]["image"] == {"link": "https://cdn.example/a.jpg", "caption": "Front"}
     assert fake_httpx.calls[1]["json"]["image"] == {"link": "https://cdn.example/b.jpg"}
@@ -69,7 +69,7 @@ async def test_notify_media_only_with_links_renders_links_as_the_body(fake_redis
     fake_httpx.responses.append(_accepted("wamid.BODY"))
     fake_httpx.responses.append(_accepted("wamid.IMG1"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         ChannelNotification(
             message="",
             recipient=ALLOWED_A,
@@ -80,7 +80,7 @@ async def test_notify_media_only_with_links_renders_links_as_the_body(fake_redis
         )
     )
 
-    assert ids == ["wamid.BODY", "wamid.IMG1"]
+    assert outcome.message_ids == ["wamid.BODY", "wamid.IMG1"]
     assert fake_httpx.calls[0]["json"]["text"]["body"] == "Details page: https://docs.example/p/1"
     assert fake_httpx.calls[1]["json"]["image"] == {"link": "https://cdn.example/b.jpg"}
 
@@ -213,7 +213,7 @@ async def test_notify_location_sends_location_message(fake_redis: FakeRedis, fak
     fake_httpx.responses.append(_accepted("wamid.BODY"))
     fake_httpx.responses.append(_accepted("wamid.LOC"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         ChannelNotification(
             message="Here is the venue",
             recipient=ALLOWED_A,
@@ -221,7 +221,7 @@ async def test_notify_location_sends_location_message(fake_redis: FakeRedis, fak
         )
     )
 
-    assert ids == ["wamid.BODY", "wamid.LOC"]
+    assert outcome.message_ids == ["wamid.BODY", "wamid.LOC"]
     assert fake_httpx.calls[0]["json"]["text"]["body"] == "Here is the venue"
     assert fake_httpx.calls[1]["json"] == {
         "messaging_product": "whatsapp",
@@ -234,11 +234,11 @@ async def test_notify_location_sends_location_message(fake_redis: FakeRedis, fak
 async def test_notify_location_only_blank_message_sends_just_location(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     fake_httpx.responses.append(_accepted("wamid.LOC"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         ChannelNotification(message="", recipient=ALLOWED_A, location=LocationElement(latitude=1.0, longitude=2.0))
     )
 
-    assert ids == ["wamid.LOC"]
+    assert outcome.message_ids == ["wamid.LOC"]
     assert len(fake_httpx.calls) == 1
     assert fake_httpx.calls[0]["json"]["location"] == {"latitude": 1.0, "longitude": 2.0}
 
@@ -249,7 +249,7 @@ async def test_notify_document_video_audio_media_each_send_native(fake_redis: Fa
     fake_httpx.responses.append(_accepted("wamid.VID"))
     fake_httpx.responses.append(_accepted("wamid.AUD"))
 
-    ids = await WhatsAppChannel().notify(
+    outcome = await WhatsAppChannel().notify(
         ChannelNotification(
             message="Files attached.",
             recipient=ALLOWED_A,
@@ -261,7 +261,7 @@ async def test_notify_document_video_audio_media_each_send_native(fake_redis: Fa
         )
     )
 
-    assert ids == ["wamid.BODY", "wamid.DOC", "wamid.VID", "wamid.AUD"]
+    assert outcome.message_ids == ["wamid.BODY", "wamid.DOC", "wamid.VID", "wamid.AUD"]
     assert fake_httpx.calls[1]["json"] == {
         "messaging_product": "whatsapp",
         "to": ALLOWED_A,

@@ -270,6 +270,17 @@ _FORM_SUBMIT_SCRIPT = """<script>
     }
     return false;
   }
+  // A value as the review readback draws it: a list joined, a boolean in the caller's yes/no
+  // words (data-true-label / data-false-label on its checkbox) when set, else the value as text.
+  function readbackText(name, value) {
+    if (Array.isArray(value)) { return value.join(', '); }
+    if (typeof value === 'boolean') {
+      var box = controlsFor(name)[0];
+      var word = box ? box.getAttribute(value ? 'data-true-label' : 'data-false-label') : null;
+      if (word !== null) { return word; }
+    }
+    return String(value);
+  }
   function fillReadback(step) {
     var dl = step.querySelector('[data-readback]');
     if (!dl) { return; }
@@ -279,7 +290,7 @@ _FORM_SUBMIT_SCRIPT = """<script>
       if (!(name in values)) { return; }
       var dt = document.createElement('dt'); dt.textContent = labels[name];
       var dd = document.createElement('dd');
-      dd.textContent = Array.isArray(values[name]) ? values[name].join(', ') : String(values[name]);
+      dd.textContent = readbackText(name, values[name]);
       dl.appendChild(dt); dl.appendChild(dd);
     });
   }
@@ -353,6 +364,7 @@ _FORM_SUBMIT_SCRIPT = """<script>
     var isArray = (first.getAttribute('data-kind') === 'array');
     var isChip = fieldset.classList.contains('chips');
     var wasRequired = first.hasAttribute('required');
+    var requiredWords = first.getAttribute('data-required');
     var selected = {};
     for (var i = 0; i < cs.length; i++) { if (cs[i].checked) { selected[cs[i].value] = true; } }
     var old = fieldset.querySelectorAll('label.choice');
@@ -367,6 +379,7 @@ _FORM_SUBMIT_SCRIPT = """<script>
       input.setAttribute('data-kind', isArray ? 'array' : 'string');
       input.setAttribute('value', o.value);
       if (!isArray && wasRequired) { input.setAttribute('required', ''); }
+      if (!isArray && requiredWords !== null) { input.setAttribute('data-required', requiredWords); }
       if (selected[o.value]) { input.checked = true; }
       label.appendChild(input);
       label.appendChild(document.createTextNode(' ' + optionLabel(o)));
@@ -420,14 +433,35 @@ _FORM_SUBMIT_SCRIPT = """<script>
     try { re = new RegExp(source); } catch (e) { return false; }
     return !re.test(value);
   }
+  // The day number of a value's written date: its leading YYYY-MM-DD (a date-time value's date part).
   function dayNumber(iso) {
-    var p = iso.split('-');
+    var p = iso.slice(0, 10).split('-');
     return Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2])) / 86400000;
+  }
+  // The seconds since midnight an HH:MM[:SS] value names.
+  function secondsOf(time) {
+    var p = time.split(':');
+    return Number(p[0]) * 3600 + Number(p[1]) * 60 + (p.length > 2 ? Number(p[2]) : 0);
+  }
+  // A range END's time before its START's time on the same date (both dates and times given).
+  function timeBeforeStart(el, value) {
+    var startTimeName = el.getAttribute('data-range-start-time');
+    if (startTimeName === null) { return false; }
+    var endDate = controlsFor(el.getAttribute('data-time-of'))[0];
+    var startDateName = endDate ? endDate.getAttribute('data-range-start') : null;
+    var startDate = startDateName !== null ? controlsFor(startDateName)[0] : null;
+    var startTime = controlsFor(startTimeName)[0];
+    if (!endDate || !startDate || !startTime) { return false; }
+    if (!endDate.value || !startDate.value || !startTime.value) { return false; }
+    return dayNumber(endDate.value) === dayNumber(startDate.value) && secondsOf(value) < secondsOf(startTime.value);
   }
   // The control's first broken shape as its sentence, or null. Native constraint states map to
   // their kind; the schema pattern and the platform's format regex are tested with an unanchored
   // RegExp search (JSON Schema's semantics); a range END checks its order and inclusive span
-  // against its START. An empty value is unfilled — a required one is the browser's own check.
+  // against its START by written date (a pair of two date-time ends, marked data-range-instant, is
+  // ordered by the answer door), and a range END's time its order against the START's time on the
+  // same date. An empty value is unfilled — a required one shows the caller's required sentence
+  // when set, else the browser's own prompt.
   function shapeError(el) {
     var v = el.validity;
     if (v && (v.badInput || v.stepMismatch)) { return shapeSentence(el, 'type'); }
@@ -444,7 +478,7 @@ _FORM_SUBMIT_SCRIPT = """<script>
     var pattern = el.getAttribute('data-pattern');
     if (pattern !== null && regexFails(pattern, value)) { return shapeSentence(el, 'pattern'); }
     var start = el.getAttribute('data-range-start');
-    if (start !== null) {
+    if (start !== null && !el.hasAttribute('data-range-instant')) {
       var startControl = controlsFor(start)[0];
       if (startControl && startControl.value) {
         var days = dayNumber(value) - dayNumber(startControl.value) + 1;
@@ -456,6 +490,7 @@ _FORM_SUBMIT_SCRIPT = """<script>
         }
       }
     }
+    if (timeBeforeStart(el, value)) { return shapeSentence(el, 'range_order'); }
     return null;
   }
   function applyDisplay(display) {
@@ -578,7 +613,15 @@ _FORM_SUBMIT_SCRIPT = """<script>
       var el = controls[c];
       var crow = el.closest('[data-field-row]');
       if (crow && crow.hidden) { continue; }
-      if (el.validity && el.validity.valueMissing) { el.reportValidity(); return false; }
+      if (el.validity && el.validity.valueMissing) {
+        // The caller's required sentence when set, pinned like a broken shape; else the
+        // browser's own prompt.
+        var own = el.getAttribute('data-required');
+        if (own === null) { el.reportValidity(); return false; }
+        pinFieldError(el.getAttribute('data-field'), own);
+        el.focus();
+        return false;
+      }
       var problem = shapeError(el);
       if (problem !== null) {
         pinFieldError(el.getAttribute('data-field'), problem);
@@ -591,7 +634,8 @@ _FORM_SUBMIT_SCRIPT = """<script>
     for (var g = 0; g < groups.length; g++) {
       if (groups[g].hidden) { continue; }
       if (!groups[g].querySelector('input[type="checkbox"]:checked')) {
-        err.textContent = text('choose_one');
+        var groupWords = groups[g].getAttribute('data-required');
+        err.textContent = groupWords === null ? text('choose_one') : groupWords;
         return false;
       }
     }

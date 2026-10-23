@@ -8,25 +8,24 @@ module carries that one hop:
 - :func:`index_send` writes a TTL'd ``provider_message_id -> {trace_id, span_id}``
   entry at the send seam when a trace is ambient, on the interactions Redis (the store
   the send surface already uses), scoped by the interactions ``key_prefix`` for
-  per-deployment isolation exactly as the notifications sink is.
-- :func:`record_send_receipt` is what the channel delivery-status webhooks call
-  when the conversation bridge does not own an outbound id (its ``record_delivery_status``
-  raised ``LookupError``): it resolves the id through this index and, on a hit, emits a
+  per-deployment isolation exactly as the notifications sink is. The trace index covers
+  every ``notify_user`` send.
+- :func:`record_send_receipt` resolves an id through this index and, on a hit, emits a
   ``delivery_receipt`` monitoring event onto the recorded trace/span with an EXPLICIT
   ``TraceContext`` — never an ambient emit, since the webhook runs in a detached context
   with no active trace. It returns whether the id was a known send, so the webhook
   keeps its genuinely-unknown-id log only on a miss.
 
-Send-outcome queries are deliberately TWO surfaces. An out-of-band send answers
-accepted-vs-delivered in one query here (send span + ``delivery_receipt`` in one
-trace); bridge-conversation deliveries belong to the conversation ledger. Never
-unify them at read time — federating the two stores costs a slow first fetch and
-cross-store pagination. If one query over both surfaces is ever needed, the shape
-is write-time stamping at the conversation seam.
+Every send that belongs to a conversation is in its conversation record, which settles on
+the channel's receipt through ``record_delivery_status``; for a recorded ``notify_user`` send
+that call also posts the trace receipt here. A receipt for a send outside any conversation
+finds no record (``record_delivery_status`` raises ``LookupError``) and reaches the trace
+through the channel's fallback call to :func:`record_send_receipt`.
 
-This index covers exactly what the conversation bridge's own ledger/receipt path does
-NOT — ``notify_user`` sends, which run no ConversationRecord. The bridge path stays
-untouched and authoritative for bridge messages.
+Send-outcome queries are deliberately TWO surfaces: the trace answers accepted-vs-delivered
+for a ``notify_user`` send (send span + ``delivery_receipt`` in one trace), and the
+conversation record answers it for every send of a conversation. Never unify them at read
+time — federating the two stores costs a slow first fetch and cross-store pagination.
 """
 
 from __future__ import annotations

@@ -12,7 +12,6 @@ from typing import Any
 
 import fakeredis
 import pytest
-from fakeredis import aioredis
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.store.store_registry import store_registry
 from tai42_kit.settings import bind_respawn_class_env
@@ -23,6 +22,7 @@ from tai42_skeleton.app.bus import SlotLostError, WorkerBus, WorkerKind
 from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings
 from tai42_skeleton.app.reload_gate import reload_gate
 
+from ..._fakes.kit_redis import KitFakeRedis
 from ._doubles import _Mixin
 
 
@@ -93,8 +93,8 @@ async def test_a_gated_reload_that_blocks_the_serving_loop_keeps_the_bus_slot(
     server = fakeredis.FakeServer()
 
     @asynccontextmanager
-    async def fake_ctx(client_cls, settings=None, *, fresh=False, **kwargs) -> AsyncIterator[aioredis.FakeRedis]:
-        client = aioredis.FakeRedis(server=server, decode_responses=True)
+    async def fake_ctx(client_cls, settings=None, *, fresh=False, **kwargs) -> AsyncIterator[KitFakeRedis]:
+        client = KitFakeRedis(server=server, decode_responses=True)
         try:
             yield client
         finally:

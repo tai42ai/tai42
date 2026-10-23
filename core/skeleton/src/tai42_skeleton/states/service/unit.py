@@ -570,6 +570,9 @@ class _UnitMixin(_StatesServiceBase):
     ) -> list[ApplyResult]:
         """Replay one subject's staged items through the apply path, validating once per staged batch.
 
+        A save is admitted when it is written, so its replay admits a person under its erase mark
+        (``admit_erasing``): the erase's drain finishes it rather than meeting a refusal.
+
         Each item runs unvalidated under its stage-time completed origin; after the last item of each
         batch the subject's document as it now stands is validated with the entry of the declaration
         version the replay holds locked, so the commit refuses only what one multi-op apply would.
@@ -581,12 +584,19 @@ class _UnitMixin(_StatesServiceBase):
             origin = staged[i].completed_origin
             if isinstance(item, StagedReplace):
                 record = await self._replace_completed(
-                    item.state, item.subject, item.data, origin=origin, conn=conn, validate=False
+                    item.state, item.subject, item.data, origin=origin, conn=conn, validate=False, admit_erasing=True
                 )
                 result = ApplyResult(applied=True, data=record.data, seq=record.seq, skipped=[])
             elif item.ops is not None:
                 result = await self._apply_completed(
-                    item.state, item.subject, item.ops, op_id=item.op_id, origin=origin, conn=conn, validate=False
+                    item.state,
+                    item.subject,
+                    item.ops,
+                    op_id=item.op_id,
+                    origin=origin,
+                    conn=conn,
+                    validate=False,
+                    admit_erasing=True,
                 )
             else:
                 if item.template_jq is None:
@@ -600,6 +610,7 @@ class _UnitMixin(_StatesServiceBase):
                     origin=origin,
                     conn=conn,
                     validate=False,
+                    admit_erasing=True,
                 )
                 result = ApplyResult(
                     applied=outcome.applied, data=outcome.data, seq=outcome.seq, skipped=outcome.skipped

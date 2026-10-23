@@ -27,6 +27,7 @@ def test_shape_keywords_are_the_keywords_a_value_can_break():
         "rangeStart",
         "minDays",
         "maxDays",
+        "timeOf",
     }
 
 
@@ -68,3 +69,17 @@ def test_form_shape_error_is_frozen_and_strict():
         FormShapeError.model_validate({"field": "a", "kind": "type", "params": {}, "message": "m", "nope": 1})
     with pytest.raises(ValidationError):
         FormShapeError(field="a", kind="not-a-kind", params={}, message="m")  # type: ignore[arg-type]
+
+
+def test_a_time_of_field_admits_an_invalid_wording():
+    from tai42_contract.interactions import FieldWording, check_form_wording_fields
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start"},
+            "end_time": {"type": "string", "format": "time", "timeOf": "end"},
+        },
+    }
+    check_form_wording_fields(schema, None, {"end_time": FieldWording(invalid="Pick a later time")})

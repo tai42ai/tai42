@@ -17,6 +17,7 @@ def _delivery_kwargs(**overrides: Any) -> dict[str, Any]:
         "answer_format": "text",
         "callback_url": "https://host.example/api/interactions/callback/tkt",
         "timeout_at": datetime(2026, 1, 1, tzinfo=UTC),
+        "sensitive": False,
     }
     base.update(overrides)
     return base
@@ -213,6 +214,7 @@ def test_channel_delivery_shape():
         "on_mismatch",
         "callback_url",
         "timeout_at",
+        "sensitive",
     }
     assert "template" not in ChannelDelivery.model_fields
 
@@ -233,6 +235,7 @@ def test_channel_delivery_carries_form_data_and_pages():
         pages=[FormPage(title="Step", fields=["color"])],
         callback_url="https://x/api/interactions/callback/t",
         timeout_at=datetime.now(UTC),
+        sensitive=False,
     )
     assert delivery.data is not None
     assert delivery.data.values == {"color": "red"}
@@ -256,6 +259,7 @@ def test_channel_delivery_carries_reactions_on_form():
         reactions=FormReactions(field_changed=["color"], submitted=True),
         callback_url="https://x/api/interactions/callback/t",
         timeout_at=datetime.now(UTC),
+        sensitive=False,
     )
     assert delivery.reactions is not None
     assert delivery.reactions.field_changed == ["color"]
@@ -276,6 +280,7 @@ def test_channel_delivery_rejects_reactions_on_non_form():
             reactions=FormReactions(submitted=True),
             callback_url="https://x/cb",
             timeout_at=datetime.now(UTC),
+            sensitive=False,
         )
 
 
@@ -293,6 +298,7 @@ def test_channel_delivery_rejects_form_extras_on_non_form():
             data=FormData(values={"x": 1}),
             callback_url="https://x/cb",
             timeout_at=datetime.now(UTC),
+            sensitive=False,
         )
 
 
@@ -310,6 +316,7 @@ def test_channel_delivery_carries_a_wording_form_chapter_on_a_form():
         wording=Wording.model_validate({"form": {"open": "Fill it in", "cancel": "Never mind", "back": "Go back"}}),
         callback_url="https://x/api/interactions/callback/t",
         timeout_at=datetime.now(UTC),
+        sensitive=False,
     )
     assert delivery.wording is not None
     assert delivery.wording.form is not None
@@ -441,3 +448,17 @@ def test_ask_accepts_on_mismatch_and_wording_keywords():
     wording = params["wording"]
     assert wording.kind is inspect.Parameter.KEYWORD_ONLY
     assert wording.default is None
+
+
+def test_delivery_requires_sensitive_and_round_trips_it():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelDelivery
+
+    kwargs = _delivery_kwargs()
+    kwargs.pop("sensitive")
+    with pytest.raises(ValidationError, match="sensitive"):
+        ChannelDelivery(**kwargs)
+    for value in (True, False):
+        delivery = ChannelDelivery(**_delivery_kwargs(sensitive=value))
+        assert ChannelDelivery.model_validate(delivery.model_dump()).sensitive is value

@@ -55,6 +55,23 @@ return 0
 """
 
 
+_RECONNECTED_CAUSE = (
+    "the reply subscription reconnected during reply collection; a reply sent while it was disconnected is lost"
+)
+
+
+class _ReplyLink:
+    """Whether the reply pub/sub reconnected; its reconnect hook sets ``reconnected``."""
+
+    def __init__(self) -> None:
+        """Start with no reconnect seen."""
+        self.reconnected = False
+
+    def mark_reconnected(self) -> None:
+        """Record a reconnect of the reply pub/sub."""
+        self.reconnected = True
+
+
 class WorkerBusPublishMixin:
     """The publisher surface of :class:`WorkerBus`: broadcast an op and collect a per-worker outcome.
 
@@ -139,8 +156,10 @@ class WorkerBusPublishMixin:
             # ``r.pubsub()`` is a non-I/O constructor, bound BEFORE the try so pubsub is
             # never unbound in the finally. A raising subscribe still reaches the finally,
             # which unsubscribes then ALWAYS closes the pub/sub (the aclose runs even if
-            # the unsubscribe raises) — no leaked connection on a failed join.
-            pubsub = r.pubsub()
+            # the unsubscribe raises) — no leaked connection on a failed join. A reconnect
+            # the retry hides inside a read is recorded on ``link`` and reported.
+            link = _ReplyLink()
+            pubsub = r.pubsub(on_reconnect=link.mark_reconnected)
             try:
                 await pubsub.subscribe(reply_channel)
                 # The op payload is NESTED under its own reserved envelope key, never
@@ -157,7 +176,7 @@ class WorkerBusPublishMixin:
                     _OP_PAYLOAD_KEY: op,
                 }
                 await r.publish(self._settings.channel, json.dumps(wire))
-                collected = await self._collect(r, pubsub, expected, gaps, op_id, op_name)
+                collected = await self._collect(r, pubsub, link, expected, gaps, op_id, op_name)
             finally:
                 try:
                     await pubsub.unsubscribe(reply_channel)
@@ -278,6 +297,7 @@ class WorkerBusPublishMixin:
         self,
         r: Any,
         pubsub: Any,
+        link: _ReplyLink,
         expected: dict[str, int | None],
         gaps: dict[str, WorkerResult],
         op_id: str,
@@ -288,13 +308,14 @@ class WorkerBusPublishMixin:
         ack_deadline = start + self._settings.ack_timeout
         apply_deadline = start + self._settings.apply_timeout
         terminal, acked, transport_error = await self._collect_replies(
-            pubsub, expected, op_id, op_name, ack_deadline, apply_deadline
+            pubsub, link, expected, op_id, op_name, ack_deadline, apply_deadline
         )
         return await self._finalize_verdicts(r, expected, gaps, terminal, acked, transport_error)
 
     async def _collect_replies(
         self,
         pubsub: Any,
+        link: _ReplyLink,
         expected: dict[str, int | None],
         op_id: str,
         op_name: str,
@@ -304,7 +325,10 @@ class WorkerBusPublishMixin:
         """Gather terminal/ack replies until the deadline.
 
         Returns the terminal map, the ack set, and a transport error string if the poll
-        hit a blip.
+        hit a blip. A reconnect of the reply subscription that the retry hid inside a
+        read is a blip too: a reply sent while it was disconnected is never delivered, so
+        it is logged and named on every worker left without a terminal reply. Collection
+        goes on after it, as the replies sent after the reconnect still arrive.
         """
         terminal: dict[str, WorkerResult] = {}
         acked: set[str] = set()
@@ -333,19 +357,32 @@ class WorkerBusPublishMixin:
                 transport_error = f"{type(exc).__name__}: {exc}"
                 logger.error("worker bus: reply collection for %r hit a transport error", op_name, exc_info=True)
                 break
-            if msg is None:
-                continue
-            frame = _decode(msg["data"])
-            if frame is None:
-                continue
-            phase, name = self._classify_reply_frame(frame, expected, op_id)
-            if name is None:
-                continue
-            if phase == "received":
-                acked.add(name)
-            elif phase == "terminal":
-                _merge_terminal(terminal, name, self._terminal_result(name, frame))
+            if link.reconnected and transport_error is None:
+                transport_error = _RECONNECTED_CAUSE
+                logger.warning("worker bus: reply collection for %r: %s", op_name, _RECONNECTED_CAUSE)
+            if msg is not None:
+                self._fold_reply(msg, expected, op_id, terminal, acked)
         return terminal, acked, transport_error
+
+    def _fold_reply(
+        self,
+        msg: dict[str, Any],
+        expected: dict[str, int | None],
+        op_id: str,
+        terminal: dict[str, WorkerResult],
+        acked: set[str],
+    ) -> None:
+        """Fold one reply message into ``terminal`` / ``acked``; an undecodable or discarded frame is skipped."""
+        frame = _decode(msg["data"])
+        if frame is None:
+            return
+        phase, name = self._classify_reply_frame(frame, expected, op_id)
+        if name is None:
+            return
+        if phase == "received":
+            acked.add(name)
+        elif phase == "terminal":
+            _merge_terminal(terminal, name, self._terminal_result(name, frame))
 
     def _classify_reply_frame(
         self, frame: dict[str, Any], expected: dict[str, int | None], op_id: str

@@ -12,6 +12,10 @@ single-use, so a page that submitted it twice — or a reload that resubmitted t
 query — would redeem nothing the second time. This leg drives the door the bundle drives
 (the harness runs no browser, so it stands in for the one submit), and pins that a second
 submit of the same code is refused: exactly one redemption per invite.
+
+A route's ``reply_texts`` word both ends: the channel route's ``pairing_code`` template carries
+the minted code and its expiry, and the web route's ``pairing_code_invalid`` is the refusal a code
+that redeems nothing reads.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from collections.abc import Awaitable, Callable
 
 import pytest
 
-from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT, BRIDGE_TWILIO_FROM
+from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT, BRIDGE_TWILIO_CLIENT_B, BRIDGE_TWILIO_FROM, BRIDGE_TWILIO_FROM_B
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.webchat import WebChatClient
 
@@ -30,6 +34,7 @@ from ._bridge_support import (
     INVALID_CODE_TEXT,
     LINK_REPLY_PREFIX,
     LINKED_TEXT,
+    PAIR_CODE_RE,
     TWILIO_INBOUND_PATH,
     BridgeHarness,
     cancel_and_join,
@@ -133,3 +138,54 @@ async def test_a_pair_url_invite_redeems_on_the_first_and_only_submit(
     assert [direction for direction, _text in exchange] == ["in", "out", "in", "out"]
     assert LINKED_TEXT in exchange[1][1]
     assert INVALID_CODE_TEXT in exchange[3][1]
+
+
+async def test_the_routes_own_pairing_code_reply_and_refusal_are_read(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    port = bridge.stack.port_b
+    await bridge.set_target_config(target_kind="agent", target_name=_AGENT, multichannel=True)
+
+    # The channel route words its /link reply: the template carries the fresh code and its expiry.
+    exec_ch = uniq("l17w-exec-ch")
+    await bridge.mint_key(user_id=exec_ch, scopes=["e2e-all"])
+    await bridge.create_channel_route(
+        route_name=uniq("l17w-route-ch").replace("_", "-"),
+        agent=_AGENT,
+        execution_key=exec_ch,
+        channel="twilio",
+        our_identity=BRIDGE_TWILIO_FROM_B,
+        reply_texts={"pairing_code": "Code {pairing_code}, good until {expires_at}."},
+    )
+    link_inbound = bridge.twilio_inbound(
+        our_identity=BRIDGE_TWILIO_FROM_B, client=BRIDGE_TWILIO_CLIENT_B, text="/link", port=port
+    )
+    assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, link_inbound, port=port)).status_code == 204
+    (link_reply,) = await wait_send_to(bridge.fake_twilio, to=BRIDGE_TWILIO_CLIENT_B, needle="Code LINK-")
+    code = extract_pair_code(link_reply["body"])
+    match = re.fullmatch(rf"Code {PAIR_CODE_RE.pattern}, good until (\S+)\.", link_reply["body"])
+    assert match is not None, link_reply["body"]
+    assert LINK_REPLY_PREFIX not in link_reply["body"]
+
+    # The web route words the refusal: a code that redeems nothing reads the route's sentence.
+    identity = uniq("l17w-site").replace("_", "-")
+    exec_web = uniq("l17w-exec-web")
+    await bridge.mint_key(user_id=exec_web, scopes=["e2e-all"])
+    invalid_reply = "That code did not work."
+    await bridge.create_channel_route(
+        route_name=uniq("l17w-route-web").replace("_", "-"),
+        agent=_AGENT,
+        execution_key=exec_web,
+        channel="web",
+        our_identity=identity,
+        reply_texts={"pairing_code_invalid": invalid_reply},
+    )
+    web, page = await WebChatClient.open_page(
+        bridge.stack.origin(bridge.stack.port_b), identity, store_url=bridge.stack.resources.redis_url
+    )
+    assert page.status_code == 200, page.text
+    wrong = "LINK-00000000" if code != "LINK-00000000" else "LINK-11111111"
+    await _await_web_out(web, lambda: web.send(wrong), invalid_reply)
+    replayed = await web.frames()
+    answers = [data["text"] for event, data in replayed if event == "chat.message" and data["direction"] == "out"]
+    assert answers == [invalid_reply], answers
