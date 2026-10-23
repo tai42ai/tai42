@@ -20,11 +20,17 @@ major component — never version-blind — so a ``>=1.0`` package cannot slip a
 breaking change through a mislabelled minor.
 
 Breaking changes are ``griffe``'s own classification (public objects removed,
-required parameters added, parameter kinds/types narrowed, and so on) plus the
-removal of a whole shipped top-level module. A module that is new at the tag is
-additive and skipped. A module attribute bound to a ``logging.getLogger(...)`` call is
-the module's own log channel, never API surface: its removal or rebinding is not a
-breaking change. A doc-only change to a known decorator/constructor call —
+required parameters added, parameter kinds/types narrowed, base classes removed,
+and so on), plus a public attribute whose bound value expression changed, plus the
+removal of a whole shipped top-level module. The gate compares attribute values
+itself, walking the same public-member tree ``griffe`` walks (inherited members
+included, each object once at its canonical path), because a shipped default or
+constant is part of the published surface: a consumer receives the new value.
+A module that is new at the tag is additive and skipped. A module attribute bound
+to a ``logging.getLogger(...)`` call is the module's own log channel, never API
+surface: its removal or rebinding is not a breaking change. A collection constant
+that only gains entries, and a ``Literal[...]`` alias that only gains members, are
+additive and not breaking. A doc-only change to a known decorator/constructor call —
 a pydantic ``Field(...)`` or a ``typer`` ``Typer``/``Option``/``Argument`` —
 editing only that callee's documentation keywords (``help``/``description``/
 ``title``/``examples`` and kin) is documentation metadata, not API surface, so it
@@ -51,37 +57,20 @@ the working directory) and ``--config`` the mode file (default
 from __future__ import annotations
 
 import argparse
-import ast
 import re
 import subprocess
 import sys
 import tomllib
-from collections import Counter
 from pathlib import Path
 from typing import NoReturn
 
 import yaml
 
+from tai42_cli.api_gate_values import is_logger_binding, value_change_findings
+
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _MODES = ("label-honesty", "strict")
 _SKIP_DIRS = {"__pycache__"}
-# Known decorator/constructor callee name -> its keywords that carry documentation
-# only; a change confined to those keywords is metadata, not API surface.
-_DOC_KEYWORDS: dict[str, frozenset[str]] = {
-    "Field": frozenset({"description", "title", "examples"}),
-    "Typer": frozenset({"help", "epilog", "rich_help_panel", "short_help"}),
-    "Option": frozenset({"help", "rich_help_panel"}),
-    "Argument": frozenset({"help", "rich_help_panel"}),
-}
-# The pydantic ``json_schema_extra`` mapping mixes documentation with behaviour:
-# alongside doc keys it carries ``secret`` (redaction), ``reload`` (settings reload
-# disposition), ``key_material``, schema-shaping keys like ``type`` and more. A
-# change to it is therefore forgiven only per key, and only for keys whose meaning
-# is purely documentation; every other key — known-behavioural or simply unknown —
-# keeps gating (fail closed). It is owned by ``Field`` only.
-_SCHEMA_EXTRA_KEYWORD = "json_schema_extra"
-_SCHEMA_EXTRA_CALLEES = frozenset({"Field"})
-_SCHEMA_EXTRA_DOC_KEYS = frozenset({"x-tai42-expression", "description", "title", "examples", "deprecated"})
 
 
 def _fail(message: str) -> NoReturn:
@@ -345,333 +334,6 @@ def _first_party_dependencies(package_dir: Path, repo_root: Path) -> list[tuple[
     return sorted((name, (member / "src").relative_to(repo_root).as_posix()) for name, member in found.items())
 
 
-def _call_callee_name(func: ast.expr) -> str | None:
-    """Callee name of a call node, else ``None``.
-
-    A bare name (``Field``) or a dotted attribute (``pydantic.Field`` -> ``Field``)
-    yields the final name; any other expression yields ``None``.
-    """
-    if isinstance(func, ast.Name):
-        return func.id
-    if isinstance(func, ast.Attribute):
-        return func.attr
-    return None
-
-
-def _pop_kwarg(node: ast.Call, name: str) -> ast.expr | None:
-    """Remove and return the value of keyword ``name`` from ``node``, or ``None`` when absent.
-
-    Mutates ``node.keywords``. A ``**expansion`` (``kw.arg is None``) is never matched and is
-    left in place, so a spread ``json_schema_extra`` survives into the structural comparison
-    and, if it differs at all, keeps the change breaking.
-    """
-    for i, kw in enumerate(node.keywords):
-        if kw.arg == name:
-            del node.keywords[i]
-            return kw.value
-    return None
-
-
-def _literal_str_key_dict(node: ast.expr) -> dict[str, str] | None:
-    """Map each literal-string key to ``ast.dump`` of its value, else ``None``.
-
-    Returns the mapping only when ``node`` is an ``ast.Dict`` whose keys are ALL literal
-    strings; a ``**expansion`` (a ``None`` key node) or a non-string/duplicate key makes the
-    mapping non-literal and returns ``None`` so the caller fails closed.
-    """
-    if not isinstance(node, ast.Dict):
-        return None
-    result: dict[str, str] = {}
-    for key, value in zip(node.keys, node.values, strict=True):
-        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
-            return None
-        if key.value in result:
-            return None
-        result[key.value] = ast.dump(value)
-    return result
-
-
-def _schema_extra_delta_is_doc_only(old_value: ast.expr | None, new_value: ast.expr | None) -> bool:
-    """True when a ``json_schema_extra`` change is confined to documentation keys.
-
-    Both values must be literal string-keyed dicts (an absent side, ``None``, counts
-    as the empty dict); the change is forgiven only when every key whose dumped value
-    differs between the two — added, removed or edited — is in
-    :data:`_SCHEMA_EXTRA_DOC_KEYS`. A non-dict/callable value, a non-literal key, or
-    any delta touching a behavioural or unknown key returns ``False`` (fail closed).
-    """
-    old_map = {} if old_value is None else _literal_str_key_dict(old_value)
-    new_map = {} if new_value is None else _literal_str_key_dict(new_value)
-    if old_map is None or new_map is None:
-        return False
-    for key in old_map.keys() | new_map.keys():
-        if old_map.get(key) != new_map.get(key) and key not in _SCHEMA_EXTRA_DOC_KEYS:
-            return False
-    return True
-
-
-def _is_literal_to_doc_field(old_node: ast.expr, new_node: ast.Call) -> bool:
-    """True when a plain-literal default was merely wrapped into a known callee's ``default=``.
-
-    The wrapping call's ONLY non-documentation content must be a ``default=`` equal to that
-    same literal — e.g. ``None`` -> ``Field(default=None, json_schema_extra={...})``. The
-    default must be passed by keyword and be structurally identical to the old literal; any
-    positional argument, any missing/differing default, or any non-doc keyword
-    (``alias``/``ge``/…) makes it real surface and returns ``False``. A wrapped
-    ``json_schema_extra`` payload is allowed only when its delta versus the empty mapping is
-    documentation-only (see :func:`_schema_extra_delta_is_doc_only`).
-    """
-    callee = _call_callee_name(new_node.func)
-    if callee not in _SCHEMA_EXTRA_CALLEES or new_node.args:
-        return False
-    allowed_doc = _DOC_KEYWORDS[callee]
-    default_matches = False
-    for kw in new_node.keywords:
-        if kw.arg == "default":
-            if ast.dump(kw.value) != ast.dump(old_node):
-                return False
-            default_matches = True
-        elif kw.arg == _SCHEMA_EXTRA_KEYWORD:
-            if not _schema_extra_delta_is_doc_only(None, kw.value):
-                return False
-        elif kw.arg not in allowed_doc:
-            return False
-    return default_matches
-
-
-def _is_doc_only_call_change(old_expr: str, new_expr: str) -> bool:
-    """True only when a value change is confined to a known decorator/constructor callee's documentation metadata.
-
-    Two shapes qualify:
-
-    * call -> call to the SAME known callee (a key of ``_DOC_KEYWORDS``) that is
-      structurally equal after dropping that callee's documentation-only keywords.
-      For an owning callee, ``json_schema_extra`` is compared separately, key by
-      key: the change is forgiven only when its delta touches documentation keys
-      alone (see :func:`_schema_extra_delta_is_doc_only`), so flipping a behavioural
-      key — and any change that also touches a non-doc keyword — stays breaking.
-    * literal -> call that merely wraps the old literal as ``default=`` on a known
-      callee with only documentation keywords besides it (see
-      :func:`_is_literal_to_doc_field`).
-
-    A parse failure, a non-call new expression, an unknown callee or a callee
-    mismatch returns ``False`` — the classification stays breaking — and any other
-    surprise propagates to the caller as a loud crash.
-    """
-    try:
-        old_node = ast.parse(old_expr, mode="eval").body
-        new_node = ast.parse(new_expr, mode="eval").body
-    except (SyntaxError, ValueError):
-        return False
-    if isinstance(new_node, ast.Call) and not isinstance(old_node, ast.Call):
-        return _is_literal_to_doc_field(old_node, new_node)
-    if not (isinstance(old_node, ast.Call) and isinstance(new_node, ast.Call)):
-        return False
-    callee = _call_callee_name(old_node.func)
-    if callee is None or callee != _call_callee_name(new_node.func):
-        return False
-    doc_keywords = _DOC_KEYWORDS.get(callee)
-    if doc_keywords is None:
-        return False
-    if callee in _SCHEMA_EXTRA_CALLEES:
-        old_extra = _pop_kwarg(old_node, _SCHEMA_EXTRA_KEYWORD)
-        new_extra = _pop_kwarg(new_node, _SCHEMA_EXTRA_KEYWORD)
-        if (old_extra is not None or new_extra is not None) and not _schema_extra_delta_is_doc_only(
-            old_extra, new_extra
-        ):
-            return False
-    old_node.keywords = [kw for kw in old_node.keywords if kw.arg not in doc_keywords]
-    new_node.keywords = [kw for kw in new_node.keywords if kw.arg not in doc_keywords]
-    return ast.dump(old_node) == ast.dump(new_node)
-
-
-# Collection wrappers whose single positional argument holds the underlying
-# literal, so ``MappingProxyType({...})`` and ``frozenset({...})`` compare as the
-# dict/set they wrap. A change of wrapper (``frozenset`` -> ``set``) is NOT a
-# match: both sides must unwrap through an identical wrapper-name chain.
-_COLLECTION_WRAPPERS = frozenset({"MappingProxyType", "frozenset", "tuple", "list", "set", "dict"})
-
-
-def _unwrap_collection(node: ast.expr) -> tuple[ast.expr, tuple[str, ...]]:
-    """Peel any chain of recognised single-argument collection wrappers off ``node``.
-
-    Returns the innermost expression and the wrapper-name chain that was peeled (outermost
-    first). A wrapper only unwraps when its callee is a bare or dotted name in
-    :data:`_COLLECTION_WRAPPERS` with EXACTLY one positional argument and NO keywords;
-    anything else stops the peeling.
-    """
-    chain: list[str] = []
-    while (
-        isinstance(node, ast.Call)
-        and _call_callee_name(node.func) in _COLLECTION_WRAPPERS
-        and len(node.args) == 1
-        and not node.keywords
-        and not isinstance(node.args[0], ast.Starred)
-    ):
-        name = _call_callee_name(node.func)
-        if name is None:
-            raise AssertionError
-        chain.append(name)
-        node = node.args[0]
-    return node, tuple(chain)
-
-
-def _is_subsequence(old: list[str], new: list[str]) -> bool:
-    """True when every element of ``old`` appears in ``new`` in the same relative order.
-
-    Insertions anywhere are allowed, reorderings are not.
-    """
-    it = iter(new)
-    return all(elem in it for elem in old)
-
-
-def _dict_is_additive(old_inner: ast.Dict, new_inner: ast.Dict) -> bool:
-    """True when ``new_inner`` is a strict superset of ``old_inner``.
-
-    Every old key is preserved with an unchanged value and at least one key was added. A
-    ``**`` expansion (a ``None`` key node) or a duplicate key makes the mapping ambiguous and
-    fails closed.
-    """
-    old_pairs = [
-        (ast.dump(k), ast.dump(v)) for k, v in zip(old_inner.keys, old_inner.values, strict=True) if k is not None
-    ]
-    new_pairs = [
-        (ast.dump(k), ast.dump(v)) for k, v in zip(new_inner.keys, new_inner.values, strict=True) if k is not None
-    ]
-    if len(old_pairs) != len(old_inner.keys) or len(new_pairs) != len(new_inner.keys):
-        return False  # a ``**expansion`` has a None key node — not a plain literal
-    old_keys = [k for k, _ in old_pairs]
-    new_keys = [k for k, _ in new_pairs]
-    if len(set(old_keys)) != len(old_keys) or len(set(new_keys)) != len(new_keys):
-        return False  # a duplicate key dump makes the mapping ambiguous
-    new_by_key = dict(new_pairs)
-    for key, value in old_pairs:
-        if new_by_key.get(key) != value:
-            return False  # a missing key or a changed value for a preserved key
-    return len(new_pairs) > len(old_pairs)
-
-
-def _set_is_additive(old_inner: ast.Set, new_inner: ast.Set) -> bool:
-    """True when ``new_inner`` is a strict multiset-superset of ``old_inner`` and grew.
-
-    A ``*`` unpack element fails closed.
-    """
-    if any(isinstance(e, ast.Starred) for e in (*old_inner.elts, *new_inner.elts)):
-        return False
-    old_dumps = [ast.dump(e) for e in old_inner.elts]
-    new_dumps = [ast.dump(e) for e in new_inner.elts]
-    return Counter(old_dumps) <= Counter(new_dumps) and len(new_dumps) > len(old_dumps)
-
-
-def _sequence_is_additive(old_inner: ast.Tuple | ast.List, new_inner: ast.Tuple | ast.List) -> bool:
-    """True when the new tuple/list grew and keeps the old elements as an ordered subsequence.
-
-    A ``*`` unpack element fails closed.
-    """
-    if any(isinstance(e, ast.Starred) for e in (*old_inner.elts, *new_inner.elts)):
-        return False
-    old_dumps = [ast.dump(e) for e in old_inner.elts]
-    new_dumps = [ast.dump(e) for e in new_inner.elts]
-    return len(new_dumps) > len(old_dumps) and _is_subsequence(old_dumps, new_dumps)
-
-
-def _is_additive_collection_growth(old_expr: str, new_expr: str) -> bool:
-    """True only when both values are same-typed collection constants and the new is a strict superset.
-
-    The growth must be purely additive (dict/set gained entries, tuple/list gained elements
-    without disturbing the order of the pre-existing ones). Every other relation — element
-    removal or edit, a changed value for a preserved dict key, a reorder, a wrapper-type or
-    collection-type change, a duplicate dict key, a non-collection expression, or an identical
-    collection — returns ``False`` so the classification stays breaking. The comparison is
-    purely structural (parse-only, never evaluated); a parse failure or any ambiguity fails
-    closed to ``False``.
-    """
-    try:
-        old_node = ast.parse(old_expr, mode="eval").body
-        new_node = ast.parse(new_expr, mode="eval").body
-    except (SyntaxError, ValueError):
-        return False
-    old_inner, old_chain = _unwrap_collection(old_node)
-    new_inner, new_chain = _unwrap_collection(new_node)
-    if old_chain != new_chain:
-        return False
-    if type(old_inner) is not type(new_inner):
-        return False
-    if isinstance(old_inner, ast.Dict) and isinstance(new_inner, ast.Dict):
-        return _dict_is_additive(old_inner, new_inner)
-    if isinstance(old_inner, ast.Set) and isinstance(new_inner, ast.Set):
-        return _set_is_additive(old_inner, new_inner)
-    if isinstance(old_inner, ast.Tuple | ast.List) and isinstance(new_inner, ast.Tuple | ast.List):
-        return _sequence_is_additive(old_inner, new_inner)
-    return False
-
-
-def _literal_members(node: ast.expr) -> tuple[str, list[str]] | None:
-    """A ``Literal[...]`` subscript's reference dump and its constant members, else ``None``.
-
-    ``node`` qualifies only as an ``ast.Subscript`` whose value is a ``Literal`` /
-    ``typing.Literal`` / ``t.Literal``-style name or attribute. The slice is normalised to a
-    sequence of members — a single-member ``Literal['x']`` becomes a one-element list — and every
-    member must be an ``ast.Constant``. A non-subscript, a non-``Literal`` reference, a non-constant
-    member, or a starred element returns ``None`` so the caller fails closed. The reference dump is
-    returned alongside the members so the caller can reject a spelling change
-    (``Literal`` -> ``typing.Literal``).
-    """
-    if not isinstance(node, ast.Subscript):
-        return None
-    ref = node.value
-    if isinstance(ref, ast.Name):
-        if ref.id != "Literal":
-            return None
-    elif isinstance(ref, ast.Attribute):
-        if ref.attr != "Literal":
-            return None
-    else:
-        return None
-    elts = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
-    members: list[str] = []
-    for elt in elts:
-        if not isinstance(elt, ast.Constant):
-            return None
-        members.append(ast.dump(elt))
-    return ast.dump(ref), members
-
-
-def _is_additive_literal_growth(old_expr: str, new_expr: str) -> bool:
-    """True only when both values are ``Literal[...]`` aliases and the new adds members in order.
-
-    Both expressions must be ``Literal[...]`` subscripts over the SAME reference spelling whose
-    members are all constants; the new members must keep the old ones as a strict ordered
-    subsequence (members appended or inserted, none removed, edited or reordered). Every other
-    relation — a removal, an edit, a reorder, a wrapper/spelling change, ``Literal`` to
-    non-``Literal`` or the reverse, a non-constant member, a non-subscript expression, or an
-    identical alias — returns ``False`` so the classification stays breaking. The comparison is
-    purely structural (parse-only, never evaluated); a parse failure fails closed to ``False``.
-    """
-    try:
-        old_node = ast.parse(old_expr, mode="eval").body
-        new_node = ast.parse(new_expr, mode="eval").body
-    except (SyntaxError, ValueError):
-        return False
-    old = _literal_members(old_node)
-    new = _literal_members(new_node)
-    if old is None or new is None:
-        return False
-    old_ref, old_members = old
-    new_ref, new_members = new
-    if old_ref != new_ref:
-        return False
-    return len(new_members) > len(old_members) and _is_subsequence(old_members, new_members)
-
-
-_LOGGER_BINDING = re.compile(r"^(logging\.)?getLogger\(")
-
-
-def _is_logger_binding(value: str | None) -> bool:
-    """True when an attribute's bound expression is a ``logging.getLogger(...)`` call."""
-    return value is not None and _LOGGER_BINDING.match(value.strip()) is not None
-
-
 def _breakages(module: str, ref: str, src_rel: str, repo_root: Path, first_party: list[str]) -> list[str]:
     # griffe is the heavy release-only dependency (api-gate extra); import it
     # lazily so the pure decision helpers can be imported and unit-tested in an
@@ -696,15 +358,10 @@ def _breakages(module: str, ref: str, src_rel: str, repo_root: Path, first_party
     new = griffe.load(module, search_paths=[repo_root / src_rel], modules_collection=new_collection)
     explained: list[str] = []
     for b in griffe.find_breaking_changes(old, new):
-        if isinstance(b.obj, griffe.Attribute) and _is_logger_binding(str(b.obj.value)):
-            continue
-        if b.kind is griffe.BreakageKind.ATTRIBUTE_CHANGED_VALUE and (
-            _is_additive_collection_growth(str(b.old_value), str(b.new_value))
-            or _is_additive_literal_growth(str(b.old_value), str(b.new_value))
-            or _is_doc_only_call_change(str(b.old_value), str(b.new_value))
-        ):
+        if isinstance(b.obj, griffe.Attribute) and is_logger_binding(str(b.obj.value)):
             continue
         explained.append(_ANSI.sub("", b.explain(style=griffe.ExplanationStyle.ONE_LINE)))
+    explained.extend(value_change_findings(old, new))
     return explained
 
 
