@@ -249,3 +249,34 @@ async def test_a_caller_cancelled_while_connecting_leaves_no_kit_task_running() 
             assert started == set()
         finally:
             await redis.aclose()
+
+
+async def test_a_caller_cancelled_as_its_socket_opens_leaves_no_open_connection_pooled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The cancel lands after the socket opened and before the handshake ran.
+    async with _tcp_stub() as stub:
+        redis = async_redis_from_url(stub.url)
+        caller: asyncio.Task[object] | None = None
+        open_socket = Connection._connect
+
+        async def open_then_cancel_caller(self: Connection) -> None:
+            await open_socket(self)
+            monkeypatch.setattr(Connection, "_connect", open_socket)
+            assert caller is not None
+            caller.cancel()
+
+        async def ping() -> None:
+            await redis.ping()
+
+        monkeypatch.setattr(Connection, "_connect", open_then_cancel_caller)
+        try:
+            caller = asyncio.create_task(ping())
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            pooled = redis.connection_pool._available_connections
+            assert len(pooled) == 1
+            assert not pooled[0].is_connected
+            assert await redis.ping() is True
+        finally:
+            await redis.aclose()

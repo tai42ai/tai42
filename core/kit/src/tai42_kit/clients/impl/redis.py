@@ -112,10 +112,20 @@ class _ConnectsFromAnEmptyContext(AbstractConnection):
     or a pub/sub reconnecting it, on every redis-py major — opens its socket through
     :meth:`_connect`, so none of them carries a caller's state (its request) into the
     transport. The retry loop and the handshake run in the caller's task.
+
+    A caller cancelled after the socket opened and before its handshake ran closes the
+    socket before the cancel propagates, so the pool never hands out a connection that
+    was never set up.
     """
 
     async def _connect(self) -> None:
-        await asyncio.create_task(super()._connect(), context=contextvars.Context())
+        opening = asyncio.create_task(super()._connect(), context=contextvars.Context())
+        try:
+            await opening
+        except asyncio.CancelledError:
+            if self.is_connected:
+                await self.disconnect(nowait=True)
+            raise
 
 
 class _TcpConnection(_ConnectsFromAnEmptyContext, Connection):
