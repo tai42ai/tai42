@@ -5455,7 +5455,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-web"
-version = "9.0.0"
+version = "9.0.1"
 source = { editable = "plugins/channel-web" }
 dependencies = [
     { name = "httpx" },
@@ -5543,7 +5543,7 @@ dev = [
 
 [[package]]
 name = "tai42-cli"
-version = "16.0.0"
+version = "16.0.1"
 source = { editable = "core/cli" }
 dependencies = [
     { name = "click" },
@@ -5617,7 +5617,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "21.0.0"
+version = "21.0.1"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -6173,7 +6173,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "28.0.0"
+version = "28.0.1"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "anyio" },
