@@ -38,13 +38,15 @@ class _NativeFake:
         self._texts = list(texts)
         self.calls = 0
         self.bind_kwargs: list[dict[str, Any]] = []
+        self.seen: list[list[Any]] = []
 
     def bind(self, **kwargs: Any) -> Any:
         self.bind_kwargs.append(kwargs)
         outer = self
 
         class _Runner:
-            async def ainvoke(self, _messages: Any, _config: object = None) -> AIMessage:
+            async def ainvoke(self, messages: Any, _config: object = None) -> AIMessage:
+                outer.seen.append(list(messages))
                 index = min(outer.calls, len(outer._texts) - 1)
                 outer.calls += 1
                 return AIMessage(content=outer._texts[index])
@@ -107,3 +109,72 @@ def test_past_the_cap_raises_reprompt_cap_error(monkeypatch: pytest.MonkeyPatch)
         asyncio.run(_invoke(cast(BaseChatModel, fake)))
     assert excinfo.value.attempts == 3  # cap + 1
     assert fake.calls == 3
+
+
+def test_null_answer_is_reprompted_with_the_missing_answer_feedback(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    _cap(monkeypatch, 3)
+    fake = _NativeFake(["null", '{"value": 7}'])
+    result = asyncio.run(_invoke(cast(BaseChatModel, fake)))
+    assert result == {"value": 7}
+    assert fake.calls == 2
+    feedback = fake.seen[1][-1]
+    assert isinstance(feedback, HumanMessage)
+    assert "no structured answer was returned" in str(feedback.content)
+    assert "JSON that matches the response schema" in str(feedback.content)
+
+
+def test_null_answer_past_the_cap_raises_reprompt_cap_error_naming_the_missing_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    _cap(monkeypatch, 2)
+    fake = _NativeFake(["null"])
+    with pytest.raises(RepromptCapError) as excinfo:
+        asyncio.run(_invoke(cast(BaseChatModel, fake)))
+    assert excinfo.value.attempts == 3
+    assert "no structured answer was returned" in excinfo.value.error
+
+
+@pytest.mark.parametrize("empty", ["", "  \n"], ids=["empty", "whitespace"])
+def test_empty_answer_is_reprompted_with_the_missing_answer_feedback(
+    monkeypatch: pytest.MonkeyPatch, empty: str
+) -> None:
+    import asyncio
+
+    _cap(monkeypatch, 3)
+    fake = _NativeFake([empty, '{"value": 7}'])
+    result = asyncio.run(_invoke(cast(BaseChatModel, fake)))
+    assert result == {"value": 7}
+    assert fake.calls == 2
+    feedback = fake.seen[1][-1]
+    assert isinstance(feedback, HumanMessage)
+    assert "no structured answer was returned" in str(feedback.content)
+    assert "JSON that matches the response schema" in str(feedback.content)
+
+
+def test_empty_answer_past_the_cap_raises_reprompt_cap_error_naming_the_missing_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    _cap(monkeypatch, 2)
+    fake = _NativeFake([""])
+    with pytest.raises(RepromptCapError) as excinfo:
+        asyncio.run(_invoke(cast(BaseChatModel, fake)))
+    assert excinfo.value.attempts == 3
+    assert "no structured answer was returned" in excinfo.value.error
+
+
+def test_non_json_answer_is_reprompted_with_its_parse_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    _cap(monkeypatch, 3)
+    fake = _NativeFake(["not json", '{"value": 7}'])
+    assert asyncio.run(_invoke(cast(BaseChatModel, fake))) == {"value": 7}
+    feedback = fake.seen[1][-1]
+    assert isinstance(feedback, HumanMessage)
+    assert "Expecting value" in str(feedback.content)
+    assert "no structured answer" not in str(feedback.content)

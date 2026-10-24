@@ -25,11 +25,12 @@ from typing import Any
 
 import pytest
 from langchain.agents import create_agent
+from langchain.agents.structured_output import ProviderStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
-from pydantic import PrivateAttr
+from pydantic import BaseModel, PrivateAttr
 from tai42_contract.agent.events import (
     MessageDelta,
     MessageFinal,
@@ -151,6 +152,104 @@ def test_malformed_json_is_reprompted_then_conforms(monkeypatch: pytest.MonkeyPa
     assert model.calls == 2
 
 
+_NATIVE_FORMATS = {"native_plan": _INT_SCHEMA, "explicit_provider_strategy": ProviderStrategy(_INT_SCHEMA)}
+
+
+@pytest.mark.parametrize("schema", list(_NATIVE_FORMATS.values()), ids=list(_NATIVE_FORMATS))
+@pytest.mark.parametrize("empty", ["", "  \n"], ids=["empty", "whitespace"])
+def test_empty_native_answer_is_reprompted_as_a_missing_answer(
+    monkeypatch: pytest.MonkeyPatch, schema: Any, empty: str
+) -> None:
+    # The native plan parses a turn with no tool calls as the answer; a turn with no text
+    # carries no answer at all, so it is judged as missing, not as malformed JSON.
+    model = _NativeModel([empty, '{"value": 7}'])
+    events = _project(model, schema, cap=3, monkeypatch=monkeypatch)
+    finals = [event for event in events if isinstance(event, StructuredFinal)]
+    assert [final.data for final in finals] == [{"value": 7}]
+    assert model.calls == 2
+    feedback = model.seen[1][-1]
+    assert isinstance(feedback, HumanMessage)
+    assert "no structured answer was returned" in str(feedback.content)
+    assert "JSON that matches the response schema" in str(feedback.content)
+    assert "Failed to parse" not in str(feedback.content)
+
+
+@pytest.mark.parametrize("schema", list(_NATIVE_FORMATS.values()), ids=list(_NATIVE_FORMATS))
+def test_never_answering_native_run_ends_on_the_typed_outcome_naming_the_missing_answer(
+    monkeypatch: pytest.MonkeyPatch, schema: Any
+) -> None:
+    model = _NativeModel([""])
+    events = _project(model, schema, cap=3, monkeypatch=monkeypatch)
+
+    terminal = events[-1]
+    assert isinstance(terminal, StructuredOutputUnresolvedFinal)
+    assert terminal.attempts == 4
+    assert "no structured answer was returned" in terminal.error
+
+
+@pytest.mark.parametrize("schema", list(_NATIVE_FORMATS.values()), ids=list(_NATIVE_FORMATS))
+def test_non_json_native_text_is_reprompted_as_a_parse_error(monkeypatch: pytest.MonkeyPatch, schema: Any) -> None:
+    model = _NativeModel(["not json at all", '{"value": 7}'])
+    events = _project(model, schema, cap=3, monkeypatch=monkeypatch)
+    finals = [event for event in events if isinstance(event, StructuredFinal)]
+    assert [final.data for final in finals] == [{"value": 7}]
+    feedback = model.seen[1][-1]
+    assert isinstance(feedback, HumanMessage)
+    assert "Failed to parse structured output" in str(feedback.content)
+    assert "no structured answer" not in str(feedback.content)
+
+
+def test_null_native_answer_is_reprompted_as_a_missing_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    # JSON ``null`` parses to no structured response at all: the final turn carries no answer.
+    model = _NativeModel(["null", '{"value": 7}'])
+    events = _project(model, _INT_SCHEMA, cap=3, monkeypatch=monkeypatch)
+    finals = [event for event in events if isinstance(event, StructuredFinal)]
+    assert [final.data for final in finals] == [{"value": 7}]
+    assert model.calls == 2
+    feedback = model.seen[1][-1]
+    assert isinstance(feedback, HumanMessage)
+    assert "JSON" in str(feedback.content)
+
+
+class _IntAnswer(BaseModel):
+    value: int
+
+
+_NULL_FORMATS = {
+    "native_plan_dict": _INT_SCHEMA,
+    "native_plan_pydantic": _IntAnswer,
+    "provider_strategy_dict": ProviderStrategy(_INT_SCHEMA),
+    "provider_strategy_pydantic": ProviderStrategy(_IntAnswer),
+}
+
+
+@pytest.mark.parametrize("schema", list(_NULL_FORMATS.values()), ids=list(_NULL_FORMATS))
+def test_null_native_answer_is_judged_as_missing_on_every_schema(monkeypatch: pytest.MonkeyPatch, schema: Any) -> None:
+    model = _NativeModel([" null ", '{"value": 7}'])
+    events = _project(model, schema, cap=3, monkeypatch=monkeypatch)
+    finals = [event for event in events if isinstance(event, StructuredFinal)]
+    assert len(finals) == 1
+    assert model.calls == 2
+    feedback = model.seen[1][-1]
+    assert isinstance(feedback, HumanMessage)
+    assert "no structured answer was returned" in str(feedback.content)
+    assert "JSON that matches the response schema" in str(feedback.content)
+    assert "Failed to parse" not in str(feedback.content)
+
+
+@pytest.mark.parametrize("schema", list(_NULL_FORMATS.values()), ids=list(_NULL_FORMATS))
+def test_never_answering_but_null_ends_on_the_typed_outcome_naming_the_missing_answer(
+    monkeypatch: pytest.MonkeyPatch, schema: Any
+) -> None:
+    model = _NativeModel(["null"])
+    events = _project(model, schema, cap=3, monkeypatch=monkeypatch)
+
+    terminal = events[-1]
+    assert isinstance(terminal, StructuredOutputUnresolvedFinal)
+    assert terminal.attempts == 4
+    assert "no structured answer was returned" in terminal.error
+
+
 def test_never_conforming_native_payload_ends_on_the_typed_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
     model = _NativeModel([f'{{"value": {_INT64_OVER}}}'])
     events = _project(model, _INT_SCHEMA, cap=3, monkeypatch=monkeypatch)
@@ -161,6 +260,26 @@ def test_never_conforming_native_payload_ends_on_the_typed_outcome(monkeypatch: 
     assert model.calls == 4
     # The reviewed gap: a raw JsonSchemaValidationError must NOT escape — the typed outcome stands.
     assert not any(isinstance(event, StructuredFinal) for event in events)
+
+
+def test_explicit_provider_strategy_is_reprompted_then_conforms(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = _NativeModel(["", f'{{"value": {_INT64_OVER}}}', '{"value": 7}'])
+    events = _project(model, ProviderStrategy(_INT_SCHEMA), cap=3, monkeypatch=monkeypatch)
+    finals = [event for event in events if isinstance(event, StructuredFinal)]
+    assert [final.data for final in finals] == [{"value": 7}]
+    assert model.calls == 3
+
+
+def test_explicit_provider_strategy_never_conforming_ends_on_the_typed_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _NativeModel(["not json at all"])
+    events = _project(model, ProviderStrategy(_INT_SCHEMA), cap=3, monkeypatch=monkeypatch)
+
+    terminal = events[-1]
+    assert isinstance(terminal, StructuredOutputUnresolvedFinal)
+    assert terminal.attempts == 4  # cap + 1
+    assert model.calls == 4
 
 
 def test_projection_suppresses_message_frames_under_the_native_plan(monkeypatch: pytest.MonkeyPatch) -> None:

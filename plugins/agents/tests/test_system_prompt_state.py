@@ -329,7 +329,7 @@ class TestToolStrategyEndToEnd:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The injected int64 bound makes the tool-calling parse reject an oversized
-        # integer, so the ToolStrategy ``handle_errors`` retry rail re-prompts the
+        # integer, so the structured-output rail re-prompts the
         # model instead of letting the value reach (and abort) the checkpoint
         # serializer. The model is scripted to first answer out of range, then in
         # range: the second model call proves the retry fired, and the final
@@ -351,7 +351,7 @@ class TestToolStrategyEndToEnd:
         # The retry produced the in-range object on the structured_response channel.
         assert result.structured == {"value": 7}
         # The second model call carried the structured-output error as a tool message,
-        # i.e. the run went through the handle_errors re-prompt path.
+        # i.e. the run went through the structured-output rail's re-prompt path.
         from langchain_core.messages import ToolMessage
 
         assert any(isinstance(message, ToolMessage) for message in model._seen[1])

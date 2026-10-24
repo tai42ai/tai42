@@ -318,6 +318,27 @@ def test_native_never_conforming_ends_on_unresolved_final(monkeypatch: pytest.Mo
     assert isinstance(result, StructuredOutputUnresolvedFinal)
 
 
+def test_native_null_answer_is_reprompted_then_conforms(monkeypatch: pytest.MonkeyPatch) -> None:
+    llm = _NativeFake(["null", '{"answer": "ok"}'])
+    _install_llm(monkeypatch, llm)
+    result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=_VQA_SCHEMA))
+    assert result == {"answer": "ok"}
+    assert llm.calls == 2
+
+
+def test_native_never_answering_ends_on_unresolved_final_naming_the_missing_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tai42_contract.agent.events import StructuredOutputUnresolvedFinal
+
+    llm = _NativeFake(["null"])
+    _install_llm(monkeypatch, llm)
+    result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=_VQA_SCHEMA))
+    assert isinstance(result, StructuredOutputUnresolvedFinal)
+    assert result.schema_name == "Answer"
+    assert "no structured answer was returned" in result.error
+
+
 def test_unprofiled_model_takes_the_tool_path(monkeypatch: pytest.MonkeyPatch) -> None:
     llm = _ToolFake([{"answer": "a cat"}])
     _install_llm(monkeypatch, llm)
