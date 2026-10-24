@@ -20,7 +20,7 @@ from typing import Any, ClassVar
 from pydantic.fields import FieldInfo
 from pydantic_settings import PydanticBaseSettingsSource
 
-from tai42_kit.settings.env_file import read_env_file
+from tai42_kit.settings.env_file import env_file_in_effect, read_env_file
 
 TAI_DEFAULT_ENV_PREFIX = "TAI_DEFAULT_"
 
@@ -97,11 +97,12 @@ class DefaultNamespaceDotEnvSource(_DefaultNamespaceSource):
     Process env is NOT consulted here — :class:`DefaultNamespaceEnvSource` covers
     it and sits above this source. The file is read through the kit's env-file
     cache, so this source and the class's dotenv source share one parse; an absent
-    file contributes nothing.
+    file, and a file whose reads are suspended
+    (:func:`~tai42_kit.settings.env_file.env_file_reads_suspended`), contributes nothing.
     """
 
     def _values(self) -> Mapping[str, str | None]:
-        env_file = getattr(self.settings_cls, "tai_env_file", None)
+        env_file = env_file_in_effect(getattr(self.settings_cls, "tai_env_file", None))
         if env_file is None:
             return {}
         path = Path(env_file).expanduser()

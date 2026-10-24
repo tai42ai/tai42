@@ -22,19 +22,22 @@ connection-tuning fields) point the plugin-owned correlation store.
 | --- | --- | --- |
 | `CHANNEL_SLACK_BOT_TOKEN` | unset | Bot token (`xoxb-…`, scope `chat:write`); authorizes outbound posts. Secret. |
 | `CHANNEL_SLACK_SIGNING_SECRET` | unset | Events API signing secret keying the `v0` HMAC the inbound door verifies over the raw body. Secret. |
-| `CHANNEL_SLACK_BOT_USER_ID` | unset | The app's own bot user id (`U…`); a bridge route's `our_identity` and the self-message filter. |
+| `CHANNEL_SLACK_BOT_USER_ID` | unset | **Required.** The app's own bot user id (`U…`); a bridge route's `our_identity` and the self-message filter. |
 | `CHANNEL_SLACK_ALLOWED_RECIPIENTS` | empty | Whitelist of conversation ids (`C…`/`D…`) a caller-requested recipient may name; unlisted is refused (fail closed). Comma-separated or JSON list. |
 | `CHANNEL_SLACK_DEFAULT_RECIPIENT` | unset | Conversation a question without a caller-requested recipient goes to; not allowlist-checked. |
+| `CHANNEL_SLACK_API_BASE_URL` | `https://slack.com/api` | Slack Web API origin. Overridable so a test stub can stand in; production leaves the default. |
 | `CHANNEL_SLACK_HTTP_TIMEOUT_SECONDS` | `30` | Wall-clock budget for one outbound HTTP call. |
 | `CHANNEL_SLACK_REDIS_URL` | unset | Connection for the correlation store. |
 
-`CHANNEL_SLACK_BOT_USER_ID` is **required** for a bridge route — without it, a
-bridge message raises loudly rather than looping the bot on its own posts. An
-`ask`-only deployment that runs no bridge route does not need it.
+`CHANNEL_SLACK_BOT_USER_ID` is **required** whenever the channel is loaded. The
+inbound door bridges under the deployment's single bot identity, so the channel's
+startup hook refuses to boot without it, naming the variable — the bot never loops
+on its own posts and an inbound event never fails for want of an identity.
 
 ## Point the Events API at the deployment
 
-Slack has no startup hook. Set the **Request URL** once in your Slack app's Event
+The Request URL is not set at boot — the channel's only startup hook is the
+`CHANNEL_SLACK_BOT_USER_ID` check above. Set the **Request URL** once in your Slack app's Event
 Subscriptions to `{public base URL}/api/channels/slack/inbound` and subscribe to
 the message events the bot should hear. Slack verifies the URL against the
 signing secret.

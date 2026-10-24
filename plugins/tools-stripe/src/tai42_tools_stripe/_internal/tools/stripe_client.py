@@ -118,10 +118,11 @@ def stripe_settings() -> StripeSettings:
 def _secret_key() -> str:
     """The configured Stripe secret key, revealed.
 
-    Missing and EMPTY are the same failure and both raise naming ``STRIPE_SECRET_KEY``: an empty
-    env var parses to ``SecretStr("")`` (not ``None``), so a plain ``is None`` test would send
-    ``Authorization: Bearer`` to Stripe. This is the module's only read path for the value, so the
-    error is identical on every path -- including the one that never talks to Stripe.
+    Missing and EMPTY are the same failure and both raise naming ``STRIPE_SECRET_KEY``: the
+    settings layer reads an empty env var as unset, and the empty-value check refuses an empty
+    value from any other source, so ``Authorization: Bearer`` with no key never reaches Stripe.
+    This is the module's only read path for the value, so the error is identical on every
+    path -- including the one that never talks to Stripe.
     """
     key = stripe_settings().secret_key
     if not (key and key.get_secret_value()):

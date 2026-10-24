@@ -656,6 +656,20 @@ async def test_bump_policy_version_increments(
     assert await management.bump_policy_version() == 2
 
 
+async def test_bump_policy_version_with_the_gate_off_touches_no_redis(monkeypatch) -> None:
+    # Nothing reads the policy version while access control is off, so the bump is a no-op:
+    # it opens no Redis client (the real factory would raise with no URL configured).
+    from tai42_kit.clients import client_ctx
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "false")
+    monkeypatch.delenv("ACCESS_CONTROL_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    monkeypatch.setattr(management, "client_ctx", client_ctx)
+    reset_all_settings()
+    assert await management.bump_policy_version() is None
+
+
 async def test_failed_version_bump_raises(pg: FakeAccessControlPg, provider: _SpyProvider, monkeypatch) -> None:
     fake = FakeRedis(strings={})
 

@@ -18,6 +18,7 @@ from starlette.applications import Starlette
 from tai42_kit.logging import redaction as kit_redaction
 
 import tai42_skeleton.cli.mcp_app as mcp_app
+from tai42_skeleton.app.boot_rules import SERVE_WORKERS_VAR
 
 from .conftest import (  # noqa: F401
     _HTTP_SCOPE,
@@ -69,10 +70,14 @@ def _own_multiproc_dir(tmp_path, monkeypatch: pytest.MonkeyPatch):
 def _bus_configured(monkeypatch: pytest.MonkeyPatch):
     """These serve-path tests exercise multi-worker runs, which the boot rules require
     the worker bus for. Report it configured so the launch wiring under test runs
-    (nothing here opens a real bus — uvicorn.run and the in-process servers are faked)."""
+    (nothing here opens a real bus — uvicorn.run and the in-process servers are faked).
+    The worker count a run stamps is restored after each test, so no later test counts
+    this test's workers."""
     from tai42_kit.settings import reset_all_settings
 
     monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv(SERVE_WORKERS_VAR, "")
+    monkeypatch.delenv(SERVE_WORKERS_VAR)
     reset_all_settings()
     try:
         yield

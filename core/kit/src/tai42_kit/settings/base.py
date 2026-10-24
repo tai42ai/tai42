@@ -8,7 +8,7 @@ from typing import Annotated, Any, ClassVar, Final, Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
-from tai42_kit.settings.env_file import DEFAULT_ENV_FILE, TaiDotEnvSettingsSource
+from tai42_kit.settings.env_file import DEFAULT_ENV_FILE, TaiDotEnvSettingsSource, env_file_in_effect
 
 # Reload disposition of a settings group (or a single field) across a settings
 # epoch flip: ``hot`` re-reads live, ``recycle`` needs its pooled resource torn
@@ -80,12 +80,14 @@ class TaiBaseSettings(BaseSettings):
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Put the kit's cached dotenv source in the dotenv slot.
 
-        Every other option of the source is read from ``settings_cls.model_config``,
-        as the framework's own source reads it.
+        The source reads ``tai_env_file``, or no file when its reads are suspended
+        (:func:`~tai42_kit.settings.env_file.env_file_reads_suspended`). Every other option of
+        the source is read from ``settings_cls.model_config``, as the framework's own source
+        reads it.
         """
         dotenv = TaiDotEnvSettingsSource(
             settings_cls,
-            env_file=cls.tai_env_file,
+            env_file=env_file_in_effect(cls.tai_env_file),
             _init_state=dotenv_settings._init_state,
         )
         return (init_settings, env_settings, dotenv, file_secret_settings)

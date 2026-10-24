@@ -9,10 +9,11 @@ are declared once there, under this group's own prefix. The group claims its pre
 
 ``host`` is REQUIRED and has no default — a mis-wired deployment must fail loudly
 at first use rather than silently target a local socket. The mTLS client identity
-that speaks the engine control API sits under the canonical ``/certs/client``
-mount, so the certs are never env-configured and never enter the app env — the one
-channel a client identity must never leak through. The plain knobs (``host``, the
-readiness-probe switches, the resource-cap fallbacks, the pull policy) are ordinary
+that speaks the engine control API is read from files, by default under the
+canonical ``/certs/client`` mount: only the three file PATHS are settings, so the
+certificate and key material never enter the app env — the one channel a client
+identity must never leak through. Every knob (``host``, the cert paths, the
+readiness-probe switches, the resource-cap fallbacks, the pull policy) is ordinary
 env. Every spec credential rides ``spec.env`` as a ``SecretStr`` and is unwrapped
 ONLY at the engine call, never here.
 """
@@ -41,8 +42,8 @@ class DockerSandboxSettings(SandboxDispatchSettings):
 
     # mTLS for a ``tcp://`` host. ``tls_verify`` off is never the documented shape;
     # an unauthenticated ``tcp://`` endpoint is not supported. The three cert paths
-    # sit under the canonical ``/certs/client`` mount the deployment provisions, so they are
-    # NOT env-configured and never enter the recycle-pinned app env.
+    # default to the canonical ``/certs/client`` mount the deployment provisions; the env
+    # carries only the paths, never the certificate or key material itself.
     tls_verify: bool = True
     tls_cert_path: str = "/certs/client/cert.pem"
     tls_key_path: str = "/certs/client/key.pem"

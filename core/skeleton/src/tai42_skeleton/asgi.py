@@ -27,7 +27,14 @@ MULTIPROCESS dir — a separate reader over a shared multiproc dir is yours to r
 and process-fleet orchestration. Fleet config-reload fan-out is the app's internal
 worker bus: an embedded worker joins it like any other process when
 ``TAI_BUS_REDIS_URL`` is set (the rules cannot count sibling processes in an
-embedded host, so set it in any multi-process embed).
+embedded host, so set it in any multi-process embed). Sub-MCP registrations are
+shared across processes only through their own store, so a multi-process embed also
+sets ``SUB_MCP_REDIS_URL`` (or ``TAI_DEFAULT_REDIS_URL``), and hooks likewise through
+``HOOKS_REDIS_URL`` (or ``TAI_DEFAULT_REDIS_URL``). The lifespan's workers-need-bus and
+workers-need-stores rules read the worker count ``tai serve`` stamps in ``TAI_SERVE_WORKERS``; an embedded
+host does not set it, so each process counts as one worker and those rules never
+refuse here. The lifespan refuses a manifest that registers a task backend over an
+in-memory hooks registry at any process count.
 """
 
 from __future__ import annotations

@@ -12,6 +12,10 @@ from tai42_skeleton.app.boot_rules import (
     require_apply_window_covers_drain,
     require_bus_for_backend,
     require_bus_for_shared_config,
+    require_bus_for_workers,
+    require_hooks_store_for_backend,
+    require_hooks_store_for_workers,
+    require_sub_mcp_store_for_workers,
 )
 from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.app.graceful_exit import request_graceful_exit
@@ -38,6 +42,14 @@ class LifespanMixin(LifecycleState):
         # serve stale config after a reload. Refuse loudly before the app starts.
         require_bus_for_shared_config()
         require_bus_for_backend(manifest)
+        # A registered backend runs in its own process, which matches the events it raises
+        # against its own hooks registry, so that registry must be shared.
+        require_hooks_store_for_backend(manifest)
+        # A server running more than one worker needs the bus, the sub-MCP registration store
+        # and the hooks registry shared, read under the stored env the boot env bridge applied.
+        require_bus_for_workers()
+        require_sub_mcp_store_for_workers()
+        require_hooks_store_for_workers()
         # A bus-enabled process's fleet apply window must cover the retire's drain floor, so
         # a worker draining real work answers inside it.
         require_apply_window_covers_drain()

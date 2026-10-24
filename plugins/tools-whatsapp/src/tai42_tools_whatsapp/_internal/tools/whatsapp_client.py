@@ -58,9 +58,9 @@ def _access_token() -> str:
     """The configured Graph access token, revealed.
 
     Missing and EMPTY are the same failure and both raise naming
-    ``CHANNEL_WHATSAPP_ACCESS_TOKEN``: an empty env var parses to ``SecretStr("")``
-    (not ``None``), so a plain ``is None`` test would send ``Authorization: Bearer``
-    to Graph.
+    ``CHANNEL_WHATSAPP_ACCESS_TOKEN``: the settings layer reads an empty env var as
+    unset, and the empty-value check refuses an empty token from any other source, so
+    ``Authorization: Bearer`` with no token never reaches Graph.
     """
     token = whatsapp_settings().access_token
     if not (token and token.get_secret_value()):

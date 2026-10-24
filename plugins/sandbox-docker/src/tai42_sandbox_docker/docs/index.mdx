@@ -17,9 +17,10 @@ sandbox_module: tai42_sandbox_docker
 
 ## Configuration
 
-The `SANDBOX_DOCKER_` env group. The mTLS client certificates are read from the
-canonical `/certs/client` mount, never from the environment — the one channel a
-client identity must never leak through; every other knob below is ordinary env.
+The `SANDBOX_DOCKER_` env group. The mTLS client certificates are read from files,
+by default on the canonical `/certs/client` mount. The environment carries only the
+file paths, never the certificate or key material — the one channel a client
+identity must never leak through. Every knob below is ordinary env.
 
 | Variable | Default | Effect |
 | --- | --- | --- |

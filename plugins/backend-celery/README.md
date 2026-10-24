@@ -71,6 +71,13 @@ in your manifest's `backend_module` field:
 backend_module: tai42_backend_celery
 ```
 
+A config that registers a task backend also needs the worker bus and a shared
+hooks registry: `tai serve`, `tai backend`, a config reload and a config write all
+refuse it unless `TAI_BUS_REDIS_URL` and `HOOKS_REDIS_URL` are set (each falls back
+to `TAI_DEFAULT_REDIS_URL`). The backend process matches the events it raises
+against its own hooks registry, so an in-memory one would run none of the hooks
+registered through the server.
+
 The worker runtime is started through the host's backend launcher with one of:
 
 ```bash

@@ -112,7 +112,7 @@ def test_default_dir_is_app(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TAI_CONFIG_DIR_PATH", raising=False)
     monkeypatch.delenv("TAI_MANIFEST_PATH", raising=False)
     mgr = FileConfigManager()
-    assert mgr._env_path == os.path.join("/app", ".env")
+    assert mgr.env_path == os.path.join("/app", ".env")
     assert mgr.manifest_path == os.path.join("/app", "manifest.yml")
     assert mgr._defaults_manifest_path == os.path.join("/app", "templates", "manifest.yml")
 
@@ -120,12 +120,12 @@ def test_default_dir_is_app(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_config_dir_path_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setenv("TAI_CONFIG_DIR_PATH", str(tmp_path))
     mgr = FileConfigManager()
-    assert mgr._env_path == os.path.join(str(tmp_path), ".env")
+    assert mgr.env_path == os.path.join(str(tmp_path), ".env")
 
 
 def test_constructor_arg_wins(tmp_path) -> None:
     mgr = FileConfigManager(config_dir_path=str(tmp_path))
-    assert mgr._env_path.startswith(str(tmp_path))
+    assert mgr.env_path.startswith(str(tmp_path))
 
 
 def test_tai_manifest_path_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -751,7 +751,7 @@ def test_write_env_blocks_on_held_sidecar_lock(tmp_path) -> None:
     import fcntl
 
     mgr = FileConfigManager(config_dir_path=str(tmp_path))
-    fd = os.open(f"{mgr._env_path}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fd = os.open(f"{mgr.env_path}.lock", os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX)
     ctx = multiprocessing.get_context("spawn")
     child, ready = _spawn_reporting(ctx, single_env_write, (str(tmp_path), "A", "1"))
@@ -779,7 +779,7 @@ def test_write_env_locks_the_sidecar_not_the_target(tmp_path) -> None:
 
     mgr = FileConfigManager(config_dir_path=str(tmp_path))
     mgr.write_env({"SEED": "0"})  # create the target so it can be locked
-    fd = os.open(mgr._env_path, os.O_RDWR)
+    fd = os.open(mgr.env_path, os.O_RDWR)
     fcntl.flock(fd, fcntl.LOCK_EX)
     ctx = multiprocessing.get_context("spawn")
     child, ready = _spawn_reporting(ctx, single_env_write, (str(tmp_path), "A", "1"))

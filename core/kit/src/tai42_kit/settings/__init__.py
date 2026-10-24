@@ -19,7 +19,7 @@ from tai42_kit.settings.default_namespace import (
     TAI_DEFAULT_ENV_PREFIX,
     DefaultNamespaceMixin,
 )
-from tai42_kit.settings.env_file import DEFAULT_ENV_FILE, env_file_identity
+from tai42_kit.settings.env_file import DEFAULT_ENV_FILE, env_file_identity, env_file_reads_suspended
 from tai42_kit.settings.owned_prefix import (
     KUBERNETES_SERVICE_LINK_SUFFIX_RE,
     UnknownOwnedSettingError,
@@ -60,6 +60,7 @@ __all__ = [
     "bind_respawn_class_env",
     "changes_only_by_respawn",
     "env_file_identity",
+    "env_file_reads_suspended",
     "is_kubernetes_service_link",
     "keyed_settings_cache",
     "kubernetes_service_link_names",

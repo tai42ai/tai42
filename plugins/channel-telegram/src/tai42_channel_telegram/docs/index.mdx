@@ -26,14 +26,22 @@ inherited connection-tuning fields) point the plugin-owned correlation store.
 | `CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS` | empty | Whitelist of chats (numeric chat id or `@username`) a caller-supplied recipient may name. Comma-separated or JSON list. |
 | `CHANNEL_TELEGRAM_DEFAULT_RECIPIENT` | unset | Chat delivered to when the caller names none; not allowlist-checked. |
 | `CHANNEL_TELEGRAM_HTTP_TIMEOUT_SECONDS` | `30` | Wall-clock budget for one outbound HTTP call. |
+| `CHANNEL_TELEGRAM_OPTION_TAP_TTL_SECONDS` | `86400` | How long a notification's tappable options stay resolvable, so a later tap still bridges the option's text. A select `ask` uses its own remaining answer time instead. |
+| `CHANNEL_TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Bot API origin. Overridable so a test stub can stand in; production leaves the default. |
 | `CHANNEL_TELEGRAM_REDIS_URL` | unset | Connection for the correlation store. |
+
+`CHANNEL_TELEGRAM_BOT_TOKEN`, `CHANNEL_TELEGRAM_WEBHOOK_SECRET` and
+`CHANNEL_TELEGRAM_PUBLIC_BASE_URL` are **required**, and so is at least one of
+`CHANNEL_TELEGRAM_DEFAULT_RECIPIENT` and `CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS`: the
+startup hook refuses to boot without them, naming the missing variable.
 
 ## Webhook registration is automatic
 
 Unlike the other channels, Telegram's webhook is registered **automatically**: on
 startup the plugin calls `setWebhook` (idempotent) to point Telegram at
 `{PUBLIC_BASE_URL}/api/channels/telegram/inbound` with the secret token. You do
-not configure it by hand.
+not configure it by hand. A failed `setWebhook` call, including an unreachable Bot
+API, aborts startup.
 
 ## Create a bridge route
 

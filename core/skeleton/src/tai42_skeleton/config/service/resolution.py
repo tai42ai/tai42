@@ -7,13 +7,15 @@ manifest/env, and derive the effective env a change or profile replace would pro
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, cast
 
 from pyaml_env import parse_config
+from tai42_kit.settings import env_file_reads_suspended
 from tai42_kit.utils.data import dump_manifest
 
 from tai42_skeleton.config.boundary import x_band_env_keys
+from tai42_skeleton.config.file_manager import FileConfigManager
 from tai42_skeleton.config.secret_seal import seal_resolved_secrets
 from tai42_skeleton.config.service.base import _ConfigServiceBase
 
@@ -102,19 +104,29 @@ class _ResolutionMixin(_ConfigServiceBase):
         except FileNotFoundError:
             return {}
 
+    def _stored_env_file(self) -> str | None:
+        """The file the stored env is kept in, or ``None`` when the config manager keeps it elsewhere."""
+        manager = self._config_manager
+        return manager.env_path if isinstance(manager, FileConfigManager) else None
+
 
 @contextmanager
-def _environ(env: dict[str, str]) -> Iterator[None]:
-    """Temporarily replace ``os.environ`` with ``env`` for the duration of the block, restoring it afterwards.
+def _environ(env: dict[str, str], *, stored_env_file: str | None) -> Iterator[None]:
+    """Model ``env`` as the whole env for the duration of the block, restoring ``os.environ`` afterwards.
 
-    Used to resolve a manifest's ``!ENV`` markers against a proposed post-change env without mutating the
-    real process env.
+    ``os.environ`` is replaced with ``env``, so a manifest's ``!ENV`` markers and every settings
+    class resolve from the proposed post-change env without mutating the real process env.
+    ``env`` carries the post-change stored env, so no settings construction reads
+    ``stored_env_file`` (the stored env file, when the stored env is kept in one) inside the
+    block: its contents are the pre-change stored env. Every other env file a settings class
+    declares is still read, as the processes keep reading it after the change.
     """
     saved = dict(os.environ)
     os.environ.clear()
     os.environ.update(env)
     try:
-        yield
+        with nullcontext() if stored_env_file is None else env_file_reads_suspended(stored_env_file):
+            yield
     finally:
         os.environ.clear()
         os.environ.update(saved)

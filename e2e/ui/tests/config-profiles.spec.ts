@@ -8,8 +8,11 @@
  * (unsupervised) deployment (`TAI_SUPERVISED` unset ⇒ `Shape.bare`):
  *
  *  1. CREATE → EDIT → DIFF. A profile carrying a user-secret-marked key AND a
- *     recycle-class key (`TAI_BUS_ACK_TIMEOUT`, a `TAI_BUS_*` field). The diff
- *     preview masks EVERY value (`••••••`) and surfaces the recycle callout. This
+ *     recycle-class key (`TAI_BUS_ACK_TIMEOUT`, a `TAI_BUS_*` field), plus the
+ *     stack's stored bus and shared-store keys at their stored values (a profile
+ *     save is validated as a whole-env replace, so a profile dropping them is
+ *     refused). The diff preview masks EVERY value (`••••••`) and surfaces the
+ *     recycle callout. This
  *     test never applies the profile and never touches the live env band — a
  *     recycle-class diff CANNOT be applied on a bare shape (refused wholesale), so
  *     the recycle callout is asserted on the diff alone.
@@ -46,6 +49,19 @@ const MASK = '••••••';
  *  bare-shape refused set (only the two bus URLs are), so a diff carrying it shows the
  *  recycle callout without a refusal. */
 const RECYCLE_KEY = 'TAI_BUS_ACK_TIMEOUT';
+
+/** The worker-bus and shared-store keys a whole-env replace must keep on this stack. A
+ *  profile save validates the profile as the WHOLE stored env: the backend and the
+ *  multi-worker fleet need the bus (`TAI_BUS_REDIS_URL`, or the `TAI_DEFAULT_REDIS_URL`
+ *  fallback) and the shared hooks / sub-MCP stores, so a profile that drops the stored
+ *  copies is refused. */
+const INFRA_KEYS = [
+  'TAI_BUS_REDIS_URL',
+  'TAI_BUS_NAMESPACE',
+  'TAI_DEFAULT_REDIS_URL',
+  'HOOKS_REDIS_URL',
+  'SUB_MCP_REDIS_URL',
+] as const;
 
 /** The stored env map GET /api/config/env exposes under `data.env`. */
 async function storedEnv(request: APIRequestContext): Promise<Record<string, string>> {
@@ -104,6 +120,7 @@ test.afterEach(async ({ request }) => {
 
 test('create, edit, and diff a profile — diff masks secrets and surfaces the recycle callout', async ({
   page,
+  request,
 }) => {
   const name = uniq('e2e_prof');
   const secretKey = uniq('E2E_SECRET').toUpperCase();
@@ -135,6 +152,15 @@ test('create, edit, and diff a profile — diff masks secrets and surfaces the r
   await createDialog.getByRole('textbox', { name: /^Value of new variable/ }).fill('5.0');
   await createDialog.getByRole('textbox', { name: /^Name of new variable/ }).fill(RECYCLE_KEY);
 
+  // The stored bus and shared-store keys, each at its stored value, entered the same way as
+  // row 2 — the save validates the profile as the whole stored env, so it must keep them.
+  const stored = await storedEnv(request);
+  for (const key of INFRA_KEYS.filter((k) => k in stored)) {
+    await createDialog.getByRole('button', { name: 'Add variable' }).click();
+    await createDialog.getByRole('textbox', { name: /^Value of new variable/ }).fill(stored[key]);
+    await createDialog.getByRole('textbox', { name: /^Name of new variable/ }).fill(key);
+  }
+
   await createDialog.getByRole('button', { name: 'Create profile' }).click();
   const row = page.getByTestId(`profile-row-${name}`);
   await expect(row).toBeVisible();
@@ -147,16 +173,17 @@ test('create, edit, and diff a profile — diff masks secrets and surfaces the r
   await expect(row).toContainText('edited desc');
 
   // DIFF: the preview masks EVERY value and names the recycle-class key in its recycle
-  // callout. A UI-created profile is SPARSE and `apply_replace_env` is a full REPLACE, so
-  // the diff also REMOVES every baseline key — including the shape's infra-identity key
-  // (`TAI_BUS_REDIS_URL`), which the recycle policy refuses. So a refused callout DOES
-  // appear here; the invariant that matters is that the RECYCLE key routes to the recycle
-  // callout and is NEVER classified refused.
+  // callout. The profile carries the stack's bus and shared-store keys at their stored
+  // values, so it saves; it is otherwise SPARSE and `apply_replace_env` is a full REPLACE,
+  // so the diff still REMOVES every other baseline key. The bus URLs the recycle policy
+  // refuses (`TAI_BUS_REDIS_URL`, `TAI_DEFAULT_REDIS_URL`) are carried unchanged, so no
+  // refused callout appears: the RECYCLE key routes to the recycle callout and is NEVER
+  // classified refused.
   await page.getByRole('button', { name: `Diff profile ${name}` }).click();
   const diffDialog = page.getByRole('dialog', { name: `Diff — ${name}` });
   await expect(diffDialog.getByTestId('diff-recycle')).toBeVisible();
   await expect(diffDialog.getByTestId('diff-recycle')).toContainText(RECYCLE_KEY);
-  await expect(diffDialog.getByTestId('diff-refused')).not.toContainText(RECYCLE_KEY);
+  await expect(diffDialog.getByTestId('diff-refused')).toHaveCount(0);
   // The secret's real value never renders; the mask does. The diff rows key by env
   // name (`diff-row-<KEY>`).
   await expect(diffDialog.getByTestId(`diff-row-${secretKey}`)).toBeVisible();

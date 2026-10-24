@@ -84,6 +84,7 @@ X_BAND_EXTRA: frozenset[str] = frozenset(
         "TAI_STATELESS_HTTP",
         "TAI_METRICS_RUN_ID",
         "TAI_RUN_MODE",
+        "TAI_SERVE_WORKERS",
         "PROMETHEUS_RUNTIME",
     }
 )

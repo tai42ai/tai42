@@ -24,6 +24,7 @@ inherited connection-tuning fields) point the plugin-owned correlation store.
 | `CHANNEL_WHATSAPP_ACCESS_TOKEN` | unset | Graph API bearer token for the send (one token serves many numbers). Secret. |
 | `CHANNEL_WHATSAPP_APP_SECRET` | unset | Keys the `X-Hub-Signature-256` HMAC the inbound door checks over the raw body. Secret. |
 | `CHANNEL_WHATSAPP_VERIFY_TOKEN` | unset | Shared secret echoed during Meta's GET webhook verification handshake. Secret. |
+| `CHANNEL_WHATSAPP_API_BASE_URL` | `https://graph.facebook.com/v23.0` | Graph API origin with a pinned version. Overridable so a test stub can stand in; production leaves the default. |
 | `CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID` | unset | `phone_number_id` used as the sender for `ask` when none is routed. |
 | `CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS` | empty | Whitelist of `wa_id`s a caller-requested recipient must be on (`ask` only). Comma-separated or JSON list. |
 | `CHANNEL_WHATSAPP_HTTP_TIMEOUT_SECONDS` | `30` | Timeout for the outbound send and the loopback answer forward. |

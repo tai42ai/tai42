@@ -72,10 +72,10 @@ def github_tools_settings() -> GithubToolsSettings:
 def _token() -> str:
     """The configured GitHub token, revealed.
 
-    Missing and EMPTY are the same failure and both raise naming ``TOOLS_GITHUB_TOKEN``: an empty
-    env var parses to ``SecretStr("")`` (not ``None``), so a plain ``is None`` test would send
-    ``Authorization: Bearer`` with no credential. This is the module's only read path for the value,
-    so the error is identical on every path.
+    Missing and EMPTY are the same failure and both raise naming ``TOOLS_GITHUB_TOKEN``: the
+    settings layer reads an empty env var as unset, and the empty-value check refuses an empty
+    token from any other source, so ``Authorization: Bearer`` with no credential is never sent.
+    This is the module's only read path for the value, so the error is identical on every path.
     """
     token = github_tools_settings().token
     if not (token and token.get_secret_value()):

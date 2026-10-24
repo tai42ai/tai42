@@ -10,7 +10,10 @@ A multi-uvicorn-worker deployment (``tai42-skeleton -w N``, ``N > 1``) REQUIRES
 ``SUB_MCP_REDIS_URL`` — the in-memory store is per-process, so without a shared
 Redis a registration made on one worker is invisible to every sibling and no
 worker rehydrates another's routes. Only a single-worker deployment may run on the
-in-memory store.
+in-memory store: under ``tai serve`` with more than one worker, each worker boot, reload
+and config write refuses it without the store
+(:func:`~tai42_skeleton.app.boot_rules.require_sub_mcp_store_for_workers`). The
+connection falls back to ``TAI_DEFAULT_REDIS_URL`` when ``SUB_MCP_REDIS_URL`` is unset.
 
 Settings are co-located with the store and de-mixed: the Redis connection is a
 field composed from the kit connection shape (not a base the feature extends), so

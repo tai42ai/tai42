@@ -19,6 +19,8 @@ from tai42_skeleton.config.service import ConfigService
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
 
+    from tai42_skeleton.config.file_manager import FileConfigManager
+
 
 class FakeConfigStore:
     """A config manager whose transactional seams persist into an in-memory document.
@@ -166,7 +168,7 @@ class RecordingBus:
 
 
 def _service(
-    store: FakeConfigStore,
+    store: FakeConfigStore | FileConfigManager,
     *,
     admin: Any = None,
     bus: Any = None,

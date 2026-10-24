@@ -69,7 +69,7 @@ def test_the_platform_budget_is_read_from_the_env_it_is_asked_under(monkeypatch:
         assert budgets.budget() == 12.0
         # A config change is validated against the env it proposes: the budget read under
         # that env is the proposed one, not the live one.
-        with _environ({**os.environ, "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "41"}):
+        with _environ({**os.environ, "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": "41"}, stored_env_file=None):
             assert budgets.budget() == 41.0
         assert budgets.budget() == 12.0
     finally:

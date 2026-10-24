@@ -7,11 +7,17 @@ size) and the variables its values interpolate (``${NAME}``) keep their
 ``os.environ`` values; any other case parses or resolves again, so a caller sees
 exactly what a fresh parse returns. A path that is not a regular file (a FIFO) is
 read on every call.
+
+Inside :func:`env_file_reads_suspended` no settings construction reads the env file at the
+given path, so a block that models an env in ``os.environ`` already carrying that file's
+post-change contents does not read the file's current contents over it.
 """
 
 import os
 import stat
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -28,6 +34,8 @@ __all__ = [
     "EnvFileIdentity",
     "TaiDotEnvSettingsSource",
     "env_file_identity",
+    "env_file_in_effect",
+    "env_file_reads_suspended",
     "read_env_file",
 ]
 
@@ -38,6 +46,43 @@ DEFAULT_ENV_FILE: Final = ".env"
 EnvFileIdentity = tuple[int, int, int, int]
 
 _DEFAULT_ENCODING: Final = "utf8"
+
+# The resolved paths whose reads are suspended in the current context.
+_SUSPENDED_ENV_FILES: ContextVar[frozenset[str]] = ContextVar("tai42_suspended_env_files", default=frozenset())
+
+
+def _resolved(path: str | os.PathLike[str]) -> str:
+    return os.path.realpath(os.path.expanduser(path))
+
+
+@contextmanager
+def env_file_reads_suspended(path: str | os.PathLike[str]) -> Iterator[None]:
+    """Read the env file at ``path`` in no settings construction inside the block.
+
+    ``path`` is resolved on entry (a relative path against the working directory, symlinks
+    followed), and a settings class whose env file resolves to the same file reads no env
+    file inside the block; an env file at any other path is still read. Blocks nest, each
+    adding its path. The state is held in a context variable: a task created inside the
+    block copies the context and so skips the file too, while a thread started with
+    ``threading.Thread`` starts from an empty context and reads it, unless the interpreter
+    makes threads inherit the context (``sys.flags.thread_inherit_context``).
+    """
+    token = _SUSPENDED_ENV_FILES.set(_SUSPENDED_ENV_FILES.get() | {_resolved(path)})
+    try:
+        yield
+    finally:
+        _SUSPENDED_ENV_FILES.reset(token)
+
+
+def env_file_in_effect[F: str | os.PathLike[str]](declared: F | None) -> F | None:
+    """The env file a settings construction reads: ``declared``, or none when its reads are suspended.
+
+    See :func:`env_file_reads_suspended`.
+    """
+    suspended = _SUSPENDED_ENV_FILES.get()
+    if declared is None or not suspended or _resolved(declared) not in suspended:
+        return declared
+    return None
 
 
 @dataclass(frozen=True)

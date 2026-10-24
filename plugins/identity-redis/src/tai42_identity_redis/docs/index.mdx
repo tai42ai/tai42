@@ -16,19 +16,27 @@ lifecycle_modules:
 ```
 
 The module registers itself as the `redis` provider at import.
-`ACCESS_CONTROL_AUTH_PROVIDERS` (an ordered JSON list, default `["redis"]`) names
-the chain the verifier tries.
+`ACCESS_CONTROL_AUTH_PROVIDERS` (an ordered JSON list) names the chain the verifier
+tries. Unset, the chain is every registered identity provider, sorted by name.
 
 ## Configuration
 
-The provider reads its connection from the shared access-control settings — it
-owns no `CHANNEL_`/`IDENTITY_` env group of its own.
+The provider owns its key store, so it reads its Redis connection and key namespace
+from its own `TAI_IDENTITY_` env group. The access-control gate keeps its own Redis,
+`ACCESS_CONTROL_REDIS_URL`, for policies, per-user live counters and the setup token.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `ACCESS_CONTROL_ENABLE` | `true` | The access-control gate. Turn it off only for local, auth-free work. |
-| `ACCESS_CONTROL_AUTH_PROVIDERS` | `["redis"]` | Ordered provider chain the verifier tries. |
-| `ACCESS_CONTROL_REDIS_URL` | unset | Redis holding the key records and per-user live counters. Falls back to the shared `TAI_DEFAULT_REDIS_URL`; with the gate on, one must be set. |
+| `ACCESS_CONTROL_AUTH_PROVIDERS` | unset: every registered provider, sorted by name | Ordered provider chain the verifier tries. |
+| `ACCESS_CONTROL_REDIS_URL` | unset | The gate's Redis: policies and per-user live counters. Falls back to the shared `TAI_DEFAULT_REDIS_URL`; with the gate on, one must be set. |
+| `TAI_IDENTITY_REDIS_URL` | unset | Redis holding the key records. Falls back to the shared `TAI_DEFAULT_REDIS_URL`; with this provider loaded, one must be set. |
+| `TAI_IDENTITY_KEY_PREFIX` | `ac:key:` | Namespace every key record carries (`<prefix><sha256 of the key>`). |
+| `TAI_IDENTITY_REDIS_MAX_CONNECTIONS` | `10` | Connection pool size. |
+| `TAI_IDENTITY_SOCKET_CONNECT_TIMEOUT` | `5` | Seconds to connect before the auth path fails; must be positive. |
+| `TAI_IDENTITY_SOCKET_TIMEOUT` | `5` | Seconds per Redis read before the auth path fails. |
+| `TAI_IDENTITY_RETRY_ON_TIMEOUT` | `true` | Retry a command that timed out. |
+| `TAI_IDENTITY_RETRY_ATTEMPTS` | `0` | Retries after a first connection or timeout failure, with backoff. |
 | `TAI_SETUP_TOKEN` | unset | Gate token for the one-shot `POST /api/setup` door that initializes the deployment. Unset, the platform auto-generates one and logs it once at startup; set it to pin a known value. |
 | `TAI_SETUP_OPEN` | `false` | Drops the setup-token gate for local/dev. Leave off in any shared deployment. |
 

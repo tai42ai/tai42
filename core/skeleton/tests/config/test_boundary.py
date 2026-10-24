@@ -86,11 +86,13 @@ def _service(store: FakeConfigStore) -> tuple[ConfigService, FakeReloadAdmin, Re
 # TAI_CONFIG_MODE  = half (a), a registry ``excluded`` field.
 # TAI_MANIFEST_PATH = redundant: registry-excluded AND listed in X_BAND_EXTRA.
 # TAI_RUN_MODE     = half (b), a boot-identity bare read no settings class declares.
+# TAI_SERVE_WORKERS = half (b), the worker count ``tai serve`` stamps for its workers.
 # TAI_SUPERVISED / TAI_SUPERVISED_PINNED_KEYS / TAI_READY_SENTINEL_PATH = the three deployment keys.
 _X_KEYS = [
     "TAI_CONFIG_MODE",
     "TAI_MANIFEST_PATH",
     "TAI_RUN_MODE",
+    "TAI_SERVE_WORKERS",
     "TAI_SUPERVISED",
     "TAI_SUPERVISED_PINNED_KEYS",
     "TAI_READY_SENTINEL_PATH",
