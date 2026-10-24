@@ -71,6 +71,7 @@ from tai42_agents._internal.park import (
     park_step_binding,
     resume_command,
 )
+from tai42_agents._internal.recovery import _is_answerable
 from tai42_agents._internal.usage import usage_event
 
 
@@ -271,7 +272,10 @@ def _ai_message_events(
     """The step events an ``updates``-channel ``AIMessage`` surfaces.
 
     A reasoning block, each non-synthetic tool call (deduped), then the run-usage event. The synthetic
-    structured-output tool call is routing mechanics and never surfaces.
+    structured-output tool call is routing mechanics and never surfaces. An invalid tool call
+    (arguments that did not parse) that has an id and a name surfaces as a call with no
+    arguments: the shared recovery answers it with an error result under the same id, so the
+    pair matches.
     """
     reasoning = _reasoning_text(message)
     if reasoning:
@@ -287,6 +291,13 @@ def _ai_message_events(
             args=tool_call.get("args", {}) or {},
             call_id=call_id,
         )
+    for invalid_call in getattr(message, "invalid_tool_calls", None) or []:
+        if not _is_answerable(invalid_call) or invalid_call.get("name") in structured_tools:
+            continue
+        call_id = dedup.call_id(dict(invalid_call))
+        if call_id is None:
+            continue
+        yield ToolCallStep(tool=invalid_call["name"], args={}, call_id=call_id)
     usage = usage_event(message)
     if usage is not None:
         yield usage

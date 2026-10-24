@@ -27,7 +27,7 @@ from typing import Annotated, Any
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import RemoveMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, RemoveMessage, SystemMessage, ToolCall, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -46,7 +46,7 @@ from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import cache_mark_key, requires_leading_user_turn
 from tai42_kit.utils.data.string_util import text_to_md5
 
-from tai42_agents._internal.recovery import _tool_error_middleware
+from tai42_agents._internal.recovery import _invalid_tool_call_answers, _tool_error_middleware
 
 
 def _merged_selected_tools(left: list[str], right: list[str]) -> list[str]:
@@ -69,7 +69,7 @@ class State(MessagesState):
 
 
 def _route_tool_calls(
-    tool_calls: list[dict],
+    tool_calls: list[ToolCall],
     *,
     retrieve_tool_name: str,
     select_node: str,
@@ -264,7 +264,10 @@ class RetrievalToolsGraph:
                 rolled = roll_cache_marks(messages, self._cache_mark_key)
                 messages = rolled if rolled is not None else messages
             response = await llm_with_tools.ainvoke(messages)
-            return {"messages": [response]}
+            # Raw graph node: the shared model-turn hook never runs here, so the turn's
+            # invalid tool calls (arguments that did not parse) are answered right after it.
+            answers = _invalid_tool_call_answers(response) if isinstance(response, AIMessage) else []
+            return {"messages": [response, *answers]}
 
         self._agent_node = RunnableCallable(func=None, afunc=node)
         return self._agent_node
@@ -350,20 +353,29 @@ class RetrievalToolsGraph:
             return self._should_continue_node
 
         def node(state: State, *, store: BaseStore) -> Any:
-            last = state["messages"][-1]
+            messages = state["messages"]
+            # The model turn is the last AIMessage: the agent node writes the answers to
+            # its invalid tool calls after it.
+            turn = next((message for message in reversed(messages) if isinstance(message, AIMessage)), None)
+            if turn is None:
+                raise ValueError("retrieval agent routing found no model turn in the thread")
 
             # 1) any pending tool_calls are dispatched to the matching node first.
-            tool_calls = getattr(last, "tool_calls", None) or []
-            if tool_calls:
+            if turn.tool_calls:
                 return _route_tool_calls(
-                    tool_calls,
+                    turn.tool_calls,
                     retrieve_tool_name=self.retrieve_tools_tool_name,
                     select_node=self.select_tools_node_name,
                     execute_node=self.execute_tools_node_name,
                 )
 
-            # 2) no tool calls left: the message MUST be the terminal status JSON.
-            status = _terminal_status(last.text.strip())
+            # 2) every call of the turn was invalid and has its error answer: the model
+            # reads the errors on its next turn (through the context node, like a tool result).
+            if turn is not messages[-1]:
+                return self.context_node_name
+
+            # 3) no tool calls left: the message MUST be the terminal status JSON.
+            status = _terminal_status(turn.text.strip())
             if status == "continue":
                 # No tool_calls left; loop back through the context node so the
                 # history is reduced before the next agent turn.

@@ -57,16 +57,24 @@ def test_none_passes_through_without_a_rail() -> None:
     assert rail is None
 
 
-def test_explicit_strategies_pass_through_without_a_rail() -> None:
-    tool = ToolStrategy(_SCHEMA)
+def test_explicit_tool_strategy_binds_its_schemas_with_the_rail_as_the_judge() -> None:
+    tool = ToolStrategy(_SCHEMA, tool_message_content="stored")
     strategy, rail = structured_output_stack(_llm(None), "openai", tool)
-    assert strategy is tool
-    assert rail is None
+    assert isinstance(strategy, ToolStrategy)
+    assert strategy.handle_errors is False
+    assert strategy.schema == _SCHEMA
+    assert strategy.schema_specs == tool.schema_specs
+    assert strategy.tool_message_content == "stored"
+    assert isinstance(rail, StructuredOutputRailMiddleware)
+    # The caller's strategy is left as it was.
+    assert tool.handle_errors is True
 
+
+def test_explicit_provider_strategy_keeps_its_binding_and_gets_a_rail() -> None:
     provider = ProviderStrategy(_Model)
-    strategy2, rail2 = structured_output_stack(_llm(None), "openai", provider)
-    assert strategy2 is provider
-    assert rail2 is None
+    strategy, rail = structured_output_stack(_llm(None), "openai", provider)
+    assert strategy is provider
+    assert isinstance(rail, StructuredOutputRailMiddleware)
 
 
 def test_native_strategy_carries_the_kit_kwargs_and_a_rail() -> None:

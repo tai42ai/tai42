@@ -1,13 +1,14 @@
 """Typed, non-fatal run outcomes for a bounded structured-output loop and a recursion trip.
 
-A structured-output ``response_format`` is enforced through langchain's tool-calling
-retry rail: a non-conforming model response is turned into an error tool message and the
-model is re-prompted. The rail has no counter of its own, so the only bound is the graph
-``recursion_limit`` — a runaway that re-prompts until the super-step budget is spent, then
-fails generically. Two mechanisms here make both stops explicit and readable:
+A structured-output ``response_format`` is enforced by the platform's own re-prompt loops,
+on the tool plan and the native plan alike: the structured-output rail middleware
+(:class:`~tai42_agents._internal.structured_rail.StructuredOutputRailMiddleware`) in a
+graph, and :func:`~tai42_agents._internal.structured.ainvoke_structured` on the single-shot
+door. A non-conforming answer is turned into a re-prompt message and the model is asked
+again. Two mechanisms here make both stops explicit and readable:
 
-* :func:`build_reprompt_handler` — a counting ``ToolStrategy.handle_errors`` callable that
-  returns the same re-prompt message the default rail does until the cap is reached, then
+* :func:`build_reprompt_handler` — the counting callable both loops call once per
+  non-conforming answer; it returns the re-prompt message until the cap is reached, then
   raises :class:`RepromptCapError`; a graph's rails count per drive
   (:func:`drive_reprompt_scope`), so a compiled graph shared across runs gives each run the
   full cap;
@@ -36,7 +37,7 @@ class RepromptCapError(Exception):
     """The per-run structured-output re-prompt cap was reached with no conforming response.
 
     Carries the schema name, the number of non-conforming model responses, and the last
-    validation error text (already masked). A face catches it around its graph drive and
+    error text (already masked). A face catches it around its graph drive and
     converts it to a :class:`StructuredOutputUnresolvedFinal`; it never surfaces as a raise.
     """
 
@@ -49,20 +50,25 @@ class RepromptCapError(Exception):
 
 
 def _schema_name_of(exc: Exception, schema_name: str | None) -> str:
-    """The structured-output schema name a failure names.
+    """The requested schema's name for a cap outcome.
 
-    A :class:`~langchain.agents.structured_output.StructuredOutputValidationError` carries a
-    single ``tool_name``; a ``MultipleStructuredOutputsError`` carries ``tool_names``. A
-    validation failure names neither, so the caller's ``schema_name`` is used, else a neutral
-    label.
+    The caller's ``schema_name`` (the requested schema) wins: a failure names the tool it
+    concerns, which under a fan-out schema is one variant's tool, not the requested schema.
+    With no ``schema_name``, the failure's tool names stand in: a
+    :class:`~langchain.agents.structured_output.StructuredOutputValidationError` carries a
+    single ``tool_name``; a ``MultipleStructuredOutputsError`` and a
+    :class:`~tai42_agents._internal.structured_rail.StructuredOutputMissingError` carry
+    ``tool_names``. A failure naming neither gets a neutral label.
     """
+    if schema_name:
+        return schema_name
     single = getattr(exc, "tool_name", None)
     if isinstance(single, str) and single:
         return single
     many = getattr(exc, "tool_names", None)
     if isinstance(many, list) and many:
         return ", ".join(str(name) for name in many)
-    return schema_name or "response_format"
+    return "response_format"
 
 
 class RepromptCounter:
@@ -113,14 +119,14 @@ def drive_reprompt_scope(counters: dict[int, RepromptCounter] | None = None) -> 
 def build_reprompt_handler(
     cap: int, counter: Callable[[], RepromptCounter], *, schema_name: str | None = None
 ) -> Callable[[Exception], str]:
-    """A ``ToolStrategy.handle_errors`` callable that caps re-prompts at ``cap``, counting on ``counter()``.
+    """The structured-output loops' re-prompt callable: caps re-prompts at ``cap``, counting on ``counter()``.
 
-    ``schema_name`` names the structured output in the cap outcome when the failure itself names none.
+    ``schema_name`` names the requested schema in the cap outcome; with none, the failure's tool names stand in.
 
     Each non-conforming structured-output response calls this once. While the count is within
-    ``cap`` it returns the SAME re-prompt message the default rail returns (so a capped run
-    re-prompts identically up to the bound); on the response past the cap it raises
-    :class:`RepromptCapError` carrying the masked last validation error, ending the loop.
+    ``cap`` it returns the re-prompt message built from the error; on the response past the
+    cap it raises :class:`RepromptCapError` carrying the masked last error (a parse or
+    validation error, or the message naming the missing structured answer), ending the loop.
     """
 
     def handle(exc: Exception) -> str:

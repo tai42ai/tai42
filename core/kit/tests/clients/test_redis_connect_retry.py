@@ -859,11 +859,20 @@ async def test_sync_a_pubsub_command_whose_send_fails_reconnects_and_resubscribe
                 worker.start()
                 await asyncio.to_thread(worker.join, 5)
             assert done.is_set(), "the pub/sub command never returned after its reconnect"
+            # A send returns before the stub reads it; the stub answers each SUBSCRIBE on
+            # one connection in order, so its answer to "status" means it counted them all.
+            replies: list[tuple[Any, Any]] = []
+            while len(replies) < 3:
+                reply = await asyncio.to_thread(pubsub.get_message, timeout=5)
+                assert reply is not None, f"the stub stopped answering after {replies}"
+                replies.append((reply["type"], reply["channel"]))
         finally:
             if done.is_set():
                 pubsub.close()
             client.close()
     assert len(_warnings(caplog)) == 1
+    # Every channel is subscribed on the new connection, the re-sent "status" last.
+    assert replies == [("subscribe", b"events"), ("subscribe", b"alerts"), ("subscribe", b"status")]
     assert stub.subscribes >= 3
 
 

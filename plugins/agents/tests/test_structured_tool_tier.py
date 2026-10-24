@@ -291,3 +291,67 @@ def test_single_shot_refuses_a_fan_out_schema(monkeypatch: pytest.MonkeyPatch) -
     _cap(monkeypatch, 3)
     with pytest.raises(StructuredOutputUnsupportedError, match="single-call door binds one object schema"):
         _single_shot(_ToolCallModel([{"l": "x"}]), schema)
+
+
+# --- single-shot route: a turn with no structured tool call --------------------
+
+
+class _TurnsModel(BaseChatModel):
+    """A real tool-calling chat model answering each call with the next scripted turn.
+
+    A ``dict`` turn is the structured tool call carrying those args; a ``str`` turn is a
+    message-text answer with no tool call. Each call's messages are recorded.
+    """
+
+    _turns: list[dict[str, Any] | str] = PrivateAttr(default_factory=list)
+    _seen: list[list[BaseMessage]] = PrivateAttr(default_factory=list)
+
+    def __init__(self, turns: Sequence[dict[str, Any] | str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._turns = list(turns)
+
+    @property
+    def _llm_type(self) -> str:
+        return "turns"
+
+    def bind_tools(self, tools: Any, *, tool_choice: Any = None, **kwargs: Any) -> Any:
+        return self.bind(tools=[convert_to_openai_tool(tool) for tool in tools], tool_choice=tool_choice, **kwargs)
+
+    def _generate(
+        self, messages: list[BaseMessage], stop: Any = None, run_manager: Any = None, **kwargs: Any
+    ) -> ChatResult:
+        turn = self._turns[min(len(self._seen), len(self._turns) - 1)]
+        self._seen.append(list(messages))
+        if isinstance(turn, str):
+            message = AIMessage(content=turn)
+        else:
+            name = kwargs["tools"][0]["function"]["name"]
+            message = AIMessage(content="", tool_calls=[{"id": "c", "name": name, "args": turn}])
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def test_single_shot_text_answer_is_reprompted_as_a_missing_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    _cap(monkeypatch, 3)
+    model = _TurnsModel(['{"value": 7}', {"value": 7}])
+
+    out = _single_shot(cast(_ToolCallModel, model), _INT_SCHEMA)
+
+    assert out == {"value": 7}
+    assert len(model._seen) == 2
+    feedback = model._seen[1][-1]
+    assert isinstance(feedback, HumanMessage)
+    assert "'Count'" in str(feedback.content)
+
+
+def test_single_shot_never_answering_ends_on_the_cap_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_agents._internal.outcomes import RepromptCapError
+
+    _cap(monkeypatch, 3)
+    model = _TurnsModel([""])
+
+    with pytest.raises(RepromptCapError) as caught:
+        _single_shot(cast(_ToolCallModel, model), _INT_SCHEMA)
+
+    assert caught.value.attempts == 4
+    assert len(model._seen) == 4
+    assert "'Count'" in caught.value.error
