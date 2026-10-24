@@ -28,30 +28,30 @@ dependencies = [
     # own ranges predate the current fleet, so the published harness stays resolvable
     # even where a member floor still admits an older patch.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
-    "tai42-contract>=22.0,<23",
+    "tai42-contract>=23.0,<24",
     # The hosted LLM providers' extras: the real ``llm`` leg runs against whichever one
     # REAL_E2E_LLM_PROVIDER selects, in this process and in the stack it boots.
-    "tai42-kit[llm,anthropic,google,mistral,xai,jq,uvicorn,redis,postgres,curl,monitoring]>=11.3,<12",
-    "tai42-skeleton[toolbox,files]>=28.0,<29",
-    "tai42-toolbox[http,prometheus,chain,embeddings,proxy,classifier]>=5.3,<6",
+    "tai42-kit[llm,anthropic,google,mistral,xai,jq,uvicorn,redis,postgres,curl,monitoring]>=12.0,<13",
+    "tai42-skeleton[toolbox,files]>=29.0,<30",
+    "tai42-toolbox[http,prometheus,chain,embeddings,proxy,classifier]>=6.0,<7",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
-    "tai42-tools-stripe>=2.3,<3",
-    "tai42-agents>=12.0,<13",
+    "tai42-tools-stripe>=3.0,<4",
+    "tai42-agents>=13.0,<14",
     # The sandbox provider plugins the sandbox-axis stacks boot: the Docker-backed
     # provider and the in-process local provider. Workspace siblings, floated at
     # their checkouts by the source overrides below.
-    "tai42-sandbox-docker>=2.3,<3",
+    "tai42-sandbox-docker>=3.0,<4",
     "tai42-sandbox-local>=2.3,<3",
     # The default identity-provider plugin; auth stacks need it in the SUT venv.
-    "tai42-identity-redis>=4.3,<5",
+    "tai42-identity-redis>=5.0,<6",
     # The Postgres-backed accounts provider (password login, sessions, invites) the
     # accounts auth stacks load.
-    "tai42-accounts-postgres>=5.3,<6",
+    "tai42-accounts-postgres>=6.0,<7",
     # The Backend plugins the matrix legs run — one per TAI_E2E_BACKEND value.
-    "tai42-backend-arq>=6.0,<7",
-    "tai42-backend-celery>=6.0,<7",
-    "tai42-backend-rq>=6.0,<7",
+    "tai42-backend-arq>=7.0,<8",
+    "tai42-backend-celery>=7.0,<8",
+    "tai42-backend-rq>=7.0,<8",
     # The real Storage plugins: the local filesystem backing plus the S3 and
     # GitHub object stores the storage-axis variant sweep boots.
     "tai42-storage-local>=2.3,<3",
@@ -61,10 +61,10 @@ dependencies = [
     "tai42-webhook-verifier-github>=1.6,<2",
     "tai42-webhook-verifier-stripe>=1.6,<2",
     # The channel plugins that deliver ask questions over a chat transport.
-    "tai42-channel-telegram>=7.0,<8",
-    "tai42-channel-slack>=7.0,<8",
-    "tai42-channel-twilio>=8.0,<9",
-    "tai42-channel-whatsapp>=12.0,<13",
+    "tai42-channel-telegram>=8.0,<9",
+    "tai42-channel-slack>=8.0,<9",
+    "tai42-channel-twilio>=9.0,<10",
+    "tai42-channel-whatsapp>=13.0,<14",
     "tai42-channel-web>=9.0,<10",
     # Loaded only by the monitoring stack's manifest.
     "tai42-monitoring-langfuse>=5.4,<6",
