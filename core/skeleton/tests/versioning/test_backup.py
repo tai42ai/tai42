@@ -245,7 +245,7 @@ async def test_backup_round_trip_preserves_a_preset_secret_reference(pg: _FakeVe
             "id": 1,
             "document_id": 1,
             "version": 1,
-            "body": {"base_tool": "echo", "fixed_kwargs": {"token": marker}},
+            "body": {"base_tool": "echo", "description": "Echo.", "fixed_kwargs": {"token": marker}},
             "tags": [],
             "created_at": _T0,
         }

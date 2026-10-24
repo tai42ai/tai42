@@ -1,6 +1,6 @@
-"""The ambient invoked-tool seam armed by the two execution doors.
+"""The ambient invoked-tool seam armed by the ``ToolBinding.run_tool`` execution door.
 
-Skeleton legs of the invocation seam (the contract channel itself is pinned in
+The skeleton leg of the invocation seam (the contract channel itself is pinned in
 ``core/contract/tests/test_tool_invocation_seam.py``):
 
 * ``ToolBinding.run_tool`` deposits the invoked tool's name for the span of its
@@ -8,24 +8,16 @@ Skeleton legs of the invocation seam (the contract channel itself is pinned in
   it is ``None`` outside any tool, a nested re-dispatch restores the OUTER name after
   the inner returns (token discipline), and the deposit is unwound in ``finally`` even
   when the body raises.
-* ``InvocationSeamMiddleware`` (a retained, standalone middleware NOT registered by
-  the platform — the live edge deposit is ``DispatchScopeMiddleware``'s) deposits the
-  called tool's name around the ``call_next`` it wraps and resets it in ``finally``,
-  and warns ``DeprecationWarning`` on instantiation.
 """
 
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
-from typing import Any, cast
 
 import pytest
-from fastmcp.server.middleware import MiddlewareContext
 from tai42_contract.tools import current_tool_invocation
 
 from tai42_skeleton.app.instance import app
-from tai42_skeleton.app.sub_mcp_app import InvocationSeamMiddleware
 from tai42_skeleton.manifest import Manifest
 
 
@@ -120,55 +112,3 @@ def test_seam_is_unwound_when_the_tool_body_raises():
             assert current_tool_invocation() is None
 
     asyncio.run(run())
-
-
-# -- MCP middleware leg -------------------------------------------------------
-
-
-def test_middleware_deposits_for_the_called_tool():
-    seen: dict[str, str | None] = {}
-
-    async def run() -> None:
-        with pytest.warns(DeprecationWarning, match="not registered by the platform"):
-            mw = InvocationSeamMiddleware()
-        # A ``MiddlewareContext`` whose message names the called tool; a minimal
-        # stand-in suffices to exercise the middleware's standalone deposit.
-        context = SimpleNamespace(message=SimpleNamespace(name="acme_echo"))
-
-        async def call_next(_context: object) -> str:
-            inv = current_tool_invocation()
-            seen["name"] = inv.tool_name if inv is not None else None
-            return "result"
-
-        assert current_tool_invocation() is None
-        result = await mw.on_call_tool(cast(MiddlewareContext[Any], context), call_next)
-        assert result == "result"
-        # The downstream call saw the called tool's name deposited by the door.
-        assert seen["name"] == "acme_echo"
-        # Reset in ``finally`` — the deposit never leaks past the call.
-        assert current_tool_invocation() is None
-
-    asyncio.run(run())
-
-
-def test_middleware_resets_when_the_call_raises():
-    async def run() -> None:
-        with pytest.warns(DeprecationWarning, match="not registered by the platform"):
-            mw = InvocationSeamMiddleware()
-        context = SimpleNamespace(message=SimpleNamespace(name="acme_echo"))
-
-        async def call_next(_context: object) -> str:
-            raise RuntimeError("edge boom")
-
-        with pytest.raises(RuntimeError, match="edge boom"):
-            await mw.on_call_tool(cast(MiddlewareContext[Any], context), call_next)
-        assert current_tool_invocation() is None
-
-    asyncio.run(run())
-
-
-def test_instantiation_warns_it_is_not_registered():
-    # The class is a retained standalone component the platform does not register (the
-    # live edge deposit is DispatchScopeMiddleware's); instantiation warns.
-    with pytest.warns(DeprecationWarning, match="not registered by the platform"):
-        InvocationSeamMiddleware()

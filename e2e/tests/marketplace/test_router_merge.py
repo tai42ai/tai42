@@ -36,7 +36,6 @@ from tai42_e2e.stack import TaiStack
 from ._market_support import (
     MarketInstaller,
     distribution_absent,
-    skip_unless_registry_supports_declared_routes,
 )
 
 pytestmark = [
@@ -98,9 +97,6 @@ async def test_router_and_middleware_merge_hot_loads_then_survives_restart(
     router_merge_stack: TaiStack,
     market_installer: MarketInstaller,
 ) -> None:
-    # Epsilon declares routes; skip when the pinned registry can't accept them (the
-    # marketplace_service fixture has already built the registry venv the gate reads).
-    skip_unless_registry_supports_declared_routes()
     stack = router_merge_stack
 
     # Publish epsilon into THIS spec's registry only — it is kept out of the shared

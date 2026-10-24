@@ -802,24 +802,6 @@ async def test_a_whitespace_tail_resume_of_a_media_part_does_not_re_send_media(m
     assert sent_ids(record) == ["w1-1"]
 
 
-async def test_a_ledger_entry_without_a_part_reads_as_part_zero(monkeypatch, fake, store):
-    """A ledger entry written before the ``part`` field existed names a single-part answer,
-    so it reads as part 0 — a single-part answer whose first chunk was ledgered pre-upgrade
-    resumes cleanly at its remainder, never re-sending the pre-upgrade chunk."""
-    await create_record(store, _record("m-f5", "aaaaaaaaaabbbbbbbbbb"))  # 20 chars, 2 chunks at width 10
-    # A legacy entry: no "part" key at all.
-    key = ConversationsSettings().chunk_ledger_key("m-f5")
-    fake._lists[key] = [json.dumps({"chars": 10, "outbound_ids": ["w1-1"]})]
-
-    channel = FakeChannel("w2")
-    _wire_channel(monkeypatch, channel)
-    await delivery_channel_module._deliver_channel(store, await _get(store, "m-f5"), "worker-2")
-
-    # Read as part 0, so the resume sends ONLY the remainder — never the pre-upgrade chunk.
-    assert channel.sends == ["bbbbbbbbbb"]
-    assert (await _get(store, "m-f5")).delivery_status is DeliveryStatus.PROVISIONAL
-
-
 # -- a long send holds its own lease ------------------------------------------
 
 
@@ -1065,11 +1047,21 @@ async def test_a_transient_ledger_read_error_leaves_the_record_deliverable(monke
     assert record.attempts == 1
 
 
-async def test_an_unparseable_ledger_entry_drives_the_record_terminal(monkeypatch, fake, store):
-    """A stored entry that cannot be decoded is a record-shaped fault, not a transient one:
-    the record reaches a terminal ``failed`` rather than being re-driven forever."""
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "{not valid json",
+        json.dumps({"chars": 10, "outbound_ids": ["w1-1"]}),
+        json.dumps({"part": 0, "outbound_ids": ["w1-1"]}),
+        json.dumps({"part": 0, "chars": 10}),
+    ],
+    ids=["garbled", "no-part", "no-chars", "no-outbound-ids"],
+)
+async def test_an_unparseable_ledger_entry_drives_the_record_terminal(monkeypatch, fake, store, entry):
+    """A stored entry that cannot be decoded, or that lacks a field, is a record-shaped fault, not a transient
+    one: the record reaches a terminal ``failed`` rather than being re-driven forever."""
     await create_record(store, _record("m-garbled", "aaaaaaaaaabbbbbbbbbb"))
-    fake._lists[ConversationsSettings().chunk_ledger_key("m-garbled")] = ["{not valid json"]
+    fake._lists[ConversationsSettings().chunk_ledger_key("m-garbled")] = [entry]
     _wire_channel(monkeypatch, FakeChannel())
 
     with pytest.raises(ledger_module.LedgerInconsistentError, match="unparseable"):

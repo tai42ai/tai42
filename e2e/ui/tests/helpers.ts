@@ -340,12 +340,10 @@ export async function fillFixedKwargs(scope: Locator, kwargs: unknown): Promise<
  * response plus a pending-list refetch after it (see `trackInboxResync`). The settle polls
  * the tracker and resolves once it reports nothing outstanding.
  *
- * The 30s poll budget is a DEFENSIVE CEILING, not a live dependency: against the fixed
- * server both engines settle in ~1-3s. It stays generous so the suite also passes against an
- * UNFIXED older server (whose stream still withholds its first byte until the ~15s keepalive,
- * the old Firefox path) — two keepalive intervals of headroom — while a genuinely dead stream
- * still fails loudly, just later, with the tracker's account of what never arrived as the
- * last polled value.
+ * The 30s poll budget is a DEFENSIVE CEILING, not a live dependency: both engines settle in
+ * ~1-3s. It spans two ~15s stream keepalive intervals of headroom, while a genuinely dead
+ * stream still fails loudly, just later, with the tracker's account of what never arrived as
+ * the last polled value.
  */
 export function armInboxResynced(page: Page): () => Promise<void> {
   const tracker = trackInboxResync(page);

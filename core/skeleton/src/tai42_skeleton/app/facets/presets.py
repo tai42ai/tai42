@@ -209,10 +209,10 @@ class PresetsFacet(_Facet):
         Replaces a per-record ``get_active_body`` round-trip on the list route + rehydrate. Reached through
         the concrete ``_versioned_store`` so the concrete-only ``list_active_bodies`` resolves.
         """
-        from tai42_contract.presets import PresetBody
+        from tai42_skeleton.presets.store import stored_preset_body
 
         raw = await self._app._versioned_store.list_active_bodies("preset")
-        return {name: PresetBody.model_validate(body) for name, body in raw.items()}
+        return {name: stored_preset_body(name, body) for name, body in raw.items()}
 
     async def list_active_versioned_bodies(self) -> dict[str, tuple[int, PresetBody]]:
         """Every preset's ``(active_version, active_body)``, keyed by name — one batched JOIN read.
@@ -221,10 +221,10 @@ class PresetsFacet(_Facet):
         sibling of :meth:`list_active_bodies`, used by the rehydration path so each preset's version is
         retained beside its body. Reached through the concrete ``_versioned_store``.
         """
-        from tai42_contract.presets import PresetBody
+        from tai42_skeleton.presets.store import stored_preset_body
 
         raw = await self._app._versioned_store.list_active_versioned_bodies("preset")
-        return {name: (version, PresetBody.model_validate(body)) for name, (version, body) in raw.items()}
+        return {name: (version, stored_preset_body(name, body)) for name, (version, body) in raw.items()}
 
     async def get_active_versioned_body(self, name: str) -> tuple[int, PresetBody]:
         """One preset's ``(active_version, active_body)``, read TOGETHER in one JOIN.
@@ -236,15 +236,16 @@ class PresetsFacet(_Facet):
         :class:`~tai42_skeleton.presets.store.PresetStoreView`. Reached through the
         concrete ``_versioned_store``.
         """
-        from tai42_contract.presets import PresetBody
         from tai42_contract.presets.errors import PresetNotFoundError
         from tai42_contract.versioning.errors import DocumentNotFoundError
+
+        from tai42_skeleton.presets.store import stored_preset_body
 
         try:
             version, body = await self._app._versioned_store.get_active_version_and_body("preset", name)
         except DocumentNotFoundError as exc:
             raise PresetNotFoundError(name) from exc
-        return version, PresetBody.model_validate(body)
+        return version, stored_preset_body(name, body)
 
     async def used_by(self, name: str) -> list[str]:
         """The other presets whose active bodies compose preset ``name`` as a tool, sorted.

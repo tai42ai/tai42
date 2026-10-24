@@ -30,7 +30,7 @@ from tai42_contract.versioning.errors import (
 )
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 
-from tai42_skeleton.presets.store import PresetStoreView
+from tai42_skeleton.presets.store import PresetStoreView, stored_preset_body
 
 
 class _MemTx:
@@ -392,16 +392,12 @@ async def test_save_version_rejects_explicit_empty_description(view):
         await view.save_version("p", description="")
 
 
-async def test_save_version_carry_forward_from_legacy_empty_description_raises(view):
-    # A body persisted with an empty description heals loudly: the next version save
-    # validates the RESULTING (carried) description, so the carry-forward raises
-    # rather than persisting an empty tool docstring.
-    await view.create_preset(
-        PresetSpec(name="legacy", description="", base_tool="weather", fixed_kwargs={"a": 1}),
-        extensions=[],
-    )
+async def test_create_rejects_empty_description(view):
     with pytest.raises(ValueError, match="description must not be empty"):
-        await view.save_version("legacy", fixed_kwargs={"b": 2})
+        await view.create_preset(
+            PresetSpec(name="p", description=" ", base_tool="weather", fixed_kwargs={"a": 1}),
+            extensions=[],
+        )
 
 
 async def test_rollback_restores_older_description(view):
@@ -459,3 +455,20 @@ async def test_save_version_output_schema_explicit_none_clears(view):
     body = await view.get_active_body("p")
     assert body.output_schema is None
     assert body.fixed_kwargs == {"a": 1}  # carried, not cleared
+
+
+def test_stored_body_parses_a_described_body():
+    raw = {"base_tool": "weather", "description": "d", "fixed_kwargs": {"a": 1}, "extensions": []}
+    assert stored_preset_body("p", raw).description == "d"
+
+
+@pytest.mark.parametrize("description", ["", "  "])
+def test_stored_body_rejects_a_blank_description(description):
+    raw = {"base_tool": "weather", "description": description, "fixed_kwargs": {}, "extensions": []}
+    with pytest.raises(ValueError, match="stored preset 'p' has an empty description"):
+        stored_preset_body("p", raw)
+
+
+def test_stored_body_rejects_a_missing_description():
+    with pytest.raises(ValueError, match="description"):
+        stored_preset_body("p", {"base_tool": "weather", "fixed_kwargs": {}, "extensions": []})

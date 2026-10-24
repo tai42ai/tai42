@@ -1124,11 +1124,20 @@ async def test_import_webhooks_existing_name_overwrites(monkeypatch, execution_g
     document = {
         "version": 1,
         "sections": {
-            "webhooks": [
-                HookParams(
-                    name="h1", topic="t2", tool="mytool", execution_key="k-fire", execution_key_fingerprint="fp-fire"
-                ).model_dump(mode="json")
-            ]
+            "webhooks": {
+                "hooks": [
+                    HookParams(
+                        name="h1",
+                        topic="t2",
+                        tool="mytool",
+                        execution_key="k-fire",
+                        execution_key_fingerprint="fp-fire",
+                    ).model_dump(mode="json")
+                ],
+                "topic_verifiers": {},
+                "trigger_links": [],
+                "tombstones": [],
+            }
         },
     }
     data = _json(await import_backup(_post_req({"document": document, "sections": ["webhooks"], "mode": "overwrite"})))[
@@ -1154,11 +1163,20 @@ async def test_import_webhooks_existing_name_skipped_by_default(monkeypatch, exe
     document = {
         "version": 1,
         "sections": {
-            "webhooks": [
-                HookParams(
-                    name="h1", topic="t2", tool="mytool", execution_key="k-fire", execution_key_fingerprint="fp-fire"
-                ).model_dump(mode="json")
-            ]
+            "webhooks": {
+                "hooks": [
+                    HookParams(
+                        name="h1",
+                        topic="t2",
+                        tool="mytool",
+                        execution_key="k-fire",
+                        execution_key_fingerprint="fp-fire",
+                    ).model_dump(mode="json")
+                ],
+                "topic_verifiers": {},
+                "trigger_links": [],
+                "tombstones": [],
+            }
         },
     }
     data = _json(await import_backup(_post_req({"document": document, "sections": ["webhooks"]})))["data"]
@@ -1181,12 +1199,21 @@ async def test_import_webhooks_keyless_record_makes_the_import_report_failure(mo
     document = {
         "version": 1,
         "sections": {
-            "webhooks": [
-                {"name": "keyless", "topic": "t1", "tool": "mytool"},
-                HookParams(
-                    name="bound", topic="t1", tool="mytool", execution_key="k-fire", execution_key_fingerprint="fp-fire"
-                ).model_dump(mode="json"),
-            ]
+            "webhooks": {
+                "hooks": [
+                    {"name": "keyless", "topic": "t1", "tool": "mytool"},
+                    HookParams(
+                        name="bound",
+                        topic="t1",
+                        tool="mytool",
+                        execution_key="k-fire",
+                        execution_key_fingerprint="fp-fire",
+                    ).model_dump(mode="json"),
+                ],
+                "topic_verifiers": {},
+                "trigger_links": [],
+                "tombstones": [],
+            }
         },
     }
     data = _json(await import_backup(_post_req({"document": document, "sections": ["webhooks"]})))["data"]
@@ -1211,22 +1238,35 @@ async def test_import_webhooks_uncompilable_jq_record_is_per_record_not_a_torn_i
     document = {
         "version": 1,
         "sections": {
-            "webhooks": [
-                HookParams(
-                    name="first", topic="t1", tool="mytool", execution_key="k-fire", execution_key_fingerprint="fp-fire"
-                ).model_dump(mode="json"),
-                HookParams(
-                    name="broken",
-                    topic="t1",
-                    tool="mytool",
-                    execution_key="k-fire",
-                    execution_key_fingerprint="fp-fire",
-                    condition=TemplatedText(content=".foo | ("),
-                ).model_dump(mode="json"),
-                HookParams(
-                    name="last", topic="t1", tool="mytool", execution_key="k-fire", execution_key_fingerprint="fp-fire"
-                ).model_dump(mode="json"),
-            ]
+            "webhooks": {
+                "hooks": [
+                    HookParams(
+                        name="first",
+                        topic="t1",
+                        tool="mytool",
+                        execution_key="k-fire",
+                        execution_key_fingerprint="fp-fire",
+                    ).model_dump(mode="json"),
+                    HookParams(
+                        name="broken",
+                        topic="t1",
+                        tool="mytool",
+                        execution_key="k-fire",
+                        execution_key_fingerprint="fp-fire",
+                        condition=TemplatedText(content=".foo | ("),
+                    ).model_dump(mode="json"),
+                    HookParams(
+                        name="last",
+                        topic="t1",
+                        tool="mytool",
+                        execution_key="k-fire",
+                        execution_key_fingerprint="fp-fire",
+                    ).model_dump(mode="json"),
+                ],
+                "topic_verifiers": {},
+                "trigger_links": [],
+                "tombstones": [],
+            }
         },
     }
     data = _json(await import_backup(_post_req({"document": document, "sections": ["webhooks"]})))["data"]

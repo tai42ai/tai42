@@ -141,7 +141,7 @@ def test_preset_body_round_trips_author_bound_config():
     combo: list[ExtensionElement] = [
         {"name": "ask_external", "config": {"verifier": {"verifier": "github", "config": {"secret_env": "GH"}}}}
     ]
-    body = PresetBody(base_tool="sign", extensions=[combo])
+    body = PresetBody(base_tool="sign", description="d", extensions=[combo])
     again = PresetBody(**body.model_dump())
     assert again == body
     assert again.extensions == [combo]
@@ -150,8 +150,7 @@ def test_preset_body_round_trips_author_bound_config():
 def test_preset_body_defaults():
     from tai42_contract.presets import PresetBody
 
-    body = PresetBody(base_tool="web_search")
-    assert body.description == ""
+    body = PresetBody(base_tool="web_search", description="d")
     assert body.fixed_kwargs == {}
     assert body.extensions == []
     assert body.output_schema is None
@@ -164,7 +163,7 @@ def test_preset_body_round_trips_input_schema():
     from tai42_contract.presets import PresetBody
 
     schema = {"type": "object", "properties": {"query": {"type": "string"}}}
-    body = PresetBody(base_tool="sandbox_exec", input_schema=schema)
+    body = PresetBody(base_tool="sandbox_exec", description="d", input_schema=schema)
     again = PresetBody(**body.model_dump())
     assert again == body
     assert again.input_schema == schema

@@ -4,7 +4,6 @@ import asyncio
 import logging
 import re
 import threading
-import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import CancelledError, Future
 from contextlib import asynccontextmanager, suppress
@@ -12,14 +11,11 @@ from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.server.http import create_sse_app
-from fastmcp.server.middleware import Middleware as McpMiddleware
-from fastmcp.server.middleware import MiddlewareContext
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.types import ASGIApp
 from tai42_contract.plugins import PATH_SEGMENT_SLUG_RE
 from tai42_contract.sub_mcp import RouteConfig
-from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 
 from tai42_skeleton.access_control.path_canon import sent_path_is_canonical, strip_root_path
 from tai42_skeleton.app.epoch import boot_stateless_http
@@ -88,44 +84,6 @@ def validate_registration(slug: str, transport: str) -> None:
 async def _not_found(send: Callable[[dict[str, Any]], Awaitable[None]], body: bytes) -> None:
     await send({"type": "http.response.start", "status": 404, "headers": []})
     await send({"type": "http.response.body", "body": body})
-
-
-class InvocationSeamMiddleware(McpMiddleware):
-    """A retained, standalone FastMCP middleware that deposits the invoked-tool seam around a ``tools/call``.
-
-    NOT registered by the platform. The live MCP ``tools/call`` edge deposits the invoked-tool seam — and arms the rest
-    of the run lifecycle — through ``DispatchScopeMiddleware``
-    (:mod:`tai42_skeleton.tools.dispatch_scope`). This class remains a public component
-    that performs the deposit on its own, but nothing in the platform wires it into a
-    server. Scheduled for removal in the next skeleton major.
-
-    ``on_call_tool`` deposits the called tool's name and resets it in ``finally`` under
-    token discipline, so a nested in-process re-dispatch restores the outer name and the
-    deposit never leaks across calls.
-    """
-
-    def __init__(self) -> None:
-        """Warn that this middleware is not wired by the platform."""
-        warnings.warn(
-            "InvocationSeamMiddleware is not registered by the platform; the MCP "
-            "tools/call edge lifecycle is handled by DispatchScopeMiddleware "
-            "(tai42_skeleton.tools.dispatch_scope). Scheduled for removal in the next "
-            "skeleton major.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-    async def on_call_tool(
-        self,
-        context: MiddlewareContext[Any],
-        call_next: Callable[[MiddlewareContext[Any]], Awaitable[Any]],
-    ) -> Any:
-        """Deposit the called tool's name for the span of the call, resetting it afterwards."""
-        token = set_current_tool_invocation(ToolInvocation(tool_name=context.message.name))
-        try:
-            return await call_next(context)
-        finally:
-            reset_current_tool_invocation(token)
 
 
 class SubAppLifespan:

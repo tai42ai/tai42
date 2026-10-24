@@ -74,7 +74,7 @@ async def test_create_run_persists_arguments_and_flag_when_crash_resume(wired) -
 
 async def test_create_run_omits_state_context_when_the_fire_had_no_subject(wired) -> None:
     # A crash-resume run whose fire ran under no subject stores no ``state_context``; its re-drive
-    # deposits none. This is the no-subject case, not a legacy branch.
+    # deposits none.
     store, fake, settings = wired
     await store.create_run(
         fake,

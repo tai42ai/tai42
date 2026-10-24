@@ -301,7 +301,7 @@ def test_conversation_answer_single_message_carries_no_parts():
     from tai42_contract.conversations import ConversationAnswer
 
     answer = ConversationAnswer(message_id="m-1", thread_id="t", status="answered", answer="just one")
-    # A single-message answer carries parts=None; a legacy consumer reads ``answer``.
+    # A single-message answer carries parts=None; a whole-text consumer reads ``answer``.
     assert answer.parts is None
 
 
@@ -316,7 +316,7 @@ def test_conversation_answer_parts_join_to_the_answer():
         parts=_parts("one", "two", "three"),
     )
     # Order-significant parts, and ``answer`` is exactly the blank-line join of the part
-    # messages so every legacy consumer keeps reading the whole text.
+    # messages, the whole text a whole-text consumer reads.
     assert answer.parts is not None
     assert [p.message for p in answer.parts] == ["one", "two", "three"]
     assert answer.answer == "one\n\ntwo\n\nthree"

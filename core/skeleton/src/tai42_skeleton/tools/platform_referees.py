@@ -171,11 +171,11 @@ async def _preset_detach_referee(state: str, template: str) -> list[str]:
     # EVERY version of every live preset is a strandable reference: a rollback re-activates
     # (and re-attaches) a historical version's binding, so a version that can be rolled back
     # to counts exactly like the active one. Feature-off (no configured store) holds none.
-    from tai42_contract.presets import PresetBody
     from tai42_kit.db import component_store_configured
 
     from tai42_skeleton.app import instance
     from tai42_skeleton.db import SKELETON_COMPONENT
+    from tai42_skeleton.presets.store import stored_preset_body
 
     if not component_store_configured(SKELETON_COMPONENT):
         return []
@@ -183,7 +183,7 @@ async def _preset_detach_referee(state: str, template: str) -> list[str]:
     holders: list[str] = []
     for record in await store.list_presets():
         for version in await store.list_versions(record.name):
-            body = PresetBody.model_validate(version.body)
+            body = stored_preset_body(record.name, version.body)
             if _binding_names_template(body.state_binding, state, template):
                 holders.append(f"preset {record.name!r} version {version.version}")
     return holders

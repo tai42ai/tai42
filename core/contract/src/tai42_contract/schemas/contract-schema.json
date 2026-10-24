@@ -3318,7 +3318,6 @@
           "type": "string"
         },
         "description": {
-          "default": "",
           "title": "Description",
           "type": "string"
         },
@@ -3391,7 +3390,8 @@
         }
       },
       "required": [
-        "base_tool"
+        "base_tool",
+        "description"
       ],
       "title": "PresetBody",
       "type": "object"

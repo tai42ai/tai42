@@ -159,10 +159,10 @@ class _StoreReads(_StoreKeys):
                 # to the parent run, answered only by resuming it.
                 continue
             request = state.request
-            # ``thread_id`` is a denormalized hash field the cascade feature stamps; it
-            # is absent on older parks, so read it tolerantly from the raw hash rather
-            # than the parsed request (which never carried it). Normalize the key across
-            # a decode/no-decode redis client.
+            # ``thread_id`` is a denormalized hash field stamped only on an async park bound
+            # to a conversation thread, so it is read from the raw hash (absent → ``None``)
+            # rather than the parsed request (which never carries it). Normalize the key
+            # across a decode/no-decode redis client.
             fields = {serde.as_str(k): serde.as_str(v) for k, v in raw.items()}
             question = request.question
             if len(question) > _PENDING_QUESTION_PREVIEW_CHARS:

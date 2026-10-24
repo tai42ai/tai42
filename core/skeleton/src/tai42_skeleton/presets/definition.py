@@ -19,6 +19,7 @@ from tai42_kit.utils.data.json_schema_util import InvalidJsonSchemaError, check_
 from tai42_kit.utils.render import SchemaBodyError, resolve_schema_body
 
 from tai42_skeleton.presets.manager import is_valid_preset_name
+from tai42_skeleton.presets.store import stored_preset_body
 from tai42_skeleton.versioning.restore_checks import register_restore_check
 
 # The versioned-document kind a preset is stored under.
@@ -84,7 +85,7 @@ async def check_preset_body(body: PresetBody, *, name: str, attach: bool) -> Non
 
 async def _restore_check(name: str, body: dict[str, Any]) -> None:
     """The preset kind's restore check: the document rules over the active body, attaching its binding."""
-    await check_preset_body(PresetBody.model_validate(body), name=name, attach=True)
+    await check_preset_body(stored_preset_body(name, body), name=name, attach=True)
 
 
 register_restore_check(_PRESET_KIND, _restore_check)

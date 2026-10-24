@@ -195,9 +195,8 @@ def _tool_messages(prompt: list[Any]) -> list[Any]:
 
 class _RawMarkerTool:
     """A tool whose RESULT is a park marker this run never minted — the wire form, as a
-    non-park-capable middle agent hands it on, as an older wire form carries it, or as a
-    model could shape it. No sentinel object ever crosses a tool face here, so only the
-    CLAIM point can catch it."""
+    non-park-capable middle agent hands it on, or as a model could shape it. No sentinel
+    object ever crosses a tool face here, so only the CLAIM point can catch it."""
 
     def __init__(self, marker: dict[str, Any]) -> None:
         self.calls = 0

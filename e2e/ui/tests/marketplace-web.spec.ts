@@ -14,18 +14,6 @@ import { needs, test } from './needs';
 
 needs('helper:marketplace-site');
 
-// Publish-circular: the marketplace-web frontend renders against the published
-// marketplace backend's browse contract (kind facet / nullable updated_at /
-// premium / docs_url), but the e2e installs the backend at the older
-// `_MARKETPLACE_PIN`. Un-skipped once the pin is bumped to that published backend.
-test.skip(
-  true,
-  'Publish-circular: the marketplace-web frontend renders against the published ' +
-    'marketplace backend browse contract (kind facet / nullable updated_at / premium / ' +
-    'docs_url), but the e2e installs the backend at the older `_MARKETPLACE_PIN`. ' +
-    'Un-skipped once the pin is bumped to that published backend.',
-);
-
 test.skip(
   process.env.TAI_E2E_MARKETPLACE !== '1',
   'marketplace area is opt-in (TAI_E2E_MARKETPLACE=1)',

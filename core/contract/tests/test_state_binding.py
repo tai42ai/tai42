@@ -96,8 +96,8 @@ def test_binding_requires_at_least_one_state() -> None:
 
 def test_every_door_definition_carries_the_optional_binding() -> None:
     binding = _binding()
-    assert PresetBody(base_tool="t", state_binding=binding).state_binding == binding
-    assert PresetBody(base_tool="t").state_binding is None
+    assert PresetBody(base_tool="t", description="d", state_binding=binding).state_binding == binding
+    assert PresetBody(base_tool="t", description="d").state_binding is None
     assert PresetSeed(name="p", description="d", base_tool="t", state_binding=binding).state_binding == binding
     assert TargetConversationConfig(target_kind="tool", target_name="n", state_binding=binding).state_binding == binding
     hook = HookRegister(name="h", topic="t", tool="x", execution_key="k", state_binding=binding)
