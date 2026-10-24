@@ -100,6 +100,35 @@ async def test_apply_change_invalid_manifest_raises_with_nothing_persisted(monke
     assert bus.publish_calls == []
 
 
+async def test_apply_change_refuses_an_unknown_nested_key_naming_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []})
+    service, admin, bus = _service(store)
+
+    def misspell(document: dict[str, Any]) -> None:
+        document["mcp"] = [{"title": "srv", "config": {"url": "http://x", "header": {"X-Key": "v"}}}]
+
+    with pytest.raises(ValidationError, match=r"mcp\.0\.config\.header\n  Extra inputs are not permitted"):
+        await service.apply_change(misspell)
+
+    assert store.persisted == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+async def test_apply_replace_refuses_an_unknown_nested_key_naming_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []})
+    service, admin, bus = _service(store)
+
+    with pytest.raises(ValidationError, match=r"api_tools\.expose_destrutive\n  Extra inputs are not permitted"):
+        await service.apply_replace({"api_tools": {"expose_destrutive": False}})
+
+    assert store.persisted == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
 async def test_apply_change_mutator_rerun_is_tolerated(monkeypatch: pytest.MonkeyPatch) -> None:
     _with_bus(monkeypatch)
     # The store re-runs the mutator (a simulated concurrency conflict) before it

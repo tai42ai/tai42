@@ -41,8 +41,9 @@ Unset connector-env refusal
 Unrecyclable-change refusal
     A ``recycle``-class key takes effect only when its worker is respawned, so a change
     to one must be carried by a recycle. A change the deployment shape cannot carry is
-    refused, naming the keys: a key the shape pins (a respawn re-injects the deployment
-    value, or the key reaches the worker bus itself) on every shape, and any
+    refused, naming the keys: a key the shape pins (a stored copy would override the
+    deployment's value at every boot and reload, or the key reaches the worker bus
+    itself) on every shape, and any
     ``recycle``-class key on a bare deployment, which has no supervisor to respawn a
     worker under the new value. :func:`refuse_unrecyclable_env_change` diffs the stored
     env against the env the write would store, so a key carried unchanged is never

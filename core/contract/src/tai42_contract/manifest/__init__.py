@@ -28,6 +28,11 @@ ExtensionElement = str | dict[str, Any]
 class BaseConfig(BaseModel):
     """Shared config fields: a ``title`` plus ``include``/``exclude`` selection lists."""
 
+    # ``extra="forbid"`` (inherited by every block built on this base): an unknown
+    # key inside a manifest block is a misconfig — fail loudly naming the key
+    # rather than silently dropping it and leaving the meant field at its default.
+    model_config = ConfigDict(extra="forbid")
+
     title: str
     include: list[str] = Field(default_factory=list)
     exclude: list[str] = Field(default_factory=list)
@@ -35,6 +40,10 @@ class BaseConfig(BaseModel):
 
 class MCPConfig(BaseModel):
     """Transport config for one MCP server: exactly one of ``url``/``uds``/``command``."""
+
+    # ``extra="forbid"``: an unknown transport key is a misconfig — fail loudly
+    # naming the key rather than silently dropping it.
+    model_config = ConfigDict(extra="forbid")
 
     type: str | None = None
     url: str | None = None
@@ -189,6 +198,10 @@ class ExtensionsConfigMixin(BaseModel):
     normalizing validator wraps a flat combo and rejects malformed input loudly.
     """
 
+    # ``extra="forbid"`` (inherited by every block mixing this in): an unknown key
+    # is a misconfig — fail loudly naming the key rather than silently dropping it.
+    model_config = ConfigDict(extra="forbid")
+
     extensions: dict[str, list[list[ExtensionElement]]] = Field(default_factory=dict)
 
     @field_validator("extensions", mode="before")
@@ -251,12 +264,11 @@ class ToolsConfig(BaseConfig, ExtensionsConfigMixin):
 
 
 class AgentsConfig(BaseConfig):
-    """An agents block: a ``module`` import path plus selection config (no extensions)."""
+    """An agents block: a ``module`` import path plus selection config.
 
-    # ``extra="forbid"``: an ``extensions`` key on an agents config is a
-    # misconfig (agents carry no clip-on extensions) — reject it loudly as a
-    # pydantic extra-field error rather than silently ignoring it.
-    model_config = ConfigDict(extra="forbid")
+    Agents carry no clip-on extensions, so an ``extensions`` key here is refused as
+    an unknown key, like any other (``BaseConfig``'s ``extra="forbid"``).
+    """
 
     module: str
 

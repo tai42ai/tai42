@@ -129,6 +129,31 @@ def test_config_lint_rejects_broken_manifest(tmp_path) -> None:
     assert "invalid manifest" in result.output
 
 
+_NESTED_UNKNOWN_KEY_MANIFEST = """
+api_tools:
+  expose_destrutive: false
+"""
+
+
+def test_config_lint_refuses_an_unknown_nested_key_naming_it(tmp_path) -> None:
+    path = tmp_path / "manifest.yml"
+    path.write_text(_NESTED_UNKNOWN_KEY_MANIFEST, encoding="utf-8")
+
+    result = CliRunner().invoke(app_module.app, ["config", "lint", str(path)])
+    assert result.exit_code != 0
+    assert "invalid manifest" in result.output
+    assert "api_tools.expose_destrutive" in result.output
+
+
+def test_manifest_validate_refuses_an_unknown_nested_key_naming_it(tmp_path) -> None:
+    path = tmp_path / "manifest.yml"
+    path.write_text(_NESTED_UNKNOWN_KEY_MANIFEST, encoding="utf-8")
+
+    result = CliRunner().invoke(app_module.app, ["manifest", "validate", str(path)])
+    assert result.exit_code != 0
+    assert "api_tools.expose_destrutive" in result.output
+
+
 def test_config_lint_missing_file_is_usage_error(tmp_path) -> None:
     missing = tmp_path / "nope.yml"
     result = CliRunner().invoke(app_module.app, ["config", "lint", str(missing)])

@@ -246,7 +246,8 @@ async def test_declared_pinned_key_refuses_a_profile_changing_it(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str], llm_stub: LlmStub
 ) -> None:
     """On a ``compose``-marked deployment the keys it declares in ``TAI_SUPERVISED_PINNED_KEYS``
-    are refused upfront at the API, naming the key: a container respawn would re-inject them."""
+    are refused upfront at the API, naming the key: a stored copy would override the deployment's
+    value on every restart."""
     stack = fresh_stack(_build_compose_marked_recycle_stack, resource_kwargs={"llm_base_url": llm_stub.base_url})
     api = stack.api()
     name = uniq("pinned")
