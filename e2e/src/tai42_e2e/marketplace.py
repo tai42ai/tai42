@@ -51,16 +51,10 @@ _MARKETPLACE_GIT_URL = "https://github.com/tai42ai/tai-marketplace"
 # listings branch (package-optional PluginSpec + connector kind), the mcp-server
 # ingest branch (contract-less ``mcp-server``-kind items), and the github
 # docs-ingest over the git-data ``/git/trees`` + ``/git/blobs`` surfaces — plus the
-# declared-plugin-routes surface the pre-4 pin already had. The api pins
-# tai42-contract >=4.1,<5 + tai42-kit[postgres] >=3.5,<4, resolving contract 4.2.0
-# against the v4 fleet, so the registry accepts route-carrying fixture specs at
-# seed time and the route-marketplace legs RUN (they gate on
-# :func:`registry_supports_declared_routes`, satisfied here).
+# declared-plugin-routes surface. The api pins tai42-contract >=4.1,<5 +
+# tai42-kit[postgres] >=3.5,<4, resolving contract 4.2.0 against the v4 fleet, so
+# the registry accepts route-carrying fixture specs at seed time.
 _MARKETPLACE_PIN = "2c22ee1ee2fc65696608fc5f1888dce2497145f3"
-
-# The first tai42-contract major whose PluginSpec accepts a declared ``routes``
-# field (contract 2.0). A registry venv below it rejects route-carrying specs.
-_ROUTES_CAPABLE_CONTRACT_MAJOR = 2
 
 # The fleet-e2e workflow DISPATCHES the source sha under test here when a
 # tai-marketplace push drives the run, so the harness boots the registry at the
@@ -124,93 +118,6 @@ def _registry_python() -> Path:
 
 def _registry_bin() -> Path:
     return _registry_venv_dir() / "bin" / "tai42-marketplace"
-
-
-def registry_supports_declared_routes() -> bool:
-    """Whether the pinned registry can accept a PluginSpec that declares ``routes``
-    — i.e. its DEDICATED venv runs tai42-contract >= 2 (contract 2.0's PluginSpec
-    is the first with a ``routes`` field; older contracts reject it as an extra
-    input at seed time).
-
-    Gates every e2e leg that admin-seeds a route-carrying fixture (epsilon /
-    epsilon_v2 / theta) into the registry. The resolved ref (:func:`_marketplace_ref`)
-    runs a routes-capable tai-marketplace today (``_MARKETPLACE_PIN`` 2c22ee1 resolves
-    tai42-contract 4.x, whose PluginSpec carries ``routes``), so this is TRUE in a
-    normal run and those legs RUN. The gate remains as a guard, not a release-window
-    skip: it degrades to skip only when the registry venv is not yet built (lazy
-    install), and — when a ref is DISPATCHED via ``TAI_E2E_MARKETPLACE_REF`` — a False
-    verdict is escalated to a hard failure by the skip helper / browser guard (see
-    :func:`declared_routes_dispatch_failure`), because a dispatched ref that cannot
-    seed routes is a regression, not an expected window. A plain importable predicate —
-    pair it with ``skip_unless_registry_supports_declared_routes`` for the pytest skip,
-    and reuse it from any future route-declaring spec (e.g. a reload-probe leg).
-
-    Reads the tai42-contract version installed in the REGISTRY venv
-    (:func:`_registry_python`), never the SUT's workspace contract — the registry's
-    contract is point-in-time and independent of the SUT's. The registry install is
-    lazy, so when that venv is not yet built this returns ``False`` (degrade to
-    skip, never crash collection); the registry-booting fixtures build the venv
-    before any gated leg runs, so in CI this reads the real installed version.
-    Raises loudly only if the venv exists but its contract version cannot be read or
-    parsed — never a silent swallow."""
-    from packaging.version import InvalidVersion, Version
-
-    py = _registry_python()
-    if not py.exists():
-        return False
-    proc = subprocess.run(
-        [str(py), "-c", "import importlib.metadata as m; print(m.version('tai42-contract'))"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"reading tai42-contract from the registry venv {py} failed "
-            f"(exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
-        )
-    raw = proc.stdout.strip()
-    try:
-        version = Version(raw)
-    except InvalidVersion as exc:
-        raise RuntimeError(f"registry venv reported an unparseable tai42-contract version {raw!r}") from exc
-    return version.major >= _ROUTES_CAPABLE_CONTRACT_MAJOR
-
-
-def declared_routes_dispatch_failure() -> str | None:
-    """The skip-vs-FAIL decision for a route-carrying leg when
-    :func:`registry_supports_declared_routes` gated ``False``.
-
-    Returns ``None`` when NO registry ref was dispatched (``TAI_E2E_MARKETPLACE_REF``
-    unset) — the normal monorepo run, where a False gate is a legitimate
-    release-window skip (the registry venv may not be built yet, or the checked-in
-    pin genuinely predates the route surface). The caller SKIPS.
-
-    Returns a LOUD dual-cause message when a ref WAS dispatched — the caller must
-    FAIL, never skip, because the fleet dispatched a specific tai-marketplace sha to
-    validate and a False gate means one of two real defects, which the message
-    distinguishes:
-
-    * the registry venv is ABSENT — a harness ordering bug: the gated leg ran before
-      the registry booted, so the gate read a not-yet-installed venv rather than a
-      real capability verdict; vs
-    * the venv is built but runs tai42-contract major below the routes floor — the
-      dispatched marketplace ref REGRESSED its contract floor, dropping the ``routes``
-      surface every declared-routes leg requires."""
-    ref = os.environ.get(_MARKETPLACE_REF_ENV)
-    if ref is None:
-        return None
-    if not _registry_python().exists():
-        return (
-            f"registry venv {_registry_venv_dir()} is absent while marketplace ref {ref} was "
-            "dispatched via TAI_E2E_MARKETPLACE_REF: harness ordering bug — the gated leg ran "
-            "before the registry booted, so the declared-routes gate read a not-yet-built venv"
-        )
-    return (
-        f"the dispatched marketplace ref {ref} regressed its contract floor: its registry venv "
-        f"runs tai42-contract major < {_ROUTES_CAPABLE_CONTRACT_MAJOR}, so the PluginSpec ``routes`` "
-        "surface every declared-routes leg needs is gone"
-    )
 
 
 @dataclass

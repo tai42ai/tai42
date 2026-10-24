@@ -49,8 +49,11 @@ async def test_preset_referee_blocks_on_a_version_binding_the_template(monkeypat
     _patch_preset_store(
         monkeypatch,
         {
-            "p": [(1, {"base_tool": "echo", "state_binding": _BINDS_T1}), (2, {"base_tool": "echo"})],
-            "q": [(1, {"base_tool": "echo", "state_binding": _BINDS_OTHER})],
+            "p": [
+                (1, {"base_tool": "echo", "description": "d", "state_binding": _BINDS_T1}),
+                (2, {"base_tool": "echo", "description": "d"}),
+            ],
+            "q": [(1, {"base_tool": "echo", "description": "d", "state_binding": _BINDS_OTHER})],
         },
     )
     assert await platform_referees._preset_detach_referee("status", "t1") == ["preset 'p' version 1"]

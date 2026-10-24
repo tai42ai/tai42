@@ -41,7 +41,7 @@ def test_hooks_door_serializes_templated_text_canonically() -> None:
 def test_presets_door_serializes_templated_text_canonically() -> None:
     # The presets store persists ``PresetBody.model_dump()``; a by-id / inline schema body
     # must serialize to the same single-source shape.
-    dumped = PresetBody(base_tool="echo", output_schema=_BY_ID, input_schema=_INLINE).model_dump()
+    dumped = PresetBody(base_tool="echo", description="d", output_schema=_BY_ID, input_schema=_INLINE).model_dump()
     assert dumped["output_schema"] == _CANONICAL_BY_ID
     assert dumped["input_schema"] == _CANONICAL_INLINE
 
@@ -50,6 +50,8 @@ def test_the_two_doors_emit_the_identical_shape() -> None:
     # The anti-drift pin: the hooks door and the presets door serialize the SAME
     # ``TemplatedText`` to the SAME bytes.
     hook = _hook_params(condition=_BY_ID, start_expr=_INLINE).model_dump(mode="json")
-    preset = PresetBody(base_tool="echo", output_schema=_BY_ID, input_schema=_INLINE).model_dump(mode="json")
+    preset = PresetBody(base_tool="echo", description="d", output_schema=_BY_ID, input_schema=_INLINE).model_dump(
+        mode="json"
+    )
     assert hook["condition"] == preset["output_schema"]
     assert hook["start_expr"] == preset["input_schema"]

@@ -26,50 +26,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-import pytest
 import yaml
 from fastmcp.client.client import CallToolResult
 
-from tai42_e2e.marketplace import declared_routes_dispatch_failure, registry_supports_declared_routes
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
-
-# The registry venv not being built yet is the only benign reason this gate reads
-# False in a normal run: the checked-in pin resolves tai42-contract 4.x (whose PluginSpec
-# still carries the contract-2.0 `routes` field), so a booted registry accepts declared
-# routes and these legs RUN. The lazy-install skip only
-# fires if a leg somehow ran before its ``marketplace_service`` fixture booted the
-# registry; a dispatched ref (TAI_E2E_MARKETPLACE_REF) turns that into a hard fail.
-_DECLARED_ROUTES_SKIP_REASON = (
-    "the marketplace registry venv is not yet built, so the declared-routes gate cannot read its "
-    "tai42-contract major; this leg must run after its marketplace_service fixture boots the registry."
-)
-
-
-def skip_unless_registry_supports_declared_routes() -> None:
-    """Guard any leg that admin-seeds a declared-routes fixture (epsilon /
-    epsilon_v2 / theta) on the registry's route capability
-    (:func:`registry_supports_declared_routes`).
-
-    In a normal run the resolved registry ref runs tai42-contract 4.x (which still
-    carries the contract-2.0 ``routes`` field), so this is a no-op and the leg proceeds.
-    When the gate is False the action depends on whether
-    a registry ref was DISPATCHED (:func:`declared_routes_dispatch_failure`):
-
-    * ref dispatched (``TAI_E2E_MARKETPLACE_REF`` set) → ``pytest.fail`` with the
-      dual-cause message (ordering bug vs contract-floor regression) — the fleet
-      validated a specific sha and a False gate is a real defect, never a skip;
-    * ref not dispatched → ``pytest.skip`` (the lazy-install window; never a swallowed
-      seed failure).
-
-    Request only after the registry venv is built (a leg that depends on
-    ``marketplace_service`` has already booted it)."""
-    if registry_supports_declared_routes():
-        return
-    detail = declared_routes_dispatch_failure()
-    if detail is not None:
-        pytest.fail(detail)
-    pytest.skip(_DECLARED_ROUTES_SKIP_REASON)
 
 
 def probe_payload(result: CallToolResult) -> dict[str, Any]:

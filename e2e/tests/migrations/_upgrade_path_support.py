@@ -36,21 +36,6 @@ import yaml
 # wins; otherwise the sibling checkout beside the monorepo members (the layout the
 # release/deploy tooling assumes).
 _DISTRIBUTION_ENV = "TAI_E2E_DISTRIBUTION_PATH"
-# A local archive of PREVIOUSLY released chart trees, one ``<version>/`` subdir per
-# release, consulted only by the old->new replay leg. Absent in a plain checkout —
-# the replay is env-limited until a release archive is provided.
-_RELEASED_CHARTS_ENV = "TAI_E2E_RELEASED_CHARTS_DIR"
-
-# Old->new replay onto the CURRENT artifacts. Each entry is a previously released
-# framework version whose deploy the replay leg renders alongside the working-tree
-# artifacts, proving the migrate-before-serve hook gated at BOTH ends of the
-# upgrade. The first entry is the first framework release. Empty until a release
-# exists to replay from: old->new replay only has meaning from the SECOND framework
-# release onward (the first release has no predecessor on the framework to upgrade
-# from). Appending a released version string extends the matrix — the leg
-# parametrizes over it with no other change.
-PREVIOUS_FRAMEWORK_VERSIONS: tuple[str, ...] = ()
-
 # The migrate command both surfaces run, and the compose completion condition
 # serve/backend gate on. Named once so every assertion reads the same invariant.
 MIGRATE_ARGS = ["db", "migrate"]
@@ -137,21 +122,3 @@ def render_schema_init_job(chart_dir: Path, *, quickstart: bool) -> dict[str, An
     if doc is None:
         raise RuntimeError(f"schema-init-job.yaml rendered empty for chart {chart_dir} (quickstart={quickstart})")
     return doc
-
-
-def released_chart_dir(base_version: str) -> Path:
-    """The chart tree of a previously released framework version, or a skip.
-
-    Resolves ``TAI_E2E_RELEASED_CHARTS_DIR/<version>/charts/tai``; the replay leg
-    renders it beside the current chart to prove the migrate hook gated the OLD
-    deploy too. Absent in a plain checkout — an env-limited skip, never a fake."""
-    base = os.environ.get(_RELEASED_CHARTS_ENV)
-    if not base:
-        pytest.skip(
-            f"no released-chart archive for framework {base_version}; set {_RELEASED_CHARTS_ENV} to a dir "
-            "holding <version>/charts/tai trees to run the old->new replay"
-        )
-    chart = Path(base) / base_version / "charts" / "tai"
-    if not (chart / "Chart.yaml").is_file():
-        pytest.skip(f"released chart for framework {base_version} not found at {chart}")
-    return chart

@@ -66,11 +66,7 @@ from tai42_e2e.fixture_catalog import forge_fixture_artifacts
 from tai42_e2e.harness import allocate_resources, connect_infra, release_resources
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import build_studio_setup_stack, build_studio_stack
-from tai42_e2e.marketplace import (
-    MarketplaceService,
-    declared_routes_dispatch_failure,
-    registry_supports_declared_routes,
-)
+from tai42_e2e.marketplace import MarketplaceService
 from tai42_e2e.oauth_idp import OAuthIdp
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.procs import ProcessHandle
@@ -440,21 +436,7 @@ def _start_marketplace(infra: Infra, root: Path, runner: StudioRunnerSettings) -
         # the marketplace-web spec assert a router/middleware listing browses + filters
         # while the shared pytest catalog stays alpha/beta/gamma. Its kinds are neither
         # tool nor extension, so it never disturbs the existing browse assertions.
-        #
-        # Epsilon carries a declared `routes` block (contract 2.0's PluginSpec field).
-        # The resolved registry ref runs tai42-contract 4.x, which still carries that
-        # `routes` field, so the registry accepts `routes` at seed time and this seed
-        # RUNS, mirroring the pytest route legs' gate. The gate
-        # only degrades to a skipped seed if the registry venv is not yet built; when a
-        # ref is DISPATCHED (TAI_E2E_MARKETPLACE_REF), a False gate is escalated to a
-        # hard failure with the dual-cause detail (ordering bug vs contract-floor
-        # regression), never a silent skip of the browser fixture.
-        if registry_supports_declared_routes():
-            asyncio.run(seed_epsilon_listing(service, index, artifacts))
-        else:
-            detail = declared_routes_dispatch_failure()
-            if detail is not None:
-                raise RuntimeError(detail)
+        asyncio.run(seed_epsilon_listing(service, index, artifacts))
         website = _MarketplaceWebSite(
             _resolve_web_repo(),
             port=runner.ui_mp_web_port,

@@ -244,8 +244,8 @@ with warnings.catch_warnings():
 def joined_answer_text(parts: Sequence[AnswerPart]) -> str:
     """The whole-text form of an ordered ``parts`` list.
 
-    The NON-BLANK part messages joined with a blank line — the single string every legacy reader
-    (api-door callbacks, sync waits, transcripts) consumes. A MEDIA-ONLY part (blank message)
+    The NON-BLANK part messages joined with a blank line — the single string the whole-text readers
+    (api-door callbacks, sync waits, transcripts) consume. A MEDIA-ONLY part (blank message)
     contributes NOTHING to the text, so an all-media answer joins to the empty string; the media
     itself rides ``parts``, which a parts-aware consumer delivers. The one definition both the wire
     :class:`ConversationAnswer` and the host record share, so the joined text can never diverge
@@ -267,10 +267,10 @@ class ConversationAnswer(BaseModel):
     ``parts`` is the ordered list of :class:`AnswerPart` messages the turn produced when a
     single joined string would lose something — more than one message, or one message
     carrying media/options/a template. It is order-significant; when it is present ``answer``
-    equals the parts' NON-BLANK MESSAGE texts joined with ``"\n\n"`` (:func:`joined_answer_text`),
-    so every consumer of ``answer`` (api-door callbacks, sync waits, transcripts) keeps seeing
-    the whole text with zero migration while a parts-aware consumer reads ``parts`` and delivers
-    each as its own message (with its media/options). A single PLAIN-TEXT answer carries
+    equals the parts' NON-BLANK MESSAGE texts joined with ``"\n\n"`` (:func:`joined_answer_text`).
+    ``answer`` is the whole text, read by the consumers that take one string (api-door callbacks,
+    sync waits, transcripts); ``parts`` is read by a consumer that delivers each part as its own
+    message (with its media/options). A single PLAIN-TEXT answer carries
     ``parts=None`` (the joined ``answer`` says everything); a richer or multi-message answer
     carries the parts. An ALL-MEDIA answer (every part media-only) joins to the EMPTY string, so
     on ``answered``/``error`` a blank ``answer`` is admissible ONLY when ``parts`` carry the
@@ -318,7 +318,7 @@ class ConversationAnswer(BaseModel):
 
         The list is non-empty, never ``silent``, and its NON-BLANK part MESSAGE texts join with
         ``"\n\n"`` to exactly ``answer`` (a media-only part contributes nothing) — so the joined
-        text a legacy consumer reads and the ordered parts a parts-aware consumer delivers can
+        text a whole-text consumer reads and the ordered parts a parts-aware consumer delivers can
         never disagree. Each part's own shape (message-or-media, media/options/template
         exclusivity) is enforced by :class:`AnswerPart`.
         """

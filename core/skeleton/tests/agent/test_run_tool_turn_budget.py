@@ -1,19 +1,18 @@
-"""The turn budget over the run tool, and the retained standalone TurnBudgetMiddleware."""
+"""The turn budget over the run tool."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable
-from typing import Any, cast
+from typing import Any
 
 import pytest
-from fastmcp.server.middleware import MiddlewareContext
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.tools.turn_budget import TurnBudgetMiddleware, _turn_budget_armed, turn_budget
+from tai42_skeleton.tools.turn_budget import _turn_budget_armed, turn_budget
 
 from .conftest import _budget_flag, _fixture_flag, _ManualClock, _plain_tools_manifest
 
@@ -275,62 +274,6 @@ def test_turn_budget_unset_runs_unbounded():
             await asyncio.sleep(0.05)
 
     asyncio.run(run())
-
-
-# -- the retained standalone TurnBudgetMiddleware -----------------------------
-# A public middleware NOT registered by the platform (the live ``tools/call`` edge
-# budget is armed by ``DispatchScopeMiddleware``); these exercise its standalone
-# behavior and its deprecation warning.
-
-
-def test_edge_middleware_over_budget_raises_turn_timeout(set_turn_timeout):
-    # ``TurnBudgetMiddleware.on_call_tool`` wraps ``call_next`` in the turn budget, so a
-    # ``call_next`` slower than the limit is cancelled on expiry and raises the typed
-    # error.
-    set_turn_timeout("0.05")
-    with pytest.warns(DeprecationWarning, match="not registered by the platform"):
-        mw = TurnBudgetMiddleware()
-
-    async def call_next(_ctx):
-        await asyncio.sleep(5)
-        return "reached"
-
-    async def run() -> None:
-        with pytest.raises(TurnTimeoutError, match=r"turn exceeded the 0\.05s turn timeout"):
-            await mw.on_call_tool(cast("MiddlewareContext[Any]", object()), call_next)
-
-    asyncio.run(run())
-
-
-def test_edge_middleware_arms_once_nested_run_tool_sees_armed_no_rearm(set_turn_timeout):
-    # ``on_call_tool`` arms the budget BEFORE ``call_next`` runs; when ``call_next``
-    # reaches the shared ``run_tool`` seam, the seam sees the guard already armed and
-    # opens no second window — the outer window bounds the whole turn.
-    set_turn_timeout("5")
-
-    async def run() -> None:
-        async with app.app_context(_plain_tools_manifest("nested_inner")):
-            with pytest.warns(DeprecationWarning, match="not registered by the platform"):
-                mw = TurnBudgetMiddleware()
-
-            async def call_next(_ctx):
-                # The middleware already armed the budget: the guard is set before the seam.
-                assert _turn_budget_armed.get() is True
-                return await app.tools.run_tool("nested_inner", {"seconds": 0.0})
-
-            assert await mw.on_call_tool(cast("MiddlewareContext[Any]", object()), call_next) == "inner-done"
-
-    asyncio.run(run())
-    # The seam ran under the guard the middleware armed, so it opened no window of its own.
-    assert _budget_flag("nested_inner_saw_armed") is True
-    assert _budget_flag("nested_inner_completed") is True
-
-
-def test_turn_budget_middleware_instantiation_warns_it_is_not_registered():
-    # The class is a retained standalone component the platform does not register (the
-    # live edge budget is DispatchScopeMiddleware's); instantiation warns.
-    with pytest.warns(DeprecationWarning, match="not registered by the platform"):
-        TurnBudgetMiddleware()
 
 
 async def test_turn_superseded_signal_passes_through_the_turn_budget(set_turn_timeout):

@@ -46,6 +46,7 @@ from tai42_skeleton.operations.response_models_group_a import (
     PresetVersionSaveResult,
     PresetVersionTagsResult,
 )
+from tai42_skeleton.presets.store import stored_preset_body
 
 # This submodule's own package generation, captured at import time (a reload builds a
 # fresh package + submodules together, so each generation's submodule reads its OWN
@@ -334,7 +335,7 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
         target = await store.get_version(name, version)
     except PresetVersionNotFoundError as exc:
         raise NotFoundError(f"preset {name!r} has no version {version}") from exc
-    target_body = PresetBody.model_validate(target.body)
+    target_body = stored_preset_body(name, target.body)
     combo_error = _combo_registry_error(target_body.extensions)
     if combo_error is not None:
         raise BadRequestError(combo_error)

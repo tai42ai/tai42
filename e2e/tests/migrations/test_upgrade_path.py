@@ -11,11 +11,6 @@ its statically rendered artifact — no live cluster needed:
 - *compose*: the one-shot ``db-migrate`` service runs ``db migrate`` and serve +
   backend gate on its successful completion.
 
-- *upgrade replay*: parametrized over the released framework versions to replay
-  from. Empty until a release exists — old->new replay only has meaning from the
-  second framework release (see ``PREVIOUS_FRAMEWORK_VERSIONS``); the leg extends
-  as versions accrue, with no other change.
-
 The artifacts live in the tai-distribution checkout and render through
 ``helm`` / ``docker compose``; a missing checkout or CLI is an env-limited skip.
 """
@@ -27,10 +22,8 @@ import pytest
 from ._upgrade_path_support import (
     GATE_CONDITION,
     MIGRATE_ARGS,
-    PREVIOUS_FRAMEWORK_VERSIONS,
     compose_config,
     distribution_root,
-    released_chart_dir,
     render_schema_init_job,
     require_cli,
 )
@@ -62,7 +55,7 @@ def test_chart_schema_init_hook_migrates_before_serve(quickstart: bool, expected
     job = render_schema_init_job(root / "charts" / "tai", quickstart=quickstart)
 
     assert job["kind"] == "Job"
-    # The hook runs the migration chain, not the retired one-shot apply.
+    # The hook runs the migration chain.
     assert _schema_init_container(job)["args"] == MIGRATE_ARGS
     # The hook PHASE is what makes it migrate-before-serve: pre-hook on external
     # Postgres (schema before pods), post-hook on the release-owned quickstart DB.
@@ -100,30 +93,3 @@ def test_compose_local_overlay_keeps_migrate_service() -> None:
     assert "build" in services["db-migrate"], "local overlay lost the db-migrate build override"
     for name in ("serve", "backend"):
         assert services[name]["depends_on"]["db-migrate"]["condition"] == GATE_CONDITION
-
-
-@pytest.mark.parametrize(
-    "base_version",
-    PREVIOUS_FRAMEWORK_VERSIONS
-    or [
-        pytest.param(
-            None,
-            marks=pytest.mark.skip(
-                reason="old->new deploy replay activates from the second framework release; "
-                "no prior release is pinned in PREVIOUS_FRAMEWORK_VERSIONS yet"
-            ),
-        )
-    ],
-)
-def test_upgrade_replays_previous_framework_release(base_version: str) -> None:
-    # Render the schema-init hook of the released base version beside the current
-    # one: the upgrade path is only safe if the migrate hook gated the OLD deploy
-    # too, so the database is never served with a pending chain across the upgrade.
-    require_cli("helm", renders="chart schema-init hook")
-    root = distribution_root()
-
-    old = _schema_init_container(render_schema_init_job(released_chart_dir(base_version), quickstart=False))
-    new = _schema_init_container(render_schema_init_job(root / "charts" / "tai", quickstart=False))
-
-    assert old["args"] == MIGRATE_ARGS, f"released {base_version} chart did not migrate before serve"
-    assert new["args"] == MIGRATE_ARGS

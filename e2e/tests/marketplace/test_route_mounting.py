@@ -47,7 +47,6 @@ from ._market_support import (
     distribution_absent,
     installed_refs,
     persisted_manifest,
-    skip_unless_registry_supports_declared_routes,
 )
 
 pytestmark = [
@@ -83,13 +82,8 @@ def route_fixtures_seeded(
     registry through the real admin-seed + ingest pipeline. Kept out of the shared
     browse catalog, so this spec seeds exactly the listings it installs.
 
-    This is the ONE route-seeding gate for the whole spec: every leg's route-carrying
-    listing is published here, and the gate skips this module's legs when the pinned
-    registry cannot accept declared routes (the fixtures declare ``routes``);
-    ``marketplace_service`` has already built the registry venv the gate reads."""
+    Every leg's route-carrying listing is published here, once for the whole spec."""
     import asyncio
-
-    skip_unless_registry_supports_declared_routes()
 
     async def seed() -> None:
         await seed_epsilon_listing(marketplace_service, package_index, fixture_artifacts)

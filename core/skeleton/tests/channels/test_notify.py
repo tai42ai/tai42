@@ -54,8 +54,8 @@ from .._fakes.recording_monitoring import RecordingMonitoring
 
 
 class RecordingChannel(AddressingChannel):
-    """Records every notification handed to ``notify``. Its ``notify`` returns
-    ``None`` — a channel not yet on the id-returning contract."""
+    """Records every notification handed to ``notify``. Its ``notify`` returns an
+    outcome carrying no outbound ids."""
 
     def __init__(self) -> None:
         self.notifications: list[ChannelNotification] = []
@@ -66,8 +66,7 @@ class RecordingChannel(AddressingChannel):
 
 
 class IdReturningChannel(AddressingChannel):
-    """Records every notification and returns the medium-assigned outbound ids — a
-    channel on the id-returning ``notify`` contract."""
+    """Records every notification and returns the medium-assigned outbound ids."""
 
     def __init__(self, ids: list[str]) -> None:
         self.notifications: list[ChannelNotification] = []
@@ -186,19 +185,19 @@ async def test_notify_sends_from_the_channels_own_identity(register_channel):
 
 
 async def test_notify_returns_channel_outbound_ids(register_channel):
-    # A channel on the id-returning contract: the helper surfaces the medium-assigned
+    # A channel that returns outbound ids: the helper surfaces the medium-assigned
     # ids (one per split part) so a later delivery receipt can be correlated back.
     register_channel("ids", IdReturningChannel(["m1", "m2"]))
 
     assert await notify_user("split message", channel="ids") == ["m1", "m2"]
 
 
-async def test_notify_none_return_becomes_empty_id_list(register_channel):
-    # A channel whose ``notify`` returns ``None`` yields an EMPTY id set: an accepted
+async def test_notify_outcome_without_ids_yields_empty_id_list(register_channel):
+    # A channel whose outcome carries no outbound ids yields an EMPTY id set: an accepted
     # send with no correlatable id, never an error.
-    register_channel("legacy", RecordingChannel())
+    register_channel("no-ids", RecordingChannel())
 
-    assert await notify_user("hi", channel="legacy") == []
+    assert await notify_user("hi", channel="no-ids") == []
 
 
 # -- media & template: threaded to a capable channel, guarded everywhere else -----

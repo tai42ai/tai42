@@ -57,7 +57,7 @@ class PresetBody(BaseModel):
     """
 
     base_tool: str
-    description: str = ""
+    description: str
     fixed_kwargs: dict[str, Any] = Field(
         default_factory=dict,
         description=(

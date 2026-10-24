@@ -462,16 +462,17 @@ async def test_a_tombstoned_record_skips_benignly_before_its_key_is_read(store, 
     assert store.settings.trigger_record_key("a" * 64) not in store.redis._strings
 
 
-# -- old shape + malformed envelope ------------------------------------------
+# -- malformed envelope ------------------------------------------------------
 
 
-async def test_old_list_shape_imports_clean(store) -> None:
-    payload = [
-        {"name": "h1", "topic": "t", "tool": "notify", "execution_key": "k-fire", "execution_key_fingerprint": "fp"}
-    ]
-    report = await webhooks_section._import_webhooks(payload)
-    assert report.created == 1
-    assert set(await store.manager.list_hooks()) == {"h1"}
+@pytest.mark.parametrize("payload", [[], "x", None])
+async def test_non_envelope_payload_whole_section_refusal_zero_written(store, payload) -> None:
+    await store.manager.register(
+        HookParams(name="pre", topic="t", tool="notify", execution_key="k-fire", execution_key_fingerprint="fp")
+    )
+    with pytest.raises(ValueError, match="must be an envelope dict"):
+        await webhooks_section._import_webhooks(payload)
+    assert set(await store.manager.list_hooks()) == {"pre"}
 
 
 @pytest.mark.parametrize("missing", ["hooks", "topic_verifiers", "trigger_links", "tombstones"])

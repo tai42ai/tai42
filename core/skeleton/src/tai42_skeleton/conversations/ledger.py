@@ -9,8 +9,7 @@ An entry records the chunk's ANSWER-PART index and its CHARACTER COUNT, not its 
 index, so the resume point survives a change to the channel's ``max_message_chars``
 between attempts. A single-message answer is part 0; a multi-message answer chunks each
 part independently, so the ``part`` field is what tells one part's chunks from the next's.
-An entry with no ``part`` field reads as part 0, the single-part answer's only part. It
-also carries the provider ids that chunk produced.
+It also carries the provider ids that chunk produced.
 
 Send-time scaffolding, not durable state: deleted at a provisional or terminal outcome, and
 carrying the answer-retention TTL so any other ending leaves nothing behind.
@@ -43,28 +42,27 @@ class SentChunk:
     """One chunk a channel provider has already accepted.
 
     Records how many characters it carried, the outbound ids the provider assigned it, and which answer PART it
-    belongs to. ``part`` defaults to 0 — a single-part answer's only part, and the value read for a stored entry
-    that carries no ``part`` field.
+    belongs to (0 for a single-part answer's only part).
     """
 
     chars: int
     outbound_ids: list[str]
-    part: int = 0
+    part: int
 
 
 def _decode(entry: bytes | str) -> SentChunk:
     """Parse one stored ledger entry.
 
-    A malformed entry raises :class:`LedgerInconsistentError` rather than reading as "nothing sent", which would
-    re-send chunks the provider already accepted. A ``part`` absent from the entry reads as
-    0 via ``payload.get("part", 0)`` — the single-part answer's only part.
+    A malformed entry — one missing ``part``, ``chars`` or ``outbound_ids`` included — raises
+    :class:`LedgerInconsistentError` rather than reading as "nothing sent", which would re-send chunks the provider
+    already accepted.
     """
     try:
         payload = json.loads(entry)
         return SentChunk(
             chars=int(payload["chars"]),
             outbound_ids=[str(i) for i in payload["outbound_ids"]],
-            part=int(payload.get("part", 0)),
+            part=int(payload["part"]),
         )
     except (ValueError, KeyError, TypeError) as exc:
         raise LedgerInconsistentError(f"channel send ledger entry {entry!r} is unparseable") from exc

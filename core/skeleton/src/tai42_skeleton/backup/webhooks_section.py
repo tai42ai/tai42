@@ -228,27 +228,22 @@ async def _restore_trigger_links(
             report.created += 1
 
 
-async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> BackupSectionReport:
+async def _import_webhooks(payload: dict[str, Any]) -> BackupSectionReport:
     """Order the webhooks restore.
 
-    A bare LIST is the hooks-only shape; else validate the envelope, run the duplicate-hash pre-scan,
-    replay topic verifiers, restore hooks, tombstones, and trigger links.
+    Validate the envelope, run the duplicate-hash pre-scan, replay topic verifiers, restore hooks,
+    tombstones, and trigger links.
     """
+    if not isinstance(payload, dict):
+        raise ValueError(  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
+            f"webhooks section payload must be an envelope dict, got {type(payload).__name__}"
+        )
     manager = hooks_cache.get_hooks_manager()
     mode = current_import_mode()
     report = _empty_report()
     # One scan for the whole restore: each distinct execution key is read and rendered once.
     scan = ExecutionKeyScan()
 
-    # A bare LIST is the hooks-only backup shape (no trigger-link envelope).
-    if isinstance(payload, list):
-        await _restore_hooks(manager, mode, report, scan, payload)
-        return report
-
-    if not isinstance(payload, dict):
-        raise ValueError(  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
-            f"webhooks section payload must be a list (old shape) or an envelope dict, got {type(payload)}"
-        )
     hooks, topic_verifiers, trigger_links, tombstones = _validate_webhooks_envelope(payload)
 
     # Whole-section pre-write scan, touching zero keys: refuse a payload binding ONE

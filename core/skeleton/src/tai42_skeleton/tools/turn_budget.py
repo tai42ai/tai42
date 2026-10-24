@@ -14,21 +14,15 @@ budget both run unbounded.
 """
 
 import asyncio
-import warnings
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any
 
-from fastmcp.server.middleware import Middleware
 from tai42_kit.utils.detached_util import in_detached_run
 
 from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
 from tai42_skeleton.settings.turn import turn_settings
 from tai42_skeleton.tools.attribution import stamp_run_attribution
-
-if TYPE_CHECKING:
-    from fastmcp.server.middleware import MiddlewareContext
 
 # Armed while the outermost tool call of a turn holds the budget window; a nested
 # ``turn_budget`` seen armed runs unwrapped so it cannot open a fresh window.
@@ -90,44 +84,6 @@ async def turn_budget() -> AsyncIterator[None]:
             raise
     finally:
         _turn_budget_armed.reset(token)
-
-
-class TurnBudgetMiddleware(Middleware):
-    """A retained, standalone FastMCP middleware that arms the synchronous turn budget around a call.
-
-    NOT registered by the platform.
-
-    The live MCP ``tools/call`` edge arms the run lifecycle — the turn budget included —
-    through ``DispatchScopeMiddleware`` (:mod:`tai42_skeleton.tools.dispatch_scope`),
-    which enters the same shared :func:`turn_budget` seam. This class remains a public
-    component that budgets a ``call_next`` on its own, but nothing in the platform wires
-    it into a server. Scheduled for removal in the next skeleton major.
-
-    ``on_call_tool`` stamps the run attribution and arms :func:`turn_budget` around
-    ``call_next``; the shared ContextVar guard keeps a nested in-process re-dispatch
-    from opening a second window.
-    """
-
-    def __init__(self) -> None:
-        """Emit the deprecation warning for this unregistered middleware."""
-        warnings.warn(
-            "TurnBudgetMiddleware is not registered by the platform; the MCP tools/call "
-            "edge lifecycle is handled by DispatchScopeMiddleware "
-            "(tai42_skeleton.tools.dispatch_scope). Scheduled for removal in the next "
-            "skeleton major.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-    async def on_call_tool(
-        self,
-        context: "MiddlewareContext[Any]",
-        call_next: Callable[["MiddlewareContext[Any]"], Awaitable[Any]],
-    ) -> Any:
-        """Stamp the run attribution and arm :func:`turn_budget` around ``call_next``."""
-        with stamp_run_attribution():
-            async with turn_budget():
-                return await call_next(context)
 
 
 async def drive_live_caller_astream[EventT](stream: AsyncIterator[EventT]) -> AsyncIterator[EventT]:

@@ -88,9 +88,9 @@ async def test_parked_ask_appears_with_all_fields(fake_redis):
     }
 
 
-async def test_thread_id_read_tolerantly_when_present(fake_redis):
-    # A cascade-era park carries a denormalized ``thread_id`` hash field; the audit
-    # surfaces it, and its absence on an older park is tolerated (None).
+async def test_thread_id_surfaced_when_present(fake_redis):
+    # A thread-bound park carries a denormalized ``thread_id`` hash field; the audit
+    # surfaces it, and a park bound to no thread lists ``None``.
     store = InteractionStore("i:")
     now = datetime.now(UTC)
     future = now + timedelta(hours=1)

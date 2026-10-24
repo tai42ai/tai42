@@ -74,7 +74,8 @@ class PresetStore(Protocol):
         land in the persisted :class:`PresetBody`. ``tags`` labels version 1 in the
         SAME create commit (``None`` leaves it untagged); a caller that must tag the
         first version does so atomically, never through a separate follow-up write.
-        Raise :class:`PresetExistsError` on a duplicate name,
+        Raise :class:`ValueError` on a blank ``description``,
+        :class:`PresetExistsError` on a duplicate name,
         :class:`PresetNameConflictError` if the name collides with a base tool.
         """
         ...
@@ -111,9 +112,7 @@ class PresetStore(Protocol):
         version: ``None`` = carry the active description forward, an explicit
         non-empty string = set it. The RESULTING description — explicit or carried
         — is validated non-empty (raising :class:`ValueError`, surfaced as a 400),
-        so an explicit ``""`` is rejected and a carry-forward from a legacy body
-        with an empty description raises rather than persisting an empty tool
-        docstring. An empty INNER combo
+        so an explicit ``""`` is rejected. An empty INNER combo
         (``[[]]`` or any ``[]`` member of ``extensions``) is REJECTED. The new body
         never DROPS a field. Raise :class:`PresetNotFoundError` if the preset is
         absent.

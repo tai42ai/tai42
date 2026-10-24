@@ -8,10 +8,10 @@ is the generic store. Its jobs are:
 
 * **body validation/reshaping** — an empty INNER extension combo (``[[]]`` or any
   ``[]`` member) is REJECTED loudly; the empty OUTER list ``[]`` is a valid value
-  (no extensions on create, an explicit clear on a version save). The resulting
-  ``description`` is validated non-empty on every version save (explicit or
-  carried), so a legacy body with an empty description heals loudly at its next
-  save instead of persisting an empty tool docstring;
+  (no extensions on create, an explicit clear on a version save). The
+  ``description`` is validated non-empty on create and on every version save
+  (explicit or carried), and every stored body read back is validated the same way
+  (:func:`stored_preset_body`), so no preset tool carries an empty docstring;
 * **carry-forward on a version save** — a version body is always the FULL
   :class:`PresetBody`, so ``base_tool`` is ALWAYS carried forward from the active
   version; ``description`` carries forward on ``None`` and is set by an explicit
@@ -70,6 +70,23 @@ def _validate_extensions(extensions: Sequence[Sequence[ExtensionElement]]) -> No
             raise ValueError("preset extensions must not contain an empty combo")
 
 
+def _require_description(description: str) -> None:
+    """Reject a blank preset description; it is the bound tool's LLM-facing docstring."""
+    if not description.strip():
+        raise ValueError("preset description must not be empty; supply a description")
+
+
+def stored_preset_body(name: str, raw: Any) -> PresetBody:
+    """Parse the stored body of preset ``name``, validated as a created body is.
+
+    A body that does not parse, or whose ``description`` is blank, raises ``ValueError``.
+    """
+    body = PresetBody.model_validate(raw)
+    if not body.description.strip():
+        raise ValueError(f"stored preset {name!r} has an empty description")
+    return body
+
+
 class PresetStoreView(PresetStore):
     """Typed preset view delegating to a generic :class:`VersionedStore`."""
 
@@ -95,6 +112,7 @@ class PresetStoreView(PresetStore):
     ) -> DocumentRecord:
         """Create a preset from ``spec`` and its extension combos; raises on a name collision."""
         _validate_extensions(extensions)
+        _require_description(spec.description)
         if self._name_conflicts is not None and await self._name_conflicts(spec.name):
             raise PresetNameConflictError(spec.name)
         body = PresetBody(
@@ -134,12 +152,9 @@ class PresetStoreView(PresetStore):
         new_input_schema = active.input_schema if isinstance(input_schema, CarryForward) else input_schema
         new_state_binding = active.state_binding if isinstance(state_binding, CarryForward) else state_binding
         # ``description`` is editable per version: None carries the active value
-        # forward, an explicit string sets it. The RESULTING description is validated
-        # non-empty either way, so an explicit "" is rejected and a carry-forward from
-        # a legacy empty body heals loudly rather than persisting an empty docstring.
+        # forward, an explicit string sets it; an explicit "" is rejected.
         new_description = active.description if description is None else description
-        if not new_description.strip():
-            raise ValueError("preset description must not be empty; supply a description")
+        _require_description(new_description)
         new_body = PresetBody(
             base_tool=active.base_tool,
             description=new_description,
@@ -232,7 +247,7 @@ class PresetStoreView(PresetStore):
             raw = await self._store.get_active_body(_KIND, name)
         except DocumentNotFoundError as exc:
             raise PresetNotFoundError(name) from exc
-        return PresetBody.model_validate(raw)
+        return stored_preset_body(name, raw)
 
 
 def preset_store(*, name_conflicts: Callable[[str], Awaitable[bool]] | None = None) -> PresetStoreView:
