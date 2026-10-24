@@ -111,7 +111,7 @@ xai = ["tai42-kit[llm]", "langchain-xai>=1.2"]
 ollama = ["tai42-kit[llm]", "langchain-ollama>=1.0"]
 huggingface = [
     "tai42-kit[llm]",
-    "langchain-huggingface>=1.2",
+    "langchain-huggingface>=1.2.3",
     "sentence-transformers>=5.3",
 ]
 # The classifier backend, imported lazily by llm/classifier.py. It publishes
