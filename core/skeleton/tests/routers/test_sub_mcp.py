@@ -330,6 +330,36 @@ async def test_failed_register_and_unregister_do_not_bump_version(install):
     assert version_key not in fake.redis._strings
 
 
+def _gate_off_without_gate_redis(monkeypatch) -> None:
+    """Access control off, and no Redis for the gate: neither its own URL nor the default."""
+    from tai42_kit.clients import client_ctx
+    from tai42_kit.settings import reset_all_settings
+
+    from tai42_skeleton.access_control import management as management_module
+
+    monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "false")
+    monkeypatch.delenv("ACCESS_CONTROL_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    # The real client factory, so a bump that reached for the gate's Redis would raise.
+    monkeypatch.setattr(management_module, "client_ctx", client_ctx)
+    reset_all_settings()
+
+
+async def test_register_and_unregister_with_the_gate_off_need_no_gate_redis(install, monkeypatch):
+    # With access control off nothing reads the policy version, so a mount change bumps
+    # nothing and the gate's Redis is never needed: both doors answer 200.
+    fake = install({})
+    _gate_off_without_gate_redis(monkeypatch)
+
+    resp = await router.register_sub_mcp(_body_req(b'{"slug": "weather", "tools": ["get_forecast"]}'))
+    assert resp.status_code == 200, _json(resp)
+    assert fake.registered == [("weather", ["get_forecast"], "http")]
+
+    resp = await router.unregister_sub_mcp(_req(slug="weather"))
+    assert resp.status_code == 200, _json(resp)
+    assert fake.unregistered == ["weather"]
+
+
 @pytest.mark.parametrize(
     ("slug", "transport", "named"),
     [("a/b", "http", "slug"), ("weather\n", "http", "slug"), ("weather", "carrier-pigeon", "transport")],

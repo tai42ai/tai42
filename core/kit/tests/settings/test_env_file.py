@@ -6,8 +6,10 @@ inode, mtime, size) and on the values of the variables the file interpolates. Th
 values every class resolves are those of a fresh parse; only the work is done once.
 """
 
+import asyncio
 import importlib
 import os
+import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -24,6 +26,7 @@ from tai42_kit.settings import (
     DefaultNamespaceMixin,
     TaiBaseSettings,
     env_file_identity,
+    env_file_reads_suspended,
     registered_settings,
 )
 from tai42_kit.settings import default_namespace as default_namespace_module
@@ -436,3 +439,140 @@ def test_redis_connection_settings_resolve_the_shared_url_from_the_file(tmp_path
         model_config = SettingsConfigDict(env_prefix="SAMPLESTORE_")
 
     assert StoreRedis().redis_url == "redis://shared.invalid:6379/0"
+
+
+# ---------------------------------------------------------------------------
+# env-file reads suspended for one file — that file is not read, every other file is
+# ---------------------------------------------------------------------------
+
+
+def test_a_construction_inside_the_block_skips_the_suspended_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / ".env", "SAMPLE_NAME=from-file\nSAMPLE_SIZE=7\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SAMPLE_SIZE", "3")
+
+    with env_file_reads_suspended(tmp_path / ".env"):
+        suspended = SampleSettings()
+
+    assert (suspended.name, suspended.size) == ("unset", 3)
+
+
+def test_a_construction_inside_the_block_reads_an_env_file_at_another_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "run").mkdir()
+    (tmp_path / "config").mkdir()
+    _write(tmp_path / "run" / ".env", "SAMPLE_NAME=from-run\n")
+    _write(tmp_path / "config" / ".env", "SAMPLE_NAME=from-config\n")
+    monkeypatch.chdir(tmp_path / "run")
+
+    with env_file_reads_suspended(tmp_path / "config" / ".env"):
+        assert SampleSettings().name == "from-run"
+
+
+def test_a_suspended_path_given_relative_resolves_against_the_working_directory_at_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / ".env", "SAMPLE_NAME=from-file\n")
+    monkeypatch.chdir(tmp_path)
+
+    with env_file_reads_suspended(".env"):
+        assert SampleSettings().name == "unset"
+
+
+def test_a_suspended_path_reached_through_a_symlink_skips_the_file_it_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config").mkdir()
+    _write(tmp_path / "config" / ".env", "SAMPLE_NAME=from-config\n")
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run" / ".env").symlink_to(tmp_path / "config" / ".env")
+    monkeypatch.chdir(tmp_path / "run")
+
+    with env_file_reads_suspended(tmp_path / "config" / ".env"):
+        assert SampleSettings().name == "unset"
+    (tmp_path / "link").symlink_to(tmp_path / "run")
+    with env_file_reads_suspended(tmp_path / "link" / ".env"):
+        assert SampleSettings().name == "unset"
+
+
+def test_nested_blocks_skip_every_suspended_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path / ".env", "SAMPLE_NAME=from-file\n")
+    monkeypatch.chdir(tmp_path)
+
+    with env_file_reads_suspended(tmp_path / "other.env"), env_file_reads_suspended(tmp_path / ".env"):
+        assert SampleSettings().name == "unset"
+    with env_file_reads_suspended(tmp_path / ".env"), env_file_reads_suspended(tmp_path / "other.env"):
+        assert SampleSettings().name == "unset"
+
+
+def test_env_file_reads_resume_when_the_suspended_block_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path / ".env", "SAMPLE_NAME=from-file\n")
+    monkeypatch.chdir(tmp_path)
+
+    with env_file_reads_suspended(tmp_path / ".env"):
+        pass
+
+    assert SampleSettings().name == "from-file"
+
+
+def test_env_file_reads_resume_when_the_suspended_block_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path / ".env", "SAMPLE_NAME=from-file\n")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(RuntimeError, match="inside"), env_file_reads_suspended(tmp_path / ".env"):
+        raise RuntimeError("inside")
+
+    assert SampleSettings().name == "from-file"
+
+
+def test_a_default_namespace_fallback_inside_the_block_skips_the_suspended_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / ".env", "TAI_DEFAULT_REDIS_URL=redis://from-file:6379/0\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    monkeypatch.delenv("FALLBACK_REDIS_URL", raising=False)
+
+    class FallbackSettings(RedisConnectionSettings):
+        registry_exclude: ClassVar[bool] = True
+        model_config = SettingsConfigDict(env_prefix="FALLBACK_")
+
+    assert FallbackSettings().redis_url == "redis://from-file:6379/0"
+    with env_file_reads_suspended(tmp_path / ".env"):
+        assert FallbackSettings().redis_url is None
+
+
+async def test_a_task_created_inside_the_block_skips_the_suspended_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / ".env", "SAMPLE_NAME=from-file\n")
+    monkeypatch.chdir(tmp_path)
+
+    async def read_name() -> str:
+        return SampleSettings().name
+
+    with env_file_reads_suspended(tmp_path / ".env"):
+        name = await asyncio.create_task(read_name())
+
+    assert name == "unset"
+
+
+@pytest.mark.skipif(
+    bool(getattr(sys.flags, "thread_inherit_context", 0)), reason="this interpreter makes threads inherit the context"
+)
+def test_a_thread_started_inside_the_block_reads_the_suspended_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / ".env", "SAMPLE_NAME=from-file\n")
+    monkeypatch.chdir(tmp_path)
+    names: list[str] = []
+
+    with env_file_reads_suspended(tmp_path / ".env"):
+        thread = threading.Thread(target=lambda: names.append(SampleSettings().name))
+        thread.start()
+        thread.join()
+
+    assert names == ["from-file"]

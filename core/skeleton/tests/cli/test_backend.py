@@ -109,12 +109,13 @@ class _FakeApp:
 @pytest.fixture(autouse=True)
 def _bus_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """A backend runtime always registers a task backend, so ``run_backend``'s boot
-    rule requires the worker bus. Report it configured so the launcher-wiring tests
+    rule requires the worker bus and a shared hooks registry. Report both configured so the launcher-wiring tests
     exercise the launch path without a real Redis (the app itself builds the no-op
     local bus, which never connects)."""
     import tai42_skeleton.app.boot_rules as boot_rules
 
     monkeypatch.setattr(boot_rules, "_bus_configured", lambda: True)
+    monkeypatch.setattr(boot_rules, "_hooks_store_shared", lambda: True)
 
 
 @pytest.fixture
@@ -123,6 +124,22 @@ def fake_app(monkeypatch: pytest.MonkeyPatch) -> _FakeApp:
     # The launcher obtains the app via the deferred factory ``instance.build_app``.
     monkeypatch.setattr(backend.instance, "build_app", lambda: app)
     return app
+
+
+async def test_run_backend_refuses_an_in_memory_hooks_registry_before_the_context(
+    fake_app: _FakeApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tai42_skeleton.app.boot_rules as boot_rules
+
+    # The backend process matches the events it raises against its own hooks registry;
+    # an in-memory one holds none of the hooks registered through the server.
+    monkeypatch.setattr(boot_rules, "_hooks_store_shared", lambda: False)
+
+    with pytest.raises(boot_rules.BackendNeedsHooksStoreError, match="HOOKS_REDIS_URL"):
+        await backend.run_backend(["worker"])
+
+    assert fake_app.context_entered is False
+    assert fake_app.run_backend_args == []
 
 
 async def test_run_backend_non_worker_enters_context_as_backend_origin(

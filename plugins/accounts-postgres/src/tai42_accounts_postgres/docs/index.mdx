@@ -55,8 +55,9 @@ TAI_DATABASE_ACCOUNTS_PG_PASSWORD=...
 The provider is on when its bound database is configured — a non-empty password — and
 cleanly off otherwise. Pool sizes and timeouts are tuned on the database itself
 (`TAI_DATABASE_<NAME>_PG_*`), not a variable of this package's own. Sessions live in
-Postgres; login backoff lives in Redis, which arrives from the access-control
-configuration.
+Postgres. The login throttle's counters (per-account backoff and per-IP failures) live
+in Redis, on the plugin's own connection: `TAI_ACCOUNTS_REDIS_URL`, falling back to
+`TAI_DEFAULT_REDIS_URL`. A login with no reachable Redis fails closed.
 
 ### Run the migrations
 
@@ -85,7 +86,8 @@ migrate`.
 | `TAI_ACCOUNTS_LOGIN_IP_WINDOW_SECONDS` | `900` | Length of that window. |
 | `TAI_ACCOUNTS_LOGIN_HASH_CONCURRENCY` | twice the CPU count, floor 2 | Concurrent password hashes before login sheds load. |
 | `TAI_ACCOUNTS_LOGIN_HASH_WAIT_SECONDS` | `2.0` | Wait before shedding. |
-| `TAI_ACCOUNTS_REDIS_KEY_PREFIX` | the database name | Redis namespace for sessions and counters. |
+| `TAI_ACCOUNTS_REDIS_URL` | unset | Redis holding the login-throttle counters. Falls back to `TAI_DEFAULT_REDIS_URL`; with the provider on, one must be set. |
+| `TAI_ACCOUNTS_REDIS_KEY_PREFIX` | the database name | Redis namespace for the login-throttle counters. |
 
 ## login
 

@@ -72,8 +72,8 @@ def _auth_token() -> str:
     """The configured auth token, revealed.
 
     Missing and EMPTY are the same failure and both raise naming ``CHANNEL_TWILIO_AUTH_TOKEN`` (never the
-    value): an empty token parses to ``SecretStr("")`` (not ``None``), so a plain ``is None`` test would
-    send an empty-password Basic header to Twilio.
+    value): the settings layer reads an empty env var as unset, and the empty-value check refuses an
+    empty token from any other source, so an empty-password Basic header never reaches Twilio.
     """
     token = twilio_settings().auth_token
     if not (token and token.get_secret_value()):

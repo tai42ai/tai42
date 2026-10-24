@@ -71,6 +71,34 @@ def test_serve_help_renders() -> None:
     assert "--transport" in result.output
 
 
+def _command_paths(group: click.Group, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    paths: list[tuple[str, ...]] = []
+    for name, command in sorted(group.commands.items()):
+        path = (*prefix, name)
+        paths.append(path)
+        if isinstance(command, click.Group):
+            paths.extend(_command_paths(command, path))
+    return paths
+
+
+@pytest.mark.parametrize("path", _command_paths(app_module.app), ids=" ".join)
+def test_help_keeps_its_unwrapped_blocks(path: tuple[str, ...]) -> None:
+    # Click keeps a paragraph unwrapped only when the line before it holds the
+    # backspace character; a literal backslash-b (a raw docstring) is printed as
+    # text and the block beneath it is re-wrapped into one paragraph.
+    result = CliRunner().invoke(app_module.app, [*path, "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "\\b" not in result.output
+
+
+def test_serve_help_prints_the_worker_table_one_row_per_line() -> None:
+    result = CliRunner().invoke(app_module.app, ["serve", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert any(line.strip().startswith("| transport") for line in result.output.splitlines())
+
+
 def test_version_runs_offline() -> None:
     # ``version`` reads only installed metadata, so it succeeds with no server.
     result = CliRunner().invoke(app_module.app, ["version"])

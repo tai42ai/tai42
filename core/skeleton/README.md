@@ -127,6 +127,23 @@ config-mode boot refuses to start without one, naming `TAI_BUS_REDIS_URL`. On a 
 `TAI_BUS_NAMESPACE` must diverge per stack — Redis pub/sub is server-global, so
 co-tenant deployments would otherwise cross-talk.
 
+The bus does not carry sub-MCP app registrations: those live in their own store.
+Under `tai serve` with more than one worker, each worker refuses to boot while that
+store is in-memory, naming `SUB_MCP_REDIS_URL` (or the shared `TAI_DEFAULT_REDIS_URL`
+it falls back to), because a sub-MCP app registered through one worker would not be
+served by its siblings. It refuses an in-memory hooks registry the same way, naming
+`HOOKS_REDIS_URL` (or `TAI_DEFAULT_REDIS_URL`): a hook registered through one worker
+would not run for the events its siblings accept. Under `tai serve` with more than
+one worker, each worker also refuses to boot without the bus. The workers check these
+rules after the stored env is applied, so a URL kept only in the config-dir `.env`
+or an external provider counts, and a config reload or config write that would leave
+a multi-worker server without the bus or with either store in-memory is refused too. A config that registers a task
+backend needs that shared registry too, whatever the worker count: `tai serve`,
+`tai backend`, a config reload and a config write all refuse a `backend_module` over
+an in-memory hooks registry, naming `HOOKS_REDIS_URL`, because the backend process
+matches the events it raises (an expired ask, for one) against its own registry,
+which holds none of the hooks registered through the server.
+
 ## Conversations and person linking
 
 The conversation bridge turns one inbound message — from an authed API caller

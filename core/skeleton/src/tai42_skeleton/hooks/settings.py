@@ -37,7 +37,12 @@ class HooksSettings(TaiBaseSettings):
     registry is in-memory and per-process, which is valid ONLY for a single worker
     — sibling workers (and a separate backend worker) do not see each other's
     registrations or deliveries. Set ``HOOKS_REDIS_URL`` for shared state whenever
-    more than one worker runs.
+    more than one worker runs; under ``tai serve`` with more than one worker, each worker
+    boot, reload and config write refuses it without the store
+    (:func:`~tai42_skeleton.app.boot_rules.require_hooks_store_for_workers`), and a
+    registered task backend is refused without it at every boot, reload and config
+    write (:func:`~tai42_skeleton.app.boot_rules.require_hooks_store_for_backend`). The
+    connection falls back to ``TAI_DEFAULT_REDIS_URL`` when ``HOOKS_REDIS_URL`` is unset.
     """
 
     model_config = SettingsConfigDict(

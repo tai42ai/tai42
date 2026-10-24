@@ -58,6 +58,7 @@ async def test_update_manifest_persists_env_markers_intact(monkeypatch: pytest.M
     # ``!ENV`` markers INTACT — the resolved value is used only for in-memory
     # validation, so no secret ever bakes to disk.
     monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("HOOKS_REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("TAI_BACKEND", "myapp.backend")
     reset_all_settings()
     try:
@@ -84,6 +85,26 @@ async def test_update_manifest_backend_without_bus_maps_to_400(monkeypatch: pyte
         _install_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
 
         with pytest.raises(BadRequestError, match="TAI_BUS_REDIS_URL"):
+            await manifest_ops.update_manifest("backend_module: myapp.backend\n")
+
+        assert store.replaced == []  # rejected in validation, before any persist
+    finally:
+        reset_all_settings()
+
+
+async def test_update_manifest_backend_without_hooks_store_maps_to_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A replacement that registers a task backend over an in-memory hooks registry is
+    # refused by ConfigService's backend-needs-hooks-store invariant at mutate time; the
+    # op maps it to a loud 400 naming HOOKS_REDIS_URL.
+    monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.delenv("HOOKS_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    reset_all_settings()
+    try:
+        store = _ReplaceStore()
+        _install_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+        with pytest.raises(BadRequestError, match="HOOKS_REDIS_URL"):
             await manifest_ops.update_manifest("backend_module: myapp.backend\n")
 
         assert store.replaced == []  # rejected in validation, before any persist

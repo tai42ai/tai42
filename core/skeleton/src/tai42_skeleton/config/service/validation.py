@@ -2,8 +2,10 @@
 
 Covers the pydantic ``Manifest`` schema, the boundary refusals (X-band, unknown owned-prefix
 settings, key material, an unrecyclable change, dangling ``!ENV``, incomplete admin pair), the
-backend-needs-bus invariant in both directions, and the apply-window invariant (a bus-enabled
-config's fleet apply window covers the retire's drain floor) against the post-change env.
+backend-needs-bus and backend-needs-hooks-store invariants in both directions, the
+workers-need-shared-stores invariants (a multi-worker server keeps its sub-MCP registration
+store and hooks registry shared), and the apply-window invariant (a bus-enabled config's fleet
+apply window covers the retire's drain floor) against the post-change env.
 """
 
 from __future__ import annotations
@@ -14,7 +16,12 @@ from typing import TYPE_CHECKING, Any
 from tai42_skeleton.app.boot_rules import (
     check_apply_window_covers_drain,
     check_backend_needs_bus,
+    check_backend_needs_hooks_store,
+    check_workers_need_bus,
+    check_workers_need_hooks_store,
+    check_workers_need_sub_mcp_store,
     declared_drain_budgets,
+    serve_workers,
 )
 from tai42_skeleton.app.bus_settings import BusSettings, bus_settings
 from tai42_skeleton.config.boundary import (
@@ -26,8 +33,10 @@ from tai42_skeleton.config.boundary import (
 )
 from tai42_skeleton.config.service.base import _ConfigServiceBase
 from tai42_skeleton.config.service.resolution import _environ
+from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.owned_settings import refuse_unknown_owned_env_write
+from tai42_skeleton.sub_mcp.settings import SubMcpSettings
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -45,23 +54,47 @@ def _refuse_unrecyclable_merge(stored: Mapping[str, str], changes: Mapping[str, 
     return recycle
 
 
-def _check_apply_window(effective: dict[str, str]) -> None:
+def _check_apply_window(effective: dict[str, str], *, stored_env_file: str | None) -> None:
     """Evaluate the apply-window invariant against the post-change env ``effective``.
 
     The bus settings and the declared drain budget are read fresh under ``effective`` (never
     the cached singletons, which hold the live env), so a change to either setting — or to
     the bus itself — is judged as the reloaded process would see it. A busless env uses no
     apply window. The drain-budget registry is reached outside the modeled env, so the app is
-    never first built under it.
+    never first built under it. ``stored_env_file`` is the stored env file :func:`_environ` skips.
     """
-    with _environ(effective):
+    with _environ(effective, stored_env_file=stored_env_file):
         bus = BusSettings()
     if not bus.enabled:
         return
     budgets = declared_drain_budgets()
-    with _environ(effective):
+    with _environ(effective, stored_env_file=stored_env_file):
         drain_budget = budgets.budget()
     check_apply_window_covers_drain(bus_enabled=True, apply_timeout=bus.apply_timeout, drain_budget=drain_budget)
+
+
+def _check_bus_invariants(*, backend_module: str | None, workers: int, bus_configured: bool) -> None:
+    """Evaluate the backend-needs-bus and workers-need-bus invariants for ``bus_configured``.
+
+    ``bus_configured`` is whether the env of the change being validated configures the bus;
+    ``workers`` is the server's worker count, read from the live process env by the caller.
+    """
+    check_backend_needs_bus(backend_module=backend_module, bus_configured=bus_configured)
+    check_workers_need_bus(workers=workers, bus_configured=bus_configured)
+
+
+def _check_store_invariants(*, backend_module: str | None, workers: int) -> None:
+    """Evaluate the backend-needs-hooks-store and workers-need-shared-stores invariants under the current env.
+
+    Called inside the modeled env of the change being validated, so the hooks and sub-MCP
+    settings are read fresh (never the cached singletons) as the stores would read them after
+    the change. ``workers`` is the server's worker count, read from the live process env by
+    the caller: it is the stamp ``tai serve`` set at launch, which no change carries.
+    """
+    hooks_store_shared = not HooksSettings().in_memory
+    check_backend_needs_hooks_store(backend_module=backend_module, hooks_store_shared=hooks_store_shared)
+    check_workers_need_sub_mcp_store(workers=workers, sub_mcp_store_shared=not SubMcpSettings().in_memory)
+    check_workers_need_hooks_store(workers=workers, hooks_store_shared=hooks_store_shared)
 
 
 class _ValidationMixin(_ConfigServiceBase):
@@ -73,13 +106,18 @@ class _ValidationMixin(_ConfigServiceBase):
     def _validate_manifest(self, document: Mapping[str, Any]) -> None:
         """Validate the resolved projection of a manifest change.
 
-        Checks the pydantic ``Manifest`` schema plus the backend-needs-bus invariant, and refuses
-        any ``!ENV`` marker left dangling against the current env. The env is unchanged by a
-        manifest mutation, so markers resolve against the current process env and the bus
+        Checks the pydantic ``Manifest`` schema plus the backend-needs-bus,
+        backend-needs-hooks-store, workers-need-bus and workers-need-shared-stores invariants,
+        and refuses any ``!ENV`` marker left dangling against the current env. The env is unchanged by a manifest
+        mutation, so markers resolve against the current process env and the bus and store
         configuration is the current one.
         """
         manifest = self._validated_projection(document)
-        check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_settings().enabled)
+        workers = serve_workers()
+        _check_bus_invariants(
+            backend_module=manifest.backend_module, workers=workers, bus_configured=bus_settings().enabled
+        )
+        _check_store_invariants(backend_module=manifest.backend_module, workers=workers)
         refuse_unresolved_env(document, dict(os.environ))
 
     def _validate_env(self, changes: dict[str, str]) -> list[str]:
@@ -88,9 +126,11 @@ class _ValidationMixin(_ConfigServiceBase):
         Refuses an X-band key in the change PAYLOAD and a change the deployment shape cannot carry
         by a recycle, resolves the persisted manifest's ``!ENV``
         markers against the post-change env (so a marker that materializes a backend participates,
-        and a dropped reference is caught as dangling), and evaluates the backend-needs-bus
-        invariant against the post-change bus configuration (so removing the bus while a backend
-        remains is rejected too) and the apply-window invariant against the post-change env.
+        and a dropped reference is caught as dangling), and evaluates the backend-needs-bus and
+        backend-needs-hooks-store invariants against the post-change bus and hooks-store
+        configuration (so removing either while a backend remains is rejected too), the
+        workers-need-bus and workers-need-shared-stores invariants (so emptying the bus or a store
+        a multi-worker server shares is rejected) and the apply-window invariant against the post-change env.
         """
         refuse_x_band(changes.keys())
         refuse_unknown_owned_env_write([key for key, value in changes.items() if value != ""])
@@ -101,7 +141,8 @@ class _ValidationMixin(_ConfigServiceBase):
         refuse_key_material(changes, stored)
         effective = self.effective_env(changes)
         refuse_incomplete_admin_pair(effective)
-        with _environ(effective):
+        workers = serve_workers()
+        with _environ(effective, stored_env_file=self._stored_env_file()):
             preserved = self._read_preserved_manifest()
             refuse_unresolved_env(preserved, effective)
             manifest = self._validated_projection(preserved)
@@ -109,10 +150,13 @@ class _ValidationMixin(_ConfigServiceBase):
             # read, NOT the cached singleton) so a bus configured only via
             # ``TAI_DEFAULT_REDIS_URL`` — not ``TAI_BUS_REDIS_URL`` — is still seen as
             # enabled; a raw ``TAI_BUS_REDIS_URL`` read would falsely reject every
-            # Studio env edit on a default-only deployment.
-            bus_configured = BusSettings().enabled
-        check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
-        _check_apply_window(effective)
+            # Studio env edit on a default-only deployment. The hooks and sub-MCP stores
+            # are read the same way.
+            _check_bus_invariants(
+                backend_module=manifest.backend_module, workers=workers, bus_configured=BusSettings().enabled
+            )
+            _check_store_invariants(backend_module=manifest.backend_module, workers=workers)
+        _check_apply_window(effective, stored_env_file=self._stored_env_file())
         # Last, so a change the bus invariants refuse is named by their rule.
         return _refuse_unrecyclable_merge(stored, changes)
 
@@ -124,7 +168,8 @@ class _ValidationMixin(_ConfigServiceBase):
         ``!ENV`` markers against the post-change effective env (so the marker the mutator
         just wrote resolves against the value the env write supplies, and a dropped
         reference is caught as dangling), validates the resolved projection, and
-        evaluates backend-needs-bus and the apply-window invariant against the post-change env.
+        evaluates backend-needs-bus, backend-needs-hooks-store, workers-need-bus,
+        workers-need-shared-stores and the apply-window invariant against the post-change env.
         """
         refuse_x_band(changes.keys())
         refuse_unknown_owned_env_write([key for key, value in changes.items() if value != ""])
@@ -134,12 +179,15 @@ class _ValidationMixin(_ConfigServiceBase):
         refuse_key_material(changes, stored)
         effective = self.effective_env(changes)
         refuse_incomplete_admin_pair(effective)
-        with _environ(effective):
+        workers = serve_workers()
+        with _environ(effective, stored_env_file=self._stored_env_file()):
             refuse_unresolved_env(document, effective)
             manifest = self._validated_projection(document)
-            bus_configured = BusSettings().enabled
-        check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
-        _check_apply_window(effective)
+            _check_bus_invariants(
+                backend_module=manifest.backend_module, workers=workers, bus_configured=BusSettings().enabled
+            )
+            _check_store_invariants(backend_module=manifest.backend_module, workers=workers)
+        _check_apply_window(effective, stored_env_file=self._stored_env_file())
         return _refuse_unrecyclable_merge(stored, changes)
 
     def _validate_replace(self, profile_env: dict[str, str]) -> None:
@@ -150,8 +198,9 @@ class _ValidationMixin(_ConfigServiceBase):
         Refuses any X-band key in the profile's DECLARED payload (NEVER the post-carry
         effective env — the applier legitimately CARRIES the whole X band across
         ``replace_env``), refuses a change that leaves a manifest ``!ENV`` marker
-        dangling against the replace-effective env, and evaluates the backend-needs-bus
-        and apply-window invariants against that same env.
+        dangling against the replace-effective env, and evaluates the backend-needs-bus,
+        backend-needs-hooks-store, workers-need-bus, workers-need-shared-stores and apply-window
+        invariants against that same env.
         """
         refuse_x_band(profile_env.keys())
         refuse_unknown_owned_env_write([key for key, value in profile_env.items() if value != ""])
@@ -161,6 +210,7 @@ class _ValidationMixin(_ConfigServiceBase):
         refuse_key_material(profile_env, self._read_stored_env())
         effective = self._effective_replace_env(profile_env)
         refuse_incomplete_admin_pair(effective)
+        workers = serve_workers()
         # A connector reads its client-credential env STRAIGHT from ``os.environ`` at connect
         # time, so it resolves against the FULL process env (current ``os.environ`` overlaid
         # with the replace band), NOT the narrowed replace band: a deployment-supplied cred a
@@ -168,13 +218,15 @@ class _ValidationMixin(_ConfigServiceBase):
         # unset. Markers keep the narrowed ``effective`` band — a dropped stored key still
         # dangles. Captured BEFORE ``_environ`` swaps ``os.environ`` to the modeled band.
         connector_env = {**os.environ, **effective}
-        with _environ(effective):
+        with _environ(effective, stored_env_file=self._stored_env_file()):
             preserved = self._read_preserved_manifest()
             refuse_unresolved_env(preserved, effective, connector_env=connector_env)
             manifest = self._validated_projection(preserved)
-            bus_configured = BusSettings().enabled
-        check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
-        _check_apply_window(effective)
+            _check_bus_invariants(
+                backend_module=manifest.backend_module, workers=workers, bus_configured=BusSettings().enabled
+            )
+            _check_store_invariants(backend_module=manifest.backend_module, workers=workers)
+        _check_apply_window(effective, stored_env_file=self._stored_env_file())
 
     def _validated_projection(self, document: Mapping[str, Any]) -> Manifest:
         """Build and validate the RESOLVED in-memory projection of a PRESERVED document.

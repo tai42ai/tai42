@@ -12,7 +12,11 @@ from tai42_kit.logging import install_record_redaction, logging_settings, setup_
 from tai42_kit.signals import signal_chain
 
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_shared_config
+from tai42_skeleton.app.boot_rules import (
+    require_bus_for_backend,
+    require_bus_for_shared_config,
+    require_hooks_store_for_backend,
+)
 from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.backend.settings import base_backend_settings
 from tai42_skeleton.config.config_mode import ConfigMode, config_mode
@@ -68,8 +72,11 @@ async def run_backend(extra_args):
 
     # A dedicated backend runtime always registers a task backend, so it requires the
     # worker bus (the backend-runtime and server processes must converge on config
-    # reloads). Refuse loudly, naming TAI_BUS_REDIS_URL, before entering app_context.
+    # reloads) and a shared hooks registry (the events this process raises are matched
+    # against its own registry). Refuse loudly, naming the setting, before entering
+    # app_context.
     require_bus_for_backend(manifest)
+    require_hooks_store_for_backend(manifest)
 
     # The resolved (``!ENV``-expanded) manifest is placed into this env var for the
     # WORKER runtime only — the one that forks job children. It carries the resolved
@@ -104,7 +111,7 @@ async def run_backend(extra_args):
 @click.argument("extra_args", nargs=-1)
 @click.pass_context
 def main(ctx, manifest_path, extra_args):
-    r"""Run a tai execution-backend runtime (worker / beat / dashboard).
+    """Run a tai execution-backend runtime (worker / beat / dashboard).
 
     \b
     A backend runtime always registers a task backend, so it requires the worker
@@ -112,7 +119,13 @@ def main(ctx, manifest_path, extra_args):
     converge on config reloads, so a busless backend is refused at boot (and again
     on any reload that would leave a backend without the bus). A non-file
     TAI_CONFIG_MODE is likewise refused without the bus.
-    """
+
+    \b
+    It also requires the shared hooks registry — set HOOKS_REDIS_URL (or
+    TAI_DEFAULT_REDIS_URL). The events this process raises are matched against
+    its own registry, and an in-memory one holds none of the hooks registered
+    through the server, so a backend over it is refused at boot and on reload.
+    """  # noqa: D301 - a plain backslash-b is Click's no-rewrap marker
     if config_mode() == ConfigMode.file:
         load_dotenv()
 

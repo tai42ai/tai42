@@ -88,7 +88,8 @@ class FileConfigManager(ConfigManager):
         self._config_dir_path = config_dir_path or os.environ.get("TAI_CONFIG_DIR_PATH", "").strip() or "/app"
 
     @property
-    def _env_path(self) -> str:
+    def env_path(self) -> str:
+        """The stored env file this manager reads and writes: ``.env`` in the config dir."""
         return os.path.join(self._config_dir_path, ".env")
 
     @property
@@ -153,7 +154,7 @@ class FileConfigManager(ConfigManager):
         values are returned literally — a ``$`` or ``${VAR}`` in a value is not
         POSIX-expanded, making the double-quoted serializer a true inverse.
         """
-        path = self._env_path
+        path = self.env_path
         if not os.path.exists(path):
             raise FileNotFoundError(f"Env file not found: {path}")
         try:
@@ -185,7 +186,7 @@ class FileConfigManager(ConfigManager):
         for key in config:
             if not ENV_KEY_RE.fullmatch(key):
                 raise ValueError(f"invalid env key {key!r}: must match [A-Za-z_][A-Za-z0-9_]*")
-        path = self._env_path
+        path = self.env_path
         # The whole read-modify-write (re-read existing → merge → atomic write) runs
         # under the env sidecar lock so a concurrent worker's write cannot merge
         # against a stale base and drop this write's keys.
@@ -237,7 +238,7 @@ class FileConfigManager(ConfigManager):
         for key in config:
             if not ENV_KEY_RE.fullmatch(key):
                 raise ValueError(f"invalid env key {key!r}: must match [A-Za-z_][A-Za-z0-9_]*")
-        path = self._env_path
+        path = self.env_path
         # The whole write runs under the env sidecar lock so a concurrent worker's
         # write cannot interleave with this replace; unlike write_env there is no
         # read-of-existing to serialize against, but the atomic write still must not

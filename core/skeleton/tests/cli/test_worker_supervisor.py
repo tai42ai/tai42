@@ -316,6 +316,7 @@ def test_startup_failure_stops_the_parent(supervisor: ExitReportingMultiprocess,
     [record] = records
     assert record.levelno == logging.ERROR
     assert record.getMessage() == f"Child process [{failed.pid}] failed to start, stopping the parent process."
+    assert supervisor.startup_failed
 
 
 def test_no_replacement_while_exiting(supervisor: ExitReportingMultiprocess, records: list) -> None:
@@ -494,6 +495,27 @@ def test_run_workers_removes_the_unix_socket(recorder: _Recorder, tmp_path) -> N
 
     run_workers(_APP, workers=2, uds=str(uds), **kwargs)
 
+    assert not uds.exists()
+
+
+def test_run_workers_exits_with_the_startup_failure_status_when_a_worker_failed_to_start(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # A worker that fails its startup stops the parent, and the parent exits with uvicorn's
+    # startup-failure status, as a single-worker ``uvicorn.run`` does, so a refused boot is
+    # never a clean exit. The Unix socket is still removed on the way out.
+    uds = tmp_path / "serve.sock"
+    uds.touch()
+    kwargs = {k: v for k, v in _KWARGS.items() if k not in {"host", "port"}}
+
+    def failed_startup(self: Any) -> None:
+        self.startup_failed = True
+
+    monkeypatch.setattr(ExitReportingMultiprocess, "run", failed_startup)
+    with pytest.raises(SystemExit) as exc:
+        run_workers(_APP, workers=2, uds=str(uds), **kwargs)
+
+    assert exc.value.code == STARTUP_FAILURE
     assert not uds.exists()
 
 

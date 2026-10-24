@@ -79,6 +79,30 @@ def _grantable_tag() -> str:
 # -- store CRUD round-trip ---------------------------------------------------
 
 
+async def test_role_crud_with_the_gate_off_needs_no_gate_redis(mem, pg: FakeAccessControlPg, monkeypatch):
+    # With access control off nothing reads the policy version, so a role write bumps
+    # nothing and every role door works with no Redis configured for the gate.
+    from tai42_kit.clients import client_ctx
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "false")
+    monkeypatch.delenv("ACCESS_CONTROL_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    # The real client factory, so a bump that reached for the gate's Redis would raise.
+    monkeypatch.setattr(management, "client_ctx", client_ctx)
+    reset_all_settings()
+    await seed_default_roles()
+    tag = _grantable_tag()
+
+    created = await roles_ops.create_role("ops", "ops role", "editor", {tag: "read"})
+    assert created["grants"] == {tag: "read"}
+    edited = await roles_ops.update_role("ops", {tag: "write"}, "edited")
+    assert edited["grants"] == {tag: "write"}
+    rolled = await roles_ops.rollback_role("ops", 1)
+    assert rolled["grants"] == {tag: "read"}
+    assert await roles_ops.delete_role("ops") == {"name": "ops", "deleted": True}
+
+
 async def test_management_crud_roundtrip(mem, pg: FakeAccessControlPg, redis_mgmt, monkeypatch):
     _admin_caller(monkeypatch)
     await seed_default_roles()

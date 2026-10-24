@@ -21,6 +21,7 @@ Limits shared by every agent in this package:
 | `TAI_AGENTS_SYSTEM_PROMPT_CACHE_DEFAULT` | `true` | Mark the per-run system prompt for prompt caching on providers that support it (see [System-prompt caching](#system-prompt-caching)). |
 | `TAI_AGENTS_STRUCTURED_OUTPUT_REPROMPT_CAP` | `3` | How many times a run re-prompts a model whose final answer fails to parse or validate against a requested `response_format`, or carries no structured answer, before it ends with a typed outcome (see [Structured-output outcomes](#structured-output-outcomes)). |
 | `TAI_AGENTS_GRAPH_CACHE_SIZE` | `64` | How many compiled tools-agent graphs each event loop keeps for reuse (an LRU); a tool registration change or a settings reload makes the next run compile afresh. |
+| `TAI_AGENTS_CHAINED_PARK_HORIZON_CAP_HOURS` | `168` | Ceiling, in hours, on how far ahead a chained park (one waiting on a nested call) may keep its inherited deadline. The park's horizon is the nearest of the inherited deadline, this cap and the run's own retention bound; a nested run with no deadline takes the cap. |
 
 ### Structured-output outcomes
 
@@ -55,7 +56,7 @@ Redis URL:
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `TAI_AGENTS_REDIS_URL` | falls back to `TAI_DEFAULT_REDIS_URL` | The park index store. With neither set there is no durable park index, so a park-capable run refuses the async ask loudly rather than parking where it cannot be resumed. |
+| `TAI_AGENTS_REDIS_URL` | falls back to `TAI_DEFAULT_REDIS_URL` | The agents plugin's Redis. It holds the park index and the workspace lease. With neither set there is no durable park index, so a park-capable run refuses the async ask loudly rather than parking where it cannot be resumed. The workspace lease serializes the turns of one `thread_id` across workers, so a threaded `claude_code` or `langchain_deep_agent` run needs this Redis even when it never parks; with neither set, such a run fails loudly when it takes the lease. A run with no `thread_id` takes no lease and does not touch Redis. |
 
 The park index is the agents plugin's own Redis, independent of the checkpoint provider
 and the interactions store. It is the platform kit's shared park index library
@@ -268,6 +269,18 @@ missing either raises a `ValueError` before the run starts. When a run requests 
 silently omitting the structured frame**: the JSON `run` face raises on drain, and the
 streaming face raises after the stream drains — unless the run paused on a pending
 interrupt, which takes precedence over the missing-structured raise.
+
+### Configuration (`TAI_AGENTS_LANGCHAIN_DEEP_*`)
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TAI_AGENTS_LANGCHAIN_DEEP_SESSION_IMAGE` | required | The scratch session image (python3 and coreutils) — a digest reference `…@sha256:<64 hex>`; a bare tag or an unset value is rejected at run start. |
+| `TAI_AGENTS_LANGCHAIN_DEEP_CREDS` | empty | Session creds injected into the session shell (service creds only; the model call runs server-side, so no model credential enters the session). See [Session credentials](#session-credentials). |
+| `TAI_AGENTS_LANGCHAIN_DEEP_SESSION_TTL_SECONDS` | `86400` | Workspace/session idle-reap deadline; also bounds how long a park may wait. |
+| `TAI_AGENTS_LANGCHAIN_DEEP_NETWORK` | inherit | Narrows the platform egress posture (`none`/`internal`/`egress`); a value looser than the platform ceiling is refused at session create. |
+| `TAI_AGENTS_LANGCHAIN_DEEP_CPU` | unset | Session CPU cap, enforced by the sandbox provider or refused by it. |
+| `TAI_AGENTS_LANGCHAIN_DEEP_MEMORY_MB` | unset | Session memory cap in MB, enforced by the sandbox provider or refused by it. |
+| `TAI_AGENTS_LANGCHAIN_DEEP_CRASH_RESUME` | `false` | Re-dispatch a recycled detached run at-least-once (re-executes from scratch). Recycle-class. |
 
 ## claude_code
 

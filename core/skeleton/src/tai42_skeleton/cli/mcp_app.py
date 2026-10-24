@@ -18,7 +18,7 @@ from tai42_kit.utils.runtime.uvicorn_util import parse_and_validate_uvicorn_args
 
 from tai42_skeleton import asgi
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.boot_rules import require_bus_for_shared_config, require_bus_for_workers
+from tai42_skeleton.app.boot_rules import SERVE_WORKERS_VAR, require_bus_for_shared_config
 from tai42_skeleton.cli.worker_supervisor import run_workers
 from tai42_skeleton.config.config_mode import ConfigMode, config_mode
 from tai42_skeleton.connectors.meta_log_redactor import register_connector_log_redaction
@@ -202,10 +202,12 @@ def _validate_serve_args(
     Guards: workers ≥ 1; uds not on Windows; uds not with stdio; host/port not set
     with stdio or uds; ``--stateless-http`` only on an http transport; more than one
     worker refused for stdio and for a stateful transport without ``--stateless-http``.
-    Then the bus boot rules (fail loud, naming TAI_BUS_REDIS_URL) run BEFORE any
+    Then the shared-config bus rule (fail loud, naming TAI_BUS_REDIS_URL) runs BEFORE any
     config-manager construction, so a busless shared-config boot refuses on the bus var
-    rather than on the provider connection. The workers rule lives only in this CLI —
-    an external process manager driving the ASGI factory bypasses it.
+    rather than on the provider connection. The workers-need-bus and
+    workers-need-shared-stores rules are not checked here: they read the stored env, which
+    only the workers apply, so each worker checks them at its boot against the worker count
+    :func:`_stamp_serve_env` hands it.
     """
     if workers < 1:
         raise click.BadParameter("Number of workers must be at least 1.", param_hint="'-w'/'--workers'")
@@ -251,18 +253,19 @@ def _validate_serve_args(
             )
 
     require_bus_for_shared_config()
-    require_bus_for_workers(workers)
 
 
-def _stamp_serve_env(manifest_path: str, transport: str, stateless_http: bool) -> None:
+def _stamp_serve_env(manifest_path: str, transport: str, stateless_http: bool, workers: int) -> None:
     """Publish the flags the uvicorn factory worker reads (a factory import string carries no arguments).
 
     Stamps the manifest path, the transport, the stateless-http flag (cleared when off so a prior
-    run cannot leak in), and a per-run metrics id inherited by every forked worker so the
-    Prometheus multiproc-dir wipe fires once per run.
+    run cannot leak in), the number of server processes the run serves on (which the
+    workers-need-bus and workers-need-shared-stores boot rules count), and a per-run metrics id inherited by every
+    forked worker so the Prometheus multiproc-dir wipe fires once per run.
     """
     os.environ["TAI_MANIFEST_PATH"] = manifest_path
     os.environ["TAI_TRANSPORT"] = transport
+    os.environ[SERVE_WORKERS_VAR] = str(workers)
     if stateless_http:
         os.environ["TAI_STATELESS_HTTP"] = "1"
     else:
@@ -318,7 +321,12 @@ def run_mcp_app(
         uvicorn_kwargs = {}
 
     _validate_serve_args(transport, host, port, workers, uds, stateless_http, app_args_settings())
-    _stamp_serve_env(manifest_path, transport, stateless_http)
+    run_mode = (os.environ.get("TAI_RUN_MODE") or "").strip()
+    debug = run_mode.lower() == "debug"
+    # The debug run mode serves one in-process server whatever --workers asked for, and
+    # uvicorn's reload supervisor, which takes precedence over workers, serves one process.
+    served = 1 if debug or uvicorn_kwargs.get("reload") else workers
+    _stamp_serve_env(manifest_path, transport, stateless_http, served)
 
     # Publish the multiproc dir to the environment BEFORE importing anything that
     # pulls in ``prometheus_client``: the library freezes its value backend (mmap
@@ -341,8 +349,7 @@ def run_mcp_app(
 
     config_kwargs = _build_serve_config(uds, host, port, uvicorn_kwargs)
 
-    run_mode = (os.environ.get("TAI_RUN_MODE") or "").strip()
-    if run_mode.lower() == "debug":
+    if debug:
         if workers > 1:
             logger.info(
                 "TAI_RUN_MODE=debug: running a single in-process server; the requested --workers=%d is ignored.",
@@ -425,7 +432,12 @@ def _launch_arguments(
     "--workers",
     type=int,
     default=1,
-    help="Number of worker processes. More than one requires the worker bus (set TAI_BUS_REDIS_URL).",
+    help=(
+        "Number of worker processes. More than one requires the worker bus (set TAI_BUS_REDIS_URL) "
+        "and shared sub-MCP and hooks stores (set SUB_MCP_REDIS_URL and HOOKS_REDIS_URL, or "
+        "TAI_DEFAULT_REDIS_URL for all three; each worker checks them at boot, after the stored env "
+        "is applied)."
+    ),
     show_default=True,
 )
 @click.option(
@@ -448,7 +460,7 @@ def cli(
     stateless_http: bool,
     extra_args: tuple[str, ...],
 ) -> None:
-    r"""Run the tai MCP server (FastMCP + Starlette), serving the Studio SPA too.
+    """Run the tai MCP server (FastMCP + Starlette), serving the Studio SPA too.
 
     \b
     Worker / transport combinations:
@@ -460,16 +472,33 @@ def cli(
 
     \b
     Worker-bus boot rules (set TAI_BUS_REDIS_URL to enable the bus):
-      - more than one worker is refused without the bus — sibling workers would
-        serve stale config after a reload with no channel to converge on;
+      - with more than one worker, each worker refuses to boot without the bus —
+        sibling workers would serve stale config after a reload with no channel to
+        converge on;
       - a non-file TAI_CONFIG_MODE is refused without the bus — an external config
         provider serves shared config and one instance cannot see its sibling count;
       - a manifest that registers a task backend is refused without the bus — the
         backend-runtime and server processes must converge on reloads.
-    The workers rule lives in this CLI only: an external process manager driving
-    the ASGI factory with its own --workers bypasses it, so set TAI_BUS_REDIS_URL
-    in any multi-process deployment.
-    """
+
+    Store boot rules: with more than one worker, each worker refuses to boot while
+    the sub-MCP registration store is in-memory (set SUB_MCP_REDIS_URL or
+    TAI_DEFAULT_REDIS_URL), because a sub-MCP app registered through one worker would
+    not be served by its siblings, and while the hooks registry is in-memory (set
+    HOOKS_REDIS_URL or TAI_DEFAULT_REDIS_URL), because a hook registered through one
+    worker would not run for the events its siblings accept. The workers check these
+    and the workers bus rule after the stored env is applied, so a bus or store URL
+    kept only in the config-dir .env or an external provider counts; a config reload
+    and a config write that would leave a multi-worker server without the bus or with
+    a store in-memory are refused the same way. A manifest that registers a task
+    backend is refused over an in-memory hooks registry at any worker count,
+    because the backend process matches the events it raises against its own
+    registry.
+
+    The worker count reaches these rules only through this CLI: an external process
+    manager driving the ASGI factory with its own --workers counts each process as
+    one worker for the workers bus and store rules, so set TAI_BUS_REDIS_URL,
+    SUB_MCP_REDIS_URL and HOOKS_REDIS_URL in any multi-process deployment.
+    """  # noqa: D301 - a plain backslash-b is Click's no-rewrap marker
     manifest_path = manifest_path if manifest_path is not None else default_manifest_path()
     if manifest_path is None:
         raise click.BadParameter("A manifest path is required.", param_hint="'--manifest-path'")

@@ -7,6 +7,21 @@ The standard toolbox: six general-purpose tools and six tool extensions, each lo
 by name into a manifest. The tool-and-extension model and the day-to-day guide stay
 central (linked below); this page is the per-item index and the extension settings.
 
+## Install extras
+
+The base install stays light: a module with a heavy dependency needs its package extra.
+A module whose extra is missing fails loudly with the install hint, for example
+`pip install 'tai42-toolbox[prometheus]'`.
+
+| Module | Extra |
+| --- | --- |
+| `request` | `http` |
+| `classify` | `classifier` |
+| `generate_embeddings` | `embeddings` |
+| `chain` | `chain` |
+| `prometheus_metrics` | `prometheus` |
+| `proxy` (SOCKS proxies only; HTTP and HTTPS proxies need none) | `proxy` |
+
 ## Tools
 
 ### classify

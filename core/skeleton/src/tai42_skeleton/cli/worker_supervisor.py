@@ -5,6 +5,9 @@ which cannot tell a worker that exited on its own (a crash, an outside kill, a n
 from a live worker the supervisor killed because it missed the health ping.
 :class:`ExitReportingMultiprocess` overrides only that dead-worker step to log which of the
 two happened and the worker's exit status; every other supervisor behaviour is uvicorn's.
+uvicorn's supervisor also returns normally after a worker fails its startup, so
+:func:`run_workers` exits with uvicorn's ``STARTUP_FAILURE`` status then, as a single-worker
+``uvicorn.run`` does.
 
 A crashed worker whose core is being dumped (a ``core_pattern`` pipe handler such as apport
 or systemd-coredump keeps it alive, threads stopped, until the dump is written) misses the
@@ -86,7 +89,14 @@ def is_dumping_core(pid: int | None) -> bool:
 
 
 class ExitReportingMultiprocess(Multiprocess):
-    """uvicorn's ``Multiprocess`` supervisor, logging why each dead worker is replaced."""
+    """uvicorn's ``Multiprocess`` supervisor, logging why each dead worker is replaced.
+
+    ``startup_failed`` turns true when a worker failed its startup and the supervisor
+    stopped the parent for it, so :func:`run_workers` can exit with uvicorn's
+    startup-failure status.
+    """
+
+    startup_failed: bool = False
 
     def keep_subprocess_alive(self) -> None:
         """Replace every worker that exited or missed its health ping, as uvicorn does, logging which it was.
@@ -113,6 +123,7 @@ class ExitReportingMultiprocess(Multiprocess):
 
             if process.exitcode == STARTUP_FAILURE:
                 logger.error(f"Child process [{process.pid}] failed to start, stopping the parent process.")
+                self.startup_failed = True
                 self.should_exit.set()
                 return
 
@@ -139,8 +150,10 @@ def run_workers(app: str, **kwargs: Any) -> None:
     ``app_dir`` onto ``sys.path``, one :class:`uvicorn.Config`, a :class:`uvicorn.Server`,
     then the reload supervisor when reload is on (it takes precedence over workers, as in
     ``uvicorn.run``), else the worker supervisor on the bound socket; the Unix socket is
-    removed on the way out. Fewer than two workers is refused — a single worker has no
-    supervisor and runs through ``uvicorn.run`` itself.
+    removed on the way out. A worker that failed its startup stops the supervisor, and the
+    run then exits with uvicorn's ``STARTUP_FAILURE`` status, as ``uvicorn.run`` does for a
+    single worker. Fewer than two workers is refused — a single worker has no supervisor and
+    runs through ``uvicorn.run`` itself.
     """
     app_dir = kwargs.pop("app_dir", None)
     if app_dir is not None:
@@ -156,7 +169,10 @@ def run_workers(app: str, **kwargs: Any) -> None:
         if config.should_reload:
             ChangeReload(config, target=server.run, sockets=[sock]).run()
         else:
-            ExitReportingMultiprocess(config, sockets=[sock]).run()
+            supervisor = ExitReportingMultiprocess(config, sockets=[sock])
+            supervisor.run()
+            if supervisor.startup_failed:
+                sys.exit(STARTUP_FAILURE)
     except KeyboardInterrupt:
         # A Ctrl-C that reaches here (before the supervisor's own signal handling is
         # installed) ends the run normally, as in ``uvicorn.run``.

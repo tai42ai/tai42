@@ -13,7 +13,14 @@ from tai42_contract.app import tai42_app
 from tai42_kit.accounts.registry import reset_registry as reset_accounts_registry
 
 from tai42_skeleton.app import lifecycle as _lifecycle
-from tai42_skeleton.app.boot_rules import require_apply_window_covers_drain, require_bus_for_backend
+from tai42_skeleton.app.boot_rules import (
+    require_apply_window_covers_drain,
+    require_bus_for_backend,
+    require_bus_for_workers,
+    require_hooks_store_for_backend,
+    require_hooks_store_for_workers,
+    require_sub_mcp_store_for_workers,
+)
 from tai42_skeleton.app.epoch import applied_env_keys
 from tai42_skeleton.app.kind_status import warn_if_noop_monitoring
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
@@ -227,6 +234,14 @@ class BootMixin(LifecycleState):
         # the bus is unconfigured is refused here (an env-materialized backend or an
         # out-of-band manifest edit). The shared-config rule is boot-fixed env, no reload twin.
         require_bus_for_backend(manifest)
+        # The same reload-time re-check for the backend-needs-hooks-store invariant.
+        require_hooks_store_for_backend(manifest)
+        # Reload-time re-check of the workers-need-bus and workers-need-shared-stores invariants
+        # under the env about to be persisted: a multi-worker server never rebuilds without the
+        # bus or onto an in-memory store.
+        require_bus_for_workers()
+        require_sub_mcp_store_for_workers()
+        require_hooks_store_for_workers()
         # Reload-time re-check of the apply-window invariant under the env about to be
         # persisted: a window below the retire's drain floor is refused before the rebuild.
         require_apply_window_covers_drain()

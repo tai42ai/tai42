@@ -445,7 +445,7 @@ def recorder(monkeypatch: pytest.MonkeyPatch, pg: FakeAccessControlPg, provider:
         monkeypatch.setattr(PostgresAccessControlStore, name, _make(name, original))
     original_bump = management.bump_policy_version
 
-    async def _bump() -> int:
+    async def _bump() -> int | None:
         rec.calls.append(("bump",))
         return await original_bump()
 

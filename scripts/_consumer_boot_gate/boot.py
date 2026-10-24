@@ -154,7 +154,10 @@ def _slot_env(provides: Provides, dist_name: str, infra: Infra) -> dict[str, str
 
     A registered task backend refuses to boot without the worker bus (the backend-runtime and
     server processes must converge on config reloads), so its queue Redis — the CI job's — is
-    pinned; a provider built eagerly at registration gets its documented placeholder config.
+    pinned. It also refuses an in-memory hooks registry (the backend process matches the events
+    it raises against its own registry); the base env already sets ``HOOKS_REDIS_URL`` for every
+    consumer, so nothing more is added here. A provider built eagerly at registration gets its
+    documented placeholder config.
     """
     env: dict[str, str] = {}
     if provides.backend_module:

@@ -741,14 +741,21 @@ async def revoke_api_key(user_id: str) -> bool:
     return True
 
 
-async def bump_policy_version() -> int:
+async def bump_policy_version() -> int | None:
     """Increment the policy-version counter (plain Redis), forcing a cross-worker cache miss on the next read.
 
     Returns the new version. A failed bump RAISES loudly — it is never swallowed. Inside an
     open request scope the new version replaces the remembered one, so the rest of that
     access-control decision reads what this bump wrote.
+
+    With access control off (``ACCESS_CONTROL_ENABLE=false``) nothing reads the version, so
+    there is nothing to invalidate: the bump touches no Redis and returns ``None``. Turning
+    the gate on is a settings change, and the settings reset drops every cache keyed on the
+    version, so no decision cached before the gate went off can be served after it is back.
     """
     s = _settings()
+    if not s.enable:
+        return None
     async with client_ctx(RedisClient, s.redis) as r:
         version = await awaited(r.incr(s.policy_version_key))
     remember_policy_version(version)

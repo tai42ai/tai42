@@ -340,7 +340,12 @@ async def test_the_health_watch_emit_runs_its_hooks_with_monitoring_off(world, h
     await manager.register(hook("watch", topic=hw.MONITORING_EXPORT_FAILED_EVENT_TOPIC))
     seen = _probe(world)
     watch = hw.MonitoringHealthWatch()
+    # The counters and the last-alerted totals are shared by every test in this process, so
+    # the baseline pass alerts any growth an earlier test left unalerted; its emit is not the
+    # one under test.
     await watch.run_pass()
+    await hook_runs.drain()
+    seen.clear()
 
     writer.grow()
     assert await watch.run_pass() is not None

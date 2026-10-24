@@ -24,6 +24,7 @@ connection-tuning fields) point the plugin-owned correlation store.
 | `CHANNEL_TWILIO_FROM` | unset | The WhatsApp sender, `whatsapp:`-prefixed (Twilio's `From`). |
 | `CHANNEL_TWILIO_ALLOWED_RECIPIENTS` | empty | Whitelist of `To` numbers a caller-requested recipient must be on. Comma-separated or JSON list. |
 | `CHANNEL_TWILIO_DEFAULT_RECIPIENT` | unset | `To` number used when the caller requests none; not allowlist-checked. |
+| `CHANNEL_TWILIO_API_BASE_URL` | `https://api.twilio.com/2010-04-01` | Twilio REST API origin (carries the API version prefix). Overridable so a test stub can stand in; production leaves the default. |
 | `CHANNEL_TWILIO_HTTP_TIMEOUT_SECONDS` | `30` | Timeout for the outbound send and the loopback answer forward. |
 | `CHANNEL_TWILIO_DEDUPE_TTL` | `172800` | Seconds a handled `MessageSid` stays remembered (replay guard). |
 | `CHANNEL_TWILIO_REDIS_URL` | unset | Connection for the correlation store. |
