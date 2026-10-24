@@ -163,7 +163,7 @@
       },
       "AgentsConfig": {
         "additionalProperties": false,
-        "description": "An agents block: a ``module`` import path plus selection config (no extensions).",
+        "description": "An agents block: a ``module`` import path plus selection config.\n\nAgents carry no clip-on extensions, so an ``extensions`` key here is refused as\nan unknown key, like any other (``BaseConfig``'s ``extra=\"forbid\"``).",
         "properties": {
           "exclude": {
             "items": {
@@ -3401,6 +3401,7 @@
         "type": "object"
       },
       "ConfigFieldSpec": {
+        "additionalProperties": false,
         "description": "One client-supplied static config value for a no-auth provider.\n\n``target`` picks the injection channel and MUST match the server transport\n(``env`` for stdio, ``header`` for http/websocket). ``secret`` flags a value\nmasked in the UI and never logged; ``required`` gates connect-time validation.",
         "properties": {
           "key": {
@@ -3660,6 +3661,7 @@
         "type": "object"
       },
       "ConnectorRef": {
+        "additionalProperties": false,
         "description": "Marker on a manifest entry pointing back at a Connection.\n\nHand-authored entries leave ``managed`` as ``None`` and are unaffected.",
         "properties": {
           "connection_id": {
@@ -8169,6 +8171,7 @@
         "type": "object"
       },
       "MCPConfig": {
+        "additionalProperties": false,
         "description": "Transport config for one MCP server: exactly one of ``url``/``uds``/``command``.",
         "properties": {
           "args": {
@@ -17855,6 +17858,7 @@
         "type": "array"
       },
       "TaiMCPConfig": {
+        "additionalProperties": false,
         "description": "An MCP block: a transport ``config`` plus optional managed-connector binding.",
         "properties": {
           "config": {
@@ -19345,6 +19349,7 @@
         "type": "object"
       },
       "ToolsConfig": {
+        "additionalProperties": false,
         "description": "A tools block: a ``module`` import path plus selection and extension config.",
         "properties": {
           "exclude": {

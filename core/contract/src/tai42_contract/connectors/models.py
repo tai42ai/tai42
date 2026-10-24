@@ -228,6 +228,10 @@ class ConnectorRef(BaseModel):
     Hand-authored entries leave ``managed`` as ``None`` and are unaffected.
     """
 
+    # ``extra="forbid"``: an unknown key on a manifest entry's marker is a
+    # misconfig — fail loudly naming the key rather than silently dropping it.
+    model_config = ConfigDict(extra="forbid")
+
     connection_id: str
     provider_id: str = Field(min_length=1, max_length=64)
     sub_service: str = Field(min_length=1, max_length=64)

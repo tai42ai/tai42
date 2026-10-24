@@ -3,7 +3,8 @@
 Pure pydantic models describing a provider, its sub-services, MCP server
 endpoints, OAuth endpoints, and client-supplied config fields. Descriptors are
 validated when built so a misconfigured provider fails loudly rather than at
-first user click.
+first user click. Every model refuses an unknown key (``extra="forbid"``), naming
+it, so a misspelled field fails loudly instead of being dropped.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from ipaddress import ip_address
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tai42_contract._urls import check_web_url
 
@@ -33,6 +34,8 @@ class McpServerDescriptor(BaseModel):
     or ``stdio`` (launched as a child process, set ``command`` + ``args``).
     Exactly one configuration is allowed: ``url`` xor (``command`` + ``args``).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["http", "websocket", "stdio"] = "http"
     url: str | None = None
@@ -72,6 +75,8 @@ class ConfigFieldSpec(BaseModel):
     masked in the UI and never logged; ``required`` gates connect-time validation.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     key: str
     label: str = Field(min_length=1)
     target: Literal["env", "header"]
@@ -88,6 +93,8 @@ class ConfigFieldSpec(BaseModel):
 
 class SubServiceDescriptor(BaseModel):
     """One sub-service a provider exposes, with its scopes and a single launch path."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     display_name: str
@@ -136,6 +143,8 @@ class OAuthEndpoints(BaseModel):
     reads the endpoints from the authorization server its MCP server names.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     authorize: str
     token: str
     revoke: str | None = None
@@ -150,6 +159,8 @@ class ProviderDescriptor(BaseModel):
     sub-services share; the client is either the env client pinned by ``issuer`` to the authorization
     server it is registered with, or (all three unset) a stored client.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     display_name: str

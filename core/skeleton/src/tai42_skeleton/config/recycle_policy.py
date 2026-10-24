@@ -14,9 +14,11 @@ Refusal is two-tier:
   scan opens the OLD bus while replacements register only on the NEW bus after
   resync. ``TAI_DEFAULT_REDIS_URL`` reaches the bus via ``BusSettings``' default-URL
   fallback, so it joins ``TAI_BUS_REDIS_URL`` here.
-* Tier 2 (``k8s`` / ``compose``): the deployment's declared pinned keys — a
-  pod/container respawn re-injects the deployment value, so a profile-carried change
-  silently reverts. They are refused upfront. ``harness`` and ``bare`` carry no Tier 2.
+* Tier 2 (``k8s`` / ``compose``): the deployment's declared pinned keys — the deployment
+  owns their values. The stored env overrides the container env at every boot and
+  reload, so a stored copy of a pinned key would shadow the deployment's value on every
+  restart, and a later change to it in the deployment manifest would silently stop
+  taking effect. They are refused upfront. ``harness`` and ``bare`` carry no Tier 2.
 """
 
 from __future__ import annotations
@@ -181,19 +183,34 @@ def _refuse_unrecyclable(
 ) -> None:
     """Refuse an env change whose diff cannot be carried on this deployment shape.
 
-    A diff key the shape PINS (``refused_keys`` — a pod/container respawn re-injects it,
-    or it reaches the worker bus itself) is refused upfront naming the key: a recycle can
-    never make it stick. A recycle-class diff on a BARE (unsupervised) deployment is
+    A diff key in ``refused_keys`` is refused upfront, each key named with its own reason:
+    a Tier-1 bus URL reaches the worker bus itself, which no recycle can carry; a
+    deployment-pinned key would shadow the deployment's value, because the stored env
+    overrides the container env at every boot and reload, so a later change in the
+    deployment manifest would stop taking effect. A recycle-class diff on a BARE (unsupervised) deployment is
     refused wholesale — no supervisor exists to respawn a worker under the new env. Both
     are loud ``ValueError``s the operations layer maps to a 400, naming ``change`` (what is
     being applied, e.g. ``"this settings profile"``) and the keys. Names only.
     """
-    pinned = sorted(diff_keys & set(report.refused_keys))
-    if pinned:
+    refused = diff_keys & set(report.refused_keys)
+    if refused:
+        reasons: list[str] = []
+        bus = sorted(refused & TIER1_REFUSED_KEYS)
+        if bus:
+            where = "deployment manifest" if report.shape in _PINNING_SHAPES else "deployment's environment"
+            reasons.append(
+                f"it changes bus-reaching key(s): {', '.join(bus)}. A bus URL reaches the worker bus itself, which "
+                f"no recycle can carry. Set them in the {where} and restart the deployment."
+            )
+        pinned = sorted(refused - TIER1_REFUSED_KEYS)
+        if pinned:
+            reasons.append(
+                f"it changes deployment-pinned key(s): {', '.join(pinned)}. A stored copy of such a key overrides "
+                "the deployment's value on every restart, so later changes to it in the deployment manifest would "
+                "stop taking effect. Change them in the deployment manifest."
+            )
         raise ValueError(
-            f"Refusing to apply {change} on a {report.shape.value!r} deployment: it changes "
-            f"deployment-pinned key(s) a recycle cannot carry (a pod/container respawn re-injects them, or "
-            f"they reach the worker bus itself): {', '.join(pinned)}. Change them in the deployment manifest."
+            f"Refusing to apply {change} on a {report.shape.value!r} deployment: {' Also, '.join(reasons)}"
         )
     if recycle_diff_keys and not report.recycle_supported:
         raise ValueError(

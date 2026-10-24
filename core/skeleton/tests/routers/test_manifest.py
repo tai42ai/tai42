@@ -648,6 +648,15 @@ async def test_update_manifest_invalid_body_400(fake_full):
     assert "invalid manifest" in _data(resp)["error"]
 
 
+async def test_update_manifest_unknown_nested_key_400_naming_it(fake_full):
+    resp = await router.update_manifest(_req({"manifest_text": "api_tools:\n  expose_destrutive: false\n"}))
+    assert resp.status_code == 400
+    error = _data(resp)["error"]
+    assert error.startswith("invalid manifest: ")
+    assert "api_tools.expose_destrutive\n  Extra inputs are not permitted" in error
+    assert fake_full.cm.written is None
+
+
 async def test_update_manifest_non_object_body_400(fake_full):
     resp = await router.update_manifest(_req(["not", "an", "object"]))
     assert resp.status_code == 400

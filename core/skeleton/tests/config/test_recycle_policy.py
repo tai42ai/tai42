@@ -17,6 +17,7 @@ from tai42_skeleton.config.recycle_policy import (
     TIER1_REFUSED_KEYS,
     X_CLASSIFIED_DEPLOYMENT_BARE_READS,
     Shape,
+    _refuse_unrecyclable,
     capability_report,
     detect_shape,
     pinned_keys,
@@ -227,3 +228,43 @@ def test_app_context_refuses_boot_on_a_supervised_marker_without_its_pinned_set(
 
     with pytest.raises(RuntimeError, match="TAI_SUPERVISED=compose requires TAI_SUPERVISED_PINNED_KEYS"):
         asyncio.run(boot())
+
+
+# -- refusal wording ------------------------------------------------------------
+
+
+def _refusal(diff_keys: set[str]) -> str:
+    with pytest.raises(ValueError, match="Refusing to apply this env change") as excinfo:
+        _refuse_unrecyclable(diff_keys, [], capability_report(), change="this env change")
+    return str(excinfo.value)
+
+
+@pytest.mark.parametrize("marker", ["harness", None])
+def test_a_bus_url_refusal_without_a_deployment_manifest_gives_the_bus_reason(
+    monkeypatch: pytest.MonkeyPatch, marker: str | None
+) -> None:
+    if marker is not None:
+        monkeypatch.setenv("TAI_SUPERVISED", marker)
+    message = _refusal({"TAI_BUS_REDIS_URL"})
+    assert "TAI_BUS_REDIS_URL" in message
+    assert "reaches the worker bus itself, which no recycle can carry" in message
+    assert "pinned" not in message
+    assert "deployment manifest" not in message
+
+
+def test_a_pinned_key_refusal_gives_the_shadowing_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", "compose")
+    monkeypatch.setenv("TAI_SUPERVISED_PINNED_KEYS", '["SUB_MCP_REDIS_URL"]')
+    message = _refusal({"SUB_MCP_REDIS_URL"})
+    assert "deployment-pinned key(s): SUB_MCP_REDIS_URL" in message
+    assert "overrides the deployment's value on every restart" in message
+    assert "worker bus" not in message
+    assert "Change them in the deployment manifest." in message
+
+
+def test_a_refusal_of_both_kinds_names_each_key_with_its_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", "k8s")
+    monkeypatch.setenv("TAI_SUPERVISED_PINNED_KEYS", '["SUB_MCP_REDIS_URL"]')
+    message = _refusal({"SUB_MCP_REDIS_URL", "TAI_DEFAULT_REDIS_URL"})
+    assert "bus-reaching key(s): TAI_DEFAULT_REDIS_URL" in message
+    assert "deployment-pinned key(s): SUB_MCP_REDIS_URL" in message

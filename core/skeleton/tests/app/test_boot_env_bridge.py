@@ -72,6 +72,16 @@ def test_store_only_var_is_bridged_and_the_marker_resolves(monkeypatch):
     assert manifest.mcp_map["svc"].config.headers["Authorization"] == "realvalue"
 
 
+def test_boot_refuses_an_unknown_nested_key_naming_it(monkeypatch):
+    """A misspelled key inside a manifest block fails the boot read loudly, naming the key."""
+    from pydantic import ValidationError
+
+    _patch_store(monkeypatch, env={}, manifest_yaml="default_routers: none\napi_tools:\n  expose_destrutive: false\n")
+
+    with pytest.raises(ValidationError, match=r"api_tools\.expose_destrutive\n  Extra inputs are not permitted"):
+        app.lifecycle.read_boot_manifest()
+
+
 def test_bridged_var_survives_into_app_context(monkeypatch):
     """The bridge applied at the door persists through ``app_context`` boot: the
     store-only var is still live in ``os.environ`` once the context is entered, and
