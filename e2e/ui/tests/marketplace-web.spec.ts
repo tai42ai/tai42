@@ -26,9 +26,11 @@ const GAMMA_REF = 'tai42/e2e-gamma';
 // the only listing whose kinds are neither `tool` nor `extension`.
 const EPSILON_REF = 'tai42/e2e-epsilon';
 
-// The result card's link is named by the item name now, not the ref — the ref
-// renders beside it as non-interactive `<p class="mp-ref">` text. Alpha provides
-// exactly one item, so this uniquely identifies alpha's card.
+// The result card's link is named by the listing title: the display name, or the
+// title-cased listing name when none is set (alpha sets none). The ref renders
+// beside it as non-interactive `<p class="mp-ref">` text.
+const ALPHA_TITLE = 'E2e Alpha';
+// Alpha's one provided item, listed by name in the detail page's Items table.
 const ALPHA_ITEM = 'e2e_market_probe';
 
 /** Reload until the assertion body passes — the detail advisories query reads a
@@ -61,9 +63,9 @@ test('browse, facet, and the detail readme/items/versions + advisory-withdrawn a
   await expect(page.getByText(BETA_REF)).toHaveCount(0);
   await page.getByRole('button', { name: 'utilities', exact: true }).click();
 
-  // 3. Open alpha's detail by its card link (named by the item name now). The
+  // 3. Open alpha's detail by its card link (named by the listing title). The
   // install command confirms the detail header rendered.
-  await page.getByRole('link', { name: ALPHA_ITEM, exact: true }).first().click();
+  await page.getByRole('link', { name: ALPHA_TITLE, exact: true }).click();
   await expect(page.getByText(`tai plugins install ${ALPHA_REF}`)).toBeVisible();
 
   // 3a. Readme tab is the default: the ingested README renders as a real HTML
@@ -77,18 +79,18 @@ test('browse, facet, and the detail readme/items/versions + advisory-withdrawn a
   await expect(readmeTable.getByRole('columnheader', { name: 'Default', exact: true })).toBeVisible();
   await expect(readmeTable.getByRole('cell', { name: 'retries', exact: true })).toBeVisible();
 
-  // 3b. Items tab: alpha's provided item lives behind the Items tab, hidden until
-  // selected.
+  // 3b. Items tab: alpha's provided item is a row of the Items table, hidden until
+  // the tab is selected.
   await page.getByRole('tab', { name: 'Items' }).click();
-  await expect(page.getByText(ALPHA_ITEM)).toBeVisible();
+  await expect(page.getByRole('cell', { name: ALPHA_ITEM, exact: true })).toBeVisible();
 
   // 3c. Versions tab: both published versions and a `published` status badge live
   // behind the Versions tab. The status is a table cell (the column header is a
   // columnheader, not a cell), so match the badge as a cell.
   await page.getByRole('tab', { name: 'Versions' }).click();
-  await expect(page.getByRole('cell', { name: '0.1.0' })).toBeVisible();
-  await expect(page.getByRole('cell', { name: '0.2.0' })).toBeVisible();
-  await expect(page.getByRole('cell', { name: 'published' }).first()).toBeVisible();
+  await expect(page.getByRole('cell', { name: '0.1.0', exact: true })).toBeVisible();
+  await expect(page.getByRole('cell', { name: '0.2.0', exact: true })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'published', exact: true }).first()).toBeVisible();
 
   // Advisories: create one via the registry admin API, then open the Advisories
   // tab. Clicking it writes `?tab=advisories` to the URL, which a reload preserves
