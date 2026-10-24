@@ -85,7 +85,7 @@ dev = [
     # root run leaves a caller's ambient attribution untouched (the builder attaches no
     # fresh context), and the monitoring tests record through the kit's OpenTelemetry
     # writer over an in-memory exporter. The shipped package imports no OpenTelemetry.
-    "opentelemetry-api>=1.30",
+    "opentelemetry-api>=1.45.1",
     "tai42-kit[monitoring]>=11.3,<12",
     # Test-only: the skeleton-boot e2e integration test (tests/test_skeleton_e2e.py)
     # boots the real tai42-skeleton app in-process to prove tools_agent registers,
