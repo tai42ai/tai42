@@ -1,7 +1,7 @@
 {
   "name": "tai42_channel_web",
   "version": "9.1.0",
-  "api_version": 1,
+  "api_version": 2,
   "entry": "tai42-channel-web-DdDbLkLb.js",
   "integrity": {
     "tai42-channel-web-DdDbLkLb.js": "sha384-KfWW/A6mEVoSz+EqWaqw0D5So4E8Ac159+tZ1kJw5vWUMAwJkLnF3cPYtSjXHZ5N"
