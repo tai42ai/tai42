@@ -61,8 +61,9 @@ have no effect: the writer never truncates a recorded value.
 The collector holds the backend credential, named outside the `LANGFUSE_` prefix:
 `OTEL_COLLECTOR_LANGFUSE_AUTH` is the base64 of `public_key:secret_key`, sent as
 `Authorization: Basic …` to `${LANGFUSE_HOST}/api/public/otel`, together with the
-header `x-langfuse-ingestion-version: 4` (without it Langfuse delays new data on the
-reads by up to 15 minutes). Its pipeline maps
+header `x-langfuse-ingestion-version: 4`, which marks the batches as Langfuse 4
+ingestion (a Langfuse that still writes both its old and new tables delays unmarked
+data on its reads by up to about 10 minutes). Its pipeline maps
 the platform's `tai42.trace.*`, `tai42.run.version`, `tai42.level`,
 `tai42.status_message`, `tai42.span.kind` and `tai42.usage.cost_usd` attributes onto
 Langfuse's names; GenAI messages, tool arguments and results, and chain inputs and
